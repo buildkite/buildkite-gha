@@ -1213,7 +1213,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 			name, trigger, want string
 		}{
 			{name: "unsupported event", trigger: "issues", want: `unsupported GitHub trigger event "issues"`},
-			{name: "path filter", trigger: "push:\n    paths: [src/**]", want: "path filters are unsupported"},
+			{name: "malformed path filter", trigger: "push:\n    paths: ['!src/**']", want: "must follow a positive pattern"},
 			{name: "mixed branch filters", trigger: "push:\n    branches: [main]\n    branches-ignore: [release]", want: "include and ignore filters cannot be combined"},
 			{name: "pull request tag filter", trigger: "pull_request:\n    tags: [v1]", want: "pull_request tag filters are unsupported"},
 			{name: "pull request activity", trigger: "pull_request:\n    types: [auto_merge_enabled, submitted]", want: `activity type "submitted" cannot be mapped exactly`},
@@ -1244,9 +1244,9 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
-	t.Run("bare validation accepts supported pull request paths", func(t *testing.T) {
+	t.Run("bare validation accepts supported path filters", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "trigger.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  pull_request:\n    paths: [src/**]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on:\n  push:\n    paths: [docs/**]\n  pull_request:\n    paths: [src/**]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -1373,9 +1373,9 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
-	t.Run("validate all events stops before admission on an unsafe trigger", func(t *testing.T) {
+	t.Run("validate all events stops before admission on a malformed trigger", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  push:\n    paths: [src/**]\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on:\n  push:\n    paths: ['!src/**']\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -1387,14 +1387,14 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "incompatible" || len(report.Evaluations) != 0 || len(report.Validation.Diagnostics) != 1 || !strings.Contains(report.Validation.Diagnostics[0].Message, "path filters are unsupported") {
+		if report.Result != "incompatible" || len(report.Evaluations) != 0 || len(report.Validation.Diagnostics) != 1 || !strings.Contains(report.Validation.Diagnostics[0].Message, "must follow a positive pattern") {
 			t.Fatalf("aggregate report = %#v", report)
 		}
 	})
 
-	t.Run("validate all events leaves supported pull request paths unmeasured", func(t *testing.T) {
+	t.Run("validate all events leaves supported paths unmeasured", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n    paths: [src/**]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on:\n  push:\n    paths: [docs/**]\n  pull_request:\n    paths: [src/**]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -1409,12 +1409,13 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if report.Result != "context-required" || report.Validation.Result != "compilable" || len(report.Validation.Diagnostics) != 0 || len(report.Evaluations) != 2 {
 			t.Fatalf("aggregate report = %#v", report)
 		}
-		if report.Evaluations[0].Event != "push" || report.Evaluations[0].Report.Result != "admitted" || report.Evaluations[1].Event != "pull_request" || report.Evaluations[1].Report.Result != "context-required" {
+		if report.Evaluations[0].Event != "push" || report.Evaluations[0].Report.Result != "context-required" || report.Evaluations[1].Event != "pull_request" || report.Evaluations[1].Report.Result != "context-required" {
 			t.Fatalf("event evaluations = %#v", report.Evaluations)
 		}
-		pullRequest := report.Evaluations[1].Report
-		if pullRequest.Compile.Result != "compilable" || pullRequest.Admission.Result != compatibility.NotEvaluated || len(pullRequest.Diagnostics) != 1 || pullRequest.Diagnostics[0].Code != compiler.CodeContextRequired || !strings.Contains(pullRequest.Diagnostics[0].Message, "verified local git diff") {
-			t.Fatalf("pull request evaluation = %#v", pullRequest)
+		for _, evaluation := range report.Evaluations {
+			if evaluation.Report.Compile.Result != "compilable" || evaluation.Report.Admission.Result != compatibility.NotEvaluated || len(evaluation.Report.Diagnostics) != 1 || evaluation.Report.Diagnostics[0].Code != compiler.CodeContextRequired || !strings.Contains(evaluation.Report.Diagnostics[0].Message, "verified local git diff") {
+				t.Fatalf("%s evaluation = %#v", evaluation.Event, evaluation.Report)
+			}
 		}
 	})
 
@@ -1440,10 +1441,10 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
-	t.Run("validate generated pull request still finds unsupported triggers", func(t *testing.T) {
+	t.Run("validate generated pull request still finds malformed inactive triggers", func(t *testing.T) {
 		for _, triggers := range []string{
-			"  pull_request:\n    paths: [src/**]\n  push:\n    paths: [docs/**]\n",
-			"  push:\n    paths: [docs/**]\n  pull_request:\n    paths: [src/**]\n",
+			"  pull_request:\n    paths: [src/**]\n  push:\n    paths: ['!docs/**']\n",
+			"  push:\n    paths: ['!docs/**']\n  pull_request:\n    paths: [src/**]\n",
 		} {
 			workflow := filepath.Join(t.TempDir(), "events.yml")
 			if err := os.WriteFile(workflow, []byte("on:\n"+triggers+"jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
@@ -1458,7 +1459,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 				t.Fatal(err)
 			}
-			if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodePipelineGeneration || !strings.Contains(report.Diagnostics[0].Message, "Push trigger path filters cannot be translated safely") {
+			if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodePipelineGeneration || !strings.Contains(report.Diagnostics[0].Message+report.Diagnostics[0].Detail, "must follow a positive pattern") {
 				t.Fatalf("processing report = %#v", report)
 			}
 		}
@@ -1483,7 +1484,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
-	t.Run("validate all events keeps mixed push and pull request paths incompatible", func(t *testing.T) {
+	t.Run("validate all events keeps mixed push and pull request paths context required", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
 		if err := os.WriteFile(workflow, []byte("on:\n  pull_request:\n    paths: [src/**]\n  push:\n    paths: [docs/**]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -1497,11 +1498,13 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "incompatible" || len(report.Evaluations) != 0 || len(report.Validation.Diagnostics) != 1 {
+		if report.Result != "context-required" || len(report.Evaluations) != 2 || len(report.Validation.Diagnostics) != 0 {
 			t.Fatalf("aggregate report = %#v", report)
 		}
-		if report.Validation.Diagnostics[0].Code != compiler.CodePipelineGeneration {
-			t.Fatalf("validation diagnostics = %#v", report.Validation.Diagnostics)
+		for _, evaluation := range report.Evaluations {
+			if evaluation.Report.Result != "context-required" {
+				t.Fatalf("evaluation = %#v", evaluation)
+			}
 		}
 	})
 
@@ -5114,9 +5117,9 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 	failure := pipeline.Steps[0]
 	message := failureArtifactForStep(failure.Plugins, runner.uploaded, "messages")
 	annotation := failureArtifactForStep(failure.Plugins, runner.uploaded, "annotations")
-	primary := "Push trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step."
-	detail := "push path filters are unsupported: Buildkite if_changed is not equivalent"
-	if failure.Group != "" || failure.Label != ":github: Crowdin upload" || failure.Condition != "" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(string(message), primary) || !strings.Contains(string(message), "detail: "+detail) || !strings.Contains(string(annotation), "<strong>Push trigger path filters cannot be translated safely.</strong>") || !strings.Contains(string(annotation), "Remove paths and paths-ignore") || !strings.Contains(string(annotation), detail) || strings.Contains(string(message), "translate workflow triggers") || strings.Contains(string(message), ".github/workflows/crowdin-upload.yml") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
+	primary := "Push trigger path filters could not be evaluated safely. Ensure the linked webhook and local checkout contain matching push history, or remove the path filters."
+	detail := "push path filters are unsupported: push path filters require linked Buildkite webhook data"
+	if failure.Group != "" || failure.Label != ":github: Crowdin upload" || failure.Condition != "" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(string(message), primary) || !strings.Contains(string(message), "detail: "+detail) || !strings.Contains(string(annotation), "<strong>Push trigger path filters could not be evaluated safely.</strong>") || !strings.Contains(string(annotation), "matching push history") || !strings.Contains(string(annotation), detail) || strings.Contains(string(message), "translate workflow triggers") || strings.Contains(string(message), ".github/workflows/crowdin-upload.yml") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
 		t.Fatalf("trigger failure step = %#v, message = %q, annotation = %q", failure, message, annotation)
 	}
 	if success := pipeline.Steps[1]; success.Group != ":github: Success" || len(success.Steps) != 1 {

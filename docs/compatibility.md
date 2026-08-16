@@ -109,7 +109,7 @@ An explicit event snapshot never consults contradictory live Buildkite event fie
 
 | Event | Supported trigger behavior |
 | --- | --- |
-| `push` | `branches`, `branches-ignore`, `tags`, and `tags-ignore`, including ordered negative patterns in an include list. Branch and tag filters select their corresponding ref kind. |
+| `push` | `branches`, `branches-ignore`, `tags`, and `tags-ignore`, including ordered negative patterns in an include list. Branch and tag filters select their corresponding ref kind. Matching `paths` and `paths-ignore` can be admitted for linked GitHub branch pushes when the bounded local-diff requirements below are met. |
 | `pull_request` | `branches` and `branches-ignore` match the base branch. Omitted `types` defaults to `opened`, `synchronize`, and `reopened`; explicitly listed activity types must map exactly to a supported Buildkite source action. Matching `paths` and `paths-ignore` can be admitted when the bounded local-diff requirements below are met. |
 | `merge_group` | Native Buildkite merge queue builds only. Enable merge queue builds and Merge groups webhook delivery in the pipeline's GitHub settings. `branches` and `branches-ignore` match the target branch. The only supported activity is `checks_requested`; other types and path, tag, and workflow filters are rejected. The merge group ref and SHA identify the speculative queue commit. |
 | `workflow_dispatch` | Selected for Buildkite UI and API builds. Webhook-style branch, tag, type, and workflow filters are unsupported. |
@@ -117,6 +117,16 @@ An explicit event snapshot never consults contradictory live Buildkite event fie
 | `workflow_call` | Defines a local reusable-workflow interface. A reusable-only file is available to callers but does not become a top-level group. |
 
 Supported `pull_request` activity types are `assigned`, `unassigned`, `labeled`, `unlabeled`, `opened`, `edited`, `closed`, `reopened`, `synchronize`, `converted_to_draft`, `locked`, `unlocked`, `enqueued`, `dequeued`, `milestoned`, `demilestoned`, `ready_for_review`, `review_requested`, `review_request_removed`, `auto_merge_enabled`, and `auto_merge_disabled`.
+
+#### Push path filters
+
+For a linked GitHub branch push, the importer binds the webhook repository, ref, `before`, `after`, `created`, `deleted`, `forced`, and complete pushed-commit list to the Buildkite build and local checkout. It also requires `HEAD`, the local `origin` repository and remote branch, and the workflow file to match the pushed commit.
+
+Normal and force pushes use GitHub's two-dot `before..after` comparison. A new branch uses the parent of its oldest pushed commit when the complete webhook commit set forms one unambiguous, single-parent boundary. Matching added, modified, deleted, and type-changed paths are admitted. Path patterns use the same ordered matching described below.
+
+Admission fails closed for deleted refs, non-GitHub repositories, missing or shallow history, a stale or mismatched checkout, origin, remote branch, workflow, ref, repository, commit set, or force state, and ambiguous new-branch history. It also fails closed for more than 1,000 pushed commits, more than 300 changed files, combined additions and deletions, renames, malformed Git output, invalid patterns, and local non-matches. GitHub runs automatically after its 1,000-commit or diff-timeout fallback, but the importer does not manufacture that admission without matching changed-path evidence.
+
+Tag pushes do not evaluate path filters, matching GitHub. Explicit and generated event snapshots, and Buildkite environment fallbacks, cannot admit push path filters because they are not linked webhook evidence.
 
 #### Pull request path filters
 
@@ -139,9 +149,7 @@ Before upload, the importer compares the pull request merge base with its head u
 | At most 300 changed files from complete local history | Missing or shallow history, multiple merge bases, or more than 300 files |
 | A mergeable pull request with matching webhook and workflow data | A conflict, stale data, changed merge workflow, path or pattern containing a backslash, invalid pattern, or malformed Git output |
 
-A local non-match fails closed because GitHub does not report whether its diff timed out and ran the workflow anyway. Unfiltered `closed` workflows remain supported; filtered `closed` workflows fail closed when GitHub supplies an actual merge, squash, or rebase commit instead of a synthetic merge.
-
-Push path filters remain unsupported because GitHub uses a different diff range and timeout rules without exposing enough data to reproduce them safely. Tag pushes do not evaluate path filters, matching GitHub behavior. Other unsupported or inexact trigger filters also replace the affected workflow with a failing step rather than broadening when it runs.
+A local non-match fails closed because GitHub does not report whether its diff timed out and ran the workflow anyway. Unfiltered `closed` workflows remain supported; filtered `closed` workflows fail closed when GitHub supplies an actual merge, squash, or rebase commit instead of a synthetic merge. Other unsupported or inexact trigger filters replace the affected workflow with a failing step rather than broadening when it runs.
 
 A top-level workflow that does not declare the effective event is excluded before event-dependent validation or compilation and represented by one top-level skipped command step. A workflow that declares that event remains represented by a group even when a same-event branch, tag, base-branch, or action condition evaluates false in Buildkite. If no directly runnable workflow declares the event, upload succeeds with a skipped-only pipeline.
 
@@ -867,7 +875,7 @@ buildkite-gha validate \
 
 Use `--event push`, `--event pull_request`, `--event merge_group`, `--event workflow_dispatch`, or `--event schedule` instead of `--event-path` to evaluate the hosted profile with a generated minimal snapshot. Generated snapshots are compatibility test inputs, not equivalents to real payloads. The options are mutually exclusive.
 
-Use `--all-events` to evaluate every declared supported event separately. Its `processing-report/v3` output preserves the event-independent result and each generated event's v2 report. Aggregate admission means every generated snapshot was admitted; it does not cover other payload shapes. A `context-required` result means compilation and hosted-policy checks passed, but generated inputs cannot measure a supported admission path, such as pull-request path filters without linked webhook and local diff evidence. It does not claim admission.
+Use `--all-events` to evaluate every declared supported event separately. Its `processing-report/v3` output preserves the event-independent result and each generated event's v2 report. Aggregate admission means every generated snapshot was admitted; it does not cover other payload shapes. A `context-required` result means compilation and hosted-policy checks passed, but generated inputs cannot measure a supported admission path, such as push or pull-request path filters without linked webhook and local diff evidence. It does not claim admission.
 
 The results mean:
 

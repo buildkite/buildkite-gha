@@ -15,6 +15,146 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
+func TestPushChangedPathsBindsWebhookAndLocalDiff(t *testing.T) {
+	workflowSource := []byte("name: CI\non:\n  push:\n    paths: [\"src/**\"]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+	repository := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", repository}, args...)...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	runGit("init", "-q")
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test")
+	runGit("remote", "add", "origin", "https://github.com/buildkite/buildkite-gha.git")
+	for path, source := range map[string][]byte{
+		"ci.yml": workflowSource, "src/main.go": []byte("package main\n"),
+		"docs/old.md": []byte("old\n"), "src/tool": []byte("regular\n"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(repository, path)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repository, path), source, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGit("add", ".")
+	runGit("commit", "-qm", "base")
+	base := runGit("rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(repository, "src/main.go"), []byte("package main\n// changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(repository, "docs/old.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(repository, "src/tool")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("main.go", filepath.Join(repository, "src/tool")); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "-A")
+	runGit("commit", "-qm", "normal push")
+	after := runGit("rev-parse", "HEAD")
+	runGit("update-ref", "refs/remotes/origin/main", after)
+	t.Chdir(repository)
+
+	input := workflowInput{
+		Path: filepath.Join(repository, "ci.yml"), CanonicalPath: "ci.yml", Source: workflowSource,
+		Triggers: []workflow.Trigger{{Event: "push", Paths: []string{"src/**"}}},
+	}
+	newEvent := func(before, after string, created, forced bool, commits ...string) compiler.Event {
+		commitValues := make([]any, len(commits))
+		for i, commit := range commits {
+			commitValues[i] = map[string]any{"id": commit}
+		}
+		return compiler.Event{
+			Provider: "github", Event: "push", SHA: after, Ref: "refs/heads/main",
+			Repository: compiler.Repository{Owner: "buildkite", Name: "buildkite-gha"},
+			Payload: map[string]any{
+				"ref": "refs/heads/main", "before": before, "after": after,
+				"created": created, "deleted": false, "forced": forced, "commits": commitValues,
+				"repository": map[string]any{"full_name": "buildkite/buildkite-gha"},
+			},
+		}
+	}
+	event := newEvent(base, after, false, false, after)
+	paths, workflowErrors, err := pushChangedPaths(event, []workflowInput{input})
+	want := []string{"docs/old.md", "src/main.go", "src/tool"}
+	if err != nil || !reflect.DeepEqual(paths, want) || len(workflowErrors) != 0 {
+		t.Fatalf("normal push paths/errors = %#v / %#v / %v, want %#v", paths, workflowErrors, err, want)
+	}
+
+	runGit("checkout", "-q", "-B", "force", base)
+	if err := os.WriteFile(filepath.Join(repository, "src/main.go"), []byte("package forced\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "src/main.go")
+	runGit("commit", "-qm", "force push")
+	forceAfter := runGit("rev-parse", "HEAD")
+	runGit("update-ref", "refs/remotes/origin/main", forceAfter)
+	forceEvent := newEvent(after, forceAfter, false, true, forceAfter)
+	if paths, _, err := pushChangedPaths(forceEvent, []workflowInput{input}); err != nil || !reflect.DeepEqual(paths, want) {
+		t.Fatalf("force push paths = %#v, %v", paths, err)
+	}
+
+	runGit("checkout", "-q", "-B", "new", base)
+	if err := os.WriteFile(filepath.Join(repository, "src/main.go"), []byte("package first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "src/main.go")
+	runGit("commit", "-qm", "first new-branch commit")
+	first := runGit("rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(repository, "src/main.go"), []byte("package second\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "src/main.go")
+	runGit("commit", "-qm", "second new-branch commit")
+	newAfter := runGit("rev-parse", "HEAD")
+	runGit("update-ref", "refs/remotes/origin/main", newAfter)
+	newBranchEvent := newEvent(zeroGitCommit, newAfter, true, false, first, newAfter)
+	if paths, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err != nil || !reflect.DeepEqual(paths, []string{"src/main.go"}) {
+		t.Fatalf("new-branch push paths = %#v, %v", paths, err)
+	}
+
+	newBranchEvent.Payload["repository"].(map[string]any)["full_name"] = "attacker/other"
+	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err == nil || !strings.Contains(err.Error(), "repository does not match") {
+		t.Fatalf("mismatched repository error = %v", err)
+	}
+	newBranchEvent.Payload["repository"].(map[string]any)["full_name"] = "buildkite/buildkite-gha"
+	newBranchEvent.Payload["deleted"] = true
+	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err == nil || !strings.Contains(err.Error(), "deleted-ref") {
+		t.Fatalf("deleted ref error = %v", err)
+	}
+	newBranchEvent.Payload["deleted"] = false
+	newBranchEvent.Payload["commits"] = []any{map[string]any{"id": first}}
+	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err == nil || !strings.Contains(err.Error(), "complete pushed commit evidence") {
+		t.Fatalf("incomplete new-branch commits error = %v", err)
+	}
+	newBranchEvent.Payload["commits"] = []any{map[string]any{"id": first}, map[string]any{"id": newAfter}}
+	input.Source = []byte("modified worktree workflow\n")
+	if _, workflowErrors, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err != nil || !strings.Contains(workflowErrors["ci.yml"], "does not match the pushed commit") {
+		t.Fatalf("mismatched workflow result = %#v, %v", workflowErrors, err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, ".git", "shallow"), []byte(base+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err == nil || !strings.Contains(err.Error(), "non-shallow checkout") {
+		t.Fatalf("shallow checkout error = %v", err)
+	}
+}
+
+func TestPushWebhookCommitsEnforcesGitHubBound(t *testing.T) {
+	commits := make([]any, maxGitHubPushCommits+1)
+	if _, err := pushWebhookCommits(map[string]any{"commits": commits}); err == nil || !strings.Contains(err.Error(), "1000-commit") {
+		t.Fatalf("push commit bound error = %v", err)
+	}
+}
+
 func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 	filteredWorkflow := []byte("name: CI\non:\n  pull_request:\n    paths: [\"src/**\"]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 	repository := t.TempDir()
@@ -296,11 +436,15 @@ func TestBoundedCommandOutput(t *testing.T) {
 }
 
 func TestPopulateChangedPathsRequiresLinkedWebhook(t *testing.T) {
-	context := buildkitepipeline.TriggerConditionContext{}
-	populateChangedPaths(&context, compiler.Event{Event: "pull_request"}, effectiveEventFromPath, []workflowInput{{
-		Triggers: []workflow.Trigger{{Event: "pull_request", Paths: []string{"src/**"}}},
-	}})
-	if context.ChangedPathsKnown || !strings.Contains(context.ChangedPathsError, "linked Buildkite webhook") {
-		t.Fatalf("changed-path context = %#v", context)
+	for _, event := range []string{"push", "pull_request"} {
+		t.Run(event, func(t *testing.T) {
+			context := buildkitepipeline.TriggerConditionContext{}
+			populateChangedPaths(&context, compiler.Event{Event: event}, effectiveEventFromPath, []workflowInput{{
+				Triggers: []workflow.Trigger{{Event: event, Paths: []string{"src/**"}}},
+			}})
+			if context.ChangedPathsKnown || !strings.Contains(context.ChangedPathsError, event+" path filters require linked Buildkite webhook") {
+				t.Fatalf("changed-path context = %#v", context)
+			}
+		})
 	}
 }

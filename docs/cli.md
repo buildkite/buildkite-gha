@@ -26,7 +26,7 @@ Validate syntax, the static graph, and every declared trigger without an event:
 buildkite-gha validate .github/workflows/ci.yml
 ```
 
-This event-independent check accepts syntactically valid pull-request path filters because linked-webhook admission can evaluate them with a verified local git diff. It rejects push path filters, malformed path filters, unsupported events, unsupported branch and tag filter combinations, and unsupported pull-request activity types. It does not resolve actions, evaluate event payload expressions, or claim hosted admission.
+This event-independent check accepts syntactically valid push and pull-request path filters because linked-webhook admission can evaluate them with a verified local git diff. It rejects malformed path filters, unsupported events, unsupported branch and tag filter combinations, and unsupported pull-request activity types. It does not resolve actions, evaluate event payload expressions, or claim hosted admission.
 
 Resolve actions and apply production policy:
 
@@ -57,7 +57,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--all-events` is mutually exclusive with `--event` and `--event-path`. It does not evaluate `workflow_call` as a standalone event. Admission applies separately to each generated snapshot, not to every possible real payload. A `context-required` result means every available compilation and hosted-policy check passed, but a supported admission path needs evidence that generated snapshots do not contain. For example, pull-request path filters need linked webhook data and a verified local git diff.
+`--all-events` is mutually exclusive with `--event` and `--event-path`. It does not evaluate `workflow_call` as a standalone event. Admission applies separately to each generated snapshot, not to every possible real payload. A `context-required` result means every available compilation and hosted-policy check passed, but a supported admission path needs evidence that generated snapshots do not contain. For example, push and pull-request path filters need linked webhook data and a verified local git diff.
 
 Reuse downloaded immutable action source across profile validation runs:
 
@@ -243,9 +243,9 @@ Raw webhook data is not retained in generated plans or pipeline YAML and cannot 
 
 The selected snapshot establishes one effective GitHub event for applicability, compilation, group conditions, and event-qualified check names; group labels remain static across events. An explicit event path uses its event directly and never re-reads live Buildkite event fields. Linked webhook metadata supplies the GitHub event name, including `merge_group`; merge queue builds require matching Buildkite head and base refs and commits. Without either source, pull request builds map to `pull_request`; Buildkite `ui` and `api` sources map to `workflow_dispatch`; `schedule` maps to `schedule`; and other sources, including `trigger_job`, map to `push` even when `build.source_event` is absent.
 
-Top-level workflows that do not declare the effective event are excluded before event-dependent validation and compilation, then emitted as top-level skipped command steps with no plan artifacts. Reusable-only workflows remain available to local callers. If no directly runnable workflow applies, upload succeeds with a skipped-only pipeline. For applicable workflows, only the selected event contributes a group condition: push branch/tag filters, pull request base-branch/activity/path filters, merge group base-branch/activity filters, or the corresponding manual/schedule Buildkite source predicate. Cross-event trigger conditions are never ORed into that group.
+Top-level workflows that do not declare the effective event are excluded before event-dependent validation and compilation, then emitted as top-level skipped command steps with no plan artifacts. Reusable-only workflows remain available to local callers. If no directly runnable workflow applies, upload succeeds with a skipped-only pipeline. For applicable workflows, only the selected event contributes a group condition: push branch/tag/path filters, pull request base-branch/activity/path filters, merge group base-branch/activity filters, or the corresponding manual/schedule Buildkite source predicate. Cross-event trigger conditions are never ORed into that group.
 
-Unsupported or uncertain filters replace only the affected workflow with a failing top-level step. Pull request path filters run only when the linked webhook and local checkout prove a match; see [Pull request path filters](compatibility.md#pull-request-path-filters). Malformed event data still stops the import. Buildkite owns build creation and schedule identity, so every workflow with `on.schedule` is eligible for every Buildkite scheduled build.
+Unsupported or uncertain filters replace only the affected workflow with a failing top-level step. Push and pull request path filters run only when the linked webhook and local checkout prove a match; see [Push path filters](compatibility.md#push-path-filters) and [Pull request path filters](compatibility.md#pull-request-path-filters). Generated or explicit snapshots can report the dependency but cannot stand in for real linked-webhook admission. Malformed event data still stops the import. Buildkite owns build creation and schedule identity, so every workflow with `on.schedule` is eligible for every Buildkite scheduled build.
 
 After all applicable workflows have been attempted, the command uploads the exact executable, content-addressed plans, and synthetic failure steps before running one:
 
