@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,10 +13,12 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
@@ -2561,5 +2564,223 @@ func TestCompilePlansEmitV8ForContainers(t *testing.T) {
 	}
 	if len(plans) != 1 || plans[0].Schema != plan.Schema || plans[0].Container == nil || len(plans[0].Services) != 1 || !slices.Equal(plans[0].RequiredCapabilities, []string{"docker", "network"}) {
 		t.Fatalf("container plan = %#v", plans)
+	}
+}
+
+func TestCompilePlansResolveStaticServiceContainerFields(t *testing.T) {
+	workflowSource := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        postgres: ['16', '17']
+    services:
+      database:
+        image: postgres:${{ matrix.postgres }}
+        credentials:
+          username: ${{ vars.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+        env: {INSTANCE: '${{ strategy.job-index }}'}
+        ports: ['${{ vars.SERVICE_PORT }}']
+        volumes: ['database:/var/lib/postgresql/data']
+        options: --health-retries 5
+        command: postgres -c fsync=off
+        entrypoint: docker-entrypoint.sh
+    steps: [{run: true}]
+`)
+	options := defaultOptions()
+	options.Vars.Buildkite = map[string]string{"SERVICE_PORT": "5432", "REGISTRY_USER": "registry-user"}
+	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %d, want 2", len(plans))
+	}
+	for i, image := range []string{"postgres:16", "postgres:17"} {
+		service := plans[i].Services["database"]
+		if service.Image != image || service.Credentials == nil || service.Credentials.Username != "registry-user" || service.Credentials.Password != "${{ secrets.REGISTRY_PASSWORD }}" || service.Env["INSTANCE"] != strconv.Itoa(i) || !slices.Equal(service.Ports, []string{"5432"}) || len(service.Volumes) != 1 || service.Options == "" || service.Command == "" || service.Entrypoint == "" {
+			t.Fatalf("compiled service %d = %#v", i, service)
+		}
+		if !slices.Equal(plans[i].ServiceOrder, []string{"database"}) {
+			t.Fatalf("service order = %#v", plans[i].ServiceOrder)
+		}
+		if !slices.Equal(plans[i].RequiredSecrets, []string{"REGISTRY_PASSWORD"}) || !plans[i].HasCapability("secrets") {
+			t.Fatalf("service credential provenance = %#v, %#v", plans[i].RequiredSecrets, plans[i].RequiredCapabilities)
+		}
+	}
+	plans[0].Services["database"].Env["INSTANCE"] = "changed"
+	if plans[1].Services["database"].Env["INSTANCE"] != "1" {
+		t.Fatal("matrix service environments share mutable state")
+	}
+}
+
+func TestResolveCompileServicesRejectsVariableIntroducedExpressionSyntax(t *testing.T) {
+	services := []workflow.Service{{
+		Name: "database",
+		Container: workflow.ServiceContainer{
+			Image: "postgres:16",
+			Credentials: &workflow.ContainerCredentials{
+				Username: "registry-user",
+				Password: "${{ vars.password }}",
+			},
+		},
+	}}
+	_, err := resolveCompileServices(services, expression.CompileContext{Vars: map[string]string{"password": "${{ secrets.ADMIN }}"}})
+	if err == nil || !strings.Contains(err.Error(), "compile-time expression result contains expression syntax") {
+		t.Fatalf("resolveCompileServices() error = %v", err)
+	}
+}
+
+func TestResolveCompileServicesRejectsUnsupportedCredentialContexts(t *testing.T) {
+	for _, value := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ needs.build.outputs.user }}"} {
+		services := []workflow.Service{{Name: "database", Container: workflow.ServiceContainer{
+			Image: "postgres:16", Credentials: &workflow.ContainerCredentials{Username: value, Password: "literal"},
+		}}}
+		if _, err := resolveCompileServices(services, expression.CompileContext{}); err == nil || !strings.Contains(err.Error(), "credential expression context") {
+			t.Errorf("resolveCompileServices() credential %q error = %v", value, err)
+		}
+	}
+}
+
+func TestCompilePlansSkipEmptyStaticServiceImage(t *testing.T) {
+	workflowSource := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: ['redis:7', '']
+    services:
+      cache:
+        image: ${{ matrix.image }}
+    steps: [{run: true}]
+`)
+	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 || plans[0].Services["cache"].Image != "redis:7" || len(plans[1].Services) != 0 {
+		t.Fatalf("compiled services = %#v, %#v", plans[0].Services, plans[1].Services)
+	}
+}
+
+func TestCompilePlansResolveWorkflowDispatchInputsAndStrategyDefaultsInServices(t *testing.T) {
+	workflowSource := []byte(`on:
+  workflow_dispatch:
+    inputs:
+      image:
+        type: string
+        default: redis:7
+      enabled:
+        type: boolean
+      replicas:
+        type: number
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      cache:
+        image: ${{ inputs.image }}
+        env:
+          FAIL_FAST: ${{ strategy.fail-fast }}
+          MAX_PARALLEL: ${{ strategy.max-parallel }}
+          ENABLED: ${{ inputs.enabled }}
+          REPLICAS: ${{ inputs.replicas }}
+    steps: [{run: true}]
+`)
+	var event map[string]any
+	if err := json.Unmarshal(readFile(t, smokePath("events", "push.json")), &event); err != nil {
+		t.Fatal(err)
+	}
+	event["event"] = "workflow_dispatch"
+	event["payload"] = map[string]any{"inputs": map[string]any{"image": "valkey:8"}}
+	eventSource, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, eventSource, "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := plans[0].Services["cache"]
+	if service.Image != "valkey:8" || service.Env["FAIL_FAST"] != "true" || service.Env["MAX_PARALLEL"] != "1" || service.Env["ENABLED"] != "false" || service.Env["REPLICAS"] != "0" {
+		t.Fatalf("compiled service = %#v", service)
+	}
+}
+
+func TestCompilePlansRetainNeedsServiceExpressionForRuntime(t *testing.T) {
+	workflowSource := []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs: {image: '${{ steps.image.outputs.value }}'}
+    steps: [{id: image, run: true}]
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    services:
+      cache:
+        image: ${{ needs.producer.outputs.image }}
+    steps: [{run: true}]
+`)
+	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plans[1].Services["cache"].Image; got != "${{ needs.producer.outputs.image }}" {
+		t.Fatalf("runtime service image = %q", got)
+	}
+}
+
+func TestCompilePlansRetainWholeServiceMapExpression(t *testing.T) {
+	workflowSource := []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.out.outputs.services }}
+    steps:
+      - id: out
+        run: echo services={} >> "$GITHUB_OUTPUT"
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    services: ${{ fromJSON(needs.producer.outputs.services) }}
+    steps: [{run: true}]
+`)
+	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := plans[1]
+	if got.ServicesExpression != "${{ fromJSON(needs.producer.outputs.services) }}" || !slices.Contains(got.RequiredCapabilities, "docker") {
+		t.Fatalf("dynamic services plan = expression %q, capabilities %#v", got.ServicesExpression, got.RequiredCapabilities)
+	}
+}
+
+func TestCompilePlansValidateFieldsBeforeSkippingEmptyService(t *testing.T) {
+	workflowSource := []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [""]
+    services:
+      optional:
+        image: ${{ matrix.image }}
+        env:
+          INVALID: ${{ needs.producer.result }}
+    steps: [{run: true}]
+`)
+	_, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	if err == nil || !strings.Contains(err.Error(), "service runtime expression must directly reference needs") {
+		t.Fatalf("error = %v", err)
 	}
 }

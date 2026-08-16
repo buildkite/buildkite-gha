@@ -106,8 +106,8 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "The complete compiler-to-Runner container fixture passed in exact-commit Buildkite build 136.",
-      "note": "Hosted admission still rejects its job- and service-container provenance.",
-      "action_preflight": "none"
+      "note": "Hosted profile smoke admits the compiler-provenanced container path; the dedicated exact-commit proof also checks admission before runtime execution.",
+      "action_preflight": "hosted"
     },
     {
       "id": "summary-annotation",
@@ -178,8 +178,8 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "The plan-v4 job-container fixture passed in exact-commit Buildkite build 136.",
-      "note": "Hosted admission still rejects job-container provenance.",
-      "action_preflight": "none"
+      "note": "Hosted profile smoke admits compiler-provenanced job containers.",
+      "action_preflight": "hosted"
     },
     {
       "id": "unsupported-service-container",
@@ -187,8 +187,8 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "The plan-v4 service-container fixture passed in exact-commit Buildkite build 136.",
-      "note": "Hosted admission still rejects service-container provenance.",
-      "action_preflight": "none"
+      "note": "Hosted profile smoke admits compiler-provenanced service containers.",
+      "action_preflight": "hosted"
     }
   ]
 }

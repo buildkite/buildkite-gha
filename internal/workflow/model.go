@@ -132,6 +132,7 @@ type Job struct {
 	Outputs                 map[string]string      `json:"outputs,omitempty"`
 	Container               *Container             `json:"container,omitempty"`
 	Services                []Service              `json:"services,omitempty"`
+	ServicesExpression      string                 `json:"services_expression,omitempty"`
 	DefaultShell            string                 `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string                 `json:"default_working_directory,omitempty"`
 	Steps                   []Step                 `json:"steps"`
@@ -146,11 +147,29 @@ type Container struct {
 	Span  Span              `json:"span"`
 }
 
-// Service is a named service container. Services are sorted by Name because
-// actionlint v1.7.12 exposes them as a map and does not retain source order.
+// Service is a named service container. Services retain workflow declaration
+// order even though actionlint exposes them as a map.
 type Service struct {
-	Name      string    `json:"name"`
-	Container Container `json:"container"`
+	Name      string           `json:"name"`
+	Container ServiceContainer `json:"container"`
+}
+
+// ServiceContainer is the GitHub Actions service-container definition.
+type ServiceContainer struct {
+	Image       string                `json:"image"`
+	Credentials *ContainerCredentials `json:"credentials,omitempty"`
+	Env         map[string]string     `json:"env,omitempty"`
+	Ports       []string              `json:"ports,omitempty"`
+	Volumes     []string              `json:"volumes,omitempty"`
+	Options     string                `json:"options,omitempty"`
+	Command     string                `json:"command,omitempty"`
+	Entrypoint  string                `json:"entrypoint,omitempty"`
+	Span        Span                  `json:"span"`
+}
+
+type ContainerCredentials struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 // ReusableWorkflowCall is a job-level invocation of another workflow.

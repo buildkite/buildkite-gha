@@ -37,7 +37,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Workflows containing reusable-workflow jobs cannot receive one. |
 | [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs resolve through the destination job's Buildkite secret authority. |
-| [Job and service containers](#containers-and-services) | 🚧 Not available in production | A bounded container subset exists, but production upload rejects it. |
+| [Job and service containers](#containers-and-services) | 🟡 Supported subset | Linux job containers and broadly compatible service definitions, including explicit registry credentials. |
 | [Environments and snapshots](#job-configuration) | 🟡 Supported subset | Environments are rejected. Snapshots are accepted with no effect. |
 | [OIDC](#other-secrets-and-oidc) | ❌ Unsupported | GitHub-compatible OIDC is outside the initial release. |
 | [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers are outside the initial release. |
@@ -372,9 +372,39 @@ A job may expand to at most 256 instances. Matrices derived from `needs` or `ste
 
 ### Containers and services
 
-**🚧 Not available in production.** The compiler and runtime support a bounded Linux subset for job `container` and `services`, but the `hosted` profile rejects it before upload.
+**🟡 Supported subset.** Linux jobs support job containers and GitHub-compatible services. A typical PostgreSQL service works without Buildkite-specific syntax:
 
-The underlying subset accepts literal public image names, environment maps, and ports. Credentials, volumes, options, private images, dynamic values, and privileged containers are unsupported.
+```yaml
+services:
+  postgres:
+    image: postgres:16
+    env:
+      POSTGRES_PASSWORD: test
+    ports:
+      - 5432
+    options: >-
+      --health-cmd pg_isready
+      --health-interval 2s
+      --health-timeout 5s
+      --health-retries 10
+```
+
+Services support `image`, `credentials`, `env`, `ports`, `volumes`, `options`, `command`, and `entrypoint`.
+
+- Service fields can use compile-time `github`, `inputs`, `vars`, `strategy`, and `matrix` values or runtime `needs` outputs. An empty evaluated image skips the service.
+- A complete non-credential service map can use `${{ fromJSON(needs.<job>.outputs.<name>) }}`. Declare credentials statically so the compiler can prove their secret authority.
+- Credentials accept direct values and `github`, `vars`, `secrets`, or `env` expressions. Passwords pass to `docker login` through standard input. Authentication uses a private per-job Docker configuration and never reads ambient Docker credentials.
+- Docker options pass through except `--network` and its `--net` aliases, which GitHub Actions does not support. Options can grant privileges, mount host paths, publish ports, and change resource settings.
+- Named, anonymous, and absolute bind volumes are supported.
+- A job can define 32 services. Each service can define 256 environment entries and 128 ports or volumes.
+
+Implicit GHCR authentication is unsupported; provide explicit credentials. Mutable tags resolve at job start. Use a digest when image immutability matters. Job container images must provide `sh` and run the mounted self-contained Linux runtime executable.
+
+Each job uses a private Docker bridge network. Container jobs reach services by service name. Host jobs use declared published ports; omitted host ports are assigned dynamically. The `job.services.<service>` context exposes `id`, `network`, and `ports`.
+
+A service with a Docker health check must become healthy before steps run. A service without one is ready after it starts. Failures include bounded status, health, port, and log diagnostics.
+
+Cleanup removes the job container, emits masked and bounded service logs, then removes services in declaration order, the network, newly created volumes, and private Docker configuration. Remaining owned resources fail the job. Docker resources are not a security or resource-isolation boundary: the hosted queue must isolate the whole job and enforce host CPU, memory, disk, and network limits. See the [security model](security.md#isolate-the-whole-job).
 
 macOS jobs reject containers, services, Dockerfile actions, and Docker capability.
 

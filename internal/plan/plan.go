@@ -13,6 +13,7 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 )
 
 const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json"
@@ -28,12 +29,18 @@ var logicalJobIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+
 var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var actionLockIDPattern = regexp.MustCompile(`^a-[0-9a-f]{16}$`)
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-var containerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$`)
+var containerImagePattern = regexp.MustCompile(`^(?:(?:[a-z0-9]+(?:[._-][a-z0-9]+)*|\[[0-9a-f:]+\])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$`)
 var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
 var serviceNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,254}$`)
 var githubRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 var githubWorkflowFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$`)
+
+// ValidContainerImageReference reports whether image is a supported literal
+// Docker image reference.
+func ValidContainerImageReference(image string) bool {
+	return containerImagePattern.MatchString(image)
+}
 
 var githubTokenPermissionAccess = map[string]map[string]bool{
 	"actions":             {"read": true, "write": true},
@@ -191,10 +198,22 @@ type Step struct {
 }
 
 type Container struct {
-	Image string            `json:"image"`
-	Env   map[string]string `json:"env,omitempty"`
-	Ports []string          `json:"ports,omitempty"`
+	Image       string                `json:"image"`
+	Credentials *ContainerCredentials `json:"credentials,omitempty"`
+	Env         map[string]string     `json:"env,omitempty"`
+	Ports       []string              `json:"ports,omitempty"`
+	Volumes     []string              `json:"volumes,omitempty"`
+	Options     string                `json:"options,omitempty"`
+	Command     string                `json:"command,omitempty"`
+	Entrypoint  string                `json:"entrypoint,omitempty"`
 }
+
+type ContainerCredentials struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type ServiceContainer = Container
 
 // GitHubToken describes one synthetic secrets.GITHUB_TOKEN value. Permissions
 // are API-normalized and compiler-owned; the repository always comes from Event.
@@ -231,9 +250,11 @@ type Job struct {
 	Steps                   []Step            `json:"steps"`
 	Actions                 []ActionLock      `json:"actions,omitempty"`
 	// RequiresMise is the compiler's explicit action-runtime decision.
-	RequiresMise *bool                `json:"requires_mise,omitempty"`
-	Container    *Container           `json:"container,omitempty"`
-	Services     map[string]Container `json:"services,omitempty"`
+	RequiresMise       *bool                `json:"requires_mise,omitempty"`
+	Container          *Container           `json:"container,omitempty"`
+	Services           map[string]Container `json:"services,omitempty"`
+	ServiceOrder       []string             `json:"service_order,omitempty"`
+	ServicesExpression string               `json:"services_expression,omitempty"`
 }
 
 // NeedsMise reports whether a generated job needs the managed action runtime.
@@ -414,7 +435,10 @@ func (job Job) Validate() error {
 		}
 		capabilities[capability] = struct{}{}
 	}
-	if job.Container != nil || len(job.Services) != 0 {
+	if len(job.ServiceOrder) != 0 && len(job.Services) == 0 {
+		return fmt.Errorf("job plan service order requires static services")
+	}
+	if job.Container != nil || len(job.Services) != 0 || job.ServicesExpression != "" {
 		if _, ok := capabilities["docker"]; !ok {
 			return fmt.Errorf("job containers and services require docker capability")
 		}
@@ -422,6 +446,9 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job containers and services require network capability")
 		}
 		if job.Container != nil {
+			if job.Container.Credentials != nil || len(job.Container.Volumes) != 0 || job.Container.Options != "" || job.Container.Command != "" || job.Container.Entrypoint != "" {
+				return fmt.Errorf("job container contains service-only fields")
+			}
 			if err := validateContainer(job.Container.Image, job.Container.Env, job.Container.Ports); err != nil {
 				return fmt.Errorf("job container: %w", err)
 			}
@@ -429,12 +456,30 @@ func (job Job) Validate() error {
 		if len(job.Services) > 32 {
 			return fmt.Errorf("job plan has more than 32 services")
 		}
+		if len(job.ServiceOrder) != len(job.Services) {
+			return fmt.Errorf("job plan service order must name every static service")
+		}
+		seen := make(map[string]bool, len(job.ServiceOrder))
+		for _, name := range job.ServiceOrder {
+			if _, ok := job.Services[name]; !ok || seen[name] {
+				return fmt.Errorf("job plan service order contains unknown or repeated service %q", name)
+			}
+			seen[name] = true
+		}
 		for name, service := range job.Services {
 			if !serviceNamePattern.MatchString(name) {
 				return fmt.Errorf("service name %q must be lowercase and valid", name)
 			}
-			if err := validateContainer(service.Image, service.Env, service.Ports); err != nil {
+			if err := validateServiceContainer(service, true); err != nil {
 				return fmt.Errorf("service %q: %w", name, err)
+			}
+		}
+		if job.ServicesExpression != "" {
+			if len(job.ServicesExpression) > 65536 {
+				return fmt.Errorf("services expression exceeds its size limit")
+			}
+			if err := expression.ValidateServiceMapRuntimeExpression(job.ServicesExpression); err != nil {
+				return err
 			}
 		}
 	}
@@ -614,6 +659,86 @@ func (job Job) Validate() error {
 	return nil
 }
 
+func validateServiceContainer(service ServiceContainer, templates bool) error {
+	if !templates && !ValidContainerImageReference(service.Image) {
+		return fmt.Errorf("invalid image reference")
+	}
+	if err := validateContainerImageEnv(service.Image, service.Env); err != nil {
+		return err
+	}
+	if len(service.Ports) > 128 || len(service.Volumes) > 128 || len(service.Options) > 65536 || len(service.Command) > 65536 || len(service.Entrypoint) > 4096 {
+		return fmt.Errorf("service container fields exceed their size limit")
+	}
+	for _, values := range [][]string{service.Ports, service.Volumes} {
+		seen := map[string]bool{}
+		for _, value := range values {
+			if value == "" || len(value) > 4096 || strings.ContainsAny(value, "\x00\r\n") || seen[value] {
+				return fmt.Errorf("service container has invalid or repeated value %q", value)
+			}
+			seen[value] = true
+		}
+	}
+	for _, value := range []string{service.Options, service.Command, service.Entrypoint} {
+		if strings.ContainsAny(value, "\x00\r") {
+			return fmt.Errorf("service container field contains a control character")
+		}
+	}
+	if service.Credentials != nil {
+		if len(service.Credentials.Username) > 65536 || len(service.Credentials.Password) > 65536 || strings.ContainsAny(service.Credentials.Username, "\x00\r\n") || strings.ContainsAny(service.Credentials.Password, "\x00\r\n") {
+			return fmt.Errorf("service container has invalid credentials")
+		}
+	}
+	values := append(append(append([]string{service.Image, service.Options, service.Command, service.Entrypoint}, service.Ports...), service.Volumes...), mapStringValues(service.Env)...)
+	if templates {
+		for _, value := range values {
+			if strings.Contains(value, "${{") {
+				if err := expression.ValidateRuntimeTemplate(value); err != nil {
+					return fmt.Errorf("service container has invalid runtime template: %w", err)
+				}
+			}
+		}
+		if service.Credentials != nil {
+			for _, value := range []string{service.Credentials.Username, service.Credentials.Password} {
+				if strings.Contains(value, "${{") {
+					if err := expression.ValidateServiceCredentialTemplate(value); err != nil {
+						return fmt.Errorf("service container has invalid credential template: %w", err)
+					}
+				}
+			}
+		}
+	} else {
+		for _, value := range values {
+			if strings.Contains(value, "${{") {
+				return fmt.Errorf("service container retains a runtime template")
+			}
+		}
+		if service.Credentials != nil && (strings.Contains(service.Credentials.Username, "${{") || strings.Contains(service.Credentials.Password, "${{")) {
+			return fmt.Errorf("service container credentials retain a runtime template")
+		}
+	}
+	return nil
+}
+
+func ValidateServiceContainer(service ServiceContainer) error {
+	return validateServiceContainer(service, true)
+}
+
+func ValidateEvaluatedServiceContainer(service ServiceContainer) error {
+	return validateServiceContainer(service, false)
+}
+
+func ValidateServiceName(name string) bool {
+	return serviceNamePattern.MatchString(name)
+}
+
+func mapStringValues(values map[string]string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, value)
+	}
+	return result
+}
+
 func validGitHubRepository(repository string) bool {
 	if len(repository) > 140 || !githubRepositoryPattern.MatchString(repository) {
 		return false
@@ -686,7 +811,30 @@ func compareNeedOutput(left, right NeedOutput) int {
 }
 
 func validateContainer(image string, env map[string]string, ports []string) error {
-	if len(image) == 0 || len(image) > 512 || !containerImagePattern.MatchString(image) {
+	if !ValidContainerImageReference(image) {
+		return fmt.Errorf("invalid image reference")
+	}
+	if err := validateContainerImageEnv(image, env); err != nil {
+		return err
+	}
+	if len(ports) > 128 {
+		return fmt.Errorf("more than 128 ports")
+	}
+	seen := map[string]bool{}
+	for _, port := range ports {
+		if seen[port] {
+			return fmt.Errorf("repeated port %q", port)
+		}
+		seen[port] = true
+		if !containerPortPattern.MatchString(port) {
+			return fmt.Errorf("invalid port %q", port)
+		}
+	}
+	return nil
+}
+
+func validateContainerImageEnv(image string, env map[string]string) error {
+	if len(image) == 0 || len(image) > 512 || !strings.Contains(image, "${{") && !ValidContainerImageReference(image) {
 		return fmt.Errorf("invalid image reference")
 	}
 	if len(env) > 256 {
@@ -701,19 +849,6 @@ func validateContainer(image string, env map[string]string, ports []string) erro
 	}
 	if total > 1048576 {
 		return fmt.Errorf("environment exceeds 1048576 bytes")
-	}
-	if len(ports) > 128 {
-		return fmt.Errorf("more than 128 ports")
-	}
-	seen := map[string]bool{}
-	for _, port := range ports {
-		if seen[port] {
-			return fmt.Errorf("repeated port %q", port)
-		}
-		seen[port] = true
-		if !containerPortPattern.MatchString(port) {
-			return fmt.Errorf("invalid port %q", port)
-		}
 	}
 	return nil
 }
