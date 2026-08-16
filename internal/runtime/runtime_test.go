@@ -1824,6 +1824,87 @@ func TestStepNameFailsClosedOnUnavailableBackgroundOutput(t *testing.T) {
 	}
 }
 
+func TestBackgroundTaskLifecycleTransitions(t *testing.T) {
+	states := []struct {
+		name  string
+		state backgroundTaskState
+	}{
+		{name: "queued", state: backgroundTaskQueued},
+		{name: "running", state: backgroundTaskRunning},
+		{name: "finished", state: backgroundTaskFinished},
+		{name: "committed", state: backgroundTaskCommitted},
+	}
+	valid := map[[2]backgroundTaskState]bool{
+		{backgroundTaskQueued, backgroundTaskRunning}:     true,
+		{backgroundTaskQueued, backgroundTaskFinished}:    true,
+		{backgroundTaskRunning, backgroundTaskFinished}:   true,
+		{backgroundTaskFinished, backgroundTaskCommitted}: true,
+	}
+
+	for _, from := range states {
+		for _, to := range states {
+			t.Run(from.name+"-to-"+to.name, func(t *testing.T) {
+				task := backgroundTask{state: from.state}
+				var panicked bool
+				func() {
+					defer func() { panicked = recover() != nil }()
+					task.transitionLocked(to.state)
+				}()
+
+				if valid[[2]backgroundTaskState{from.state, to.state}] {
+					if panicked || task.state != to.state {
+						t.Fatalf("transition %d -> %d: state = %d, panicked = %v", from.state, to.state, task.state, panicked)
+					}
+				} else if !panicked || task.state != from.state {
+					t.Fatalf("invalid transition %d -> %d: state = %d, panicked = %v", from.state, to.state, task.state, panicked)
+				}
+			})
+		}
+	}
+}
+
+func TestBackgroundSupervisorCommitsCompletedTaskExactlyOnceUnderContention(t *testing.T) {
+	supervisor := newBackgroundSupervisor(1)
+	task := &backgroundTask{
+		done:      make(chan struct{}),
+		execution: stepExecution{step: plan.Step{ID: "only"}},
+		state:     backgroundTaskFinished,
+	}
+	close(task.done)
+
+	const callers = 32
+	start := make(chan struct{})
+	results := make(chan []stepExecution, callers)
+	var group sync.WaitGroup
+	for range callers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			results <- supervisor.commitCompleted([]*backgroundTask{task})
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(results)
+
+	commits := 0
+	for executions := range results {
+		commits += len(executions)
+		if len(executions) == 1 && executions[0].step.ID != "only" {
+			t.Fatalf("committed execution ID = %q, want only", executions[0].step.ID)
+		}
+	}
+	if commits != 1 {
+		t.Fatalf("commits = %d, want 1", commits)
+	}
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	if task.state != backgroundTaskCommitted {
+		t.Fatalf("state = %d, want committed", task.state)
+	}
+}
+
 func TestBackgroundSupervisorBoundsActiveWorkAndQueuesFIFO(t *testing.T) {
 	supervisor := newBackgroundSupervisor(maxActiveBackgroundSteps)
 	release := make(chan struct{})
