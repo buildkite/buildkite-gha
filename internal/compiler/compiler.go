@@ -213,7 +213,7 @@ func Validate(path string, source []byte) (Report, error) {
 	if err != nil {
 		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
-	triggerErr := processingFinding(StagePipeline, CodePipelineGeneration, "compatibility", buildkitepipeline.ValidateTriggerConditions(parsed.Triggers))
+	triggerErr := triggerValidationFinding(buildkitepipeline.ValidateTriggerConditions(parsed.Triggers))
 	options := defaultOptions()
 	event := Event{
 		Event: "validation", Trust: options.EventTrust,
@@ -233,6 +233,25 @@ func Validate(path string, source []byte) (Report, error) {
 		return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), err
 	}
 	return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), nil
+}
+
+func triggerValidationFinding(err error) error {
+	if err == nil {
+		return nil
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		findings := make([]error, 0, len(children))
+		for _, child := range children {
+			findings = append(findings, triggerValidationFinding(child))
+		}
+		return errors.Join(findings...)
+	}
+	var contextRequired *buildkitepipeline.PathFilterContextRequiredError
+	if errors.As(err, &contextRequired) {
+		return processingFinding(StagePipeline, CodeContextRequired, "context", err)
+	}
+	return processingFinding(StagePipeline, CodePipelineGeneration, "compatibility", err)
 }
 
 // ValidateEvent validates both the supported static graph and its event input.

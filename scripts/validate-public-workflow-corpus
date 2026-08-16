@@ -306,10 +306,12 @@ with open(os.environ["manifest"], encoding="utf-8") as manifest:
         record = json.loads(line)
         repositories[record["source"]] = record["repository"]
 
-blocked_repos = set()
+incompatible_repos = set()
+context_required_repos = set()
 codes_by_repo = collections.defaultdict(set)
 findings = collections.Counter()
 evaluations = collections.Counter()
+workflow_results = collections.Counter()
 seen_workflows = set()
 bad_reports = 0
 for path in glob.glob(os.path.join(os.environ["reports"], "**", "*.json"), recursive=True):
@@ -332,12 +334,16 @@ for path in glob.glob(os.path.join(os.environ["reports"], "**", "*.json"), recur
         or not isinstance(result.get("evaluations"), list)
     ):
         bad_reports += 1
-        blocked_repos.add(repository)
+        incompatible_repos.add(repository)
         codes_by_repo[repository].add("E_REPORT")
         findings["E_REPORT"] += 1
         continue
-    if result.get("result") not in ("admitted", "not-applicable"):
-        blocked_repos.add(repository)
+    workflow_result = result.get("result")
+    workflow_results[workflow_result or "missing"] += 1
+    if workflow_result == "context-required":
+        context_required_repos.add(repository)
+    elif workflow_result not in ("admitted", "not-applicable"):
+        incompatible_repos.add(repository)
     reports = [("validation", result["validation"])]
     seen_events = set()
     for evaluation in result["evaluations"]:
@@ -350,7 +356,7 @@ for path in glob.glob(os.path.join(os.environ["reports"], "**", "*.json"), recur
             or not isinstance(evaluation.get("report"), dict)
         ):
             bad_reports += 1
-            blocked_repos.add(repository)
+            incompatible_repos.add(repository)
             codes_by_repo[repository].add("E_REPORT")
             findings["E_REPORT"] += 1
             reports = []
@@ -361,7 +367,7 @@ for path in glob.glob(os.path.join(os.environ["reports"], "**", "*.json"), recur
     for _, report in reports:
         if report.get("schema") != "buildkite-gha/processing-report/v2":
             bad_reports += 1
-            blocked_repos.add(repository)
+            incompatible_repos.add(repository)
             codes_by_repo[repository].add("E_REPORT")
             findings["E_REPORT"] += 1
             break
@@ -374,17 +380,26 @@ for path in glob.glob(os.path.join(os.environ["reports"], "**", "*.json"), recur
 for workflow in repositories.keys() - seen_workflows:
     repository = repositories[workflow]
     bad_reports += 1
-    blocked_repos.add(repository)
+    incompatible_repos.add(repository)
     codes_by_repo[repository].add("E_REPORT")
     findings["E_REPORT"] += 1
 
 all_repos = set(repositories.values())
-clean = len(all_repos - blocked_repos)
+context_required_only = context_required_repos - incompatible_repos
+compatible_repos = all_repos - incompatible_repos - context_required_only
+measured = len(all_repos) - len(context_required_only)
+compatible = len(compatible_repos)
+compatible_percent = 100 * compatible / measured if measured else 0
 print(
-    f"repos: {len(all_repos):,}   clean: {clean:,} "
-    f"({100 * clean / len(all_repos):.2f}%)   unparseable reports: {bad_reports:,}"
+    f"repos: {len(all_repos):,}   measured: {measured:,}   "
+    f"compatible: {compatible:,} ({compatible_percent:.2f}% of measured)   "
+    f"context required: {len(context_required_only):,}   "
+    f"incompatible: {len(incompatible_repos):,}   unparseable reports: {bad_reports:,}"
 )
 print("admission scope: generated event snapshots, not arbitrary real payloads")
+print("workflow results: " + ", ".join(
+    f"{result}={count:,}" for result, count in sorted(workflow_results.items())
+))
 print("\ndiagnostic code -> repos affected")
 repos_by_code = collections.Counter(
     code for codes in codes_by_repo.values() for code in codes
@@ -394,7 +409,10 @@ for code, count in repos_by_code.most_common(40):
 
 tally = {
     "repos": len(all_repos),
-    "clean": clean,
+    "measured_repos": measured,
+    "compatible_repos": compatible,
+    "context_required_repos": len(context_required_only),
+    "incompatible_repos": len(incompatible_repos),
     "validator_commit": os.environ["validator_commit"],
     "validator_version": os.environ["validator_version"],
     "validator_digest": "sha256:" + os.environ["validator_digest"],
@@ -402,6 +420,7 @@ tally = {
     "by_repo": dict(repos_by_code),
     "by_finding": dict(findings),
     "evaluations": dict(evaluations),
+    "workflow_results": dict(workflow_results),
     "unparseable_reports": bad_reports,
 }
 if os.environ["sample_key"] != "full":

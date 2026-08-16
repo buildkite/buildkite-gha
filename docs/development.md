@@ -78,7 +78,11 @@ Useful environment variables are:
 | `ACTION_CACHE_MAX_BYTES` | `21474836480` | Bound extracted immutable action trees. |
 | `REFRESH_ACTION_RESOLUTIONS` | `0` | Set to `1` to start a new action-resolution generation. This removes existing report sets for the record. |
 
-The script prints a repository-level diagnostic tally. Sample metadata is also written to `records/<record-id>/samples/<sample-key>/validate-tally.json`; per-workflow v3 reports are under `reports/<record-id>/samples/<sample-key>/<validator-digest>/`. Full-corpus tallies and reports retain their existing paths.
+The script reports compatible and incompatible repositories among those the generated snapshots measured. It reports repositories that require context separately and excludes them from the compatibility percentage. The tally also records workflow result counts and keeps every diagnostic in the per-workflow report.
+
+Pull-request path filters require a linked Buildkite webhook and a verified, bounded local git diff. The public corpus has workflow files but no repository checkouts or pull-request history, so it reports otherwise-compatible workflows with these filters as `context-required`. This does not claim admission. Push path filters, malformed filters, and workflows with another incompatibility remain incompatible.
+
+Sample metadata is written to `records/<record-id>/samples/<sample-key>/validate-tally.json`; per-workflow v3 reports are under `reports/<record-id>/samples/<sample-key>/<validator-digest>/`. Full-corpus tallies and reports retain their existing paths.
 
 Admission covers generated event snapshots, not arbitrary real payloads or action execution. The action-resolution snapshot pins action revisions only. Preserve the snapshot, corpus record, sample seed, and sample size when comparing compatibility across commits.
 

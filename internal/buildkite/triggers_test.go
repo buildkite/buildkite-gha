@@ -1,6 +1,7 @@
 package buildkite
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -57,6 +58,26 @@ func TestValidateTriggerConditionsAllowsReusableOnlyWorkflow(t *testing.T) {
 	}
 	if err := ValidateTriggerConditions([]workflow.Trigger{{Event: "issues"}}); err == nil || !strings.Contains(err.Error(), "unsupported GitHub trigger") {
 		t.Fatalf("ValidateTriggerConditions(issues) error = %v", err)
+	}
+}
+
+func TestValidateTriggerConditionsClassifiesOnlySupportedPullRequestPathsAsContextRequired(t *testing.T) {
+	err := ValidateTriggerConditions([]workflow.Trigger{
+		{Event: "pull_request", Paths: []string{"src/**"}},
+		{Event: "push", Paths: []string{"docs/**"}},
+	})
+	var contextRequired *PathFilterContextRequiredError
+	var unsupported *UnsupportedPathFiltersError
+	if !errors.As(err, &contextRequired) || contextRequired.Event != "pull_request" {
+		t.Fatalf("ValidateTriggerConditions() context error = %v", err)
+	}
+	if !errors.As(err, &unsupported) || unsupported.Event != "push" {
+		t.Fatalf("ValidateTriggerConditions() unsupported error = %v", err)
+	}
+
+	err = ValidateTriggerConditions([]workflow.Trigger{{Event: "pull_request", Paths: []string{"!src/**"}}})
+	if errors.As(err, &contextRequired) || err == nil || !strings.Contains(err.Error(), "must follow a positive pattern") {
+		t.Fatalf("ValidateTriggerConditions() invalid pull request path error = %v", err)
 	}
 }
 

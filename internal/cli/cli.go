@@ -1464,14 +1464,20 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 	validation, validationErr := compiler.Validate(workflowPath, source)
 	validationReport := compatibility.InitialProcessingReport(workflowPath, "", false, validation, validationErr)
 	if validationErr != nil {
-		validationReport.Result = "incompatible"
-		report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
-		if out.writeV3(report) != nil {
+		if processingReportOnlyRequiresContext(validationReport) {
+			validationReport.Result = "context-required"
+		} else {
+			validationReport.Result = "incompatible"
+			report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
+			if out.writeV3(report) != nil {
+				return 1
+			}
 			return 1
 		}
-		return 1
 	}
-	validationReport.Result = "compilable"
+	if validationErr == nil {
+		validationReport.Result = "compilable"
+	}
 	report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
 	parsed, err := workflow.Parse(workflowPath, source)
 	if err != nil {
@@ -1481,6 +1487,7 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 	for _, trigger := range parsed.Triggers {
 		declared[trigger.Event] = true
 	}
+	contextRequired := validationReport.Result == "context-required"
 	cleanup := func() {}
 	if runtime == nil {
 		actionSource, sourceCleanup, sourceErr := newHostedActionSource(actionCacheDir, nil, nil)
@@ -1498,9 +1505,17 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 		runtime = &profileValidationRuntime{actionSource: actionSource, distributionDigest: distributionDigest, executableErr: executableErr}
 	}
 	defer cleanup()
-	failed := false
+	failed := contextRequired
 	for _, event := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
 		if !declared[event] {
+			continue
+		}
+		if event == "pull_request" && contextRequired {
+			eventReport := validationReport
+			eventReport.Profile = hostedProfile
+			report.Evaluations = append(report.Evaluations, compatibility.EventEvaluation{
+				Event: event, Source: "generated", Report: eventReport,
+			})
 			continue
 		}
 		var eventReport *compatibility.ProcessingReport
@@ -1525,6 +1540,20 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 		return 1
 	}
 	return 0
+}
+
+func processingReportOnlyRequiresContext(report compatibility.ProcessingReport) bool {
+	found := false
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Level != "error" {
+			continue
+		}
+		if diagnostic.Code != compiler.CodeContextRequired {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 func validateActionCacheArgs(args []string) ([]string, string, error) {
@@ -2342,19 +2371,26 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 	report := triggerProcessingReport(input.Path, input.Source)
 	var pathFilters *buildkitepipeline.UnsupportedPathFiltersError
 	if errors.As(err, &pathFilters) {
+		code, category := compiler.CodePipelineGeneration, "compatibility"
 		message := fmt.Sprintf("%s trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step.", upperFirst(pathFilters.Event))
-		if pathFilters.Reason != "" {
+		if pathFilters.Event == "pull_request" && pathFilters.Reason == "" {
+			code, category = compiler.CodeContextRequired, "context"
+			message = "Pull request path filters require linked Buildkite webhook data and a verified local git diff."
+			report.Result = "context-required"
+		} else if pathFilters.Reason != "" {
 			message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. Ensure the linked webhook and local checkout contain matching pull-request history, or remove the path filters.", upperFirst(pathFilters.Event))
 		}
 		err = &compiler.ProcessingFinding{
-			Stage: compiler.StagePipeline, Code: compiler.CodePipelineGeneration, Category: "compatibility",
+			Stage: compiler.StagePipeline, Code: code, Category: category,
 			Path: input.Path, Line: 1, Column: 1,
 			Message: message,
 			Detail:  pathFilters.Error(), Err: err,
 		}
 	}
 	report.AddFailure(input.Path, string(compiler.StagePipeline), compiler.CodePipelineGeneration, "compatibility", err)
-	report.Result = "incompatible"
+	if report.Result != "context-required" {
+		report.Result = "incompatible"
+	}
 	return report
 }
 

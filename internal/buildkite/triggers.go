@@ -1,6 +1,7 @@
 package buildkite
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -43,6 +44,16 @@ func (e *UnsupportedPathFiltersError) Error() string {
 	return fmt.Sprintf("%s path filters are unsupported: Buildkite if_changed is not equivalent", e.Event)
 }
 
+// PathFilterContextRequiredError reports a supported path-filter mode that
+// cannot be evaluated without linked webhook and local checkout evidence.
+type PathFilterContextRequiredError struct {
+	Event string
+}
+
+func (e *PathFilterContextRequiredError) Error() string {
+	return fmt.Sprintf("%s path filters require linked webhook data and a verified local git diff", e.Event)
+}
+
 // LiveTriggerConditionContext uses fields from the Buildkite build that
 // supplied the effective event snapshot.
 func LiveTriggerConditionContext(eventPredicate string) TriggerConditionContext {
@@ -78,12 +89,18 @@ func TranslateTriggerCondition(triggers []workflow.Trigger) (string, error) {
 // ValidateTriggerConditions validates every trigger using the same translation
 // rules as pipeline generation without selecting an effective event.
 func ValidateTriggerConditions(triggers []workflow.Trigger) error {
+	var findings []error
 	for _, trigger := range triggers {
 		if _, _, err := translateTrigger(trigger, liveTriggerContext(trigger.Event), true); err != nil {
-			return err
+			var pathFilters *UnsupportedPathFiltersError
+			if errors.As(err, &pathFilters) && pathFilters.Event == "pull_request" && pathFilters.Reason == "" {
+				findings = append(findings, &PathFilterContextRequiredError{Event: pathFilters.Event})
+			} else {
+				findings = append(findings, err)
+			}
 		}
 	}
-	return nil
+	return errors.Join(findings...)
 }
 
 // TranslateEventTriggerCondition validates every trigger but emits a

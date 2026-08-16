@@ -171,6 +171,31 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 	}
 }
 
+func TestProcessingReportV3ClassifiesContextRequiredWithoutHidingIncompatibility(t *testing.T) {
+	validation := NewProcessingReport("ci.yml", "")
+	validation.Result = "context-required"
+	contextRequired := NewProcessingReport("ci.yml", "hosted")
+	contextRequired.Result = "context-required"
+	report := NewProcessingReportV3("ci.yml", "hosted", validation)
+	report.Evaluations = append(report.Evaluations, EventEvaluation{
+		Event: "pull_request", Source: "generated", Report: contextRequired,
+	})
+	report.Finalize()
+	if report.Result != "context-required" {
+		t.Fatalf("context-required report result = %q", report.Result)
+	}
+
+	incompatible := NewProcessingReport("ci.yml", "hosted")
+	incompatible.Result = "incompatible"
+	report.Evaluations = append(report.Evaluations, EventEvaluation{
+		Event: "push", Source: "generated", Report: incompatible,
+	})
+	report.Finalize()
+	if report.Result != "incompatible" {
+		t.Fatalf("mixed report result = %q", report.Result)
+	}
+}
+
 func TestProcessingReportV1RemainsStrictWithoutDetail(t *testing.T) {
 	report := NewProcessingReport("ci.yml", "")
 	report.Diagnostics = append(report.Diagnostics, Diagnostic{
