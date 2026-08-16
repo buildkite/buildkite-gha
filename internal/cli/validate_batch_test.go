@@ -119,6 +119,17 @@ func TestBatchValidationManifestAndIdentity(t *testing.T) {
 	if _, err := parseBatchValidationArgs([]string{"--manifest", "manifest"}); err == nil || !strings.Contains(err.Error(), "required") {
 		t.Fatalf("missing options error = %v", err)
 	}
+	baseArgs := []string{"--manifest", "manifest", "--output-dir", "reports", "--corpus-id", "corpus"}
+	if _, err := parseBatchValidationArgs(append(append([]string{}, baseArgs...), "--action-cache-max-bytes", "1024")); err == nil || !strings.Contains(err.Error(), "requires --action-cache-dir") {
+		t.Fatalf("cache budget without directory error = %v", err)
+	}
+	cacheArgs := append(append([]string{}, baseArgs...), "--action-cache-dir", "cache", "--action-cache-max-bytes", "1024")
+	if options, err := parseBatchValidationArgs(cacheArgs); err != nil || options.actionCacheMaxBytes != 1024 {
+		t.Fatalf("cache budget options = %#v, %v", options, err)
+	}
+	if _, err := parseBatchValidationArgs(append(append([]string{}, baseArgs...), "--action-cache-dir", "cache", "--action-cache-max-bytes", "0")); err == nil || !strings.Contains(err.Error(), "positive integer") {
+		t.Fatalf("invalid cache budget error = %v", err)
+	}
 	options := batchValidationArgs{outputDir: root, corpusID: "record-one"}
 	base := batchValidationResultPath(options, valid, "validator-one")
 	variants := []string{

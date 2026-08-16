@@ -57,7 +57,7 @@ Run "buildkite-gha help <command>" for command help.
 
 var commandUsage = map[string]string{
 	"validate":       "Usage: buildkite-gha validate [--profile hosted] [--event <name> | --event-path <path> | --all-events] [--action-cache-dir <path>] [--format text|json] <workflow>\n",
-	"validate-batch": "Usage: buildkite-gha validate-batch --manifest <path> --output-dir <path> --corpus-id <id> [--action-cache-dir <path>] [--jobs <count>]\n",
+	"validate-batch": "Usage: buildkite-gha validate-batch --manifest <path> --output-dir <path> --corpus-id <id> [--action-cache-dir <path> --action-cache-max-bytes <bytes>] [--jobs <count>]\n",
 	"compile":        "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
 	"upload":         "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--experimental-runner-user] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
 	"run-job":        "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
@@ -2682,7 +2682,7 @@ func newHostedActionSource(actionCacheDir string, sourceOptions []actionsource.O
 		cleanup()
 		return nil, func() {}, fmt.Errorf("configure public action resolver: %w", err)
 	}
-	store, err := actionsource.NewStore(actionRoot, nil)
+	store, err := actionsource.NewStore(actionRoot, nil, sourceOptions...)
 	if err != nil {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("configure public action source store: %w", err)

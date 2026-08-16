@@ -64,6 +64,7 @@ type actionLockBuilder struct {
 	ids          map[string]string
 	active       map[string]bool
 	caps         map[string]bool
+	materialized []source.Materialized
 	requiresMise bool
 }
 
@@ -223,6 +224,11 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 		return actionCompilation{}, fmt.Errorf("resolve workspace: %w", err)
 	}
 	b := &actionLockBuilder{workspace: abs, source: actionSource, nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
+	defer func() {
+		for _, materialized := range b.materialized {
+			materialized.Release()
+		}
+	}()
 	selectors := make([]plan.ActionSelector, 0, len(refs))
 	roots := make([]*actionNode, 0, len(refs))
 	for _, ref := range refs {
@@ -450,6 +456,7 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 	if err != nil {
 		return "", plan.ActionLock{}, "", "", err
 	}
+	b.materialized = append(b.materialized, materialized)
 	repositoryRoot, err := filepath.Abs(materialized.RepositoryRoot)
 	if err != nil {
 		return "", plan.ActionLock{}, "", "", fmt.Errorf("resolve materialized repository root: %w", err)
@@ -520,7 +527,8 @@ func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) 
 	s.mu.Lock()
 	if cached, ok := s.cache[key]; ok {
 		s.mu.Unlock()
-		return cached.resolved, cached.materialized, nil
+		materialized, err := cached.materialized.Retain(ctx)
+		return cached.resolved, materialized, err
 	}
 	if active, ok := s.active[key]; ok {
 		s.mu.Unlock()
@@ -531,7 +539,11 @@ func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) 
 			if active.err != nil && ctx.Err() == nil && (errors.Is(active.err, context.Canceled) || errors.Is(active.err, context.DeadlineExceeded)) {
 				return s.Fetch(ctx, ref)
 			}
-			return active.resolved, active.materialized, active.err
+			if active.err != nil {
+				return active.resolved, active.materialized, active.err
+			}
+			materialized, err := active.materialized.Retain(ctx)
+			return active.resolved, materialized, err
 		}
 	}
 	call := &memoizedActionCall{done: make(chan struct{})}

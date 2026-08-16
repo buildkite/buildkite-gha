@@ -164,6 +164,10 @@ printf 'validator: %s (%s, sha256:%s)\n' "$validator_version" "$validator_commit
   echo 'buildkite-gha validate-batch must support --action-cache-dir' >&2
   exit 1
 }
+[[ "$("$validator" help validate-batch)" == *"--action-cache-max-bytes"* ]] || {
+  echo 'buildkite-gha validate-batch must support --action-cache-max-bytes' >&2
+  exit 1
+}
 
 action_cache="$workdir/action-cache"
 reports="$workdir/reports/$record_id/$validator_digest"
@@ -177,6 +181,7 @@ batch_args=(
   --output-dir "$reports"
   --corpus-id "zenodo:$record_id"
   --action-cache-dir "$action_cache"
+  --action-cache-max-bytes "${ACTION_CACHE_MAX_BYTES:-21474836480}"
 )
 if [[ -n "${JOBS:-}" ]]; then
   batch_args+=(--jobs "$JOBS")

@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -56,6 +57,23 @@ type Materialized struct {
 	RepositoryRoot string
 	ActionRoot     string
 	SourceDigest   string
+	lease          *materializedLease
+}
+
+// Release marks the materialized tree as no longer in use. Callers must
+// release bounded persistent-cache entries after reading them.
+func (m Materialized) Release() {
+	if m.lease != nil {
+		m.lease.release()
+	}
+}
+
+// Retain acquires another lease for a memoized materialization.
+func (m Materialized) Retain(ctx context.Context) (Materialized, error) {
+	if m.lease == nil {
+		return m, nil
+	}
+	return m.lease.retain(ctx)
 }
 
 // Parse parses owner/repository[/path]@ref.
@@ -113,6 +131,7 @@ type config struct {
 	finalHosts                          map[string]bool
 	credential                          *actionSourceCredential
 	mutableRefs                         *mutableRefCache
+	cacheMaxBytes                       int64
 	maxCompressed, maxExpanded, maxFile int64
 	maxEntries                          int
 	maxPath, maxSegment                 int
@@ -195,6 +214,18 @@ func WithLimits(compressed, expanded, perFile int64, entries int) Option {
 			return fmt.Errorf("limits must be positive")
 		}
 		c.maxCompressed, c.maxExpanded, c.maxFile, c.maxEntries = compressed, expanded, perFile, entries
+		return nil
+	}
+}
+
+// WithCacheMaxBytes bounds the immutable action-source cache. A materialized
+// entry remains protected from eviction until its lease is released.
+func WithCacheMaxBytes(maxBytes int64) Option {
+	return func(c *config) error {
+		if maxBytes <= 0 {
+			return fmt.Errorf("cache maximum bytes must be positive")
+		}
+		c.cacheMaxBytes = maxBytes
 		return nil
 	}
 }
@@ -422,9 +453,10 @@ func setAPIHeaders(r *http.Request, token string) {
 // caches them in an existing real directory. A Store must not be shared by
 // mutually untrusted processes writing the same cache root.
 type Store struct {
-	root   string
-	client *http.Client
-	cfg    config
+	root     string
+	client   *http.Client
+	cfg      config
+	pressure atomic.Bool
 }
 
 func NewStore(root string, client *http.Client, opts ...Option) (*Store, error) {
@@ -454,7 +486,13 @@ func NewStore(root string, client *http.Client, opts ...Option) (*Store, error) 
 	if client == nil {
 		client = &http.Client{Timeout: 2 * time.Minute}
 	}
-	return &Store{root, client, c}, nil
+	store := &Store{root: root, client: client, cfg: c}
+	if c.cacheMaxBytes > 0 {
+		if err := store.maintain(context.Background()); err != nil {
+			return nil, fmt.Errorf("maintain action source cache: %w", err)
+		}
+	}
+	return store, nil
 }
 
 // Materialize returns the verified repository and selected action identity.
@@ -469,32 +507,60 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	resolved.Reference = parsed
 	base := filepath.Join(s.root, strings.ToLower(parsed.Owner), strings.ToLower(parsed.Repository), resolved.Commit)
 	tree := filepath.Join(base, "tree")
+	parent := filepath.Dir(base)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return Materialized{}, err
+	}
+	entryLock, err := lockActionCache(ctx, base+".lock", actionCacheLockShared, false)
+	if err != nil {
+		return Materialized{}, err
+	}
 	m, verifyErr := s.verify(base, resolved)
 	if verifyErr == nil {
-		return materialized(tree, parsed.Path, m.Digest)
+		s.touch(base)
+		return s.materializedLease(entryLock, resolved, tree, parsed.Path, m.Digest)
 	}
 	if _, statErr := os.Stat(base); statErr == nil {
 		// The initial verification may have raced a publisher between its
 		// manifest and tree operations. Once base exists, verify the complete
 		// publication again before treating it as corrupt.
 		if m, retryErr := s.verify(base, resolved); retryErr == nil {
-			return materialized(tree, parsed.Path, m.Digest)
+			s.touch(base)
+			return s.materializedLease(entryLock, resolved, tree, parsed.Path, m.Digest)
 		}
+		entryLock.unlock()
 		return Materialized{}, fmt.Errorf("verify action source cache: %w", verifyErr)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
+		entryLock.unlock()
 		return Materialized{}, fmt.Errorf("stat action source cache: %w", statErr)
 	}
+	entryLock.unlock()
 	if err := ctx.Err(); err != nil {
 		return Materialized{}, err
 	}
-	parent := filepath.Dir(base)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return Materialized{}, err
-	}
-	tmp, err := os.MkdirTemp(parent, ".partial-")
+	entryLock, err = lockActionCache(ctx, base+".lock", actionCacheLockExclusive, false)
 	if err != nil {
 		return Materialized{}, err
 	}
+	defer func() {
+		if entryLock != nil {
+			entryLock.unlock()
+		}
+	}()
+	if m, verifyErr = s.verify(base, resolved); verifyErr == nil {
+		if err := entryLock.shared(); err != nil {
+			return Materialized{}, err
+		}
+		s.touch(base)
+		lease, err := s.materializedLease(entryLock, resolved, tree, parsed.Path, m.Digest)
+		entryLock = nil
+		return lease, err
+	}
+	tmp, partialLock, err := s.createPartial(ctx, parent)
+	if err != nil {
+		return Materialized{}, err
+	}
+	defer partialLock.unlock()
 	defer func() { _ = os.RemoveAll(tmp) }()
 	if err = s.downloadExtract(ctx, resolved, filepath.Join(tmp, "tree")); err != nil {
 		return Materialized{}, err
@@ -513,13 +579,19 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	if err = os.WriteFile(filepath.Join(tmp, manifestName), data, 0o644); err != nil {
 		return Materialized{}, err
 	}
-	if err = os.Rename(tmp, base); err != nil {
+	if err = s.publishCacheEntry(ctx, tmp, base); err != nil {
 		m, verifyErr = s.verify(base, resolved)
 		if verifyErr != nil {
 			return Materialized{}, fmt.Errorf("publish cache: %w (existing cache invalid: %v)", err, verifyErr)
 		}
 	}
-	return materialized(tree, parsed.Path, m.Digest)
+	if err := entryLock.shared(); err != nil {
+		return Materialized{}, err
+	}
+	s.touch(base)
+	lease, err := s.materializedLease(entryLock, resolved, tree, parsed.Path, m.Digest)
+	entryLock = nil
+	return lease, err
 }
 func materialized(tree, p, digest string) (Materialized, error) {
 	action, err := selected(tree, p)
