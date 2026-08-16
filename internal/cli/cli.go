@@ -2363,26 +2363,19 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 	report := triggerProcessingReport(input.Path, input.Source)
 	var pathFilters *buildkitepipeline.UnsupportedPathFiltersError
 	if errors.As(err, &pathFilters) {
-		code, category := compiler.CodePipelineGeneration, "compatibility"
 		message := fmt.Sprintf("%s trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step.", upperFirst(pathFilters.Event))
-		if pathFilters.Event == "pull_request" && pathFilters.Reason == "" {
-			code, category = compiler.CodeContextRequired, "context"
-			message = "Pull request path filters require linked Buildkite webhook data and a verified local git diff."
-			report.Result = "context-required"
-		} else if pathFilters.Reason != "" {
+		if pathFilters.Reason != "" {
 			message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. Ensure the linked webhook and local checkout contain matching pull-request history, or remove the path filters.", upperFirst(pathFilters.Event))
 		}
 		err = &compiler.ProcessingFinding{
-			Stage: compiler.StagePipeline, Code: code, Category: category,
+			Stage: compiler.StagePipeline, Code: compiler.CodePipelineGeneration, Category: "compatibility",
 			Path: input.Path, Line: 1, Column: 1,
 			Message: message,
 			Detail:  pathFilters.Error(), Err: err,
 		}
 	}
 	report.AddFailure(input.Path, string(compiler.StagePipeline), compiler.CodePipelineGeneration, "compatibility", err)
-	if report.Result != "context-required" {
-		report.Result = "incompatible"
-	}
+	report.Result = "incompatible"
 	return report
 }
 

@@ -78,7 +78,7 @@ Useful environment variables are:
 | `ACTION_CACHE_MAX_BYTES` | `21474836480` | Bound extracted immutable action trees. |
 | `REFRESH_ACTION_RESOLUTIONS` | `0` | Set to `1` to start a new action-resolution generation. This removes existing report sets for the record. |
 
-The script reports compatible and incompatible repositories among those the generated snapshots measured. It reports repositories that require context separately and excludes them from the compatibility percentage. The tally also records workflow result counts and keeps every diagnostic in the per-workflow report.
+The script reports compatible, incompatible, and policy-rejected repositories among those the generated snapshots measured. It reports context-required and indeterminate repositories separately and excludes them from the compatibility percentage. The tally also records workflow result counts and keeps every diagnostic in the per-workflow report.
 
 Pull-request path filters require a linked Buildkite webhook and a verified, bounded local git diff. The public corpus has workflow files but no repository checkouts or pull-request history. It still compiles these workflows, resolves their actions, constructs their plans, and applies hosted policy. When the diff is the only missing evidence, it reports the workflow as `context-required`. This does not claim admission. Push path filters, malformed filters, and workflows with another incompatibility remain incompatible.
 
