@@ -1210,6 +1210,7 @@ jobs:
     uses: ./.github/workflows/reusable.yml
     with:
       enabled: true
+      label: release
 `)
 	writeWorkflow(t, repository, "reusable.yml", `on:
   workflow_call:
@@ -1217,10 +1218,17 @@ jobs:
       enabled:
         type: boolean
         required: true
+      label:
+        type: string
+        required: true
 jobs:
   gated:
     if: ${{ inputs['enabled'] && github.ref }}
     runs-on: ubuntu-latest
+    env:
+      LABEL: ${{ inputs['label'] }}
+    outputs:
+      label: ${{ inputs['label'] }}
     steps:
       - run: echo ${{ inputs['enabled'] }} ${{ github.ref }}
 `)
@@ -1229,7 +1237,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Condition != "${{ inputs['enabled'] && github.ref }}" || plans[0].Inputs["enabled"] != true || len(plans[0].Steps) != 1 || plans[0].Steps[0].Command != "echo ${{ inputs['enabled'] }} ${{ github.ref }}" {
+	if len(plans) != 1 || plans[0].Condition != "${{ inputs['enabled'] && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "${{ inputs['label'] }}" || plans[0].Outputs["label"] != "${{ inputs['label'] }}" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Command != "echo ${{ inputs['enabled'] }} ${{ github.ref }}" {
 		t.Fatalf("reusable condition = %#v", plans)
 	}
 }

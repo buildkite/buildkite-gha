@@ -138,6 +138,9 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 		}
 		items, ok := expressionCollection(value)
 		if !ok {
+			if reflected := reflect.ValueOf(value); reflected.IsValid() && reflected.Kind() == reflect.Map {
+				return "", true, nil
+			}
 			joined, convertible := expressionString(value)
 			if !convertible {
 				return nil, true, fmt.Errorf("function %q cannot convert %T to a string", node.Callee, value)
@@ -152,12 +155,12 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 			}
 			separator, ok = expressionString(value)
 			if !ok {
-				return nil, true, fmt.Errorf("function %q separator cannot convert %T to a string", node.Callee, value)
+				separator = ","
 			}
 		}
 		parts := make([]string, len(items))
 		for i, item := range items {
-			parts[i], ok = expressionString(item)
+			parts[i], ok = expressionJoinString(item)
 			if !ok {
 				return nil, true, fmt.Errorf("function %q item %d cannot convert %T to a string", node.Callee, i, item)
 			}
@@ -192,6 +195,24 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 		return decoded, true, err
 	default:
 		return nil, false, nil
+	}
+}
+
+func expressionJoinString(value any) (string, bool) {
+	if text, ok := expressionString(value); ok {
+		return text, true
+	}
+	reflected := reflect.ValueOf(value)
+	if !reflected.IsValid() {
+		return "", true
+	}
+	switch reflected.Kind() {
+	case reflect.Map:
+		return "Object", true
+	case reflect.Array, reflect.Slice:
+		return "Array", true
+	default:
+		return "", false
 	}
 }
 

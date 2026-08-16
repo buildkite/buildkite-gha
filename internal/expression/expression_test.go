@@ -1139,6 +1139,9 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ format('{0}', fromJSON('1e2')) }}", want: "100"},
 		{expression: "${{ join(fromJSON('[\"one\",2,true,null]'), '-') }}", want: "one-2-true-"},
 		{expression: "${{ join(fromJSON('[1e2]')) }}", want: "100"},
+		{expression: "${{ join(fromJSON('{}')) }}", want: ""},
+		{expression: "${{ join(fromJSON('[\"one\",\"two\"]'), fromJSON('{}')) }}", want: "one,two"},
+		{expression: "${{ join(fromJSON('[{},[]]')) }}", want: "Object,Array"},
 		{expression: "${{ toJSON(fromJSON('1e2')) }}", want: "100"},
 		{expression: "${{ toJSON(fromJSON('1e20')) }}", want: "1E+20"},
 		{expression: "${{ toJSON(github.event_name) }}", want: `"push"`},
@@ -1146,6 +1149,7 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ case(false, vars.missing, true, 'selected', vars.missing) }}", want: "selected"},
 		{expression: "${{ '0xff' == 255 && '0o10' == 8 && 'Infinity' > 1e308 }}", want: true},
 		{expression: "${{ '0xffffffff' == -1 }}", want: true},
+		{expression: "${{ '0o37777777777' == -1 }}", want: true},
 	}
 	context.GitHub["ref"] = "refs/pull/42/merge"
 	context.GitHub["event"] = map[string]any{"action": "opened", "number": json.Number("0")}
@@ -1374,12 +1378,22 @@ func TestSubstituteCompileInputsPreservesExpressionSyntax(t *testing.T) {
 }
 
 func TestEvaluateAvailableCompileTemplatePreservesRuntimeExpressions(t *testing.T) {
-	got, err := EvaluateAvailableCompileTemplate("echo ${{ 'target' }} ${{ github.ref }}", CompileContext{})
+	got, err := EvaluateAvailableCompileTemplate("echo ${{ 'target' }} ${{ fromJSON('1e20') }} ${{ github.ref }}", CompileContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "echo target ${{ github.ref }}"; got != want {
+	if want := "echo target 1E+20 ${{ github.ref }}"; got != want {
 		t.Fatalf("EvaluateAvailableCompileTemplate() = %q, want %q", got, want)
+	}
+}
+
+func TestEvaluateCompileTemplateUsesGitHubNumberRendering(t *testing.T) {
+	got, err := EvaluateCompileTemplate("prefix-${{ fromJSON('1e20') }}", CompileContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "prefix-1E+20"; got != want {
+		t.Fatalf("EvaluateCompileTemplate() = %q, want %q", got, want)
 	}
 }
 

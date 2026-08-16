@@ -239,9 +239,9 @@ func parseExpressionNumber(source string) float64 {
 		return math.NaN()
 	}
 	if strings.HasPrefix(value, "0o") {
-		parsed, err := strconv.ParseInt(value[2:], 8, 32)
+		parsed, err := strconv.ParseUint(value[2:], 8, 32)
 		if err == nil {
-			return float64(parsed)
+			return float64(int32(parsed))
 		}
 		return math.NaN()
 	}

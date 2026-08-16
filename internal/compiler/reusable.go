@@ -828,8 +828,6 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 		jobValues = append(jobValues, job.Concurrency.Group)
 	}
 	jobValues = append(jobValues, job.RunsOn...)
-	jobValues = appendMapValues(jobValues, job.Env)
-	jobValues = appendMapValues(jobValues, job.Outputs)
 	for _, service := range job.Services {
 		container := service.Container
 		jobValues = append(jobValues, container.Image, container.Options, container.Command, container.Entrypoint)

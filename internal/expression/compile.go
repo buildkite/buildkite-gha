@@ -318,15 +318,11 @@ func EvaluateCompileTemplate(template string, context CompileContext) (string, e
 		if err != nil {
 			return "", err
 		}
-		switch value := value.(type) {
-		case nil:
-		case string:
-			evaluated.WriteString(value)
-		case bool, json.Number, float64, int:
-			_, _ = fmt.Fprint(&evaluated, value)
-		default:
+		replacement, scalar := expressionString(value)
+		if !scalar {
 			return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
 		}
+		evaluated.WriteString(replacement)
 		remaining = source[consumed:]
 	}
 }
@@ -354,14 +350,8 @@ func EvaluateAvailableCompileTemplate(template string, context CompileContext) (
 		if err != nil {
 			evaluated.WriteString(complete)
 		} else {
-			var replacement string
-			switch value := value.(type) {
-			case nil:
-			case string:
-				replacement = value
-			case bool, json.Number, float64, int:
-				replacement = fmt.Sprint(value)
-			default:
+			replacement, scalar := expressionString(value)
+			if !scalar {
 				return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
 			}
 			if introducesExpressionSyntax(evaluated.String(), replacement, source[consumed:]) {
@@ -472,7 +462,7 @@ func compileInputLiteral(value any) (string, error) {
 	case int:
 		return strconv.Itoa(value), nil
 	case float64:
-		return strconv.FormatFloat(value, 'g', -1, 64), nil
+		return expressionNumberString(value), nil
 	default:
 		return "", fmt.Errorf("compile-time input %T cannot be represented as an expression literal", value)
 	}
