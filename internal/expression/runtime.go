@@ -149,7 +149,11 @@ func evaluateRuntimeTemplate(template string, context Context, evaluate func(act
 		case string:
 			evaluated.WriteString(value)
 		default:
-			_, _ = fmt.Fprint(&evaluated, value)
+			text, ok := expressionString(value)
+			if !ok {
+				return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
+			}
+			evaluated.WriteString(text)
 		}
 		remaining = source[consumed:]
 	}
@@ -197,6 +201,19 @@ func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, al
 	}
 	validator.validateAccess = func(access actionlint.ExprNode) error {
 		root := strings.ToLower(referenceRoot(access))
+		if root == "" {
+			switch access := access.(type) {
+			case *actionlint.ObjectDerefNode:
+				return validator.validate(access.Receiver)
+			case *actionlint.IndexAccessNode:
+				if err := validator.validate(access.Operand); err != nil {
+					return err
+				}
+				return validator.validate(access.Index)
+			case *actionlint.ArrayDerefNode:
+				return validator.validate(access.Receiver)
+			}
+		}
 		if allowedContexts != nil && !allowedContexts[root] {
 			return fmt.Errorf("runtime context %q is unavailable in this field", root)
 		}

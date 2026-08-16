@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -719,18 +718,48 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 		step.Shell = replaceStaticInputs(step.Shell, inputs)
 		step.WorkingDirectory = replaceStaticInputs(step.WorkingDirectory, inputs)
 		if step.ContinueOnErrorExpression != "" {
-			resolved := replaceStaticInputs(step.ContinueOnErrorExpression, inputs)
-			if value, err := strconv.ParseBool(resolved); err == nil {
-				step.ContinueOnError, step.ContinueOnErrorExpression = value, ""
+			resolved, err := expression.SubstituteCompileInputs(step.ContinueOnErrorExpression, inputs)
+			if err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("resolve continue-on-error expression: %v", err))
+			}
+			expr, err := expression.Parse(resolved, step.Span.Start.Line, step.Span.Start.Column)
+			if err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("parse continue-on-error expression: %v", err))
+			}
+			value, available, err := expression.EvaluateCompileAvailable(expr, expression.CompileContext{})
+			if err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("evaluate continue-on-error expression: %v", err))
+			}
+			if !available {
+				step.ContinueOnErrorExpression = resolved
+			} else if enabled, ok := value.(bool); ok {
+				step.ContinueOnError, step.ContinueOnErrorExpression = enabled, ""
+			} else {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "continue-on-error expression must produce a boolean")
 			}
 		}
 		if step.TimeoutMinutesExpression != "" {
-			resolved := replaceStaticInputs(step.TimeoutMinutesExpression, inputs)
-			if value, err := strconv.ParseFloat(resolved, 64); err == nil {
-				if value <= 0 || value > 360 || math.IsNaN(value) || math.IsInf(value, 0) {
+			resolved, err := expression.SubstituteCompileInputs(step.TimeoutMinutesExpression, inputs)
+			if err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("resolve timeout-minutes expression: %v", err))
+			}
+			expr, err := expression.Parse(resolved, step.Span.Start.Line, step.Span.Start.Column)
+			if err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("parse timeout-minutes expression: %v", err))
+			}
+			value, available, err := expression.EvaluateCompileAvailable(expr, expression.CompileContext{})
+			if err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("evaluate timeout-minutes expression: %v", err))
+			}
+			if !available {
+				step.TimeoutMinutesExpression = resolved
+			} else if minutes, ok := staticTimeoutMinutes(value); ok {
+				if minutes <= 0 || minutes > 360 || math.IsNaN(minutes) || math.IsInf(minutes, 0) {
 					return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "timeout-minutes expression must produce a number greater than 0 and at most 360")
 				}
-				step.TimeoutMinutes, step.TimeoutMinutesExpression = value, ""
+				step.TimeoutMinutes, step.TimeoutMinutesExpression = minutes, ""
+			} else {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "timeout-minutes expression must produce a number")
 			}
 		}
 		step.If = replaceStaticInputCondition(step.If, inputs)
@@ -738,6 +767,24 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 		step.With = replaceMapInputs(step.With, inputs)
 	}
 	return job, nil
+}
+
+func staticTimeoutMinutes(value any) (float64, bool) {
+	switch value := value.(type) {
+	case int:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	case uint64:
+		return float64(value), true
+	case float64:
+		return value, true
+	case json.Number:
+		minutes, err := value.Float64()
+		return minutes, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {

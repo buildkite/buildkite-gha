@@ -1231,6 +1231,66 @@ jobs:
 	}
 }
 
+func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
+	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
+	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
+		Span:                      span,
+		ContinueOnErrorExpression: "${{ inputs.allow }}",
+		TimeoutMinutesExpression:  "${{ inputs.wait }}",
+	}}}
+	resolved, err := applyStaticInputs("workflow.yml", job, map[string]any{"allow": true, "wait": 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved.Steps[0].ContinueOnError || resolved.Steps[0].ContinueOnErrorExpression != "" || resolved.Steps[0].TimeoutMinutes != 5 || resolved.Steps[0].TimeoutMinutesExpression != "" {
+		t.Fatalf("resolved controls = %#v", resolved.Steps[0])
+	}
+
+	job.Steps[0].ContinueOnErrorExpression = "${{ inputs.allow && matrix.experimental }}"
+	job.Steps[0].TimeoutMinutesExpression = "${{ matrix.timeout || inputs.wait }}"
+	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"allow": true, "wait": 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Steps[0].ContinueOnErrorExpression != "${{ true && matrix.experimental }}" || resolved.Steps[0].TimeoutMinutesExpression != "${{ matrix.timeout || 5 }}" {
+		t.Fatalf("partially resolved controls = %#v", resolved.Steps[0])
+	}
+
+	job.Steps[0].ContinueOnErrorExpression = "${{ matrix.experimental && fromJSON(inputs.value) }}"
+	job.Steps[0].TimeoutMinutesExpression = ""
+	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"value": "invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Steps[0].ContinueOnErrorExpression != "${{ matrix.experimental && fromJSON('invalid') }}" {
+		t.Fatalf("runtime-first control = %#v", resolved.Steps[0])
+	}
+
+	for _, test := range []struct {
+		name       string
+		expression string
+		inputs     map[string]any
+		want       string
+	}{
+		{name: "boolean string", expression: "${{ inputs.value }}", inputs: map[string]any{"value": "true"}, want: "must produce a boolean"},
+		{name: "numeric string", expression: "${{ inputs.value }}", inputs: map[string]any{"value": "5"}, want: "must produce a number"},
+		{name: "invalid static expression", expression: "${{ fromJSON(inputs.value) && matrix.experimental }}", inputs: map[string]any{"value": "invalid"}, want: "evaluate timeout-minutes expression"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			step := workflow.Step{Span: span}
+			if test.name == "boolean string" {
+				step.ContinueOnErrorExpression = test.expression
+			} else {
+				step.TimeoutMinutesExpression = test.expression
+			}
+			_, err := applyStaticInputs("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, test.inputs)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("applyStaticInputs() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestCompilePlansResolveReusableLocalActionsFromRepositoryRoot(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n")

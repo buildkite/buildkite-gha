@@ -3,6 +3,7 @@ package expression
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 
 	"github.com/rhysd/actionlint"
@@ -344,14 +345,24 @@ func expressionChildren(value any) ([]any, bool) {
 	switch value := value.(type) {
 	case map[string]any:
 		values := make([]any, 0, len(value))
-		for _, item := range value {
-			values = append(values, item)
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			values = append(values, value[key])
 		}
 		return values, true
 	case map[string]string:
 		values := make([]any, 0, len(value))
-		for _, item := range value {
-			values = append(values, item)
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			values = append(values, value[key])
 		}
 		return values, true
 	default:

@@ -4,6 +4,7 @@ package expression
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -25,6 +26,32 @@ type CompileContext struct {
 // surface is intentionally limited to literals, github/event/vars/matrix
 // references, boolean/equality operators, and selected pure functions.
 func EvaluateCompile(expr Expression, context CompileContext) (any, error) {
+	node, err := parseCompileExpression(expr)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateCompileExpressionNode(node); err != nil {
+		return nil, err
+	}
+	return evaluateCompileNode(node, context)
+}
+
+// EvaluateCompileAvailable evaluates an expression until it either produces a
+// value, needs a runtime-only value, or encounters a deterministic error.
+func EvaluateCompileAvailable(expr Expression, context CompileContext) (any, bool, error) {
+	node, err := parseCompileExpression(expr)
+	if err != nil {
+		return nil, false, err
+	}
+	value, err := evaluateCompileNode(node, context)
+	var dependency compileRuntimeDependencyError
+	if errors.As(err, &dependency) {
+		return nil, false, nil
+	}
+	return value, err == nil, err
+}
+
+func parseCompileExpression(expr Expression) (actionlint.ExprNode, error) {
 	body, err := expressionBody(expr.Text)
 	if err != nil {
 		return nil, err
@@ -33,10 +60,7 @@ func EvaluateCompile(expr Expression, context CompileContext) (any, error) {
 	if parseErr != nil {
 		return nil, fmt.Errorf("invalid expression: %w", parseErr)
 	}
-	if err := validateCompileExpressionNode(node); err != nil {
-		return nil, err
-	}
-	return evaluateCompileNode(node, context)
+	return node, nil
 }
 
 // ValidateReusableInputDefault validates an expression-valued workflow_call
@@ -424,26 +448,26 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 		switch strings.ToLower(root) {
 		case "github":
 			if context.GitHub == nil {
-				return nil, fmt.Errorf("compile-time context %q is unavailable", root)
+				return nil, compileRuntimeDependencyError{fmt.Errorf("compile-time context %q is unavailable", root)}
 			}
 			return context.GitHub, nil
 		case "event":
 			if context.Event == nil {
-				return nil, fmt.Errorf("compile-time context %q is unavailable", root)
+				return nil, compileRuntimeDependencyError{fmt.Errorf("compile-time context %q is unavailable", root)}
 			}
 			return context.Event, nil
 		case "vars":
 			if context.Vars == nil {
-				return nil, fmt.Errorf("compile-time context %q is unavailable", root)
+				return nil, compileRuntimeDependencyError{fmt.Errorf("compile-time context %q is unavailable", root)}
 			}
 			return context.Vars, nil
 		case "matrix":
 			if context.Matrix == nil {
-				return nil, fmt.Errorf("compile-time context %q is unavailable", root)
+				return nil, compileRuntimeDependencyError{fmt.Errorf("compile-time context %q is unavailable", root)}
 			}
 			return context.Matrix, nil
 		default:
-			return nil, fmt.Errorf("unsupported compile-time context %q", root)
+			return nil, compileRuntimeDependencyError{fmt.Errorf("unsupported compile-time context %q", root)}
 		}
 	}
 	evaluator.truthy = githubTruthy
@@ -462,14 +486,23 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 		if recognized {
 			return value, err
 		}
+		if strings.EqualFold(node.Callee, "hashFiles") {
+			return nil, compileRuntimeDependencyError{fmt.Errorf("unsupported compile-time function %q", node.Callee)}
+		}
 		return nil, fmt.Errorf("unsupported compile-time function %q", node.Callee)
 	}
 	return evaluator.evaluate(node)
 }
 
+type compileRuntimeDependencyError struct {
+	err error
+}
+
+func (e compileRuntimeDependencyError) Error() string { return e.err.Error() }
+
 func resolveCompileReference(root string, path []string, context CompileContext) (any, error) {
 	if strings.EqualFold(root, "github") && len(path) != 0 && strings.EqualFold(path[0], "token") {
-		return nil, fmt.Errorf("compile-time expression references unavailable value %q", root+"."+strings.Join(path, "."))
+		return nil, compileRuntimeDependencyError{fmt.Errorf("compile-time expression references unavailable value %q", root+"."+strings.Join(path, "."))}
 	}
 	var (
 		current   any
@@ -485,7 +518,7 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 	case strings.EqualFold(root, "matrix"):
 		current, available = context.Matrix, context.Matrix != nil
 	default:
-		return nil, fmt.Errorf("unsupported compile-time context %q", root)
+		return nil, compileRuntimeDependencyError{fmt.Errorf("unsupported compile-time context %q", root)}
 	}
 	legalMissing := strings.EqualFold(root, "event") || strings.EqualFold(root, "vars") || strings.EqualFold(root, "matrix") ||
 		strings.EqualFold(root, "github") && len(path) != 0 && strings.EqualFold(path[0], "event")
@@ -508,7 +541,7 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 				missing = true
 				continue
 			}
-			return nil, fmt.Errorf("compile-time expression references unavailable value %q", root+"."+strings.Join(path, "."))
+			return nil, compileRuntimeDependencyError{fmt.Errorf("compile-time expression references unavailable value %q", root+"."+strings.Join(path, "."))}
 		}
 	}
 	return current, nil

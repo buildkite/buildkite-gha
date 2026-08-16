@@ -366,8 +366,8 @@ macOS jobs reject containers, services, Dockerfile actions, and Docker capabilit
 | `name`, `id` | ✅ Supported | Use `id` to read outputs or target background work. IDs must be unique within a job. |
 | `if` | 🟡 Supported subset | May use step status, step outputs, `env`, and service ports in addition to job-condition contexts. |
 | `env` | 🟡 Supported subset | Values override job and workflow values and may use supported direct interpolation. |
-| `continue-on-error` | ✅ Supported | A failure records `outcome: failure` and `conclusion: success`, then the job continues. |
-| `timeout-minutes` | 🟡 Supported subset | Accepts literal timeouts up to 360 minutes. Expressions are rejected. |
+| `continue-on-error` | ✅ Supported | Accepts literal booleans or expressions that produce a Boolean. A failure records `outcome: failure` and `conclusion: success`, then the job continues. |
+| `timeout-minutes` | 🟡 Supported subset | Accepts literal numbers or expressions that produce a number greater than 0 and at most 360. |
 
 A step can continue after failure and expose its outcome to a later condition:
 
@@ -701,7 +701,7 @@ JavaScript and Docker actions with compatible bundled cache clients also receive
 
 ### GitHub token
 
-**🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or by using an action whose effective input default can reach `github.token` for the event provider. A `github.server_url == 'https://github.com'` guard skips the token branch for an Origin event repository. Native action adapters ignore upstream input defaults, so `actions/checkout` alone does not request a token. Effective `permissions` determine the token scope. The Buildkite organization feature and the pipeline's workflow access token setting must be enabled. Both are disabled by default.
+**🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or `github.token`, or by using an action whose effective input default can reach `github.token` for the event provider. A `github.server_url == 'https://github.com'` guard skips the token branch for an Origin event repository. Native action adapters ignore upstream input defaults, so `actions/checkout` alone does not request a token. Effective `permissions` determine the token scope. The Buildkite organization feature and the pipeline's workflow access token setting must be enabled. Both are disabled by default.
 
 Buildkite reads the workflow policy from the pipeline repository at the build's immutable commit. The workflow must be directly under `.github/workflows/`, use a simple `.yml` or `.yaml` filename, and contain no job-level permission maps or reusable-workflow jobs. The workflow-token endpoint must interpret omitted top-level permissions as exactly `contents: read`, without consulting GitHub repository or organization defaults. Write access requires an explicit, non-empty top-level map. An explicit empty map or scopes resolving only to `none` produce no token.
 

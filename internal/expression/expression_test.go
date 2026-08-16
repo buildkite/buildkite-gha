@@ -570,6 +570,24 @@ func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
 	if _, err := Evaluate("${{ contains('abc', 'a') }}", context); err == nil {
 		t.Fatal("Evaluate() broadened general runtime interpolation")
 	}
+	if got, err := EvaluateStep(`${{ join(fromJSON('[{"name":"bug"},{"name":"help"}]').*.name, ',') }}`, context); err != nil || got != "bug,help" {
+		t.Fatalf("EvaluateStep() function projection = %q, %v", got, err)
+	}
+	for _, template := range []string{`${{ fromJSON('["a","b"]') }}`, `${{ fromJSON('{"a":1}') }}`} {
+		if _, err := EvaluateStep(template, context); err == nil || !strings.Contains(err.Error(), "want a scalar") {
+			t.Errorf("EvaluateStep(%q) error = %v, want scalar rejection", template, err)
+		}
+	}
+}
+
+func TestExpressionMapProjectionIsDeterministic(t *testing.T) {
+	context := Context{Matrix: map[string]any{"zed": "last", "alpha": "first", "middle": "second"}}
+	for range 100 {
+		got, err := EvaluateStep("${{ join(matrix.*, '-') }}", context)
+		if err != nil || got != "first-second-last" {
+			t.Fatalf("EvaluateStep() map projection = %q, %v", got, err)
+		}
+	}
 }
 
 func TestEvaluateJobSurfacesSupportAuthorizedCompoundExpressions(t *testing.T) {
