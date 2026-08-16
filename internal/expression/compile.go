@@ -133,7 +133,10 @@ func validateCompileExpressionNode(node actionlint.ExprNode) error {
 		switch {
 		case strings.EqualFold(root, "vars") && len(path) == 1,
 			strings.EqualFold(root, "inputs") && len(path) == 1,
-			strings.EqualFold(root, "matrix") && len(path) == 1,
+			// Matrix values may be objects or arrays (matrix include entries
+			// and object lists), so nested references such as
+			// matrix.config.os are valid.
+			strings.EqualFold(root, "matrix") && len(path) >= 1,
 			strings.EqualFold(root, "strategy") && len(path) == 1,
 			strings.EqualFold(root, "event") && len(path) >= 1:
 			return nil
@@ -414,6 +417,12 @@ func SubstituteCompileInputs(template string, inputs map[string]any) (string, er
 		var replacements []replacement
 		for i := 0; i+2 < len(tokens); i++ {
 			if tokens[i].Kind != actionlint.TokenKindIdent || !strings.EqualFold(tokens[i].Value, "inputs") || tokens[i+1].Kind != actionlint.TokenKindDot || tokens[i+2].Kind != actionlint.TokenKindIdent {
+				continue
+			}
+			// A preceding '.' means this is a property named "inputs" on
+			// another receiver, such as github.event.inputs.<name>, not the
+			// workflow-call inputs context.
+			if i > 0 && tokens[i-1].Kind == actionlint.TokenKindDot {
 				continue
 			}
 			value, ok := findCompileInput(inputs, tokens[i+2].Value)

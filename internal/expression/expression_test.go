@@ -1025,6 +1025,84 @@ func TestEvaluateConditionSupportsPureFunctions(t *testing.T) {
 	}
 }
 
+func TestNestedMatrixReferencesAreSupported(t *testing.T) {
+	matrix := map[string]any{"config": map[string]any{"os": "ubuntu-24.04", "name": "linux"}, "os": "ubuntu-24.04"}
+
+	// Compile-time templates such as runs-on.
+	got, err := EvaluateCompileTemplate("${{ matrix.config.os }}", CompileContext{Matrix: matrix})
+	if err != nil || got != "ubuntu-24.04" {
+		t.Fatalf("EvaluateCompileTemplate() = %q, %v", got, err)
+	}
+	// Missing or scalar intermediate segments yield null, matching GitHub.
+	for _, template := range []string{"${{ matrix.config.missing }}", "${{ matrix.os.name }}"} {
+		if got, err := EvaluateCompileTemplate(template, CompileContext{Matrix: matrix}); err != nil || got != "" {
+			t.Errorf("EvaluateCompileTemplate(%q) = %q, %v, want empty", template, got, err)
+		}
+	}
+
+	// Runtime templates such as step run and env.
+	if err := ValidateRuntimeTemplate("${{ matrix.config.name }}"); err != nil {
+		t.Fatalf("ValidateRuntimeTemplate() error = %v", err)
+	}
+	if got, err := EvaluateStep("${{ matrix.config.name }}", Context{Matrix: matrix}); err != nil || got != "linux" {
+		t.Fatalf("EvaluateStep() = %q, %v", got, err)
+	}
+	if got, err := Evaluate("${{ matrix.config.missing }}", Context{Matrix: matrix}); err != nil || got != "" {
+		t.Fatalf("Evaluate() = %q, %v, want empty", got, err)
+	}
+
+	// Conditions.
+	for condition, want := range map[string]bool{
+		"matrix.config.name == 'linux'": true,
+		"matrix.config.name == 'mac'":   false,
+		"matrix.config.missing == null": true,
+		"matrix.os.name == null":        true,
+	} {
+		if err := ValidateCondition(condition, StepCondition); err != nil {
+			t.Errorf("ValidateCondition(%q) error = %v", condition, err)
+			continue
+		}
+		got, err := EvaluateCondition(condition, ConditionContext{Matrix: matrix})
+		if err != nil || got != want {
+			t.Errorf("EvaluateCondition(%q) = %v, %v, want %v", condition, got, err, want)
+		}
+	}
+}
+
+func TestEvaluateConditionSupportsBracketFormGitHubReferences(t *testing.T) {
+	for condition, want := range map[string]bool{
+		"github['event_name'] == 'push'":       true,
+		"github['EVENT_NAME'] == 'push'":       true,
+		"github['event_name'] == 'workflow'":   false,
+		"github['head_ref'] == null":           true,
+		"github['ref'] == 'refs/heads/main'":   true,
+		"github['repository'] == 'acme/thing'": true,
+	} {
+		if err := ValidateCondition(condition, StepCondition); err != nil {
+			t.Errorf("ValidateCondition(%q) error = %v", condition, err)
+			continue
+		}
+		got, err := EvaluateCondition(condition, ConditionContext{GitHub: map[string]any{
+			"event_name": "push",
+			"ref":        "refs/heads/main",
+			"repository": "acme/thing",
+		}})
+		if err != nil || got != want {
+			t.Errorf("EvaluateCondition(%q) = %v, %v, want %v", condition, got, err, want)
+		}
+	}
+	if _, err := EvaluateCondition("github['event_name'] == 'push'", ConditionContext{}); err == nil || !strings.Contains(err.Error(), "condition references unavailable value github.event_name") {
+		t.Fatalf("EvaluateCondition() without github context error = %v", err)
+	}
+	// Whole and dynamic github access fails closed at evaluation even
+	// without prior validation, such as composite-action if conditions.
+	for _, condition := range []string{"github", "github[vars.KEY]", "github.*"} {
+		if _, err := EvaluateCondition(condition, ConditionContext{GitHub: map[string]any{"event_name": "push"}, Vars: map[string]string{"KEY": "event_name"}}); err == nil {
+			t.Errorf("EvaluateCondition(%q) error = nil, want fail-closed error", condition)
+		}
+	}
+}
+
 func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
 	context := ConditionContext{
 		Vars:   map[string]string{"KEY": "target"},
@@ -1384,6 +1462,18 @@ func TestSubstituteCompileInputsPreservesExpressionSyntax(t *testing.T) {
 	}
 }
 
+func TestSubstituteCompileInputsIgnoresNestedInputsProperties(t *testing.T) {
+	template := "${{ inputs.debug }} ${{ github.event.inputs.debug }} ${{ steps.inputs.name }} ${{ fromJSON(vars.CFG).inputs.name }}"
+	got, err := SubstituteCompileInputs(template, map[string]any{"debug": true, "name": "prod"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "${{ true }} ${{ github.event.inputs.debug }} ${{ steps.inputs.name }} ${{ fromJSON(vars.CFG).inputs.name }}"
+	if got != want {
+		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
+	}
+}
+
 func TestEvaluateAvailableCompileTemplatePreservesRuntimeExpressions(t *testing.T) {
 	got, err := EvaluateAvailableCompileTemplate("echo ${{ 'target' }} ${{ fromJSON('1e20') }} ${{ github.ref }}", CompileContext{})
 	if err != nil {
@@ -1462,6 +1552,40 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 				t.Fatalf("EvaluateCompile() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestEvaluateCompileRejectsNonDigitFormatPlaceholders(t *testing.T) {
+	for _, template := range []string{
+		"${{ format('{+0}', 'x') }}",
+		"${{ format('{-0}', 'x') }}",
+		"${{ format('{ 0 }', 'x') }}",
+		"${{ format('{0x1}', 'x') }}",
+	} {
+		if _, err := EvaluateCompileTemplate(template, CompileContext{}); err == nil || !strings.Contains(err.Error(), "format placeholder") {
+			t.Errorf("EvaluateCompileTemplate(%q) error = %v, want format placeholder error", template, err)
+		}
+	}
+	got, err := EvaluateCompileTemplate("${{ format('{0} {01}', 'a', 'b') }}", CompileContext{})
+	if err != nil || got != "a b" {
+		t.Fatalf("EvaluateCompileTemplate() = %q, %v", got, err)
+	}
+}
+
+func TestFromJSONCollapsesCaseInsensitiveDuplicateKeys(t *testing.T) {
+	for template, want := range map[string]string{
+		`${{ fromJSON('{"a":1,"A":2}').a }}`:       "2",
+		`${{ fromJSON('{"a":1,"A":2}').A }}`:       "2",
+		`${{ fromJSON('{"a":1,"A":2}')['A'] }}`:    "2",
+		`${{ fromJSON('{"A":2,"a":1}').a }}`:       "1",
+		`${{ fromJSON('{"Σ":1,"ς":2}')['Σ'] }}`:    "2",
+		`${{ fromJSON('{"Σ":1,"ς":2}')['σ'] }}`:    "2",
+		`${{ toJSON(fromJSON('{"a":1,"A":2}')) }}`: "{\n  \"a\": 2\n}",
+	} {
+		got, err := EvaluateCompileTemplate(template, CompileContext{})
+		if err != nil || got != want {
+			t.Errorf("EvaluateCompileTemplate(%q) = %q, %v, want %q", template, got, err, want)
+		}
 	}
 }
 

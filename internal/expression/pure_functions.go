@@ -438,8 +438,14 @@ func expressionFormat(format string, valueCount int, value func(int) (any, error
 				return "", fmt.Errorf("format string contains an unmatched '{'")
 			}
 			end += i + 1
-			index, err := strconv.Atoi(format[i+1 : end])
-			if err != nil || index < 0 || index >= valueCount {
+			indexText := format[i+1 : end]
+			// GitHub requires placeholder indexes to be bare digits; signs
+			// and whitespace are rejected, so strconv.Atoi alone is too loose.
+			if indexText == "" || strings.ContainsFunc(indexText, func(r rune) bool { return r < '0' || r > '9' }) {
+				return "", fmt.Errorf("format placeholder %q is invalid", format[i:end+1])
+			}
+			index, err := strconv.Atoi(indexText)
+			if err != nil || index >= valueCount {
 				return "", fmt.Errorf("format placeholder %q is invalid", format[i:end+1])
 			}
 			argument, exists := values[index]

@@ -183,7 +183,11 @@ func (e *semanticEvaluator) evaluate(node actionlint.ExprNode) (any, error) {
 		return nil, err
 	case *actionlint.IndexAccessNode:
 		root, path, err := referencePath(node)
-		if err == nil && strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports") {
+		// Mirror the validator: static bracket references to authority
+		// contexts resolve as ordinary references so evaluation never
+		// exposes the whole context root.
+		staticAuthority := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets")
+		if err == nil && (staticAuthority || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
 			return e.resolve(root, path)
 		}
 		if e.resolveRoot != nil {
