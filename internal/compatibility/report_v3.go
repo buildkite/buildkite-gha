@@ -68,11 +68,11 @@ func (r *ProcessingReportV3) Finalize() {
 				r.Result = "incompatible"
 			}
 		case "context-required":
-			if r.Result == "admitted" || r.Result == "not-admitted" {
+			if r.Result == "admitted" {
 				r.Result = "context-required"
 			}
 		case "not-admitted":
-			if r.Result == "admitted" {
+			if r.Result == "admitted" || r.Result == "context-required" {
 				r.Result = "not-admitted"
 			}
 		case "admitted":

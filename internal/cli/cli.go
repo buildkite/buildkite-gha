@@ -1332,6 +1332,7 @@ func validateOne(out processingOutput, workflowPath, eventPath, eventName, profi
 }
 
 func validateOneSource(out processingOutput, workflowPath string, workflowSource []byte, eventPath, eventName, profile, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
+	contextRequired := false
 	var loadEvent func() ([]byte, error)
 	if eventPath != "" {
 		event, eventErr := os.ReadFile(eventPath)
@@ -1359,11 +1360,13 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 		if parseErr == nil && eventErr == nil && !parsed.ReusableOnly() {
 			selection, triggerErr := selectWorkflowTrigger(parsed.Triggers, effectiveEvent)
 			if triggerErr != nil {
-				report := triggerFailureProcessingReport(workflowInput{Path: workflowPath, Source: source}, triggerErr)
-				_ = out.write(report)
-				return 1
-			}
-			if !selection.Applicable {
+				contextRequired = pullRequestPathContextRequired(triggerErr)
+				if !contextRequired {
+					report := triggerFailureProcessingReport(workflowInput{Path: workflowPath, Source: source}, triggerErr)
+					_ = out.write(report)
+					return 1
+				}
+			} else if !selection.Applicable {
 				report := triggerProcessingReport(workflowPath, source)
 				report.Result = "not-applicable"
 				if out.write(report) != nil {
@@ -1421,14 +1424,27 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 			_ = out.write(processingReport)
 			return 1
 		}
-		processingReport.SetStage(string(compiler.StageAdmission), compatibility.Passed)
-		processingReport.Admission.Result = "admitted"
 		if preflight.HasActions {
 			processingReport.Diagnostics = append(processingReport.Diagnostics, compatibility.Diagnostic{
 				Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Category: "compatibility", Stage: string(compiler.StageAdmission),
 				Message: "Third-party action runtime behavior was not validated. The action source, metadata, declared runtime, entrypoints, inputs, and nested actions were validated, but the action code was not executed and may depend on GitHub-only services. No action is required for admission; test the action on Buildkite if runtime compatibility is important.",
 			})
 		}
+		if contextRequired {
+			processingReport.SetStage(string(compiler.StageAdmission), compatibility.NotEvaluated)
+			processingReport.Admission.Result = compatibility.NotEvaluated
+			processingReport.Diagnostics = append(processingReport.Diagnostics, compatibility.Diagnostic{
+				Level: "error", Code: compiler.CodeContextRequired, Category: "context", Stage: string(compiler.StageAdmission),
+				Message: "Pull request path filters require linked Buildkite webhook data and a verified local git diff before admission can be determined.",
+			})
+			processingReport.Result = "context-required"
+			if out.write(processingReport) != nil {
+				return 1
+			}
+			return 1
+		}
+		processingReport.SetStage(string(compiler.StageAdmission), compatibility.Passed)
+		processingReport.Admission.Result = "admitted"
 		processingReport.Result = "admitted"
 		if out.write(processingReport) != nil {
 			return 1
@@ -1464,20 +1480,14 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 	validation, validationErr := compiler.Validate(workflowPath, source)
 	validationReport := compatibility.InitialProcessingReport(workflowPath, "", false, validation, validationErr)
 	if validationErr != nil {
-		if processingReportOnlyRequiresContext(validationReport) {
-			validationReport.Result = "context-required"
-		} else {
-			validationReport.Result = "incompatible"
-			report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
-			if out.writeV3(report) != nil {
-				return 1
-			}
+		validationReport.Result = "incompatible"
+		report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
+		if out.writeV3(report) != nil {
 			return 1
 		}
+		return 1
 	}
-	if validationErr == nil {
-		validationReport.Result = "compilable"
-	}
+	validationReport.Result = "compilable"
 	report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
 	parsed, err := workflow.Parse(workflowPath, source)
 	if err != nil {
@@ -1487,7 +1497,6 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 	for _, trigger := range parsed.Triggers {
 		declared[trigger.Event] = true
 	}
-	contextRequired := validationReport.Result == "context-required"
 	cleanup := func() {}
 	if runtime == nil {
 		actionSource, sourceCleanup, sourceErr := newHostedActionSource(actionCacheDir, nil, nil)
@@ -1505,17 +1514,9 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 		runtime = &profileValidationRuntime{actionSource: actionSource, distributionDigest: distributionDigest, executableErr: executableErr}
 	}
 	defer cleanup()
-	failed := contextRequired
+	failed := false
 	for _, event := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
 		if !declared[event] {
-			continue
-		}
-		if event == "pull_request" && contextRequired {
-			eventReport := validationReport
-			eventReport.Profile = hostedProfile
-			report.Evaluations = append(report.Evaluations, compatibility.EventEvaluation{
-				Event: event, Source: "generated", Report: eventReport,
-			})
 			continue
 		}
 		var eventReport *compatibility.ProcessingReport
@@ -1540,20 +1541,6 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 		return 1
 	}
 	return 0
-}
-
-func processingReportOnlyRequiresContext(report compatibility.ProcessingReport) bool {
-	found := false
-	for _, diagnostic := range report.Diagnostics {
-		if diagnostic.Level != "error" {
-			continue
-		}
-		if diagnostic.Code != compiler.CodeContextRequired {
-			return false
-		}
-		found = true
-	}
-	return found
 }
 
 func validateActionCacheArgs(args []string) ([]string, string, error) {
@@ -2360,6 +2347,11 @@ func selectWorkflowTrigger(triggers []workflow.Trigger, event effectiveEventSele
 		SkipReason:       buildkitepipeline.TriggerEventSkipReason(triggers, event.Event.Event),
 		AnnotationReason: annotationReason,
 	}, nil
+}
+
+func pullRequestPathContextRequired(err error) bool {
+	var pathFilters *buildkitepipeline.UnsupportedPathFiltersError
+	return errors.As(err, &pathFilters) && pathFilters.Event == "pull_request" && pathFilters.Reason == ""
 }
 
 func triggerConditionLiteral(value string) string {

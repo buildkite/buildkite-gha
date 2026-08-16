@@ -26,7 +26,7 @@ Validate syntax, the static graph, and every declared trigger without an event:
 buildkite-gha validate .github/workflows/ci.yml
 ```
 
-This event-independent check rejects unsupported events, path filters, branch and tag filter combinations, and pull request activity types. It does not resolve actions, evaluate event payload expressions, or claim hosted admission.
+This event-independent check accepts syntactically valid pull-request path filters because linked-webhook admission can evaluate them with a verified local git diff. It rejects push path filters, malformed path filters, unsupported events, unsupported branch and tag filter combinations, and unsupported pull-request activity types. It does not resolve actions, evaluate event payload expressions, or claim hosted admission.
 
 Resolve actions and apply production policy:
 
@@ -57,7 +57,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--all-events` is mutually exclusive with `--event` and `--event-path`. It does not evaluate `workflow_call` as a standalone event. Admission applies separately to each generated snapshot, not to every possible real payload. A `context-required` result means a supported admission path needs evidence that generated snapshots do not contain. For example, pull-request path filters need linked webhook data and a verified local git diff.
+`--all-events` is mutually exclusive with `--event` and `--event-path`. It does not evaluate `workflow_call` as a standalone event. Admission applies separately to each generated snapshot, not to every possible real payload. A `context-required` result means every available compilation and hosted-policy check passed, but a supported admission path needs evidence that generated snapshots do not contain. For example, pull-request path filters need linked webhook data and a verified local git diff.
 
 Reuse downloaded immutable action source across profile validation runs:
 

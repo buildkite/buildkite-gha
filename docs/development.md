@@ -80,7 +80,7 @@ Useful environment variables are:
 
 The script reports compatible and incompatible repositories among those the generated snapshots measured. It reports repositories that require context separately and excludes them from the compatibility percentage. The tally also records workflow result counts and keeps every diagnostic in the per-workflow report.
 
-Pull-request path filters require a linked Buildkite webhook and a verified, bounded local git diff. The public corpus has workflow files but no repository checkouts or pull-request history, so it reports otherwise-compatible workflows with these filters as `context-required`. This does not claim admission. Push path filters, malformed filters, and workflows with another incompatibility remain incompatible.
+Pull-request path filters require a linked Buildkite webhook and a verified, bounded local git diff. The public corpus has workflow files but no repository checkouts or pull-request history. It still compiles these workflows, resolves their actions, constructs their plans, and applies hosted policy. When the diff is the only missing evidence, it reports the workflow as `context-required`. This does not claim admission. Push path filters, malformed filters, and workflows with another incompatibility remain incompatible.
 
 Sample metadata is written to `records/<record-id>/samples/<sample-key>/validate-tally.json`; per-workflow v3 reports are under `reports/<record-id>/samples/<sample-key>/<validator-digest>/`. Full-corpus tallies and reports retain their existing paths.
 

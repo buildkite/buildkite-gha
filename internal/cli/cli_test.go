@@ -1240,20 +1240,20 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
-	t.Run("bare validation requires pull request path context", func(t *testing.T) {
+	t.Run("bare validation accepts supported pull request paths", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "trigger.yml")
 		if err := os.WriteFile(workflow, []byte("on:\n  pull_request:\n    paths: [src/**]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
-		if code := Run([]string{"validate", "--format", "json", workflow}, &stdout, &stderr, "dev"); code != 1 {
-			t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+		if code := Run([]string{"validate", "--format", "json", workflow}, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
 		var report compatibility.ProcessingReport
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeContextRequired {
+		if report.Result != "compilable" || len(report.Diagnostics) != 0 {
 			t.Fatalf("report = %#v", report)
 		}
 	})
@@ -1402,14 +1402,15 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "context-required" || report.Validation.Result != "context-required" || len(report.Evaluations) != 2 {
+		if report.Result != "context-required" || report.Validation.Result != "compilable" || len(report.Validation.Diagnostics) != 0 || len(report.Evaluations) != 2 {
 			t.Fatalf("aggregate report = %#v", report)
 		}
 		if report.Evaluations[0].Event != "push" || report.Evaluations[0].Report.Result != "admitted" || report.Evaluations[1].Event != "pull_request" || report.Evaluations[1].Report.Result != "context-required" {
 			t.Fatalf("event evaluations = %#v", report.Evaluations)
 		}
-		if len(report.Validation.Diagnostics) != 1 || report.Validation.Diagnostics[0].Code != compiler.CodeContextRequired || !strings.Contains(report.Validation.Diagnostics[0].Message, "verified local git diff") {
-			t.Fatalf("validation diagnostics = %#v", report.Validation.Diagnostics)
+		pullRequest := report.Evaluations[1].Report
+		if pullRequest.Compile.Result != "compilable" || pullRequest.Admission.Result != compatibility.NotEvaluated || len(pullRequest.Diagnostics) != 1 || pullRequest.Diagnostics[0].Code != compiler.CodeContextRequired || !strings.Contains(pullRequest.Diagnostics[0].Message, "verified local git diff") {
+			t.Fatalf("pull request evaluation = %#v", pullRequest)
 		}
 	})
 
@@ -1430,6 +1431,28 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if report.Result != "context-required" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeContextRequired {
 			t.Fatalf("processing report = %#v", report)
 		}
+		if report.Compile.Result != "compilable" || report.Admission.Result != compatibility.NotEvaluated {
+			t.Fatalf("processing stages = compile %#v, admission %#v", report.Compile, report.Admission)
+		}
+	})
+
+	t.Run("validate generated pull request still finds body incompatibility", func(t *testing.T) {
+		workflow := filepath.Join(t.TempDir(), "events.yml")
+		if err := os.WriteFile(workflow, []byte("on:\n  pull_request:\n    paths: [src/**]\njobs:\n  test:\n    runs-on: windows-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		args := []string{"validate", "--profile", "hosted", "--event", "pull_request", "--format", "json", workflow}
+		if code := Run(args, &stdout, &stderr, "dev"); code != 1 {
+			t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+		}
+		var report compatibility.ProcessingReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code == compiler.CodeContextRequired || !strings.Contains(report.Diagnostics[0].Message, "Windows") {
+			t.Fatalf("processing report = %#v", report)
+		}
 	})
 
 	t.Run("validate all events keeps mixed push and pull request paths incompatible", func(t *testing.T) {
@@ -1446,12 +1469,11 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "incompatible" || len(report.Evaluations) != 0 || len(report.Validation.Diagnostics) != 2 {
+		if report.Result != "incompatible" || len(report.Evaluations) != 0 || len(report.Validation.Diagnostics) != 1 {
 			t.Fatalf("aggregate report = %#v", report)
 		}
-		codes := []string{report.Validation.Diagnostics[0].Code, report.Validation.Diagnostics[1].Code}
-		if !slices.Contains(codes, compiler.CodeContextRequired) || !slices.Contains(codes, compiler.CodePipelineGeneration) {
-			t.Fatalf("validation diagnostic codes = %v", codes)
+		if report.Validation.Diagnostics[0].Code != compiler.CodePipelineGeneration {
+			t.Fatalf("validation diagnostics = %#v", report.Validation.Diagnostics)
 		}
 	})
 

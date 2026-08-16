@@ -861,7 +861,7 @@ buildkite-gha validate \
 
 Use `--event push`, `--event pull_request`, `--event workflow_dispatch`, or `--event schedule` instead of `--event-path` to evaluate the hosted profile with a generated minimal snapshot. Generated snapshots are compatibility test inputs, not equivalents to real payloads. The options are mutually exclusive.
 
-Use `--all-events` to evaluate every declared supported event separately. Its `processing-report/v3` output preserves the event-independent result and each generated event's v2 report. Aggregate admission means every generated snapshot was admitted; it does not cover other payload shapes. A `context-required` result preserves supported paths that generated inputs cannot measure, such as pull-request path filters without linked webhook and local diff evidence. It does not claim admission.
+Use `--all-events` to evaluate every declared supported event separately. Its `processing-report/v3` output preserves the event-independent result and each generated event's v2 report. Aggregate admission means every generated snapshot was admitted; it does not cover other payload shapes. A `context-required` result means compilation and hosted-policy checks passed, but generated inputs cannot measure a supported admission path, such as pull-request path filters without linked webhook and local diff evidence. It does not claim admission.
 
 The results mean:
 

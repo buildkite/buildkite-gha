@@ -173,7 +173,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 
 func TestProcessingReportV3ClassifiesContextRequiredWithoutHidingIncompatibility(t *testing.T) {
 	validation := NewProcessingReport("ci.yml", "")
-	validation.Result = "context-required"
+	validation.Result = "compilable"
 	contextRequired := NewProcessingReport("ci.yml", "hosted")
 	contextRequired.Result = "context-required"
 	report := NewProcessingReportV3("ci.yml", "hosted", validation)
@@ -193,6 +193,17 @@ func TestProcessingReportV3ClassifiesContextRequiredWithoutHidingIncompatibility
 	report.Finalize()
 	if report.Result != "incompatible" {
 		t.Fatalf("mixed report result = %q", report.Result)
+	}
+
+	notAdmitted := NewProcessingReport("ci.yml", "hosted")
+	notAdmitted.Result = "not-admitted"
+	report.Evaluations = []EventEvaluation{
+		{Event: "pull_request", Source: "generated", Report: contextRequired},
+		{Event: "push", Source: "generated", Report: notAdmitted},
+	}
+	report.Finalize()
+	if report.Result != "not-admitted" {
+		t.Fatalf("context-required and not-admitted report result = %q", report.Result)
 	}
 }
 
