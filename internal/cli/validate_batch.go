@@ -105,6 +105,16 @@ func validateBatch(args []string, stderr io.Writer, version string) int {
 				if ctx.Err() != nil {
 					return
 				}
+				captured, err := captureBatchValidationRecord(record)
+				if err != nil {
+					select {
+					case failures <- fmt.Errorf("%s: %w", record.ID, err):
+						cancel()
+					default:
+					}
+					return
+				}
+				record = captured
 				resultPath := batchValidationResultPath(options, record, distributionDigest, resolutionSnapshotID)
 				if validBatchValidationResult(resultPath, record.Source) {
 					resumed.Add(1)
@@ -244,13 +254,6 @@ func loadBatchValidationManifest(path string) ([]batchValidationRecord, error) {
 			return nil, fmt.Errorf("manifest line %d repeats id %q", line, record.ID)
 		}
 		seen[record.ID] = true
-		contents, err := os.ReadFile(record.Source)
-		if err != nil {
-			return nil, fmt.Errorf("manifest line %d source: %w", line, err)
-		}
-		contentDigest := sha256.Sum256(contents)
-		record.contentID = hex.EncodeToString(contentDigest[:])
-		record.content = contents
 		records = append(records, record)
 	}
 	if err := scanner.Err(); err != nil {
@@ -260,6 +263,17 @@ func loadBatchValidationManifest(path string) ([]batchValidationRecord, error) {
 		return nil, fmt.Errorf("manifest contains no records")
 	}
 	return records, nil
+}
+
+func captureBatchValidationRecord(record batchValidationRecord) (batchValidationRecord, error) {
+	contents, err := os.ReadFile(record.Source)
+	if err != nil {
+		return batchValidationRecord{}, fmt.Errorf("read workflow source: %w", err)
+	}
+	contentDigest := sha256.Sum256(contents)
+	record.contentID = hex.EncodeToString(contentDigest[:])
+	record.content = contents
+	return record, nil
 }
 
 func batchValidationResultPath(options batchValidationArgs, record batchValidationRecord, validatorDigest, resolutionSnapshotID string) string {

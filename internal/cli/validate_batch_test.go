@@ -156,13 +156,16 @@ func TestBatchValidationManifestAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstContentID := loaded[0].contentID
+	first, err := captureBatchValidationRecord(loaded[0])
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(sourcePath, []byte("on: pull_request\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err = loadBatchValidationManifest(manifest)
-	if err != nil || loaded[0].contentID == firstContentID {
-		t.Fatalf("changed workflow content identity = %q, %v", loaded[0].contentID, err)
+	second, err := captureBatchValidationRecord(loaded[0])
+	if err != nil || second.contentID == first.contentID {
+		t.Fatalf("changed workflow content identity = %q, %v", second.contentID, err)
 	}
 	if _, err := parseBatchValidationArgs([]string{"--manifest", "manifest"}); err == nil || !strings.Contains(err.Error(), "required") {
 		t.Fatalf("missing options error = %v", err)
