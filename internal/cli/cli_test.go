@@ -522,7 +522,7 @@ func TestConfiguredLinuxRunnerTargetsDefaultHostedToolchainImages(t *testing.T) 
 		label string
 		image string
 	}{
-		{label: "ubuntu-latest", image: defaultNobleRunnerImage},
+		{label: "Ubuntu-Latest", image: defaultNobleRunnerImage},
 		{label: "ubuntu-24.04", image: defaultNobleRunnerImage},
 		{label: "ubuntu-22.04", image: defaultJammyRunnerImage},
 	} {
@@ -531,7 +531,7 @@ func TestConfiguredLinuxRunnerTargetsDefaultHostedToolchainImages(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if canonical != test.label || target != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: test.image}) {
+			if canonical != strings.ToLower(test.label) || target != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: test.image}) {
 				t.Fatalf("configuredRunnerTarget() = %q, %#v", canonical, target)
 			}
 		})
@@ -544,6 +544,32 @@ func TestConfiguredLinuxRunnerTargetsDefaultHostedToolchainImages(t *testing.T) 
 	}
 	if target.Image != override {
 		t.Fatalf("explicit image = %q, want %q", target.Image, override)
+	}
+}
+
+func TestHostedRunnerTargetsContainOnlyHostedGuarantees(t *testing.T) {
+	targets := hostedRunnerTargets()
+	labels := make([]string, 0, len(targets))
+	for label := range targets {
+		labels = append(labels, label)
+	}
+	slices.Sort(labels)
+	want := []string{"macos-latest", "ubuntu-22.04", "ubuntu-24.04", "ubuntu-latest"}
+	if !slices.Equal(labels, want) {
+		t.Fatalf("hosted runner labels = %q, want %q", labels, want)
+	}
+	if got := targets["macos-latest"]; got != (compiler.RunnerTarget{Queue: defaultMacOSRunnerQueue, Platform: compiler.PlatformDarwinARM64}) {
+		t.Fatalf("macos-latest target = %#v", got)
+	}
+	for _, label := range []string{"macos-14", "macos-15", "ubuntu-24.04-arm", "windows-latest"} {
+		if _, ok := targets[label]; ok {
+			t.Errorf("hosted runner preset unexpectedly contains %q", label)
+		}
+	}
+
+	canonical, target, err := configuredRunnerTarget("macOS-15", "organization-macos", "")
+	if err != nil || canonical != "macos-15" || target != (compiler.RunnerTarget{Queue: "organization-macos", Platform: compiler.PlatformDarwinARM64}) {
+		t.Fatalf("organization macOS target = %q, %#v, %v", canonical, target, err)
 	}
 }
 
@@ -1382,9 +1408,9 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
-	t.Run("validate hosted profile admits unmapped macos-latest", func(t *testing.T) {
+	t.Run("validate hosted profile admits macOS-latest alias", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "macos-latest.yml")
-		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  macos:\n    runs-on: macos-latest\n    steps:\n      - run: echo macos\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  macos:\n    runs-on: macOS-latest\n    steps:\n      - run: echo macos\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -5488,8 +5514,8 @@ func TestCompileHostedRequiresExplicitMacOSQueueAndRuntime(t *testing.T) {
 	}
 }
 
-func TestCompileHostedDefaultsMacOSLatestToHostedQueue(t *testing.T) {
-	workflow := []byte("on: push\njobs:\n  macos:\n    runs-on: macos-latest\n    steps:\n      - run: echo macos\n")
+func TestCompileHostedDefaultsMacOSLatestAliasToHostedQueue(t *testing.T) {
+	workflow := []byte("on: push\njobs:\n  macos:\n    runs-on: macOS-latest\n    steps:\n      - run: echo macos\n")
 	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
 	if err != nil {
 		t.Fatal(err)

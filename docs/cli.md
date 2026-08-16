@@ -108,6 +108,7 @@ buildkite-gha validate \
 ```
 
 The deprecated `hosted-tokenless` profile name remains an alias for `hosted`.
+Hosted validation uses the same runner preset as production upload.
 
 Use `--format json` for a `buildkite-gha/processing-report/v2` report. `--all-events` emits `buildkite-gha/processing-report/v3`, which contains the event-independent v2 report and one v2 report for each generated event evaluation. The top-level result is `admitted` only when every evaluation is admitted.
 
@@ -244,13 +245,17 @@ buildkite-gha upload \
   .github/workflows/ci.yml
 ```
 
-`ubuntu-latest` and `ubuntu-24.04` default to the Noble hosted-toolchains
-image; `ubuntu-22.04` defaults to Jammy. Use `--runner-image` with an immutable
-digest to override the default for a configured profile. Unmapped Linux labels
-keep default agent targeting with the matching image. Unmapped `macos-latest`
-targets the hosted `macos-medium` queue provisioned at signup; a mapping
-overrides it, and the queue must exist and allow macOS capacity. `macos-14`
-and `macos-15` require a queue. Every macOS label rejects images. Runtime distribution paths must be absolute executables. The
+The hosted preset accepts runner labels case-insensitively, so aliases such as
+`macOS-latest` and `Ubuntu-Latest` are equivalent to their lowercase forms.
+`ubuntu-latest` and `ubuntu-24.04` default to the Noble hosted-toolchains image;
+`ubuntu-22.04` defaults to Jammy. Use `--runner-image` with an immutable digest
+to override the default for a configured profile. Linux labels keep default
+agent targeting with the matching image. `macos-latest` targets the hosted
+`macos-medium` queue provisioned at signup; a mapping overrides it, and the
+queue must exist and allow macOS capacity. Version-specific `macos-14` and
+`macos-15` labels require an organization-provided queue and are not part of
+the hosted preset. Linux ARM, macOS x86-64, Windows, and other labels are
+unsupported. Every macOS label rejects images. Runtime distribution paths must be absolute executables. The
 importer's platform defaults to its running executable; the other platform has
 no direct-upload default.
 `BUILDKITE_GHA_TARGET_QUEUE` and `BUILDKITE_GHA_RUNTIME_IMAGE` are no longer
