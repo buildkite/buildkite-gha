@@ -85,6 +85,11 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 		workflowJobs := make(map[string]workflow.Job, len(parsed.Jobs))
 		replacements := make(map[string]needBinding, len(parsed.Jobs))
 		for i, job := range parsed.Jobs {
+			resolvedJob, err := applyStaticInputs(sourcePath, job, context.Inputs)
+			if err != nil {
+				return nil, runtimeMatrixBoundary, err
+			}
+			job = resolvedJob
 			job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, nil, false)
 			bindings := make(map[string]needBinding, len(job.Needs))
 			for _, need := range job.Needs {

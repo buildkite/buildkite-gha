@@ -1126,6 +1126,7 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ join(fromJSON('[1e2]')) }}", want: "100"},
 		{expression: "${{ toJSON(fromJSON('1e2')) }}", want: "100"},
 		{expression: "${{ toJSON(github.event_name) }}", want: `"push"`},
+		{expression: "${{ toJSON('<&>') }}", want: `"<&>"`},
 		{expression: "${{ case(false, vars.missing, true, 'selected', vars.missing) }}", want: "selected"},
 	}
 	context.GitHub["ref"] = "refs/pull/42/merge"

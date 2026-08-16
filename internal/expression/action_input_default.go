@@ -4,7 +4,6 @@
 package expression
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -146,11 +145,11 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 		if strings.EqualFold(node.Callee, "toJSON") && len(node.Args) == 1 {
 			root, path, err := referencePath(node.Args[0])
 			if err == nil && strings.EqualFold(root, "matrix") && len(path) == 0 {
-				value, err := json.MarshalIndent(context.Matrix, "", "  ")
+				value, err := encodeExpressionJSON(context.Matrix)
 				if err != nil {
 					return nil, fmt.Errorf("encode action input default matrix as JSON: %w", err)
 				}
-				return string(value), nil
+				return value, nil
 			}
 		}
 		if value, recognized, err := evaluatePureFunction(evaluator, node); recognized {

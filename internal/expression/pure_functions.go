@@ -1,6 +1,7 @@
 package expression
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -169,11 +170,11 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 		if err != nil {
 			return nil, true, err
 		}
-		encoded, err := json.MarshalIndent(value, "", "  ")
+		encoded, err := encodeExpressionJSON(value)
 		if err != nil {
 			return nil, true, fmt.Errorf("function %q: %w", node.Callee, err)
 		}
-		return string(encoded), true, nil
+		return encoded, true, nil
 	case "fromjson":
 		if argc != 1 {
 			return nil, true, fmt.Errorf("function %q requires 1 argument", node.Callee)
@@ -191,6 +192,17 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 	default:
 		return nil, false, nil
 	}
+}
+
+func encodeExpressionJSON(value any) (string, error) {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(value); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(encoded.String(), "\n"), nil
 }
 
 func expressionCollection(value any) ([]any, bool) {

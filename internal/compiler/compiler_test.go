@@ -2962,6 +2962,53 @@ jobs:
 	}
 }
 
+func TestCompilePlansSubstituteWorkflowDispatchInputsWithoutReusableCalls(t *testing.T) {
+	workflowSource := []byte(`on:
+  workflow_dispatch:
+    inputs:
+      timeout:
+        type: number
+        default: 5
+      label:
+        type: string
+        default: dispatched
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      LABEL: ${{ inputs.label }}
+    defaults:
+      run:
+        shell: ${{ inputs.label }}
+    outputs:
+      label: ${{ inputs.label }}
+    steps:
+      - run: true
+        timeout-minutes: ${{ inputs.timeout }}
+`)
+	var event map[string]any
+	if err := json.Unmarshal(readFile(t, smokePath("events", "push.json")), &event); err != nil {
+		t.Fatal(err)
+	}
+	event["event"] = "workflow_dispatch"
+	event["payload"] = map[string]any{"inputs": map[string]any{"timeout": 7, "label": "bash"}}
+	eventSource, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compilePlansForTest(context.Background(), "dispatch.yml", workflowSource, eventSource, "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("compiled plans = %d, want 1", len(plans))
+	}
+	job := plans[0]
+	if job.Env["LABEL"] != "bash" || job.DefaultShell != "bash" || job.Outputs["label"] != "bash" || job.Steps[0].TimeoutMinutes != 7 || job.Steps[0].TimeoutMinutesExpression != "" {
+		t.Fatalf("compiled dispatch input surfaces = %#v", job)
+	}
+}
+
 func TestCompilePlansRetainNeedsServiceExpressionForRuntime(t *testing.T) {
 	workflowSource := []byte(`on: push
 jobs:
