@@ -40,7 +40,7 @@ func TestParseSampleSize(t *testing.T) {
 	}
 }
 
-func TestSampleManifestIsStable(t *testing.T) {
+func TestSampleManifestStable(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "workflows.jsonl")
 	records := []manifestRecord{
