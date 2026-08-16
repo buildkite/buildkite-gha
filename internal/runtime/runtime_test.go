@@ -2923,6 +2923,8 @@ func TestJavaScriptPostConditionsUseFinalJobStatus(t *testing.T) {
 		{name: "success after failure", condition: "${{ success() }}", failMain: true, wantFailure: true},
 		{name: "failure after failure", condition: "failure()", failMain: true, wantPost: true, wantStatus: "failure", wantFailure: true},
 		{name: "always after failure", condition: "always()", failMain: true, wantPost: true, wantStatus: "failure", wantFailure: true},
+		{name: "not cancelled after success", condition: "!cancelled()", wantPost: true, wantStatus: "success"},
+		{name: "not cancelled after failure", condition: "!cancelled()", failMain: true, wantPost: true, wantStatus: "failure", wantFailure: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
