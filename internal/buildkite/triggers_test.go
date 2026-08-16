@@ -1,7 +1,6 @@
 package buildkite
 
 import (
-	"errors"
 	"strings"
 	"testing"
 
@@ -85,21 +84,15 @@ func TestValidateTriggerConditionsAllowsReusableOnlyWorkflow(t *testing.T) {
 	}
 }
 
-func TestValidateTriggerConditionsAcceptsSupportedPullRequestPaths(t *testing.T) {
-	if err := ValidateTriggerConditions([]workflow.Trigger{{Event: "pull_request", Paths: []string{"src/**"}}}); err != nil {
-		t.Fatalf("ValidateTriggerConditions() pull request paths error = %v", err)
-	}
-
-	err := ValidateTriggerConditions([]workflow.Trigger{
+func TestValidateTriggerConditionsAcceptsSupportedPathFilters(t *testing.T) {
+	if err := ValidateTriggerConditions([]workflow.Trigger{
 		{Event: "pull_request", Paths: []string{"src/**"}},
 		{Event: "push", Paths: []string{"docs/**"}},
-	})
-	var unsupported *UnsupportedPathFiltersError
-	if !errors.As(err, &unsupported) || unsupported.Event != "push" {
-		t.Fatalf("ValidateTriggerConditions() unsupported error = %v", err)
+	}); err != nil {
+		t.Fatalf("ValidateTriggerConditions() path filters error = %v", err)
 	}
 
-	err = ValidateTriggerConditions([]workflow.Trigger{{Event: "pull_request", Paths: []string{"!src/**"}}})
+	err := ValidateTriggerConditions([]workflow.Trigger{{Event: "pull_request", Paths: []string{"!src/**"}}})
 	if err == nil || !strings.Contains(err.Error(), "must follow a positive pattern") {
 		t.Fatalf("ValidateTriggerConditions() invalid pull request path error = %v", err)
 	}
@@ -142,13 +135,13 @@ func TestTranslateEventTriggerConditionValidatesInactiveTriggers(t *testing.T) {
 	}
 }
 
-func TestTranslateEventTriggerConditionRejectsInactivePushPathFilters(t *testing.T) {
-	_, _, err := TranslateEventTriggerCondition([]workflow.Trigger{
+func TestTranslateEventTriggerConditionAllowsInactivePushPathFilters(t *testing.T) {
+	condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{
 		{Event: "push", Paths: []string{"src/**"}},
 		{Event: "pull_request"},
 	}, "pull_request", TriggerConditionContext{EventPredicate: "true", PullRequestAction: `"opened"`})
-	if err == nil || !strings.Contains(err.Error(), "path filters are unsupported") {
-		t.Fatalf("inactive push path filter error = %v", err)
+	if err != nil || !applicable || !strings.Contains(condition, `"opened"`) {
+		t.Fatalf("inactive push path filter condition/applicable/error = %q / %t / %v", condition, applicable, err)
 	}
 }
 
@@ -187,6 +180,38 @@ func TestTranslateEventTriggerConditionMatchesPullRequestPaths(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "diff-timeout outcome is unavailable") {
 		t.Fatalf("nonmatching local paths error = %v", err)
+	}
+}
+
+func TestTranslateEventTriggerConditionMatchesPushPaths(t *testing.T) {
+	branch := "main"
+	context := TriggerConditionContext{
+		EventPredicate:    "true",
+		Branch:            `"main"`,
+		Tag:               "null",
+		BranchValue:       &branch,
+		ChangedPaths:      []string{"docs/readme.md", "src/generated/api.go", "src/main.go"},
+		ChangedPathsKnown: true,
+	}
+	trigger := workflow.Trigger{Event: "push", Paths: []string{"src/**", "!src/generated/**"}}
+	condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger}, "push", context)
+	if err != nil || !applicable || condition != "(true)" {
+		t.Fatalf("push condition/applicable/error = %q / %t / %v", condition, applicable, err)
+	}
+	context.ChangedPaths = []string{"docs/readme.md", "src/generated/api.go"}
+	if _, _, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger}, "push", context); err == nil || !strings.Contains(err.Error(), "diff-timeout outcome is unavailable") {
+		t.Fatalf("nonmatching push paths error = %v", err)
+	}
+	context.ChangedPathsKnown = false
+	context.ChangedPathsError = "verified push diff unavailable"
+	if _, _, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger}, "push", context); err == nil || !strings.Contains(err.Error(), "verified push diff unavailable") {
+		t.Fatalf("unknown push paths error = %v", err)
+	}
+
+	tag := "v1.0.0"
+	tagContext := TriggerConditionContext{EventPredicate: "true", Branch: "null", Tag: `"v1.0.0"`, TagValue: &tag}
+	if _, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger}, "push", tagContext); err != nil || !applicable {
+		t.Fatalf("tag push path filter = %t, %v", applicable, err)
 	}
 }
 

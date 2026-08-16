@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -18,15 +20,36 @@ import (
 const (
 	maxLocallyEvaluatedPathFilterFiles = 300
 	maxGitChangedPathBytes             = 2 << 20
+	maxGitHubPushCommits               = 1000
+	zeroGitCommit                      = "0000000000000000000000000000000000000000"
 )
 
 func populateChangedPaths(context *buildkitepipeline.TriggerConditionContext, event compiler.Event, origin effectiveEventOrigin, workflows []workflowInput) {
-	if event.Event != "pull_request" {
+	if event.Event != "pull_request" && event.Event != "push" {
+		return
+	}
+	if event.Event == "push" && context.TagValue != nil {
 		return
 	}
 	if origin != effectiveEventFromWebhook {
 		if workflowsUsePathFilters(workflows, event.Event) {
-			context.ChangedPathsError = "pull request path filters require linked Buildkite webhook data"
+			context.ChangedPathsError = event.Event + " path filters require linked Buildkite webhook data"
+		}
+		return
+	}
+	if event.Event == "push" {
+		if !workflowsUsePathFilters(workflows, event.Event) {
+			return
+		}
+		paths, workflowErrors, err := pushChangedPaths(event, workflows)
+		if err != nil {
+			setPathFiltersError(context, workflows, event.Event, err.Error(), true)
+			return
+		}
+		context.ChangedPaths = paths
+		context.ChangedPathsKnown = true
+		for i := range workflows {
+			workflows[i].PathFiltersError = workflowErrors[workflows[i].CanonicalPath]
 		}
 		return
 	}
@@ -57,6 +80,219 @@ func populateChangedPaths(context *buildkitepipeline.TriggerConditionContext, ev
 		}
 		workflows[i].PathFiltersError = workflowErrors[workflows[i].CanonicalPath]
 	}
+}
+
+func pushChangedPaths(event compiler.Event, workflows []workflowInput) ([]string, map[string]string, error) {
+	if event.Provider != "github" {
+		return nil, nil, fmt.Errorf("push path filters require a GitHub repository webhook")
+	}
+	if nestedString(event.Payload, "repository", "full_name") != event.Repository.Owner+"/"+event.Repository.Name {
+		return nil, nil, fmt.Errorf("webhook push repository does not match the Buildkite build")
+	}
+	if nestedString(event.Payload, "ref") != event.Ref || !strings.HasPrefix(event.Ref, "refs/heads/") {
+		return nil, nil, fmt.Errorf("webhook push branch ref does not match the Buildkite build")
+	}
+	after, before := nestedString(event.Payload, "after"), nestedString(event.Payload, "before")
+	created, createdOK := event.Payload["created"].(bool)
+	deleted, deletedOK := event.Payload["deleted"].(bool)
+	forced, forcedOK := event.Payload["forced"].(bool)
+	if !createdOK || !deletedOK || !forcedOK {
+		return nil, nil, fmt.Errorf("webhook push requires boolean created, deleted, and forced fields")
+	}
+	if deleted || after == zeroGitCommit {
+		return nil, nil, fmt.Errorf("deleted-ref pushes cannot admit path-filtered workflows")
+	}
+	if !validBuildkiteCommit(after) || after != event.SHA {
+		return nil, nil, fmt.Errorf("webhook push after commit does not match the Buildkite build")
+	}
+	if created != (before == zeroGitCommit) || !created && !validBuildkiteCommit(before) {
+		return nil, nil, fmt.Errorf("webhook push before commit is inconsistent with ref creation")
+	}
+
+	rootBytes, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return nil, nil, fmt.Errorf("locate checked-out git repository: %w", err)
+	}
+	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
+	shallowBytes, err := gitCommand(root, "rev-parse", "--is-shallow-repository").Output()
+	if err != nil || strings.TrimSpace(string(shallowBytes)) != "false" {
+		return nil, nil, fmt.Errorf("push path filters require a complete non-shallow checkout")
+	}
+	remoteURLBytes, err := gitCommand(root, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return nil, nil, fmt.Errorf("push path filters require the local origin repository")
+	}
+	provider, owner, name, _, err := parseBuildkiteRepository(strings.TrimSpace(string(remoteURLBytes)))
+	if err != nil || provider != event.Provider || owner != event.Repository.Owner || name != event.Repository.Name {
+		return nil, nil, fmt.Errorf("local origin repository does not match the Buildkite build")
+	}
+	branch := strings.TrimPrefix(event.Ref, "refs/heads/")
+	if err := gitCommand(root, "check-ref-format", "refs/heads/"+branch).Run(); err != nil {
+		return nil, nil, fmt.Errorf("webhook push branch is invalid")
+	}
+	for label, revision := range map[string]string{"checkout": "HEAD", "origin branch": "refs/remotes/origin/" + branch} {
+		value, err := gitCommand(root, "rev-parse", "--verify", revision+"^{commit}").Output()
+		if err != nil || strings.TrimSpace(string(value)) != after {
+			return nil, nil, fmt.Errorf("push after commit does not match the local %s", label)
+		}
+	}
+	if err := gitCommand(root, "cat-file", "-e", after+"^{commit}").Run(); err != nil {
+		return nil, nil, fmt.Errorf("push after commit is unavailable in the local checkout")
+	}
+
+	webhookCommits, err := pushWebhookCommits(event.Payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	diffBase := before
+	if created {
+		if forced {
+			return nil, nil, fmt.Errorf("new-branch push cannot also be forced")
+		}
+		diffBase, err = newBranchPushDiffBase(root, after, webhookCommits)
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		if err := gitCommand(root, "cat-file", "-e", before+"^{commit}").Run(); err != nil {
+			return nil, nil, fmt.Errorf("push before commit is unavailable in the local checkout")
+		}
+		isAncestor, err := gitIsAncestor(root, before, after)
+		if err != nil {
+			return nil, nil, fmt.Errorf("verify push force state: %w", err)
+		}
+		if forced == isAncestor {
+			return nil, nil, fmt.Errorf("webhook push forced state does not match local commit history")
+		}
+		commitsBytes, err := gitCommand(root, "rev-list", "--max-count=1001", before+".."+after).Output()
+		if err != nil {
+			return nil, nil, fmt.Errorf("list pushed commits: %w", err)
+		}
+		localCommits := strings.Fields(string(commitsBytes))
+		if len(localCommits) > maxGitHubPushCommits {
+			return nil, nil, fmt.Errorf("push exceeds GitHub's %d-commit path-filter diff bound", maxGitHubPushCommits)
+		}
+		if !sameCommitSet(localCommits, webhookCommits) {
+			return nil, nil, fmt.Errorf("webhook pushed commits do not match local commit history")
+		}
+	}
+
+	workflowErrors := make(map[string]string)
+	for _, input := range workflows {
+		if !workflowUsesPathFilters(input, event.Event) {
+			continue
+		}
+		if !gitTracksWorkflow(root, input) {
+			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q is not provider-backed and cannot use push path filters", input.CanonicalPath)
+			continue
+		}
+		committedSource, err := gitCommand(root, "cat-file", "blob", after+":"+input.CanonicalPath).Output()
+		if err != nil || !bytes.Equal(committedSource, input.Source) {
+			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q does not match the pushed commit", input.CanonicalPath)
+		}
+	}
+
+	output, err := boundedCommandOutput(gitCommand(root, "diff", "--name-status", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", diffBase, after), maxGitChangedPathBytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list push changed paths: %w", err)
+	}
+	paths, err := parseChangedPaths(output)
+	if err != nil {
+		return nil, nil, err
+	}
+	return paths, workflowErrors, nil
+}
+
+func pushWebhookCommits(payload map[string]any) ([]string, error) {
+	values, ok := payload["commits"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("webhook push requires its commits array")
+	}
+	if len(values) > maxGitHubPushCommits {
+		return nil, fmt.Errorf("push exceeds GitHub's %d-commit path-filter diff bound", maxGitHubPushCommits)
+	}
+	commits := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		commit, ok := value.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("webhook push contains an invalid commit")
+		}
+		id, _ := commit["id"].(string)
+		if !validBuildkiteCommit(id) || seen[id] {
+			return nil, fmt.Errorf("webhook push contains an invalid or duplicate commit ID")
+		}
+		seen[id] = true
+		commits = append(commits, id)
+	}
+	return commits, nil
+}
+
+func newBranchPushDiffBase(root, after string, commits []string) (string, error) {
+	if len(commits) == 0 || !slices.Contains(commits, after) {
+		return "", fmt.Errorf("new-branch push requires complete pushed commit evidence")
+	}
+	pushed := make(map[string]bool, len(commits))
+	for _, commit := range commits {
+		pushed[commit] = true
+		if err := gitCommand(root, "cat-file", "-e", commit+"^{commit}").Run(); err != nil {
+			return "", fmt.Errorf("new-branch pushed commit is unavailable in the local checkout")
+		}
+		if err := gitCommand(root, "merge-base", "--is-ancestor", commit, after).Run(); err != nil {
+			return "", fmt.Errorf("new-branch pushed commit is not an ancestor of the after commit")
+		}
+	}
+	var rootCommit, parent string
+	for _, commit := range commits {
+		output, err := gitCommand(root, "rev-list", "--parents", "-n", "1", commit).Output()
+		fields := strings.Fields(string(output))
+		if err != nil || len(fields) == 0 || fields[0] != commit {
+			return "", fmt.Errorf("inspect new-branch pushed commit parents")
+		}
+		hasPushedParent := false
+		for _, candidate := range fields[1:] {
+			hasPushedParent = hasPushedParent || pushed[candidate]
+		}
+		if hasPushedParent {
+			continue
+		}
+		if rootCommit != "" || len(fields) != 2 {
+			return "", fmt.Errorf("new-branch push does not have one unambiguous diff ancestor")
+		}
+		rootCommit, parent = commit, fields[1]
+	}
+	if rootCommit == "" {
+		return "", fmt.Errorf("new-branch push does not have one unambiguous diff ancestor")
+	}
+	return parent, nil
+}
+
+func sameCommitSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	commits := make(map[string]bool, len(left))
+	for _, commit := range left {
+		commits[commit] = true
+	}
+	for _, commit := range right {
+		if !commits[commit] {
+			return false
+		}
+	}
+	return true
+}
+
+func gitIsAncestor(root, ancestor, descendant string) (bool, error) {
+	err := gitCommand(root, "merge-base", "--is-ancestor", ancestor, descendant).Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) && exitError.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, err
 }
 
 func setPathFiltersError(context *buildkitepipeline.TriggerConditionContext, workflows []workflowInput, event, reason string, filteredOnly bool) {
@@ -346,7 +582,7 @@ func parseChangedPaths(output []byte) ([]string, error) {
 			return nil, fmt.Errorf("git returned unsupported changed-path status %q", status)
 		}
 		if len(paths) > maxLocallyEvaluatedPathFilterFiles {
-			return nil, fmt.Errorf("pull request changes exceed the importer's %d-file local evaluation bound", maxLocallyEvaluatedPathFilterFiles)
+			return nil, fmt.Errorf("changed paths exceed the importer's %d-file local evaluation bound", maxLocallyEvaluatedPathFilterFiles)
 		}
 	}
 	if added && deleted {

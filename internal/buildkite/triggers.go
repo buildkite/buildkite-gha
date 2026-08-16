@@ -89,7 +89,7 @@ func ValidateTriggerConditions(triggers []workflow.Trigger) error {
 	for _, trigger := range triggers {
 		if _, _, err := translateTrigger(trigger, liveTriggerContext(trigger.Event), true); err != nil {
 			var pathFilters *UnsupportedPathFiltersError
-			if errors.As(err, &pathFilters) && pathFilters.Event == "pull_request" && pathFilters.Reason == "" {
+			if errors.As(err, &pathFilters) && (pathFilters.Event == "push" || pathFilters.Event == "pull_request") && pathFilters.Reason == "" {
 				continue
 			}
 			findings = append(findings, err)
@@ -307,8 +307,20 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext, selec
 		} else if hasTagFilter {
 			parts = append(parts, context.Tag+" != null", tag)
 		}
-		if pathFilters && (!selected || context.TagValue == nil) {
-			return "", false, &UnsupportedPathFiltersError{Event: t.Event}
+		if pathFilters && selected && context.TagValue == nil {
+			if !context.ChangedPathsKnown {
+				return "", false, &UnsupportedPathFiltersError{Event: t.Event, Reason: context.ChangedPathsError}
+			}
+			matches, err := pathFiltersMatch(context.ChangedPaths, t.Paths, t.PathsIgnore)
+			if err != nil {
+				return "", false, fmt.Errorf("push paths: %w", err)
+			}
+			if !matches {
+				return "", false, &UnsupportedPathFiltersError{
+					Event:  t.Event,
+					Reason: "local changed paths do not match, and GitHub's diff-timeout outcome is unavailable",
+				}
+			}
 		}
 		return strings.Join(parts, " && "), true, nil
 	case "pull_request":

@@ -24,6 +24,8 @@ Workflow files, action metadata, event snapshots, and job plans are untrusted in
 
 Digests and immutable action locks detect changed code. They do not make code trusted or grant credentials.
 
+Push and pull request path-filter admission uses Buildkite's reserved linked-webhook metadata only after binding it to the Buildkite repository and commit and matching local Git history. Missing, shallow, ambiguous, oversized, or mismatched evidence fails closed. Explicit and generated snapshots cannot grant this admission. This check controls workflow selection; it does not make the selected workflow trusted.
+
 ## Credential boundaries
 
 | Credential | Current boundary |

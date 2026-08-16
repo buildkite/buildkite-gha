@@ -1373,7 +1373,7 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 		if parseErr == nil && eventErr == nil && !parsed.ReusableOnly() {
 			selection, triggerErr := selectWorkflowTrigger(parsed.Triggers, effectiveEvent)
 			if triggerErr != nil {
-				contextRequired = pullRequestPathContextRequired(triggerErr)
+				contextRequired = pathFilterContextRequired(triggerErr)
 				if contextRequired {
 					triggerErr = buildkitepipeline.ValidateTriggerConditions(parsed.Triggers)
 					contextRequired = triggerErr == nil
@@ -1452,7 +1452,7 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 			processingReport.Admission.Result = compatibility.NotEvaluated
 			processingReport.Diagnostics = append(processingReport.Diagnostics, compatibility.Diagnostic{
 				Level: "error", Code: compiler.CodeContextRequired, Category: "context", Stage: string(compiler.StageAdmission),
-				Message: "Pull request path filters require linked Buildkite webhook data and a verified local git diff before admission can be determined.",
+				Message: "Push and pull request path filters require linked Buildkite webhook data and a verified local git diff before admission can be determined.",
 			})
 			processingReport.Result = "context-required"
 			if out.write(processingReport) != nil {
@@ -2387,9 +2387,9 @@ func selectWorkflowTrigger(triggers []workflow.Trigger, event effectiveEventSele
 	}, nil
 }
 
-func pullRequestPathContextRequired(err error) bool {
+func pathFilterContextRequired(err error) bool {
 	var pathFilters *buildkitepipeline.UnsupportedPathFiltersError
-	return errors.As(err, &pathFilters) && pathFilters.Event == "pull_request" && pathFilters.Reason == ""
+	return errors.As(err, &pathFilters) && (pathFilters.Event == "push" || pathFilters.Event == "pull_request") && pathFilters.Reason == ""
 }
 
 func triggerConditionLiteral(value string) string {
@@ -2403,7 +2403,8 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 	if errors.As(err, &pathFilters) {
 		message := fmt.Sprintf("%s trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step.", upperFirst(pathFilters.Event))
 		if pathFilters.Reason != "" {
-			message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. Ensure the linked webhook and local checkout contain matching pull-request history, or remove the path filters.", upperFirst(pathFilters.Event))
+			history := strings.ReplaceAll(pathFilters.Event, "_", "-")
+			message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. Ensure the linked webhook and local checkout contain matching %s history, or remove the path filters.", upperFirst(pathFilters.Event), history)
 		}
 		err = &compiler.ProcessingFinding{
 			Stage: compiler.StagePipeline, Code: compiler.CodePipelineGeneration, Category: "compatibility",
