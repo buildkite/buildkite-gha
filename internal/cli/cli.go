@@ -1840,9 +1840,18 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		return 1
 	}
+	populateChangedPaths(&effectiveEvent.TriggerContext, effectiveEvent.Event, effectiveEvent.Origin, workflows)
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i := range workflows {
 		if workflows[i].ReusableOnly {
+			continue
+		}
+		if workflows[i].PathFiltersError != "" {
+			workflows[i].Applicable = true
+			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
+			processingReports[i] = triggerFailureProcessingReport(workflows[i], &buildkitepipeline.UnsupportedPathFiltersError{
+				Event: effectiveEvent.Event.Event, Reason: workflows[i].PathFiltersError,
+			})
 			continue
 		}
 		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
@@ -2319,10 +2328,14 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 	report := triggerProcessingReport(input.Path, input.Source)
 	var pathFilters *buildkitepipeline.UnsupportedPathFiltersError
 	if errors.As(err, &pathFilters) {
+		message := fmt.Sprintf("%s trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step.", upperFirst(pathFilters.Event))
+		if pathFilters.Reason != "" {
+			message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. Ensure the linked webhook and local checkout contain matching pull-request history, or remove the path filters.", upperFirst(pathFilters.Event))
+		}
 		err = &compiler.ProcessingFinding{
 			Stage: compiler.StagePipeline, Code: compiler.CodePipelineGeneration, Category: "compatibility",
 			Path: input.Path, Line: 1, Column: 1,
-			Message: fmt.Sprintf("%s trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step.", upperFirst(pathFilters.Event)),
+			Message: message,
 			Detail:  pathFilters.Error(), Err: err,
 		}
 	}
@@ -2351,6 +2364,7 @@ type workflowInput struct {
 	Source                                                []byte
 	Triggers                                              []workflow.Trigger
 	TriggerCondition, SkipReason, AnnotationReason        string
+	PathFiltersError                                      string
 	ReusableOnly, Applicable                              bool
 }
 

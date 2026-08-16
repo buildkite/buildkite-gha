@@ -107,14 +107,37 @@ An explicit event snapshot never consults contradictory live Buildkite event fie
 | Event | Supported trigger behavior |
 | --- | --- |
 | `push` | `branches`, `branches-ignore`, `tags`, and `tags-ignore`, including ordered negative patterns in an include list. Branch and tag filters select their corresponding ref kind. |
-| `pull_request` | `branches` and `branches-ignore` match the base branch. Omitted `types` defaults to `opened`, `synchronize`, and `reopened`; explicitly listed activity types must map exactly to a supported Buildkite source action. |
+| `pull_request` | `branches` and `branches-ignore` match the base branch. Omitted `types` defaults to `opened`, `synchronize`, and `reopened`; explicitly listed activity types must map exactly to a supported Buildkite source action. Matching `paths` and `paths-ignore` can be admitted when the bounded local-diff requirements below are met. |
 | `workflow_dispatch` | Selected for Buildkite UI and API builds. Webhook-style branch, tag, type, and workflow filters are unsupported. |
 | `schedule` | Selected for Buildkite scheduled builds. Buildkite owns cron configuration and does not expose which schedule started a build, so every `on.schedule` workflow is eligible for every Buildkite scheduled build. |
 | `workflow_call` | Defines a local reusable-workflow interface. A reusable-only file is available to callers but does not become a top-level group. |
 
 Supported `pull_request` activity types are `assigned`, `unassigned`, `labeled`, `unlabeled`, `opened`, `edited`, `closed`, `reopened`, `synchronize`, `converted_to_draft`, `locked`, `unlocked`, `enqueued`, `dequeued`, `milestoned`, `demilestoned`, `ready_for_review`, `review_requested`, `review_request_removed`, `auto_merge_enabled`, and `auto_merge_disabled`.
 
-`paths` and `paths-ignore` are unsupported because Buildkite `if_changed` has different semantics. Unsupported trigger events, path filters, push type/workflow filters, pull request tag/workflow filters, inexact activity types, and invalid include/ignore combinations are not approximated; they replace the affected workflow with a failing step. Trigger shapes are validated even on a different event, but only the selected event contributes a group condition.
+#### Pull request path filters
+
+`paths` and `paths-ignore` support ordered GitHub patterns. For example, this runs for changes under `src`, except generated files:
+
+```yaml
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "!src/generated/**"
+```
+
+Before upload, the importer compares the pull request merge base with its head using the local checkout. It admits a workflow only when a changed path matches and the linked webhook, commits, synthetic merge, base branch, and workflow file all agree. It uses the checkout's existing Git access for public, private, and fork pull requests. It does not call GitHub or use Buildkite `if_changed`.
+
+| Admitted | Fails closed |
+| --- | --- |
+| A matching added, modified, deleted, or type-changed path | No local match |
+| A copied destination that matches | A rename, or a diff containing both additions and deletions |
+| At most 300 changed files from complete local history | Missing or shallow history, multiple merge bases, or more than 300 files |
+| A mergeable pull request with matching webhook and workflow data | A conflict, stale data, changed merge workflow, path or pattern containing a backslash, invalid pattern, or malformed Git output |
+
+A local non-match fails closed because GitHub does not report whether its diff timed out and ran the workflow anyway. Unfiltered `closed` workflows remain supported; filtered `closed` workflows fail closed when GitHub supplies an actual merge, squash, or rebase commit instead of a synthetic merge.
+
+Push path filters remain unsupported because GitHub uses a different diff range and timeout rules without exposing enough data to reproduce them safely. Tag pushes do not evaluate path filters, matching GitHub behavior. Other unsupported or inexact trigger filters also replace the affected workflow with a failing step rather than broadening when it runs.
 
 A top-level workflow that does not declare the effective event is excluded before event-dependent validation or compilation and represented by one top-level skipped command step. A workflow that declares that event remains represented by a group even when a same-event branch, tag, base-branch, or action condition evaluates false in Buildkite. If no directly runnable workflow declares the event, upload succeeds with a skipped-only pipeline.
 
