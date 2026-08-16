@@ -233,6 +233,9 @@ func boundJobSummary(summary string, truncated bool) (string, bool) {
 // runDockerAction builds and executes an explicitly resolved local Docker
 // action, creating an isolated workspace when the caller supplies none.
 func (r Runner) runDockerAction(ctx context.Context, action dockerAction) (result Result, err error) {
+	if err := validateEnvironmentNames(action.Env); err != nil {
+		return newResult(), err
+	}
 	callerWorkspace := action.Workspace != ""
 	if !callerWorkspace {
 		action.Workspace, err = os.MkdirTemp("", "buildkite-gha-workspace-")
@@ -794,6 +797,9 @@ func (effects fileCommandEffects) reportSummaryUploadFailure(processor *commandP
 }
 
 func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, name string, args ...string) error {
+	if err := validateEnvironmentNames(env); err != nil {
+		return err
+	}
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = processEnv(env)
@@ -1337,6 +1343,15 @@ func processEnv(overrides map[string]string) []string {
 	return mapEnv(values)
 }
 
+func validateEnvironmentNames(env map[string]string) error {
+	for name := range env {
+		if name == "" || strings.ContainsAny(name, "=\x00") {
+			return fmt.Errorf("invalid environment variable name %q", name)
+		}
+	}
+	return nil
+}
+
 func sortedKeys[V any](values map[string]V) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -1641,12 +1656,27 @@ func (p *commandProcessor) addMaskLocked(value string) {
 	if value == "" {
 		return
 	}
-	p.masks = append(p.masks, value)
+	p.addMaskValueLocked(value)
 	for _, line := range strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n") {
 		if line != "" && line != value {
-			p.masks = append(p.masks, line)
+			p.addMaskValueLocked(line)
 		}
 	}
+	sort.Slice(p.masks, func(i, j int) bool {
+		if len(p.masks[i]) != len(p.masks[j]) {
+			return len(p.masks[i]) > len(p.masks[j])
+		}
+		return p.masks[i] < p.masks[j]
+	})
+}
+
+func (p *commandProcessor) addMaskValueLocked(value string) {
+	for _, mask := range p.masks {
+		if mask == value {
+			return
+		}
+	}
+	p.masks = append(p.masks, value)
 }
 
 func parseWorkflowCommand(line string) (parsedWorkflowCommand, bool) {

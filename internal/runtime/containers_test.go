@@ -1679,6 +1679,27 @@ func TestContainerPathUsesLongestReadOnlyMount(t *testing.T) {
 	}
 }
 
+func TestJobContainerExecRejectsInvalidEnvironmentNamesBeforeDocker(t *testing.T) {
+	for _, name := range []string{"", "ALIAS=OTHER", "NUL\x00NAME"} {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "docker-ran")
+			docker := filepath.Join(t.TempDir(), "docker")
+			writeFixtureFile(t, filepath.Dir(docker), filepath.Base(docker), "#!/bin/sh\ntouch "+shellTestQuote(marker)+"\n")
+			if err := os.Chmod(docker, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			backend := jobContainerBackend{docker: docker, container: "job", workspace: t.TempDir(), temp: t.TempDir()}
+			err := backend.exec(context.Background(), Runner{}, newCommandProcessor(io.Discard, io.Discard), backend.workspace, map[string]string{name: "value"}, "true")
+			if err == nil || !strings.Contains(err.Error(), "invalid environment variable name") {
+				t.Fatalf("exec() error = %v, want invalid environment name", err)
+			}
+			if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("Docker was invoked with invalid environment name: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestRunJobContainerNodeProbeFailureCleansOwnedResources(t *testing.T) {
 	t.Parallel()
 
