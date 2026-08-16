@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Set SAMPLE_SIZE to validate a stable hash-ranked subset. SAMPLE_SEED selects
+# another reproducible subset without changing the full corpus manifest.
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly root
 
 workdir="${WORKDIR:-$HOME/gha-corpus}"
 record_id="${RECORD_ID:-20340547}"
-readonly record_id
+sample_size="${SAMPLE_SIZE:-}"
+sample_seed="${SAMPLE_SEED:-default}"
+readonly record_id sample_size sample_seed
+
+if [[ -n "$sample_size" && ( ! "$sample_size" =~ ^[1-9][0-9]*$ ) ]]; then
+  echo 'SAMPLE_SIZE must be a positive integer' >&2
+  exit 2
+fi
 
 for command in curl python3; do
   command -v "$command" >/dev/null || {
@@ -139,6 +149,81 @@ with open("workflows.tsv", encoding="utf-8") as source, open(
 PY
 fi
 
+manifest="$corpus_dir/workflows.jsonl"
+corpus_id="zenodo:$record_id"
+sample_key="full"
+tally="$corpus_dir/validate-tally.json"
+if [[ -n "$sample_size" ]]; then
+  sample_key="$(python3 - "$manifest" "$corpus_dir/samples" "$sample_size" "$sample_seed" <<'PY'
+import hashlib
+import heapq
+import json
+import os
+import sys
+import tempfile
+
+source_path, samples_root, sample_size_text, sample_seed = sys.argv[1:]
+sample_size = int(sample_size_text)
+seed = sample_seed.encode("utf-8")
+seed_digest = hashlib.sha256(seed).hexdigest()[:12]
+
+ranked = []
+with open(source_path, encoding="utf-8") as source:
+    for line in source:
+        record = json.loads(line)
+        identity = "\0".join(
+            (record["repository"], record["path"], record["hash"])
+        ).encode("utf-8")
+        rank = hashlib.sha256(
+            b"buildkite-gha-public-workflow-sample-v1\0" + seed + b"\0" + identity
+        ).digest()
+        ranked.append((rank, record["id"], record))
+
+if sample_size > len(ranked):
+    raise SystemExit(
+        f"SAMPLE_SIZE {sample_size:,} exceeds the {len(ranked):,}-workflow corpus"
+    )
+
+selected = heapq.nsmallest(sample_size, ranked)
+selected.sort(key=lambda item: item[1])
+selection_digest = hashlib.sha256()
+for _, _, record in selected:
+    selection_digest.update(
+        "\0".join((record["repository"], record["path"], record["hash"])).encode(
+            "utf-8"
+        )
+    )
+    selection_digest.update(b"\n")
+sample_key = f"n{sample_size}-s{seed_digest}-m{selection_digest.hexdigest()[:12]}"
+sample_directory = os.path.join(samples_root, sample_key)
+sample_path = os.path.join(sample_directory, "workflows.jsonl")
+os.makedirs(sample_directory, exist_ok=True)
+temporary = tempfile.NamedTemporaryFile(
+    "w", encoding="utf-8", dir=sample_directory, prefix=".workflows-", delete=False
+)
+try:
+    for _, _, record in selected:
+        json.dump(record, temporary, sort_keys=True)
+        temporary.write("\n")
+    temporary.close()
+    os.replace(temporary.name, sample_path)
+finally:
+    temporary.close()
+    if os.path.exists(temporary.name):
+        os.remove(temporary.name)
+print(sample_key)
+print(
+    f"sample: {sample_size:,} workflows, seed {sample_seed!r}, key {sample_key}",
+    file=sys.stderr,
+)
+PY
+)"
+  manifest="$corpus_dir/samples/$sample_key/workflows.jsonl"
+  corpus_id="zenodo:$record_id:sample:$sample_key"
+  tally="$corpus_dir/samples/$sample_key/validate-tally.json"
+fi
+readonly manifest corpus_id sample_key tally
+
 validator="$workdir/buildkite-gha"
 (
   cd "$root"
@@ -175,20 +260,25 @@ printf 'validator: %s (%s, sha256:%s)\n' "$validator_version" "$validator_commit
 
 action_cache="$workdir/action-cache"
 action_resolution_snapshot="$workdir/action-resolution-snapshot"
-report_root="$workdir/reports/$record_id"
-reports="$report_root/$validator_digest"
-readonly action_cache action_resolution_snapshot report_root reports
+record_report_root="$workdir/reports/$record_id"
+if [[ "$sample_key" == "full" ]]; then
+  reports="$record_report_root/$validator_digest"
+else
+  reports="$record_report_root/samples/$sample_key/$validator_digest"
+fi
+readonly action_cache action_resolution_snapshot record_report_root reports
 mkdir -p "$action_cache"
 if [[ "${REFRESH_ACTION_RESOLUTIONS:-0}" == 1 ]]; then
-  rm -rf "$report_root"
+  rm -rf "$record_report_root"
 fi
 mkdir -p "$reports"
-export reports validator_commit validator_version validator_digest
+export manifest reports sample_key sample_seed sample_size tally
+export validator_commit validator_version validator_digest
 batch_args=(
   validate-batch
-  --manifest workflows.jsonl
+  --manifest "$manifest"
   --output-dir "$reports"
-  --corpus-id "zenodo:$record_id"
+  --corpus-id "$corpus_id"
   --action-cache-dir "$action_cache"
   --action-cache-max-bytes "${ACTION_CACHE_MAX_BYTES:-21474836480}"
   --action-resolution-snapshot "$action_resolution_snapshot"
@@ -211,7 +301,7 @@ import json
 import os
 
 repositories = {}
-with open("workflows.jsonl", encoding="utf-8") as manifest:
+with open(os.environ["manifest"], encoding="utf-8") as manifest:
     for line in manifest:
         record = json.loads(line)
         repositories[record["source"]] = record["repository"]
@@ -302,23 +392,25 @@ repos_by_code = collections.Counter(
 for code, count in repos_by_code.most_common(40):
     print(f"{100 * count / len(all_repos):6.2f}%  {count:6,}  {code}")
 
-with open("validate-tally.json", "w", encoding="utf-8") as destination:
-    json.dump(
-        {
-            "repos": len(all_repos),
-            "clean": clean,
-            "validator_commit": os.environ["validator_commit"],
-            "validator_version": os.environ["validator_version"],
-            "validator_digest": "sha256:" + os.environ["validator_digest"],
-            "admission_scope": "generated-event-snapshots",
-            "by_repo": dict(repos_by_code),
-            "by_finding": dict(findings),
-            "evaluations": dict(evaluations),
-            "unparseable_reports": bad_reports,
-        },
-        destination,
-        indent=2,
-        sort_keys=True,
-    )
+tally = {
+    "repos": len(all_repos),
+    "clean": clean,
+    "validator_commit": os.environ["validator_commit"],
+    "validator_version": os.environ["validator_version"],
+    "validator_digest": "sha256:" + os.environ["validator_digest"],
+    "admission_scope": "generated-event-snapshots",
+    "by_repo": dict(repos_by_code),
+    "by_finding": dict(findings),
+    "evaluations": dict(evaluations),
+    "unparseable_reports": bad_reports,
+}
+if os.environ["sample_key"] != "full":
+    tally["sample"] = {
+        "key": os.environ["sample_key"],
+        "seed": os.environ["sample_seed"],
+        "size": int(os.environ["sample_size"]),
+    }
+with open(os.environ["tally"], "w", encoding="utf-8") as destination:
+    json.dump(tally, destination, indent=2, sort_keys=True)
     destination.write("\n")
 PY
