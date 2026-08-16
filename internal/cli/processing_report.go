@@ -484,10 +484,14 @@ func loadProcessingInputs(out processingOutput, workflowPath, profile, eventFail
 		out.fail(compatibility.EnvironmentProcessingReport(workflowPath, profile, "workflow input could not be read"), err)
 		return nil, nil, false
 	}
+	return loadProcessingInputsSource(out, workflowPath, profile, source, eventFailureMessage, loadEvent)
+}
+
+func loadProcessingInputsSource(out processingOutput, workflowPath, profile string, source []byte, eventFailureMessage string, loadEvent func() ([]byte, error)) ([]byte, []byte, bool) {
 	if loadEvent == nil {
 		return source, nil, true
 	}
-	event, err = loadEvent()
+	event, err := loadEvent()
 	if err != nil {
 		out.fail(compatibility.EventInputProcessingReport(workflowPath, profile, source, eventFailureMessage), err)
 		return nil, nil, false

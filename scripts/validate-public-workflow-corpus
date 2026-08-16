@@ -168,11 +168,20 @@ printf 'validator: %s (%s, sha256:%s)\n' "$validator_version" "$validator_commit
   echo 'buildkite-gha validate-batch must support --action-cache-max-bytes' >&2
   exit 1
 }
+[[ "$("$validator" help validate-batch)" == *"--action-resolution-snapshot"* ]] || {
+  echo 'buildkite-gha validate-batch must support --action-resolution-snapshot' >&2
+  exit 1
+}
 
 action_cache="$workdir/action-cache"
-reports="$workdir/reports/$record_id/$validator_digest"
-readonly action_cache reports
+action_resolution_snapshot="$workdir/action-resolution-snapshot"
+report_root="$workdir/reports/$record_id"
+reports="$report_root/$validator_digest"
+readonly action_cache action_resolution_snapshot report_root reports
 mkdir -p "$action_cache"
+if [[ "${REFRESH_ACTION_RESOLUTIONS:-0}" == 1 ]]; then
+  rm -rf "$report_root"
+fi
 mkdir -p "$reports"
 export reports validator_commit validator_version validator_digest
 batch_args=(
@@ -182,7 +191,14 @@ batch_args=(
   --corpus-id "zenodo:$record_id"
   --action-cache-dir "$action_cache"
   --action-cache-max-bytes "${ACTION_CACHE_MAX_BYTES:-21474836480}"
+  --action-resolution-snapshot "$action_resolution_snapshot"
 )
+if [[ "${REFRESH_ACTION_RESOLUTIONS:-0}" == 1 ]]; then
+  batch_args+=(--refresh-action-resolution-snapshot)
+fi
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  batch_args+=(--github-token-env GITHUB_TOKEN)
+fi
 if [[ -n "${JOBS:-}" ]]; then
   batch_args+=(--jobs "$JOBS")
 fi
