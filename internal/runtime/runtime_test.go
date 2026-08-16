@@ -3562,6 +3562,28 @@ func TestRunStreamingRejectsInvalidEnvironmentNamesBeforeExecution(t *testing.T)
 	}
 }
 
+func TestRunDockerRejectsInvalidEnvironmentNamesBeforeDocker(t *testing.T) {
+	for _, name := range []string{"", "GITHUB_SHA=ALIAS", "NUL\x00NAME"} {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "docker-ran")
+			docker := filepath.Join(t.TempDir(), "docker")
+			if err := os.WriteFile(docker, []byte("#!/bin/sh\ntouch "+shellTestQuote(marker)+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			action := fakeDockerAction(t)
+			action.runnerTemp = t.TempDir()
+			action.Env = map[string]string{name: "value"}
+			_, err := (Runner{Docker: docker}).runDocker(context.Background(), newCommandProcessor(io.Discard, io.Discard), action)
+			if err == nil || !strings.Contains(err.Error(), "invalid environment variable name") {
+				t.Fatalf("runDocker() error = %v, want invalid environment name", err)
+			}
+			if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("Docker was invoked with invalid environment name: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestWorkflowCommandParsingIsCaseInsensitiveAndExact(t *testing.T) {
 	mask, ok := parseWorkflowCommand(" \t::ADD-MASK::secret%250Avalue")
 	if !ok || !strings.EqualFold(mask.name, "add-mask") || mask.message != "secret%0Avalue" {

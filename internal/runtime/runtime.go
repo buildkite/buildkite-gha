@@ -233,9 +233,6 @@ func boundJobSummary(summary string, truncated bool) (string, bool) {
 // runDockerAction builds and executes an explicitly resolved local Docker
 // action, creating an isolated workspace when the caller supplies none.
 func (r Runner) runDockerAction(ctx context.Context, action dockerAction) (result Result, err error) {
-	if err := validateEnvironmentNames(action.Env); err != nil {
-		return newResult(), err
-	}
 	callerWorkspace := action.Workspace != ""
 	if !callerWorkspace {
 		action.Workspace, err = os.MkdirTemp("", "buildkite-gha-workspace-")
@@ -287,6 +284,9 @@ func (r Runner) runDockerAction(ctx context.Context, action dockerAction) (resul
 
 func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, action dockerAction) (result Result, err error) {
 	result = newResult()
+	if err := validateEnvironmentNames(action.Env); err != nil {
+		return result, err
+	}
 	if action.runnerTemp == "" {
 		action.runnerTemp = r.runnerTemp
 	}
