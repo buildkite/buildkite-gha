@@ -99,6 +99,29 @@ func TestWorkflowTokenPolicyEvidence(t *testing.T) {
 	}
 }
 
+func TestCompilePlansCarriesIDTokenWithoutForwardingItToGitHubToken(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "oidc.yml", `on: push
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo deploy
+`)
+	plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-oidc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].IDTokenPermission != "write" || plans[0].GitHubToken == nil || !reflect.DeepEqual(plans[0].GitHubToken.Permissions, map[string]string{"contents": "read"}) {
+		t.Fatalf("OIDC and GitHub token plan = %#v", plans)
+	}
+}
+
 func TestCompilePlansBoundsNestedReusableWorkflowDefaultPermissions(t *testing.T) {
 	repository := t.TempDir()
 	caller := writeWorkflow(t, repository, "caller.yml", `on: push

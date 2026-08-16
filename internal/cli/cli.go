@@ -526,6 +526,18 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 		workflowTokens = githubTokens
 	}
+	var oidcTokens gharuntime.OIDCTokenProvider
+	if job.IDTokenPermission == "write" {
+		oidcTokens, err = gharuntime.NewAgentOIDCTokens(gharuntime.AgentOIDCTokenConfig{
+			Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+			JobID:    os.Getenv("BUILDKITE_JOB_ID"),
+			JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure OIDC token service: %v\n", err)
+			return 1
+		}
+	}
 	var repositoryCredentials *gharuntime.AgentRepositoryCredentials
 	if repositoryProviderGitCredentialsEnabled(os.Getenv) {
 		repositoryCredentials = &gharuntime.AgentRepositoryCredentials{
@@ -560,6 +572,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		Cache:                 cacheCredentials,
 		RepositoryCredentials: repositoryCredentials,
 		WorkflowToken:         workflowTokens,
+		OIDCToken:             oidcTokens,
 	}
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {

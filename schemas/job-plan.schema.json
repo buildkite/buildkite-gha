@@ -15,6 +15,7 @@
     "required_capabilities": {"type": "array", "uniqueItems": true, "maxItems": 16, "items": {"$ref": "#/$defs/capability"}},
     "required_secrets": {"type": "array", "uniqueItems": true, "maxItems": 128, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "not": {"const": "GITHUB_TOKEN"}}},
     "github_token": {"$ref": "#/$defs/githubToken"},
+    "id_token_permission": {"enum": ["read", "write"]},
     "matrix": {"type": "object"},
     "inputs": {"type": "object", "maxProperties": 25, "propertyNames": {"minLength": 1, "maxLength": 255}, "additionalProperties": {"type": ["string", "number", "boolean"], "maxLength": 65536}},
     "vars": {"$ref": "#/$defs/stringMap"},

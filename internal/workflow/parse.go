@@ -818,10 +818,7 @@ func adaptPermissions(path string, in *actionlint.Permissions) (*Permissions, er
 		if scope == nil || scope.Name == nil || scope.Value == nil {
 			return nil, locatedError(path, in.Pos, "permissions", "invalid permission declaration")
 		}
-		if name == "id-token" {
-			return nil, locatedError(path, scope.Name.Pos, "permissions", "id-token permission requires GitHub-compatible OIDC and is unsupported")
-		}
-		if !supportedGitHubTokenPermission(name) {
+		if name != "id-token" && !supportedGitHubTokenPermission(name) {
 			return nil, locatedError(path, scope.Name.Pos, "permissions", fmt.Sprintf("unsupported permission %q; use canonical GitHub permission names", name))
 		}
 		switch scope.Value.Value {

@@ -33,7 +33,7 @@ Digests and immutable action locks detect changed code. They do not make code tr
 | Cache token | When caching is configured, every JavaScript or Docker action lifecycle receives a fresh job-bound token. This includes compatible clients such as `actions/setup-go`, not only `actions/cache`. Shell steps do not receive it. |
 | Ordinary workflow secrets | Static names are resolved with `buildkite-agent secret get` in the destination job. The job's Buildkite identity and Secret access policies are the sole authorization boundary. Values are registered with Agent and local redaction before use. |
 | Service registry credentials | Explicit credentials can be literal or use supported `github`, `vars`, `secrets`, and `env` expressions. Ordinary secrets use the destination job's Buildkite Secret access policy. Secret-derived values stay out of plans and generated pipeline YAML; authored literal values do not. Passwords pass to Docker through standard input. Authentication uses a private per-job Docker configuration that cleanup verifies is removed. Ambient Docker configuration and implicit GHCR authentication are unavailable. |
-| GitHub-compatible OIDC | Unsupported. |
+| OIDC token | Jobs with `id-token: write` expose the `getIDToken()` wire contract through a per-invocation, bearer-authenticated loopback endpoint to host JavaScript actions. It mints Buildkite OIDC tokens for action-requested audiences. Tokens use Buildkite's issuer and claims and are registered with Agent and local redaction before use. Shell steps and containerized actions do not receive the endpoint. Repository tests use a contract-conformant shim; the hosted runtime proof remains pending. |
 
 An action that receives a credential can use or exfiltrate it. It can also export `GITHUB_TOKEN` to later steps through `GITHUB_ENV`. Log masking reduces accidental disclosure, but it is not access control and does not catch transformed values.
 
@@ -67,4 +67,4 @@ Command scoping limits accidental spread. It does not stop a hostile concurrent 
       .github/workflows/ci.yml
     ```
 
-1. Keep private actions, OIDC, and protected queues out of imported workflows.
+1. Keep private actions and protected queues out of imported workflows. Configure OIDC trust for Buildkite's issuer and restrict subjects and audiences to the intended jobs.

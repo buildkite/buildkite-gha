@@ -74,6 +74,7 @@ type Runner struct {
 	Cache                 CacheCredentialProvider
 	RepositoryCredentials *AgentRepositoryCredentials
 	WorkflowToken         WorkflowTokenProvider
+	OIDCToken             OIDCTokenProvider
 	runnerTemp            string
 	implicitJobPATH       string
 	explicitJobPATH       bool
@@ -83,6 +84,7 @@ type Runner struct {
 	nodeDigests           map[int]string
 	artifactRegistry      *artifactRegistry
 	node16Warnings        *node16DeprecationWarnings
+	idTokenService        *idTokenService
 }
 
 func resolveHostExecutableBeforeWorkflow(configured, fallback, label string) (string, error) {
@@ -443,7 +445,7 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 		}}
 	}
 	for _, name := range sortedKeys(action.Env) {
-		if isCacheServiceEnvironment(name) || name == "RUNNER_TOOL_CACHE" || (name == "PATH" && !action.explicitPATH) || name == "GITHUB_WORKSPACE" || name == "RUNNER_TEMP" {
+		if isCacheServiceEnvironment(name) || isIDTokenEnvironment(name) || name == "RUNNER_TOOL_CACHE" || (name == "PATH" && !action.explicitPATH) || name == "GITHUB_WORKSPACE" || name == "RUNNER_TEMP" {
 			continue
 		}
 		value := action.Env[name]
@@ -638,6 +640,7 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		env["PATH"] = path
 	}
 	env["GITHUB_ACTION_PATH"] = action.Path
+	env = removeIDTokenEnvironment(env)
 	for name, value := range stateEnv {
 		env["STATE_"+name] = value
 	}
@@ -662,6 +665,14 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		}
 		env = mergeStringMaps(env, cacheEnv)
 		cacheToken = cacheEnv["ACTIONS_RUNTIME_TOKEN"]
+	}
+	if r.idTokenService != nil && r.jobContainer == nil {
+		idTokenEnv, revoke, err := r.idTokenService.actionEnvironment(ctx, env)
+		if err != nil {
+			return fmt.Errorf("configure actions ID-token service: %w", err)
+		}
+		defer revoke()
+		env = mergeStringMaps(env, idTokenEnv)
 	}
 	entrypoint := filepath.Join(action.Path, entry)
 	if r.jobContainer != nil {

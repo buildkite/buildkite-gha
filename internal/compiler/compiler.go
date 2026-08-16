@@ -516,8 +516,14 @@ instances:
 			if referencesGitHubTokenSecret {
 				secrets = slices.DeleteFunc(secrets, func(name string) bool { return name == "GITHUB_TOKEN" })
 			}
+			githubPermissions := make(map[string]string, len(instance.Permissions))
+			for name, access := range instance.Permissions {
+				if name != "id-token" {
+					githubPermissions[name] = access
+				}
+			}
 			if referencesGitHubTokenSecret || referencesGitHubToken || actionRequiresGitHubToken {
-				if len(instance.Permissions) == 0 {
+				if len(githubPermissions) == 0 {
 					reference := "an action input default that references github.token"
 					if referencesGitHubTokenSecret {
 						reference = "secrets.GITHUB_TOKEN"
@@ -526,8 +532,8 @@ instances:
 					}
 					return fmt.Errorf("%s:%d:%d: job %q references %s but has no effective permissions", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, reference)
 				}
-				permissions := make(map[string]string, len(instance.Permissions))
-				for name, access := range instance.Permissions {
+				permissions := make(map[string]string, len(githubPermissions))
+				for name, access := range githubPermissions {
 					permissions[strings.ReplaceAll(name, "-", "_")] = access
 				}
 				githubToken = &plan.GitHubToken{Permissions: permissions}
@@ -564,6 +570,7 @@ instances:
 				RequiredCapabilities:    capabilities,
 				RequiredSecrets:         secrets,
 				GitHubToken:             githubToken,
+				IDTokenPermission:       instance.Permissions["id-token"],
 				Matrix:                  instance.Matrix,
 				Inputs:                  cloneAnyMap(instance.Inputs),
 				Vars:                    cloneMap(ir.Vars),
@@ -838,6 +845,9 @@ func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string
 	}
 	normalizedPermissions := make(map[string]string, len(permissions))
 	for name, access := range permissions {
+		if name == "id-token" {
+			continue
+		}
 		normalizedPermissions[strings.ReplaceAll(name, "-", "_")] = access
 	}
 	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(normalizedPermissions); err != nil {
