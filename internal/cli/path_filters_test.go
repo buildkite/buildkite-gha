@@ -77,7 +77,7 @@ func TestPushChangedPathsBindsWebhookAndLocalDiff(t *testing.T) {
 			Repository: compiler.Repository{Owner: "buildkite", Name: "buildkite-gha"},
 			Payload: map[string]any{
 				"ref": "refs/heads/main", "before": before, "after": after,
-				"created": created, "deleted": false, "forced": forced, "commits": commitValues, "size": len(commitValues),
+				"created": created, "deleted": false, "forced": forced, "commits": commitValues,
 				"repository": map[string]any{"full_name": "buildkite/buildkite-gha"},
 			},
 		}
@@ -132,14 +132,8 @@ func TestPushChangedPathsBindsWebhookAndLocalDiff(t *testing.T) {
 	}
 	newBranchEvent.Payload["deleted"] = false
 	newBranchEvent.Payload["commits"] = []any{map[string]any{"id": first}}
-	newBranchEvent.Payload["size"] = 1
 	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err == nil || !strings.Contains(err.Error(), "complete pushed commit evidence") {
 		t.Fatalf("incomplete new-branch commits error = %v", err)
-	}
-	newBranchEvent.Payload["commits"] = []any{map[string]any{"id": newAfter}}
-	newBranchEvent.Payload["size"] = 2
-	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err == nil || !strings.Contains(err.Error(), "complete commit list") {
-		t.Fatalf("omitted new-branch commit error = %v", err)
 	}
 	newBranchEvent.Payload["commits"] = []any{map[string]any{"id": first}, map[string]any{"id": newAfter}}
 	input.Source = []byte("modified worktree workflow\n")
@@ -156,7 +150,7 @@ func TestPushChangedPathsBindsWebhookAndLocalDiff(t *testing.T) {
 
 func TestPushWebhookCommitsEnforcesGitHubBound(t *testing.T) {
 	commits := make([]any, maxGitHubPushCommits+1)
-	if _, err := pushWebhookCommits(map[string]any{"commits": commits, "size": len(commits)}); err == nil || !strings.Contains(err.Error(), "1000-commit") {
+	if _, err := pushWebhookCommits(map[string]any{"commits": commits}); err == nil || !strings.Contains(err.Error(), "1000-commit") {
 		t.Fatalf("push commit bound error = %v", err)
 	}
 }

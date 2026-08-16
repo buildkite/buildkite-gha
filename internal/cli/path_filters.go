@@ -208,11 +208,7 @@ func pushWebhookCommits(payload map[string]any) ([]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("webhook push requires its commits array")
 	}
-	commitCount, countOK := exactNonNegativeInt(payload["size"])
-	if !countOK || commitCount != len(values) {
-		return nil, fmt.Errorf("webhook push does not contain its complete commit list")
-	}
-	if commitCount > maxGitHubPushCommits {
+	if len(values) > maxGitHubPushCommits {
 		return nil, fmt.Errorf("push exceeds GitHub's %d-commit path-filter diff bound", maxGitHubPushCommits)
 	}
 	commits := make([]string, 0, len(values))
@@ -230,28 +226,6 @@ func pushWebhookCommits(payload map[string]any) ([]string, error) {
 		commits = append(commits, id)
 	}
 	return commits, nil
-}
-
-func exactNonNegativeInt(value any) (int, bool) {
-	var result int
-	switch number := value.(type) {
-	case json.Number:
-		parsed, err := strconv.Atoi(number.String())
-		if err != nil {
-			return 0, false
-		}
-		result = parsed
-	case float64:
-		result = int(number)
-		if float64(result) != number {
-			return 0, false
-		}
-	case int:
-		result = number
-	default:
-		return 0, false
-	}
-	return result, result >= 0
 }
 
 func newBranchPushDiffBase(root, after string, commits []string) (string, error) {
