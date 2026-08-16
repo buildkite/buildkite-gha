@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
@@ -105,17 +107,21 @@ func TestAgentOIDCTokensRejectsAuthFailuresAndMalformedResponses(t *testing.T) {
 }
 
 type testOIDCTokenProvider struct {
-	token     string
-	audiences []string
+	token              string
+	requireLiveContext bool
+	audiences          []string
 }
 
-func (p *testOIDCTokenProvider) OIDCToken(_ context.Context, audience string) (string, error) {
+func (p *testOIDCTokenProvider) OIDCToken(ctx context.Context, audience string) (string, error) {
+	if p.requireLiveContext && ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 	p.audiences = append(p.audiences, audience)
 	return p.token, nil
 }
 
 func TestIDTokenServiceWireContract(t *testing.T) {
-	provider := &testOIDCTokenProvider{token: "header.payload.signature"}
+	provider := &testOIDCTokenProvider{token: "header.payload.signature", requireLiveContext: true}
 	redactor := &testRedactor{}
 	processor := newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{})
 	service, err := startIDTokenService(context.Background(), provider, redactor, processor)
@@ -235,6 +241,44 @@ if (!endpoint.search) throw new Error("ACTIONS_ID_TOKEN_REQUEST_URL must already
 		t.Fatal(err)
 	}
 	if string(contents) != provider.token || len(provider.audiences) != 1 || provider.audiences[0] != "sts.amazonaws.com" {
+		t.Fatalf("token/audiences = %q / %#v", contents, provider.audiences)
+	}
+}
+
+func TestNodePostActionUsesIDTokenServiceAfterJobCancellation(t *testing.T) {
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/oidc-cancel.yml"
+	actionPath := ".github/actions/oidc-cancel"
+	writeFixtureFile(t, workspace, workflowPath, "name: OIDC cancellation\n")
+	writeFixtureFile(t, workspace, actionPath+"/action.yml", "name: OIDC cancellation\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeOIDCUtilsContractShim(t, workspace, actionPath)
+	writeFixtureFile(t, workspace, actionPath+"/main.js", "setTimeout(() => {}, 30000)\n")
+	writeFixtureFile(t, workspace, actionPath+"/post.js", `
+const fs = require("node:fs");
+const core = require("@actions/core");
+(async () => fs.writeFileSync(process.env.MARKER, await core.getIDToken("post-cleanup")))().catch(error => { console.error(error); process.exitCode = 1; });
+`)
+	marker := filepath.Join(workspace, "post-token")
+	lockID := "a-0123456789abcdef"
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "oidc-cancel", Kind: "uses", Uses: "./" + actionPath,
+		Env: map[string]string{"MARKER": marker}, Action: &plan.ActionSelector{Lock: lockID},
+	}})
+	job.IDTokenPermission = "write"
+	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
+	provider := &testOIDCTokenProvider{token: "header.payload.signature", requireLiveContext: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: &testRedactor{}}).RunJob(ctx, job, workspace)
+	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" {
+		t.Fatalf("RunJob() = %#v, %v", result, err)
+	}
+	contents, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("post action did not mint an ID token after cancellation: %v", err)
+	}
+	if string(contents) != provider.token || len(provider.audiences) != 1 || provider.audiences[0] != "post-cleanup" {
 		t.Fatalf("token/audiences = %q / %#v", contents, provider.audiences)
 	}
 }

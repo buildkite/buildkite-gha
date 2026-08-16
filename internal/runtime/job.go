@@ -396,11 +396,16 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	}
 	defer cancelJob()
 	if oidcTokenRequired {
-		r.idTokenService, err = startIDTokenService(runCtx, r.OIDCToken, r.Redactor, processor)
+		// Post actions run on a bounded cleanup context after job cancellation.
+		// Keep their ID-token requests alive for the same lifecycle.
+		serviceCtx, cancelService := context.WithCancel(context.WithoutCancel(runCtx))
+		r.idTokenService, err = startIDTokenService(serviceCtx, r.OIDCToken, r.Redactor, processor)
 		if err != nil {
+			cancelService()
 			return jobResult, err
 		}
 		defer func() { runJobErr = errors.Join(runJobErr, r.idTokenService.Close()) }()
+		defer cancelService()
 	}
 	if r.Mise == "" && r.ResolveMise != nil {
 		r.Mise, err = r.ResolveMise(runCtx)
