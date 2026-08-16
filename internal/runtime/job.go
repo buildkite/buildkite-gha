@@ -1313,13 +1313,17 @@ func applyPaths(env map[string]string, paths []string) {
 
 func githubContext(job plan.Job) map[string]any {
 	return map[string]any{
-		"repository": job.Event.Repository,
-		"ref":        job.Event.Ref,
-		"head_ref":   job.Event.HeadRef,
-		"sha":        job.Event.SHA,
-		"actor":      job.Event.Actor,
-		"event_name": job.Event.Name,
-		"server_url": plan.EventServerURL(job.Event.Provider),
+		"repository":       job.Event.Repository,
+		"repository_owner": plan.EventRepositoryOwner(job.Event.Repository),
+		"ref":              job.Event.Ref,
+		"ref_name":         plan.EventRefName(job.Event.Ref),
+		"ref_type":         plan.EventRefType(job.Event.Ref),
+		"head_ref":         job.Event.HeadRef,
+		"base_ref":         job.Event.BaseRef,
+		"sha":              job.Event.SHA,
+		"actor":            job.Event.Actor,
+		"event_name":       job.Event.Name,
+		"server_url":       plan.EventServerURL(job.Event.Provider),
 	}
 }
 
