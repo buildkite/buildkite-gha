@@ -52,6 +52,11 @@ The profile task uses the network to resolve selected public actions and apply t
 
 Every normal Buildkite build runs repository checks, Test Engine-split Go tests, native macOS tests, the starter workflow compatibility report, and the shell smoke workflow against the build's exact CLI source. Test Engine records the Linux test results; the repository checks retain the race-enabled suite. GitHub Actions differential oracles run only when manually dispatched.
 
+The **Expression differential oracle** records hosted GitHub expression results
+for the conformance fixtures in `internal/expression/conformance_test.go`. Run it
+manually when expression semantics change; it is not part of the local check
+gate.
+
 Run the complete hosted smoke suite for a pushed commit with:
 
 ```sh

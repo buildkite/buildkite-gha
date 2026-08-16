@@ -120,6 +120,68 @@ func TestJobContinueOnErrorContract(t *testing.T) {
 	validateJobPlanSchema(t, encoded)
 }
 
+func TestStepControlExpressionContract(t *testing.T) {
+	job := validJob()
+	job.Steps[0].ContinueOnErrorExpression = "${{ matrix.experimental }}"
+	job.Steps[0].TimeoutMinutesExpression = "${{ matrix.timeout }}"
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := decoded.Steps[0]
+	if step.ContinueOnErrorExpression != "${{ matrix.experimental }}" || step.TimeoutMinutesExpression != "${{ matrix.timeout }}" {
+		t.Fatalf("decoded step = %#v", step)
+	}
+	validateJobPlanSchema(t, encoded)
+
+	job.Steps[0].ContinueOnError = true
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "both literal and expression continue_on_error") {
+		t.Fatalf("Validate() mixed continue-on-error error = %v", err)
+	}
+	job = validJob()
+	job.Steps[0].TimeoutMinutesExpression = "5"
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "expression must be complete") {
+		t.Fatalf("Validate() incomplete expression error = %v", err)
+	}
+}
+
+func TestDecodeRejectsBothStepControlWireKeysAtZeroValues(t *testing.T) {
+	for _, test := range []struct {
+		literal, expression string
+		value               any
+	}{
+		{literal: "continue_on_error", expression: "continue_on_error_expression", value: false},
+		{literal: "timeout_minutes", expression: "timeout_minutes_expression", value: 0},
+		{literal: "continue_on_error", expression: "CONTINUE_ON_ERROR_EXPRESSION", value: false},
+		{literal: "timeout_minutes", expression: "TIMEOUT_MINUTES_EXPRESSION", value: 0},
+		{literal: "continue_on_error", expression: "continue_on_error_expreſſion", value: false},
+	} {
+		job := validJob()
+		encoded, err := json.Marshal(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire map[string]any
+		if err := json.Unmarshal(encoded, &wire); err != nil {
+			t.Fatal(err)
+		}
+		step := wire["steps"].([]any)[0].(map[string]any)
+		step[test.literal] = test.value
+		step[test.expression] = "${{ true }}"
+		encoded, err = json.Marshal(wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Decode(encoded); err == nil || !strings.Contains(err.Error(), "both") {
+			t.Errorf("Decode() %s error = %v", test.literal, err)
+		}
+	}
+}
+
 func TestValidateConcurrentStepTopology(t *testing.T) {
 	job := validJob()
 	job.Steps = []Step{

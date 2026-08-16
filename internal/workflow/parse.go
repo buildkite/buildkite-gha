@@ -95,6 +95,16 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, locatedError(path, parsed.Env.Expression.Pos, "workflow", "expression-valued workflow env is unsupported")
 	}
 	owned.Env = adaptEnv(parsed.Env)
+	envNames := make([]string, 0, len(owned.Env))
+	for name := range owned.Env {
+		envNames = append(envNames, name)
+	}
+	sort.Strings(envNames)
+	for _, name := range envNames {
+		if err := expression.ValidateRuntimeTemplate(owned.Env[name]); err != nil {
+			return nil, fmt.Errorf("%s: workflow env %q: %w", path, name, err)
+		}
+	}
 	if parsed.Defaults != nil && parsed.Defaults.Run != nil {
 		if parsed.Defaults.Run.Shell != nil {
 			owned.DefaultShell = parsed.Defaults.Run.Shell.Value
@@ -102,16 +112,37 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		if parsed.Defaults.Run.WorkingDirectory != nil {
 			owned.DefaultWorkingDirectory = parsed.Defaults.Run.WorkingDirectory.Value
 		}
+		if err := expression.ValidateRuntimeTemplate(owned.DefaultShell); err != nil {
+			return nil, fmt.Errorf("%s: workflow default shell: %w", path, err)
+		}
+		if err := expression.ValidateRuntimeTemplate(owned.DefaultWorkingDirectory); err != nil {
+			return nil, fmt.Errorf("%s: workflow default working-directory: %w", path, err)
+		}
 	}
 	if call, ok := parsed.FindWorkflowCallEvent(); ok {
 		owned.Callable = true
 		if len(call.Inputs) != 0 {
 			owned.CallInputs = make(map[string]CallInput, len(call.Inputs))
 		}
-		for _, input := range call.Inputs {
+		inputIndices := make([]int, len(call.Inputs))
+		for i := range call.Inputs {
+			inputIndices[i] = i
+		}
+		sort.Slice(inputIndices, func(i, j int) bool { return call.Inputs[inputIndices[i]].ID < call.Inputs[inputIndices[j]].ID })
+		for _, i := range inputIndices {
+			input := call.Inputs[i]
 			ownedInput := CallInput{Type: workflowCallInputType(input.Type), Required: input.IsRequired()}
 			if input.Default != nil {
 				value := Value{Data: scalarAt(input.Default, scalars), Span: spanFrom(input.Default.Pos, input.Default.Value)}
+				if text, ok := value.Data.(string); ok && strings.Contains(text, "${{") {
+					if err := expression.ValidateReusableInputDefault(text); err != nil {
+						message := fmt.Sprintf("default for workflow_call input %q is invalid: %v", input.ID, err)
+						if strings.Contains(err.Error(), `context "inputs" is unavailable`) {
+							message = fmt.Sprintf("default for workflow_call input %q references workflow-dispatch inputs, which are unavailable during compilation", input.ID)
+						}
+						return nil, locatedError(path, input.Default.Pos, "workflow", message)
+					}
+				}
 				ownedInput.Default = &value
 			}
 			owned.CallInputs[input.ID] = ownedInput
@@ -674,15 +705,17 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		}
 		if step.ContinueOnError != nil {
 			if step.ContinueOnError.Expression != nil {
-				return Job{}, locatedError(path, step.ContinueOnError.Expression.Pos, in.ID.Value, "expression-valued step continue-on-error is unsupported")
+				owned.ContinueOnErrorExpression = step.ContinueOnError.Expression.Value
+			} else {
+				owned.ContinueOnError = step.ContinueOnError.Value
 			}
-			owned.ContinueOnError = step.ContinueOnError.Value
 		}
 		if step.TimeoutMinutes != nil {
 			if step.TimeoutMinutes.Expression != nil {
-				return Job{}, locatedError(path, step.TimeoutMinutes.Expression.Pos, in.ID.Value, "expression-valued step timeout-minutes is unsupported")
+				owned.TimeoutMinutesExpression = step.TimeoutMinutes.Expression.Value
+			} else {
+				owned.TimeoutMinutes = step.TimeoutMinutes.Value
 			}
-			owned.TimeoutMinutes = step.TimeoutMinutes.Value
 		}
 		if step.Env != nil && step.Env.Expression != nil {
 			return Job{}, locatedError(path, step.Env.Expression.Pos, in.ID.Value, "expression-valued step env is unsupported")

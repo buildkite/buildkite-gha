@@ -213,20 +213,22 @@ type Value struct {
 
 // Step is the execution data retained in the workflow compiler IR.
 type Step struct {
-	ID               string            `json:"id,omitempty"`
-	Name             string            `json:"name,omitempty"`
-	Kind             string            `json:"kind"`
-	Background       bool              `json:"background,omitempty"`
-	Targets          []string          `json:"targets,omitempty"`
-	Run              string            `json:"run,omitempty"`
-	Uses             string            `json:"uses,omitempty"`
-	Shell            string            `json:"shell,omitempty"`
-	WorkingDirectory string            `json:"working_directory,omitempty"`
-	Env              map[string]string `json:"env,omitempty"`
-	With             map[string]string `json:"with,omitempty"`
-	If               string            `json:"if,omitempty"`
-	IfSpan           Span              `json:"-"`
-	ContinueOnError  bool              `json:"continue_on_error,omitempty"`
-	TimeoutMinutes   float64           `json:"timeout_minutes,omitempty"`
-	Span             Span              `json:"span"`
+	ID                        string            `json:"id,omitempty"`
+	Name                      string            `json:"name,omitempty"`
+	Kind                      string            `json:"kind"`
+	Background                bool              `json:"background,omitempty"`
+	Targets                   []string          `json:"targets,omitempty"`
+	Run                       string            `json:"run,omitempty"`
+	Uses                      string            `json:"uses,omitempty"`
+	Shell                     string            `json:"shell,omitempty"`
+	WorkingDirectory          string            `json:"working_directory,omitempty"`
+	Env                       map[string]string `json:"env,omitempty"`
+	With                      map[string]string `json:"with,omitempty"`
+	If                        string            `json:"if,omitempty"`
+	IfSpan                    Span              `json:"-"`
+	ContinueOnError           bool              `json:"continue_on_error,omitempty"`
+	ContinueOnErrorExpression string            `json:"continue_on_error_expression,omitempty"`
+	TimeoutMinutes            float64           `json:"timeout_minutes,omitempty"`
+	TimeoutMinutesExpression  string            `json:"timeout_minutes_expression,omitempty"`
+	Span                      Span              `json:"span"`
 }

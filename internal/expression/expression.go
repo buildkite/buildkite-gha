@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/big"
+	"math"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -99,30 +100,169 @@ func visitTemplateExpressions(template string, visit func(actionlint.ExprNode) e
 	}
 }
 
-// conditionNumber converts native numeric representations to a rational.
-// It is shared infrastructure for both the strict condition family and the
-// loose actionInputDefault family and does not by itself imply coercion:
-// callers decide whether non-numeric values become numbers.
-func conditionNumber(value any) (*big.Rat, bool) {
-	var source string
+func githubTruthy(value any) bool {
 	switch value := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return value
+	case string:
+		return value != ""
+	case float32:
+		return !math.IsNaN(float64(value)) && value != 0
+	case float64:
+		return !math.IsNaN(value) && value != 0
+	}
+	if number, ok := githubNumber(value); ok {
+		return !math.IsNaN(number) && number != 0
+	}
+	return true
+}
+
+func githubEqual(left, right any) bool {
+	if left == nil && right == nil {
+		return true
+	}
+	switch left := left.(type) {
+	case string:
+		if right, ok := right.(string); ok {
+			return strings.EqualFold(left, right)
+		}
+	case bool:
+		if right, ok := right.(bool); ok {
+			return left == right
+		}
+	}
+	if left != nil && right != nil && reflect.TypeOf(left) == reflect.TypeOf(right) {
+		leftValue, rightValue := reflect.ValueOf(left), reflect.ValueOf(right)
+		switch leftValue.Kind() {
+		case reflect.Map:
+			return leftValue.UnsafePointer() == rightValue.UnsafePointer()
+		case reflect.Pointer, reflect.Slice:
+			return leftValue.Pointer() == rightValue.Pointer()
+		}
+	}
+	leftNumber, leftOK := githubNumber(left)
+	rightNumber, rightOK := githubNumber(right)
+	return leftOK && rightOK && !math.IsNaN(leftNumber) && !math.IsNaN(rightNumber) && leftNumber == rightNumber
+}
+
+func githubOrderedCompare(left, right any) (int, bool) {
+	leftString, leftIsString := left.(string)
+	rightString, rightIsString := right.(string)
+	if leftIsString && rightIsString {
+		return strings.Compare(strings.ToLower(leftString), strings.ToLower(rightString)), true
+	}
+	leftNumber, leftOK := githubNumber(left)
+	rightNumber, rightOK := githubNumber(right)
+	if !leftOK || !rightOK {
+		return 0, false
+	}
+	switch {
+	case math.IsNaN(leftNumber) || math.IsNaN(rightNumber):
+		return 0, false
+	case leftNumber < rightNumber:
+		return -1, true
+	case leftNumber > rightNumber:
+		return 1, true
+	default:
+		return 0, true
+	}
+}
+
+func githubCompare(kind actionlint.CompareOpNodeKind, left, right any) (bool, error) {
+	switch kind {
+	case actionlint.CompareOpNodeKindEq:
+		return githubEqual(left, right), nil
+	case actionlint.CompareOpNodeKindNotEq:
+		return !githubEqual(left, right), nil
+	case actionlint.CompareOpNodeKindLessEq, actionlint.CompareOpNodeKindGreaterEq:
+		if githubEqual(left, right) {
+			return true, nil
+		}
+	}
+	comparison, ok := githubOrderedCompare(left, right)
+	if !ok {
+		return false, nil
+	}
+	switch kind {
+	case actionlint.CompareOpNodeKindLess:
+		return comparison < 0, nil
+	case actionlint.CompareOpNodeKindLessEq:
+		return comparison <= 0, nil
+	case actionlint.CompareOpNodeKindGreater:
+		return comparison > 0, nil
+	case actionlint.CompareOpNodeKindGreaterEq:
+		return comparison >= 0, nil
+	default:
+		return false, fmt.Errorf("unsupported comparison %s", kind)
+	}
+}
+
+func githubNumber(value any) (float64, bool) {
+	switch value := value.(type) {
+	case nil:
+		return 0, true
+	case bool:
+		if value {
+			return 1, true
+		}
+		return 0, true
 	case json.Number:
-		source = value.String()
+		parsed, err := strconv.ParseFloat(value.String(), 64)
+		return parsed, err == nil || math.IsInf(parsed, 0)
+	case string:
+		return parseExpressionNumber(value), true
 	default:
 		reflected := reflect.ValueOf(value)
 		switch reflected.Kind() {
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			source = strconv.FormatInt(reflected.Int(), 10)
+			return float64(reflected.Int()), true
 		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			source = strconv.FormatUint(reflected.Uint(), 10)
+			return float64(reflected.Uint()), true
 		case reflect.Float32, reflect.Float64:
-			source = strconv.FormatFloat(reflected.Float(), 'g', -1, reflected.Type().Bits())
+			return reflected.Float(), true
 		default:
-			return nil, false
+			return math.NaN(), false
 		}
 	}
-	number, ok := new(big.Rat).SetString(source)
-	return number, ok
+}
+
+var decimalExpressionNumber = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$`)
+
+func parseExpressionNumber(source string) float64 {
+	value := strings.TrimSpace(source)
+	if value == "" {
+		return 0
+	}
+	if strings.HasPrefix(value, "0x") {
+		parsed, err := strconv.ParseUint(value[2:], 16, 32)
+		if err == nil {
+			return float64(int32(parsed))
+		}
+		return math.NaN()
+	}
+	if strings.HasPrefix(value, "0o") {
+		parsed, err := strconv.ParseUint(value[2:], 8, 32)
+		if err == nil {
+			return float64(int32(parsed))
+		}
+		return math.NaN()
+	}
+	switch value {
+	case "Infinity":
+		return math.Inf(1)
+	case "-Infinity":
+		return math.Inf(-1)
+	}
+	if !decimalExpressionNumber.MatchString(value) {
+		return math.NaN()
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil && !math.IsInf(parsed, 0) {
+		return math.NaN()
+	}
+	return parsed
 }
 
 func containsStatusFunction(node actionlint.ExprNode) bool {
@@ -144,14 +284,18 @@ func containsStatusFunction(node actionlint.ExprNode) bool {
 
 func expressionBody(text string) (string, error) {
 	trimmed := strings.TrimSpace(text)
-	if !strings.HasPrefix(trimmed, "${{") || !strings.HasSuffix(trimmed, "}}") {
+	if !strings.HasPrefix(trimmed, "${{") {
 		return "", fmt.Errorf("expected a complete ${{ ... }} expression")
 	}
-	body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "${{"), "}}"))
-	if strings.Contains(body, "}}") {
+	source := strings.TrimPrefix(trimmed, "${{")
+	_, consumed, err := actionlint.LexExpression(source)
+	if err != nil {
+		return "", fmt.Errorf("invalid expression: %w", err)
+	}
+	if consumed != len(source) {
 		return "", fmt.Errorf("expression contains an embedded closing delimiter")
 	}
-	return body, nil
+	return strings.TrimSpace(strings.TrimSuffix(source[:consumed], "}}")), nil
 }
 
 func referencePath(node actionlint.ExprNode) (string, []string, error) {
@@ -229,6 +373,37 @@ func decodeJSONValue(source string) (any, error) {
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return nil, fmt.Errorf("fromJSON argument contains multiple JSON values")
+	}
+	return normalizeJSONNumbers(value)
+}
+
+func normalizeJSONNumbers(value any) (any, error) {
+	switch value := value.(type) {
+	case json.Number:
+		parsed, err := strconv.ParseFloat(value.String(), 64)
+		if err != nil && !math.IsInf(parsed, 0) {
+			return nil, fmt.Errorf("fromJSON argument contains an invalid number")
+		}
+		return parsed, nil
+	case []any:
+		if len(value) == 0 {
+			return make([]any, 0, 1), nil
+		}
+		for i, item := range value {
+			normalized, err := normalizeJSONNumbers(item)
+			if err != nil {
+				return nil, err
+			}
+			value[i] = normalized
+		}
+	case map[string]any:
+		for name, item := range value {
+			normalized, err := normalizeJSONNumbers(item)
+			if err != nil {
+				return nil, err
+			}
+			value[name] = normalized
+		}
 	}
 	return value, nil
 }

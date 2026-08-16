@@ -1,0 +1,54 @@
+name: Expression differential oracle
+
+on:
+  workflow_dispatch:
+    inputs:
+      oracle_prefix:
+        type: string
+        default: dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  reusable-defaults:
+    uses: ./.github/workflows/expression-oracle-reusable.yml
+
+  expressions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify expression semantics
+        shell: bash
+        env:
+          NULL_EQUALS_ZERO: ${{ null == 0 }}
+          ORDERED_COMPARISON: ${{ fromJSON('2') > 1 }}
+          LOGICAL_RESULT: ${{ '' || 'fallback' }}
+          STRING_CAST: ${{ startsWith(123, '12') }}
+          ARRAY_CONTAINS: ${{ contains(fromJSON(format('[{0}, {1}]', toJSON('push'), toJSON('pull_request'))), 'PULL_REQUEST') }}
+          FORMATTED: ${{ format('{{Hello {0}!}}', 'Mona') }}
+          JOINED: ${{ join(fromJSON(format('[{0}, {1}]', toJSON('one'), toJSON('two'))), '|') }}
+          FILTERED: ${{ join(fromJSON(format('[{{{0}:{1}}}, {{{0}:{2}}}]', toJSON('name'), toJSON('bug'), toJSON('help wanted'))).*.name, ',') }}
+          MISSING: ${{ github.event.missing }}
+          LAZY_CASE: ${{ case(false, fromJSON(format('invalid-{0}', github.run_id)), true, 'matched', fromJSON(format('invalid-{0}', github.run_id)) == null, 'late', 'default') }}
+        run: |
+          test "$NULL_EQUALS_ZERO" = "true"
+          test "$ORDERED_COMPARISON" = "true"
+          test "$LOGICAL_RESULT" = "fallback"
+          test "$STRING_CAST" = "true"
+          test "$ARRAY_CONTAINS" = "true"
+          test "$FORMATTED" = "{Hello Mona!}"
+          test "$JOINED" = "one|two"
+          test "$FILTERED" = "bug,help wanted"
+          test -z "$MISSING"
+          test "$LAZY_CASE" = "matched"
+          printf '%s\n' \
+            "NULL_EQUALS_ZERO=$NULL_EQUALS_ZERO" \
+            "ORDERED_COMPARISON=$ORDERED_COMPARISON" \
+            "LOGICAL_RESULT=$LOGICAL_RESULT" \
+            "STRING_CAST=$STRING_CAST" \
+            "ARRAY_CONTAINS=$ARRAY_CONTAINS" \
+            "FORMATTED=$FORMATTED" \
+            "JOINED=$JOINED" \
+            "FILTERED=$FILTERED" \
+            "MISSING=$MISSING" \
+            "LAZY_CASE=$LAZY_CASE"

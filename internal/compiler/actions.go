@@ -357,13 +357,29 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string) (actionRequirements, error) {
 	requirements := actionRequirements{requiredSecrets: map[string]bool{}}
 	for _, suppliedName := range sortedKeys(supplied) {
-		names, err := expression.SecretReferences(supplied[suppliedName])
+		value := supplied[suppliedName]
+		referencesEvent, err := expression.TemplateReferencesGitHubEvent(value)
+		if err != nil {
+			return actionRequirements{}, fmt.Errorf("action input %q: %w", suppliedName, err)
+		}
+		if referencesEvent {
+			return actionRequirements{}, fmt.Errorf("action input %q: github.event cannot be retained in a job plan", suppliedName)
+		}
+		names, err := expression.SecretReferences(value)
+		if err != nil {
+			return actionRequirements{}, fmt.Errorf("action input %q: %w", suppliedName, err)
+		}
+		referencesToken, err := expression.ReferencesGitHubToken(value)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("action input %q: %w", suppliedName, err)
 		}
 		if !workflowAuthored && len(names) != 0 {
 			return actionRequirements{}, fmt.Errorf("action input %q: composite action metadata cannot grant secret authority", suppliedName)
 		}
+		if !workflowAuthored && referencesToken {
+			return actionRequirements{}, fmt.Errorf("action input %q: composite action metadata cannot grant github.token authority", suppliedName)
+		}
+		requirements.githubToken = requirements.githubToken || referencesToken
 		input, declared := n.metadata.Inputs[strings.ToLower(suppliedName)]
 		for _, name := range names {
 			if declared && !input.Required && name != "GITHUB_TOKEN" {

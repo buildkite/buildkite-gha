@@ -898,11 +898,19 @@ func TestCompileBundleGitHubTokenUsesRestrictedDefaultPermissions(t *testing.T) 
 }
 
 func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
-	for _, permissions := range []string{"permissions: {}\n", "permissions:\n  contents: none\n"} {
-		source := []byte("on: push\n" + permissions + "jobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
-		_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
-		if err == nil || !strings.Contains(err.Error(), "references secrets.GITHUB_TOKEN but has no effective permissions") {
-			t.Fatalf("CompileBundle() error = %v, want empty permission rejection", err)
+	for _, test := range []struct {
+		reference string
+		want      string
+	}{
+		{reference: "secrets.GITHUB_TOKEN", want: "references secrets.GITHUB_TOKEN"},
+		{reference: "github.token", want: "references github.token"},
+	} {
+		for _, permissions := range []string{"permissions: {}\n", "permissions:\n  contents: none\n"} {
+			source := []byte("on: push\n" + permissions + "jobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ " + test.reference + " }}'\n")
+			_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err == nil || !strings.Contains(err.Error(), test.want+" but has no effective permissions") {
+				t.Fatalf("CompileBundle() error = %v, want empty permission rejection for %s", err, test.reference)
+			}
 		}
 	}
 }
@@ -952,6 +960,58 @@ func TestCompileBundleRejectsDynamicSecretIndex(t *testing.T) {
 	_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err == nil || !strings.Contains(err.Error(), "expression index must be a string literal") {
 		t.Fatalf("CompileBundle() error = %v, want dynamic secret index rejection", err)
+	}
+}
+
+func TestCompileBundleScansRetainedExpressionsForAuthority(t *testing.T) {
+	source := []byte(`on: push
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ${{ secrets.NAME_SECRET }}
+        run: echo '${{ github.token }}'
+`)
+	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := bundle.Plans[0].Job
+	if !reflect.DeepEqual(job.RequiredSecrets, []string{"NAME_SECRET"}) {
+		t.Fatalf("retained field secrets = %#v", job.RequiredSecrets)
+	}
+	if job.GitHubToken == nil || !job.HasCapability("provider-token-write") {
+		t.Fatalf("github.token authority = %#v, capabilities %#v", job.GitHubToken, job.RequiredCapabilities)
+	}
+	if bundle.Plans[0].Authorization.GitHubTokenSecretReference {
+		t.Fatal("github.token was reported as a secrets.GITHUB_TOKEN reference")
+	}
+}
+
+func TestCompileBundleRejectsRetainedGitHubEventPayload(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ github.event.action }}'
+`)
+	_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained in a job plan") {
+		t.Fatalf("CompileBundle() error = %v, want retained event rejection", err)
+	}
+}
+
+func TestRequiredSecretsDoesNotInterpretConditionLiteralsAsTemplates(t *testing.T) {
+	instance := JobInstance{If: "'${{ github.token }} ${{ secrets.DEPLOY }} ${{ github.event.action }}' == runner.os"}
+	secrets, referencesToken, err := requiredSecrets(instance, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets) != 0 || referencesToken {
+		t.Fatalf("condition literal granted secret authority: %#v, token = %v", secrets, referencesToken)
 	}
 }
 

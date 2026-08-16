@@ -214,18 +214,6 @@ func TestCompilePreflightsUnsupportedConditionsWithLocation(t *testing.T) {
 		want   string
 	}{
 		{
-			name: "job event payload",
-			source: `on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    if: github.event.action == 'opened'
-    steps:
-      - run: true
-`,
-			want: `conditions.yml:5:9: job "test": job condition: condition reference "github.event.action" is unavailable at runtime`,
-		},
-		{
 			name: "job hash function",
 			source: `on: push
 jobs:
@@ -248,78 +236,6 @@ jobs:
         run: true
 `,
 			want: `conditions.yml:6:13: job "test": step 1 condition: condition context "secrets" is unsupported`,
-		},
-		{
-			name: "mixed equality",
-			source: `on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    if: vars.ENABLED == true
-    steps:
-      - run: true
-`,
-			want: `conditions.yml:5:9: job "test": job condition: condition equality compares incompatible string and boolean operands`,
-		},
-		{
-			name: "parallel member condition location",
-			source: `on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - parallel:
-          - if:  vars.ENABLED == true
-            run: true
-`,
-			want: `conditions.yml:7:18: job "test": step "__parallel_6_9_1" condition: condition equality compares incompatible string and boolean operands`,
-		},
-		{
-			name: "concrete matrix type",
-			source: `on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        version: [12, "14"]
-    if: matrix.version == 12
-    steps:
-      - run: true
-`,
-			want: `conditions.yml:8:9: job "test": job condition: condition equality compares incompatible string and number operands`,
-		},
-		{
-			name: "concrete matrix step type",
-			source: `on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        version: [12, "14"]
-    steps:
-      - if: matrix.version == 12
-        run: true
-`,
-			want: `conditions.yml:9:13: job "test": step 1 condition: condition equality compares incompatible string and number operands`,
-		},
-		{
-			name: "missing concrete matrix value",
-			source: `on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - version: 12
-          - os: ubuntu-latest
-    if: matrix.version == 12
-    steps:
-      - run: true
-`,
-			want: `conditions.yml:10:9: job "test": job condition: condition reference "matrix.version" is unavailable in this matrix instance`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -345,6 +261,121 @@ jobs:
 				})
 			}
 		})
+	}
+}
+
+func TestCompileAcceptsGitHubConditionCoercionAndMissingMembers(t *testing.T) {
+	eventSource := readFile(t, smokePath("events", "push.json"))
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - version: 12
+          - os: ubuntu-latest
+    if: github.event.action == 'opened' || vars.ENABLED == true || matrix.version >= 12
+    steps:
+      - if: matrix.version == 12
+        run: true
+`)
+	if _, err := Compile("conditions.yml", source, eventSource); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompileRejectsAuthorityAndWholeEventInLazyGraphFunctions(t *testing.T) {
+	eventSource := readFile(t, smokePath("events", "push.json"))
+	for _, test := range []struct {
+		name, source, want string
+	}{
+		{
+			name: "skipped secret in runner",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ${{ case(true, 'ubuntu-latest', secrets.TOKEN) }}
+    steps:
+      - run: true
+`,
+			want: `unsupported compile-time context "secrets"`,
+		},
+		{
+			name: "whole event in concurrency",
+			source: `on: push
+concurrency:
+  group: ${{ toJSON(github.event) }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`,
+			want: `unavailable value "github.event"`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Compile("expressions.yml", []byte(test.source), eventSource); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Compile() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCompileAcceptsCompoundWorkflowStepFields(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ${{ format('test-{0}', github.event_name) }}
+        env:
+          ENABLED: ${{ contains(github.ref, 'heads') }}
+        run: echo "${{ format('{0}-{1}', vars.PREFIX, vars.MISSING || 'fallback') }}"
+        shell: ${{ 'bash' || 'sh' }}
+        working-directory: ${{ format('{0}', '.') }}
+`)
+	if _, err := Compile("steps.yml", source, readFile(t, smokePath("events", "push.json"))); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompileRetainsExpressionValuedStepControls(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        experimental: [true]
+        timeout: [5]
+    runs-on: ubuntu-latest
+    steps:
+      - run: exit 1
+        continue-on-error: ${{ matrix.experimental }}
+        timeout-minutes: ${{ matrix.timeout }}
+`)
+	encoded, err := Compile("controls.yml", source, readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result IR
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		t.Fatal(err)
+	}
+	step := result.Jobs[0].Steps[0]
+	if step.ContinueOnErrorExpression != "${{ matrix.experimental }}" || step.TimeoutMinutesExpression != "${{ matrix.timeout }}" {
+		t.Fatalf("compiled step controls = %#v", step)
+	}
+}
+
+func TestReusableStepTimeoutRejectsOutOfRangeStaticInput(t *testing.T) {
+	job := workflow.Job{ID: "callee", Steps: []workflow.Step{{
+		Kind: "run", Run: "true", TimeoutMinutesExpression: "${{ inputs.timeout }}",
+		Span: workflow.Span{Start: workflow.Position{Line: 7, Column: 7}},
+	}}}
+	if _, err := applyStaticInputs("callee.yml", job, map[string]any{"timeout": 0}); err == nil || !strings.Contains(err.Error(), "greater than 0 and at most 360") {
+		t.Fatalf("applyStaticInputs() error = %v", err)
 	}
 }
 
@@ -1149,7 +1180,7 @@ jobs:
 	}
 }
 
-func TestCompilePreflightsConditionsInReusableWorkflows(t *testing.T) {
+func TestCompileAllowsMissingEventMembersInReusableWorkflowConditions(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -1166,14 +1197,12 @@ jobs:
         run: true
 `)
 
-	_, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
-	want := `./.github/workflows/reusable.yml:7:13: job "call.test": step "inspect" condition: condition reference "github.event.action" is unavailable at runtime`
-	if err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("compileUntrustedPlans() error = %v, want callee condition diagnostic %q", err, want)
+	if _, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted"); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestCompileSubstitutesStaticInputsInReusableConditions(t *testing.T) {
+func TestCompileSupportsStaticAndIndexedInputsInReusableConditions(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -1181,6 +1210,7 @@ jobs:
     uses: ./.github/workflows/reusable.yml
     with:
       enabled: true
+      label: release
 `)
 	writeWorkflow(t, repository, "reusable.yml", `on:
   workflow_call:
@@ -1188,20 +1218,123 @@ jobs:
       enabled:
         type: boolean
         required: true
+      label:
+        type: string
+        required: true
 jobs:
   gated:
-    if: ${{ inputs.enabled && github.ref }}
+    if: ${{ inputs['enabled'] && github.ref }}
     runs-on: ubuntu-latest
+    env:
+      LABEL: ${{ inputs['label'] }}
+    outputs:
+      label: ${{ inputs['label'] }}
     steps:
-      - run: echo ${{ inputs.enabled }} ${{ github.ref }}
+      - run: echo ${{ inputs['enabled'] }} ${{ github.ref }}
 `)
 
 	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Command != "echo true ${{ github.ref }}" {
+	if len(plans) != 1 || plans[0].Condition != "${{ inputs['enabled'] && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "${{ inputs['label'] }}" || plans[0].Outputs["label"] != "${{ inputs['label'] }}" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Command != "echo ${{ inputs['enabled'] }} ${{ github.ref }}" {
 		t.Fatalf("reusable condition = %#v", plans)
+	}
+}
+
+func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
+	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
+	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
+		Span:                      span,
+		ContinueOnErrorExpression: "${{ inputs.allow }}",
+		TimeoutMinutesExpression:  "${{ inputs.wait }}",
+	}}}
+	resolved, err := applyStaticInputs("workflow.yml", job, map[string]any{"allow": true, "wait": 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved.Steps[0].ContinueOnError || resolved.Steps[0].ContinueOnErrorExpression != "" || resolved.Steps[0].TimeoutMinutes != 5 || resolved.Steps[0].TimeoutMinutesExpression != "" {
+		t.Fatalf("resolved controls = %#v", resolved.Steps[0])
+	}
+
+	job.Steps[0].ContinueOnErrorExpression = "${{ inputs.allow && matrix.experimental }}"
+	job.Steps[0].TimeoutMinutesExpression = "${{ matrix.timeout || inputs.wait }}"
+	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"allow": true, "wait": 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Steps[0].ContinueOnErrorExpression != "${{ true && matrix.experimental }}" || resolved.Steps[0].TimeoutMinutesExpression != "${{ matrix.timeout || 5 }}" {
+		t.Fatalf("partially resolved controls = %#v", resolved.Steps[0])
+	}
+
+	for _, field := range []string{"continue-on-error", "timeout-minutes"} {
+		t.Run("validates hidden "+field+" branch", func(t *testing.T) {
+			step := workflow.Step{Span: span}
+			source := "${{ inputs.allow || unsupported() }}"
+			if field == "continue-on-error" {
+				step.ContinueOnErrorExpression = source
+			} else {
+				step.TimeoutMinutesExpression = source
+			}
+			_, err := applyStaticInputs("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, map[string]any{"allow": true})
+			if err == nil || !strings.Contains(err.Error(), "unsupported runtime function") {
+				t.Fatalf("applyStaticInputs() error = %v, want unsupported runtime function", err)
+			}
+		})
+	}
+
+	job.Steps[0].ContinueOnErrorExpression = "${{ matrix.experimental && fromJSON(inputs.value) }}"
+	job.Steps[0].TimeoutMinutesExpression = ""
+	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"value": "invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Steps[0].ContinueOnErrorExpression != "${{ matrix.experimental && fromJSON('invalid') }}" {
+		t.Fatalf("runtime-first control = %#v", resolved.Steps[0])
+	}
+
+	for _, test := range []struct {
+		name       string
+		expression string
+		inputs     map[string]any
+		want       string
+	}{
+		{name: "boolean string", expression: "${{ inputs.value }}", inputs: map[string]any{"value": "true"}, want: "must produce a boolean"},
+		{name: "numeric string", expression: "${{ inputs.value }}", inputs: map[string]any{"value": "5"}, want: "must produce a number"},
+		{name: "invalid static expression", expression: "${{ fromJSON(inputs.value) && matrix.experimental }}", inputs: map[string]any{"value": "invalid"}, want: "evaluate timeout-minutes expression"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			step := workflow.Step{Span: span}
+			if test.name == "boolean string" {
+				step.ContinueOnErrorExpression = test.expression
+			} else {
+				step.TimeoutMinutesExpression = test.expression
+			}
+			_, err := applyStaticInputs("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, test.inputs)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("applyStaticInputs() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestRejectUnresolvedIndexedInputsInCompileTimeFields(t *testing.T) {
+	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
+	for _, test := range []struct {
+		name string
+		job  workflow.Job
+	}{
+		{name: "job name", job: workflow.Job{Name: "${{ inputs['label'] }}"}},
+		{name: "runner label", job: workflow.Job{RunsOn: []string{"${{ inputs['runner'] }}"}}},
+		{name: "action reference", job: workflow.Job{Steps: []workflow.Step{{Uses: "${{ inputs['action'] }}", Span: span}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.job.ID = "test"
+			test.job.Span = span
+			if err := rejectUnresolvedInputExpressions("workflow.yml", test.job); err == nil || !strings.Contains(err.Error(), "not statically resolvable") {
+				t.Fatalf("rejectUnresolvedInputExpressions() error = %v", err)
+			}
+		})
 	}
 }
 
@@ -1664,6 +1797,138 @@ jobs:
 	}
 }
 
+func TestCompileEvaluatesReusableWorkflowInputDefaults(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n")
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      label:
+        type: string
+        default: ${{ format('{0}-{1}', github.event_name, vars.SUFFIX) }}
+      enabled:
+        type: boolean
+        default: ${{ github.ref == 'refs/heads/main' }}
+      count:
+        type: number
+        default: ${{ fromJSON(vars.COUNT) }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ inputs.label }}:${{ inputs.enabled }}:${{ inputs.count }}
+`)
+	result, err := CompileWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), Options{
+		EventTrust: EventTrusted,
+		Vars:       VariableSources{Bridge: map[string]string{"COUNT": "3", "SUFFIX": "release"}},
+		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo push-release:true:3" {
+		t.Fatalf("reusable defaults = %#v", ir.Jobs)
+	}
+}
+
+func TestValidateRejectsInvalidReusableInputDefaultWithoutCall(t *testing.T) {
+	source := []byte(`on:
+  push:
+  workflow_call:
+    inputs:
+      value:
+        type: string
+        default: ${{ secrets.TOKEN }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	if _, err := Validate("workflow.yml", source); err == nil || !strings.Contains(err.Error(), `default for workflow_call input "value" is invalid`) || !strings.Contains(err.Error(), `context "secrets" is unavailable`) {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestCompileValidatesReusableWorkflowInputDefaults(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		input    string
+		want     string
+		override bool
+	}{
+		{name: "dispatch inputs", input: "${{ inputs.other }}", want: "workflow-dispatch inputs, which are unavailable during compilation", override: true},
+		{name: "token in lazy branch", input: "${{ false && github.token || 'safe' }}", want: `unavailable value "github.token"`, override: true},
+		{name: "type mismatch", input: "${{ github.ref == 'refs/heads/main' }}", want: "must be string"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			with := ""
+			if test.override {
+				with = "    with:\n      value: override\n"
+			}
+			path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n"+with)
+			writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      value:\n        type: string\n        default: "+test.input+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+			_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+			if err == nil || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), ".github/workflows/reusable.yml:6:") {
+				t.Fatalf("Compile() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCompileResolvesCompoundNestedReusableWorkflowInputs(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/middle.yml
+    with:
+      prefix: ${{ format('{0}-{1}', vars.PREFIX, github.event_name) }}
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      prefix: {type: string}
+jobs:
+  call:
+    strategy:
+      matrix:
+        os: [linux]
+    uses: ./.github/workflows/leaf.yml
+    with:
+      value: ${{ format('{0}-{1}-{2}', inputs.prefix, matrix.os, github.event_name) }}
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      value: {type: string}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ inputs.value }}
+`)
+	result, err := CompileWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), Options{
+		EventTrust: EventTrusted,
+		Vars:       VariableSources{Bridge: map[string]string{"PREFIX": "release"}},
+		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo release-push-linux-push" {
+		t.Fatalf("nested reusable input = %#v", ir.Jobs)
+	}
+}
+
 func TestCompileExposesGitHubHeadRef(t *testing.T) {
 	workflow := []byte(`on: [push, pull_request, pull_request_target]
 concurrency: group-${{ github.head_ref }}
@@ -1741,6 +2006,52 @@ jobs:
 	}
 }
 
+func TestCompilePartiallyReducesEventBackedConditionsBeforeRuntime(t *testing.T) {
+	workflow := []byte(`on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  configure:
+    needs: build
+    if: github.event.pull_request.draft && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event.pull_request.draft && failure()
+        run: echo draft failure
+`)
+	event := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "kafka"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha",
+  "payload": {"pull_request": {"draft": true}}
+}`)
+	result, err := Compile("ci.yml", workflow, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	var configure *JobInstance
+	for i := range ir.Jobs {
+		if ir.Jobs[i].LogicalJobID == "configure" {
+			configure = &ir.Jobs[i]
+		}
+	}
+	if configure == nil || configure.If != "(true && (needs.build.result == 'success'))" || len(configure.Steps) != 1 || configure.Steps[0].If != "(true && failure())" {
+		t.Fatalf("partially reduced conditions = %#v", configure)
+	}
+	if strings.Contains(strings.ToLower(configure.If), "github.event") {
+		t.Fatalf("job condition retains github.event: %q", configure.If)
+	}
+}
+
 func TestCompilePreservesStatusFunctionsWhenFoldingEventConditions(t *testing.T) {
 	workflow := []byte(`on: pull_request
 jobs:
@@ -1797,21 +2108,6 @@ jobs:
       - run: echo draft
 `,
 			want: `ci.yml:5:9: job "configure": job condition: condition function "hashFiles" is unsupported`,
-		},
-		{
-			name: "step matrix type after false event operand",
-			workflow: `on: pull_request
-jobs:
-  configure:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        version: ["14"]
-    steps:
-      - if: github.event.pull_request.draft && matrix.version == 12
-        run: echo draft
-`,
-			want: `ci.yml:9:13: job "configure": step 1 condition: condition equality compares incompatible string and number operands`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2707,6 +3003,54 @@ jobs:
 	service := plans[0].Services["cache"]
 	if service.Image != "valkey:8" || service.Env["FAIL_FAST"] != "true" || service.Env["MAX_PARALLEL"] != "1" || service.Env["ENABLED"] != "false" || service.Env["REPLICAS"] != "0" {
 		t.Fatalf("compiled service = %#v", service)
+	}
+}
+
+func TestCompilePlansSubstituteWorkflowDispatchInputsWithoutReusableCalls(t *testing.T) {
+	workflowSource := []byte(`on:
+  workflow_dispatch:
+    inputs:
+      timeout:
+        type: number
+        default: 5
+      label:
+        type: string
+        default: dispatched
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      LABEL: ${{ inputs.label }}
+      INDEXED_LABEL: ${{ inputs['label'] }}
+    defaults:
+      run:
+        shell: ${{ inputs.label }}
+    outputs:
+      label: ${{ inputs.label }}
+    steps:
+      - run: true
+        timeout-minutes: ${{ inputs.timeout }}
+`)
+	var event map[string]any
+	if err := json.Unmarshal(readFile(t, smokePath("events", "push.json")), &event); err != nil {
+		t.Fatal(err)
+	}
+	event["event"] = "workflow_dispatch"
+	event["payload"] = map[string]any{"inputs": map[string]any{"timeout": 7, "label": "bash"}}
+	eventSource, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compilePlansForTest(context.Background(), "dispatch.yml", workflowSource, eventSource, "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("compiled plans = %d, want 1", len(plans))
+	}
+	job := plans[0]
+	if job.Env["LABEL"] != "bash" || job.Env["INDEXED_LABEL"] != "${{ inputs['label'] }}" || job.Inputs["label"] != "bash" || job.Inputs["timeout"] != json.Number("7") || job.DefaultShell != "bash" || job.Outputs["label"] != "bash" || job.Steps[0].TimeoutMinutes != 7 || job.Steps[0].TimeoutMinutesExpression != "" {
+		t.Fatalf("compiled dispatch input surfaces = %#v", job)
 	}
 }
 

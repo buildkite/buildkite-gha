@@ -1834,7 +1834,7 @@ jobs:
   bad-condition:
     runs-on: ubuntu-latest
     steps:
-      - if: ${{ contains('go.sum', 'sum') }}
+      - if: ${{ unsupported('go.sum') }}
         run: true
   bad-runner:
     runs-on: windows-latest
@@ -3228,14 +3228,14 @@ jobs:
     strategy:
       matrix:
         version: [12, "14"]
-    if: matrix.version == 12
+    if: unsupported(matrix.version)
     steps:
       - run: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	want := `job condition: condition equality compares incompatible string and number operands`
+	want := `job condition: condition function "unsupported" is unsupported`
 
 	t.Run("validate json", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer

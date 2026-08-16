@@ -349,13 +349,16 @@ runs:
 `)
 	compiled, err := compileActionInvocations(
 		context.Background(), workspace, nil, "https://github.com", []string{"./secrets"},
-		[]map[string]string{{"optional": "${{ secrets.OPTIONAL_TOKEN }}", "required": "${{ secrets.REQUIRED_TOKEN }}-${{ secrets.GITHUB_TOKEN }}"}},
+		[]map[string]string{{"optional": "${{ secrets.OPTIONAL_TOKEN }}", "required": "${{ secrets.REQUIRED_TOKEN }}-${{ secrets.GITHUB_TOKEN }}-${{ github.token }}"}},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(compiled.requiredSecrets, []string{"GITHUB_TOKEN", "REQUIRED_TOKEN"}) {
 		t.Fatalf("required action secrets = %#v", compiled.requiredSecrets)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("workflow-authored github.token input did not request a scoped token")
 	}
 }
 
@@ -381,6 +384,25 @@ runs:
 	_, err := compileActionInvocations(context.Background(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
 	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant secret authority") {
 		t.Fatalf("composite metadata secret error = %v", err)
+	}
+}
+
+func TestCompileActionInvocationsRejectsRetainedEventPayload(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "event", `name: event input
+inputs:
+  action:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	_, err := compileActionInvocations(
+		context.Background(), workspace, nil, "https://github.com", []string{"./event"},
+		[]map[string]string{{"action": "${{ github.event.action }}"}},
+	)
+	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained in a job plan") {
+		t.Fatalf("retained action input event error = %v", err)
 	}
 }
 

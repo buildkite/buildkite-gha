@@ -172,7 +172,7 @@ func bindHashFilesContext(ctx context.Context, eval *expression.Context) {
 
 func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
 	result, err := r.runJobStep(runCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
-	return classifyStepExecution(jobCtx, runCtx, step, result, err)
+	return classifyStepExecutionWithControls(jobCtx, runCtx, step, result, err, eval)
 }
 
 func classifyStepExecution(jobCtx, runCtx context.Context, step plan.Step, result Result, err error) stepExecution {
@@ -187,6 +187,18 @@ func classifyStepExecution(jobCtx, runCtx context.Context, step plan.Step, resul
 	execution.conclusion = execution.outcome
 	if step.ContinueOnError && execution.outcome == "failure" && !isHardJobFailure(err) {
 		execution.conclusion = "success"
+	}
+	return execution
+}
+
+func classifyStepExecutionWithControls(jobCtx, runCtx context.Context, step plan.Step, result Result, err error, eval expression.Context) stepExecution {
+	execution := classifyStepExecution(jobCtx, runCtx, step, result, err)
+	if execution.outcome == "failure" && !isHardJobFailure(err) && step.ContinueOnErrorExpression != "" {
+		resolved, controlErr := evaluateStepContinueOnError(step, eval)
+		if controlErr != nil {
+			return classifyStepExecution(jobCtx, runCtx, step, result, errors.Join(err, fmt.Errorf("controls: %w", controlErr)))
+		}
+		return classifyStepExecution(jobCtx, runCtx, resolved, result, err)
 	}
 	return execution
 }
@@ -234,8 +246,13 @@ func commitResultEnvironment(env map[string]string, result Result) {
 }
 
 func cloneExpressionContext(in expression.Context) expression.Context {
+	var inputs map[string]string
+	if in.Inputs != nil {
+		inputs = cloneStrings(in.Inputs)
+	}
 	return expression.Context{
-		Inputs:           cloneStrings(in.Inputs),
+		Inputs:           inputs,
+		WorkflowInputs:   cloneAnyMap(in.WorkflowInputs),
 		Matrix:           cloneAnyMap(in.Matrix),
 		Steps:            cloneNestedStrings(in.Steps),
 		StepStatuses:     cloneStepStatuses(in.StepStatuses),

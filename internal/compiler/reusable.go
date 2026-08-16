@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,6 +30,7 @@ type sourcedJob struct {
 	path            string
 	digest          string
 	root            string
+	inputs          map[string]any
 	secretAuthority bool
 	needBindings    map[string]needBinding
 }
@@ -84,12 +86,17 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 		workflowJobs := make(map[string]workflow.Job, len(parsed.Jobs))
 		replacements := make(map[string]needBinding, len(parsed.Jobs))
 		for i, job := range parsed.Jobs {
+			resolvedJob, err := applyStaticInputs(sourcePath, job, context.Inputs)
+			if err != nil {
+				return nil, runtimeMatrixBoundary, err
+			}
+			job = resolvedJob
 			job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, nil, false)
 			bindings := make(map[string]needBinding, len(job.Needs))
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
 			}
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, secretAuthority: true, needBindings: bindings}
+			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: cloneAnyMap(context.Inputs), secretAuthority: true, needBindings: bindings}
 			workflowJobs[job.ID] = job
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
@@ -179,7 +186,10 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 	for _, id := range order {
 		job := jobs[id]
 		job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, permissionCeiling, depth != 0)
-		job = applyStaticInputs(job, inputs)
+		job, err = applyStaticInputs(path, job, inputs)
+		if err != nil {
+			return reusableResolution{}, err
+		}
 		if parsed.Callable {
 			if err := rejectUnresolvedInputExpressions(path, job); err != nil {
 				return reusableResolution{}, err
@@ -217,7 +227,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			if resolver.expanded > maxFlattenedJobs {
 				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow graph expands beyond %d jobs", maxFlattenedJobs))
 			}
-			resolved = append(resolved, sourcedJob{Job: job, path: path, digest: digest, root: resolver.root, secretAuthority: secretAuthority, needBindings: needBindings})
+			resolved = append(resolved, sourcedJob{Job: job, path: path, digest: digest, root: resolver.root, inputs: cloneAnyMap(inputs), secretAuthority: secretAuthority, needBindings: needBindings})
 			replacements[id] = needBinding{members: []string{job.ID}}
 			continue
 		}
@@ -554,7 +564,11 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 		if !ok && declaration.Default != nil {
 			value, ok = declaration.Default.Data, true
 			if text, isString := value.(string); isString && strings.Contains(text, "${{") {
-				return nil, locatedJobError(call.Uses, job, declaration.Default.Span.Start.Line, declaration.Default.Span.Start.Column, fmt.Sprintf("default for reusable-workflow input %q is not statically resolvable", name))
+				var err error
+				value, err = expression.EvaluateReusableInputDefault(text, context)
+				if err != nil {
+					return nil, locatedJobError(call.Uses, job, declaration.Default.Span.Start.Line, declaration.Default.Span.Start.Column, fmt.Sprintf("evaluate default for reusable-workflow input %q: %v", name, err))
+				}
 			}
 		}
 		if !ok {
@@ -668,9 +682,9 @@ func inputTypeMatches(inputType string, value any) bool {
 	}
 }
 
-func applyStaticInputs(job workflow.Job, inputs map[string]any) workflow.Job {
+func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (workflow.Job, error) {
 	if len(inputs) == 0 {
-		return job
+		return job, nil
 	}
 	job.Name = replaceStaticInputs(job.Name, inputs)
 	job.If = replaceStaticInputCondition(job.If, inputs)
@@ -727,11 +741,80 @@ func applyStaticInputs(job workflow.Job, inputs map[string]any) workflow.Job {
 		step.Uses = replaceStaticInputs(step.Uses, inputs)
 		step.Shell = replaceStaticInputs(step.Shell, inputs)
 		step.WorkingDirectory = replaceStaticInputs(step.WorkingDirectory, inputs)
+		if step.ContinueOnErrorExpression != "" {
+			resolved, err := expression.SubstituteCompileInputs(step.ContinueOnErrorExpression, inputs)
+			if err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("resolve continue-on-error expression: %v", err))
+			}
+			if err := expression.ValidateStepControl(resolved); err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("validate continue-on-error expression: %v", err))
+			}
+			expr, err := expression.Parse(resolved, step.Span.Start.Line, step.Span.Start.Column)
+			if err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("parse continue-on-error expression: %v", err))
+			}
+			value, available, err := expression.EvaluateCompileAvailable(expr, expression.CompileContext{})
+			if err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("evaluate continue-on-error expression: %v", err))
+			}
+			if !available {
+				step.ContinueOnErrorExpression = resolved
+			} else if enabled, ok := value.(bool); ok {
+				step.ContinueOnError, step.ContinueOnErrorExpression = enabled, ""
+			} else {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "continue-on-error expression must produce a boolean")
+			}
+		}
+		if step.TimeoutMinutesExpression != "" {
+			resolved, err := expression.SubstituteCompileInputs(step.TimeoutMinutesExpression, inputs)
+			if err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("resolve timeout-minutes expression: %v", err))
+			}
+			if err := expression.ValidateStepControl(resolved); err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("validate timeout-minutes expression: %v", err))
+			}
+			expr, err := expression.Parse(resolved, step.Span.Start.Line, step.Span.Start.Column)
+			if err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("parse timeout-minutes expression: %v", err))
+			}
+			value, available, err := expression.EvaluateCompileAvailable(expr, expression.CompileContext{})
+			if err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("evaluate timeout-minutes expression: %v", err))
+			}
+			if !available {
+				step.TimeoutMinutesExpression = resolved
+			} else if minutes, ok := staticTimeoutMinutes(value); ok {
+				if minutes <= 0 || minutes > 360 || math.IsNaN(minutes) || math.IsInf(minutes, 0) {
+					return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "timeout-minutes expression must produce a number greater than 0 and at most 360")
+				}
+				step.TimeoutMinutes, step.TimeoutMinutesExpression = minutes, ""
+			} else {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "timeout-minutes expression must produce a number")
+			}
+		}
 		step.If = replaceStaticInputCondition(step.If, inputs)
 		step.Env = replaceMapInputs(step.Env, inputs)
 		step.With = replaceMapInputs(step.With, inputs)
 	}
-	return job
+	return job, nil
+}
+
+func staticTimeoutMinutes(value any) (float64, bool) {
+	switch value := value.(type) {
+	case int:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	case uint64:
+		return float64(value), true
+	case float64:
+		return value, true
+	case json.Number:
+		minutes, err := value.Float64()
+		return minutes, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func replaceSliceInputs(values []string, inputs map[string]any) []string {
@@ -746,18 +829,11 @@ func replaceSliceInputs(values []string, inputs map[string]any) []string {
 }
 
 func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
-	if usesInputs, err := expression.ConditionUsesContext(job.If, "inputs"); err != nil {
-		return jobError(path, job, fmt.Sprintf("parse reusable-workflow job condition: %v", err))
-	} else if usesInputs {
-		return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
-	}
-	jobValues := []string{job.Name, job.DefaultShell, job.DefaultWorkingDirectory}
+	jobValues := []string{job.Name}
 	if job.Concurrency != nil {
 		jobValues = append(jobValues, job.Concurrency.Group)
 	}
 	jobValues = append(jobValues, job.RunsOn...)
-	jobValues = appendMapValues(jobValues, job.Env)
-	jobValues = appendMapValues(jobValues, job.Outputs)
 	for _, service := range job.Services {
 		container := service.Container
 		jobValues = append(jobValues, container.Image, container.Options, container.Command, container.Entrypoint)
@@ -801,18 +877,8 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 		}
 	}
 	for _, step := range job.Steps {
-		if usesInputs, err := expression.ConditionUsesContext(step.If, "inputs"); err != nil {
-			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("parse reusable-workflow step condition: %v", err))
-		} else if usesInputs {
-			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
-		}
-		stepValues := []string{step.Name, step.Run, step.Uses, step.Shell, step.WorkingDirectory}
-		stepValues = appendMapValues(stepValues, step.Env)
-		stepValues = appendMapValues(stepValues, step.With)
-		for _, value := range stepValues {
-			if hasInputExpression(value) {
-				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
-			}
+		if hasInputExpression(step.Uses) {
+			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow action reference input expression is not statically resolvable")
 		}
 	}
 	return nil
@@ -875,21 +941,8 @@ func containsInputExpression(value any) bool {
 }
 
 func hasInputExpression(value string) bool {
-	for {
-		start := strings.Index(value, "${{")
-		if start < 0 {
-			return false
-		}
-		value = value[start+3:]
-		end := strings.Index(value, "}}")
-		if end < 0 {
-			return false
-		}
-		if strings.Contains(strings.ToLower(value[:end]), "inputs.") {
-			return true
-		}
-		value = value[end+2:]
-	}
+	usesInputs, err := expression.TemplateUsesContext(value, "inputs")
+	return err != nil || usesInputs
 }
 
 func cloneMatrixWithInputs(matrix *workflow.Matrix, inputs map[string]any) *workflow.Matrix {

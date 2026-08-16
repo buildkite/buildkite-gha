@@ -179,22 +179,24 @@ type Span struct {
 }
 
 type Step struct {
-	ID               string            `json:"id"`
-	Name             string            `json:"name,omitempty"`
-	Kind             string            `json:"kind"`
-	Background       bool              `json:"background,omitempty"`
-	Targets          []string          `json:"targets,omitempty"`
-	Command          string            `json:"command,omitempty"`
-	Uses             string            `json:"uses,omitempty"`
-	Action           *ActionSelector   `json:"action,omitempty"`
-	Shell            string            `json:"shell,omitempty"`
-	WorkingDirectory string            `json:"working_directory,omitempty"`
-	Env              map[string]string `json:"env,omitempty"`
-	With             map[string]string `json:"with,omitempty"`
-	Condition        string            `json:"condition,omitempty"`
-	ContinueOnError  bool              `json:"continue_on_error,omitempty"`
-	TimeoutMinutes   float64           `json:"timeout_minutes,omitempty"`
-	Source           *Span             `json:"source,omitempty"`
+	ID                        string            `json:"id"`
+	Name                      string            `json:"name,omitempty"`
+	Kind                      string            `json:"kind"`
+	Background                bool              `json:"background,omitempty"`
+	Targets                   []string          `json:"targets,omitempty"`
+	Command                   string            `json:"command,omitempty"`
+	Uses                      string            `json:"uses,omitempty"`
+	Action                    *ActionSelector   `json:"action,omitempty"`
+	Shell                     string            `json:"shell,omitempty"`
+	WorkingDirectory          string            `json:"working_directory,omitempty"`
+	Env                       map[string]string `json:"env,omitempty"`
+	With                      map[string]string `json:"with,omitempty"`
+	Condition                 string            `json:"condition,omitempty"`
+	ContinueOnError           bool              `json:"continue_on_error,omitempty"`
+	ContinueOnErrorExpression string            `json:"continue_on_error_expression,omitempty"`
+	TimeoutMinutes            float64           `json:"timeout_minutes,omitempty"`
+	TimeoutMinutesExpression  string            `json:"timeout_minutes_expression,omitempty"`
+	Source                    *Span             `json:"source,omitempty"`
 }
 
 type Container struct {
@@ -233,6 +235,7 @@ type Job struct {
 	RequiredSecrets      []string                `json:"required_secrets,omitempty"`
 	GitHubToken          *GitHubToken            `json:"github_token,omitempty"`
 	Matrix               map[string]any          `json:"matrix,omitempty"`
+	Inputs               map[string]any          `json:"inputs,omitempty"`
 	Vars                 map[string]string       `json:"vars,omitempty"`
 	Dependencies         []string                `json:"dependencies,omitempty"`
 	NeedSources          map[string][]NeedSource `json:"need_sources,omitempty"`
@@ -281,6 +284,33 @@ func (job Job) RuntimeDistributionDigest() string {
 func Decode(source []byte) (Job, error) {
 	if err := rejectDuplicateKeys(source); err != nil {
 		return Job{}, fmt.Errorf("decode job plan: %w", err)
+	}
+	var presence struct {
+		Steps []map[string]json.RawMessage `json:"steps"`
+	}
+	if err := json.Unmarshal(source, &presence); err != nil {
+		return Job{}, fmt.Errorf("decode job plan: %w", err)
+	}
+	for i, step := range presence.Steps {
+		controls := make(map[string]bool, 4)
+		for name := range step {
+			for _, canonical := range []string{"continue_on_error", "continue_on_error_expression", "timeout_minutes", "timeout_minutes_expression"} {
+				if !strings.EqualFold(name, canonical) {
+					continue
+				}
+				if controls[canonical] {
+					return Job{}, fmt.Errorf("decode job plan: step %d repeats %s with different casing", i+1, canonical)
+				}
+				controls[canonical] = true
+				break
+			}
+		}
+		if controls["continue_on_error"] && controls["continue_on_error_expression"] {
+			return Job{}, fmt.Errorf("decode job plan: step %d has both continue_on_error fields", i+1)
+		}
+		if controls["timeout_minutes"] && controls["timeout_minutes_expression"] {
+			return Job{}, fmt.Errorf("decode job plan: step %d has both timeout_minutes fields", i+1)
+		}
 	}
 	var job Job
 	decoder := json.NewDecoder(bytes.NewReader(source))
@@ -419,6 +449,23 @@ func (job Job) Validate() error {
 	}
 	if len(job.Condition) > 65536 || len(job.RequiredSecrets) > 128 {
 		return fmt.Errorf("job plan condition or required secrets exceed their size limit")
+	}
+	if len(job.Inputs) > 25 {
+		return fmt.Errorf("job plan inputs exceed their size limit")
+	}
+	for name, value := range job.Inputs {
+		if name == "" || len(name) > 255 {
+			return fmt.Errorf("job plan has invalid input name")
+		}
+		switch value := value.(type) {
+		case string:
+			if len(value) > 65536 {
+				return fmt.Errorf("job plan input %q exceeds its size limit", name)
+			}
+		case bool, json.Number, int, int64, uint64, float64:
+		default:
+			return fmt.Errorf("job plan input %q has unsupported type %T", name, value)
+		}
 	}
 	capabilities := make(map[string]struct{}, len(job.RequiredCapabilities))
 	if !sort.StringsAreSorted(job.RequiredCapabilities) {
@@ -615,6 +662,24 @@ func (job Job) Validate() error {
 		ids[id] = struct{}{}
 		if step.TimeoutMinutes < 0 || step.TimeoutMinutes > 360 {
 			return fmt.Errorf("job plan step %q timeout_minutes must be between 0 and 360", step.ID)
+		}
+		if step.TimeoutMinutesExpression != "" && step.TimeoutMinutes != 0 {
+			return fmt.Errorf("job plan step %q has both literal and expression timeout_minutes", step.ID)
+		}
+		if step.ContinueOnErrorExpression != "" && step.ContinueOnError {
+			return fmt.Errorf("job plan step %q has both literal and expression continue_on_error", step.ID)
+		}
+		if len(step.TimeoutMinutesExpression) > 65536 || len(step.ContinueOnErrorExpression) > 65536 {
+			return fmt.Errorf("job plan step %q control expression exceeds 65536 bytes", step.ID)
+		}
+		for _, control := range []struct{ name, value string }{
+			{name: "continue_on_error", value: step.ContinueOnErrorExpression},
+			{name: "timeout_minutes", value: step.TimeoutMinutesExpression},
+		} {
+			trimmed := strings.TrimSpace(control.value)
+			if control.value != "" && (!strings.HasPrefix(trimmed, "${{") || !strings.HasSuffix(trimmed, "}}")) {
+				return fmt.Errorf("job plan step %q %s expression must be complete", step.ID, control.name)
+			}
 		}
 		if len(step.Condition) > 65536 {
 			return fmt.Errorf("job plan step %q condition exceeds 65536 bytes", step.ID)
@@ -1031,7 +1096,7 @@ func hasControl(value string) bool {
 }
 
 func validateControlStep(step Step, backgroundIDs map[string]struct{}) error {
-	if step.Background || step.Command != "" || step.Uses != "" || step.Action != nil || step.Shell != "" || step.WorkingDirectory != "" || len(step.Env) != 0 || len(step.With) != 0 || step.Condition != "" || step.ContinueOnError || step.TimeoutMinutes != 0 {
+	if step.Background || step.Command != "" || step.Uses != "" || step.Action != nil || step.Shell != "" || step.WorkingDirectory != "" || len(step.Env) != 0 || len(step.With) != 0 || step.Condition != "" || step.ContinueOnError || step.ContinueOnErrorExpression != "" || step.TimeoutMinutes != 0 || step.TimeoutMinutesExpression != "" {
 		return fmt.Errorf("control step %q contains incompatible execution fields", step.ID)
 	}
 	switch step.Kind {

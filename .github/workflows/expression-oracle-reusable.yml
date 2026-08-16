@@ -1,0 +1,24 @@
+name: Expression differential oracle reusable workflow
+
+on:
+  workflow_call:
+    inputs:
+      event-label:
+        type: string
+        default: pre-${{ format('{{{0}}}', github.event_name) }}
+      dispatch-label:
+        type: string
+        default: ${{ inputs.oracle_prefix }}
+
+jobs:
+  verify-defaults:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify reusable input defaults
+        shell: bash
+        env:
+          EVENT_LABEL: ${{ inputs.event-label }}
+          DISPATCH_LABEL: ${{ inputs.dispatch-label }}
+        run: |
+          test "$EVENT_LABEL" = "pre-{workflow_dispatch}"
+          test "$DISPATCH_LABEL" = "dispatch"

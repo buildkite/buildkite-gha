@@ -774,6 +774,23 @@ func TestRunJobUnresolvedDockerActionUsesFakeBackend(t *testing.T) {
 	}
 }
 
+func TestRunJobEvaluatesIndexedWorkflowInputs(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/inputs.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: inputs\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "check", Kind: "run", Command: `test "$VALUE" = dispatched`,
+		Env: map[string]string{"VALUE": "${{ inputs[env.KEY] }}"},
+	}})
+	job.Inputs = map[string]any{"label": "dispatched"}
+	job.Env = map[string]string{"KEY": "label"}
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+}
+
 func TestRunJobDoesNotTolerateDockerActionCleanupFailure(t *testing.T) {
 	requireLinuxAMD64(t)
 	fake := newFakeDocker(t, "leftover")
@@ -1702,6 +1719,111 @@ func TestBackgroundOutputsFailClosedBeforeBarrier(t *testing.T) {
 	}
 }
 
+func TestExpressionValuedStepControls(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: expression controls\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "soft", Kind: "run", Command: "exit 7", ContinueOnErrorExpression: "${{ matrix.experimental }}", TimeoutMinutesExpression: "${{ matrix.timeout }}"},
+		{ID: "verify", Kind: "run", Condition: "steps.soft.outcome == 'failure' && steps.soft.conclusion == 'success'", Command: "true"},
+	})
+	job.Matrix = map[string]any{"experimental": true, "timeout": 1.0}
+	encoded, err := plan.Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = plan.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestSkippedStepDoesNotEvaluateTypedControls(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: skipped controls\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "skipped", Kind: "run", Condition: "false", Command: "true", TimeoutMinutesExpression: "${{ fromJSON('invalid') }}",
+	}})
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestStepTimeoutExpressionUsesSameStepEnvironment(t *testing.T) {
+	step := plan.Step{Env: map[string]string{"MINUTES": "5"}, TimeoutMinutesExpression: "${{ fromJSON(env.MINUTES) }}"}
+	context := expression.Context{}
+	env, err := evaluateStepMap(step.Env, context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	context.Env = env
+	step, err = evaluateStepTimeout(step, context)
+	if err != nil || step.TimeoutMinutes != 5 {
+		t.Fatalf("evaluateStepTimeout() = %#v, %v", step, err)
+	}
+}
+
+func TestExpressionValuedStepControlsRequireTypedBoundedResults(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		step plan.Step
+		want string
+	}{
+		{name: "boolean", step: plan.Step{ContinueOnErrorExpression: "${{ 'true' }}"}, want: "want boolean"},
+		{name: "number", step: plan.Step{TimeoutMinutesExpression: "${{ '1' }}"}, want: "want number"},
+		{name: "range", step: plan.Step{TimeoutMinutesExpression: "${{ 361 }}"}, want: "at most 360"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := evaluateStepControls(test.step, expression.Context{}); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("evaluateStepControls() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestExpressionContinueOnErrorAppliesToPreparedActionFailure(t *testing.T) {
+	step := plan.Step{ID: "action", ContinueOnErrorExpression: "${{ true }}"}
+	execution := classifyStepExecutionWithControls(context.Background(), context.Background(), step, newResult(), errors.New("pre failed"), expression.Context{})
+	if execution.outcome != "failure" || execution.conclusion != "success" {
+		t.Fatalf("prepared action execution = %#v", execution)
+	}
+}
+
+func TestExpressionContinueOnErrorIsNotEvaluatedForCancellation(t *testing.T) {
+	jobCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	step := plan.Step{ID: "cancelled", ContinueOnErrorExpression: "${{ fromJSON('invalid') }}"}
+	execution := classifyStepExecutionWithControls(jobCtx, jobCtx, step, newResult(), context.Canceled, expression.Context{})
+	if execution.outcome != "cancelled" || execution.err != context.Canceled {
+		t.Fatalf("cancelled execution = %#v", execution)
+	}
+}
+
+func TestStepNameFailsClosedOnUnavailableBackgroundOutput(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "background", Kind: "run", Background: true, Command: `echo "value=private" >> "$GITHUB_OUTPUT"`},
+		{ID: "premature-reader", Name: `${{ steps.background.outputs.value }}`, Kind: "run", Command: `touch should-not-run`},
+	})
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), "name: expression references unavailable step") {
+		t.Fatalf("RunJob() result = %#v, error = %v, want unavailable background output in name", result, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(workspace, "should-not-run")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("premature reader command ran: %v", statErr)
+	}
+}
+
 func TestBackgroundSupervisorBoundsActiveWorkAndQueuesFIFO(t *testing.T) {
 	supervisor := newBackgroundSupervisor(maxActiveBackgroundSteps)
 	release := make(chan struct{})
@@ -2171,6 +2293,40 @@ func TestJobConditionConsumesNeedResultAndOutput(t *testing.T) {
 	}
 }
 
+func TestJobRuntimeFieldsEvaluateCompoundExpressions(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	if err := os.Mkdir(filepath.Join(workspace, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:      "run",
+		Kind:    "run",
+		Env:     map[string]string{"SCOPE": "step"},
+		Command: `test "$VALUE" = "release-linux-v1" && printf 'value=done\n' >> "$GITHUB_OUTPUT"`,
+	}})
+	job.Matrix = map[string]any{"os": "linux", "directory": "src"}
+	job.Vars = map[string]string{"PREFIX": "release"}
+	job.Needs = map[string]plan.Need{"producer": {Result: "success", Outputs: map[string]string{"tag": "v1"}}}
+	job.Env = map[string]string{
+		"ROOT":  workspace,
+		"SCOPE": "job",
+		"VALUE": "${{ format('{0}-{1}-{2}', vars.PREFIX, matrix.os, needs.producer.outputs.tag) }}",
+	}
+	job.DefaultShell = "${{ format('{0}', 'sh') }}"
+	job.DefaultWorkingDirectory = "${{ format('{0}/{1}', env.ROOT, matrix.directory) }}"
+	job.Outputs = map[string]string{
+		"environment": "${{ format('{0}', env.SCOPE) }}",
+		"result":      "${{ format('{0}-{1}', steps.run.outputs.value, needs.producer.result) }}",
+	}
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" || result.Outputs["result"] != "done-success" || result.Outputs["environment"] != "job" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
 func TestDecodedPlanMatrixNumbersDriveRuntimeConditions(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -2284,7 +2440,7 @@ func TestRunJobRejectsNestedWorkflowTokenPathBeforeMinting(t *testing.T) {
 	}
 }
 
-func TestResolveActionInputsExposesScopedTokenOnlyToMetadataDefaults(t *testing.T) {
+func TestResolveActionInputsExposesScopedTokenToMetadataDefaults(t *testing.T) {
 	tokenDefault := "${{ github.token }}"
 	conditionalTokenDefault := "${{ github.server_url == 'https://github.com' && github.token || '' }}"
 	actorDefault := "${{ github.actor }}"
@@ -2335,6 +2491,21 @@ func TestResolveActionInputsExposesScopedTokenOnlyToMetadataDefaults(t *testing.
 	}
 }
 
+func TestStepExpressionContextExposesScopedTokenWithoutMutatingJobContext(t *testing.T) {
+	eval := expression.Context{
+		GitHub:  map[string]any{"actor": "octocat"},
+		Secrets: map[string]string{"GITHUB_TOKEN": "ghs_scoped_step"},
+	}
+	stepEval := stepExpressionContext(eval)
+	value, err := expression.Evaluate("${{ github.token }}", stepEval)
+	if err != nil || value != "ghs_scoped_step" {
+		t.Fatalf("step github.token = %q, %v", value, err)
+	}
+	if _, leaked := eval.GitHub["token"]; leaked {
+		t.Fatalf("step evaluation mutated job context: %#v", eval.GitHub)
+	}
+}
+
 func TestOriginUsesProviderServerURLWithoutGitHubToken(t *testing.T) {
 	job := plan.Job{Event: plan.Event{Provider: "cursor-origin"}}
 	github := githubContext(job)
@@ -2382,10 +2553,12 @@ jobs:
 
       - if: env.GITHUB_SHA == 'action-sha' && env.RUNNER_TEMP == '/action-temp'
         env:
+          DIRECT_GITHUB_TOKEN: ${{ github.token }}
           ENV_GITHUB_SHA: ${{ env.GITHUB_SHA }}
           ENV_RUNNER_TEMP: ${{ env.RUNNER_TEMP }}
         run: |
           test "$GITHUB_TOKEN" = "ghs_scoped_action_default"
+          test "$DIRECT_GITHUB_TOKEN" = "ghs_scoped_action_default"
           test "$GITHUB_SHA" = "1111111111111111111111111111111111111111"
           test "$RUNNER_TEMP" = "$EXPECTED_RUNNER_TEMP"
           test "$ENV_GITHUB_SHA" = "action-sha"
@@ -4369,6 +4542,67 @@ printf '%s\n' 'result=nested-ok' >> "$GITHUB_OUTPUT"
 	}
 }
 
+func TestExpressionTimeoutBoundsNestedCompositePre(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: nested pre timeout\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "root/action.yml", "name: root\nruns:\n  using: composite\n  steps:\n    - uses: "+remoteLifecycleUses("child")+"\n")
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "child/pre.js", "")
+	writeFixtureFile(t, remote, "child/main.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+if [ "$(basename "$(dirname "$1")")/$(basename "$1")" = child/pre.js ]; then sleep 5; fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	rootID, childID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}, TimeoutMinutesExpression: "${{ matrix.timeout }}",
+	}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Matrix = map[string]any{"timeout": 0.001}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	started := time.Now()
+	_, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunJob() nested pre timeout error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("RunJob() nested pre took %s after expression timeout", elapsed)
+	}
+}
+
+func TestSkippedRemoteCompositeWithoutPreDoesNotEvaluateTimeout(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: skipped composite timeout\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "root/action.yml", "name: root\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: true\n")
+	digest := digestTree(t, remote)
+	rootID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}, Condition: "false", TimeoutMinutesExpression: "${{ fromJSON('invalid') }}",
+	}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(rootID, "root", digest, nil)}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	if result, err := (Runner{Actions: materializer}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() skipped composite result = %#v, error = %v", result, err)
+	}
+}
+
 func TestNestedCompositePreservesInheritedJobStatus(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -4619,7 +4853,7 @@ func TestRemoteActionPostRegistrationFollowsStartedLifecycle(t *testing.T) {
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: skipped remote lifecycle\n")
 	remote := t.TempDir()
-	writeFixtureFile(t, remote, "with-pre/action.yml", "name: with pre\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, remote, "with-pre/action.yml", "name: with pre\ninputs:\n  token:\n    required: true\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
 	for _, phase := range []string{"pre", "main", "post"} {
 		writeFixtureFile(t, remote, "with-pre/"+phase+".js", "")
 	}
@@ -4641,6 +4875,7 @@ if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
 action=$(basename "$(dirname "$1")")
 phase=$(basename "$1" .js)
 printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
+if [ "$action:$phase" = with-pre:pre ]; then test "$INPUT_TOKEN" = ghs_scoped_pre; fi
 if [ "$action:$phase" = main-fails:main ]; then exit 7; fi
 `)
 	if err := os.Chmod(fakeNode, 0o700); err != nil {
@@ -4650,13 +4885,15 @@ if [ "$action:$phase" = main-fails:main ]; then exit 7; fi
 	withPreID, withoutPreID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
 	falsePreID, mainFailsID := remoteLifecycleLockID(3), remoteLifecycleLockID(4)
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
-		{ID: "with-pre", Kind: "uses", Uses: remoteLifecycleUses("with-pre"), Action: &plan.ActionSelector{Lock: withPreID}},
+		{ID: "with-pre", Kind: "uses", Uses: remoteLifecycleUses("with-pre"), Action: &plan.ActionSelector{Lock: withPreID}, With: map[string]string{"token": "${{ github.token }}"}, Env: map[string]string{"MINUTES": "5"}, TimeoutMinutesExpression: "${{ fromJSON(env.MINUTES) }}"},
 		{ID: "without-pre", Kind: "uses", Uses: remoteLifecycleUses("without-pre"), Action: &plan.ActionSelector{Lock: withoutPreID}, Condition: "failure()"},
-		{ID: "pre-if-false", Kind: "uses", Uses: remoteLifecycleUses("pre-if-false"), Action: &plan.ActionSelector{Lock: falsePreID}, Condition: "failure()"},
+		{ID: "pre-if-false", Kind: "uses", Uses: remoteLifecycleUses("pre-if-false"), Action: &plan.ActionSelector{Lock: falsePreID}, Condition: "failure()", TimeoutMinutesExpression: "${{ fromJSON('invalid') }}"},
 		{ID: "main-fails", Kind: "uses", Uses: remoteLifecycleUses("main-fails"), Action: &plan.ActionSelector{Lock: mainFailsID}},
 	})
 	job.Schema = plan.Schema
-	job.RequiredCapabilities = []string{"network"}
+	job.RequiredCapabilities = []string{"network", "provider-token-write"}
+	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"contents": "read"}}
+	job.Event.Repository = "owner/repo"
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
 	job.Actions = []plan.ActionLock{
 		remoteLifecycleLock(withPreID, "with-pre", digest, nil),
@@ -4665,7 +4902,8 @@ if [ "$action:$phase" = main-fails:main ]; then exit 7; fi
 		remoteLifecycleLock(mainFailsID, "main-fails", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	provider := &testWorkflowTokenProvider{token: "ghs_scoped_pre"}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer, WorkflowToken: provider, Redactor: &testRedactor{}}).RunJob(context.Background(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}

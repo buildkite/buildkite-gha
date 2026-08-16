@@ -101,6 +101,7 @@ type JobInstance struct {
 	Platform                Platform                `json:"-"`
 	RuntimeImage            string                  `json:"runtime_image,omitempty"`
 	Matrix                  map[string]any          `json:"matrix,omitempty"`
+	Inputs                  map[string]any          `json:"inputs,omitempty"`
 	FailFast                *bool                   `json:"fail_fast,omitempty"`
 	MaxParallel             *int                    `json:"max_parallel,omitempty"`
 	ConcurrencyGroup        string                  `json:"concurrency_group,omitempty"`
@@ -363,7 +364,8 @@ instances:
 					ID: id, Name: step.Name, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Command: step.Run, Uses: step.Uses,
 					Shell: step.Shell, WorkingDirectory: step.WorkingDirectory,
 					Env: cloneMap(step.Env), With: cloneMap(step.With), Condition: step.If,
-					ContinueOnError: step.ContinueOnError, TimeoutMinutes: step.TimeoutMinutes, Source: &span,
+					ContinueOnError: step.ContinueOnError, ContinueOnErrorExpression: step.ContinueOnErrorExpression,
+					TimeoutMinutes: step.TimeoutMinutes, TimeoutMinutesExpression: step.TimeoutMinutesExpression, Source: &span,
 				}
 				if step.Kind == "uses" {
 					actionIndexes = append(actionIndexes, i)
@@ -505,7 +507,7 @@ instances:
 					}
 				}
 			}
-			secrets, err := requiredSecrets(instance, actionRequiredSecrets, actionInputsInspected)
+			secrets, referencesGitHubToken, err := requiredSecrets(instance, actionRequiredSecrets, actionInputsInspected)
 			if err != nil {
 				return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 			}
@@ -514,11 +516,13 @@ instances:
 			if referencesGitHubTokenSecret {
 				secrets = slices.DeleteFunc(secrets, func(name string) bool { return name == "GITHUB_TOKEN" })
 			}
-			if referencesGitHubTokenSecret || actionRequiresGitHubToken {
+			if referencesGitHubTokenSecret || referencesGitHubToken || actionRequiresGitHubToken {
 				if len(instance.Permissions) == 0 {
 					reference := "an action input default that references github.token"
 					if referencesGitHubTokenSecret {
 						reference = "secrets.GITHUB_TOKEN"
+					} else if referencesGitHubToken {
+						reference = "github.token"
 					}
 					return fmt.Errorf("%s:%d:%d: job %q references %s but has no effective permissions", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, reference)
 				}
@@ -561,6 +565,7 @@ instances:
 				RequiredSecrets:         secrets,
 				GitHubToken:             githubToken,
 				Matrix:                  instance.Matrix,
+				Inputs:                  cloneAnyMap(instance.Inputs),
 				Vars:                    cloneMap(ir.Vars),
 				Dependencies:            append([]string(nil), instance.Needs...),
 				NeedSources:             needSources,
@@ -631,9 +636,17 @@ func planConstructionFinding(instance JobInstance, err error) error {
 	}
 }
 
-func requiredSecrets(instance JobInstance, actionRequired []string, actionInputsInspected bool) ([]string, error) {
+func requiredSecrets(instance JobInstance, actionRequired []string, actionInputsInspected bool) ([]string, bool, error) {
 	found := map[string]string{}
+	referencesGitHubToken := false
 	collect := func(value string) error {
+		referencesEvent, err := expression.TemplateReferencesGitHubEvent(value)
+		if err != nil {
+			return err
+		}
+		if referencesEvent {
+			return fmt.Errorf("github.event cannot be retained in a job plan")
+		}
 		names, err := expression.SecretReferences(value)
 		if err != nil {
 			return err
@@ -641,24 +654,61 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		for _, name := range names {
 			found[name] = name
 		}
+		referencesToken, err := expression.ReferencesGitHubToken(value)
+		if err != nil {
+			return err
+		}
+		if referencesToken {
+			referencesGitHubToken = true
+		}
 		return nil
 	}
-	for _, value := range []string{instance.If, instance.DefaultShell, instance.DefaultWorkingDirectory} {
+	checkCondition := func(value string) error {
+		referencesEvent, err := expression.ReferencesGitHubEvent(value)
+		if err != nil {
+			return err
+		}
+		if referencesEvent {
+			return fmt.Errorf("github.event cannot be retained in a job plan")
+		}
+		names, err := expression.ConditionSecretReferences(value)
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
+			found[name] = name
+		}
+		referencesToken, err := expression.ConditionReferencesGitHubToken(value)
+		if err != nil {
+			return err
+		}
+		if referencesToken {
+			referencesGitHubToken = true
+		}
+		return nil
+	}
+	if err := checkCondition(instance.If); err != nil {
+		return nil, false, err
+	}
+	for _, value := range []string{instance.DefaultShell, instance.DefaultWorkingDirectory} {
 		if err := collect(value); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	for _, values := range []map[string]string{instance.Env, instance.Outputs} {
 		for _, name := range sortedValueKeys(values) {
 			if err := collect(values[name]); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 	}
 	for _, step := range instance.Steps {
-		for _, value := range []string{step.Run, step.If, step.Shell, step.WorkingDirectory} {
+		if err := checkCondition(step.If); err != nil {
+			return nil, false, err
+		}
+		for _, value := range []string{step.Name, step.Run, step.Uses, step.Shell, step.WorkingDirectory, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression} {
 			if err := collect(value); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 		valuesToInspect := []map[string]string{step.Env}
@@ -668,20 +718,41 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		for _, values := range valuesToInspect {
 			for _, name := range sortedValueKeys(values) {
 				if err := collect(values[name]); err != nil {
-					return nil, err
+					return nil, false, err
 				}
 			}
 		}
 	}
+	if instance.Container != nil {
+		for _, value := range append([]string{instance.Container.Image}, instance.Container.Ports...) {
+			if err := collect(value); err != nil {
+				return nil, false, err
+			}
+		}
+		for _, name := range sortedValueKeys(instance.Container.Env) {
+			if err := collect(instance.Container.Env[name]); err != nil {
+				return nil, false, err
+			}
+		}
+	}
 	for _, service := range instance.Services {
-		if service.Container.Credentials == nil {
-			continue
+		for _, value := range append([]string{service.Container.Image}, service.Container.Ports...) {
+			if err := collect(value); err != nil {
+				return nil, false, err
+			}
 		}
-		if err := collect(service.Container.Credentials.Username); err != nil {
-			return nil, err
+		for _, name := range sortedValueKeys(service.Container.Env) {
+			if err := collect(service.Container.Env[name]); err != nil {
+				return nil, false, err
+			}
 		}
-		if err := collect(service.Container.Credentials.Password); err != nil {
-			return nil, err
+		if service.Container.Credentials != nil {
+			if err := collect(service.Container.Credentials.Username); err != nil {
+				return nil, false, err
+			}
+			if err := collect(service.Container.Credentials.Password); err != nil {
+				return nil, false, err
+			}
 		}
 	}
 	for _, name := range actionRequired {
@@ -699,7 +770,7 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return names, nil
+	return names, referencesGitHubToken, nil
 }
 
 func planSpan(span workflow.Span) plan.Span {
@@ -951,6 +1022,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	sourceRoots := make(map[string]string, len(resolved))
 	secretAuthorities := make(map[string]bool, len(resolved))
 	needBindings := make(map[string]map[string]needBinding, len(resolved))
+	inputs := make(map[string]map[string]any, len(resolved))
 	var diagnostics []error
 	failedJobs := make(map[string]bool, len(resolved))
 	for _, sourced := range resolved {
@@ -965,6 +1037,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		sourceRoots[job.ID] = sourced.root
 		secretAuthorities[job.ID] = sourced.secretAuthority
 		needBindings[job.ID] = sourced.needBindings
+		inputs[job.ID] = sourced.inputs
 		if err := supported(sourced.path, job); err != nil {
 			diagnostics = append(diagnostics, err)
 			failedJobs[job.ID] = true
@@ -1076,6 +1149,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				Key:                     key,
 				LogicalJobID:            job.ID,
 				Matrix:                  matrix,
+				Inputs:                  cloneAnyMap(inputs[id]),
 				FailFast:                job.FailFast,
 				MaxParallel:             job.MaxParallel,
 				Steps:                   append([]workflow.Step(nil), instanceJob.Steps...),
@@ -1401,16 +1475,20 @@ func resolveCompileTimeCondition(source string, context expression.CompileContex
 		return source, false
 	}
 	resolved, err := expression.EvaluateCompileCondition(source, context)
+	if err == nil {
+		if resolved {
+			referencesStatus, _ := expression.ReferencesStatusFunction(source)
+			if referencesStatus {
+				return "always()", true
+			}
+		}
+		return strconv.FormatBool(resolved), true
+	}
+	reduced, err := expression.ReduceCompileCondition(source, context)
 	if err != nil {
 		return source, false
 	}
-	if resolved {
-		referencesStatus, _ := expression.ReferencesStatusFunction(source)
-		if referencesStatus {
-			return "always()", true
-		}
-	}
-	return strconv.FormatBool(resolved), true
+	return reduced, true
 }
 
 func supportedConditions(path string, job workflow.Job, matrix map[string]any, matrixKnown bool) error {

@@ -31,7 +31,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash` and `sh`. |
-| [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | Boolean and equality conditions and direct references to selected contexts. |
+| [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local workflows with static inputs and direct job-output mappings. Secret forwarding is unsupported. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
@@ -149,7 +149,8 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 - Local `./.github/workflows/...` paths.
 - `boolean`, `number`, and `string` inputs.
-- Static input values and defaults.
+- Static input values. Caller values may use graph-time `github`, `vars`, matrix, and parent reusable-workflow inputs with the supported operators and pure functions.
+- Literal defaults and expression defaults over graph-time `github` and `vars` values.
 - Nested calls up to four levels.
 - Caller-visible aggregate results.
 - Outputs mapped directly from `jobs.<job>.outputs.<name>`.
@@ -160,7 +161,8 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Call-level `if`.
 - Token requests from any direct or expanded job in a workflow containing a reusable-workflow call.
 - `secrets: inherit`, explicit secret mappings, or required called-workflow secrets.
-- Dynamic inputs or matrices.
+- `needs`-dependent inputs or dynamic matrices.
+- Input defaults that reference `inputs`.
 - Literal or compound output expressions.
 - Top-level concurrency in the called workflow.
 
@@ -201,7 +203,7 @@ jobs:
 
 ### Permissions
 
-**🟡 Supported subset.** Permissions matter only when a job statically references `secrets.GITHUB_TOKEN`, or an effective action input default can reach `github.token` for the event provider.
+**🟡 Supported subset.** Permissions matter only when a job statically references `secrets.GITHUB_TOKEN` or `github.token`, or an effective action input default can reach `github.token` for the event provider.
 
 A workflow-level permissions map can request repository access:
 
@@ -248,7 +250,7 @@ defaults:
 
 ### Concurrency
 
-**🟡 Supported subset with different queue behavior.** A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use `vars`, supported `github` fields, static reusable-workflow inputs, and concrete matrix values at job level. Boolean and equality operators, `fromJSON`, and the case-insensitive string functions `startsWith`, `contains`, and `endsWith` are supported when the whole expression resolves during compilation. Runtime `needs` and `strategy` values remain unsupported.
+**🟡 Supported subset with different queue behavior.** A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use `vars`, supported `github` fields, static reusable-workflow inputs, and concrete matrix values at job level. Core operators, `fromJSON`, and the case-insensitive string functions `startsWith`, `contains`, and `endsWith` are supported when the whole expression resolves during compilation. Runtime `needs` and `strategy` values remain unsupported.
 
 A workflow can set a group and cancellation expression while a job uses a matrix-derived group:
 
@@ -421,8 +423,8 @@ macOS jobs reject containers, services, Dockerfile actions, and Docker capabilit
 | `name`, `id` | ✅ Supported | Use `id` to read outputs or target background work. IDs must be unique within a job. |
 | `if` | 🟡 Supported subset | May use step status, step outputs, `env`, and service ports in addition to job-condition contexts. |
 | `env` | 🟡 Supported subset | Values override job and workflow values and may use supported direct interpolation. |
-| `continue-on-error` | ✅ Supported | A failure records `outcome: failure` and `conclusion: success`, then the job continues. |
-| `timeout-minutes` | 🟡 Supported subset | Accepts literal timeouts up to 360 minutes. Expressions are rejected. |
+| `continue-on-error` | ✅ Supported | Accepts literal booleans or expressions that produce a Boolean. A failure records `outcome: failure` and `conclusion: success`, then the job continues. |
+| `timeout-minutes` | 🟡 Supported subset | Accepts literal numbers or expressions that produce a number greater than 0 and at most 360. |
 
 A step can continue after failure and expose its outcome to a later condition:
 
@@ -510,14 +512,16 @@ Three expression modes intentionally support different syntax.
 
 | Syntax | Conditions | Runtime interpolation | Other compile-time expressions |
 | --- | --- | --- | --- |
-| `!`, `&&`, `\|\|`, `==`, `!=` | ✅ Supported | ❌ Unsupported | 🟡 When the result resolves fully |
+| `!`, `&&`, `\|\|`, `==`, `!=`, `<`, `<=`, `>`, `>=` | ✅ Supported | 🟡 Listed workflow fields | 🟡 When the result resolves fully |
 | `always()`, `success()`, `failure()`, `cancelled()` | ✅ Without arguments | ❌ Unsupported | ❌ Unsupported |
-| `fromJSON()`, case-insensitive string `startsWith()`, `contains()`, `endsWith()` | 🟡 Compile time only | ❌ Unsupported | 🟡 When the result resolves fully |
+| `startsWith()`, `contains()`, `endsWith()`, `format()`, `join()`, `toJSON()`, `fromJSON()`, `case()` | ✅ Supported | 🟡 Listed workflow fields | 🟡 When the result resolves fully |
 | `hashFiles()` | 🟡 Step `if` only | 🟡 Workflow steps only | ❌ Unsupported |
 
 ### Conditions
 
-Job and step `if` conditions support literals and the syntax listed above. Ordered comparisons and other functions are unsupported. `hashFiles()` accepts 1–255 literal or direct-reference arguments in step conditions only.
+Job and step `if` conditions support literals and the syntax listed above. Values use GitHub's truthiness, loose numeric coercion, case-insensitive string comparison, and operand-returning `&&` and `||` semantics. String functions convert primitive arguments; `contains()` also searches arrays. `case()` takes 3–255 odd-numbered arguments, requires Boolean predicates, and evaluates values lazily through the first match. Missing properties in an available `github` or matrix context evaluate to null; unavailable contexts still fail closed. Other functions are unsupported. `hashFiles()` accepts 1–255 literal or direct-reference arguments in step conditions only.
+
+Conditions support computed object indexes, numeric array indexes, whole `matrix`, `needs`, and step-scoped `steps` objects, and `.*` projections. Missing and out-of-range indexes evaluate to null. Projections omit missing children; a later wildcard flattens one collection level. The equivalent `[*]` spelling is unsupported by the current expression parser. Whole or dynamic `github` access, whole `inputs`, and the `strategy` context remain unsupported.
 
 | Context | Job `if` | Step `if` |
 | --- | --- | --- |
@@ -526,23 +530,36 @@ Job and step `if` conditions support literals and the syntax listed above. Order
 | `runner.os`, `runner.arch` | ✅ Yes | ✅ Yes |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
 | `vars.<name>`, `matrix.<name>` | ✅ Yes | ✅ Yes |
+| `inputs.<name>` and computed input indexes | ✅ Yes | ✅ Yes |
 | `steps.<id>.outcome`, `steps.<id>.conclusion`, `steps.<id>.outputs.<name>` | ❌ No | ✅ Yes |
 | `env.<name>` | ❌ No | ✅ Yes |
 | `job.services.<service>.ports[<port>]` | ❌ No | ✅ Yes |
 | `github.event.*`, including `github.event.pull_request.*` | 🟡 Compile time only | 🟡 Compile time only |
 | `secrets` and other contexts | ❌ No | ❌ No |
 
-An event-backed condition is evaluated from the immutable event snapshot before runtime validation. Every branch is validated before evaluation, so short-circuiting cannot hide an unsupported function, context, or concrete matrix type error. A condition that cannot be fully resolved at compile time cannot carry `github.event` into the runtime.
+An event-backed condition is reduced from the immutable event snapshot before runtime validation. Resolvable `github.event` subtrees become literals; supported runtime-dependent subtrees remain for job or step evaluation. Every branch is validated before reduction, so short-circuiting cannot hide an unsupported function, context, or concrete matrix type error. A residual condition cannot carry `github.event` into the runtime.
 
 ### Runtime interpolation
 
-Interpolated values support direct references only. Available contexts include `github`, `runner`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists. Top-level workflow step `run`, `env`, `with`, explicit `shell`, and explicit `working-directory` fields also support `hashFiles()` with literal or direct-reference arguments. Job fields, job outputs, job defaults, step names, and action metadata keep the direct-reference-only rule.
+Workflow step `run`, `env`, `with`, `name`, explicit `shell`, explicit `working-directory`, `continue-on-error`, and `timeout-minutes` fields support the operators and pure functions listed above. They also support computed indexes and projections over available `matrix`, `vars`, `inputs`, `env`, and `runner` values. Computed, whole, and projected `steps` and `needs` access remains unsupported so unavailable background outputs fail closed.
+
+Job-level expressions support the same operators and pure functions with these field-specific contexts:
+
+| Field | Contexts |
+| --- | --- |
+| `env` | `github`, `needs`, `matrix`, `vars`, `secrets`, `inputs` |
+| `defaults.run` | `github`, `needs`, `matrix`, `env`, `vars`, `inputs` |
+| `outputs` | `github`, `needs`, `matrix`, `runner`, `env`, `vars`, `secrets`, `steps`, `inputs` |
+
+These workflow step fields support `hashFiles()`; job-level fields do not. General runtime interpolation and action metadata keep the direct-reference-only rule. The GitHub-authorized `strategy` context, and `job` in job outputs, remain unsupported because the runtime does not carry equivalent context values. Computed, whole, and projected `steps` and `needs` access also remains unsupported in job-level fields.
+
+Expression-valued `continue-on-error` must produce a Boolean. Expression-valued `timeout-minutes` must produce a number greater than 0 and at most 360.
+
+Direct `github.token` references are step-only. Whole, filtered, or dynamically indexed `github` access fails closed because the compiler cannot prove token authority.
 
 The only runner references are `runner.os` and `runner.arch`. They resolve to
-`Linux`/`X64` or `macOS`/`ARM64`. Runtime interpolation does not evaluate
-operators or functions; use the supported condition syntax in job or step
-`if`. Other runner fields and compile-time positions that require runner
-identity are unsupported.
+`Linux`/`X64` or `macOS`/`ARM64`. Other runner fields and compile-time positions
+that require runner identity are unsupported.
 
 A runtime interpolation can read a verified upstream output directly:
 
@@ -560,7 +577,7 @@ Patterns cannot be absolute, contain a `..` path segment, or contain ASCII contr
 
 ### Compile-time expressions
 
-Matrices, runner labels, names, concurrency groups, and event-backed conditions may use statically known `github`, `event`, `vars`, and matrix values. They support the compile-time syntax listed above where the complete expression resolves during compilation. Values derived from runtime `needs` or `steps` are unsupported.
+Matrices, runner labels, names, concurrency groups, and event-backed conditions may use statically known `github`, `event`, `vars`, and matrix values. They support the compile-time syntax listed above, computed indexes, numeric array indexes, and `.*` projections where the complete expression resolves during compilation. Whole or dynamic `github` access and whole-event serialization remain unsupported. Event-backed conditions may also combine reducible event subtrees with supported runtime condition values such as `needs` and status functions.
 
 ## Actions
 
@@ -742,7 +759,7 @@ JavaScript and Docker actions with compatible bundled cache clients also receive
 
 ### GitHub token
 
-**🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or by using an action whose effective input default can reach `github.token` for the event provider. A `github.server_url == 'https://github.com'` guard skips the token branch for an Origin event repository. Native action adapters ignore upstream input defaults, so `actions/checkout` alone does not request a token. Effective `permissions` determine the token scope. The Buildkite organization feature and the pipeline's workflow access token setting must be enabled. Both are disabled by default.
+**🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or `github.token`, or by using an action whose effective input default can reach `github.token` for the event provider. A `github.server_url == 'https://github.com'` guard skips the token branch for an Origin event repository. Native action adapters ignore upstream input defaults, so `actions/checkout` alone does not request a token. Effective `permissions` determine the token scope. The Buildkite organization feature and the pipeline's workflow access token setting must be enabled. Both are disabled by default.
 
 Buildkite reads the workflow policy from the pipeline repository at the build's immutable commit. The workflow must be directly under `.github/workflows/`, use a simple `.yml` or `.yaml` filename, and contain no job-level permission maps or reusable-workflow jobs. The workflow-token endpoint must interpret omitted top-level permissions as exactly `contents: read`, without consulting GitHub repository or organization defaults. Write access requires an explicit, non-empty top-level map. An explicit empty map or scopes resolving only to `none` produce no token.
 
@@ -767,7 +784,7 @@ jobs:
 
 The server restricts pull requests, merge queues, and their descendants. For other builds, job binding does not establish that an arbitrary commit is trusted. Restrict who can create builds and enable write tokens only when branch builds run trusted code.
 
-The token is not added to the initial job environment. The `github.token` value is available only while evaluating an effective action metadata input default. Workflow-authored `github.token` and automatic ambient `GITHUB_TOKEN` are unsupported.
+The token is not added to the initial job environment. Direct workflow-authored `github.token` references are available during step execution and use the same scoped token as `secrets.GITHUB_TOKEN`. Effective action metadata input defaults can also use `github.token`. Automatic ambient `GITHUB_TOKEN` is unsupported.
 
 ### Other secrets and OIDC
 
