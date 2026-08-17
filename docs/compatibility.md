@@ -46,6 +46,17 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers are outside the initial release. |
 | [Other GitHub services](#github-services) | ❌ Unsupported | No general emulation for Releases, Packages, Checks, deployments, or GitHub artifact APIs. |
 
+## Outside the initial scope
+
+Windows execution is outside the initial product scope. `buildkite-gha`
+currently targets Linux x86-64 and native macOS arm64. It rejects Windows
+runner labels instead of mapping them to a different platform.
+
+Compatibility analysis should distinguish this scope boundary from features
+that could be added to the supported platforms. This distinction does not
+change validation: Windows workflows remain unsupported and appear in raw
+corpus results.
+
 ## How workflows run on Buildkite
 
 GitHub Actions combines run creation and workload definition in one file. Buildkite keeps them separate.
