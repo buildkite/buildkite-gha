@@ -229,20 +229,14 @@ func cancelledStepExecution(jobCtx, runCtx context.Context, step plan.Step) step
 	return classifyStepExecution(jobCtx, runCtx, step, newResult(), err)
 }
 
-func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *expression.Context, statuses map[string]expression.StepStatus) error {
+func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *expression.Context) error {
 	id := strings.ToLower(execution.step.ID)
-	eval.Steps[id] = execution.result.Outputs
+	eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: execution.result.Outputs}
 	commitResultEnvironment(jobResult.Env, execution.result)
 	eval.Env = jobResult.Env
 	mergeInto(jobResult.State, execution.result.State)
 	appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, execution.result.Summary, execution.result.summaryTruncated)
 	jobResult.Artifacts = append(jobResult.Artifacts, execution.result.Artifacts...)
-	status := expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: execution.result.Outputs}
-	statuses[id] = status
-	if eval.StepStatuses == nil {
-		eval.StepStatuses = make(map[string]expression.StepStatus)
-	}
-	eval.StepStatuses[id] = status
 	if execution.conclusion != "success" {
 		return fmt.Errorf("step %q: %w", execution.step.ID, execution.err)
 	}
@@ -272,8 +266,7 @@ func cloneExpressionContext(in expression.Context) expression.Context {
 		Inputs:           inputs,
 		WorkflowInputs:   cloneAnyMap(in.WorkflowInputs),
 		Matrix:           cloneAnyMap(in.Matrix),
-		Steps:            cloneNestedStrings(in.Steps),
-		StepStatuses:     cloneStepStatuses(in.StepStatuses),
+		Steps:            cloneStepStatuses(in.Steps),
 		Needs:            cloneNestedStrings(in.Needs),
 		NeedResults:      cloneStrings(in.NeedResults),
 		Secrets:          cloneStrings(in.Secrets),

@@ -33,8 +33,7 @@ type Expression struct {
 	Span Span   `json:"span"`
 }
 
-// StepStatus contains the values exposed for one completed step while
-// evaluating a condition.
+// StepStatus contains the runtime values exposed for one completed step.
 type StepStatus struct {
 	Outcome    string
 	Conclusion string

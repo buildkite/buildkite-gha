@@ -354,8 +354,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	eval := expression.Context{
 		WorkflowInputs: job.Inputs,
 		Matrix:         job.Matrix,
-		Steps:          make(map[string]map[string]string, len(job.Steps)),
-		StepStatuses:   make(map[string]expression.StepStatus, len(job.Steps)),
+		Steps:          make(map[string]expression.StepStatus, len(job.Steps)),
 		Needs:          needOutputs(job.Needs),
 		NeedResults:    needResults(job.Needs),
 		Vars:           job.Vars,
@@ -615,7 +614,6 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	}
 	eval.Env = jobResult.Env
 	var posts postRegistry
-	statuses := eval.StepStatuses
 	supervisor := newBackgroundSupervisor(maxActiveBackgroundSteps)
 
 	var runErr error
@@ -686,13 +684,12 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
 		if step.Kind == "cancel" {
 			for _, execution := range supervisor.cancel(step.Targets[0]) {
-				targetErr := commitStepExecution(execution, &jobResult, &eval, statuses)
+				targetErr := commitStepExecution(execution, &jobResult, &eval)
 				if execution.conclusion != "cancelled" {
 					runErr = errors.Join(runErr, targetErr)
 				}
 			}
-			statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "success", Conclusion: "success", Outputs: map[string]string{}}
-			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
+			eval.Steps[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "success", Conclusion: "success", Outputs: map[string]string{}}
 			continue
 		}
 		if step.Kind == "wait" || step.Kind == "wait-all" {
@@ -704,7 +701,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}
 			var barrierErr error
 			for _, execution := range completed {
-				barrierErr = errors.Join(barrierErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+				barrierErr = errors.Join(barrierErr, commitStepExecution(execution, &jobResult, &eval))
 			}
 			outcome, conclusion := "success", "success"
 			if barrierErr != nil {
@@ -715,23 +712,21 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				conclusion = outcome
 				runErr = errors.Join(runErr, fmt.Errorf("step %q: %w", step.ID, barrierErr))
 			}
-			statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: outcome, Conclusion: conclusion, Outputs: map[string]string{}}
-			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
+			eval.Steps[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: outcome, Conclusion: conclusion, Outputs: map[string]string{}}
 			continue
 		}
 		if execution, ok := preFailures[stepIndex]; ok {
-			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
 			continue
 		}
 		referencesStatus, err := expression.ReferencesStatusFunction(step.Condition)
 		if err != nil {
 			execution := classifyStepExecution(ctx, runCtx, step, newResult(), fmt.Errorf("condition: %w", err))
-			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
 			continue
 		}
 		if !referencesStatus && (runErr != nil || runCtx.Err() != nil) {
-			statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
-			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
+			eval.Steps[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
 			continue
 		}
 		evaluationCtx, cancelEvaluation := stepContext(runCtx, step.TimeoutMinutes)
@@ -741,29 +736,28 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("environment: %w", err), stepEval)
 			cancelEvaluation()
-			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
 			continue
 		}
 		stepEval.Env = mergeStringMaps(stepEval.Env, stepEnv)
-		condition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
+		condition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: eval.Steps, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
 		run, err := expression.EvaluateCondition(step.Condition, condition)
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("condition: %w", err), stepEval)
 			cancelEvaluation()
-			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
 			continue
 		}
 		if !run {
 			cancelEvaluation()
-			statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
-			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
+			eval.Steps[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
 			continue
 		}
 		step, err = evaluateStepTimeout(step, stepEval)
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("controls: %w", err), stepEval)
 			cancelEvaluation()
-			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
 			continue
 		}
 		cancelEvaluation()
@@ -773,7 +767,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, stepCtx, step, newResult(), fmt.Errorf("name: %w", err), stepEval)
 			cancelStep()
-			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
 			continue
 		}
 
@@ -803,10 +797,10 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			processor.expandCurrentSection()
 			jobResult.failureVisible = true
 		}
-		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
 	}
 	for _, execution := range supervisor.waitAll() {
-		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
 	}
 	if runCtx.Err() != nil {
 		runErr = errors.Join(runErr, runCtx.Err())
@@ -2037,9 +2031,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 	eval.HashFiles = nil
 	eval.HashFilesContext = nil
 	eval.Inputs = inputs
-	eval.Steps = make(map[string]map[string]string)
-	eval.StepStatuses = make(map[string]expression.StepStatus)
-	statuses := eval.StepStatuses
+	eval.Steps = make(map[string]expression.StepStatus)
 	compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
 	compositeProcessEnv["GITHUB_ACTION_PATH"] = actionPath
 	compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
@@ -2061,7 +2053,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		for name, value := range eval.Inputs {
 			inputs[name] = value
 		}
-		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
+		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: eval.Steps, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
 		run, err := expression.EvaluateCondition(step.If, condition)
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d condition: %w", i+1, err))
@@ -2069,8 +2061,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		}
 		if !run {
 			if id != "" {
-				eval.Steps[id] = map[string]string{}
-				statuses[id] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
+				eval.Steps[id] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
 			}
 			continue
 		}
@@ -2130,12 +2121,11 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		mergeInto(result.State, stepResult.State)
 		appendJobSummary(&result.Summary, &result.summaryTruncated, stepResult.Summary, stepResult.summaryTruncated)
 		if id != "" {
-			eval.Steps[id] = stepResult.Outputs
 			outcome := "success"
 			if childErr != nil {
 				outcome = "failure"
 			}
-			statuses[id] = expression.StepStatus{Outcome: outcome, Conclusion: outcome, Outputs: stepResult.Outputs}
+			eval.Steps[id] = expression.StepStatus{Outcome: outcome, Conclusion: outcome, Outputs: stepResult.Outputs}
 		}
 		if childErr != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d: %w", i+1, childErr))

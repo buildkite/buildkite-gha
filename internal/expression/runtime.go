@@ -12,13 +12,12 @@ import (
 	"github.com/rhysd/actionlint"
 )
 
-// Context contains the compile-time values available while evaluating a template.
+// Context contains the runtime values available while evaluating a template.
 type Context struct {
 	Inputs           map[string]string
 	WorkflowInputs   map[string]any
 	Matrix           map[string]any
-	Steps            map[string]map[string]string
-	StepStatuses     map[string]StepStatus
+	Steps            map[string]StepStatus
 	Needs            map[string]map[string]string
 	NeedResults      map[string]string
 	Secrets          map[string]string
@@ -456,16 +455,8 @@ func resolveStepRuntimeRoot(root string, context Context) (any, error) {
 		return map[string]any{"services": services}, nil
 	case "steps":
 		steps := make(map[string]any)
-		for name, outputs := range context.Steps {
-			steps[name] = map[string]any{"outputs": outputs}
-		}
-		for name, status := range context.StepStatuses {
-			step, _ := steps[name].(map[string]any)
-			if step == nil {
-				step = map[string]any{"outputs": map[string]string{}}
-				steps[name] = step
-			}
-			step["outcome"], step["conclusion"] = status.Outcome, status.Conclusion
+		for name, step := range context.Steps {
+			steps[name] = map[string]any{"outputs": step.Outputs, "outcome": step.Outcome, "conclusion": step.Conclusion}
 		}
 		return steps, nil
 	case "needs":
@@ -579,24 +570,20 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 	case runtimeReferenceEnv:
 		return findString(context.Env, path[0]), nil
 	case runtimeReferenceStepOutput:
-		outputs, ok := findOutputs(context.Steps, path[0])
+		step, ok := findStepStatus(context.Steps, path[0])
 		if !ok {
 			return "", fmt.Errorf("expression references unavailable step %q", path[0])
 		}
-		return findString(outputs, path[2]), nil
+		return findString(step.Outputs, path[2]), nil
 	case runtimeReferenceStepStatus:
-		for candidate, status := range context.StepStatuses {
-			if !strings.EqualFold(candidate, path[0]) {
-				continue
-			}
-			switch {
-			case strings.EqualFold(path[1], "outcome"):
-				return status.Outcome, nil
-			case strings.EqualFold(path[1], "conclusion"):
-				return status.Conclusion, nil
-			}
+		step, ok := findStepStatus(context.Steps, path[0])
+		if !ok {
+			return "", fmt.Errorf("expression references unavailable step %q", path[0])
 		}
-		return "", fmt.Errorf("expression references unavailable step %q", path[0])
+		if strings.EqualFold(path[1], "outcome") {
+			return step.Outcome, nil
+		}
+		return step.Conclusion, nil
 	case runtimeReferenceNeedOutput:
 		outputs, ok := findOutputs(context.Needs, path[0])
 		if !ok {
@@ -688,6 +675,15 @@ func findStringValue(values map[string]string, name string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func findStepStatus(values map[string]StepStatus, name string) (StepStatus, bool) {
+	for candidate, status := range values {
+		if strings.EqualFold(candidate, name) {
+			return status, true
+		}
+	}
+	return StepStatus{}, false
 }
 
 func findOutputs(values map[string]map[string]string, name string) (map[string]string, bool) {
