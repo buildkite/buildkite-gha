@@ -84,7 +84,7 @@ buildkite-gha validate-batch \
   --action-resolution-snapshot .buildkite-gha-action-resolutions
 ```
 
-Each JSON Lines manifest record requires `id`, `repository`, `path`, `hash`, and `source` fields. Batch validation applies the hosted profile to all declared supported events and writes one `processing-report/v3` JSON file per workflow. It uses one worker per CPU by default; set `--jobs` to override the worker count. It publishes each report atomically and resumes valid reports keyed by the corpus ID, record identity, actual workflow content, validator executable digest, and action-resolution snapshot generation.
+Each JSON Lines manifest record requires `id`, `repository`, `path`, `hash`, and `source` fields. Batch validation applies the hosted profile to all declared supported events and writes one `processing-report/v3` JSON file per workflow. It uses one worker per CPU by default; set `--jobs` to override the worker count. It publishes each report atomically and resumes valid reports keyed by the corpus ID, record identity, workflow and repository-local dependency content, validator executable digest, and action-resolution snapshot generation. Records with unresolved local dependencies are reprocessed instead of resumed.
 
 `--action-cache-max-bytes` requires `--action-cache-dir`. It evicts the least recently used immutable action trees until the cache is within the byte budget. Concurrent validators protect entries while reading or publishing them. Maintenance also removes abandoned partial entries; active partial entries remain locked. The public corpus script defaults to 20 GiB, leaving headroom on a 64 GB orb.
 

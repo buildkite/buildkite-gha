@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1128,6 +1129,135 @@ func TestActionResolutionSnapshotPinsAndRefreshesMutableRefs(t *testing.T) {
 	resolved, err = third.Resolve(context.Background(), ref)
 	if err != nil || resolved.Commit != nextSHA || requests.Load() != 2 || third.ResolutionSnapshotID() == firstGeneration {
 		t.Fatalf("refreshed resolution = %#v, %v; requests %d; generation %q", resolved, err, requests.Load(), third.ResolutionSnapshotID())
+	}
+}
+
+func TestActionResolutionSnapshotRetriesStorageFailures(t *testing.T) {
+	original := actionResolutionSnapshotStorage
+	t.Cleanup(func() { actionResolutionSnapshotStorage = original })
+	failure := errors.New("injected storage failure")
+
+	t.Run("generation publication preserves current", func(t *testing.T) {
+		for _, operation := range []string{"create", "write", "short write", "close", "rename"} {
+			t.Run(operation, func(t *testing.T) {
+				actionResolutionSnapshotStorage = original
+				root := t.TempDir()
+				prior, err := newActionResolutionSnapshot(root, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				injectActionResolutionSnapshotStorageFailure(t, operation, failure)
+				wantErr := failure
+				if operation == "short write" {
+					wantErr = io.ErrShortWrite
+				}
+				if _, err := newActionResolutionSnapshot(root, true); !errors.Is(err, wantErr) {
+					t.Fatalf("refresh error = %v, want %v", err, wantErr)
+				}
+				actionResolutionSnapshotStorage = original
+				retried, err := newActionResolutionSnapshot(root, false)
+				if err != nil || retried.generation != prior.generation {
+					t.Fatalf("retry = %#v, %v; want generation %q", retried, err, prior.generation)
+				}
+			})
+		}
+	})
+
+	t.Run("generation initialization can retry", func(t *testing.T) {
+		for _, operation := range []string{"create", "write", "short write", "close", "rename"} {
+			t.Run(operation, func(t *testing.T) {
+				actionResolutionSnapshotStorage = original
+				root := t.TempDir()
+				injectActionResolutionSnapshotStorageFailure(t, operation, failure)
+				wantErr := failure
+				if operation == "short write" {
+					wantErr = io.ErrShortWrite
+				}
+				if _, err := newActionResolutionSnapshot(root, false); !errors.Is(err, wantErr) {
+					t.Fatalf("initialization error = %v, want %v", err, wantErr)
+				}
+				actionResolutionSnapshotStorage = original
+				if _, err := newActionResolutionSnapshot(root, false); err != nil {
+					t.Fatalf("retry: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("entry publication can retry", func(t *testing.T) {
+		for _, operation := range []string{"claim create", "claim close", "entry create", "entry write", "entry short write", "entry close", "entry rename"} {
+			t.Run(operation, func(t *testing.T) {
+				actionResolutionSnapshotStorage = original
+				snapshot, err := newActionResolutionSnapshot(t.TempDir(), false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ref, _ := Parse("owner/repo@v1")
+				injectActionResolutionSnapshotStorageFailure(t, operation, failure)
+				resolve := func(context.Context, Reference) (Resolved, error) {
+					return Resolved{Reference: ref, Commit: testSHA}, nil
+				}
+				wantErr := failure
+				if operation == "entry short write" {
+					wantErr = io.ErrShortWrite
+				}
+				if _, err := snapshot.resolve(context.Background(), ref, resolve); !errors.Is(err, wantErr) {
+					t.Fatalf("first resolution error = %v, want %v", err, wantErr)
+				}
+				actionResolutionSnapshotStorage = original
+				resolved, err := snapshot.resolve(context.Background(), ref, resolve)
+				if err != nil || resolved.Commit != testSHA {
+					t.Fatalf("retry = %#v, %v", resolved, err)
+				}
+			})
+		}
+	})
+}
+
+func injectActionResolutionSnapshotStorageFailure(t *testing.T, operation string, failure error) {
+	t.Helper()
+	original := actionResolutionSnapshotStorage
+	failed := false
+	shouldFail := func(want string) bool {
+		if !failed && operation == want {
+			failed = true
+			return true
+		}
+		return false
+	}
+	actionResolutionSnapshotStorage.createTemp = func(dir, pattern string) (*os.File, error) {
+		if shouldFail("create") || shouldFail("entry create") {
+			return nil, failure
+		}
+		return original.createTemp(dir, pattern)
+	}
+	actionResolutionSnapshotStorage.openFile = func(path string, flag int, perm os.FileMode) (*os.File, error) {
+		if shouldFail("claim create") {
+			return nil, failure
+		}
+		return original.openFile(path, flag, perm)
+	}
+	actionResolutionSnapshotStorage.write = func(file *os.File, data []byte) (int, error) {
+		if shouldFail("write") || shouldFail("entry write") {
+			return 0, failure
+		}
+		if shouldFail("short write") || shouldFail("entry short write") {
+			return len(data) - 1, nil
+		}
+		return original.write(file, data)
+	}
+	actionResolutionSnapshotStorage.close = func(file *os.File) error {
+		if shouldFail("close") || shouldFail("claim close") || shouldFail("entry close") {
+			_ = file.Close()
+			return failure
+		}
+		return original.close(file)
+	}
+	actionResolutionSnapshotStorage.rename = func(oldPath, newPath string) error {
+		if shouldFail("rename") || shouldFail("entry rename") {
+			return failure
+		}
+		return original.rename(oldPath, newPath)
 	}
 }
 

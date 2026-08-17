@@ -1281,6 +1281,9 @@ func discoverNodeContext(ctx context.Context, major int, explicit, managedRoot s
 		command.Env = processEnv(nil)
 		output, err := command.CombinedOutput()
 		if err != nil {
+			if cause := context.Cause(ctx); cause != nil {
+				return "", fmt.Errorf("node %d discovery for %s: %w", major, candidate, cause)
+			}
 			failures = append(failures, fmt.Sprintf("%s: %v", candidate, err))
 			continue
 		}

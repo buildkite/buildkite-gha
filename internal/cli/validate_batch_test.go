@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -71,6 +73,250 @@ func TestValidateBatchWritesAndResumesAtomicReports(t *testing.T) {
 	if code := Run(args, &stdout, &stderr, "dev"); code != 0 || !strings.Contains(stderr.String(), "wrote 1 reports; resumed 1") {
 		t.Fatalf("resumed Run() = %d, stderr %q", code, stderr.String())
 	}
+}
+
+func TestValidateBatchCacheTracksLocalCompilationDependencies(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		workflow   string
+		dependency string
+		before     string
+		after      string
+	}{
+		{
+			name:       "reusable workflow",
+			workflow:   "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n",
+			dependency: ".github/workflows/reusable.yml",
+			before:     "on:\n  workflow_call:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo before\n",
+			after:      "on:\n  workflow_call:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo after\n",
+		},
+		{
+			name:       "action source",
+			workflow:   "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./action\n",
+			dependency: "action/index.js",
+			before:     "console.log('before')\n",
+			after:      "console.log('after')\n",
+		},
+		{
+			name:       "action metadata",
+			workflow:   "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./action\n",
+			dependency: "action/action.yml",
+			before:     "name: Before\nruns:\n  using: node24\n  main: index.js\n",
+			after:      "name: After\nruns:\n  using: node24\n  main: index.js\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			workflowPath := filepath.Join(root, ".github", "workflows", "ci.yml")
+			if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(workflowPath, []byte(test.workflow), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dependencyPath := filepath.Join(root, filepath.FromSlash(test.dependency))
+			if err := os.MkdirAll(filepath.Dir(dependencyPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasPrefix(test.dependency, "action/") {
+				if test.dependency != "action/action.yml" {
+					if err := os.WriteFile(filepath.Join(root, "action", "action.yml"), []byte("runs:\n  using: node24\n  main: index.js\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(filepath.Join(root, "action", "index.js"), []byte("console.log('ok')\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(dependencyPath, []byte(test.before), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			record := batchValidationRecord{ID: "one", Repository: "owner/repo", Path: ".github/workflows/ci.yml", Hash: strings.Repeat("1", 64), Source: workflowPath}
+			manifest := writeBatchManifest(t, root, []batchValidationRecord{record})
+			args := []string{"validate-batch", "--manifest", manifest, "--output-dir", filepath.Join(root, "reports"), "--corpus-id", "corpus", "--action-resolution-snapshot", filepath.Join(root, "resolutions"), "--jobs", "1"}
+			runBatch := func(want string) {
+				t.Helper()
+				var stdout, stderr bytes.Buffer
+				if code := Run(args, &stdout, &stderr, "dev"); code != 0 || !strings.Contains(stderr.String(), want) {
+					t.Fatalf("Run() = %d, stderr %q, want %q", code, stderr.String(), want)
+				}
+			}
+			runBatch("wrote 1 reports; resumed 0")
+			runBatch("wrote 0 reports; resumed 1")
+			if err := os.WriteFile(dependencyPath, []byte(test.after), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runBatch("wrote 1 reports; resumed 0")
+		})
+	}
+}
+
+func TestValidateBatchRemoteActionStillUsesResolutionSnapshotCacheKey(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "ci.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: owner/action@v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := batchValidationRecord{ID: "one", Repository: "owner/repo", Path: ".github/workflows/ci.yml", Hash: strings.Repeat("1", 64), Source: workflowPath}
+	captured, err := captureBatchValidationRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !captured.resumable {
+		t.Fatal("remote-only workflow was not resumable")
+	}
+	options := batchValidationArgs{outputDir: root, corpusID: "corpus"}
+	first := batchValidationResultPath(options, captured, "validator", "snapshot-one")
+	second := batchValidationResultPath(options, captured, "validator", "snapshot-two")
+	if first == second {
+		t.Fatal("remote action resolution snapshot did not affect cache key")
+	}
+}
+
+func TestBatchValidationCacheTracksRepositoryRootAction(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "ci.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "action.yml"), []byte("runs:\n  using: node24\n  main: index.js\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(root, "index.js")
+	if err := os.WriteFile(sourcePath, []byte("console.log('before')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := batchValidationRecord{Source: workflowPath}
+	before, err := captureBatchValidationRecord(record)
+	if err != nil || !before.resumable {
+		t.Fatalf("initial capture = %#v, %v", before, err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("console.log('after')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := captureBatchValidationRecord(record)
+	if err != nil || !after.resumable || after.contentID == before.contentID {
+		t.Fatalf("changed capture = %#v, %v; want new resumable identity", after, err)
+	}
+}
+
+func TestBatchValidationDisablesResumptionForUnresolvedLocalDependencies(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		source   string
+		workflow string
+	}{
+		{name: "missing reusable workflow", source: ".github/workflows/ci.yml", workflow: "on: push\njobs:\n  call:\n    uses: ./.github/workflows/missing.yml\n"},
+		{name: "missing local action", source: ".github/workflows/ci.yml", workflow: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./missing\n"},
+		{name: "unknown repository root", source: "ci.yml", workflow: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./action\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, filepath.FromSlash(test.source))
+			if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(source, []byte(test.workflow), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			captured, err := captureBatchValidationRecord(batchValidationRecord{Source: source})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if captured.resumable {
+				t.Fatal("record with unresolved local dependency was resumable")
+			}
+		})
+	}
+}
+
+func TestBatchValidationDisablesResumptionForEscapingReusableWorkflowSymlink(t *testing.T) {
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, ".github", "workflows")
+	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflowPath := filepath.Join(workflowDir, "ci.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(t.TempDir(), "reusable.yml")
+	if err := os.WriteFile(external, []byte("on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(workflowDir, "reusable.yml")); err != nil {
+		t.Fatal(err)
+	}
+	captured, err := captureBatchValidationRecord(batchValidationRecord{Source: workflowPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if captured.resumable {
+		t.Fatal("record with escaping reusable workflow symlink was resumable")
+	}
+}
+
+func TestBatchValidationDependencyWalkUsesCompilerDepthBounds(t *testing.T) {
+	t.Run("reusable workflows", func(t *testing.T) {
+		root := t.TempDir()
+		workflowDir := filepath.Join(root, ".github", "workflows")
+		if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for depth := 0; depth <= compiler.MaxReusableWorkflowDepth+1; depth++ {
+			name := fmt.Sprintf("depth-%d.yml", depth)
+			source := "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
+			if depth <= compiler.MaxReusableWorkflowDepth {
+				source = fmt.Sprintf("on: workflow_call\njobs:\n  call:\n    uses: ./.github/workflows/depth-%d.yml\n", depth+1)
+			}
+			if err := os.WriteFile(filepath.Join(workflowDir, name), []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		captured, err := captureBatchValidationRecord(batchValidationRecord{Source: filepath.Join(workflowDir, "depth-0.yml")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if captured.resumable {
+			t.Fatal("workflow beyond compiler depth bound was resumable")
+		}
+	})
+
+	t.Run("local actions", func(t *testing.T) {
+		root := t.TempDir()
+		workflowPath := filepath.Join(root, ".github", "workflows", "ci.yml")
+		if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./action-0\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for depth := 0; depth <= metadata.MaxNestedActionDepth+1; depth++ {
+			actionDir := filepath.Join(root, fmt.Sprintf("action-%d", depth))
+			if err := os.Mkdir(actionDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			source := "runs:\n  using: node24\n  main: index.js\n"
+			if depth <= metadata.MaxNestedActionDepth {
+				source = fmt.Sprintf("runs:\n  using: composite\n  steps:\n    - uses: ./action-%d\n", depth+1)
+			}
+			if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		captured, err := captureBatchValidationRecord(batchValidationRecord{Source: workflowPath})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if captured.resumable {
+			t.Fatal("action beyond compiler depth bound was resumable")
+		}
+	})
 }
 
 func TestBatchValidationReusesActionResolutionAcrossWorkflows(t *testing.T) {

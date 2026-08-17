@@ -12,14 +12,18 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
+	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
 const batchResultIdentity = "buildkite-gha-corpus-result/v1"
@@ -39,6 +43,7 @@ type batchValidationRecord struct {
 	Source     string `json:"source"`
 	contentID  string
 	content    []byte
+	resumable  bool
 }
 
 type synchronizedWriter struct {
@@ -116,7 +121,7 @@ func validateBatch(args []string, stderr io.Writer, version string) int {
 				}
 				record = captured
 				resultPath := batchValidationResultPath(options, record, distributionDigest, resolutionSnapshotID)
-				if validBatchValidationResult(resultPath, record.Source) {
+				if record.resumable && validBatchValidationResult(resultPath, record.Source) {
 					resumed.Add(1)
 					continue
 				}
@@ -270,10 +275,154 @@ func captureBatchValidationRecord(record batchValidationRecord) (batchValidation
 	if err != nil {
 		return batchValidationRecord{}, fmt.Errorf("read workflow source: %w", err)
 	}
+	record.content = contents
+	record.contentID, record.resumable = localCompilationDependencyDigest(record.Source, contents)
+	if record.resumable {
+		return record, nil
+	}
 	contentDigest := sha256.Sum256(contents)
 	record.contentID = hex.EncodeToString(contentDigest[:])
-	record.content = contents
 	return record, nil
+}
+
+// localCompilationDependencyDigest identifies the repository-local inputs the
+// compiler can read in addition to the captured root workflow. A false result
+// disables resumption rather than caching an incomplete dependency closure.
+func localCompilationDependencyDigest(workflowPath string, contents []byte) (string, bool) {
+	absPath, err := filepath.Abs(filepath.Clean(workflowPath))
+	if err != nil {
+		return "", false
+	}
+	if filepath.Base(filepath.Dir(absPath)) != "workflows" || filepath.Base(filepath.Dir(filepath.Dir(absPath))) != ".github" {
+		parsed, parseErr := workflow.Parse(absPath, contents)
+		if parseErr != nil {
+			return "", false
+		}
+		for _, job := range parsed.Jobs {
+			if job.Reusable != nil && strings.HasPrefix(job.Reusable.Uses, "./") {
+				return "", false
+			}
+			for _, step := range job.Steps {
+				if strings.HasPrefix(step.Uses, "./") {
+					return "", false
+				}
+			}
+		}
+		digest := sha256.Sum256(contents)
+		return hex.EncodeToString(digest[:]), true
+	}
+	root, err := filepath.EvalSymlinks(filepath.Dir(filepath.Dir(filepath.Dir(absPath))))
+	if err != nil {
+		return "", false
+	}
+	withinRoot := func(path string) bool {
+		relative, err := filepath.Rel(root, path)
+		return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	}
+	absPath, err = filepath.EvalSymlinks(absPath)
+	if err != nil || !withinRoot(absPath) {
+		return "", false
+	}
+	hash := sha256.New()
+	seenWorkflows := map[string]bool{}
+	actions := map[string]bool{}
+	var visit func(string, []byte, int) bool
+	visit = func(path string, source []byte, depth int) bool {
+		relative, err := filepath.Rel(root, path)
+		if err != nil || !withinRoot(path) {
+			return false
+		}
+		if seenWorkflows[relative] {
+			return true
+		}
+		seenWorkflows[relative] = true
+		parsed, err := workflow.Parse(path, source)
+		if err != nil {
+			return false
+		}
+		_, _ = fmt.Fprintf(hash, "workflow\x00%s\x00%d\x00", filepath.ToSlash(relative), len(source))
+		_, _ = hash.Write(source)
+		for _, job := range parsed.Jobs {
+			if job.Reusable != nil {
+				if depth >= compiler.MaxReusableWorkflowDepth {
+					return false
+				}
+				uses := job.Reusable.Uses
+				relative := filepath.Clean(filepath.FromSlash(strings.TrimPrefix(uses, "./")))
+				if !strings.HasPrefix(uses, "./") || strings.Contains(uses, "${{") || filepath.Dir(relative) != filepath.Join(".github", "workflows") {
+					return false
+				}
+				callee, err := filepath.EvalSymlinks(filepath.Join(root, relative))
+				if err != nil || !withinRoot(callee) {
+					return false
+				}
+				calleeSource, err := os.ReadFile(callee)
+				if err != nil || !visit(callee, calleeSource, depth+1) {
+					return false
+				}
+			}
+			for _, step := range job.Steps {
+				if strings.Contains(step.Uses, "${{") {
+					return false
+				}
+				if strings.HasPrefix(step.Uses, "./") {
+					path := strings.TrimPrefix(step.Uses, "./")
+					if path != "" && (filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))) != path || strings.Contains(path, "\\")) {
+						return false
+					}
+					actions[path] = true
+				}
+			}
+		}
+		return true
+	}
+	if !visit(absPath, contents, 0) {
+		return "", false
+	}
+	paths := make([]string, 0, len(actions))
+	for path := range actions {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	seenActions := map[string]bool{}
+	var visitAction func(string, int) bool
+	visitAction = func(path string, depth int) bool {
+		if depth > metadata.MaxNestedActionDepth {
+			return false
+		}
+		if seenActions[path] {
+			return true
+		}
+		seenActions[path] = true
+		action, err := metadata.Load(root, path)
+		if err != nil {
+			return false
+		}
+		digest, err := actionsource.DigestTree(action.Path)
+		if err != nil {
+			return false
+		}
+		_, _ = fmt.Fprintf(hash, "action\x00%s\x00%s\x00", path, digest)
+		for _, step := range action.Runs.Steps {
+			if strings.Contains(step.Uses, "${{") {
+				return false
+			}
+			if !strings.HasPrefix(step.Uses, "./") {
+				continue
+			}
+			nested := strings.TrimPrefix(step.Uses, "./")
+			if nested != "" && (filepath.ToSlash(filepath.Clean(filepath.FromSlash(nested))) != nested || strings.Contains(nested, "\\")) || !visitAction(nested, depth+1) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, path := range paths {
+		if !visitAction(path, 0) {
+			return "", false
+		}
+	}
+	return hex.EncodeToString(hash.Sum(nil)), true
 }
 
 func batchValidationResultPath(options batchValidationArgs, record batchValidationRecord, validatorDigest, resolutionSnapshotID string) string {
@@ -339,6 +488,13 @@ func writeBatchValidationResult(path string, record batchValidationRecord, versi
 	defer func() { _ = os.Remove(temporaryPath) }()
 	out := processingOutput{command: "validate-batch", format: "json", reports: temporary, stderr: stderr}
 	_ = validateAllEventsSource(out, record.Source, record.content, version, actionCacheDir, runtime, stderr)
+	if record.resumable {
+		contentID, complete := localCompilationDependencyDigest(record.Source, record.content)
+		if !complete || contentID != record.contentID {
+			_ = temporary.Close()
+			return fmt.Errorf("local compilation dependencies changed during validation")
+		}
+	}
 	if err := temporary.Sync(); err != nil {
 		_ = temporary.Close()
 		return fmt.Errorf("sync report: %w", err)

@@ -4172,6 +4172,28 @@ func TestDiscoverNodeManagedAndWrongExplicitVersion(t *testing.T) {
 	}
 }
 
+func TestDiscoverNodePreservesDeadline(t *testing.T) {
+	node := filepath.Join(t.TempDir(), "node")
+	if err := os.WriteFile(node, []byte("#!/bin/sh\nexec sleep 5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	_, err := discoverNodeContext(ctx, 24, node, "")
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "node 24 discovery") {
+		t.Fatalf("discoverNodeContext(24) error = %v, want contextual deadline exceeded", err)
+	}
+
+	if err := os.WriteFile(node, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err = discoverNodeContext(context.Background(), 24, node, "")
+	if err == nil || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "exit status 7") {
+		t.Fatalf("discoverNodeContext(24) error = %v, want genuine discovery failure", err)
+	}
+}
+
 func TestMiseNodeSelectionIsExactAndConfigFree(t *testing.T) {
 	root := canonicalTempDir(t)
 	log := filepath.Join(root, "args")

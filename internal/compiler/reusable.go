@@ -17,7 +17,8 @@ import (
 )
 
 const (
-	maxReusableWorkflowDepth = 4
+	// MaxReusableWorkflowDepth bounds repository-local reusable workflow expansion.
+	MaxReusableWorkflowDepth = 4
 	maxFlattenedJobs         = 1024
 )
 
@@ -131,7 +132,7 @@ func hasReusableCall(parsed *workflow.Workflow) bool {
 
 func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(parsed *workflow.Workflow, depth int, scannedAtDepth map[string]int) {
 	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
-	if depth >= maxReusableWorkflowDepth {
+	if depth >= MaxReusableWorkflowDepth {
 		resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasReusableCall(parsed)
 		return
 	}
@@ -239,8 +240,8 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 		if call.Secrets {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow secret forwarding is unsupported")
 		}
-		if depth >= maxReusableWorkflowDepth {
-			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow nesting exceeds maximum depth %d", maxReusableWorkflowDepth))
+		if depth >= MaxReusableWorkflowDepth {
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow nesting exceeds maximum depth %d", MaxReusableWorkflowDepth))
 		}
 		calleePath, err := resolver.localWorkflowPath(call.Uses)
 		if err != nil {
