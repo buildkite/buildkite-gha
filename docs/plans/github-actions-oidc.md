@@ -106,7 +106,7 @@ action-time parameters:
 | --- | --- |
 | `--audience` | Query parameter; the only knob the GitHub contract gives actions |
 | `--lifetime` | Fixed API default (five minutes) |
-| `--claim`, `--aws-session-tag`, `--subject-claim` | Plugin `oidc` configuration applied to every mint (later slice) |
+| `--claim`, `--aws-session-tag`, `--subject-claim` | Plugin `oidc` configuration applied to every mint |
 | `--format gcp` | Not needed; `google-github-actions/auth` consumes the raw JWT |
 | `--skip-redaction` | Never; both redactors always apply |
 
