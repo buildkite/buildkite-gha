@@ -563,6 +563,28 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsSupportsNestedRunnerDebugDefault(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "github-script", `name: GitHub Script
+inputs:
+  debug:
+    default: ${{ runner.debug == '1' }}
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, workspace, "parent", `name: Parent
+runs:
+  using: composite
+  steps:
+    - uses: ./github-script
+`)
+
+	if _, err := compileActionInvocations(context.Background(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil}); err != nil {
+		t.Fatalf("compile nested github-script action: %v", err)
+	}
+}
+
 func TestCompilePlansScopesGitHubTokenForEffectiveActionDefaults(t *testing.T) {
 	w := t.TempDir()
 	workflowPath := filepath.Join(w, ".github", "workflows", "token.yml")
