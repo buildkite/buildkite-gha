@@ -13,8 +13,7 @@ import (
 // job or step condition.
 type ConditionContext struct {
 	Inputs       map[string]any
-	Needs        map[string]map[string]string
-	NeedResults  map[string]string
+	Needs        map[string]NeedStatus
 	Steps        map[string]StepStatus
 	Env          map[string]string
 	Vars         map[string]string
@@ -433,13 +432,8 @@ func resolveConditionRoot(root string, context ConditionContext) (any, error) {
 		return context.Env, nil
 	case "needs":
 		needs := make(map[string]any)
-		for name, outputs := range context.Needs {
-			needs[name] = map[string]any{"outputs": outputs, "result": context.NeedResults[name]}
-		}
-		for name, result := range context.NeedResults {
-			if _, ok := needs[name]; !ok {
-				needs[name] = map[string]any{"outputs": map[string]string{}, "result": result}
-			}
+		for name, status := range context.Needs {
+			needs[name] = map[string]any{"outputs": status.Outputs, "result": status.Result}
 		}
 		return needs, nil
 	case "steps":
@@ -542,14 +536,12 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		}
 		return nil, nil
 	case len(path) == 2 && strings.EqualFold(root, "needs") && strings.EqualFold(path[1], "result"):
-		for name, result := range context.NeedResults {
-			if strings.EqualFold(name, path[0]) {
-				return result, nil
-			}
+		if status, ok := findNeedStatus(context.Needs, path[0]); ok {
+			return status.Result, nil
 		}
 	case len(path) == 3 && strings.EqualFold(root, "needs") && strings.EqualFold(path[1], "outputs"):
-		if outputs, ok := findOutputs(context.Needs, path[0]); ok {
-			return findString(outputs, path[2]), nil
+		if status, ok := findNeedStatus(context.Needs, path[0]); ok {
+			return findString(status.Outputs, path[2]), nil
 		}
 	case len(path) == 2 && strings.EqualFold(root, "steps"):
 		for name, step := range context.Steps {

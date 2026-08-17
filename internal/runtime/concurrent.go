@@ -267,8 +267,7 @@ func cloneExpressionContext(in expression.Context) expression.Context {
 		WorkflowInputs:   cloneAnyMap(in.WorkflowInputs),
 		Matrix:           cloneAnyMap(in.Matrix),
 		Steps:            cloneStepStatuses(in.Steps),
-		Needs:            cloneNestedStrings(in.Needs),
-		NeedResults:      cloneStrings(in.NeedResults),
+		Needs:            cloneNeedStatuses(in.Needs),
 		Secrets:          cloneStrings(in.Secrets),
 		Vars:             cloneStrings(in.Vars),
 		Env:              cloneStrings(in.Env),
@@ -302,10 +301,11 @@ func cloneStepStatuses(in map[string]expression.StepStatus) map[string]expressio
 	return out
 }
 
-func cloneNestedStrings(in map[string]map[string]string) map[string]map[string]string {
-	out := make(map[string]map[string]string, len(in))
-	for name, values := range in {
-		out[name] = cloneStrings(values)
+func cloneNeedStatuses(in map[string]expression.NeedStatus) map[string]expression.NeedStatus {
+	out := make(map[string]expression.NeedStatus, len(in))
+	for name, status := range in {
+		status.Outputs = cloneStrings(status.Outputs)
+		out[name] = status
 	}
 	return out
 }

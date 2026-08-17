@@ -1392,6 +1392,26 @@ func TestCloneExpressionContextDeepCopiesStepOutputs(t *testing.T) {
 	}
 }
 
+func TestCloneExpressionContextDeepCopiesNeedOutputs(t *testing.T) {
+	source := expression.Context{Needs: map[string]expression.NeedStatus{
+		"build": {Outputs: map[string]string{"result": "source"}, Result: "success"},
+	}}
+
+	cloned := cloneExpressionContext(source)
+	status := cloned.Needs["build"]
+	status.Result = "failure"
+	status.Outputs["result"] = "clone"
+	cloned.Needs["build"] = status
+	cloned.Needs["added"] = expression.NeedStatus{}
+
+	if got := source.Needs["build"]; got.Result != "success" || got.Outputs["result"] != "source" {
+		t.Fatalf("source need changed through clone: %#v", got)
+	}
+	if _, ok := source.Needs["added"]; ok {
+		t.Fatal("source needs map changed through clone")
+	}
+}
+
 func TestConcurrentPathEffectsComposeWithLiveBarrierState(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -2372,6 +2392,33 @@ func TestExplicitCancelTerminatesBackgroundProcessGroup(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("explicitly canceled child process %d survived", pid)
+}
+
+func TestNeedStatusesCopiesOnlyExpressionVisibleState(t *testing.T) {
+	outputs := map[string]string{"release": "v1"}
+	needs := map[string]plan.Need{
+		"producer": {
+			Result:    "success",
+			Outputs:   outputs,
+			Artifacts: []plan.NeedArtifact{{Name: "private-runtime-authority"}},
+		},
+	}
+
+	got := needStatuses(needs)
+	want := map[string]expression.NeedStatus{
+		"producer": {Outputs: map[string]string{"release": "v1"}, Result: "success"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("needStatuses() = %#v, want %#v", got, want)
+	}
+	outputs["release"] = "plan"
+	if got["producer"].Outputs["release"] != "v1" {
+		t.Fatalf("expression output changed through plan: %#v", got)
+	}
+	got["producer"].Outputs["release"] = "expression"
+	if outputs["release"] != "plan" {
+		t.Fatalf("plan output changed through expression state: %#v", outputs)
+	}
 }
 
 func TestJobConditionConsumesNeedResultAndOutput(t *testing.T) {

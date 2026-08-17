@@ -12,14 +12,19 @@ import (
 	"github.com/rhysd/actionlint"
 )
 
+// NeedStatus contains the expression-visible state of one prerequisite.
+type NeedStatus struct {
+	Outputs map[string]string
+	Result  string
+}
+
 // Context contains the runtime values available while evaluating a template.
 type Context struct {
 	Inputs           map[string]string
 	WorkflowInputs   map[string]any
 	Matrix           map[string]any
 	Steps            map[string]StepStatus
-	Needs            map[string]map[string]string
-	NeedResults      map[string]string
+	Needs            map[string]NeedStatus
 	Secrets          map[string]string
 	Vars             map[string]string
 	Env              map[string]string
@@ -461,13 +466,8 @@ func resolveStepRuntimeRoot(root string, context Context) (any, error) {
 		return steps, nil
 	case "needs":
 		needs := make(map[string]any)
-		for name, outputs := range context.Needs {
-			needs[name] = map[string]any{"outputs": outputs, "result": context.NeedResults[name]}
-		}
-		for name, result := range context.NeedResults {
-			if _, ok := needs[name]; !ok {
-				needs[name] = map[string]any{"outputs": map[string]string{}, "result": result}
-			}
+		for name, status := range context.Needs {
+			needs[name] = map[string]any{"outputs": status.Outputs, "result": status.Result}
 		}
 		return needs, nil
 	default:
@@ -585,16 +585,14 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 		}
 		return step.Conclusion, nil
 	case runtimeReferenceNeedOutput:
-		outputs, ok := findOutputs(context.Needs, path[0])
+		status, ok := findNeedStatus(context.Needs, path[0])
 		if !ok {
 			return "", fmt.Errorf("expression references unavailable need %q", path[0])
 		}
-		return findString(outputs, path[2]), nil
+		return findString(status.Outputs, path[2]), nil
 	case runtimeReferenceNeedResult:
-		for candidate, result := range context.NeedResults {
-			if strings.EqualFold(candidate, path[0]) {
-				return result, nil
-			}
+		if status, ok := findNeedStatus(context.Needs, path[0]); ok {
+			return status.Result, nil
 		}
 		return "", fmt.Errorf("expression references unavailable need %q", path[0])
 	default:
@@ -686,11 +684,11 @@ func findStepStatus(values map[string]StepStatus, name string) (StepStatus, bool
 	return StepStatus{}, false
 }
 
-func findOutputs(values map[string]map[string]string, name string) (map[string]string, bool) {
-	for candidate, outputs := range values {
+func findNeedStatus(values map[string]NeedStatus, name string) (NeedStatus, bool) {
+	for candidate, status := range values {
 		if strings.EqualFold(candidate, name) {
-			return outputs, true
+			return status, true
 		}
 	}
-	return nil, false
+	return NeedStatus{}, false
 }
