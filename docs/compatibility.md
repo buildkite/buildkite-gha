@@ -617,6 +617,10 @@ Nested calls from a repository-local composite must be local. Public composites 
 
 Pre, main, and post phases; inputs; outputs; state; and LIFO post ordering are supported. Other Node declarations are rejected.
 
+JavaScript action `pre-if` and `post-if` metadata uses the condition operators, status functions, and pure functions described in [Conditions](#conditions). Lifecycle conditions can read `env`, `github`, `job.services`, `matrix`, `runner`, and `steps`. Other contexts and `hashFiles()` fail closed. An empty lifecycle condition always runs and does not receive an implicit `success()` guard.
+
+Pre conditions use the status and action-scoped environment available when preparation reaches the action. Post conditions run during job teardown and use the final job status and environment, including `GITHUB_ENV` changes from main. Root action posts also see final workflow step state. Nested composite actions retain their isolated step context. Cancellation remains distinct from failure, and posts keep LIFO order.
+
 ### Checkout action
 
 **🟡 Supported subset.** The final v3.7.0 release commit is admitted exactly. Resolved commits in the v4-and-later range of the static [`actions/checkout` upstream `main` snapshot](https://github.com/actions/checkout/tree/f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a) are also admitted. The following known releases remain admitted even when their commits aren't reachable from that snapshot:

@@ -3103,6 +3103,7 @@ func TestJavaScriptPostConditionsUseFinalJobStatus(t *testing.T) {
 		{name: "success after success", condition: "success()", wantPost: true, wantStatus: "success"},
 		{name: "success after failure", condition: "${{ success() }}", failMain: true, wantFailure: true},
 		{name: "failure after failure", condition: "failure()", failMain: true, wantPost: true, wantStatus: "failure", wantFailure: true},
+		{name: "final step state after failure", condition: "failure() && steps.conditional.outcome == 'failure'", failMain: true, wantPost: true, wantStatus: "failure", wantFailure: true},
 		{name: "always after failure", condition: "always()", failMain: true, wantPost: true, wantStatus: "failure", wantFailure: true},
 		{name: "not cancelled after success", condition: "!cancelled()", wantPost: true, wantStatus: "success"},
 		{name: "not cancelled after failure", condition: "!cancelled()", failMain: true, wantPost: true, wantStatus: "failure", wantFailure: true},
@@ -3144,6 +3145,112 @@ if [ "${1##*/}" = main.js ] && [ "${FAIL_MAIN:-false}" = true ]; then exit 9; fi
 				}
 			}
 		})
+	}
+}
+
+func TestRustCachePostConditionUsesFinalStatusAndMainEnvironment(t *testing.T) {
+	tests := []struct {
+		name       string
+		failJob    bool
+		cacheValue string
+		wantPost   bool
+	}{
+		{name: "success", wantPost: true},
+		{name: "failure default", failJob: true},
+		{name: "failure disabled", failJob: true, cacheValue: "false"},
+		{name: "failure enabled", failJob: true, cacheValue: "true", wantPost: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: rust-cache lifecycle\n")
+			writeFixtureFile(t, workspace, ".github/actions/rust-cache/action.yml", `name: rust-cache
+runs:
+  using: node24
+  main: main.js
+  post: post.js
+  post-if: success() || env.CACHE_ON_FAILURE == 'true'
+`)
+			writeFixtureFile(t, workspace, ".github/actions/rust-cache/main.js", "")
+			writeFixtureFile(t, workspace, ".github/actions/rust-cache/post.js", "")
+			fakeNode := filepath.Join(workspace, "node24")
+			writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+case "$(basename "$1")" in
+  main.js)
+    if [ -n "${CACHE_SETTING:-}" ]; then printf 'CACHE_ON_FAILURE=%s\n' "$CACHE_SETTING" >> "$GITHUB_ENV"; fi
+    ;;
+  post.js) touch "$POST_MARKER" ;;
+esac
+`)
+			if err := os.Chmod(fakeNode, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(workspace, "post")
+			steps := []plan.Step{{ID: "cache", Kind: "uses", Uses: "./.github/actions/rust-cache"}}
+			if test.failJob {
+				steps = append(steps, plan.Step{ID: "fail", Kind: "run", Command: "exit 7"})
+			}
+			job := runtimePlan(t, workspace, workflowPath, steps)
+			job.Env = map[string]string{"CACHE_SETTING": test.cacheValue, "POST_MARKER": marker}
+			result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+			if (err != nil) != test.failJob || (result.Conclusion == "failure") != test.failJob {
+				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+			}
+			_, statErr := os.Stat(marker)
+			if got := statErr == nil; got != test.wantPost {
+				t.Fatalf("post ran = %v, want %v (stat error %v)", got, test.wantPost, statErr)
+			}
+		})
+	}
+}
+
+func TestNestedSetupRustToolchainPostUsesMainEnvironmentAtJobTeardown(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: nested rust-cache lifecycle\n")
+	writeFixtureFile(t, workspace, ".github/actions/setup-rust-toolchain/action.yml", `name: setup-rust-toolchain
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/rust-cache
+`)
+	writeFixtureFile(t, workspace, ".github/actions/rust-cache/action.yml", `name: rust-cache
+runs:
+  using: node24
+  main: main.js
+  post: post.js
+  post-if: success() || env.CACHE_ON_FAILURE == 'true'
+`)
+	writeFixtureFile(t, workspace, ".github/actions/rust-cache/main.js", "")
+	writeFixtureFile(t, workspace, ".github/actions/rust-cache/post.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+case "$(basename "$1")" in
+  main.js) printf '%s\n' 'CACHE_ON_FAILURE=true' >> "$GITHUB_ENV" ;;
+  post.js) touch "$POST_MARKER" ;;
+esac
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(workspace, "post")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "setup", Kind: "uses", Uses: "./.github/actions/setup-rust-toolchain"},
+		{ID: "not-yet", Kind: "run", Command: `test ! -e "$POST_MARKER"`},
+		{ID: "fail", Kind: "run", Command: "exit 7"},
+	})
+	job.Env = map[string]string{"POST_MARKER": marker}
+	result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("nested rust-cache post did not run during teardown: %v", err)
 	}
 }
 
@@ -5125,7 +5232,7 @@ func TestRemoteActionPostRegistrationFollowsStartedLifecycle(t *testing.T) {
 	writeFixtureFile(t, remote, "without-pre/action.yml", "name: without pre\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
 	writeFixtureFile(t, remote, "without-pre/main.js", "")
 	writeFixtureFile(t, remote, "without-pre/post.js", "")
-	writeFixtureFile(t, remote, "pre-if-false/action.yml", "name: pre condition false\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: failure()\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, remote, "pre-if-false/action.yml", "name: pre condition false\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: success() && env.RUN_PRE == 'true'\n  main: main.js\n  post: post.js\n")
 	for _, phase := range []string{"pre", "main", "post"} {
 		writeFixtureFile(t, remote, "pre-if-false/"+phase+".js", "")
 	}

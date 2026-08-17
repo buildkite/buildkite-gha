@@ -36,6 +36,9 @@ const (
 	JobCondition ConditionScope = iota
 	// StepCondition is evaluated while a job is running.
 	StepCondition
+	// ActionLifecycleCondition is evaluated for action pre-if and post-if
+	// metadata. It has its own context policy and no implicit success guard.
+	ActionLifecycleCondition
 )
 
 // ValidateCondition verifies that a job or step condition uses only expression
@@ -49,6 +52,23 @@ func ValidateCondition(source string, scope ConditionScope) error {
 // types against one concrete, statically expanded matrix instance.
 func ValidateConditionWithMatrix(source string, scope ConditionScope, matrix map[string]any) error {
 	return validateCondition(source, scope, matrix, true)
+}
+
+// ValidateActionLifecycleCondition verifies an action pre-if or post-if
+// expression without resolving runtime-dependent values.
+func ValidateActionLifecycleCondition(source string) error {
+	if err := validateLifecycleDelimiters(source); err != nil {
+		return err
+	}
+	return validateCondition(source, ActionLifecycleCondition, nil, false)
+}
+
+func validateLifecycleDelimiters(source string) error {
+	condition := strings.TrimSpace(source)
+	if strings.HasPrefix(condition, "${{") != strings.HasSuffix(condition, "}}") {
+		return fmt.Errorf("parse condition: mismatched expression delimiters")
+	}
+	return nil
 }
 
 // ValidateCompileConditionWithMatrix verifies every branch of an event-backed
@@ -95,6 +115,9 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 			}
 			return nil
 		case "hashfiles":
+			if scope == ActionLifecycleCondition {
+				return fmt.Errorf("condition function %q is unsupported in action lifecycle conditions", node.Callee)
+			}
 			if scope != StepCondition {
 				return fmt.Errorf("condition function %q is unavailable in job conditions", node.Callee)
 			}
@@ -183,6 +206,13 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 	reference := root
 	if len(path) != 0 {
 		reference += "." + strings.Join(path, ".")
+	}
+	if scope == ActionLifecycleCondition {
+		switch strings.ToLower(root) {
+		case "env", "github", "job", "matrix", "runner", "steps":
+		default:
+			return fmt.Errorf("lifecycle condition context %q is unsupported", root)
+		}
 	}
 	switch strings.ToLower(root) {
 	case "runner":
@@ -297,32 +327,30 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 	return validationErr
 }
 
-// EvaluateActionLifecycleCondition evaluates an action pre-if or post-if
-// condition against the supplied lifecycle state. The accepted grammar is
-// deliberately narrower than general conditions: exactly one status function,
-// or !cancelled(), with optional ${{ }} delimiters. An empty condition is
-// unconditionally true (unlike general conditions, which apply the implicit
-// success guard), failure() means unsuccessful and not cancelled, and any
-// other expression fails closed with an error.
-func EvaluateActionLifecycleCondition(value string, unsuccessful, cancelled bool) (bool, error) {
-	value = strings.TrimSpace(value)
-	if strings.HasPrefix(value, "${{") && strings.HasSuffix(value, "}}") {
-		value = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "${{"), "}}"))
+// EvaluateActionLifecycleCondition evaluates action pre-if or post-if
+// metadata. Empty conditions are unconditionally true and, unlike workflow
+// step conditions, lifecycle conditions have no implicit success guard.
+func EvaluateActionLifecycleCondition(source string, context ConditionContext) (bool, error) {
+	if err := validateLifecycleDelimiters(source); err != nil {
+		return false, err
 	}
-	switch strings.ToLower(value) {
-	case "", "always()":
+	node, empty, err := parseCondition(source)
+	if err != nil {
+		return false, err
+	}
+	if empty {
 		return true, nil
-	case "success()":
-		return !unsuccessful && !cancelled, nil
-	case "failure()":
-		return unsuccessful && !cancelled, nil
-	case "cancelled()":
-		return cancelled, nil
-	case "!cancelled()":
-		return !cancelled, nil
-	default:
-		return false, fmt.Errorf("condition %q is unsupported", value)
 	}
+	// Validate before evaluation so short-circuiting cannot hide an
+	// unsupported context or function in an unselected branch.
+	if err := validateConditionNode(node, ActionLifecycleCondition, nil, false); err != nil {
+		return false, err
+	}
+	value, err := evaluateConditionNode(node, context)
+	if err != nil {
+		return false, err
+	}
+	return githubTruthy(value), nil
 }
 
 // EvaluateCondition evaluates a job or step condition. Unsupported syntax and
