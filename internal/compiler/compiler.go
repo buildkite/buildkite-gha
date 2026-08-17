@@ -317,6 +317,10 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 	var diagnostics []error
 	planDigests := make(map[string]string, len(ir.Jobs))
 	actionSource := newMemoizedActionSource(options.ActionSource)
+	workflowName := ir.Workflow.Name
+	if workflowName == "" {
+		workflowName = canonicalWorkflowName(ir.Workflow.Path)
+	}
 instances:
 	for _, instance := range ir.Jobs {
 		for _, dependency := range instance.Needs {
@@ -558,6 +562,7 @@ instances:
 				Runtime: &plan.Runtime{DistributionDigest: runtimeDistributionDigest},
 				Workflow: plan.Workflow{
 					Path:         instance.SourcePath,
+					Name:         workflowName,
 					Digest:       instance.SourceDigest,
 					LogicalJobID: instance.LogicalJobID,
 				},

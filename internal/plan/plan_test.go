@@ -23,7 +23,7 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
-	if job.Compiler.DistributionDigest == "" || job.Event.PayloadDigest == "" || job.Event.HeadRef != "feature/head-ref" || job.Target.StepKey != "gha-test" {
+	if job.Compiler.DistributionDigest == "" || job.Workflow.Name != "CI" || job.Event.PayloadDigest == "" || job.Event.HeadRef != "feature/head-ref" || job.Target.StepKey != "gha-test" {
 		t.Fatalf("decoded fixture lost trust bindings: %#v", job)
 	}
 	validateJobPlanSchema(t, source)
@@ -680,7 +680,7 @@ func validJob() Job {
 		Schema:               Schema,
 		Compiler:             Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
 		Runtime:              &Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
-		Workflow:             Workflow{Path: ".github/workflows/ci.yml", Digest: "sha256:" + strings.Repeat("0", 64), LogicalJobID: "test"},
+		Workflow:             Workflow{Path: ".github/workflows/ci.yml", Name: "CI", Digest: "sha256:" + strings.Repeat("0", 64), LogicalJobID: "test"},
 		Event:                Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
 		Target:               Target{StepKey: "gha-test", Queue: "ubuntu-latest"},
 		RequiredCapabilities: []string{},
