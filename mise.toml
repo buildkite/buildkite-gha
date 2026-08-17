@@ -79,7 +79,8 @@ run = "./scripts/starter-workflows-corpus --profile"
 
 [tasks."corpus:public"]
 description = "Validate the public GitHub Actions workflow corpus"
-run = "./scripts/validate-public-workflow-corpus"
+dir = "{{cwd}}"
+run = '"$MISE_CONFIG_ROOT/scripts/validate-public-workflow-corpus"'
 
 [tasks.check]
 description = "Run formatting, build, tests, lint, vet, and fixture checks"
