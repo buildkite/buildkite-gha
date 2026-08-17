@@ -280,10 +280,10 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 	if err := yaml.Unmarshal(output, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document.Steps) != 2 || document.Steps[0].Group != ":github: CI" || document.Steps[0].Key != "gha-workflow-1111111111111111" || document.Steps[0].Condition != `build.source_event == "push"` || document.Steps[0].DependsOn != "importer" || document.Steps[0].Notify != nil || len(document.Steps[0].Steps) != 1 || document.Steps[0].Steps[0].Key != "gha-1111111111111111-test" || len(document.Steps[0].Steps[0].Notify) != 1 || document.Steps[0].Steps[0].Notify[0].GitHubCheck.Name != "CI / Test (push)" {
+	if len(document.Steps) != 2 || document.Steps[0].Group != "[:github: workflow] CI" || document.Steps[0].Key != "gha-workflow-1111111111111111" || document.Steps[0].Condition != `build.source_event == "push"` || document.Steps[0].DependsOn != "importer" || document.Steps[0].Notify != nil || len(document.Steps[0].Steps) != 1 || document.Steps[0].Steps[0].Key != "gha-1111111111111111-test" || len(document.Steps[0].Steps[0].Notify) != 1 || document.Steps[0].Steps[0].Notify[0].GitHubCheck.Name != "CI / Test (push)" {
 		t.Fatalf("first aggregate group = %#v\n%s", document.Steps, output)
 	}
-	if document.Steps[1].Group != ":github: .github/workflows/release.yml" || document.Steps[1].Key != "gha-workflow-2222222222222222" || document.Steps[1].DependsOn != "importer" || document.Steps[1].Notify != nil || len(document.Steps[1].Steps) != 1 || document.Steps[1].Steps[0].Key != "gha-2222222222222222-test" || len(document.Steps[1].Steps[0].Notify) != 1 || document.Steps[1].Steps[0].Notify[0].GitHubCheck.Name != ".github/workflows/release.yml / Test \"quoted\"\nnext (workflow_dispatch)" {
+	if document.Steps[1].Group != "[:github: workflow] .github/workflows/release.yml" || document.Steps[1].Key != "gha-workflow-2222222222222222" || document.Steps[1].DependsOn != "importer" || document.Steps[1].Notify != nil || len(document.Steps[1].Steps) != 1 || document.Steps[1].Steps[0].Key != "gha-2222222222222222-test" || len(document.Steps[1].Steps[0].Notify) != 1 || document.Steps[1].Steps[0].Notify[0].GitHubCheck.Name != ".github/workflows/release.yml / Test \"quoted\"\nnext (workflow_dispatch)" {
 		t.Fatalf("second aggregate group = %#v\n%s", document.Steps[1], output)
 	}
 	for _, group := range document.Steps {
@@ -464,7 +464,7 @@ func TestEmitAggregateSkippedWorkflowStep(t *testing.T) {
 		t.Fatalf("skipped aggregate steps = %#v\n%s", document.Steps, output)
 	}
 	step := document.Steps[0]
-	if step.Group != "" || step.Label != ":github: Pull request" || step.Key != "gha-workflow-1111111111111111" || step.Type != "command" || step.Condition != "" || step.Skip != "This workflow is not triggered by a `push` event" || step.Command != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Pull request (push)" || len(step.Steps) != 0 || !step.Checkout.Skip {
+	if step.Group != "" || step.Label != "[:github: workflow] Pull request" || step.Key != "gha-workflow-1111111111111111" || step.Type != "command" || step.Condition != "" || step.Skip != "This workflow is not triggered by a `push` event" || step.Command != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Pull request (push)" || len(step.Steps) != 0 || !step.Checkout.Skip {
 		t.Fatalf("skipped aggregate step = %#v\n%s", step, output)
 	}
 }
@@ -537,7 +537,7 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 	if !ok {
 		t.Fatalf("failure step plugins = %#v", step.Plugins)
 	}
-	if step.Group != "" || len(step.Steps) != 0 || step.Label != ":github: CI" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "" || step.Skip != "" || plugin.Step != "importer" || len(plugin.Download) != 2 || plugin.Download[0].From != ".buildkite-gha/failures/messages/message.txt" || plugin.Download[0].To != ".buildkite-gha-failure-message.txt" || plugin.Download[1].From != ".buildkite-gha/failures/annotations/annotation.html" || plugin.Download[1].To != ".buildkite-gha-failure-annotation.html" || step.DependsOn != "importer" || step.Retry.Manual == nil || step.Retry.Manual.Allowed || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "CI (push)" || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded" || step.Command != `cat .buildkite-gha-failure-message.txt
+	if step.Group != "" || len(step.Steps) != 0 || step.Label != "[:github: workflow] CI" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "" || step.Skip != "" || plugin.Step != "importer" || len(plugin.Download) != 2 || plugin.Download[0].From != ".buildkite-gha/failures/messages/message.txt" || plugin.Download[0].To != ".buildkite-gha-failure-message.txt" || plugin.Download[1].From != ".buildkite-gha/failures/annotations/annotation.html" || plugin.Download[1].To != ".buildkite-gha-failure-annotation.html" || step.DependsOn != "importer" || step.Retry.Manual == nil || step.Retry.Manual.Allowed || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "CI (push)" || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded" || step.Command != `cat .buildkite-gha-failure-message.txt
 buildkite-agent annotate --scope=job --style=error < .buildkite-gha-failure-annotation.html
 exit 1` || !step.Checkout.Skip {
 		t.Fatalf("failure step = %#v", step)
