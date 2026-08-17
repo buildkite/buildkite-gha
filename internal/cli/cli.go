@@ -2807,7 +2807,11 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 				continue
 			}
 			if capability == "provider-token-write" {
-				filename, filenameErr := plan.GitHubWorkflowPolicyFilename(artifact.Job.Workflow.Path)
+				filename := ""
+				if artifact.Job.GitHubToken != nil {
+					filename = artifact.Job.GitHubToken.Workflow
+				}
+				filenameErr := plan.ValidateGitHubWorkflowPolicyFilename(filename)
 				if artifact.Job.GitHubToken == nil || !slices.Equal(artifact.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) || filenameErr != nil || artifact.Authorization.WorkflowTokenPolicyFilename == "" || artifact.Authorization.WorkflowTokenPolicyFilename != filename {
 					reason := bundle.IR.Workflow.WorkflowTokenPolicyDiagnostic
 					if reason == "" {

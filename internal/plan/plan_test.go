@@ -435,7 +435,7 @@ func TestRuntimeDistributionRoundTripAndSchema(t *testing.T) {
 		}},
 		{name: "unknown GitHub permission", edit: func(document map[string]any) {
 			document["required_capabilities"] = []any{"provider-token-write"}
-			document["github_token"] = map[string]any{"permissions": map[string]any{"future_permission": "read"}}
+			document["github_token"] = map[string]any{"workflow": "ci.yml", "permissions": map[string]any{"future_permission": "read"}}
 			document["event"].(map[string]any)["repository"] = "buildkite/buildkite-gha"
 		}},
 		{name: "incomplete GitHub action lock", edit: func(document map[string]any) {
@@ -846,7 +846,7 @@ func TestGitHubWorkflowTokenContractAndSchema(t *testing.T) {
 	job := validJob()
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
-	job.GitHubToken = &GitHubToken{Permissions: map[string]string{"contents": "read", "pull_requests": "write"}}
+	job.GitHubToken = &GitHubToken{Workflow: "ci.yml", Permissions: map[string]string{"contents": "read", "pull_requests": "write"}}
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -899,6 +899,7 @@ func TestGitHubWorkflowTokenContractAndSchema(t *testing.T) {
 	}{
 		{name: "missing capability", edit: func(j *Job) { j.RequiredCapabilities = []string{} }, want: "declared together"},
 		{name: "missing token", edit: func(j *Job) { j.GitHubToken = nil }, want: "declared together"},
+		{name: "missing workflow", edit: func(j *Job) { j.GitHubToken.Workflow = "" }, want: "simple .yml or .yaml filename"},
 		{name: "unknown permission", edit: func(j *Job) { j.GitHubToken.Permissions = map[string]string{"administration": "write"} }, want: "unsupported permission"},
 		{name: "invalid access", edit: func(j *Job) { j.GitHubToken.Permissions = map[string]string{"contents": "admin"} }, want: "unsupported permission"},
 		{name: "reserved ambient secret", edit: func(j *Job) {
@@ -915,7 +916,7 @@ func TestGitHubWorkflowTokenContractAndSchema(t *testing.T) {
 			for name, access := range job.GitHubToken.Permissions {
 				permissions[name] = access
 			}
-			changed.GitHubToken = &GitHubToken{Permissions: permissions}
+			changed.GitHubToken = &GitHubToken{Workflow: job.GitHubToken.Workflow, Permissions: permissions}
 			test.edit(&changed)
 			if err := changed.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Validate() error = %v, want %q", err, test.want)

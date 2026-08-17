@@ -194,7 +194,7 @@ func ParseWorkflow(path string, source []byte) (Report, error) {
 	if err != nil {
 		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
-	return Report{LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency, false)}, nil
+	return Report{LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed, false)}, nil
 }
 
 func expansionReport(expanded expansionResult, warnings []Warning) Report {
@@ -243,9 +243,9 @@ func ValidateWithOptions(path string, source []byte, options Options) (Report, e
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
 	expanded, expandErr := expand(path, source, parsed, context, options)
 	if err := errors.Join(optionsErr, triggerErr, concurrencyErr, cancellationErr, expandErr); err != nil {
-		return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), err
+		return expansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
-	return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), nil
+	return expansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), nil
 }
 
 // ValidateEvent validates both the supported static graph and its event input.
@@ -277,7 +277,7 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 		}
 		return Report{
 			LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed),
-			Warnings: compilerWarnings(parsed.Concurrency, false), NotEvaluatedJobs: notEvaluatedJobs,
+			Warnings: compilerWarnings(parsed, false), NotEvaluatedJobs: notEvaluatedJobs,
 		}, errors.Join(parseErr, eventErr, optionsErr)
 	}
 	event.Trust = options.EventTrust
@@ -289,9 +289,9 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
 	expanded, expandErr := expand(path, source, parsed, context, options)
 	if err := errors.Join(concurrencyErr, cancellationErr, expandErr); err != nil {
-		return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), err
+		return expansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
-	return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), nil
+	return expansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), nil
 }
 
 // Compile parses a workflow and event, expands its static graph, and returns
@@ -540,6 +540,10 @@ instances:
 				}
 			}
 			if referencesGitHubTokenSecret || referencesGitHubToken || actionRequiresGitHubToken {
+				policyWorkflow := ir.Workflow.WorkflowTokenPolicyFilename
+				if policyWorkflow == "" {
+					policyWorkflow = filepath.Base(instance.SourcePath)
+				}
 				if len(githubPermissions) == 0 {
 					reference := "an action input default that references github.token"
 					if referencesGitHubTokenSecret {
@@ -553,7 +557,7 @@ instances:
 				for name, access := range githubPermissions {
 					permissions[strings.ReplaceAll(name, "-", "_")] = access
 				}
-				githubToken = &plan.GitHubToken{Permissions: permissions}
+				githubToken = &plan.GitHubToken{Workflow: policyWorkflow, Permissions: permissions}
 				capabilities = append(capabilities, "provider-token-write")
 				authorization.ProviderTokenWriteCapabilitySources = []string{"effective-permissions"}
 				authorization.WorkflowTokenPolicyFilename = ir.Workflow.WorkflowTokenPolicyFilename
@@ -839,7 +843,7 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 		},
 		Event:    event,
 		Vars:     vars,
-		Warnings: compilerWarnings(parsed.Concurrency, cancelInProgress),
+		Warnings: compilerWarnings(parsed, cancelInProgress),
 		Execution: ExecutionBoundary{
 			Supported: true,
 			Reason:    "run-job supports the fail-closed supported shell and local-action subset",
@@ -875,24 +879,35 @@ func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string
 		if job.Permissions != nil {
 			return "", "GitHub workflow access tokens do not support job-level permissions"
 		}
-		if job.Reusable != nil {
-			return "", "GitHub workflow access tokens do not support reusable-workflow jobs"
-		}
 	}
 	return filename, ""
 }
 
-func compilerWarnings(concurrency *workflow.Concurrency, cancelInProgress bool) []Warning {
-	if concurrency == nil || !cancelInProgress {
-		return nil
+func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warning {
+	var warnings []Warning
+	for _, job := range parsed.Jobs {
+		if job.Reusable == nil || !strings.HasPrefix(job.Reusable.Uses, "./.github/workflows/") {
+			continue
+		}
+		position := job.Reusable.Span.Start
+		warnings = append(warnings, Warning{
+			Code:    "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS",
+			Line:    position.Line,
+			Column:  position.Column,
+			Message: "jobs expanded from local reusable workflows use the top-level requesting workflow permissions for GITHUB_TOKEN; permissions declared in called workflows are not enforced",
+		})
+		break
 	}
-	position := concurrency.CancelInProgressPosition
-	return []Warning{{
-		Code:    "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED",
-		Line:    position.Line,
-		Column:  position.Column,
-		Message: "workflow concurrency cancel-in-progress is not enforced; Buildkite pipeline settings can approximate it for same-branch builds",
-	}}
+	if parsed.Concurrency != nil && cancelInProgress {
+		position := parsed.Concurrency.CancelInProgressPosition
+		warnings = append(warnings, Warning{
+			Code:    "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED",
+			Line:    position.Line,
+			Column:  position.Column,
+			Message: "workflow concurrency cancel-in-progress is not enforced; Buildkite pipeline settings can approximate it for same-branch builds",
+		})
+	}
+	return warnings
 }
 
 // ParseEvent validates and decodes the event snapshot used for compilation.

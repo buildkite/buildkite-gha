@@ -74,7 +74,7 @@ func TestWorkflowTokenPolicyEvidence(t *testing.T) {
 			source: "on: push\npermissions:\n  contents: read\njobs:\n  test:\n    permissions:\n      contents: read\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		},
 		{
-			name: "reusable workflow", path: ".github/workflows/ci.yml", diagnostic: "reusable-workflow",
+			name: "reusable workflow", path: ".github/workflows/ci.yml", want: "ci.yml",
 			source: "on: push\npermissions:\n  contents: read\njobs:\n  test:\n    uses: ./.github/workflows/reusable.yml\n",
 		},
 		{
@@ -168,9 +168,12 @@ jobs:
     steps:
       - run: test -n '${{ secrets.GITHUB_TOKEN }}'
 `)
-	_, err = compileUntrustedPlans(emptyCaller, readFile(t, emptyCaller), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
-	if err == nil || !strings.Contains(err.Error(), "no effective permissions") {
-		t.Fatalf("explicit empty reusable call permissions error = %v", err)
+	plans, err = compileUntrustedPlans(emptyCaller, readFile(t, emptyCaller), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken == nil || !reflect.DeepEqual(plans[0].GitHubToken.Permissions, map[string]string{"contents": "read"}) {
+		t.Fatalf("reusable call permissions changed the root token scope: %#v", plans)
 	}
 }
 
