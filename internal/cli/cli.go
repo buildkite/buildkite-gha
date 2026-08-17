@@ -101,8 +101,8 @@ const (
 	maxWebhookMetadataBytes                     = 25 << 20
 	workflowCheckSummaryLimit                   = 65535
 	workflowCheckSummaryNotice                  = "\n\n_Additional diagnostics omitted at the provider check summary size limit._\n"
-	defaultNobleRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:62a45683afffaae9edfd669c16d2fee23b5a571679f31715e1063dada667ea24"
-	defaultJammyRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:a014d0bae6b06bb315d10b5ff8bb226d5fe7fa468bcf140b3c0d7e72a33aa1ac"
+	defaultNobleRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:d8fa20ce298d9ee8673dc6e9ecddabb23ebbff3bcaf828d2011714a960cc5853"
+	defaultJammyRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:3489d7d999869a11a243bdd9f91f318784cb74f0b57646c57424d10008b1e21d"
 	defaultMacOSRunnerQueue                     = "macos-medium"
 )
 
