@@ -526,6 +526,78 @@ func TestCompileBundleRetainsGitHubHeadRefWithoutPayload(t *testing.T) {
 	}
 }
 
+func TestCompileBundleFoldsGitHubRefScalarsForConcurrencyAndRunnerSelection(t *testing.T) {
+	source := []byte(`on: [push, pull_request]
+concurrency: ${{ github.ref_type }}-${{ github.ref_name }}-${{ github.base_ref }}
+jobs:
+  test:
+    if: github.ref_type == 'branch' && (github.base_ref == '' || github.base_ref == 'trunk') && github.ref_name
+    runs-on: ${{ format('runner-{0}-{1}', github.ref_type, github.base_ref || github.ref_name) }}
+    steps: [{run: true}]
+`)
+	pullRequest := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha-smoke",
+  "payload": {"pull_request": {"base": {"ref": "trunk"}}}
+}`)
+	tests := []struct {
+		name, concurrency, label, queue string
+		event                           []byte
+	}{
+		{name: "push", event: pushEvent(t), concurrency: "branch-main-", label: "runner-branch-main", queue: "push-linux"},
+		{name: "pull request", event: pullRequest, concurrency: "branch-42/merge-trunk", label: "runner-branch-trunk", queue: "pr-linux"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			bundle, err := CompileBundleWithOptions("refs.yml", source, test.event, "0.0.0-test", testDistributionDigest, "gha-importer", Options{
+				EventTrust: EventTrusted,
+				Runners: RunnerPolicy{Labels: map[string]string{
+					"runner-branch-main":  "push-linux",
+					"runner-branch-trunk": "pr-linux",
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bundle.IR.Workflow.ConcurrencyGroup != test.concurrency || len(bundle.IR.Jobs) != 1 || bundle.IR.Jobs[0].Queue != test.queue || bundle.IR.Jobs[0].RunsOn[0] != test.label {
+				t.Fatalf("folded bundle = concurrency %q, jobs %#v", bundle.IR.Workflow.ConcurrencyGroup, bundle.IR.Jobs)
+			}
+			if strings.Contains(bundle.IR.Jobs[0].If, "github.") || bytes.Contains(bundle.Plans[0].Contents, []byte("github.ref_")) || bytes.Contains(bundle.Plans[0].Contents, []byte("github.base_ref")) {
+				t.Fatalf("compile-time GitHub ref scalar reached emitted plan: %s", bundle.Plans[0].Contents)
+			}
+		})
+	}
+}
+
+func TestCompileBundleAppliesRunnerPolicyAfterGitHubRefScalarResolution(t *testing.T) {
+	source := []byte(`on: pull_request
+jobs:
+  test:
+    runs-on: runner-${{ github.ref_type }}-${{ github.base_ref }}
+    steps: [{run: true}]
+`)
+	event := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha-smoke",
+  "payload": {"pull_request": {"base": {"ref": "trunk"}}}
+}`)
+	_, err := CompileBundleWithOptions("refs.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer", Options{
+		EventTrust: EventTrusted,
+		Runners:    RunnerPolicy{Labels: map[string]string{"runner-branch-main": "linux"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), `runner label "runner-branch-trunk" is not mapped by policy`) {
+		t.Fatalf("CompileBundleWithOptions() error = %v, want resolved-label policy rejection", err)
+	}
+}
+
 func TestCompileBundleTranslatesWorkflowAndJobConcurrency(t *testing.T) {
 	source := []byte(`name: Deployment
 on: push

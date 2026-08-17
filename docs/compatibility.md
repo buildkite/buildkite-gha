@@ -592,7 +592,7 @@ Patterns cannot be absolute, contain a `..` path segment, or contain ASCII contr
 
 ### Compile-time expressions
 
-Matrices, runner labels, names, concurrency groups, and event-backed conditions may use statically known `github`, `event`, `vars`, and matrix values. They support the compile-time syntax listed above, computed indexes, numeric array indexes, and `.*` projections where the complete expression resolves during compilation. Whole or dynamic `github` access and whole-event serialization remain unsupported. Event-backed conditions may also combine reducible event subtrees with supported runtime condition values such as `needs` and status functions.
+Matrices, runner labels, names, concurrency groups, and event-backed conditions may use statically known `github`, `event`, `vars`, and matrix values. Compile-time `github` values include `github.actor`, `github.base_ref`, `github.event_name`, `github.head_ref`, `github.ref`, `github.ref_name`, `github.ref_type`, `github.repository`, `github.repository_owner`, `github.sha`, and `github.workflow`. They support the compile-time syntax listed above, computed indexes, numeric array indexes, and `.*` projections where the complete expression resolves during compilation. Whole or dynamic `github` access and whole-event serialization remain unsupported. Event-backed conditions may also combine reducible event subtrees with supported runtime condition values such as `needs` and status functions.
 
 ## Actions
 

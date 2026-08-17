@@ -209,7 +209,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			}
 		}
 		if job.Reusable != nil {
-			if err := rejectCallMatrixExpressions(path, job); err != nil {
+			if err := rejectCallMatrixExpressions(path, job, resolver.context); err != nil {
 				return reusableResolution{}, err
 			}
 			if strings.TrimSpace(job.If) != "" {
@@ -287,7 +287,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 		}
 		calleeDigest := "sha256:" + sha256Sum(source)
 
-		matrices, err := expandMatrix(path, job, expression.CompileContext{})
+		matrices, err := expandMatrix(path, job, resolver.context)
 		if err != nil {
 			return reusableResolution{}, err
 		}
@@ -923,7 +923,7 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 	return nil
 }
 
-func rejectCallMatrixExpressions(path string, job workflow.Job) error {
+func rejectCallMatrixExpressions(path string, job workflow.Job, context expression.CompileContext) error {
 	if job.Matrix == nil {
 		return nil
 	}
@@ -936,7 +936,10 @@ func rejectCallMatrixExpressions(path string, job workflow.Job) error {
 		}
 		for _, value := range row.Values {
 			if containsExpression(value.Data) {
-				return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "runtime-dependent reusable-workflow matrix value is unsupported")
+				text, _ := value.Data.(string)
+				if _, err := expression.EvaluateCompileTemplate(text, context); err != nil {
+					return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "runtime-dependent reusable-workflow matrix value is unsupported")
+				}
 			}
 		}
 	}
@@ -944,7 +947,10 @@ func rejectCallMatrixExpressions(path string, job workflow.Job) error {
 		for _, combination := range combinations {
 			for _, value := range combination.Values {
 				if containsExpression(value.Data) {
-					return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "runtime-dependent reusable-workflow matrix value is unsupported")
+					text, _ := value.Data.(string)
+					if _, err := expression.EvaluateCompileTemplate(text, context); err != nil {
+						return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "runtime-dependent reusable-workflow matrix value is unsupported")
+					}
 				}
 			}
 		}

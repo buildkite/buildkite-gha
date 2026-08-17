@@ -142,7 +142,7 @@ func validateCompileExpressionNode(node actionlint.ExprNode) error {
 			return nil
 		case strings.EqualFold(root, "github") && len(path) == 1:
 			switch strings.ToLower(path[0]) {
-			case "actor", "event_name", "head_ref", "ref", "repository", "repository_owner", "sha", "workflow":
+			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow":
 				return nil
 			}
 		case strings.EqualFold(root, "github") && len(path) >= 2 && strings.EqualFold(path[0], "event"):
