@@ -1962,7 +1962,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		return 1
 	}
-	populateChangedPaths(&effectiveEvent.TriggerContext, effectiveEvent.Event, effectiveEvent.Origin, workflows)
+	populateChangedPaths(&effectiveEvent.TriggerSnapshot, effectiveEvent.Event, effectiveEvent.Origin, workflows)
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i := range workflows {
 		if workflows[i].ReusableOnly {
@@ -1971,13 +1971,13 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
 		if triggerErr != nil {
 			workflows[i].Applicable = true
-			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
+			workflows[i].TriggerCondition = effectiveEvent.TriggerExpressions.EventPredicate
 			processingReports[i] = triggerFailureProcessingReport(workflows[i], triggerErr)
 			continue
 		}
 		if workflows[i].PathFiltersError != "" && selection.AnnotationReason == "" {
 			workflows[i].Applicable = true
-			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
+			workflows[i].TriggerCondition = effectiveEvent.TriggerExpressions.EventPredicate
 			processingReports[i] = triggerFailureProcessingReport(workflows[i], &buildkitepipeline.UnsupportedPathFiltersError{
 				Event: effectiveEvent.Event.Event, Reason: workflows[i].PathFiltersError,
 			})
@@ -2337,10 +2337,11 @@ const (
 )
 
 type effectiveEventSelection struct {
-	Source         []byte
-	Event          compiler.Event
-	Origin         effectiveEventOrigin
-	TriggerContext buildkitepipeline.TriggerConditionContext
+	Source             []byte
+	Event              compiler.Event
+	Origin             effectiveEventOrigin
+	TriggerExpressions buildkitepipeline.TriggerConditionExpressions
+	TriggerSnapshot    buildkitepipeline.TriggerEventSnapshot
 }
 
 func loadEffectiveEventSource(ctx context.Context, eventPath string, agent transport.Agent) ([]byte, effectiveEventOrigin, error) {
@@ -2370,9 +2371,11 @@ func newEffectiveEvent(source []byte, origin effectiveEventOrigin, getenv func(s
 	if err != nil {
 		return effectiveEventSelection{}, err
 	}
+	expressions, snapshot := snapshotTriggerState(event)
 	effective := effectiveEventSelection{
 		Source: source, Event: event, Origin: origin,
-		TriggerContext: snapshotTriggerConditionContext(event),
+		TriggerExpressions: expressions,
+		TriggerSnapshot:    snapshot,
 	}
 	if origin == effectiveEventFromPath {
 		return effective, nil
@@ -2381,12 +2384,12 @@ func newEffectiveEvent(source []byte, origin effectiveEventOrigin, getenv func(s
 	if buildSource := strings.TrimSpace(getenv("BUILDKITE_SOURCE")); buildSource != "" {
 		predicate = "build.source == " + triggerConditionLiteral(buildSource)
 	}
-	effective.TriggerContext.EventPredicate = predicate
+	effective.TriggerExpressions.EventPredicate = predicate
 	return effective, nil
 }
 
-func snapshotTriggerConditionContext(event compiler.Event) buildkitepipeline.TriggerConditionContext {
-	context := buildkitepipeline.TriggerConditionContext{
+func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerConditionExpressions, buildkitepipeline.TriggerEventSnapshot) {
+	expressions := buildkitepipeline.TriggerConditionExpressions{
 		EventPredicate:        "true",
 		Branch:                "null",
 		Tag:                   "null",
@@ -2395,37 +2398,38 @@ func snapshotTriggerConditionContext(event compiler.Event) buildkitepipeline.Tri
 		MergeGroupBaseBranch:  "null",
 		MergeGroupAction:      "null",
 	}
+	snapshot := buildkitepipeline.TriggerEventSnapshot{}
 	if branch, ok := strings.CutPrefix(event.Ref, "refs/heads/"); ok {
-		context.Branch = triggerConditionLiteral(branch)
-		context.BranchValue = &branch
+		expressions.Branch = triggerConditionLiteral(branch)
+		snapshot.Branch = &branch
 	}
 	if tag, ok := strings.CutPrefix(event.Ref, "refs/tags/"); ok {
-		context.Tag = triggerConditionLiteral(tag)
-		context.TagValue = &tag
+		expressions.Tag = triggerConditionLiteral(tag)
+		snapshot.Tag = &tag
 	}
 	if action, ok := event.Payload["action"].(string); ok && strings.TrimSpace(action) != "" {
-		context.PullRequestAction = triggerConditionLiteral(action)
-		context.PullRequestActionValue = &action
-		context.MergeGroupAction = triggerConditionLiteral(action)
-		context.MergeGroupActionValue = &action
+		expressions.PullRequestAction = triggerConditionLiteral(action)
+		snapshot.PullRequestAction = &action
+		expressions.MergeGroupAction = triggerConditionLiteral(action)
+		snapshot.MergeGroupAction = &action
 	}
 	if pullRequest, ok := event.Payload["pull_request"].(map[string]any); ok {
 		if base, ok := pullRequest["base"].(map[string]any); ok {
 			if branch, ok := base["ref"].(string); ok && strings.TrimSpace(branch) != "" {
-				context.PullRequestBaseBranch = triggerConditionLiteral(branch)
-				context.PullRequestBaseValue = &branch
+				expressions.PullRequestBaseBranch = triggerConditionLiteral(branch)
+				snapshot.PullRequestBaseBranch = &branch
 			}
 		}
 	}
 	if mergeGroup, ok := event.Payload["merge_group"].(map[string]any); ok {
 		if baseRef, ok := mergeGroup["base_ref"].(string); ok {
 			if branch, ok := strings.CutPrefix(baseRef, "refs/heads/"); ok && branch != "" {
-				context.MergeGroupBaseBranch = triggerConditionLiteral(branch)
-				context.MergeGroupBaseValue = &branch
+				expressions.MergeGroupBaseBranch = triggerConditionLiteral(branch)
+				snapshot.MergeGroupBaseBranch = &branch
 			}
 		}
 	}
-	return context
+	return expressions, snapshot
 }
 
 type workflowTriggerSelection struct {
@@ -2434,13 +2438,13 @@ type workflowTriggerSelection struct {
 }
 
 func selectWorkflowTrigger(triggers []workflow.Trigger, event effectiveEventSelection) (workflowTriggerSelection, error) {
-	condition, applicable, err := buildkitepipeline.TranslateEventTriggerCondition(triggers, event.Event.Event, event.TriggerContext)
+	condition, applicable, err := buildkitepipeline.TranslateEventTriggerCondition(triggers, event.Event.Event, event.TriggerExpressions, event.TriggerSnapshot)
 	if err != nil {
 		return workflowTriggerSelection{}, err
 	}
 	annotationReason := buildkitepipeline.TriggerEventSkipReason(triggers, event.Event.Event)
 	if applicable {
-		annotationReason, err = buildkitepipeline.TriggerFilterMismatchReason(triggers, event.Event.Event, event.TriggerContext)
+		annotationReason, err = buildkitepipeline.TriggerFilterMismatchReason(triggers, event.Event.Event, event.TriggerSnapshot)
 		if err != nil {
 			return workflowTriggerSelection{}, err
 		}
