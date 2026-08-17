@@ -57,7 +57,7 @@ Use a stable sample while developing:
 ```sh
 export GITHUB_TOKEN="$(gh auth token)"
 SAMPLE_SIZE=1000 SAMPLE_SEED=default JOBS=32 \
-  scripts/validate-public-workflow-corpus
+  mise run corpus:public
 ```
 
 Sampling ranks `repository`, workflow path, and content hash with the seed. The same corpus, size, and seed select the same workflows. Sample manifests, reports, and tallies use a key containing the size, seed digest, and selected-manifest digest, so they do not mix with full-corpus results.
