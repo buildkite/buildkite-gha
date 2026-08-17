@@ -310,12 +310,11 @@ func TestEvaluateActionInputDefaultMatchesGitHubEqualityAndTemplateBoundaries(t 
 func TestEvaluateIsSinglePass(t *testing.T) {
 	literal := "literal ${{ matrix.secret }} and ${{"
 	context := Context{
-		Inputs:       map[string]string{"value": literal},
-		Matrix:       map[string]any{"value": literal, "secret": "reevaluated", "number": json.Number("1e3")},
-		Steps:        map[string]map[string]string{"producer": {"value": literal}},
-		StepStatuses: map[string]StepStatus{"producer": {Outcome: "failure", Conclusion: "success"}},
-		Needs:        map[string]map[string]string{"producer": {"value": literal}},
-		NeedResults:  map[string]string{"producer": "success"},
+		Inputs:      map[string]string{"value": literal},
+		Matrix:      map[string]any{"value": literal, "secret": "reevaluated", "number": json.Number("1e3")},
+		Steps:       map[string]StepStatus{"producer": {Outcome: "failure", Conclusion: "success", Outputs: map[string]string{"value": literal}}},
+		Needs:       map[string]map[string]string{"producer": {"value": literal}},
+		NeedResults: map[string]string{"producer": "success"},
 	}
 	tests := map[string]string{
 		"${{ inputs.value }}":                 literal,
@@ -601,11 +600,10 @@ func TestHashFilesIsLimitedToStepRuntimeExpressions(t *testing.T) {
 
 func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
 	context := Context{
-		Matrix:       map[string]any{"os": "linux", "versions": []any{1, 2}},
-		Vars:         map[string]string{"PREFIX": "release"},
-		Env:          map[string]string{"KEY": "os"},
-		Steps:        map[string]map[string]string{"build": {"image": "app:v1"}},
-		StepStatuses: map[string]StepStatus{"build": {Outcome: "success", Conclusion: "success"}},
+		Matrix: map[string]any{"os": "linux", "versions": []any{1, 2}},
+		Vars:   map[string]string{"PREFIX": "release"},
+		Env:    map[string]string{"KEY": "os"},
+		Steps:  map[string]StepStatus{"build": {Outcome: "success", Conclusion: "success", Outputs: map[string]string{"image": "app:v1"}}},
 	}
 	template := "${{ format('{0}-{1}-{2}', vars.PREFIX, matrix[env.KEY], join(matrix.versions, '.')) }}:${{ matrix.missing || steps.build.outputs.image }}"
 	got, err := EvaluateStep(template, context)
@@ -662,7 +660,7 @@ func TestEvaluateJobSurfacesSupportAuthorizedCompoundExpressions(t *testing.T) {
 		Needs:       map[string]map[string]string{"build": {"tag": "v1"}},
 		NeedResults: map[string]string{"build": "success"},
 		Secrets:     map[string]string{"TOKEN": "secret"},
-		Steps:       map[string]map[string]string{"build": {"image": "app:v1"}},
+		Steps:       map[string]StepStatus{"build": {Outputs: map[string]string{"image": "app:v1"}}},
 		Vars:        map[string]string{"PREFIX": "release"},
 		Env:         map[string]string{"ROOT": "src"},
 	}
@@ -688,7 +686,7 @@ func TestEvaluateJobSurfacesFailClosed(t *testing.T) {
 	context := Context{
 		GitHub: map[string]any{"token": "secret"},
 		Env:    map[string]string{"KEY": "TOKEN"},
-		Steps:  map[string]map[string]string{"build": {"value": "ok"}},
+		Steps:  map[string]StepStatus{"build": {Outputs: map[string]string{"value": "ok"}}},
 	}
 	tests := []struct {
 		name     string

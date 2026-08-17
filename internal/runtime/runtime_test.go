@@ -1351,10 +1351,9 @@ func TestBackgroundSummariesAreBoundedInCommitOrder(t *testing.T) {
 	)
 
 	jobResult := JobResult{Env: map[string]string{}, State: map[string]string{}}
-	eval := expression.Context{Steps: map[string]map[string]string{}}
-	statuses := map[string]expression.StepStatus{}
+	eval := expression.Context{Steps: map[string]expression.StepStatus{}}
 	for _, execution := range supervisor.waitAll() {
-		if err := commitStepExecution(execution, &jobResult, &eval, statuses); err != nil {
+		if err := commitStepExecution(execution, &jobResult, &eval); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1370,6 +1369,26 @@ func TestBackgroundSummariesAreBoundedInCommitOrder(t *testing.T) {
 	wantPrefix := strings.Repeat("a", summaryBytes) + strings.Repeat("b", len(prefix)-summaryBytes)
 	if prefix != wantPrefix {
 		t.Fatalf("summary did not preserve commit order")
+	}
+}
+
+func TestCloneExpressionContextDeepCopiesStepOutputs(t *testing.T) {
+	source := expression.Context{Steps: map[string]expression.StepStatus{
+		"build": {Outcome: "success", Conclusion: "success", Outputs: map[string]string{"result": "source"}},
+	}}
+
+	cloned := cloneExpressionContext(source)
+	status := cloned.Steps["build"]
+	status.Outcome = "failure"
+	status.Outputs["result"] = "clone"
+	cloned.Steps["build"] = status
+	cloned.Steps["added"] = expression.StepStatus{}
+
+	if got := source.Steps["build"]; got.Outcome != "success" || got.Outputs["result"] != "source" {
+		t.Fatalf("source step changed through clone: %#v", got)
+	}
+	if _, ok := source.Steps["added"]; ok {
+		t.Fatal("source steps map changed through clone")
 	}
 }
 
@@ -1695,7 +1714,7 @@ func TestSkippedBackgroundAndRepeatedWaitAreCommittedAtMostOnce(t *testing.T) {
 		{ID: "first-wait", Kind: "wait", Targets: []string{"completed"}},
 		{ID: "cancel-completed", Kind: "cancel", Targets: []string{"completed"}},
 		{ID: "second-wait", Kind: "wait", Targets: []string{"completed"}},
-		{ID: "verify", Kind: "run", Condition: "steps.skipped.conclusion == 'skipped' && steps.cancel-skipped.conclusion == 'success' && steps.cancel-completed.conclusion == 'success'", Command: "true"},
+		{ID: "verify", Kind: "run", Condition: "steps.skipped.conclusion == 'skipped' && steps.skipped.outputs.missing == '' && steps.cancel-skipped.conclusion == 'success' && steps.cancel-skipped.outputs.missing == '' && steps.wait-skipped.conclusion == 'success' && steps.wait-skipped.outputs.missing == '' && steps.first-wait.outputs.missing == '' && steps.cancel-completed.conclusion == 'success' && steps.cancel-completed.outputs.missing == '' && steps.second-wait.outputs.missing == ''", Command: "true"},
 	})
 
 	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
@@ -5485,7 +5504,7 @@ runs:
       shell: sh
       run: touch "$SHOULD_NOT_RUN"
     - id: observed
-      if: failure() && steps.failed.outcome == 'failure'
+      if: failure() && steps.failed.outcome == 'failure' && steps.skipped.outcome == 'skipped' && steps.skipped.outputs.missing == ''
       shell: sh
       run: touch "$STATUS_RAN"
     - id: cleanup
