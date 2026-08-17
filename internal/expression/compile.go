@@ -126,8 +126,8 @@ func EvaluateReusableInputDefault(template string, context CompileContext) (any,
 	return EvaluateCompileTemplate(template, context)
 }
 
-// ValidateRunName validates the expression surface GitHub makes available
-// while creating a workflow run.
+// ValidateRunName validates the supported expression surface available while
+// creating a workflow run.
 func ValidateRunName(template string) error {
 	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
 		validator := newSemanticValidator(compileTimeSurface)

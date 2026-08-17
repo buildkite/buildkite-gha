@@ -112,6 +112,8 @@ to:
 
 The provider check remains `Deploy / <job-id> (<event>)`. Buildkite owns the containing build and its message, so an aggregate upload can show a different run title for each workflow without renaming the build.
 
+GitHub uses event-specific information, such as a commit message or pull request title, when `run-name` is omitted or blank. Buildkite already owns that build-level presentation, so `buildkite-gha` does not repeat a synthesized fallback in each workflow group. GitHub's [context availability](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability) also lists `vars` for `run-name`, but the production importer has no authenticated GitHub variable snapshot. It rejects `vars` rather than silently resolving configured GitHub variables as empty.
+
 Buildkite controls when a build starts. The trigger declaration controls whether and under which condition the workflow group participates in that existing build:
 
 ```yaml
