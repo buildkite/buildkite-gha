@@ -122,6 +122,41 @@ jobs:
 	}
 }
 
+func TestCompilePlansCarriesPluginOIDCConfigurationToEveryJob(t *testing.T) {
+	configuration := &plan.OIDCConfiguration{
+		Claims:         []string{"organization_id"},
+		AWSSessionTags: []string{"organization_slug", "pipeline_id"},
+		SubjectClaim:   "pipeline_id",
+	}
+	options := defaultOptions()
+	options.OIDC = configuration
+	plans, err := compilePlansForTest(context.Background(), "oidc.yml", []byte(`on: push
+jobs:
+  mint:
+    permissions:
+      id-token: write
+    runs-on: ubuntu-latest
+    steps: [{run: echo mint}]
+  no-permission:
+    runs-on: ubuntu-latest
+    steps: [{run: echo no endpoint}]
+`), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %#v", plans)
+	}
+	for _, job := range plans {
+		if !reflect.DeepEqual(job.OIDC, configuration) {
+			t.Errorf("job %q OIDC configuration = %#v", job.Workflow.LogicalJobID, job.OIDC)
+		}
+		if job.Workflow.LogicalJobID == "no-permission" && job.IDTokenPermission != "" {
+			t.Errorf("OIDC configuration implied id-token permission %q", job.IDTokenPermission)
+		}
+	}
+}
+
 func TestCompilePlansBoundsNestedReusableWorkflowDefaultPermissions(t *testing.T) {
 	repository := t.TempDir()
 	caller := writeWorkflow(t, repository, "caller.yml", `on: push

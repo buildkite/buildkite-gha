@@ -199,13 +199,15 @@ buildkite-gha upload .github/workflows/ci.yml
 The importer must run on Linux/amd64 or Darwin/arm64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
 
 The hidden zero-argument `buildkite-gha plugin` entry point reads `workflow`,
-`workflows`, and `runners` from `BUILDKITE_PLUGIN_CONFIGURATION`. Set `workflow`
+`workflows`, `runners`, and `oidc` from `BUILDKITE_PLUGIN_CONFIGURATION`. Set `workflow`
 to one explicit path or `workflows` to a non-empty array of explicit paths; the
 fields are mutually exclusive. Every path must identify a regular, tracked
 `.yml` or `.yaml` file inside the repository; directories and glob patterns are
 rejected. It also accepts the plugin-owned `version`, `source-ref`, and
 `minimum-release-age` fields, plus the boolean `experimental-runner-user` field.
-Unknown fields and non-boolean values are rejected before upload.
+The optional `oidc` object accepts `claims`, `aws-session-tags`, and
+`subject-claim`; configured lists and strings must be non-empty. Unknown fields
+and invalid values are rejected before upload.
 The importer uses its verified executable for jobs on the same platform and
 fetches the other platform's distribution from the same release only when a
 workflow requires it. Custom importers can use the public flags below. Runner

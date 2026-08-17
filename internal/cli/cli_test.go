@@ -456,6 +456,11 @@ func TestParsePluginConfiguration(t *testing.T) {
   "source-ref": "0123456789abcdef0123456789abcdef01234567",
   "minimum-release-age": "24h",
   "experimental-runner-user": true,
+  "oidc": {
+    "claims": ["organization_id", "future_server_claim"],
+    "aws-session-tags": ["organization_slug", "pipeline_id"],
+    "subject-claim": "pipeline_id"
+  },
   "runners": [
     {"runs-on":"ubuntu-latest","queue":"hosted","image":"` + image + `"},
     {"runs-on":"macos-14","queue":"macos-sonoma-arm64"}
@@ -466,6 +471,9 @@ func TestParsePluginConfiguration(t *testing.T) {
 	}
 	if !slices.Equal(configuration.Workflows, []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}) || !configuration.ExperimentalRunnerUser || len(configuration.runnerTargets) != 2 {
 		t.Fatalf("configuration = %#v", configuration)
+	}
+	if configuration.OIDC == nil || !slices.Equal(configuration.OIDC.Claims, []string{"organization_id", "future_server_claim"}) || !slices.Equal(configuration.OIDC.AWSSessionTags, []string{"organization_slug", "pipeline_id"}) || configuration.OIDC.SubjectClaim != "pipeline_id" {
+		t.Fatalf("OIDC configuration = %#v", configuration.OIDC)
 	}
 	if got := configuration.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {
 		t.Fatalf("Linux target = %#v", got)
@@ -501,6 +509,15 @@ func TestParsePluginConfiguration(t *testing.T) {
 		{name: "string experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":"true"}`, want: "must be a boolean"},
 		{name: "numeric experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":1}`, want: "must be a boolean"},
 		{name: "null experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":null}`, want: "must be a boolean"},
+		{name: "null oidc", source: `{"workflow":"ci.yml","oidc":null}`, want: "oidc must be a JSON object"},
+		{name: "array oidc", source: `{"workflow":"ci.yml","oidc":[]}`, want: "oidc must be a JSON object"},
+		{name: "unknown oidc field", source: `{"workflow":"ci.yml","oidc":{"subject_claim":"pipeline_id"}}`, want: "oidc contains unknown field"},
+		{name: "empty claims", source: `{"workflow":"ci.yml","oidc":{"claims":[]}}`, want: "oidc claims must be a non-empty array"},
+		{name: "claims string", source: `{"workflow":"ci.yml","oidc":{"claims":"organization_id"}}`, want: "oidc claims must be a non-empty array"},
+		{name: "empty claim entry", source: `{"workflow":"ci.yml","oidc":{"claims":["organization_id",""]}}`, want: "oidc claims entry 1 must be a non-empty string"},
+		{name: "non-string AWS tag entry", source: `{"workflow":"ci.yml","oidc":{"aws-session-tags":["pipeline_id",null]}}`, want: "oidc aws-session-tags entry 1 must be a non-empty string"},
+		{name: "empty subject claim", source: `{"workflow":"ci.yml","oidc":{"subject-claim":" "}}`, want: "oidc subject-claim must be a non-empty string"},
+		{name: "non-string subject claim", source: `{"workflow":"ci.yml","oidc":{"subject-claim":1}}`, want: "oidc subject-claim must be a non-empty string"},
 		{name: "null runners", source: `{"workflow":"ci.yml","runners":null}`, want: "non-empty array"},
 		{name: "empty runners", source: `{"workflow":"ci.yml","runners":[]}`, want: "non-empty array"},
 		{name: "unknown runner field", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","extra":true}]}`, want: "unknown field"},
@@ -659,6 +676,11 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 		"workflow":                 workflowPath,
 		"version":                  "0.8.0",
 		"experimental-runner-user": true,
+		"oidc": map[string]any{
+			"claims":           []string{"organization_id"},
+			"aws-session-tags": []string{"pipeline_id"},
+			"subject-claim":    "pipeline_id",
+		},
 		"runners": []map[string]string{
 			{"runs-on": "ubuntu-latest", "queue": "hosted"},
 		},
@@ -705,6 +727,26 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 		if step.Agents["queue"] != "hosted" || step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") || !strings.Contains(step.Command, "useradd --create-home") || !strings.Contains(step.Command, "sudo -n --preserve-env --user runner") {
 			t.Fatalf("plugin profile was not applied: %#v", step)
 		}
+	}
+	planCount := 0
+	for path, contents := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatal(err)
+		}
+		planCount++
+		if job.OIDC == nil || !slices.Equal(job.OIDC.Claims, []string{"organization_id"}) || !slices.Equal(job.OIDC.AWSSessionTags, []string{"pipeline_id"}) || job.OIDC.SubjectClaim != "pipeline_id" {
+			t.Errorf("plan %q OIDC configuration = %#v", job.Workflow.LogicalJobID, job.OIDC)
+		}
+		if job.IDTokenPermission != "" {
+			t.Errorf("plugin OIDC configuration implied plan permission %q", job.IDTokenPermission)
+		}
+	}
+	if planCount != 3 {
+		t.Fatalf("plan count = %d, want 3", planCount)
 	}
 }
 

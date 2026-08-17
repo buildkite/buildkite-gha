@@ -815,6 +815,24 @@ These are Buildkite secrets available to the destination job, not GitHub reposit
 
 Jobs with `id-token: write` expose the GitHub Actions `getIDToken()` wire contract to host JavaScript actions, including JavaScript actions called by composite actions. The endpoint mints a Buildkite OIDC token for the requested audience. Cloud identity providers must trust Buildkite's issuer and claims, not GitHub's. `id-token: read`, `id-token: none`, and omitted permission maps do not expose the endpoint. Repository tests verify the wire contract with a shim that mirrors `actions/toolkit`'s `oidc-utils.ts`; the hosted runtime proof remains pending.
 
+The plugin can apply additional Buildkite OIDC settings to every mint:
+
+```yaml
+plugins:
+  - github-actions#latest:
+      workflow: .github/workflows/deploy.yml
+      oidc:
+        claims: [organization_id]
+        aws-session-tags: [organization_slug, pipeline_id]
+        subject-claim: pipeline_id
+```
+
+`claims` and `aws-session-tags` accept non-empty claim-name lists.
+`subject-claim` accepts one non-empty immutable claim name. The Agent API owns
+the available claim vocabulary and rejects unsupported names when a job mints
+a token. Plugin OIDC configuration applies to jobs without granting
+`id-token: write`; those jobs still receive no endpoint.
+
 The endpoint variables are scoped to each host action lifecycle invocation. Shell steps, Docker container actions, and actions running in job containers do not receive them. Container actions that call `getIDToken()` fail with its missing endpoint variable diagnostic.
 
 ### GitHub services

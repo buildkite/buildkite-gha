@@ -254,6 +254,14 @@ type GitHubToken struct {
 	Permissions map[string]string `json:"permissions"`
 }
 
+// OIDCConfiguration applies additional Buildkite claims to every OIDC token
+// minted for the job.
+type OIDCConfiguration struct {
+	Claims         []string `json:"claims,omitempty"`
+	AWSSessionTags []string `json:"aws_session_tags,omitempty"`
+	SubjectClaim   string   `json:"subject_claim,omitempty"`
+}
+
 // Job is one immutable, compiler-selected workflow job instance.
 type Job struct {
 	Schema               string                  `json:"schema"`
@@ -266,6 +274,7 @@ type Job struct {
 	RequiredSecrets      []string                `json:"required_secrets,omitempty"`
 	GitHubToken          *GitHubToken            `json:"github_token,omitempty"`
 	IDTokenPermission    string                  `json:"id_token_permission,omitempty"`
+	OIDC                 *OIDCConfiguration      `json:"oidc,omitempty"`
 	Matrix               map[string]any          `json:"matrix,omitempty"`
 	Inputs               map[string]any          `json:"inputs,omitempty"`
 	Vars                 map[string]string       `json:"vars,omitempty"`
@@ -598,6 +607,21 @@ func (job Job) Validate() error {
 	}
 	if job.IDTokenPermission != "" && job.IDTokenPermission != "read" && job.IDTokenPermission != "write" {
 		return fmt.Errorf("job plan contains invalid id-token permission %q", job.IDTokenPermission)
+	}
+	if job.OIDC != nil {
+		for i, claim := range job.OIDC.Claims {
+			if strings.TrimSpace(claim) == "" {
+				return fmt.Errorf("job plan OIDC claims entry %d must be a non-empty string", i)
+			}
+		}
+		for i, claim := range job.OIDC.AWSSessionTags {
+			if strings.TrimSpace(claim) == "" {
+				return fmt.Errorf("job plan OIDC AWS session tags entry %d must be a non-empty string", i)
+			}
+		}
+		if job.OIDC.SubjectClaim != "" && strings.TrimSpace(job.OIDC.SubjectClaim) == "" {
+			return fmt.Errorf("job plan OIDC subject claim must be a non-empty string")
+		}
 	}
 	if !sort.StringsAreSorted(job.Dependencies) {
 		return fmt.Errorf("job plan dependencies must be sorted")

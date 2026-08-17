@@ -593,6 +593,7 @@ instances:
 				RequiredSecrets:         secrets,
 				GitHubToken:             githubToken,
 				IDTokenPermission:       instance.Permissions["id-token"],
+				OIDC:                    cloneOIDCConfiguration(options.OIDC),
 				Matrix:                  instance.Matrix,
 				Inputs:                  cloneAnyMap(instance.Inputs),
 				Vars:                    cloneMap(ir.Vars),
@@ -655,6 +656,17 @@ instances:
 		evaluations = append(evaluations, JobEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Evaluated: true, Passed: true})
 	}
 	return plans, authorizations, evaluations, errors.Join(diagnostics...)
+}
+
+func cloneOIDCConfiguration(configuration *plan.OIDCConfiguration) *plan.OIDCConfiguration {
+	if configuration == nil {
+		return nil
+	}
+	return &plan.OIDCConfiguration{
+		Claims:         append([]string(nil), configuration.Claims...),
+		AWSSessionTags: append([]string(nil), configuration.AWSSessionTags...),
+		SubjectClaim:   configuration.SubjectClaim,
+	}
 }
 
 func planConstructionFinding(instance JobInstance, err error) error {

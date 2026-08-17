@@ -139,6 +139,21 @@ For example, the Buildkite statement can use these conditions:
 
 The workflow must grant `id-token: write`. The endpoint is available to host
 JavaScript and composite actions, including `aws-actions/configure-aws-credentials`.
+Use the plugin's `oidc` block to add claims, AWS session tags, or replace the
+default compound subject for every token minted by imported jobs:
+
+```yaml
+plugins:
+  - github-actions#latest:
+      workflow: .github/workflows/deploy.yml
+      oidc:
+        claims: [organization_id]
+        aws-session-tags: [organization_slug, pipeline_id]
+        subject-claim: pipeline_id
+```
+
+This configuration does not grant OIDC access. Each workflow job must still
+declare `permissions: {id-token: write}` to receive the endpoint.
 See Buildkite's [AWS setup guide](https://buildkite.com/docs/pipelines/security/oidc/aws)
 for the complete IAM configuration and [OIDC claims reference](https://buildkite.com/docs/agent/cli/reference/oidc#claims)
 for the full subject format and available claims.

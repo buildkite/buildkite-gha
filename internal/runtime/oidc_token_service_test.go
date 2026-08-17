@@ -17,7 +17,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
-func TestAgentOIDCTokensMintsRequestedAudience(t *testing.T) {
+func TestAgentOIDCTokensMintsRequestedAudienceAndConfiguredClaims(t *testing.T) {
 	const token = "header.payload.signature"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/jobs/"+testCacheJobID+"/oidc/tokens" {
@@ -30,13 +30,20 @@ func TestAgentOIDCTokensMintsRequestedAudience(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(body) != `{"audience":"sts.amazonaws.com"}` {
+		if string(body) != `{"audience":"sts.amazonaws.com","claims":["organization_id"],"aws_session_tags":["organization_slug","pipeline_id"],"subject_claim":"pipeline_id"}` {
 			t.Errorf("body = %s", body)
 		}
 		_, _ = io.WriteString(w, `{"token":"`+token+`"}`)
 	}))
 	defer server.Close()
-	provider, err := NewAgentOIDCTokens(AgentOIDCTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret"})
+	provider, err := NewAgentOIDCTokens(AgentOIDCTokenConfig{
+		Endpoint:       server.URL,
+		JobID:          testCacheJobID,
+		JobToken:       "job-secret",
+		Claims:         []string{"organization_id"},
+		AWSSessionTags: []string{"organization_slug", "pipeline_id"},
+		SubjectClaim:   "pipeline_id",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

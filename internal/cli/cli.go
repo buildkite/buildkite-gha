@@ -213,6 +213,7 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		workflowOperands:       configuration.Workflows,
 		explicitWorkflowPaths:  true,
 		runnerTargets:          configuration.runnerTargets,
+		oidc:                   configuration.OIDC,
 		experimentalRunnerUser: configuration.ExperimentalRunnerUser,
 		pluginAcquisition:      &pluginRuntimeAcquisition{version: version},
 		importerPlatform:       importerPlatform,
@@ -234,6 +235,7 @@ func importerPlatform(goos, goarch string) (compiler.Platform, error) {
 type pluginConfiguration struct {
 	Workflows              []string
 	ExperimentalRunnerUser bool
+	OIDC                   *plan.OIDCConfiguration
 	runnerTargets          map[string]compiler.RunnerTarget
 }
 
@@ -258,7 +260,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	for key := range encoded {
 		switch key {
-		case "workflow", "workflows", "runners", "version", "source-ref", "minimum-release-age", "experimental-runner-user":
+		case "workflow", "workflows", "runners", "oidc", "version", "source-ref", "minimum-release-age", "experimental-runner-user":
 		default:
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
 		}
@@ -343,7 +345,65 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			targets[label] = target
 		}
 	}
-	return pluginConfiguration{Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, runnerTargets: targets}, nil
+	var oidc *plan.OIDCConfiguration
+	if value, configured := encoded["oidc"]; configured {
+		oidc, err = parsePluginOIDCConfiguration(value)
+		if err != nil {
+			return pluginConfiguration{}, err
+		}
+	}
+	return pluginConfiguration{Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, OIDC: oidc, runnerTargets: targets}, nil
+}
+
+func parsePluginOIDCConfiguration(value any) (*plan.OIDCConfiguration, error) {
+	oidc, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s oidc must be a JSON object", pluginConfigurationEnvironment)
+	}
+	for key := range oidc {
+		switch key {
+		case "claims", "aws-session-tags", "subject-claim":
+		default:
+			return nil, fmt.Errorf("%s oidc contains unknown field %q", pluginConfigurationEnvironment, key)
+		}
+	}
+	configuration := &plan.OIDCConfiguration{}
+	var err error
+	if claims, configured := oidc["claims"]; configured {
+		configuration.Claims, err = pluginNonEmptyStringList(claims, "oidc claims")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if tags, configured := oidc["aws-session-tags"]; configured {
+		configuration.AWSSessionTags, err = pluginNonEmptyStringList(tags, "oidc aws-session-tags")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if subject, configured := oidc["subject-claim"]; configured {
+		configuration.SubjectClaim, ok = subject.(string)
+		if !ok || strings.TrimSpace(configuration.SubjectClaim) == "" {
+			return nil, fmt.Errorf("%s oidc subject-claim must be a non-empty string", pluginConfigurationEnvironment)
+		}
+	}
+	return configuration, nil
+}
+
+func pluginNonEmptyStringList(value any, field string) ([]string, error) {
+	values, ok := value.([]any)
+	if !ok || len(values) == 0 {
+		return nil, fmt.Errorf("%s %s must be a non-empty array of non-empty strings", pluginConfigurationEnvironment, field)
+	}
+	result := make([]string, len(values))
+	for index, value := range values {
+		entry, ok := value.(string)
+		if !ok || strings.TrimSpace(entry) == "" {
+			return nil, fmt.Errorf("%s %s entry %d must be a non-empty string", pluginConfigurationEnvironment, field, index)
+		}
+		result[index] = entry
+	}
+	return result, nil
 }
 
 func normalizePluginCommit(ctx context.Context, getenv func(string) string, setenv func(string, string) error, runner transport.Runner) error {
@@ -528,11 +588,17 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	}
 	var oidcTokens gharuntime.OIDCTokenProvider
 	if job.IDTokenPermission == "write" {
-		oidcTokens, err = gharuntime.NewAgentOIDCTokens(gharuntime.AgentOIDCTokenConfig{
+		config := gharuntime.AgentOIDCTokenConfig{
 			Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
 			JobID:    os.Getenv("BUILDKITE_JOB_ID"),
 			JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
-		})
+		}
+		if job.OIDC != nil {
+			config.Claims = job.OIDC.Claims
+			config.AWSSessionTags = job.OIDC.AWSSessionTags
+			config.SubjectClaim = job.OIDC.SubjectClaim
+		}
+		oidcTokens, err = gharuntime.NewAgentOIDCTokens(config)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure OIDC token service: %v\n", err)
 			return 1
@@ -2043,7 +2109,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			failureArtifacts = append(failureArtifacts, artifacts...)
 			continue
 		}
-		preflight, err := compileHostedNamespaced(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, authentication)
+		preflight, err := compileHostedNamespaced(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, authentication)
 		applyHostedPreflight(&processingReports[i], preflight)
 		if err != nil {
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
@@ -2696,20 +2762,21 @@ func hostedRunnerTargets() map[string]compiler.RunnerTarget {
 }
 
 func compileHosted(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespaced(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", actionAuthentication)
+	return compileHostedNamespaced(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", nil, actionAuthentication)
 }
 
 func compileHostedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", actionCacheDir, sharedActionSource, actionAuthentication)
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", nil, actionCacheDir, sharedActionSource, actionAuthentication)
 }
 
-func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, stepKeyNamespace, "", nil, actionAuthentication)
+func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, stepKeyNamespace, oidc, "", nil, actionAuthentication)
 }
 
-func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
 	options.StepKeyNamespace = stepKeyNamespace
+	options.OIDC = oidc
 	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, options)
 	if err != nil {
 		return hostedCompilation{}, hostedError(hostedEvaluationFailure, err)
@@ -2993,6 +3060,7 @@ type parsedUploadArgs struct {
 	eventPath                string
 	runtimeDistributionPaths map[compiler.Platform]string
 	runnerTargets            map[string]compiler.RunnerTarget
+	oidc                     *plan.OIDCConfiguration
 	experimentalRunnerUser   bool
 	pluginAcquisition        *pluginRuntimeAcquisition
 	importerPlatform         compiler.Platform
