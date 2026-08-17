@@ -3166,6 +3166,10 @@ func TestRustCachePostConditionUsesFinalStatusAndMainEnvironment(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			workspace := t.TempDir()
+			resolvedWorkspace, err := filepath.EvalSymlinks(workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
 			workflowPath := ".github/workflows/test.yml"
 			writeFixtureFile(t, workspace, workflowPath, "name: rust-cache lifecycle\n")
 			writeFixtureFile(t, workspace, ".github/actions/rust-cache/action.yml", `name: rust-cache
@@ -3212,7 +3216,7 @@ esac
 			}
 			if test.wantPost && test.finalCacheValue != "" {
 				value, err := os.ReadFile(marker)
-				want := test.finalCacheValue + "|" + workspace
+				want := test.finalCacheValue + "|" + resolvedWorkspace
 				if err != nil || string(value) != want {
 					t.Fatalf("post environment = %q, %v, want %q", value, err, want)
 				}
