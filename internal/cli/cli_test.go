@@ -2766,7 +2766,7 @@ jobs:
 	if len(report.Jobs) != 1 || report.Jobs[0].ID != "delegated" || report.Jobs[0].Result != compatibility.Failed {
 		t.Fatalf("caller job ledger = %#v", report.Jobs)
 	}
-	if len(report.Diagnostics) != 2 || report.Diagnostics[0].Job != "delegated" || report.Diagnostics[0].Stage != stageGraph || report.Diagnostics[1].Code != "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS" {
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Job != "delegated" || report.Diagnostics[0].Stage != stageGraph {
 		t.Fatalf("diagnostics = %#v", report.Diagnostics)
 	}
 }

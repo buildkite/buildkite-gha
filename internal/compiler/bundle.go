@@ -91,6 +91,12 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	if len(plans) != len(ir.Jobs) || len(authorizations) != len(plans) {
 		return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("compiler produced %d plans and %d authorizations for %d job instances", len(plans), len(authorizations), len(ir.Jobs)))
 	}
+	for i, job := range plans {
+		if job.GitHubToken != nil && ir.Jobs[i].tokenPolicyNarrowed {
+			bundle.IR.Warnings = append(bundle.IR.Warnings, reusableWorkflowTokenWarning(ir.Jobs[i].reusableCall))
+			break
+		}
+	}
 
 	artifacts := make([]PlanArtifact, len(plans))
 	for i, job := range plans {

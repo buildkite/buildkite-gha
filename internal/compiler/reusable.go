@@ -28,12 +28,14 @@ var callOutputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 
 type sourcedJob struct {
 	workflow.Job
-	path            string
-	digest          string
-	root            string
-	inputs          map[string]any
-	secretAuthority bool
-	needBindings    map[string]needBinding
+	path                string
+	digest              string
+	root                string
+	inputs              map[string]any
+	secretAuthority     bool
+	needBindings        map[string]needBinding
+	tokenPolicyNarrowed bool
+	reusableCall        workflow.Position
 }
 
 type needBinding struct {
@@ -121,7 +123,7 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 		rootPermissions: effectivePermissions(nil, parsed.Permissions, nil, false), runtimeMatrixBoundary: runtimeMatrixBoundary,
 	}
 	resolver.discoverRuntimeMatrixBoundaries(parsed, 0, map[string]int{canonicalPath: 0})
-	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", context.Inputs, nil, nil, true, 0)
+	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", context.Inputs, nil, nil, true, false, workflow.Position{}, 0)
 	return resolution.jobs, resolver.runtimeMatrixBoundary, err
 }
 
@@ -175,7 +177,7 @@ func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(parsed *workfl
 	}
 }
 
-func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secretAuthority bool, depth int) (reusableResolution, error) {
+func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secretAuthority, tokenPolicyNarrowed bool, reusableCallPosition workflow.Position, depth int) (reusableResolution, error) {
 	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
 	for _, job := range parsed.Jobs {
@@ -191,7 +193,9 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 	for _, id := range order {
 		job := jobs[id]
 		job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, permissionCeiling, depth != 0)
+		jobTokenPolicyNarrowed := tokenPolicyNarrowed
 		if depth != 0 {
+			jobTokenPolicyNarrowed = jobTokenPolicyNarrowed || repositoryPermissionsNarrowed(resolver.rootPermissions, job.Permissions)
 			idTokenPermission, hasIDTokenPermission := job.Permissions.Scopes["id-token"]
 			job.Permissions = clonePermissions(resolver.rootPermissions)
 			delete(job.Permissions.Scopes, "id-token")
@@ -240,7 +244,11 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			if resolver.expanded > maxFlattenedJobs {
 				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow graph expands beyond %d jobs", maxFlattenedJobs))
 			}
-			resolved = append(resolved, sourcedJob{Job: job, path: path, digest: digest, root: resolver.root, inputs: cloneAnyMap(inputs), secretAuthority: secretAuthority, needBindings: needBindings})
+			resolved = append(resolved, sourcedJob{
+				Job: job, path: path, digest: digest, root: resolver.root, inputs: cloneAnyMap(inputs),
+				secretAuthority: secretAuthority, needBindings: needBindings,
+				tokenPolicyNarrowed: jobTokenPolicyNarrowed, reusableCall: reusableCallPosition,
+			})
 			replacements[id] = needBinding{members: []string{job.ID}}
 			continue
 		}
@@ -327,8 +335,12 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			if calleePermissionCeiling == nil {
 				calleePermissionCeiling = &workflow.Permissions{Scopes: map[string]string{}, Span: call.Span}
 			}
+			calleeCallPosition := reusableCallPosition
+			if depth == 0 {
+				calleeCallPosition = call.Span.Start
+			}
 			resolver.stack = append(resolver.stack, calleePath)
-			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, secretAuthority && call.InheritSecrets, depth+1)
+			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, secretAuthority && call.InheritSecrets, jobTokenPolicyNarrowed, calleeCallPosition, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {
 				message := "local reusable workflow could not be resolved"
@@ -409,6 +421,18 @@ func clonePermissions(in *workflow.Permissions) *workflow.Permissions {
 		out.Scopes[name] = access
 	}
 	return out
+}
+
+func repositoryPermissionsNarrowed(root, effective *workflow.Permissions) bool {
+	for name, rootAccess := range root.Scopes {
+		if name == "id-token" || rootAccess == "none" {
+			continue
+		}
+		if effective.Scopes[name] != rootAccess {
+			return true
+		}
+	}
+	return false
 }
 
 func replacementNeeds(needs []string, replacements map[string]needBinding) map[string]needBinding {
