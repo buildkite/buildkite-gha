@@ -278,6 +278,18 @@ func TestLoadRejectsCompositeControlsWithLocation(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsCompositeContinueOnError(t *testing.T) {
+	root := t.TempDir()
+	writeAction(t, root, "action.yml", "runs:\n  using: composite\n  steps:\n    - run: exit 1\n      shell: sh\n      continue-on-error: true\n")
+	action, err := Load(root, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !action.Runs.Steps[0].ContinueOnError {
+		t.Fatal("Load() did not retain composite continue-on-error")
+	}
+}
+
 func TestLoadRejectsInvalidCompositeStepSyntax(t *testing.T) {
 	tests := []struct {
 		name    string

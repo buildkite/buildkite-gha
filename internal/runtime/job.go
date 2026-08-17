@@ -2235,14 +2235,11 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		result.Artifacts = append(result.Artifacts, stepResult.Artifacts...)
 		mergeInto(result.State, stepResult.State)
 		appendJobSummary(&result.Summary, &result.summaryTruncated, stepResult.Summary, stepResult.summaryTruncated)
+		execution := classifyStepExecution(ctx, ctx, plan.Step{ContinueOnError: step.ContinueOnError}, stepResult, childErr)
 		if id != "" {
-			outcome := "success"
-			if childErr != nil {
-				outcome = "failure"
-			}
-			eval.Steps[id] = expression.StepStatus{Outcome: outcome, Conclusion: outcome, Outputs: stepResult.Outputs}
+			eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: stepResult.Outputs}
 		}
-		if childErr != nil {
+		if execution.conclusion != "success" {
 			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d: %w", i+1, childErr))
 		}
 	}
