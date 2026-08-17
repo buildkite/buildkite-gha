@@ -574,7 +574,9 @@ Direct `github.token` references are step-only. Whole, filtered, or dynamically 
 
 The only runner references are `runner.os` and `runner.arch`. They resolve to
 `Linux`/`X64` or `macOS`/`ARM64`. Other runner fields and compile-time positions
-that require runner identity are unsupported.
+that require runner identity are unsupported. Action metadata input defaults
+may also use direct `runner.debug`, which resolves to the string `false` because
+Buildkite has no equivalent step-debug mode.
 
 A runtime interpolation can read a verified upstream output directly:
 
