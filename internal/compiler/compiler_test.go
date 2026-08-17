@@ -3065,6 +3065,36 @@ func TestParseEventValidatesMergeGroupIdentity(t *testing.T) {
 	}
 }
 
+func TestParseEventValidatesReleaseIdentity(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	event := fmt.Sprintf(`{"provider":"github","event":"release","repository":{"owner":"acme","name":"widgets"},"ref":"refs/tags/v1.2.3","sha":%q,"actor":"octocat","payload":{"action":"published","release":{"tag_name":"v1.2.3","draft":false,"prerelease":false}}}`, sha)
+	parsed, err := ParseEvent([]byte(event))
+	if err != nil || parsed.Event != "release" || parsed.Ref != "refs/tags/v1.2.3" || parsed.SHA != sha {
+		t.Fatalf("ParseEvent() = %#v, %v", parsed, err)
+	}
+	for _, test := range []struct {
+		name, old, replacement, want string
+	}{
+		{name: "unsupported activity", old: `"published"`, replacement: `"edited"`, want: "published, created, or released"},
+		{name: "tag mismatch", old: `"tag_name":"v1.2.3"`, replacement: `"tag_name":"v2.0.0"`, want: "ref must match"},
+		{name: "missing tag", old: `"tag_name":"v1.2.3",`, replacement: "", want: "tag_name"},
+		{name: "malformed draft", old: `"draft":false`, replacement: `"draft":"false"`, want: "draft"},
+		{name: "malformed prerelease", old: `"prerelease":false`, replacement: `"prerelease":"false"`, want: "prerelease"},
+		{name: "draft created", old: `"action":"published"`, replacement: `"action":"created"`, want: "draft created"},
+		{name: "invalid sha", old: sha, replacement: "HEAD", want: "full lowercase sha"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := strings.Replace(event, test.old, test.replacement, 1)
+			if test.name == "draft created" {
+				changed = strings.Replace(changed, `"draft":false`, `"draft":true`, 1)
+			}
+			if _, err := ParseEvent([]byte(changed)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ParseEvent() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func smokePath(parts ...string) string {
 	return filepath.Join(append([]string{"..", "..", "testdata", "smoke"}, parts...)...)
 }

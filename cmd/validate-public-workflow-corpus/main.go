@@ -37,6 +37,7 @@ var supportedEvents = map[string]bool{
 	"push":              true,
 	"pull_request":      true,
 	"merge_group":       true,
+	"release":           true,
 	"workflow_dispatch": true,
 	"schedule":          true,
 }

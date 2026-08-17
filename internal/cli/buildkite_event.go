@@ -166,6 +166,14 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 			return nil, err
 		}
 	}
+	if _, hasRelease := payload["release"]; hasRelease && snapshot["event"] != "release" {
+		return nil, fmt.Errorf("release webhook payload does not match BUILDKITE_GITHUB_EVENT")
+	}
+	if snapshot["event"] == "release" {
+		if err := validateBuildkiteRelease(snapshot, getenv); err != nil {
+			return nil, err
+		}
+	}
 	result, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, fmt.Errorf("encode Buildkite webhook snapshot: %w", err)
@@ -204,6 +212,41 @@ func validateBuildkiteMergeGroup(snapshot map[string]any, getenv func(string) st
 	if baseSHA, _ := mergeGroup["base_sha"].(string); baseSHA != baseCommit {
 		return fmt.Errorf("merge_group webhook base_sha does not match BUILDKITE_MERGE_QUEUE_BASE_COMMIT")
 	}
+	return nil
+}
+
+func validateBuildkiteRelease(snapshot map[string]any, getenv func(string) string) error {
+	if snapshot["provider"] != "github" {
+		return fmt.Errorf("release webhook requires a GitHub repository")
+	}
+	payload := snapshot["payload"].(map[string]any)
+	action, _ := payload["action"].(string)
+	if action == "" || action != strings.TrimSpace(getenv("BUILDKITE_GITHUB_ACTION")) {
+		return fmt.Errorf("release webhook payload.action does not match BUILDKITE_GITHUB_ACTION")
+	}
+	if action != "published" && action != "created" && action != "released" {
+		return fmt.Errorf("release webhook action %q is unsupported", action)
+	}
+	release, ok := payload["release"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("release webhook requires payload.release")
+	}
+	tag, tagOK := release["tag_name"].(string)
+	draft, draftOK := release["draft"].(bool)
+	_, prereleaseOK := release["prerelease"].(bool)
+	if !tagOK || strings.TrimSpace(tag) == "" || !draftOK || !prereleaseOK {
+		return fmt.Errorf("release webhook requires payload.release tag_name, draft, and prerelease")
+	}
+	if draft {
+		if action == "created" {
+			return fmt.Errorf("release webhook draft created activity does not trigger GitHub Actions")
+		}
+		return fmt.Errorf("release webhook %s activity requires a non-draft release", action)
+	}
+	if tag != getenv("BUILDKITE_TAG") || tag != getenv("BUILDKITE_BRANCH") {
+		return fmt.Errorf("release webhook tag_name does not match BUILDKITE_TAG and BUILDKITE_BRANCH")
+	}
+	snapshot["ref"] = "refs/tags/" + tag
 	return nil
 }
 

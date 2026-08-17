@@ -1532,7 +1532,7 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 	}
 	defer cleanup()
 	failed := false
-	for _, event := range []string{"push", "pull_request", "merge_group", "workflow_dispatch", "schedule"} {
+	for _, event := range []string{"push", "pull_request", "merge_group", "release", "workflow_dispatch", "schedule"} {
 		if !declared[event] {
 			continue
 		}
@@ -1651,8 +1651,8 @@ func validateArgs(args []string) (workflowPath, eventPath, eventName, format, pr
 	if eventSeen && profile == "" {
 		return "", "", "", "", "", false, fmt.Errorf("--event requires --profile hosted")
 	}
-	if eventSeen && !slices.Contains([]string{"push", "pull_request", "merge_group", "workflow_dispatch", "schedule"}, eventName) {
-		return "", "", "", "", "", false, fmt.Errorf("unsupported --event %q; supported events are push, pull_request, merge_group, workflow_dispatch, and schedule", eventName)
+	if eventSeen && !slices.Contains([]string{"push", "pull_request", "merge_group", "release", "workflow_dispatch", "schedule"}, eventName) {
+		return "", "", "", "", "", false, fmt.Errorf("unsupported --event %q; supported events are push, pull_request, merge_group, release, workflow_dispatch, and schedule", eventName)
 	}
 	if allEvents && (eventPathSeen || eventSeen) {
 		return "", "", "", "", "", false, fmt.Errorf("--all-events is mutually exclusive with --event and --event-path")
@@ -1698,11 +1698,19 @@ func generatedEventSnapshot(name string) ([]byte, error) {
 			"base_ref": "refs/heads/main",
 			"base_sha": strings.Repeat("1", 40),
 		}
+	case "release":
+		event.Ref = "refs/tags/v1.0.0"
+		event.Payload["action"] = "published"
+		event.Payload["release"] = map[string]any{
+			"tag_name":   "v1.0.0",
+			"draft":      false,
+			"prerelease": false,
+		}
 	case "schedule":
 		event.Payload["schedule"] = "0 0 * * *"
 	case "workflow_dispatch":
 	default:
-		return nil, fmt.Errorf("unsupported generated event %q; supported events are push, pull_request, merge_group, workflow_dispatch, and schedule", name)
+		return nil, fmt.Errorf("unsupported generated event %q; supported events are push, pull_request, merge_group, release, workflow_dispatch, and schedule", name)
 	}
 	return json.Marshal(event)
 }
@@ -2331,6 +2339,7 @@ func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerCondit
 		PullRequestAction:     "null",
 		MergeGroupBaseBranch:  "null",
 		MergeGroupAction:      "null",
+		ReleaseAction:         "null",
 	}
 	snapshot := buildkitepipeline.TriggerEventSnapshot{}
 	if branch, ok := strings.CutPrefix(event.Ref, "refs/heads/"); ok {
@@ -2346,6 +2355,8 @@ func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerCondit
 		snapshot.PullRequestAction = &action
 		expressions.MergeGroupAction = triggerConditionLiteral(action)
 		snapshot.MergeGroupAction = &action
+		expressions.ReleaseAction = triggerConditionLiteral(action)
+		snapshot.ReleaseAction = &action
 	}
 	if pullRequest, ok := event.Payload["pull_request"].(map[string]any); ok {
 		if base, ok := pullRequest["base"].(map[string]any); ok {
