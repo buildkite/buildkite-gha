@@ -338,7 +338,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	if err := m.ValidateEntrypoints(runtime); err != nil {
 		return nil, err
 	}
-	if runtime == metadata.RuntimeNode16 || runtime == metadata.RuntimeNode20 || runtime == metadata.RuntimeNode24 {
+	if runtime == metadata.RuntimeNode16 || runtime == metadata.RuntimeNode24 {
 		if err := expression.ValidateActionLifecycleCondition(m.Runs.PreIf); err != nil {
 			return nil, fmt.Errorf("pre-if: %w", err)
 		}
