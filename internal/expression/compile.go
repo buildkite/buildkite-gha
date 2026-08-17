@@ -139,7 +139,7 @@ func ValidateRunName(template string) error {
 		}
 		validator.validateAccess = func(node actionlint.ExprNode) error {
 			root := referenceRoot(node)
-			if !strings.EqualFold(root, "github") && !strings.EqualFold(root, "inputs") {
+			if root != "" && !strings.EqualFold(root, "github") && !strings.EqualFold(root, "inputs") {
 				return fmt.Errorf("run-name context %q is unavailable", root)
 			}
 			switch node := node.(type) {
