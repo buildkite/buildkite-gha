@@ -3184,8 +3184,9 @@ if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
 case "$(basename "$1")" in
   main.js)
     if [ -n "${CACHE_SETTING:-}" ]; then printf 'CACHE_ON_FAILURE=%s\n' "$CACHE_SETTING" >> "$GITHUB_ENV"; fi
+    printf '%s\n' 'GITHUB_WORKSPACE=/tmp/spoofed' >> "$GITHUB_ENV"
     ;;
-  post.js) printf '%s' "${CACHE_ON_FAILURE:-}" > "$POST_MARKER" ;;
+  post.js) printf '%s|%s' "${CACHE_ON_FAILURE:-}" "$GITHUB_WORKSPACE" > "$POST_MARKER" ;;
 esac
 `)
 			if err := os.Chmod(fakeNode, 0o700); err != nil {
@@ -3211,8 +3212,9 @@ esac
 			}
 			if test.wantPost && test.finalCacheValue != "" {
 				value, err := os.ReadFile(marker)
-				if err != nil || string(value) != test.finalCacheValue {
-					t.Fatalf("post environment = %q, %v, want %q", value, err, test.finalCacheValue)
+				want := test.finalCacheValue + "|" + workspace
+				if err != nil || string(value) != want {
+					t.Fatalf("post environment = %q, %v, want %q", value, err, want)
 				}
 			}
 		})
