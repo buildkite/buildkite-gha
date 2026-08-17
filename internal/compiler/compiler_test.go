@@ -1736,13 +1736,43 @@ jobs:
       matrix:
         target: [linux, arm]
     uses: ./.github/workflows/reusable.yml
+    with:
+      target: ${{ matrix.target }}
   call-%s:
     uses: ./.github/workflows/reusable.yml
+    with:
+      target: duplicate
 `, suffix))
-	writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
-	_, err = Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        required: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ inputs.target }}
+`)
+	ir, err := compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), defaultOptions())
 	if err == nil || !strings.Contains(err.Error(), "flattened job id") || !strings.Contains(err.Error(), "collides with another job") {
 		t.Fatalf("Compile() error = %v, want fail-closed flattened ID collision", err)
+	}
+	collisionID := fmt.Sprintf("call-%s.test", suffix)
+	var collision *JobInstance
+	for i := range ir.Jobs {
+		if ir.Jobs[i].LogicalJobID == collisionID {
+			collision = &ir.Jobs[i]
+			break
+		}
+	}
+	if collision == nil || collision.Inputs["target"] != "linux" || collision.Steps[0].Run != "echo linux" {
+		t.Fatalf("accepted colliding job = %#v, want first flattened record", collision)
+	}
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) || finding.Stage != StageGraph || finding.Code != CodeGraphInvalid || finding.Path != "./.github/workflows/reusable.yml" || finding.Job != collisionID {
+		t.Fatalf("collision finding = %#v, want duplicate source attribution", finding)
 	}
 }
 
