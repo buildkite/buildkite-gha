@@ -131,6 +131,7 @@ type preparedInvocation struct {
 	envOverlay     map[string]string
 	isolated       bool
 	postRegistered bool
+	preFailure     error
 }
 
 type remotePreparations map[string]*preparedInvocation
@@ -1812,6 +1813,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			posts.register(postForInvocation(invocation, action.Runs.PostIf))
 			invocation.postRegistered = true
 			if err := r.runJavaScriptPhase(phaseCtx, processor, workspace, node, javascript, javascript.Pre, nil, invocation.state, &result); err != nil {
+				invocation.preFailure = err
 				return result, err
 			}
 		}
@@ -1861,8 +1863,11 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			mergeInto(result.State, childResult.State)
 			appendJobSummary(&result.Summary, &result.summaryTruncated, childResult.Summary, childResult.summaryTruncated)
 			if childErr != nil {
-				status.unsuccessful = true
-				err = errors.Join(err, fmt.Errorf("composite action step %d: %w", i+1, childErr))
+				execution := classifyStepExecution(ctx, ctx, plan.Step{ContinueOnError: childStep.ContinueOnError}, childResult, childErr)
+				if execution.conclusion != "success" {
+					status.unsuccessful = true
+					err = errors.Join(err, fmt.Errorf("composite action step %d: %w", i+1, childErr))
+				}
 			}
 		}
 		return result, err
@@ -2056,6 +2061,9 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			javascript.Inputs = inputs
 			javascript.Env = environment.process()
 			invocation.action = javascript
+			if invocation.preFailure != nil {
+				return result, invocation.preFailure
+			}
 		}
 		lifecycleEval := cloneExpressionContext(eval)
 		bindHashFilesContext(ctx, &lifecycleEval)
