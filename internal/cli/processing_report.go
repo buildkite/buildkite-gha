@@ -536,6 +536,7 @@ func validatedProcessingReportWithOptions(out processingOutput, workflowPath, pr
 // grant into the report.
 func applyHostedPreflight(report *compatibility.ProcessingReport, preflight hostedCompilation) {
 	report.ApplyEvidence(preflight.Bundle.Processing)
+	report.ApplyWarnings(report.Workflow, preflight.Bundle.IR.Warnings)
 	if preflight.Admitted {
 		report.SetStage(string(compiler.StageAdmission), compatibility.Passed)
 		report.Admission.Result = "admitted"

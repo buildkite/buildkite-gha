@@ -2771,6 +2771,34 @@ jobs:
 	}
 }
 
+func TestHostedProfileReportsNarrowedReusableWorkflowTokenWarning(t *testing.T) {
+	root := t.TempDir()
+	workflowRoot := filepath.Join(root, ".github", "workflows")
+	if err := os.MkdirAll(workflowRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflowPath := filepath.Join(workflowRoot, "caller.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: push\npermissions:\n  contents: write\njobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workflowRoot, "reusable.yml"), []byte("on: workflow_call\npermissions:\n  contents: read\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+		t.Fatalf("Run() code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS" || report.Diagnostics[0].Level != "warning" {
+		t.Fatalf("diagnostics = %#v, want reusable workflow token warning", report.Diagnostics)
+	}
+}
+
 func TestProcessingReportAggregatesIndependentExpressionChecksPerInstance(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), "expressions.yml")
 	workflow := []byte(`on: push
