@@ -46,9 +46,9 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--event` supports `push`, `pull_request`, `merge_group`, `workflow_dispatch`, and `schedule`. It is available only with `--profile hosted` and is mutually exclusive with `--event-path`. The generated snapshot uses example repository identity and minimal event fields. It can expose payload-dependent incompatibilities, but it is not equivalent to a real payload and cannot prove behavior for every payload shape. Use `--event-path` when exact refs, activity, repository identity, or payload fields matter.
+`--event` supports `push`, `pull_request`, `merge_group`, `release`, `workflow_dispatch`, and `schedule`. It is available only with `--profile hosted` and is mutually exclusive with `--event-path`. The generated snapshot uses example repository identity and minimal event fields. The release snapshot is a stable, non-prerelease `published` event; it is representative static validation, not proof of every supported activity. Generated snapshots are not equivalent to real payloads. Use `--event-path` when exact refs, activity, repository identity, or payload fields matter.
 
-Use `--all-events` with `--profile hosted` to evaluate every declared `push`, `pull_request`, `merge_group`, `workflow_dispatch`, and `schedule` trigger with a separate generated snapshot:
+Use `--all-events` with `--profile hosted` to evaluate every declared `push`, `pull_request`, `merge_group`, `release`, `workflow_dispatch`, and `schedule` trigger with a separate generated snapshot:
 
 ```sh
 buildkite-gha validate \
@@ -199,13 +199,15 @@ buildkite-gha upload .github/workflows/ci.yml
 The importer must run on Linux/amd64 or Darwin/arm64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
 
 The hidden zero-argument `buildkite-gha plugin` entry point reads `workflow`,
-`workflows`, and `runners` from `BUILDKITE_PLUGIN_CONFIGURATION`. Set `workflow`
+`workflows`, `runners`, and `oidc` from `BUILDKITE_PLUGIN_CONFIGURATION`. Set `workflow`
 to one explicit path or `workflows` to a non-empty array of explicit paths; the
 fields are mutually exclusive. Every path must identify a regular, tracked
 `.yml` or `.yaml` file inside the repository; directories and glob patterns are
 rejected. It also accepts the plugin-owned `version`, `source-ref`, and
 `minimum-release-age` fields, plus the boolean `experimental-runner-user` field.
-Unknown fields and non-boolean values are rejected before upload.
+The optional `oidc` object accepts `claims`, `aws-session-tags`, and
+`subject-claim`; configured lists and strings must be non-empty. Unknown fields
+and invalid values are rejected before upload.
 The importer uses its verified executable for jobs on the same platform and
 fetches the other platform's distribution from the same release only when a
 workflow requires it. Custom importers can use the public flags below. Runner
@@ -241,9 +243,9 @@ An explicit event path never reads Buildkite metadata. Webhook metadata must be 
 
 Raw webhook data is not retained in generated plans or pipeline YAML and cannot grant queues, secrets, or tokens.
 
-The selected snapshot establishes one effective GitHub event for applicability, compilation, group conditions, event-qualified check names, and explicit run-name evaluation. Workflow names, group keys, and check names remain static across events; an appended run title can vary. An explicit event path uses its event directly and never re-reads live Buildkite event fields. Linked webhook metadata supplies the GitHub event name, including `merge_group`; merge queue builds require matching Buildkite head and base refs and commits. Without either source, pull request builds map to `pull_request`; Buildkite `ui` and `api` sources map to `workflow_dispatch`; `schedule` maps to `schedule`; and other sources, including `trigger_job`, map to `push` even when `build.source_event` is absent.
+The selected snapshot establishes one effective GitHub event for applicability, compilation, group conditions, event-qualified check names, and explicit run-name evaluation. Workflow names, group keys, and check names remain static across events; an appended run title can vary. An explicit event path uses its event directly and never re-reads live Buildkite event fields. Linked webhook metadata supplies the GitHub event name, including `merge_group` and `release`. Merge queue builds require matching Buildkite head and base refs and commits. Release builds require matching webhook and Buildkite activities, a valid release payload, and a tag matching both `BUILDKITE_TAG` and `BUILDKITE_BRANCH`. The plugin resolves Buildkite's symbolic release commit from the checked-out `HEAD` before constructing the event. Without linked metadata, the environment fallback never infers `release`: pull request builds map to `pull_request`; Buildkite `ui` and `api` sources map to `workflow_dispatch`; `schedule` maps to `schedule`; and other sources, including tag builds and `trigger_job`, map to `push` even when `build.source_event` is absent.
 
-Top-level workflows that do not declare the effective event are excluded before event-dependent validation and compilation, then emitted as top-level skipped command steps with no plan artifacts. Reusable-only workflows remain available to local callers. If no directly runnable workflow applies, upload succeeds with a skipped-only pipeline. For applicable workflows, only the selected event contributes a group condition: push branch/tag/path filters, pull request base-branch/activity/path filters, merge group base-branch/activity filters, or the corresponding manual/schedule Buildkite source predicate. Cross-event trigger conditions are never ORed into that group.
+Top-level workflows that do not declare the effective event are excluded before event-dependent validation and compilation, then emitted as top-level skipped command steps with no plan artifacts. Reusable-only workflows remain available to local callers. If no directly runnable workflow applies, upload succeeds with a skipped-only pipeline. For applicable workflows, only the selected event contributes a group condition: push branch/tag/path filters, pull request base-branch/activity/path filters, merge group base-branch/activity filters, release activity filters, or the corresponding manual/schedule Buildkite source predicate. Cross-event trigger conditions are never ORed into that group.
 
 Unsupported or uncertain filters replace only the affected workflow with a failing top-level step. Push and pull request path filters run only when the linked webhook and local checkout prove a match; see [Push path filters](compatibility.md#push-path-filters) and [Pull request path filters](compatibility.md#pull-request-path-filters). Generated or explicit snapshots can report the dependency but cannot stand in for real linked-webhook admission. Malformed event data still stops the import. Buildkite owns build creation and schedule identity, so every workflow with `on.schedule` is eligible for every Buildkite scheduled build.
 

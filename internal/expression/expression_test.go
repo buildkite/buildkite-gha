@@ -894,6 +894,7 @@ func TestEvaluateActionLifecycleCondition(t *testing.T) {
 		condition    string
 		unsuccessful bool
 		cancelled    bool
+		env          map[string]string
 		want         bool
 		wantErr      bool
 	}{
@@ -917,17 +918,29 @@ func TestEvaluateActionLifecycleCondition(t *testing.T) {
 		{name: "delimiters without spaces", condition: "${{always()}}", cancelled: true, want: true},
 		{name: "case is insensitive", condition: "ALWAYS()", want: true},
 		{name: "surrounding whitespace trims", condition: "  success()  ", want: true},
-		{name: "literals fail closed", condition: "true", wantErr: true},
+		{name: "literal", condition: "true", want: true},
+		{name: "rust-cache succeeds normally", condition: "success() || env.CACHE_ON_FAILURE == 'true'", want: true},
+		{name: "rust-cache skips after failure by default", condition: "success() || env.CACHE_ON_FAILURE == 'true'", unsuccessful: true},
+		{name: "rust-cache skips after failure when disabled", condition: "success() || env.CACHE_ON_FAILURE == 'true'", unsuccessful: true, env: map[string]string{"CACHE_ON_FAILURE": "false"}},
+		{name: "rust-cache runs after opted-in failure", condition: "success() || env.CACHE_ON_FAILURE == 'true'", unsuccessful: true, env: map[string]string{"CACHE_ON_FAILURE": "true"}, want: true},
+		{name: "rust-cache skips after cancellation", condition: "success() || env.CACHE_ON_FAILURE == 'true'", cancelled: true},
 		{name: "references fail closed", condition: "github.event_name == 'push'", wantErr: true},
-		{name: "compound expressions fail closed", condition: "success() || failure()", wantErr: true},
+		{name: "compound status expression", condition: "success() || failure()", unsuccessful: true, want: true},
 		{name: "arguments fail closed", condition: "success('build')", wantErr: true},
 		{name: "unknown functions fail closed", condition: "finished()", wantErr: true},
+		{name: "unsupported lazy branch fails closed", condition: "success() || secrets.TOKEN != ''", wantErr: true},
 		{name: "unopened delimiter fails closed", condition: "failure() }}", wantErr: true},
 		{name: "unclosed delimiter fails closed", condition: "${{ failure()", wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := EvaluateActionLifecycleCondition(test.condition, test.unsuccessful, test.cancelled)
+			context := ConditionContext{
+				Env:          test.env,
+				Failure:      test.unsuccessful && !test.cancelled,
+				Unsuccessful: test.unsuccessful,
+				Cancelled:    test.cancelled,
+			}
+			got, err := EvaluateActionLifecycleCondition(test.condition, context)
 			if test.wantErr {
 				if err == nil || got {
 					t.Fatalf("EvaluateActionLifecycleCondition(%q) = %v, %v, want false with error", test.condition, got, err)
@@ -938,6 +951,51 @@ func TestEvaluateActionLifecycleCondition(t *testing.T) {
 				t.Fatalf("EvaluateActionLifecycleCondition(%q, unsuccessful=%v, cancelled=%v) = %v, %v, want %v", test.condition, test.unsuccessful, test.cancelled, got, err, test.want)
 			}
 		})
+	}
+}
+
+func TestValidateActionLifecycleCondition(t *testing.T) {
+	for _, condition := range []string{
+		"success() || env.CACHE_ON_FAILURE == 'true'",
+		"${{ failure() && matrix.allow_failure }}",
+		"steps.build.conclusion == 'success' && runner.os == 'Linux'",
+		"inputs.cache == true && hashFiles('Cargo.lock') != ''",
+		"inputs['cache'] == true",
+	} {
+		if err := ValidateActionLifecycleCondition(condition); err != nil {
+			t.Errorf("ValidateActionLifecycleCondition(%q) error = %v", condition, err)
+		}
+	}
+	for _, condition := range []string{
+		"success() || secrets.TOKEN != ''",
+		"success() || needs.build.result == 'success'",
+		"needs[env.JOB].result == 'success'",
+		"vars[env.FLAG] == 'true'",
+		"steps[env.STEP].conclusion == 'success'",
+		"inputs[env.INPUT] == true",
+		"unknown()",
+	} {
+		if err := ValidateActionLifecycleCondition(condition); err == nil {
+			t.Errorf("ValidateActionLifecycleCondition(%q) accepted unsupported expression", condition)
+		}
+	}
+}
+
+func TestEvaluateActionLifecycleConditionUsesWorkflowInputsAndHashFiles(t *testing.T) {
+	var patterns []string
+	context := ConditionContext{
+		Inputs: map[string]any{"cache": true},
+		HashFiles: func(got []string) (string, error) {
+			patterns = append([]string(nil), got...)
+			return "digest", nil
+		},
+	}
+	got, err := EvaluateActionLifecycleCondition("inputs.cache && hashFiles('Cargo.lock') != ''", context)
+	if err != nil || !got {
+		t.Fatalf("EvaluateActionLifecycleCondition() = %v, %v, want true", got, err)
+	}
+	if !reflect.DeepEqual(patterns, []string{"Cargo.lock"}) {
+		t.Fatalf("hashFiles patterns = %#v, want [Cargo.lock]", patterns)
 	}
 }
 

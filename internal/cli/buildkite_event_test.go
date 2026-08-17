@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 )
@@ -183,6 +184,25 @@ func TestGeneratedPullRequestEventIncludesRuntimeRefs(t *testing.T) {
 	}
 }
 
+func TestGeneratedReleaseEventIsCanonicalPublishedStableRelease(t *testing.T) {
+	source, err := generatedEventSnapshot("release")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot struct {
+		Event   string         `json:"event"`
+		Ref     string         `json:"ref"`
+		Payload map[string]any `json:"payload"`
+	}
+	if err := json.Unmarshal(source, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	release := snapshot.Payload["release"].(map[string]any)
+	if snapshot.Event != "release" || snapshot.Ref != "refs/tags/v1.0.0" || snapshot.Payload["action"] != "published" || release["tag_name"] != "v1.0.0" || release["draft"] != false || release["prerelease"] != false {
+		t.Fatalf("generated release event = %#v", snapshot)
+	}
+}
+
 func TestBuildkiteEventSourceFailsClosed(t *testing.T) {
 	valid := map[string]string{"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step", "BUILDKITE_REPO": "https://github.com/a/b", "BUILDKITE_COMMIT": strings.Repeat("a", 40), "BUILDKITE_BRANCH": "main"}
 	for _, test := range []struct{ name, key, value string }{
@@ -276,6 +296,99 @@ func TestBuildkiteWebhookEventSourceBindsMergeGroupIdentity(t *testing.T) {
 				t.Fatalf("buildkiteWebhookEventSource() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestBuildkiteWebhookEventSourceBindsReleaseIdentity(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	env := map[string]string{
+		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step",
+		"BUILDKITE_REPO":          "https://github.com/acme/widgets",
+		"BUILDKITE_COMMIT":        commit,
+		"BUILDKITE_BRANCH":        "v1.2.3",
+		"BUILDKITE_TAG":           "v1.2.3",
+		"BUILDKITE_GITHUB_EVENT":  "release",
+		"BUILDKITE_GITHUB_ACTION": "published",
+	}
+	webhook := `{"action":"published","release":{"tag_name":"v1.2.3","draft":false,"prerelease":false},"sender":{"login":"octocat"},"extra":{"preserved":true}}`
+	source, err := buildkiteWebhookEventSource(func(key string) string { return env[key] }, []byte(webhook))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(source, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	payload := snapshot["payload"].(map[string]any)
+	if snapshot["event"] != "release" || snapshot["ref"] != "refs/tags/v1.2.3" || snapshot["sha"] != commit || snapshot["actor"] != "octocat" || payload["extra"].(map[string]any)["preserved"] != true {
+		t.Fatalf("release snapshot = %#v", snapshot)
+	}
+	for _, activity := range []struct {
+		action     string
+		prerelease bool
+	}{{"published", true}, {"released", false}, {"created", false}} {
+		t.Run(activity.action, func(t *testing.T) {
+			changed := maps.Clone(env)
+			changed["BUILDKITE_GITHUB_ACTION"] = activity.action
+			payload := fmt.Sprintf(`{"action":%q,"release":{"tag_name":"v1.2.3","draft":false,"prerelease":%t}}`, activity.action, activity.prerelease)
+			if _, err := buildkiteWebhookEventSource(func(key string) string { return changed[key] }, []byte(payload)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name      string
+		changeEnv func(map[string]string)
+		webhook   string
+		want      string
+	}{
+		{name: "event mismatch", changeEnv: func(env map[string]string) { env["BUILDKITE_GITHUB_EVENT"] = "push" }, webhook: webhook, want: "BUILDKITE_GITHUB_EVENT"},
+		{name: "non-GitHub repository", changeEnv: func(env map[string]string) { env["BUILDKITE_REPO"] = "https://origin.cursor.com/git/acme/widgets.git" }, webhook: webhook, want: "GitHub repository"},
+		{name: "action mismatch", changeEnv: func(env map[string]string) { env["BUILDKITE_GITHUB_ACTION"] = "released" }, webhook: webhook, want: "BUILDKITE_GITHUB_ACTION"},
+		{name: "unsupported action", changeEnv: func(env map[string]string) { env["BUILDKITE_GITHUB_ACTION"] = "edited" }, webhook: strings.Replace(webhook, "published", "edited", 1), want: "unsupported"},
+		{name: "tag mismatch", changeEnv: func(env map[string]string) { env["BUILDKITE_TAG"] = "v2.0.0" }, webhook: webhook, want: "BUILDKITE_TAG"},
+		{name: "branch mismatch", changeEnv: func(env map[string]string) { env["BUILDKITE_BRANCH"] = "main" }, webhook: webhook, want: "BUILDKITE_TAG"},
+		{name: "missing release", webhook: `{"action":"published"}`, want: "payload.release"},
+		{name: "missing tag", webhook: `{"action":"published","release":{"draft":false,"prerelease":false}}`, want: "tag_name"},
+		{name: "malformed draft", webhook: `{"action":"published","release":{"tag_name":"v1.2.3","draft":"false","prerelease":false}}`, want: "draft"},
+		{name: "malformed prerelease", webhook: `{"action":"published","release":{"tag_name":"v1.2.3","draft":false,"prerelease":"false"}}`, want: "prerelease"},
+		{name: "draft created", changeEnv: func(env map[string]string) { env["BUILDKITE_GITHUB_ACTION"] = "created" }, webhook: `{"action":"created","release":{"tag_name":"v1.2.3","draft":true,"prerelease":false}}`, want: "draft created"},
+		{name: "symbolic commit", changeEnv: func(env map[string]string) { env["BUILDKITE_COMMIT"] = "HEAD" }, webhook: webhook, want: "BUILDKITE_COMMIT"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := maps.Clone(env)
+			if test.changeEnv != nil {
+				test.changeEnv(changed)
+			}
+			_, err := buildkiteWebhookEventSource(func(key string) string { return changed[key] }, []byte(test.webhook))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("buildkiteWebhookEventSource() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestBuildkiteEventSourceDoesNotInventReleaseFromEnvironment(t *testing.T) {
+	env := map[string]string{
+		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step",
+		"BUILDKITE_REPO":          "https://github.com/acme/widgets",
+		"BUILDKITE_COMMIT":        strings.Repeat("a", 40),
+		"BUILDKITE_BRANCH":        "v1.2.3",
+		"BUILDKITE_TAG":           "v1.2.3",
+		"BUILDKITE_GITHUB_EVENT":  "release",
+		"BUILDKITE_GITHUB_ACTION": "published",
+	}
+	source, err := buildkiteEventSource(func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(source, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot["event"] != "push" || snapshot["ref"] != "refs/tags/v1.2.3" {
+		t.Fatalf("environment fallback snapshot = %#v", snapshot)
 	}
 }
 

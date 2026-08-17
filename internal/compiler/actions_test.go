@@ -771,6 +771,38 @@ func TestCompileActionLocksDeterministic(t *testing.T) {
 	}
 }
 
+func TestCompileActionLocksValidatesJavaScriptLifecycleConditions(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "rust-cache", "name: rust-cache\nruns:\n  using: node24\n  main: index.js\n  post: index.js\n  post-if: (success() || env.CACHE_ON_FAILURE == 'true') && inputs.cache == true && hashFiles('Cargo.lock') != ''\n")
+	writeAction(t, workspace, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./rust-cache\n")
+	if _, _, _, _, err := compileActionLocks(context.Background(), workspace, nil, []string{"./parent"}); err != nil {
+		t.Fatalf("compileActionLocks() rejected rust-cache lifecycle condition: %v", err)
+	}
+
+	writeAction(t, workspace, "broken", "name: broken\nruns:\n  using: node24\n  pre: index.js\n  pre-if: success() || secrets.TOKEN != ''\n  main: index.js\n")
+	if _, _, _, _, err := compileActionLocks(context.Background(), workspace, nil, []string{"./broken"}); err == nil || !strings.Contains(err.Error(), "pre-if") || !strings.Contains(err.Error(), `context "secrets"`) {
+		t.Fatalf("direct lifecycle validation error = %v", err)
+	}
+
+	writeAction(t, workspace, "nested-broken", "name: broken\nruns:\n  using: node24\n  main: index.js\n  post: index.js\n  post-if: needs[env.JOB].result == 'success'\n")
+	writeAction(t, workspace, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./nested-broken\n")
+	if _, _, _, _, err := compileActionLocks(context.Background(), workspace, nil, []string{"./parent"}); err == nil || !strings.Contains(err.Error(), `child action "./nested-broken"`) || !strings.Contains(err.Error(), "post-if") || !strings.Contains(err.Error(), `context "needs"`) {
+		t.Fatalf("nested lifecycle validation error = %v", err)
+	}
+}
+
+func TestCompileActionLocksDoesNotValidateUnusedNativeLifecycle(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  pre: index.js\n  pre-if: secrets.UNSUPPORTED\n  main: index.js\n")
+	source := classifiedActionSource{
+		roots:   map[string]string{"actions/checkout": remote},
+		commits: map[string]string{"actions/checkout": actionintegration.CheckoutV4Commit},
+	}
+	if _, _, _, _, err := compileActionLocks(context.Background(), workspace, source, []string{"actions/checkout@v4"}); err != nil {
+		t.Fatalf("compileActionLocks() validated replaced native lifecycle: %v", err)
+	}
+}
+
 func TestCompileActionLocksAllowsOnlyAuditedCacheCommits(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	for _, path := range []string{"", "restore", "save"} {

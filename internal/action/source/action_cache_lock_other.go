@@ -4,29 +4,13 @@ package source
 
 import (
 	"context"
-	"errors"
-	"os"
 	"sync"
 )
 
-type actionCacheLockMode int
-
-const (
-	actionCacheLockShared actionCacheLockMode = iota
-	actionCacheLockExclusive
-)
-
 var (
-	errActionCacheLockUnavailable = errors.New("action cache lock is held")
-	actionCacheLocksMu            sync.Mutex
-	actionCacheLocks              = map[string]*sync.RWMutex{}
+	actionCacheLocksMu sync.Mutex
+	actionCacheLocks   = map[string]*sync.RWMutex{}
 )
-
-type actionCacheLock struct {
-	mu        *sync.RWMutex
-	exclusive bool
-	file      *os.File
-}
 
 func lockActionCache(ctx context.Context, path string, mode actionCacheLockMode, nonblocking bool) (*actionCacheLock, error) {
 	if err := ctx.Err(); err != nil {
@@ -54,7 +38,7 @@ func lockActionCache(ctx context.Context, path string, mode actionCacheLockMode,
 	} else {
 		mu.RLock()
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := openLockFile(path)
 	if err != nil {
 		if mode == actionCacheLockExclusive {
 			mu.Unlock()
@@ -63,18 +47,9 @@ func lockActionCache(ctx context.Context, path string, mode actionCacheLockMode,
 		}
 		return nil, err
 	}
-	return &actionCacheLock{mu: mu, exclusive: mode == actionCacheLockExclusive, file: file}, nil
-}
-
-func (l *actionCacheLock) unlock() {
-	if l == nil || l.file == nil {
-		return
+	release := mu.RUnlock
+	if mode == actionCacheLockExclusive {
+		release = mu.Unlock
 	}
-	_ = l.file.Close()
-	l.file = nil
-	if l.exclusive {
-		l.mu.Unlock()
-	} else {
-		l.mu.RUnlock()
-	}
+	return &actionCacheLock{file: file, release: release}, nil
 }

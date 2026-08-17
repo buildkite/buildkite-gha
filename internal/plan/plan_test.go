@@ -16,6 +16,7 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 	fixture := validJob()
 	fixture.Event.HeadRef = "feature/head-ref"
 	fixture.Event.BaseRef = "main"
+	fixture.OIDC = &OIDCConfiguration{Claims: []string{"organization_id"}, AWSSessionTags: []string{"pipeline_id"}, SubjectClaim: "pipeline_id"}
 	source, err := Encode(fixture)
 	if err != nil {
 		t.Fatal(err)
@@ -24,7 +25,7 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
-	if job.Compiler.DistributionDigest == "" || job.Workflow.Name != "CI" || job.Event.PayloadDigest == "" || job.Event.HeadRef != "feature/head-ref" || job.Event.BaseRef != "main" || job.Target.StepKey != "gha-test" {
+	if job.Compiler.DistributionDigest == "" || job.Workflow.Name != "CI" || job.Event.PayloadDigest == "" || job.Event.HeadRef != "feature/head-ref" || job.Event.BaseRef != "main" || job.Target.StepKey != "gha-test" || !slices.Equal(job.OIDC.Claims, []string{"organization_id"}) {
 		t.Fatalf("decoded fixture lost trust bindings: %#v", job)
 	}
 	validateJobPlanSchema(t, source)

@@ -32,16 +32,22 @@ type OIDCTokenProvider interface {
 
 // AgentOIDCTokenConfig identifies the current Buildkite job's Agent API.
 type AgentOIDCTokenConfig struct {
-	Endpoint string
-	JobID    string
-	JobToken string
-	Client   *http.Client
+	Endpoint       string
+	JobID          string
+	JobToken       string
+	Claims         []string
+	AWSSessionTags []string
+	SubjectClaim   string
+	Client         *http.Client
 }
 
 // AgentOIDCTokens mints job-bound Buildkite OIDC tokens through the Agent API.
 type AgentOIDCTokens struct {
 	mintURL  string
 	jobToken string
+	claims   []string
+	awsTags  []string
+	subject  string
 	client   *http.Client
 }
 
@@ -63,7 +69,14 @@ func NewAgentOIDCTokens(config AgentOIDCTokenConfig) (*AgentOIDCTokens, error) {
 	if bounded.Timeout == 0 {
 		bounded.Timeout = 15 * time.Second
 	}
-	return &AgentOIDCTokens{mintURL: mintURL, jobToken: config.JobToken, client: &bounded}, nil
+	return &AgentOIDCTokens{
+		mintURL:  mintURL,
+		jobToken: config.JobToken,
+		claims:   append([]string(nil), config.Claims...),
+		awsTags:  append([]string(nil), config.AWSSessionTags...),
+		subject:  config.SubjectClaim,
+		client:   &bounded,
+	}, nil
 }
 
 func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (string, error) {
@@ -74,8 +87,11 @@ func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (strin
 		return "", fmt.Errorf("OIDC token audience is invalid")
 	}
 	body, err := json.Marshal(struct {
-		Audience string `json:"audience"`
-	}{Audience: audience})
+		Audience       string   `json:"audience"`
+		Claims         []string `json:"claims,omitempty"`
+		AWSSessionTags []string `json:"aws_session_tags,omitempty"`
+		SubjectClaim   string   `json:"subject_claim,omitempty"`
+	}{Audience: audience, Claims: c.claims, AWSSessionTags: c.awsTags, SubjectClaim: c.subject})
 	if err != nil {
 		return "", fmt.Errorf("encode OIDC token request: %w", err)
 	}

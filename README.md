@@ -42,6 +42,8 @@ steps:
 
 The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint. It uses mise to install and verify the selected CLI release, and defaults to the latest stable release. During the preview, leaving `version` unset means there is no CLI version to update as new stable releases ship. Set `workflow` to one explicit path or `workflows` to an explicit path list; plugin configuration does not accept directories or glob patterns.
 
+For `on.release`, open the pipeline's GitHub settings, select **Additional Webhooks** > **Releases**, and use **Code** trigger mode. Only explicit `types` containing `published`, `created`, and/or `released` are supported.
+
 The importer can run on Linux x86-64 or native macOS arm64. Its agent targeting
 is independent of `runners`: each runner mapping selects the queue for generated
 workflow jobs, not the importer step.
@@ -79,7 +81,7 @@ GitHub image or Xcode inventory.
 
 The imported workflows are a dynamic part of the Buildkite pipeline. The plugin creates one aggregate group per successfully compiled, explicitly listed workflow in a single transaction. Workflows that do not declare the selected event become top-level skipped steps. Groups and replacement steps depend on the importer. Each runnable job publishes a provider check named `<workflow> / <job> (<event>)`: a GitHub check for GitHub events or an Origin check for Origin events. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
 
-Buildkite owns build creation and schedule configuration. Within that build, `buildkite-gha` maps push, pull request, merge queue, manual/API, and scheduled builds to `push`, `pull_request`, `merge_group`, `workflow_dispatch`, and `schedule`, then applies the matching `on:` branch, tag, base-branch, activity, and safely evidenced path filters. Cross-event workflows are excluded before event-dependent compilation and retained as top-level skipped steps.
+Buildkite owns build creation and schedule configuration. Within that build, `buildkite-gha` maps push, pull request, merge queue, release, manual/API, and scheduled builds to `push`, `pull_request`, `merge_group`, `release`, `workflow_dispatch`, and `schedule`, then applies the matching `on:` branch, tag, base-branch, activity, and safely evidenced path filters. Cross-event workflows are excluded before event-dependent compilation and retained as top-level skipped steps.
 
 ## Check workflow compatibility
 
@@ -137,6 +139,21 @@ For example, the Buildkite statement can use these conditions:
 
 The workflow must grant `id-token: write`. The endpoint is available to host
 JavaScript and composite actions, including `aws-actions/configure-aws-credentials`.
+Use the plugin's `oidc` block to add claims, AWS session tags, or replace the
+default compound subject for every token minted by imported jobs:
+
+```yaml
+plugins:
+  - github-actions#latest:
+      workflow: .github/workflows/deploy.yml
+      oidc:
+        claims: [organization_id]
+        aws-session-tags: [organization_slug, pipeline_id]
+        subject-claim: pipeline_id
+```
+
+This configuration does not grant OIDC access. Each workflow job must still
+declare `permissions: {id-token: write}` to receive the endpoint.
 See Buildkite's [AWS setup guide](https://buildkite.com/docs/pipelines/security/oidc/aws)
 for the complete IAM configuration and [OIDC claims reference](https://buildkite.com/docs/agent/cli/reference/oidc#claims)
 for the full subject format and available claims.
@@ -169,7 +186,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--event` also supports `pull_request`, `merge_group`, `workflow_dispatch`, and `schedule`. The generated minimal snapshot is not equivalent to a real payload; use `--event-path` when exact payload data matters.
+`--event` also supports `pull_request`, `merge_group`, `release`, `workflow_dispatch`, and `schedule`. Generated release validation uses one stable `published` snapshot; it is representative static validation, not proof of every release activity. Generated snapshots are not equivalent to real payloads; use `--event-path` when exact payload data matters.
 
 Use `--all-events` to evaluate every declared supported event separately:
 

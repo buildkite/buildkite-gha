@@ -213,6 +213,7 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		workflowOperands:       configuration.Workflows,
 		explicitWorkflowPaths:  true,
 		runnerTargets:          configuration.runnerTargets,
+		oidc:                   configuration.OIDC,
 		experimentalRunnerUser: configuration.ExperimentalRunnerUser,
 		pluginAcquisition:      &pluginRuntimeAcquisition{version: version},
 		importerPlatform:       importerPlatform,
@@ -234,6 +235,7 @@ func importerPlatform(goos, goarch string) (compiler.Platform, error) {
 type pluginConfiguration struct {
 	Workflows              []string
 	ExperimentalRunnerUser bool
+	OIDC                   *plan.OIDCConfiguration
 	runnerTargets          map[string]compiler.RunnerTarget
 }
 
@@ -258,7 +260,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	for key := range encoded {
 		switch key {
-		case "workflow", "workflows", "runners", "version", "source-ref", "minimum-release-age", "experimental-runner-user":
+		case "workflow", "workflows", "runners", "oidc", "version", "source-ref", "minimum-release-age", "experimental-runner-user":
 		default:
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
 		}
@@ -343,7 +345,65 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			targets[label] = target
 		}
 	}
-	return pluginConfiguration{Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, runnerTargets: targets}, nil
+	var oidc *plan.OIDCConfiguration
+	if value, configured := encoded["oidc"]; configured {
+		oidc, err = parsePluginOIDCConfiguration(value)
+		if err != nil {
+			return pluginConfiguration{}, err
+		}
+	}
+	return pluginConfiguration{Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, OIDC: oidc, runnerTargets: targets}, nil
+}
+
+func parsePluginOIDCConfiguration(value any) (*plan.OIDCConfiguration, error) {
+	oidc, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s oidc must be a JSON object", pluginConfigurationEnvironment)
+	}
+	for key := range oidc {
+		switch key {
+		case "claims", "aws-session-tags", "subject-claim":
+		default:
+			return nil, fmt.Errorf("%s oidc contains unknown field %q", pluginConfigurationEnvironment, key)
+		}
+	}
+	configuration := &plan.OIDCConfiguration{}
+	var err error
+	if claims, configured := oidc["claims"]; configured {
+		configuration.Claims, err = pluginNonEmptyStringList(claims, "oidc claims")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if tags, configured := oidc["aws-session-tags"]; configured {
+		configuration.AWSSessionTags, err = pluginNonEmptyStringList(tags, "oidc aws-session-tags")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if subject, configured := oidc["subject-claim"]; configured {
+		configuration.SubjectClaim, ok = subject.(string)
+		if !ok || strings.TrimSpace(configuration.SubjectClaim) == "" {
+			return nil, fmt.Errorf("%s oidc subject-claim must be a non-empty string", pluginConfigurationEnvironment)
+		}
+	}
+	return configuration, nil
+}
+
+func pluginNonEmptyStringList(value any, field string) ([]string, error) {
+	values, ok := value.([]any)
+	if !ok || len(values) == 0 {
+		return nil, fmt.Errorf("%s %s must be a non-empty array of non-empty strings", pluginConfigurationEnvironment, field)
+	}
+	result := make([]string, len(values))
+	for index, value := range values {
+		entry, ok := value.(string)
+		if !ok || strings.TrimSpace(entry) == "" {
+			return nil, fmt.Errorf("%s %s entry %d must be a non-empty string", pluginConfigurationEnvironment, field, index)
+		}
+		result[index] = entry
+	}
+	return result, nil
 }
 
 func normalizePluginCommit(ctx context.Context, getenv func(string) string, setenv func(string, string) error, runner transport.Runner) error {
@@ -528,11 +588,17 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	}
 	var oidcTokens gharuntime.OIDCTokenProvider
 	if job.IDTokenPermission == "write" {
-		oidcTokens, err = gharuntime.NewAgentOIDCTokens(gharuntime.AgentOIDCTokenConfig{
+		config := gharuntime.AgentOIDCTokenConfig{
 			Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
 			JobID:    os.Getenv("BUILDKITE_JOB_ID"),
 			JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
-		})
+		}
+		if job.OIDC != nil {
+			config.Claims = job.OIDC.Claims
+			config.AWSSessionTags = job.OIDC.AWSSessionTags
+			config.SubjectClaim = job.OIDC.SubjectClaim
+		}
+		oidcTokens, err = gharuntime.NewAgentOIDCTokens(config)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure OIDC token service: %v\n", err)
 			return 1
@@ -1532,7 +1598,7 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 	}
 	defer cleanup()
 	failed := false
-	for _, event := range []string{"push", "pull_request", "merge_group", "workflow_dispatch", "schedule"} {
+	for _, event := range []string{"push", "pull_request", "merge_group", "release", "workflow_dispatch", "schedule"} {
 		if !declared[event] {
 			continue
 		}
@@ -1651,8 +1717,8 @@ func validateArgs(args []string) (workflowPath, eventPath, eventName, format, pr
 	if eventSeen && profile == "" {
 		return "", "", "", "", "", false, fmt.Errorf("--event requires --profile hosted")
 	}
-	if eventSeen && !slices.Contains([]string{"push", "pull_request", "merge_group", "workflow_dispatch", "schedule"}, eventName) {
-		return "", "", "", "", "", false, fmt.Errorf("unsupported --event %q; supported events are push, pull_request, merge_group, workflow_dispatch, and schedule", eventName)
+	if eventSeen && !slices.Contains([]string{"push", "pull_request", "merge_group", "release", "workflow_dispatch", "schedule"}, eventName) {
+		return "", "", "", "", "", false, fmt.Errorf("unsupported --event %q; supported events are push, pull_request, merge_group, release, workflow_dispatch, and schedule", eventName)
 	}
 	if allEvents && (eventPathSeen || eventSeen) {
 		return "", "", "", "", "", false, fmt.Errorf("--all-events is mutually exclusive with --event and --event-path")
@@ -1698,11 +1764,19 @@ func generatedEventSnapshot(name string) ([]byte, error) {
 			"base_ref": "refs/heads/main",
 			"base_sha": strings.Repeat("1", 40),
 		}
+	case "release":
+		event.Ref = "refs/tags/v1.0.0"
+		event.Payload["action"] = "published"
+		event.Payload["release"] = map[string]any{
+			"tag_name":   "v1.0.0",
+			"draft":      false,
+			"prerelease": false,
+		}
 	case "schedule":
 		event.Payload["schedule"] = "0 0 * * *"
 	case "workflow_dispatch":
 	default:
-		return nil, fmt.Errorf("unsupported generated event %q; supported events are push, pull_request, merge_group, workflow_dispatch, and schedule", name)
+		return nil, fmt.Errorf("unsupported generated event %q; supported events are push, pull_request, merge_group, release, workflow_dispatch, and schedule", name)
 	}
 	return json.Marshal(event)
 }
@@ -1897,7 +1971,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		return 1
 	}
-	populateChangedPaths(&effectiveEvent.TriggerContext, effectiveEvent.Event, effectiveEvent.Origin, workflows)
+	populateChangedPaths(&effectiveEvent.TriggerSnapshot, effectiveEvent.Event, effectiveEvent.Origin, workflows)
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i := range workflows {
 		if workflows[i].ReusableOnly {
@@ -1907,11 +1981,11 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		switch {
 		case triggerErr != nil:
 			workflows[i].Applicable = true
-			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
+			workflows[i].TriggerCondition = effectiveEvent.TriggerExpressions.EventPredicate
 			processingReports[i] = triggerFailureProcessingReport(workflows[i], triggerErr)
 		case workflows[i].PathFiltersError != "" && selection.AnnotationReason == "":
 			workflows[i].Applicable = true
-			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
+			workflows[i].TriggerCondition = effectiveEvent.TriggerExpressions.EventPredicate
 			processingReports[i] = triggerFailureProcessingReport(workflows[i], &buildkitepipeline.UnsupportedPathFiltersError{
 				Event: effectiveEvent.Event.Event, Reason: workflows[i].PathFiltersError,
 			})
@@ -2049,7 +2123,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			failureArtifacts = append(failureArtifacts, artifacts...)
 			continue
 		}
-		preflight, err := compileHostedNamespaced(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, authentication)
+		preflight, err := compileHostedNamespaced(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, authentication)
 		applyHostedPreflight(&processingReports[i], preflight)
 		if err != nil {
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
@@ -2296,10 +2370,11 @@ const (
 )
 
 type effectiveEventSelection struct {
-	Source         []byte
-	Event          compiler.Event
-	Origin         effectiveEventOrigin
-	TriggerContext buildkitepipeline.TriggerConditionContext
+	Source             []byte
+	Event              compiler.Event
+	Origin             effectiveEventOrigin
+	TriggerExpressions buildkitepipeline.TriggerConditionExpressions
+	TriggerSnapshot    buildkitepipeline.TriggerEventSnapshot
 }
 
 func loadEffectiveEventSource(ctx context.Context, eventPath string, agent transport.Agent) ([]byte, effectiveEventOrigin, error) {
@@ -2329,9 +2404,11 @@ func newEffectiveEvent(source []byte, origin effectiveEventOrigin, getenv func(s
 	if err != nil {
 		return effectiveEventSelection{}, err
 	}
+	expressions, snapshot := snapshotTriggerState(event)
 	effective := effectiveEventSelection{
 		Source: source, Event: event, Origin: origin,
-		TriggerContext: snapshotTriggerConditionContext(event),
+		TriggerExpressions: expressions,
+		TriggerSnapshot:    snapshot,
 	}
 	if origin == effectiveEventFromPath {
 		return effective, nil
@@ -2340,12 +2417,12 @@ func newEffectiveEvent(source []byte, origin effectiveEventOrigin, getenv func(s
 	if buildSource := strings.TrimSpace(getenv("BUILDKITE_SOURCE")); buildSource != "" {
 		predicate = "build.source == " + triggerConditionLiteral(buildSource)
 	}
-	effective.TriggerContext.EventPredicate = predicate
+	effective.TriggerExpressions.EventPredicate = predicate
 	return effective, nil
 }
 
-func snapshotTriggerConditionContext(event compiler.Event) buildkitepipeline.TriggerConditionContext {
-	context := buildkitepipeline.TriggerConditionContext{
+func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerConditionExpressions, buildkitepipeline.TriggerEventSnapshot) {
+	expressions := buildkitepipeline.TriggerConditionExpressions{
 		EventPredicate:        "true",
 		Branch:                "null",
 		Tag:                   "null",
@@ -2353,38 +2430,42 @@ func snapshotTriggerConditionContext(event compiler.Event) buildkitepipeline.Tri
 		PullRequestAction:     "null",
 		MergeGroupBaseBranch:  "null",
 		MergeGroupAction:      "null",
+		ReleaseAction:         "null",
 	}
+	snapshot := buildkitepipeline.TriggerEventSnapshot{}
 	if branch, ok := strings.CutPrefix(event.Ref, "refs/heads/"); ok {
-		context.Branch = triggerConditionLiteral(branch)
-		context.BranchValue = &branch
+		expressions.Branch = triggerConditionLiteral(branch)
+		snapshot.Branch = &branch
 	}
 	if tag, ok := strings.CutPrefix(event.Ref, "refs/tags/"); ok {
-		context.Tag = triggerConditionLiteral(tag)
-		context.TagValue = &tag
+		expressions.Tag = triggerConditionLiteral(tag)
+		snapshot.Tag = &tag
 	}
 	if action, ok := event.Payload["action"].(string); ok && strings.TrimSpace(action) != "" {
-		context.PullRequestAction = triggerConditionLiteral(action)
-		context.PullRequestActionValue = &action
-		context.MergeGroupAction = triggerConditionLiteral(action)
-		context.MergeGroupActionValue = &action
+		expressions.PullRequestAction = triggerConditionLiteral(action)
+		snapshot.PullRequestAction = &action
+		expressions.MergeGroupAction = triggerConditionLiteral(action)
+		snapshot.MergeGroupAction = &action
+		expressions.ReleaseAction = triggerConditionLiteral(action)
+		snapshot.ReleaseAction = &action
 	}
 	if pullRequest, ok := event.Payload["pull_request"].(map[string]any); ok {
 		if base, ok := pullRequest["base"].(map[string]any); ok {
 			if branch, ok := base["ref"].(string); ok && strings.TrimSpace(branch) != "" {
-				context.PullRequestBaseBranch = triggerConditionLiteral(branch)
-				context.PullRequestBaseValue = &branch
+				expressions.PullRequestBaseBranch = triggerConditionLiteral(branch)
+				snapshot.PullRequestBaseBranch = &branch
 			}
 		}
 	}
 	if mergeGroup, ok := event.Payload["merge_group"].(map[string]any); ok {
 		if baseRef, ok := mergeGroup["base_ref"].(string); ok {
 			if branch, ok := strings.CutPrefix(baseRef, "refs/heads/"); ok && branch != "" {
-				context.MergeGroupBaseBranch = triggerConditionLiteral(branch)
-				context.MergeGroupBaseValue = &branch
+				expressions.MergeGroupBaseBranch = triggerConditionLiteral(branch)
+				snapshot.MergeGroupBaseBranch = &branch
 			}
 		}
 	}
-	return context
+	return expressions, snapshot
 }
 
 type workflowTriggerSelection struct {
@@ -2393,13 +2474,13 @@ type workflowTriggerSelection struct {
 }
 
 func selectWorkflowTrigger(triggers []workflow.Trigger, event effectiveEventSelection) (workflowTriggerSelection, error) {
-	condition, applicable, err := buildkitepipeline.TranslateEventTriggerCondition(triggers, event.Event.Event, event.TriggerContext)
+	condition, applicable, err := buildkitepipeline.TranslateEventTriggerCondition(triggers, event.Event.Event, event.TriggerExpressions, event.TriggerSnapshot)
 	if err != nil {
 		return workflowTriggerSelection{}, err
 	}
 	annotationReason := buildkitepipeline.TriggerEventSkipReason(triggers, event.Event.Event)
 	if applicable {
-		annotationReason, err = buildkitepipeline.TriggerFilterMismatchReason(triggers, event.Event.Event, event.TriggerContext)
+		annotationReason, err = buildkitepipeline.TriggerFilterMismatchReason(triggers, event.Event.Event, event.TriggerSnapshot)
 		if err != nil {
 			return workflowTriggerSelection{}, err
 		}
@@ -2708,20 +2789,21 @@ func hostedRunnerTargets() map[string]compiler.RunnerTarget {
 }
 
 func compileHosted(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespaced(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", actionAuthentication)
+	return compileHostedNamespaced(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", nil, actionAuthentication)
 }
 
 func compileHostedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", actionCacheDir, sharedActionSource, actionAuthentication)
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", nil, actionCacheDir, sharedActionSource, actionAuthentication)
 }
 
-func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, stepKeyNamespace, "", nil, actionAuthentication)
+func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, stepKeyNamespace, oidc, "", nil, actionAuthentication)
 }
 
-func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
 	options.StepKeyNamespace = stepKeyNamespace
+	options.OIDC = oidc
 	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, options)
 	if err != nil {
 		return hostedCompilation{}, hostedError(hostedEvaluationFailure, err)
@@ -3005,6 +3087,7 @@ type parsedUploadArgs struct {
 	eventPath                string
 	runtimeDistributionPaths map[compiler.Platform]string
 	runnerTargets            map[string]compiler.RunnerTarget
+	oidc                     *plan.OIDCConfiguration
 	experimentalRunnerUser   bool
 	pluginAcquisition        *pluginRuntimeAcquisition
 	importerPlatform         compiler.Platform

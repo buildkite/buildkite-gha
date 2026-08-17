@@ -329,6 +329,12 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 		return n, nil
 	}
 	if runtime == metadata.RuntimeNode16 || runtime == metadata.RuntimeNode20 || runtime == metadata.RuntimeNode24 {
+		if err := expression.ValidateActionLifecycleCondition(m.Runs.PreIf); err != nil {
+			return nil, fmt.Errorf("pre-if: %w", err)
+		}
+		if err := expression.ValidateActionLifecycleCondition(m.Runs.PostIf); err != nil {
+			return nil, fmt.Errorf("post-if: %w", err)
+		}
 		b.requiresMise = true
 	}
 	for _, capability := range runtime.RequiredCapabilities() {
