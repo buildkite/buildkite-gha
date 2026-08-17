@@ -1494,7 +1494,7 @@ func validateAllEvents(out processingOutput, workflowPath, version, actionCacheD
 }
 
 func validateAllEventsSource(out processingOutput, workflowPath string, source []byte, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
-	validation, validationErr := compiler.Validate(workflowPath, source)
+	validation, validationErr := compiler.ValidateWithOptions(workflowPath, source, hostedOptions("", nil, nil))
 	validationReport := compatibility.InitialProcessingReport(workflowPath, "", false, validation, validationErr)
 	if validationErr != nil {
 		validationReport.Result = "incompatible"

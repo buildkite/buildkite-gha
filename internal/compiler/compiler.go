@@ -209,12 +209,25 @@ func expansionReport(expanded expansionResult, warnings []Warning) Report {
 // Validate parses and validates the supported static graph without requiring an
 // event snapshot.
 func Validate(path string, source []byte) (Report, error) {
-	parsed, err := workflow.Parse(path, source)
-	if err != nil {
-		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
+	return ValidateWithOptions(path, source, defaultOptions())
+}
+
+// ValidateWithOptions validates the static graph against an explicit runner
+// policy without requiring an event snapshot.
+func ValidateWithOptions(path string, source []byte, options Options) (Report, error) {
+	var optionsErr error
+	if err := options.validate(); err != nil {
+		optionsErr = &ProcessingFinding{
+			Code: CodeEnvironment, Category: "environment",
+			Message: "workflow-processing configuration is invalid", Err: err,
+		}
+	}
+	parsed, parseErr := workflow.Parse(path, source)
+	parseErr = processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", parseErr)
+	if parseErr != nil {
+		return Report{}, errors.Join(parseErr, optionsErr)
 	}
 	triggerErr := processingFinding(StagePipeline, CodePipelineGeneration, "compatibility", buildkitepipeline.ValidateTriggerConditions(parsed.Triggers))
-	options := defaultOptions()
 	event := Event{
 		Event: "validation", Trust: options.EventTrust,
 		Repository: Repository{Owner: "validation", Name: "validation"},
@@ -229,7 +242,7 @@ func Validate(path string, source []byte) (Report, error) {
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
 	expanded, expandErr := expand(path, source, parsed, context, options)
-	if err := errors.Join(triggerErr, concurrencyErr, cancellationErr, expandErr); err != nil {
+	if err := errors.Join(optionsErr, triggerErr, concurrencyErr, cancellationErr, expandErr); err != nil {
 		return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), err
 	}
 	return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), nil
