@@ -747,6 +747,27 @@ func TestCanonicalWorkflowNameIsRepositoryRelative(t *testing.T) {
 	}
 }
 
+func TestJobPlansCarryEffectiveWorkflowName(t *testing.T) {
+	event := readFile(t, smokePath("events", "push.json"))
+	tests := []struct {
+		name   string
+		path   string
+		source []byte
+		want   string
+	}{
+		{name: "declared name", path: ".github/workflows/ci.yml", source: []byte("name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"), want: "CI"},
+		{name: "path fallback", path: ".github/workflows/ci.yml", source: []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"), want: ".github/workflows/ci.yml"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plans, err := compileUntrustedPlans(test.path, test.source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "hosted")
+			if err != nil || len(plans) != 1 || plans[0].Workflow.Name != test.want {
+				t.Fatalf("compiled plans = %#v, %v, want workflow name %q", plans, err, test.want)
+			}
+		})
+	}
+}
+
 func TestCompileResolvesReusableJobConcurrencyInputs(t *testing.T) {
 	repository := t.TempDir()
 	writeWorkflow(t, repository, "reusable.yml", `on:

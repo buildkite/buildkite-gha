@@ -10,6 +10,7 @@
     },
     "workflow": {
       "path": "./.github/workflows/shell.yml",
+      "name": "buildkite-gha shell smoke",
       "digest": "sha256:15ecf8cf6f5e03f52862f6988c8972973c6a1feb63b3518a03be9f69eaf5ee0c",
       "logical_job_id": "producer"
     },
@@ -81,6 +82,7 @@
     },
     "workflow": {
       "path": "./.github/workflows/shell.yml",
+      "name": "buildkite-gha shell smoke",
       "digest": "sha256:15ecf8cf6f5e03f52862f6988c8972973c6a1feb63b3518a03be9f69eaf5ee0c",
       "logical_job_id": "consumer"
     },
@@ -107,7 +109,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:abb17c90ef0776497e3740045cb017113b24d0cf7331a728f0db70f4df9247c5"
+          "plan_digest": "sha256:0512162f5009d09b762e6eff9e406f1cff715580619c28d427ab5c06e16d4d62"
         }
       ]
     },
@@ -147,6 +149,7 @@
     },
     "workflow": {
       "path": "./.github/workflows/shell.yml",
+      "name": "buildkite-gha shell smoke",
       "digest": "sha256:15ecf8cf6f5e03f52862f6988c8972973c6a1feb63b3518a03be9f69eaf5ee0c",
       "logical_job_id": "consumer"
     },
@@ -173,7 +176,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:abb17c90ef0776497e3740045cb017113b24d0cf7331a728f0db70f4df9247c5"
+          "plan_digest": "sha256:0512162f5009d09b762e6eff9e406f1cff715580619c28d427ab5c06e16d4d62"
         }
       ]
     },

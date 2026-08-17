@@ -1325,6 +1325,10 @@ func githubContext(job plan.Job) map[string]any {
 
 func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string) map[string]string {
 	runner, _ := canonicalRunnerContext(goruntime.GOOS, goruntime.GOARCH)
+	workflowName := job.Workflow.Name
+	if workflowName == "" {
+		workflowName = job.Workflow.Path
+	}
 	env := map[string]string{
 		"CI":                "true",
 		"GITHUB_ACTIONS":    "true",
@@ -1335,6 +1339,7 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string) 
 		"GITHUB_REPOSITORY": job.Event.Repository,
 		"GITHUB_SERVER_URL": plan.EventServerURL(job.Event.Provider),
 		"GITHUB_SHA":        job.Event.SHA,
+		"GITHUB_WORKFLOW":   workflowName,
 		"GITHUB_WORKSPACE":  workspace,
 		"RUNNER_OS":         runner["os"],
 		"RUNNER_ARCH":       runner["arch"],
@@ -1468,6 +1473,7 @@ func isRuntimeContextEnvironment(name string) bool {
 		"GITHUB_REPOSITORY",
 		"GITHUB_SERVER_URL",
 		"GITHUB_SHA",
+		"GITHUB_WORKFLOW",
 		"GITHUB_WORKSPACE",
 		"RUNNER_ARCH",
 		"RUNNER_OS",

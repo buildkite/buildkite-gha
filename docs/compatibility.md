@@ -816,6 +816,10 @@ The endpoint variables are scoped to each host action lifecycle invocation. Shel
 
 ## Runtime behavior and limits
 
+### Default environment
+
+The runtime sets `GITHUB_WORKFLOW` to the workflow's top-level `name`. If the workflow has no name, it uses the repository-relative workflow path. Workflow and step environment entries cannot override this value.
+
 ### Runner tools
 
 Linux labels use the corresponding Noble or Jammy hosted-toolchains image.

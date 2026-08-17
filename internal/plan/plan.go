@@ -127,6 +127,7 @@ func EventServerURL(provider string) string {
 
 type Workflow struct {
 	Path         string `json:"path"`
+	Name         string `json:"name,omitempty"`
 	Digest       string `json:"digest"`
 	LogicalJobID string `json:"logical_job_id"`
 }
@@ -438,6 +439,9 @@ func (job Job) Validate() error {
 	}
 	if job.Workflow.Path == "" || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {
 		return fmt.Errorf("job plan requires a workflow path, sha256 digest, and logical job id")
+	}
+	if len(job.Workflow.Name) > 1024 {
+		return fmt.Errorf("job plan workflow name exceeds its size limit")
 	}
 	if !targetPattern.MatchString(job.Target.StepKey) {
 		return fmt.Errorf("job plan requires a target step key")

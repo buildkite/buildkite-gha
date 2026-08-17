@@ -2621,6 +2621,29 @@ func TestGitHubContextExposesHeadRef(t *testing.T) {
 	}
 }
 
+func TestStandardEnvironmentSuppliesProtectedGitHubWorkflow(t *testing.T) {
+	tests := []struct {
+		name     string
+		workflow plan.Workflow
+		want     string
+	}{
+		{name: "declared name", workflow: plan.Workflow{Path: ".github/workflows/ci.yml", Name: "CI"}, want: "CI"},
+		{name: "path fallback", workflow: plan.Workflow{Path: ".github/workflows/ci.yml"}, want: ".github/workflows/ci.yml"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			env := standardEnvironment(plan.Job{Workflow: test.workflow}, "/workspace", "/tmp", "/tool-cache")
+			if got := env["GITHUB_WORKFLOW"]; got != test.want {
+				t.Fatalf("GITHUB_WORKFLOW = %q, want %q", got, test.want)
+			}
+			merged := mergeStepEnvironment(env, map[string]string{"GITHUB_WORKFLOW": "spoofed"})
+			if got := merged["GITHUB_WORKFLOW"]; got != test.want {
+				t.Fatalf("overlaid GITHUB_WORKFLOW = %q, want protected value %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRunJobSuppliesScopedGitHubTokenToEffectiveActionDefault(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()
