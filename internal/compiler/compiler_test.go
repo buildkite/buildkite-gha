@@ -1714,6 +1714,25 @@ func TestCompileRejectsRuntimeExpressionsLaunderedThroughReusableInputs(t *testi
 		}
 	})
 
+	t.Run("matrix value", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    strategy:
+      matrix:
+        target: ["${{ github.run_id }}"]
+    uses: ./.github/workflows/reusable.yml
+    with:
+      target: ${{ matrix.target }}
+`)
+		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ${{ inputs.target }}\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), "runtime-dependent reusable-workflow matrix value is unsupported") {
+			t.Fatalf("Compile() error = %v, want matrix expression rejection", err)
+		}
+	})
+
 	t.Run("callee body", func(t *testing.T) {
 		repository := t.TempDir()
 		path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    with:\n      enabled: true\n")
@@ -1742,20 +1761,18 @@ jobs:
 	})
 }
 
-func TestCompileResolvesGitHubRefNameInReusableMatrixValue(t *testing.T) {
-	repository := t.TempDir()
-	path := writeWorkflow(t, repository, "caller.yml", `on: push
+func TestCompileResolvesGitHubRefNameInMatrixDimension(t *testing.T) {
+	workflow := []byte(`on: push
 jobs:
-  call:
+  test:
     strategy:
       matrix:
-        target: ["${{ github.ref_name }}"]
-    uses: ./.github/workflows/reusable.yml
-    with:
-      target: ${{ matrix.target }}
+        target: ${{ fromJSON(format('["{0}"]', github.ref_name)) }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ matrix.target }}
 `)
-	writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ${{ inputs.target }}\n")
-	result, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+	result, err := Compile("matrix.yml", workflow, readFile(t, smokePath("events", "push.json")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1763,7 +1780,7 @@ jobs:
 	if err := json.Unmarshal(result, &ir); err != nil {
 		t.Fatal(err)
 	}
-	if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo main" {
+	if len(ir.Jobs) != 1 || ir.Jobs[0].Matrix["target"] != "main" {
 		t.Fatalf("resolved github.ref_name matrix value = %#v", ir.Jobs)
 	}
 }

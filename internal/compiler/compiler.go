@@ -1804,18 +1804,6 @@ func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (
 		resolved.Rows[i] = row
 		if row.Expression == nil {
 			resolved.Rows[i].Values = append([]workflow.Value(nil), row.Values...)
-			for j := range resolved.Rows[i].Values {
-				value := &resolved.Rows[i].Values[j]
-				text, ok := value.Data.(string)
-				if !ok || !containsExpression(text) {
-					continue
-				}
-				resolvedValue, err := expression.EvaluateCompileTemplate(text, context)
-				if err != nil {
-					return nil, fmt.Errorf("matrix dimension %q value: %w", row.Name, matrixExpressionError(err))
-				}
-				value.Data = resolvedValue
-			}
 			continue
 		}
 		value, err := expression.EvaluateCompile(*row.Expression, context)
@@ -1835,34 +1823,7 @@ func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (
 	if matrix.IncludeExpression != nil {
 		return nil, fmt.Errorf("runtime-dependent matrix include expressions are unsupported")
 	}
-	var err error
-	if resolved.Include, err = resolveMatrixCombinations(matrix.Include, context); err != nil {
-		return nil, fmt.Errorf("matrix include: %w", err)
-	}
-	if resolved.Exclude, err = resolveMatrixCombinations(matrix.Exclude, context); err != nil {
-		return nil, fmt.Errorf("matrix exclude: %w", err)
-	}
 	return &resolved, nil
-}
-
-func resolveMatrixCombinations(combinations []workflow.MatrixCombination, context expression.CompileContext) ([]workflow.MatrixCombination, error) {
-	resolved := make([]workflow.MatrixCombination, len(combinations))
-	for i, combination := range combinations {
-		resolved[i] = combination
-		resolved[i].Values = make(map[string]workflow.Value, len(combination.Values))
-		for name, value := range combination.Values {
-			text, ok := value.Data.(string)
-			if ok && containsExpression(text) {
-				resolvedValue, err := expression.EvaluateCompileTemplate(text, context)
-				if err != nil {
-					return nil, matrixExpressionError(err)
-				}
-				value.Data = resolvedValue
-			}
-			resolved[i].Values[name] = value
-		}
-	}
-	return resolved, nil
 }
 
 func matrixExpressionError(err error) error {
