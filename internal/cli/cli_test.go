@@ -4272,7 +4272,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	sources := map[string]string{
 		"a.yml":        runnable("name: 'Shared \"checks\"'\nrun-name: Run ${{ inputs.target }} on ${{ github.ref_name }} by @${{ github.actor }}\n", "\n  push:\n  workflow_dispatch:\n    inputs:\n      target:\n        default: production"),
 		"b.yml":        runnable("name: 'Shared \"checks\"'\nrun-name: Skipped ${{ github.event_name }} run\n", "pull_request"),
-		"c.yml":        runnable("name: Manual deploy\nrun-name: Deploy ${{ inputs.target }}\n", "workflow_dispatch"),
+		"c.yml":        runnable("name: Manual deploy\nrun-name: Deploy ${{ inputs.target }}\n", "\n  workflow_dispatch:\n    inputs:\n      target:\n        default: production"),
 		"unnamed.yml":  runnable("run-name: '   '\n", "\n  push:\n    branches-ignore: [main]"),
 		"reusable.yml": "name: Shared\non: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
 	}

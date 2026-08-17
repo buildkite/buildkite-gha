@@ -1995,7 +1995,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			workflows[i].SkipReason = selection.SkipReason
 			workflows[i].AnnotationReason = selection.AnnotationReason
 		}
-		runName, runNameErr := compiler.ResolveWorkflowRunName(workflows[i].Path, workflows[i].Parsed, effectiveEvent.Event)
+		runName, runNameErr := compiler.ResolveWorkflowRunName(workflows[i].Path, workflows[i].Parsed, effectiveEvent.Event, workflows[i].Applicable)
 		if runNameErr != nil {
 			if workflows[i].Applicable {
 				if len(processingReports[i].Stages) == 0 {
