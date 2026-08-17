@@ -86,13 +86,18 @@ func InitialProcessingReport(path, profile string, eventEvaluated bool, report c
 		markFailedJobs(&out)
 		setInitialStageResults(&out, eventEvaluated, failed)
 	}
-	for _, warning := range report.Warnings {
-		out.Diagnostics = append(out.Diagnostics, Diagnostic{
+	out.ApplyWarnings(path, report.Warnings)
+	return out
+}
+
+// ApplyWarnings adds compiler warnings to the processing report.
+func (r *ProcessingReport) ApplyWarnings(path string, warnings []compiler.Warning) {
+	for _, warning := range warnings {
+		r.Diagnostics = append(r.Diagnostics, Diagnostic{
 			Level: "warning", Code: warning.Code, Category: "compatibility", Stage: stageExpressions,
 			Message: fmt.Sprintf("%s:%d:%d: %s", path, warning.Line, warning.Column, warning.Message), Location: sourceLocation(path, warning.Line, warning.Column),
 		})
 	}
-	return out
 }
 
 func setInitialStageResults(report *ProcessingReport, eventEvaluated bool, failed map[string]bool) {

@@ -1042,6 +1042,90 @@ jobs:
 	}
 }
 
+func TestCompileBundleReusableWorkflowTokenWarningRequiresNarrowedRepositoryPermissions(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		callerPermissions string
+		calleePermissions string
+		calleeStep        string
+		wantToken         bool
+	}{
+		{
+			name:              "identical repository permissions",
+			callerPermissions: "  contents: read\n",
+			calleePermissions: "  contents: read\n",
+			calleeStep:        "      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n",
+			wantToken:         true,
+		},
+		{
+			name:              "tokenless narrowed permissions",
+			callerPermissions: "  contents: write\n",
+			calleePermissions: "  contents: read\n",
+			calleeStep:        "      - run: echo tokenless\n",
+		},
+		{
+			name:              "id-token-only difference",
+			callerPermissions: "  contents: read\n  id-token: write\n",
+			calleePermissions: "  contents: read\n",
+			calleeStep:        "      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n",
+			wantToken:         true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			caller := writeWorkflow(t, repository, "caller.yml", "on: push\npermissions:\n"+test.callerPermissions+"jobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n")
+			writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\npermissions:\n"+test.calleePermissions+"jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"+test.calleeStep)
+
+			bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bundle.IR.Warnings) != 0 {
+				t.Fatalf("warnings = %#v, want none", bundle.IR.Warnings)
+			}
+			if got := bundle.Plans[0].Job.GitHubToken != nil; got != test.wantToken {
+				t.Fatalf("called job has token = %t, want %t", got, test.wantToken)
+			}
+			if bundle.Plans[0].Job.IDTokenPermission != "" {
+				t.Fatalf("called job id-token permission = %q, want narrowed permission", bundle.Plans[0].Job.IDTokenPermission)
+			}
+		})
+	}
+}
+
+func TestCompileBundleNestedReusableWorkflowTokenWarning(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: write
+jobs:
+  delegated:
+    uses: ./.github/workflows/middle.yml
+`)
+	writeWorkflow(t, repository, "middle.yml", `on: workflow_call
+permissions:
+  contents: read
+jobs:
+  delegated:
+    uses: ./.github/workflows/leaf.yml
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on: workflow_call
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ secrets.GITHUB_TOKEN }}'
+`)
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS" || bundle.IR.Warnings[0].Line != 6 {
+		t.Fatalf("warnings = %#v, want nested reusable workflow token warning at the top-level call", bundle.IR.Warnings)
+	}
+}
+
 func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
 	for _, test := range []struct {
 		reference string

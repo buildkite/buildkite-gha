@@ -122,6 +122,8 @@ type JobInstance struct {
 	RepositoryRoot          string                  `json:"-"`
 	Source                  workflow.Span           `json:"source"`
 	secretAuthority         bool
+	tokenPolicyNarrowed     bool
+	reusableCall            workflow.Position
 }
 
 // NeedOutput selects one caller-visible output from a concrete prerequisite.
@@ -897,19 +899,6 @@ func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string
 
 func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warning {
 	var warnings []Warning
-	for _, job := range parsed.Jobs {
-		if job.Reusable == nil || !strings.HasPrefix(job.Reusable.Uses, "./.github/workflows/") {
-			continue
-		}
-		position := job.Reusable.Span.Start
-		warnings = append(warnings, Warning{
-			Code:    "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS",
-			Line:    position.Line,
-			Column:  position.Column,
-			Message: "jobs expanded from local reusable workflows use the top-level requesting workflow permissions for GITHUB_TOKEN; permissions declared in called workflows are not enforced",
-		})
-		break
-	}
 	if parsed.Concurrency != nil && cancelInProgress {
 		position := parsed.Concurrency.CancelInProgressPosition
 		warnings = append(warnings, Warning{
@@ -920,6 +909,15 @@ func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warnin
 		})
 	}
 	return warnings
+}
+
+func reusableWorkflowTokenWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "jobs expanded from local reusable workflows use the top-level requesting workflow permissions for GITHUB_TOKEN; permissions declared in called workflows are not enforced",
+	}
 }
 
 // ParseEvent validates and decodes the event snapshot used for compilation.
@@ -1311,6 +1309,8 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				RepositoryRoot:          sourced.root,
 				Source:                  job.Span,
 				secretAuthority:         sourced.secretAuthority,
+				tokenPolicyNarrowed:     sourced.tokenPolicyNarrowed,
+				reusableCall:            sourced.reusableCall,
 			}
 			result.candidates = append(result.candidates, candidate)
 
