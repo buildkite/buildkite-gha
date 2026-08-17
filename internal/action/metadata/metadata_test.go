@@ -204,7 +204,7 @@ runs:
 	t.Run("unknown field", func(t *testing.T) {
 		root := t.TempDir()
 		writeAction(t, root, "action.yml", "env:\n  GITHUB_TOKEN: ignored\nunexpected: true\nruns:\n  using: node24\n")
-		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "field unexpected not found") {
+		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "line 3: field unexpected not found") {
 			t.Fatalf("Load() error = %v, want unknown field rejection", err)
 		}
 	})
@@ -212,7 +212,7 @@ runs:
 	t.Run("unknown nested field", func(t *testing.T) {
 		root := t.TempDir()
 		writeAction(t, root, "action.yml", "env:\n  GITHUB_TOKEN: ignored\nbranding:\n  unexpected: true\nruns:\n  using: node24\n")
-		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "field unexpected not found") {
+		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "line 4: field unexpected not found") {
 			t.Fatalf("Load() error = %v, want nested unknown field rejection", err)
 		}
 	})

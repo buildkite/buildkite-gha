@@ -170,6 +170,15 @@ func Load(root, path string) (Metadata, error) {
 		return Metadata{}, err
 	}
 	if discardTopLevelEnv(&document) {
+		var validated struct {
+			Metadata `yaml:",inline"`
+			Env      yaml.Node `yaml:"env"`
+		}
+		validator := yaml.NewDecoder(bytes.NewReader(source))
+		validator.KnownFields(true)
+		if err := validator.Decode(&validated); err != nil {
+			return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
+		}
 		source, err = yaml.Marshal(&document)
 		if err != nil {
 			return Metadata{}, fmt.Errorf("parse action metadata %q: discard top-level env: %w", metadataPath, err)
