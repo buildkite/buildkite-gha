@@ -803,14 +803,25 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	if err != nil {
 		return IR{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
-	workflowTokenPolicyFilename, workflowTokenPolicyDiagnostic := workflowTokenPolicyEvidence(path, parsed)
+	displayPath := path
+	if options.RepositoryRoot != "" {
+		root, canonicalPath, locationErr := workflowRepository(path, options.RepositoryRoot)
+		if locationErr != nil {
+			return IR{}, &ProcessingFinding{Code: CodeEnvironment, Category: "environment", Message: "workflow-processing configuration is invalid", Err: locationErr}
+		}
+		displayPath, locationErr = repositoryWorkflowPath(root, canonicalPath)
+		if locationErr != nil {
+			return IR{}, &ProcessingFinding{Code: CodeEnvironment, Category: "environment", Message: "workflow-processing configuration is invalid", Err: locationErr}
+		}
+	}
+	workflowTokenPolicyFilename, workflowTokenPolicyDiagnostic := workflowTokenPolicyEvidence(displayPath, parsed)
 	event, err := parseEvent(eventSource)
 	if err != nil {
 		return IR{}, processingFinding(StageEventValidation, CodeEventInvalid, "environment", err)
 	}
 	event.Trust = options.EventTrust
 	vars := options.Vars.snapshot()
-	context := compileContext(event, vars, path, parsed.Name)
+	context := compileContext(event, vars, displayPath, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
@@ -821,7 +832,7 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	ir := IR{
 		Schema: schema,
 		Workflow: WorkflowSource{
-			Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
+			Path: displayPath, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
 			WorkflowTokenPolicyFilename: workflowTokenPolicyFilename, WorkflowTokenPolicyDiagnostic: workflowTokenPolicyDiagnostic,
 		},
 		Event:    event,
@@ -1063,7 +1074,7 @@ func eventBaseRef(event Event) string {
 
 func canonicalWorkflowName(path string) string {
 	if isRepositoryWorkflowPath(path) {
-		root, canonicalPath, err := workflowRepository(path)
+		root, canonicalPath, err := workflowRepository(path, "")
 		if err == nil {
 			if relative, err := repositoryWorkflowPath(root, canonicalPath); err == nil {
 				return strings.TrimPrefix(relative, "./")
@@ -1074,7 +1085,7 @@ func canonicalWorkflowName(path string) string {
 }
 
 func expand(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (expansionResult, error) {
-	resolved, runtimeMatrixBoundary, err := resolveReusableWorkflows(path, source, parsed, context)
+	resolved, runtimeMatrixBoundary, err := resolveReusableWorkflows(path, source, parsed, context, options.RepositoryRoot)
 	if err != nil {
 		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
 		for _, job := range parsed.Jobs {

@@ -1928,6 +1928,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.StepKeyNamespace = input.StepKeyNamespace
+		validationOptions.RepositoryRoot = input.RepositoryRoot
 		validation, validationErr := compiler.ValidateEventWithOptions(input.Path, input.Source, effectiveEvent.Source, validationOptions)
 		processingReports[i] = compatibility.InitialProcessingReport(input.Path, hostedProfile, true, validation, validationErr)
 		if validationErr != nil {
@@ -1952,7 +1953,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 			continue
 		}
-		platforms, platformErr := requiredRuntimePlatforms(input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets)
+		platforms, platformErr := requiredRuntimePlatforms(input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets, input.RepositoryRoot)
 		if platformErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", platformErr)
 			return 1
@@ -2035,7 +2036,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			failureArtifacts = append(failureArtifacts, artifacts...)
 			continue
 		}
-		preflight, err := compileHostedNamespaced(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, authentication)
+		preflight, err := compileHostedNamespacedAtRoot(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, input.RepositoryRoot, authentication)
 		applyHostedPreflight(&processingReports[i], preflight)
 		if err != nil {
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
@@ -2230,8 +2231,10 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 	return transport.Artifact{Path: path, Digest: digest, Contents: encoded}
 }
 
-func requiredRuntimePlatforms(workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget) (map[compiler.Platform]bool, error) {
-	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, hostedOptions(groupLabel, configuredTargets, nil))
+func requiredRuntimePlatforms(workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, repositoryRoot string) (map[compiler.Platform]bool, error) {
+	options := hostedOptions(groupLabel, configuredTargets, nil)
+	options.RepositoryRoot = repositoryRoot
+	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, options)
 	if err != nil {
 		return nil, err
 	}
@@ -2434,12 +2437,12 @@ func triggerProcessingReport(path string, source []byte) compatibility.Processin
 }
 
 type workflowInput struct {
-	Path, CanonicalPath, Identity, StepKeyNamespace, Name string
-	Source                                                []byte
-	Triggers                                              []workflow.Trigger
-	TriggerCondition, SkipReason, AnnotationReason        string
-	PathFiltersError                                      string
-	ReusableOnly, Applicable                              bool
+	Path, CanonicalPath, RepositoryRoot, Identity, StepKeyNamespace, Name string
+	Source                                                                []byte
+	Triggers                                                              []workflow.Trigger
+	TriggerCondition, SkipReason, AnnotationReason                        string
+	PathFiltersError                                                      string
+	ReusableOnly, Applicable                                              bool
 }
 
 func resolveWorkflowOperands(operands []string) ([]workflowInput, error) {
@@ -2458,13 +2461,20 @@ func resolveWorkflowOperands(operands []string) ([]workflowInput, error) {
 		return nil, fmt.Errorf("workflow path %q must end in .yml or .yaml", operands[0])
 	}
 	canonical := filepath.ToSlash(filepath.Clean(operands[0]))
+	repositoryRoot := ""
 	if rootBytes, rootErr := exec.Command("git", "rev-parse", "--show-toplevel").Output(); rootErr == nil {
 		root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
 		if relative, relativeErr := filepath.Rel(root, path); relativeErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			canonical = filepath.ToSlash(filepath.Clean(relative))
+			candidate := filepath.ToSlash(filepath.Clean(relative))
+			output, trackedErr := exec.Command("git", "-C", root, "ls-files", "-z", "--", ":(top,literal)"+candidate).Output()
+			entries := bytes.Split(output, []byte{0})
+			if trackedErr == nil && len(entries) == 2 && string(entries[0]) == candidate && len(entries[1]) == 0 {
+				canonical = candidate
+				repositoryRoot = root
+			}
 		}
 	}
-	return workflowInputs([]workflowInput{{Path: path, CanonicalPath: canonical}}, false)
+	return workflowInputs([]workflowInput{{Path: path, CanonicalPath: canonical, RepositoryRoot: repositoryRoot}}, false)
 }
 
 func expandExplicitWorkflowPaths(operands []string) ([]workflowInput, error) {
@@ -2505,7 +2515,7 @@ func expandExplicitWorkflowPaths(operands []string) ([]workflowInput, error) {
 			}
 			return nil, fmt.Errorf("workflow path %q is not tracked by git", operand)
 		}
-		matches = append(matches, workflowInput{Path: filepath.Join(root, filepath.FromSlash(canonical)), CanonicalPath: canonical})
+		matches = append(matches, workflowInput{Path: filepath.Join(root, filepath.FromSlash(canonical)), CanonicalPath: canonical, RepositoryRoot: root})
 	}
 	return workflowInputs(matches, true)
 }
@@ -2689,12 +2699,21 @@ func compileHostedWithActionCache(ctx context.Context, workflowPath string, work
 }
 
 func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, stepKeyNamespace, "", nil, actionAuthentication)
+	return compileHostedNamespacedAtRoot(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, stepKeyNamespace, "", actionAuthentication)
+}
+
+func compileHostedNamespacedAtRoot(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace, repositoryRoot string, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+	return compileHostedNamespacedWithActionCacheAtRoot(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, stepKeyNamespace, repositoryRoot, "", nil, actionAuthentication)
 }
 
 func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+	return compileHostedNamespacedWithActionCacheAtRoot(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, stepKeyNamespace, "", actionCacheDir, sharedActionSource, actionAuthentication)
+}
+
+func compileHostedNamespacedWithActionCacheAtRoot(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace, repositoryRoot, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
 	options.StepKeyNamespace = stepKeyNamespace
+	options.RepositoryRoot = repositoryRoot
 	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, options)
 	if err != nil {
 		return hostedCompilation{}, hostedError(hostedEvaluationFailure, err)

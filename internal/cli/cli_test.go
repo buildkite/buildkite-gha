@@ -3633,6 +3633,30 @@ func TestValidateHostedProfileAdmitsImplicitReadOnlyWorkflowToken(t *testing.T) 
 	}
 }
 
+func TestArbitraryRepositoryWorkflowTokenKeepsHostedPolicyLimit(t *testing.T) {
+	repository := t.TempDir()
+	workflowPath := filepath.Join(repository, "ci", "token.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte("on: push\npermissions:\n  contents: read\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compileHostedNamespacedAtRoot(context.Background(), workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("a", 64), "importer", "", nil, nil, "", repository, nil)
+	if err == nil || len(compiled.Bundle.Plans) != 1 {
+		t.Fatalf("arbitrary-path token compilation = %#v, %v", compiled, err)
+	}
+	message, _ := githubTokenAdmissionDiagnostic(compiled.Bundle.Plans[0], compiled.Bundle.IR.Workflow.WorkflowTokenPolicyDiagnostic)
+	if !strings.Contains(message, "hosted GITHUB_TOKEN issuance requires the workflow directly under .github/workflows") {
+		t.Fatalf("arbitrary-path token diagnostic = %q", message)
+	}
+}
+
 func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
@@ -3932,9 +3956,17 @@ func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 		t.Fatalf("canonical explicit inputs = %#v and %#v", first, second)
 	}
 	for _, input := range first {
-		if input.Identity == "" || input.StepKeyNamespace != input.Identity || !filepath.IsAbs(input.Path) {
+		if input.Identity == "" || input.StepKeyNamespace != input.Identity || !filepath.IsAbs(input.Path) || input.RepositoryRoot != repository {
 			t.Fatalf("explicit workflow identity = %#v", input)
 		}
+	}
+	single, err := resolveWorkflowOperands([]string{aPath})
+	if err != nil || len(single) != 1 || single[0].RepositoryRoot != repository {
+		t.Fatalf("single tracked workflow root = %#v, %v", single, err)
+	}
+	untracked, err := resolveWorkflowOperands([]string{filepath.Join(".github", "workflows", "untracked.yml")})
+	if err != nil || len(untracked) != 1 || untracked[0].RepositoryRoot != "" {
+		t.Fatalf("single untracked workflow root = %#v, %v", untracked, err)
 	}
 	metacharacter, err := expandExplicitWorkflowPaths([]string{filepath.Join(".github", "workflows", "workflow[1].yml"), aPath})
 	if err != nil || len(metacharacter) != 2 || metacharacter[1].CanonicalPath != ".github/workflows/workflow[1].yml" {

@@ -107,6 +107,9 @@ type Options struct {
 	Vars       VariableSources
 	Runners    RunnerPolicy
 	EventTrust EventTrust
+	// RepositoryRoot identifies the verified checkout containing the workflow.
+	// Empty preserves standalone and in-memory compiler behavior.
+	RepositoryRoot string
 	// ResolveActions enables immutable remote action locking independently of
 	// event trust. Workspace-local actions are always locked without network
 	// access. ActionSource is required only when a workflow uses remote actions.
