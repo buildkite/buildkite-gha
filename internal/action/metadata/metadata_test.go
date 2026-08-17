@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -110,6 +111,52 @@ func TestValidateDockerEntrypoints(t *testing.T) {
 }
 
 func TestLoadIsStrictAndConfined(t *testing.T) {
+	t.Run("softprops top-level env is inert", func(t *testing.T) {
+		root := t.TempDir()
+		writeAction(t, root, "action.yml", `name: GH Release
+description: Github Action for creating Github Releases
+author: softprops
+inputs:
+  token:
+    description: Authorized GitHub token or PAT
+    required: false
+    default: ${{ github.token }}
+env:
+  GITHUB_TOKEN: "As provided by Github Actions"
+runs:
+  using: node24
+  main: dist/index.js
+`)
+		action, err := Load(root, ".")
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(action)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), "As provided by Github Actions") || action.Runs.Env != nil {
+			t.Fatalf("Load() retained top-level env: %s", encoded)
+		}
+		if token := action.Inputs["token"].Default; token == nil || *token != "${{ github.token }}" {
+			t.Fatalf("Load() token input default = %v, want retained input authority", token)
+		}
+	})
+
+	t.Run("top-level env accepts arbitrary YAML values", func(t *testing.T) {
+		for _, value := range []string{
+			"placeholder",
+			"[GITHUB_TOKEN, {nested: true}]",
+			"{GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}', nested: {token: value}}",
+		} {
+			root := t.TempDir()
+			writeAction(t, root, "action.yml", "env: "+value+"\nruns:\n  using: node24\n  main: dist/index.js\n")
+			if _, err := Load(root, "."); err != nil {
+				t.Fatalf("Load() env %q error = %v", value, err)
+			}
+		}
+	})
+
 	t.Run("official declarative fields", func(t *testing.T) {
 		root := t.TempDir()
 		writeAction(t, root, "action.yml", "name: Setup tool\ndescription: Installs a tool\ndeprecationMessage: Use setup-tool v2 instead\nauthor: GitHub\ninputs:\n  version:\n    deprecationMessage: Use version-file instead\n    type: string\nbranding:\n  icon: package\n  color: blue\nruns:\n  using: node24\n  main: dist/index.js\n")
@@ -156,17 +203,25 @@ func TestLoadIsStrictAndConfined(t *testing.T) {
 
 	t.Run("unknown field", func(t *testing.T) {
 		root := t.TempDir()
-		writeAction(t, root, "action.yml", "unexpected: true\nruns:\n  using: node24\n")
-		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "field unexpected not found") {
+		writeAction(t, root, "action.yml", "env:\n  GITHUB_TOKEN: ignored\nunexpected: true\nruns:\n  using: node24\n")
+		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "line 3: field unexpected not found") {
 			t.Fatalf("Load() error = %v, want unknown field rejection", err)
 		}
 	})
 
 	t.Run("unknown nested field", func(t *testing.T) {
 		root := t.TempDir()
-		writeAction(t, root, "action.yml", "branding:\n  unexpected: true\nruns:\n  using: node24\n")
-		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "field unexpected not found") {
+		writeAction(t, root, "action.yml", "env:\n  GITHUB_TOKEN: ignored\nbranding:\n  unexpected: true\nruns:\n  using: node24\n")
+		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "line 4: field unexpected not found") {
 			t.Fatalf("Load() error = %v, want nested unknown field rejection", err)
+		}
+	})
+
+	t.Run("malformed top-level env", func(t *testing.T) {
+		root := t.TempDir()
+		writeAction(t, root, "action.yml", "env: [unterminated\nruns:\n  using: node24\n")
+		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "parse action metadata") {
+			t.Fatalf("Load() error = %v, want malformed YAML rejection", err)
 		}
 	})
 

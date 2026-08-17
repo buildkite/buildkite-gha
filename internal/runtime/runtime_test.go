@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -2853,6 +2854,62 @@ runs:
 	}
 	if result.Env["GITHUB_TOKEN"] != "***" || result.Env["GITHUB_SHA"] != "action-sha" || result.Env["RUNNER_TEMP"] != "/action-temp" || strings.Contains(logs.String(), "ghs_scoped_action_default") || !strings.Contains(logs.String(), "exported token: ***") {
 		t.Fatalf("exported workflow token leaked: result = %#v, logs = %q", result, logs.String())
+	}
+}
+
+func TestCompileAndRunJobDiscardsTopLevelActionEnv(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "test.yml")
+	workflow := []byte(`on: push
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/release
+        env:
+          GITHUB_TOKEN: workflow-step-token
+          PRESERVED: workflow-step-env
+`)
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", string(workflow))
+	writeFixtureFile(t, workspace, ".github/actions/release/action.yml", `name: GH Release
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  METADATA_ONLY: ${{ secrets.DEPLOY_TOKEN }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: |
+        test "$GITHUB_TOKEN" = workflow-step-token
+        test "$PRESERVED" = workflow-step-env
+        test -z "${METADATA_ONLY:-}"
+`)
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken != nil || len(plans[0].RequiredSecrets) != 0 || plans[0].HasCapability("provider-token-write") || plans[0].HasCapability("secrets") {
+		t.Fatalf("top-level action env added authority to plan: %#v", plans)
+	}
+	encoded, err := json.Marshal(plans[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "METADATA_ONLY") || strings.Contains(string(encoded), "DEPLOY_TOKEN") {
+		t.Fatalf("top-level action env leaked into plan: %s", encoded)
+	}
+
+	provider := &testWorkflowTokenProvider{token: "must-not-be-minted"}
+	result, err := (Runner{WorkflowToken: provider, Secrets: testSecretResolver{}}).RunJob(context.Background(), plans[0], workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if provider.calls != 0 {
+		t.Fatalf("top-level action env requested %d workflow tokens", provider.calls)
 	}
 }
 
