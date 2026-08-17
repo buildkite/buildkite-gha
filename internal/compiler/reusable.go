@@ -66,19 +66,19 @@ type reusableResolver struct {
 	runtimeMatrixBoundary bool
 }
 
-func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext) ([]sourcedJob, bool, error) {
+func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositoryRoot string) ([]sourcedJob, bool, error) {
 	digest := "sha256:" + sha256Sum(source)
 	runtimeMatrixBoundary := hasRuntimeMatrixBoundary(parsed)
 	if !hasReusableCall(parsed) {
 		sourcePath := path
 		root := ""
-		if isRepositoryWorkflowPath(path) {
-			repositoryRoot, canonicalPath, err := workflowRepository(path)
+		if repositoryRoot != "" || isRepositoryWorkflowPath(path) {
+			resolvedRoot, canonicalPath, err := workflowRepository(path, repositoryRoot)
 			if err != nil {
 				return nil, runtimeMatrixBoundary, err
 			}
-			root = repositoryRoot
-			sourcePath, err = repositoryWorkflowPath(repositoryRoot, canonicalPath)
+			root = resolvedRoot
+			sourcePath, err = repositoryWorkflowPath(resolvedRoot, canonicalPath)
 			if err != nil {
 				return nil, runtimeMatrixBoundary, err
 			}
@@ -107,13 +107,16 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 		return jobs, runtimeMatrixBoundary, nil
 	}
 
-	root, canonicalPath, err := workflowRepository(path)
+	root, canonicalPath, err := workflowRepository(path, repositoryRoot)
 	if err != nil {
 		return nil, runtimeMatrixBoundary, err
 	}
 	sourcePath, err := repositoryWorkflowPath(root, canonicalPath)
 	if err != nil {
 		return nil, runtimeMatrixBoundary, err
+	}
+	if filepath.Dir(filepath.FromSlash(strings.TrimPrefix(sourcePath, "./"))) != filepath.Join(".github", "workflows") {
+		return nil, runtimeMatrixBoundary, fmt.Errorf("%s: local reusable workflows require the caller under .github/workflows", path)
 	}
 	resolver := reusableResolver{root: root, stack: []string{canonicalPath}, context: context, runtimeMatrixBoundary: runtimeMatrixBoundary}
 	resolver.discoverRuntimeMatrixBoundaries(parsed, 0, map[string]int{canonicalPath: 0})
@@ -1069,23 +1072,31 @@ func isRepositoryWorkflowPath(path string) bool {
 	return filepath.Base(workflowDir) == "workflows" && filepath.Base(filepath.Dir(workflowDir)) == ".github"
 }
 
-func workflowRepository(path string) (string, string, error) {
+func workflowRepository(path, suppliedRoot string) (string, string, error) {
 	absPath, err := filepath.Abs(filepath.Clean(path))
 	if err != nil {
 		return "", "", fmt.Errorf("resolve workflow path: %w", err)
 	}
-	workflowDir := filepath.Dir(absPath)
-	if filepath.Base(workflowDir) != "workflows" || filepath.Base(filepath.Dir(workflowDir)) != ".github" {
-		return "", "", fmt.Errorf("%s: local reusable workflows require the caller under .github/workflows", path)
+	repositoryDir := suppliedRoot
+	if repositoryDir == "" {
+		workflowDir := filepath.Dir(absPath)
+		if filepath.Base(workflowDir) != "workflows" || filepath.Base(filepath.Dir(workflowDir)) != ".github" {
+			return "", "", fmt.Errorf("%s: local reusable workflows require the caller under .github/workflows", path)
+		}
+		repositoryDir = filepath.Dir(filepath.Dir(workflowDir))
+	} else {
+		repositoryDir, err = filepath.Abs(filepath.Clean(repositoryDir))
+		if err != nil {
+			return "", "", fmt.Errorf("resolve repository root %q: %w", suppliedRoot, err)
+		}
 	}
-	repositoryDir := filepath.Dir(filepath.Dir(workflowDir))
 	root, err := filepath.EvalSymlinks(repositoryDir)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve repository root for %q: %w", path, err)
 	}
 	canonicalPath, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		if suppliedRoot != "" || !os.IsNotExist(err) {
 			return "", "", fmt.Errorf("resolve workflow path %q: %w", path, err)
 		}
 		relative, relativeErr := filepath.Rel(repositoryDir, absPath)

@@ -708,6 +708,123 @@ func TestCompileActionLocksRequiresRepositoryRoot(t *testing.T) {
 	}
 }
 
+func TestCompileArbitraryRepositoryWorkflowActions(t *testing.T) {
+	repository := t.TempDir()
+	workflowPath := filepath.Join(repository, "ci", "node.js.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, repository, "actions/local", "name: local\nruns:\n  using: node24\n  main: index.js\n")
+	remote := t.TempDir()
+	writeAction(t, remote, "", "name: setup\nruns:\n  using: node24\n  main: index.js\n")
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/setup-node@v4\n      - uses: ./actions/local\n")
+	if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{
+		EventTrust:     EventUntrusted,
+		RepositoryRoot: repository,
+		Runners: RunnerPolicy{
+			Labels:                     map[string]string{"ubuntu-latest": ""},
+			AllowUntrustedDefaultQueue: true,
+		},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	}
+	bundle, err := CompileBundlePlansContext(context.Background(), workflowPath, source, pushEvent(t), "0.0.0-test", testDistributionDigest, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.IR.Workflow.Path != "./ci/node.js.yml" || len(bundle.Plans) != 1 || bundle.Plans[0].Job.Workflow.Path != "./ci/node.js.yml" {
+		t.Fatalf("repository-relative workflow provenance = IR %q, plans %#v", bundle.IR.Workflow.Path, bundle.Plans)
+	}
+	if got := bundle.Plans[0].Job.Actions; len(got) != 2 || got[0].Source != "workspace" || got[0].Path != "actions/local" || got[1].Source != "github" {
+		t.Fatalf("action locks = %#v", got)
+	}
+}
+
+func TestCompileRepositoryRootConfinement(t *testing.T) {
+	repository := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.yml")
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+	if err := os.WriteFile(outside, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := defaultOptions()
+	options.RepositoryRoot = repository
+	if _, err := CompileWithOptions(outside, source, pushEvent(t), options); err == nil || !strings.Contains(err.Error(), "escapes repository root") {
+		t.Fatalf("outside-root error = %v", err)
+	}
+
+	symlink := filepath.Join(repository, "ci.yml")
+	if err := os.Symlink(outside, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CompileWithOptions(symlink, source, pushEvent(t), options); err == nil || !strings.Contains(err.Error(), "escapes repository root") {
+		t.Fatalf("symlink escape error = %v", err)
+	}
+}
+
+func TestCompileRepositoryRootIsOptionalAndSourcePathsAreDeterministic(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./actions/local\n")
+	options := defaultOptions()
+	if _, err := CompileBundlePlansContext(context.Background(), "ci/workflow.yml", source, pushEvent(t), "0.0.0-test", testDistributionDigest, options); err == nil || !strings.Contains(err.Error(), "workflow path") {
+		t.Fatalf("empty-root local action error = %v", err)
+	}
+
+	var outputs [][]byte
+	for range 2 {
+		repository := t.TempDir()
+		workflowPath := filepath.Join(repository, "ci", "workflow.yml")
+		if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeAction(t, repository, "actions/local", "name: local\nruns:\n  using: node24\n  main: index.js\n")
+		options.RepositoryRoot = repository
+		compiled, err := CompileWithOptions(workflowPath, source, pushEvent(t), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outputs = append(outputs, compiled)
+	}
+	if !bytes.Equal(outputs[0], outputs[1]) {
+		t.Fatalf("compilation depends on checkout location:\n%s\n%s", outputs[0], outputs[1])
+	}
+}
+
+func TestCompileArbitraryRepositoryWorkflowPreservesPolicyBoundaries(t *testing.T) {
+	repository := t.TempDir()
+	workflowPath := filepath.Join(repository, "ci", "caller.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	options := defaultOptions()
+	options.RepositoryRoot = repository
+
+	reusable := []byte("on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n")
+	if err := os.WriteFile(workflowPath, reusable, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CompileWithOptions(workflowPath, reusable, pushEvent(t), options); err == nil || !strings.Contains(err.Error(), "local reusable workflows require the caller under .github/workflows") {
+		t.Fatalf("reusable caller error = %v", err)
+	}
+
+	token := []byte("on: push\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
+	if err := os.WriteFile(workflowPath, token, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundlePlansContext(context.Background(), workflowPath, token, pushEvent(t), "0.0.0-test", testDistributionDigest, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Authorization.WorkflowTokenPolicyFilename != "" || !strings.Contains(bundle.IR.Workflow.WorkflowTokenPolicyDiagnostic, "directly under .github/workflows") {
+		t.Fatalf("arbitrary-path token policy = IR %#v, authorization %#v", bundle.IR.Workflow, bundle.Plans)
+	}
+}
+
 func TestCompileActionLocksRejectsExcessiveDepthBeforeResolvingLeaf(t *testing.T) {
 	w := t.TempDir()
 	for i := 0; i <= metadata.MaxNestedActionDepth; i++ {

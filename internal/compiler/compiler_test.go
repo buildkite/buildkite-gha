@@ -2951,7 +2951,7 @@ func TestLocalActionCapabilityResolutionStaysWithinRepository(t *testing.T) {
 func TestWorkflowRepositoryNormalizesInMemoryWorkflowPath(t *testing.T) {
 	repository := t.TempDir()
 	path := filepath.Join(repository, ".github", "workflows", "memory.yml")
-	root, canonical, err := workflowRepository(path)
+	root, canonical, err := workflowRepository(path, "")
 	if err != nil {
 		t.Fatal(err)
 	}
