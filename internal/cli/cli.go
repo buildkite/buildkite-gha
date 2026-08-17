@@ -673,6 +673,13 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			runErr = fmt.Errorf("hydrate prerequisite results: %w", runErr)
 		}
 	}
+	if runErr == nil && len(job.CallGuards) != 0 {
+		job.CallGuards, runErr = gharuntime.ResolveCallGuards(ctx, agent, artifactRoot, producer.BuildID, job.CallGuards)
+		if runErr != nil {
+			details.setFailurePhase(telemetry.FailurePhaseSourceResolution)
+			runErr = fmt.Errorf("hydrate reusable-workflow call guards: %w", runErr)
+		}
+	}
 	if runErr == nil {
 		result, runErr = runner.RunJob(ctx, job, "")
 		failureVisible = result.FailureVisible()
@@ -1247,7 +1254,7 @@ func cacheServiceRequired(locks []plan.ActionLock) (bool, error) {
 
 func resultProducer(job plan.Job, planDigest, expectedDigest string) (transport.Producer, bool, error) {
 	if os.Getenv("BUILDKITE") == "" {
-		if len(job.NeedSources) != 0 {
+		if len(job.NeedSources) != 0 || callGuardsHaveNeedSources(job.CallGuards) {
 			return transport.Producer{}, false, fmt.Errorf("plans with prerequisites require Buildkite result identity")
 		}
 		return transport.Producer{}, false, nil
@@ -1270,6 +1277,15 @@ func resultProducer(job plan.Job, planDigest, expectedDigest string) (transport.
 		return transport.Producer{}, false, fmt.Errorf("result producer step %q does not match plan target %q", producer.StepKey, job.Target.StepKey)
 	}
 	return producer, true, nil
+}
+
+func callGuardsHaveNeedSources(guards []plan.CallGuard) bool {
+	for _, guard := range guards {
+		if len(guard.NeedSources) != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJobResult(path string, result gharuntime.JobResult) error {

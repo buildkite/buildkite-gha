@@ -606,6 +606,21 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 	}
 }
 
+func TestValidateCallConditionUsesCallerOnlySurface(t *testing.T) {
+	if err := ValidateCallCondition("always() && github.ref && vars.FLAG && inputs.enabled && needs.prepare.outputs.ready"); err != nil {
+		t.Fatalf("ValidateCallCondition() error = %v", err)
+	}
+	for _, source := range []string{"matrix.os", "strategy.job-index", "secrets.TOKEN", "env.FLAG", "runner.os", "steps.test.outcome", "job.services.redis.id", "hashFiles('**')"} {
+		if err := ValidateCallCondition(source); err == nil {
+			t.Errorf("ValidateCallCondition(%q) accepted unavailable surface", source)
+		}
+	}
+	context := CompileContext{GitHub: map[string]any{"ref": "refs/heads/main"}, Vars: map[string]string{"FLAG": "true"}, Inputs: map[string]any{"enabled": true}}
+	if err := ValidateCompileCallCondition("github.ref == 'refs/heads/main' && vars.FLAG && inputs.enabled && needs.prepare.result == 'success'", context); err != nil {
+		t.Fatalf("ValidateCompileCallCondition() error = %v", err)
+	}
+}
+
 func TestHashFilesIsLimitedToStepRuntimeExpressions(t *testing.T) {
 	hash := func(patterns []string) (string, error) {
 		if !reflect.DeepEqual(patterns, []string{"*.go", "!generated/**"}) {

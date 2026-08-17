@@ -7036,10 +7036,11 @@ func TestRunJobMiseRequirementUsesCompilerDecisionAndFailsClosed(t *testing.T) {
 	}
 }
 
-func TestRunJobSkipsActionJobBeforePreparingRuntimeMise(t *testing.T) {
+func TestRunJobCallGuardSkipsActionJobBeforePreparingRuntimeMise(t *testing.T) {
 	job := cliRunJobPlan()
 	job.Schema = plan.Schema
-	job.Condition = "${{ false }}"
+	job.Condition = "always()"
+	job.CallGuards = []plan.CallGuard{{Condition: "false"}}
 	job.Actions = []plan.ActionLock{{
 		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
 		SourceDigest: "sha256:" + strings.Repeat("a", 64),
@@ -7677,6 +7678,11 @@ func TestRunJobHydratesNeedsAndPublishesAuthoritativeResult(t *testing.T) {
 	job.NeedSources = map[string][]plan.NeedSource{
 		"producer": {{StepKey: producerStep, PlanDigest: producerPlanDigest}},
 	}
+	job.CallGuards = []plan.CallGuard{{
+		Condition:   "needs.producer.result == 'success' && needs.producer.outputs.result == 'hydrated'",
+		NeedSources: map[string][]plan.NeedSource{"producer": {{StepKey: producerStep, PlanDigest: producerPlanDigest}}},
+		NeedOutputs: map[string][]plan.NeedOutput{"producer": {{Name: "result", StepKey: producerStep, Output: "result"}}},
+	}}
 	job.Env = map[string]string{"RESULT": "${{ needs.producer.outputs.result }}"}
 	job.Steps = []plan.Step{{ID: "consume", Kind: "run", Command: `test "$RESULT" = "hydrated"`}}
 	planPath, planDigest := writeCLIJobPlan(t, job)

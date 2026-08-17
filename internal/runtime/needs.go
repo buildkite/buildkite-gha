@@ -49,6 +49,23 @@ func ResolveNeeds(ctx context.Context, agent transport.Agent, root, buildID stri
 	return needs, nil
 }
 
+// ResolveCallGuards hydrates each caller scope independently so nested guards
+// cannot observe a callee job's needs or another call boundary's producers.
+func ResolveCallGuards(ctx context.Context, agent transport.Agent, root, buildID string, guards []plan.CallGuard) ([]plan.CallGuard, error) {
+	resolved := append([]plan.CallGuard(nil), guards...)
+	for i := range resolved {
+		if len(resolved[i].NeedSources) == 0 {
+			continue
+		}
+		needs, err := ResolveNeeds(ctx, agent, root, buildID, resolved[i].NeedSources, resolved[i].NeedOutputs)
+		if err != nil {
+			return nil, fmt.Errorf("call guard %d: %w", i+1, err)
+		}
+		resolved[i].Needs = needs
+	}
+	return resolved, nil
+}
+
 // PublishJobResult maps every terminal runtime conclusion to the canonical
 // producer-attributed manifest. The caller invokes it for success, failure,
 // cancelled, and runtime-skipped jobs before exiting.

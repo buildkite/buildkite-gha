@@ -28,6 +28,8 @@ Push and pull request path-filter admission uses Buildkite's reserved linked-web
 
 Release ingestion also requires reserved linked-webhook metadata. It binds the webhook activity to `BUILDKITE_GITHUB_ACTION`, the release tag to both `BUILDKITE_TAG` and `BUILDKITE_BRANCH`, and the event SHA to the checked-out commit after the plugin resolves Buildkite's symbolic `HEAD`. Environment fallback cannot invent a release event. Enable **Additional Webhooks** > **Releases** only with **Code** trigger mode.
 
+Local reusable-workflow call conditions are immutable plan guards evaluated in caller scope. Direct `needs` values come only from producer-attributed, digest-bound result manifests; missing or changed manifests fail closed. A false guard skips the flattened job before secret retrieval, workflow-token minting, OIDC startup, action materialization, containers, or steps.
+
 ## Credential boundaries
 
 | Credential | Current boundary |
