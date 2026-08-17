@@ -152,7 +152,15 @@ func Load(root, path string) (Metadata, error) {
 
 	metadata := Metadata{Path: actionPath}
 	var document yaml.Node
-	if err := yaml.Unmarshal(source, &document); err != nil {
+	documentDecoder := yaml.NewDecoder(bytes.NewReader(source))
+	if err := documentDecoder.Decode(&document); err != nil {
+		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
+	}
+	var trailing any
+	if err := documentDecoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return Metadata{}, fmt.Errorf("parse action metadata %q: multiple YAML documents", metadataPath)
+		}
 		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
 	}
 	if err := rejectCompositeControls(metadataPath, &document); err != nil {
@@ -161,16 +169,15 @@ func Load(root, path string) (Metadata, error) {
 	if err := validateCompositeSteps(metadataPath, &document); err != nil {
 		return Metadata{}, err
 	}
+	if discardTopLevelEnv(&document) {
+		source, err = yaml.Marshal(&document)
+		if err != nil {
+			return Metadata{}, fmt.Errorf("parse action metadata %q: discard top-level env: %w", metadataPath, err)
+		}
+	}
 	decoder := yaml.NewDecoder(bytes.NewReader(source))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&metadata); err != nil {
-		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return Metadata{}, fmt.Errorf("parse action metadata %q: multiple YAML documents", metadataPath)
-		}
 		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
 	}
 	if metadata.Runs.Using == "" {
@@ -195,6 +202,24 @@ func Load(root, path string) (Metadata, error) {
 		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
 	}
 	return metadata, nil
+}
+
+func discardTopLevelEnv(document *yaml.Node) bool {
+	root := document
+	if root.Kind == yaml.DocumentNode && len(root.Content) != 0 {
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != "env" {
+			continue
+		}
+		root.Content = append(root.Content[:i], root.Content[i+2:]...)
+		return true
+	}
+	return false
 }
 
 func rejectCompositeControls(path string, document *yaml.Node) error {

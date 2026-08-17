@@ -620,10 +620,13 @@ Matrices, runner labels, names, concurrency groups, and event-backed conditions 
 | Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; `bash` or `sh` for `run`. |
 | Dockerfile action | 🟡 Supported subset | Verified local or public Dockerfile action on Linux. Rejected on macOS, including through a composite action. |
 | `docker://` action | ❌ Unsupported | Rejected during validation. |
+| Top-level action metadata `env` | ➖ Accepted, no effect | Any valid YAML value is discarded. It is not evaluated, injected, retained in plans, or used to request secrets or tokens. |
 
 Mutable public refs are resolved during upload, then locked to a commit. The importer lazily requests one Buildkite action-source token and reuses it across all workflow roots and nested composite actions. This token authenticates only public metadata requests for repositories other than the credential repository; the credential repository and codeload requests remain anonymous. If token issuance is unavailable during rollout, resolution safely falls back to anonymous GitHub API access. Exact lowercase commit SHAs need no GitHub API lookup. Complete source trees are verified again at runtime.
 
 Nested calls from a repository-local composite must be local. Public composites may call local children or other public actions; every child is resolved and locked. Dockerfile actions cannot request credentials, volumes, arbitrary options, or privileged mode.
+
+Action metadata parsing remains strict for every other unknown top-level field and for unknown nested fields. The inert top-level `env` exception does not replace workflow or action-step environments, populate `runs.env`, or add `GITHUB_TOKEN` authority.
 
 | Action declaration | Runtime |
 | --- | --- |
