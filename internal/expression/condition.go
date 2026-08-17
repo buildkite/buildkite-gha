@@ -127,7 +127,7 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 				return nil
 			}
 			switch strings.ToLower(path[0]) {
-			case "actor", "event_name", "ref", "repository", "repository_owner", "sha", "workflow":
+			case "actor", "base_ref", "event_name", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow":
 				if len(path) == 1 {
 					return nil
 				}
@@ -194,11 +194,11 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 	case "github":
 		if len(path) == 1 {
 			switch strings.ToLower(path[0]) {
-			case "actor", "event_name", "head_ref", "ref", "repository", "sha":
+			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha":
 				return nil
 			}
 		}
-		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are actor, event_name, head_ref, ref, repository, and sha", reference)
+		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are actor, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, and sha", reference)
 	case "needs":
 		if len(path) == 2 && strings.EqualFold(path[1], "result") || len(path) == 3 && strings.EqualFold(path[1], "outputs") {
 			return nil

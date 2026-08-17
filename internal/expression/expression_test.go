@@ -526,6 +526,8 @@ func TestValidateConditionAllowsSupportedRuntimeExpressions(t *testing.T) {
 		},
 		{name: "github head ref in job", source: "github.head_ref != ''", scope: JobCondition},
 		{name: "github head ref in step", source: "github.head_ref != ''", scope: StepCondition},
+		{name: "GitHub runtime event identity in job", source: "github.repository_owner && github.ref_name && github.ref_type && github.base_ref", scope: JobCondition},
+		{name: "GitHub runtime event identity in step", source: "github.repository_owner && github.ref_name && github.ref_type && github.base_ref", scope: StepCondition},
 		{name: "compatible booleans", source: "success() == true", scope: JobCondition},
 		{name: "compatible strings", source: "vars.ENABLED == 'true'", scope: JobCondition},
 		{name: "compatible integer and float", source: "1 == 1.0", scope: JobCondition},

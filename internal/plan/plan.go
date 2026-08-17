@@ -108,8 +108,36 @@ type Event struct {
 	Repository    string `json:"repository,omitempty"`
 	Ref           string `json:"ref,omitempty"`
 	HeadRef       string `json:"head_ref,omitempty"`
+	BaseRef       string `json:"base_ref,omitempty"`
 	SHA           string `json:"sha,omitempty"`
 	Actor         string `json:"actor,omitempty"`
+}
+
+// EventRepositoryOwner returns the owner component of an event repository.
+func EventRepositoryOwner(repository string) string {
+	owner, _, _ := strings.Cut(repository, "/")
+	return owner
+}
+
+// EventRefName returns the short branch, tag, or pull request ref name.
+func EventRefName(ref string) string {
+	for _, prefix := range []string{"refs/heads/", "refs/tags/", "refs/pull/"} {
+		if name, ok := strings.CutPrefix(ref, prefix); ok {
+			return name
+		}
+	}
+	return ""
+}
+
+// EventRefType returns the GitHub ref type for a branch, tag, or pull request ref.
+func EventRefType(ref string) string {
+	if strings.HasPrefix(ref, "refs/tags/") {
+		return "tag"
+	}
+	if strings.HasPrefix(ref, "refs/heads/") || strings.HasPrefix(ref, "refs/pull/") {
+		return "branch"
+	}
+	return ""
 }
 
 // EventServerURL returns the repository provider URL exposed through the
@@ -434,7 +462,7 @@ func (job Job) Validate() error {
 	if (job.Event.Provider != "github" && job.Event.Provider != "cursor-origin") || job.Event.Name == "" || !digestPattern.MatchString(job.Event.PayloadDigest) {
 		return fmt.Errorf("job plan requires a supported event binding")
 	}
-	if len(job.Event.Repository) > 512 || len(job.Event.Ref) > 1024 || len(job.Event.HeadRef) > 1024 || len(job.Event.SHA) > 128 || len(job.Event.Actor) > 256 {
+	if len(job.Event.Repository) > 512 || len(job.Event.Ref) > 1024 || len(job.Event.HeadRef) > 1024 || len(job.Event.BaseRef) > 1024 || len(job.Event.SHA) > 128 || len(job.Event.Actor) > 256 {
 		return fmt.Errorf("job plan event identity exceeds its size limit")
 	}
 	if job.Workflow.Path == "" || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {

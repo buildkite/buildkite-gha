@@ -2602,20 +2602,31 @@ func TestOriginUsesProviderServerURLWithoutGitHubToken(t *testing.T) {
 	}
 }
 
-func TestGitHubContextExposesHeadRef(t *testing.T) {
+func TestGitHubContextExposesRuntimeEventIdentity(t *testing.T) {
 	tests := []struct {
-		name    string
-		headRef string
+		name        string
+		event       plan.Event
+		wantOwner   string
+		wantRefName string
+		wantRefType string
+		wantBaseRef string
 	}{
-		{name: "pull request source branch", headRef: "feature/runtime"},
-		{name: "unavailable", headRef: ""},
+		{name: "branch", event: plan.Event{Repository: "acme/widgets", Ref: "refs/heads/feature/runtime"}, wantOwner: "acme", wantRefName: "feature/runtime", wantRefType: "branch"},
+		{name: "tag", event: plan.Event{Repository: "acme/widgets", Ref: "refs/tags/v1.2.3"}, wantOwner: "acme", wantRefName: "v1.2.3", wantRefType: "tag"},
+		{name: "pull request merge", event: plan.Event{Repository: "acme/widgets", Ref: "refs/pull/42/merge", HeadRef: "feature/runtime", BaseRef: "main"}, wantOwner: "acme", wantRefName: "42/merge", wantRefType: "branch", wantBaseRef: "main"},
+		{name: "pull request head", event: plan.Event{Repository: "acme/widgets", Ref: "refs/pull/42/head", HeadRef: "feature/runtime", BaseRef: "main"}, wantOwner: "acme", wantRefName: "42/head", wantRefType: "branch", wantBaseRef: "main"},
+		{name: "unavailable", event: plan.Event{}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			github := githubContext(plan.Job{Event: plan.Event{HeadRef: test.headRef}})
-			got, err := expression.Evaluate("${{ github.head_ref }}", expression.Context{GitHub: github})
-			if err != nil || got != test.headRef {
-				t.Fatalf("github.head_ref = %#v, %v, want %q", got, err, test.headRef)
+			github := githubContext(plan.Job{Event: test.event})
+			if github["repository_owner"] != test.wantOwner || github["ref_name"] != test.wantRefName || github["ref_type"] != test.wantRefType || github["base_ref"] != test.wantBaseRef {
+				t.Fatalf("GitHub context = %#v", github)
+			}
+			condition := "github.repository_owner == '" + test.wantOwner + "' && github.ref_name == '" + test.wantRefName + "' && github.ref_type == '" + test.wantRefType + "' && github.base_ref == '" + test.wantBaseRef + "'"
+			got, err := expression.EvaluateCondition(condition, expression.ConditionContext{GitHub: github})
+			if err != nil || !got {
+				t.Fatalf("EvaluateCondition(%q) = %v, %v", condition, got, err)
 			}
 		})
 	}

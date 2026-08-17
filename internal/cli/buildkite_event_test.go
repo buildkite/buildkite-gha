@@ -165,6 +165,24 @@ func TestBuildkiteEventSourceMappings(t *testing.T) {
 	}
 }
 
+func TestGeneratedPullRequestEventIncludesRuntimeRefs(t *testing.T) {
+	source, err := generatedEventSnapshot("pull_request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot struct {
+		Ref     string         `json:"ref"`
+		Payload map[string]any `json:"payload"`
+	}
+	if err := json.Unmarshal(source, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	pullRequest := snapshot.Payload["pull_request"].(map[string]any)
+	if snapshot.Ref != "refs/pull/1/merge" || pullRequest["base"].(map[string]any)["ref"] != "main" || pullRequest["head"].(map[string]any)["ref"] != "example" {
+		t.Fatalf("generated pull request event = %#v", snapshot)
+	}
+}
+
 func TestBuildkiteEventSourceFailsClosed(t *testing.T) {
 	valid := map[string]string{"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step", "BUILDKITE_REPO": "https://github.com/a/b", "BUILDKITE_COMMIT": strings.Repeat("a", 40), "BUILDKITE_BRANCH": "main"}
 	for _, test := range []struct{ name, key, value string }{

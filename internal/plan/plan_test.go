@@ -15,6 +15,7 @@ import (
 func TestDecodePreservesPlanContract(t *testing.T) {
 	fixture := validJob()
 	fixture.Event.HeadRef = "feature/head-ref"
+	fixture.Event.BaseRef = "main"
 	source, err := Encode(fixture)
 	if err != nil {
 		t.Fatal(err)
@@ -23,7 +24,7 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
-	if job.Compiler.DistributionDigest == "" || job.Workflow.Name != "CI" || job.Event.PayloadDigest == "" || job.Event.HeadRef != "feature/head-ref" || job.Target.StepKey != "gha-test" {
+	if job.Compiler.DistributionDigest == "" || job.Workflow.Name != "CI" || job.Event.PayloadDigest == "" || job.Event.HeadRef != "feature/head-ref" || job.Event.BaseRef != "main" || job.Target.StepKey != "gha-test" {
 		t.Fatalf("decoded fixture lost trust bindings: %#v", job)
 	}
 	validateJobPlanSchema(t, source)
@@ -49,6 +50,21 @@ func TestEventHeadRefSizeLimit(t *testing.T) {
 	encoded = []byte(strings.Replace(string(encoded), strings.Repeat("a", 1024), oversized, 1))
 	if _, err := Decode(encoded); err == nil || !strings.Contains(err.Error(), "event identity exceeds its size limit") {
 		t.Fatalf("Decode() oversized head_ref error = %v", err)
+	}
+}
+
+func TestEventBaseRefSizeLimit(t *testing.T) {
+	job := validJob()
+	job.Event.BaseRef = strings.Repeat("a", 1024)
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatalf("Encode() maximum base_ref error = %v", err)
+	}
+	validateJobPlanSchema(t, encoded)
+
+	job.Event.BaseRef = strings.Repeat("a", 1025)
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "event identity exceeds its size limit") {
+		t.Fatalf("Validate() oversized base_ref error = %v", err)
 	}
 }
 

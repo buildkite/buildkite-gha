@@ -569,7 +569,7 @@ instances:
 				Event: plan.Event{
 					Provider: ir.Event.Provider, Name: ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(eventDigest[:]),
 					Repository: ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name,
-					Ref:        ir.Event.Ref, HeadRef: eventHeadRef(ir.Event), SHA: ir.Event.SHA, Actor: ir.Event.Actor,
+					Ref:        ir.Event.Ref, HeadRef: eventHeadRef(ir.Event), BaseRef: eventBaseRef(ir.Event), SHA: ir.Event.SHA, Actor: ir.Event.Actor,
 				},
 				Target:                  plan.Target{StepKey: instance.Key, Queue: instance.Queue},
 				RequiredCapabilities:    capabilities,
@@ -973,9 +973,12 @@ func compileContext(event Event, vars map[string]string, workflowPath, workflowN
 			"event_name":       event.Event,
 			"event":            event.Payload,
 			"head_ref":         eventHeadRef(event),
+			"base_ref":         eventBaseRef(event),
 			"repository":       repository,
 			"repository_owner": event.Repository.Owner,
 			"ref":              event.Ref,
+			"ref_name":         plan.EventRefName(event.Ref),
+			"ref_type":         plan.EventRefType(event.Ref),
 			"sha":              event.SHA,
 			"actor":            event.Actor,
 			"workflow":         workflowName,
@@ -1039,6 +1042,22 @@ func eventHeadRef(event Event) string {
 		return ""
 	}
 	ref, _ := head["ref"].(string)
+	return ref
+}
+
+func eventBaseRef(event Event) string {
+	if event.Event != "pull_request" && event.Event != "pull_request_target" {
+		return ""
+	}
+	pullRequest, ok := event.Payload["pull_request"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	base, ok := pullRequest["base"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	ref, _ := base["ref"].(string)
 	return ref
 }
 

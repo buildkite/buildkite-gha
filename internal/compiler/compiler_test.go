@@ -2132,6 +2132,46 @@ jobs:
 	}
 }
 
+func TestCompileRetainsGitHubRuntimeEventIdentity(t *testing.T) {
+	workflow := []byte(`on: [push, pull_request, pull_request_target]
+jobs:
+  test:
+    if: always() && github.repository_owner == 'buildkite' && github.ref_name && github.ref_type && github.base_ref == ''
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+	tests := []struct {
+		name, event, ref, payload, wantBaseRef string
+	}{
+		{name: "branch", event: "push", ref: "refs/heads/feature/runtime", payload: `{}`},
+		{name: "tag", event: "push", ref: "refs/tags/v1.2.3", payload: `{}`},
+		{name: "pull request", event: "pull_request", ref: "refs/pull/42/merge", payload: `{"pull_request":{"base":{"ref":"main"},"head":{"ref":"feature/pr"}}}`, wantBaseRef: "main"},
+		{name: "pull request target", event: "pull_request_target", ref: "refs/heads/main", payload: `{"pull_request":{"base":{"ref":"main"},"head":{"ref":"feature/target"}}}`, wantBaseRef: "main"},
+		{name: "missing pull request shape", event: "pull_request", ref: "refs/pull/42/merge", payload: `{}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			event := []byte(fmt.Sprintf(`{
+  "provider": "github",
+  "event": %q,
+  "repository": {"owner": "buildkite", "name": "kafka"},
+  "ref": %q,
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha",
+  "payload": %s
+}`, test.event, test.ref, test.payload))
+			plans, err := compileUntrustedPlans("ci.yml", workflow, event, "0.0.0-test", testDistributionDigest, "gha-untrusted")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 1 || plans[0].Event.BaseRef != test.wantBaseRef || !strings.Contains(plans[0].Condition, "github.repository_owner") {
+				t.Fatalf("runtime event identity plan = %#v", plans)
+			}
+		})
+	}
+}
+
 func TestCompileFoldsEventBackedConditionsBeforeRuntime(t *testing.T) {
 	workflow := []byte(`on: pull_request
 jobs:
