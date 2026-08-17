@@ -355,8 +355,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		WorkflowInputs: job.Inputs,
 		Matrix:         job.Matrix,
 		Steps:          make(map[string]expression.StepStatus, len(job.Steps)),
-		Needs:          needOutputs(job.Needs),
-		NeedResults:    needResults(job.Needs),
+		Needs:          needStatuses(job.Needs),
 		Vars:           job.Vars,
 		GitHub:         githubContext(job),
 		JobStatus:      "success",
@@ -374,7 +373,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			return jobResult, fmt.Errorf("prerequisite %q has invalid result %q", name, need.Result)
 		}
 	}
-	jobCondition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Matrix: job.Matrix, Vars: job.Vars, GitHub: eval.GitHub, Runner: eval.Runner}
+	jobCondition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, Matrix: job.Matrix, Vars: job.Vars, GitHub: eval.GitHub, Runner: eval.Runner}
 	for _, need := range job.Needs {
 		jobCondition.Failure = jobCondition.Failure || need.Result == "failure"
 		jobCondition.Cancelled = jobCondition.Cancelled || need.Result == "cancelled"
@@ -740,7 +739,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			continue
 		}
 		stepEval.Env = mergeStringMaps(stepEval.Env, stepEnv)
-		condition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: eval.Steps, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
+		condition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, Steps: eval.Steps, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
 		run, err := expression.EvaluateCondition(step.Condition, condition)
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("condition: %w", err), stepEval)
@@ -2057,7 +2056,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		for name, value := range eval.Inputs {
 			inputs[name] = value
 		}
-		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: eval.Steps, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
+		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, Steps: eval.Steps, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
 		run, err := expression.EvaluateCondition(step.If, condition)
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d condition: %w", i+1, err))
@@ -2252,20 +2251,16 @@ func actionJobStatusInputs(action metadata.Metadata, supplied map[string]string)
 	return inputs, nil
 }
 
-func needOutputs(needs map[string]plan.Need) map[string]map[string]string {
-	outputs := make(map[string]map[string]string, len(needs))
+func needStatuses(needs map[string]plan.Need) map[string]expression.NeedStatus {
+	statuses := make(map[string]expression.NeedStatus, len(needs))
 	for name, need := range needs {
-		outputs[name] = need.Outputs
+		var outputs map[string]string
+		if need.Outputs != nil {
+			outputs = cloneStrings(need.Outputs)
+		}
+		statuses[name] = expression.NeedStatus{Outputs: outputs, Result: need.Result}
 	}
-	return outputs
-}
-
-func needResults(needs map[string]plan.Need) map[string]string {
-	results := make(map[string]string, len(needs))
-	for name, need := range needs {
-		results[name] = need.Result
-	}
-	return results
+	return statuses
 }
 
 func shellCommand(shell, script string) ([]string, error) {

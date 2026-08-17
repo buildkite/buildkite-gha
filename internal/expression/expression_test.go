@@ -310,11 +310,10 @@ func TestEvaluateActionInputDefaultMatchesGitHubEqualityAndTemplateBoundaries(t 
 func TestEvaluateIsSinglePass(t *testing.T) {
 	literal := "literal ${{ matrix.secret }} and ${{"
 	context := Context{
-		Inputs:      map[string]string{"value": literal},
-		Matrix:      map[string]any{"value": literal, "secret": "reevaluated", "number": json.Number("1e3")},
-		Steps:       map[string]StepStatus{"producer": {Outcome: "failure", Conclusion: "success", Outputs: map[string]string{"value": literal}}},
-		Needs:       map[string]map[string]string{"producer": {"value": literal}},
-		NeedResults: map[string]string{"producer": "success"},
+		Inputs: map[string]string{"value": literal},
+		Matrix: map[string]any{"value": literal, "secret": "reevaluated", "number": json.Number("1e3")},
+		Steps:  map[string]StepStatus{"producer": {Outcome: "failure", Conclusion: "success", Outputs: map[string]string{"value": literal}}},
+		Needs:  map[string]NeedStatus{"producer": {Outputs: map[string]string{"value": literal}, Result: "success"}},
 	}
 	tests := map[string]string{
 		"${{ inputs.value }}":                 literal,
@@ -654,15 +653,14 @@ func TestExpressionMapProjectionIsDeterministic(t *testing.T) {
 
 func TestEvaluateJobSurfacesSupportAuthorizedCompoundExpressions(t *testing.T) {
 	context := Context{
-		GitHub:      map[string]any{"ref": "refs/heads/main"},
-		Inputs:      map[string]string{"suffix": "prod"},
-		Matrix:      map[string]any{"os": "linux"},
-		Needs:       map[string]map[string]string{"build": {"tag": "v1"}},
-		NeedResults: map[string]string{"build": "success"},
-		Secrets:     map[string]string{"TOKEN": "secret"},
-		Steps:       map[string]StepStatus{"build": {Outputs: map[string]string{"image": "app:v1"}}},
-		Vars:        map[string]string{"PREFIX": "release"},
-		Env:         map[string]string{"ROOT": "src"},
+		GitHub:  map[string]any{"ref": "refs/heads/main"},
+		Inputs:  map[string]string{"suffix": "prod"},
+		Matrix:  map[string]any{"os": "linux"},
+		Needs:   map[string]NeedStatus{"build": {Outputs: map[string]string{"tag": "v1"}, Result: "success"}},
+		Secrets: map[string]string{"TOKEN": "secret"},
+		Steps:   map[string]StepStatus{"build": {Outputs: map[string]string{"image": "app:v1"}}},
+		Vars:    map[string]string{"PREFIX": "release"},
+		Env:     map[string]string{"ROOT": "src"},
 	}
 
 	jobEnv := "${{ format('{0}-{1}-{2}', vars.PREFIX, matrix.os, inputs.suffix) }}:${{ needs.build.outputs.tag }}"
@@ -867,6 +865,29 @@ func TestEvaluateFailsClosed(t *testing.T) {
 	}
 }
 
+func TestEvaluateNeedLookupDistinguishesMissingNeedAndOutput(t *testing.T) {
+	needs := map[string]NeedStatus{
+		"build": {Outputs: map[string]string{"release": "v1"}, Result: "success"},
+	}
+	context := Context{Needs: needs}
+	if got, err := Evaluate("${{ needs.BUILD.outputs.RELEASE }}", context); err != nil || got != "v1" {
+		t.Fatalf("case-insensitive need output = %q, %v, want v1", got, err)
+	}
+	if got, err := Evaluate("${{ needs.BUILD.outputs.missing }}", context); err != nil || got != "" {
+		t.Fatalf("missing output = %q, %v, want empty value", got, err)
+	}
+	if _, err := Evaluate("${{ needs.missing.outputs.release }}", context); err == nil {
+		t.Fatal("missing need output did not fail")
+	}
+	condition := ConditionContext{Needs: needs}
+	if got, err := EvaluateCondition("needs.BUILD.result == 'success' && needs.BUILD.outputs.MISSING == ''", condition); err != nil || !got {
+		t.Fatalf("condition need lookup = %v, %v, want true", got, err)
+	}
+	if _, err := EvaluateCondition("needs.missing.result", condition); err == nil {
+		t.Fatal("missing condition need did not fail")
+	}
+}
+
 func TestEvaluateActionLifecycleCondition(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -922,11 +943,10 @@ func TestEvaluateActionLifecycleCondition(t *testing.T) {
 
 func TestEvaluateConditionStatusOutputsAndTruthiness(t *testing.T) {
 	context := ConditionContext{
-		Inputs:      map[string]any{"enabled": "true"},
-		Needs:       map[string]map[string]string{"build": {"gate": "yes"}},
-		NeedResults: map[string]string{"build": "failure"},
-		Steps:       map[string]StepStatus{"soft": {Outcome: "failure", Conclusion: "success", Outputs: map[string]string{"ready": "true"}}},
-		Failure:     true,
+		Inputs:  map[string]any{"enabled": "true"},
+		Needs:   map[string]NeedStatus{"build": {Outputs: map[string]string{"gate": "yes"}, Result: "failure"}},
+		Steps:   map[string]StepStatus{"soft": {Outcome: "failure", Conclusion: "success", Outputs: map[string]string{"ready": "true"}}},
+		Failure: true,
 	}
 	for _, condition := range []string{
 		"inputs.enabled == 'true'",
@@ -1137,9 +1157,11 @@ func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
 			"object": map[string]any{"true": "boolean", "2": "number"},
 			"items":  []any{[]any{"first"}, []any{}, []any{nil}},
 		},
-		Needs:       map[string]map[string]string{"build": {}, "lint": {}},
-		NeedResults: map[string]string{"build": "success", "lint": "failure"},
-		Env:         map[string]string{"STEP": "build"},
+		Needs: map[string]NeedStatus{
+			"build": {Outputs: map[string]string{}, Result: "success"},
+			"lint":  {Outputs: map[string]string{}, Result: "failure"},
+		},
+		Env: map[string]string{"STEP": "build"},
 		Steps: map[string]StepStatus{
 			"build": {Outcome: "success", Conclusion: "success"},
 			"lint":  {Outcome: "failure", Conclusion: "success"},
