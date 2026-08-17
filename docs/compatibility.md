@@ -528,11 +528,11 @@ Three expression modes intentionally support different syntax.
 | `!`, `&&`, `\|\|`, `==`, `!=`, `<`, `<=`, `>`, `>=` | ✅ Supported | 🟡 Listed workflow fields | 🟡 When the result resolves fully |
 | `always()`, `success()`, `failure()`, `cancelled()` | ✅ Without arguments | ❌ Unsupported | ❌ Unsupported |
 | `startsWith()`, `contains()`, `endsWith()`, `format()`, `join()`, `toJSON()`, `fromJSON()`, `case()` | ✅ Supported | 🟡 Listed workflow fields | 🟡 When the result resolves fully |
-| `hashFiles()` | 🟡 Step `if` only | 🟡 Workflow steps only | ❌ Unsupported |
+| `hashFiles()` | 🟡 Step `if` and action lifecycle conditions | 🟡 Workflow steps only | ❌ Unsupported |
 
 ### Conditions
 
-Job and step `if` conditions support literals and the syntax listed above. Values use GitHub's truthiness, loose numeric coercion, case-insensitive string comparison, and operand-returning `&&` and `||` semantics. String functions convert primitive arguments; `contains()` also searches arrays. `case()` takes 3–255 odd-numbered arguments, requires Boolean predicates, and evaluates values lazily through the first match. Missing properties in an available `github` or matrix context evaluate to null; unavailable contexts still fail closed. Other functions are unsupported. `hashFiles()` accepts 1–255 literal or direct-reference arguments in step conditions only.
+Job and step `if` conditions support literals and the syntax listed above. Values use GitHub's truthiness, loose numeric coercion, case-insensitive string comparison, and operand-returning `&&` and `||` semantics. String functions convert primitive arguments; `contains()` also searches arrays. `case()` takes 3–255 odd-numbered arguments, requires Boolean predicates, and evaluates values lazily through the first match. Missing properties in an available `github` or matrix context evaluate to null; unavailable contexts still fail closed. Other functions are unsupported. `hashFiles()` accepts 1–255 literal or direct-reference arguments in step and JavaScript action lifecycle conditions.
 
 Conditions support computed object indexes, numeric array indexes, whole `matrix`, `needs`, and step-scoped `steps` objects, and `.*` projections. Missing and out-of-range indexes evaluate to null. Projections omit missing children; a later wildcard flattens one collection level. The equivalent `[*]` spelling is unsupported by the current expression parser. Whole or dynamic `github` access, whole `inputs`, and the `strategy` context remain unsupported.
 
@@ -616,6 +616,10 @@ Nested calls from a repository-local composite must be local. Public composites 
 | `node24` | Managed Node 24.18.0. |
 
 Pre, main, and post phases; inputs; outputs; state; and LIFO post ordering are supported. Other Node declarations are rejected.
+
+JavaScript action `pre-if` and `post-if` metadata uses the condition operators, status functions, pure functions, and `hashFiles()` described in [Conditions](#conditions). Lifecycle conditions can read direct properties from workflow `inputs`, `env`, `github`, `job.services`, `matrix`, `runner`, and `steps`. Other contexts and dynamic or whole-context access fail closed. An empty lifecycle condition always runs and does not receive an implicit `success()` guard.
+
+Pre conditions use the status and action-scoped environment available when preparation reaches the action. Post conditions run during job teardown and use the final job status and environment, including `GITHUB_ENV` changes from main. Root action posts also see final workflow step state. Nested composite actions retain their isolated step context. Cancellation remains distinct from failure, and posts keep LIFO order.
 
 ### Checkout action
 
