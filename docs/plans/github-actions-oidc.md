@@ -140,7 +140,7 @@ workflows cannot express.
   the loopback service is the exposure surface, and injecting a step would
   require handing a credential to action code or new backend credentials.
 
-## Delivery slices
+## Delivered slices
 
 ### 1. Endpoint contract and minting client
 
@@ -178,8 +178,9 @@ plugins:
         subject-claim: pipeline_id
 ```
 
-Deliver when a workflow needs AWS session tags or Azure exact-match
-subjects.
+The plugin configuration is validated before compilation, recorded in every
+job plan, and forwarded to every Agent API mint. It does not grant
+`id-token: write` or expose the loopback endpoint by itself.
 
 ## Open questions
 

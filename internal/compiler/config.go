@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 var queuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
@@ -107,6 +109,7 @@ type Options struct {
 	Vars       VariableSources
 	Runners    RunnerPolicy
 	EventTrust EventTrust
+	OIDC       *plan.OIDCConfiguration
 	// ResolveActions enables immutable remote action locking independently of
 	// event trust. Workspace-local actions are always locked without network
 	// access. ActionSource is required only when a workflow uses remote actions.
