@@ -130,8 +130,8 @@ expand_template() {
 record_report() {
   local id=$1 status=$2 output=$3 result codes reason graph icon
   if result="$(jq -er '.result | select(type == "string")' "$output")"; then
-    codes="$(jq -r '[.diagnostics[]?.code] | unique | join(", ")' "$output")"
-    reason="$(jq -r '[.diagnostics[]?.message | split(". ")[0] | gsub("\\s+"; " ")] | unique | if length == 0 then "" elif length == 1 then .[0] else .[0] + " (+" + ((length - 1) | tostring) + " more)" end | if length > 180 then .[:177] + "..." else . end' "$output")"
+    codes="$(jq -r '[.diagnostics[]? | select(.code != "W_ACTION_RUNTIME_UNKNOWN") | .code] | unique | join(", ")' "$output")"
+    reason="$(jq -r '[.diagnostics[]? | select(.code != "W_ACTION_RUNTIME_UNKNOWN") | .message | split(". ")[0] | gsub("\\s+"; " ")] | unique | if length == 0 then "" elif length == 1 then .[0] else .[0] + " (+" + ((length - 1) | tostring) + " more)" end | if length > 180 then .[:177] + "..." else . end' "$output")"
     graph="$(jq -r 'if has("compile") then .compile else . end | "\(.logical_jobs // 0) jobs, \(.instances // 0) instances"' "$output")"
   else
     result=invalid-report
@@ -201,6 +201,9 @@ for id in "${case_ids[@]}"; do
   record_report "$id" "$status" "$report"
 done
 
+if $profile; then
+  printf '\n_Profile admission resolves and validates actions but does not execute action code._\n' >> "$summary"
+fi
 printf '\n**%d passing; %d blocked; %d disabled.**\n' "$passed" "$blocked" "$disabled" >> "$summary"
 cat "$summary"
 if [[ "${BUILDKITE:-}" == true ]] && command -v buildkite-agent >/dev/null; then
@@ -208,8 +211,5 @@ if [[ "${BUILDKITE:-}" == true ]] && command -v buildkite-agent >/dev/null; then
   (( blocked > 0 || disabled > 0 )) && style=warning
   buildkite-agent annotate --context "starter-workflows-corpus-$mode" --style "$style" < "$summary" || \
     echo 'warning: failed to publish Buildkite annotation' >&2
-fi
-if $profile; then
-  echo 'CAVEAT: profile checks resolve actions but do not execute third-party code.'
 fi
 (( blocked == 0 ))

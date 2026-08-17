@@ -1444,7 +1444,7 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 		if preflight.HasActions {
 			processingReport.Diagnostics = append(processingReport.Diagnostics, compatibility.Diagnostic{
 				Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Category: "compatibility", Stage: string(compiler.StageAdmission),
-				Message: "Third-party action runtime behavior was not validated. The action source, metadata, declared runtime, entrypoints, inputs, and nested actions were validated, but the action code was not executed and may depend on GitHub-only services. No action is required for admission; test the action on Buildkite if runtime compatibility is important.",
+				Message: "Action runtime behavior was not evaluated. The action source, metadata, declared runtime, entrypoints, inputs, and nested actions were validated, but the action code was not executed and may depend on GitHub-only services. No action is required for admission; test the action on Buildkite if runtime compatibility is important.",
 			})
 		}
 		if contextRequired {

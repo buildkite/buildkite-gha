@@ -3337,10 +3337,10 @@ func TestProcessingAnnotationLeadsWithTheActionableDiagnostic(t *testing.T) {
 			want: `Job "test" requires Docker without matching compiler provenance.`,
 		},
 		{
-			name: "third-party runtime warning",
+			name: "action runtime warning",
 			diagnostic: compatibility.Diagnostic{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN",
-				Message: "Third-party action runtime behavior was not validated."},
-			want: "Third-party action runtime behavior was not validated.",
+				Message: "Action runtime behavior was not evaluated."},
+			want: "Action runtime behavior was not evaluated.",
 		},
 	}
 	for _, test := range tests {
