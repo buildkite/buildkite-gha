@@ -311,15 +311,29 @@ func localCompilationDependencyDigest(workflowPath string, contents []byte) (str
 		digest := sha256.Sum256(contents)
 		return hex.EncodeToString(digest[:]), true
 	}
-	root := filepath.Dir(filepath.Dir(filepath.Dir(absPath)))
+	root, err := filepath.EvalSymlinks(filepath.Dir(filepath.Dir(filepath.Dir(absPath))))
+	if err != nil {
+		return "", false
+	}
+	withinRoot := func(path string) bool {
+		relative, err := filepath.Rel(root, path)
+		return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	}
+	absPath, err = filepath.EvalSymlinks(absPath)
+	if err != nil || !withinRoot(absPath) {
+		return "", false
+	}
 	hash := sha256.New()
 	seenWorkflows := map[string]bool{}
 	actions := map[string]bool{}
 	var visit func(string, []byte, int) bool
 	visit = func(path string, source []byte, depth int) bool {
 		relative, err := filepath.Rel(root, path)
-		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || seenWorkflows[relative] {
-			return err == nil && seenWorkflows[relative]
+		if err != nil || !withinRoot(path) {
+			return false
+		}
+		if seenWorkflows[relative] {
+			return true
 		}
 		seenWorkflows[relative] = true
 		parsed, err := workflow.Parse(path, source)
@@ -338,7 +352,10 @@ func localCompilationDependencyDigest(workflowPath string, contents []byte) (str
 				if !strings.HasPrefix(uses, "./") || strings.Contains(uses, "${{") || filepath.Dir(relative) != filepath.Join(".github", "workflows") {
 					return false
 				}
-				callee := filepath.Join(root, relative)
+				callee, err := filepath.EvalSymlinks(filepath.Join(root, relative))
+				if err != nil || !withinRoot(callee) {
+					return false
+				}
 				calleeSource, err := os.ReadFile(callee)
 				if err != nil || !visit(callee, calleeSource, depth+1) {
 					return false

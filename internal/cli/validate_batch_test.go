@@ -235,6 +235,32 @@ func TestBatchValidationDisablesResumptionForUnresolvedLocalDependencies(t *test
 	}
 }
 
+func TestBatchValidationDisablesResumptionForEscapingReusableWorkflowSymlink(t *testing.T) {
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, ".github", "workflows")
+	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflowPath := filepath.Join(workflowDir, "ci.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(t.TempDir(), "reusable.yml")
+	if err := os.WriteFile(external, []byte("on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(workflowDir, "reusable.yml")); err != nil {
+		t.Fatal(err)
+	}
+	captured, err := captureBatchValidationRecord(batchValidationRecord{Source: workflowPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if captured.resumable {
+		t.Fatal("record with escaping reusable workflow symlink was resumable")
+	}
+}
+
 func TestBatchValidationDependencyWalkUsesCompilerDepthBounds(t *testing.T) {
 	t.Run("reusable workflows", func(t *testing.T) {
 		root := t.TempDir()
