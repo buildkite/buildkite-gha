@@ -24,16 +24,18 @@ const (
 	zeroGitCommit                      = "0000000000000000000000000000000000000000"
 )
 
-func populateChangedPaths(context *buildkitepipeline.TriggerConditionContext, event compiler.Event, origin effectiveEventOrigin, workflows []workflowInput) {
+func populateChangedPaths(snapshot *buildkitepipeline.TriggerEventSnapshot, event compiler.Event, origin effectiveEventOrigin, workflows []workflowInput) {
 	if event.Event != "pull_request" && event.Event != "push" {
 		return
 	}
-	if event.Event == "push" && context.TagValue != nil {
+	if event.Event == "push" && snapshot.Tag != nil {
 		return
 	}
 	if origin != effectiveEventFromWebhook {
 		if workflowsUsePathFilters(workflows, event.Event) {
-			context.ChangedPathsError = event.Event + " path filters require linked Buildkite webhook data"
+			snapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{
+				UnavailableReason: event.Event + " path filters require linked Buildkite webhook data",
+			}
 		}
 		return
 	}
@@ -43,11 +45,10 @@ func populateChangedPaths(context *buildkitepipeline.TriggerConditionContext, ev
 		}
 		paths, workflowErrors, err := pushChangedPaths(event, workflows)
 		if err != nil {
-			setPathFiltersError(context, workflows, event.Event, err.Error(), true)
+			setPathFiltersError(snapshot, workflows, event.Event, err.Error(), true)
 			return
 		}
-		context.ChangedPaths = paths
-		context.ChangedPathsKnown = true
+		snapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{Paths: append([]string{}, paths...)}
 		for i := range workflows {
 			workflows[i].PathFiltersError = workflowErrors[workflows[i].CanonicalPath]
 		}
@@ -59,21 +60,20 @@ func populateChangedPaths(context *buildkitepipeline.TriggerConditionContext, ev
 	}
 	pullRequestNumber, err := strconv.Atoi(os.Getenv("BUILDKITE_PULL_REQUEST"))
 	if err != nil || pullRequestNumber <= 0 {
-		setPathFiltersError(context, workflows, event.Event, "pull request path filters require the Buildkite pull request number", closed)
+		setPathFiltersError(snapshot, workflows, event.Event, "pull request path filters require the Buildkite pull request number", closed)
 		return
 	}
 	baseRef := os.Getenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH")
 	if baseRef == "" {
-		setPathFiltersError(context, workflows, event.Event, "pull request path filters require the Buildkite pull request base branch", closed)
+		setPathFiltersError(snapshot, workflows, event.Event, "pull request path filters require the Buildkite pull request base branch", closed)
 		return
 	}
 	paths, workflowErrors, err := pullRequestChangedPaths(event, pullRequestNumber, baseRef, workflows)
 	if err != nil {
-		setPathFiltersError(context, workflows, event.Event, err.Error(), closed)
+		setPathFiltersError(snapshot, workflows, event.Event, err.Error(), closed)
 		return
 	}
-	context.ChangedPaths = paths
-	context.ChangedPathsKnown = true
+	snapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{Paths: append([]string{}, paths...)}
 	for i := range workflows {
 		if closed && !workflowUsesPathFilters(workflows[i], event.Event) {
 			continue
@@ -306,8 +306,8 @@ func gitIsAncestor(root, ancestor, descendant string) (bool, error) {
 	return false, err
 }
 
-func setPathFiltersError(context *buildkitepipeline.TriggerConditionContext, workflows []workflowInput, event, reason string, filteredOnly bool) {
-	context.ChangedPathsError = reason
+func setPathFiltersError(snapshot *buildkitepipeline.TriggerEventSnapshot, workflows []workflowInput, event, reason string, filteredOnly bool) {
+	snapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{UnavailableReason: reason}
 	rootBytes, rootErr := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
 	for i := range workflows {
