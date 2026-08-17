@@ -1854,6 +1854,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		workflows[i].ReusableOnly = parsed.ReusableOnly()
 		workflows[i].Name = parsed.Name
+		workflows[i].Parsed = parsed
 		workflows[i].Triggers = parsed.Triggers
 		if !workflows[i].ReusableOnly {
 			runnableWorkflowCount++
@@ -1902,6 +1903,16 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if workflows[i].ReusableOnly {
 			continue
 		}
+		runName, runNameErr := compiler.ResolveWorkflowRunName(workflows[i].Path, workflows[i].Parsed, effectiveEvent.Event)
+		if runNameErr != nil {
+			workflows[i].Applicable = true
+			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
+			processingReports[i] = triggerProcessingReport(workflows[i].Path, workflows[i].Source)
+			processingReports[i].AddFailure(workflows[i].Path, string(compiler.StageExpressions), compiler.CodeExpressionInvalid, "compatibility", runNameErr)
+			processingReports[i].Result = "incompatible"
+			continue
+		}
+		workflows[i].RunName = runName
 		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
 		if triggerErr != nil {
 			workflows[i].Applicable = true
@@ -2015,13 +2026,15 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			continue
 		}
 		if !input.Applicable {
-			label := input.Name
-			if label == "" {
-				label = input.CanonicalPath
+			checkName := input.Name
+			if checkName == "" {
+				checkName = input.CanonicalPath
 			}
+			label := workflowGroupLabel(checkName, input.RunName)
 			groupKey := "gha-workflow-" + input.Identity
 			generatedWorkflows = append(generatedWorkflows, buildkitepipeline.Workflow{
 				GroupLabel: label,
+				CheckName:  checkName,
 				GroupKey:   groupKey,
 				Event:      effectiveEvent.Event.Event,
 				SkipReason: input.SkipReason,
@@ -2050,12 +2063,14 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			return 1
 		}
 		bundle := preflight.Bundle
-		label := bundle.IR.Workflow.Name
-		if label == "" {
-			label = input.CanonicalPath
+		checkName := bundle.IR.Workflow.Name
+		if checkName == "" {
+			checkName = input.CanonicalPath
 		}
+		label := workflowGroupLabel(checkName, bundle.IR.Workflow.RunName)
 		generated := bundle.GeneratedWorkflow
 		generated.GroupLabel = label
+		generated.CheckName = checkName
 		generated.GroupKey = "gha-workflow-" + input.Identity
 		generated.Event = effectiveEvent.Event.Event
 		generated.Condition = input.TriggerCondition
@@ -2179,10 +2194,11 @@ func processingReportHasErrors(report compatibility.ProcessingReport) bool {
 }
 
 func failedGeneratedWorkflow(input workflowInput, event string, report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (buildkitepipeline.Workflow, []transport.Artifact) {
-	label := input.Name
-	if label == "" {
-		label = input.CanonicalPath
+	checkName := input.Name
+	if checkName == "" {
+		checkName = input.CanonicalPath
 	}
+	label := workflowGroupLabel(checkName, input.RunName)
 	report.Diagnostics = append([]compatibility.Diagnostic(nil), report.Diagnostics...)
 	report.Finalize()
 	messages := make([]string, 0, len(report.Diagnostics))
@@ -2212,6 +2228,7 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 	annotationArtifact := generatedFailureArtifact("annotations", ".html", annotation)
 	workflow := buildkitepipeline.Workflow{
 		GroupLabel: label,
+		CheckName:  checkName,
 		GroupKey:   "gha-workflow-" + input.Identity,
 		Event:      event,
 		Failure: &buildkitepipeline.Failure{
@@ -2221,6 +2238,13 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		},
 	}
 	return workflow, []transport.Artifact{messageArtifact, annotationArtifact}
+}
+
+func workflowGroupLabel(workflowName, runName string) string {
+	if strings.TrimSpace(runName) == "" {
+		return workflowName
+	}
+	return workflowName + " — " + runName
 }
 
 func generatedFailureArtifact(kind, extension, contents string) transport.Artifact {
@@ -2434,12 +2458,14 @@ func triggerProcessingReport(path string, source []byte) compatibility.Processin
 }
 
 type workflowInput struct {
-	Path, CanonicalPath, Identity, StepKeyNamespace, Name string
-	Source                                                []byte
-	Triggers                                              []workflow.Trigger
-	TriggerCondition, SkipReason, AnnotationReason        string
-	PathFiltersError                                      string
-	ReusableOnly, Applicable                              bool
+	Path, CanonicalPath, Identity, StepKeyNamespace string
+	Name, RunName                                   string
+	Source                                          []byte
+	Parsed                                          *workflow.Workflow
+	Triggers                                        []workflow.Trigger
+	TriggerCondition, SkipReason, AnnotationReason  string
+	PathFiltersError                                string
+	ReusableOnly, Applicable                        bool
 }
 
 func resolveWorkflowOperands(operands []string) ([]workflowInput, error) {

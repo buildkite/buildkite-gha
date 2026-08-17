@@ -28,7 +28,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 
 | Area | Status | Initial release boundary |
 | --- | --- | --- |
-| [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name` and job names are retained. `run-name` has no effect. |
+| [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name`, `run-name`, and job names are retained. Explicit `run-name` values can use supported expressions over `github` and `inputs`. |
 | [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. Local `workflow_call` is supported for composition. |
 | [Platforms](#job-configuration) | 🟡 Supported subset | The hosted preset provides Linux x86-64 with `ubuntu-latest`, `ubuntu-24.04`, or `ubuntu-22.04`, and native macOS arm64 with `macos-latest`. Organization-provided queues can map `macos-14` or `macos-15`. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
@@ -67,9 +67,9 @@ Steps remain inside one job because they share a workspace, environment files, a
 
 The plugin accepts one explicit `workflow` path or a non-empty `workflows` path array. Plugin paths and aggregate `upload` operands must identify regular, tracked `.yml` or `.yaml` files inside the repository; directories, missing or untracked files, outside paths, symlinks, and globs fail. A custom importer may upload one explicit regular workflow outside the repository. Inputs are canonicalized, sorted, and deduplicated before workflow identities and job-key namespaces are assigned.
 
-All directly runnable workflows are represented in one artifact and pipeline transaction. Each successfully compiled workflow becomes an aggregate group labeled `:github: <workflow-name>`, with its canonical path as the fallback for an unnamed workflow. A workflow that declares the effective event compiles into child jobs. Each child publishes a provider check named `<workflow-name-or-path> / <job-id> (<effective-event>)`; matrix instances append their sorted matrix values to the job ID. GitHub events publish GitHub checks. Origin events publish Origin checks keyed by the jobs' stable generated identities. A workflow that does not declare the event becomes one top-level skipped command step with no plan artifacts and a check named `<workflow-name-or-path> (<effective-event>)`. After upload, an importer-scoped info annotation lists workflows skipped by event or trigger filters, explains each mismatch, and links each workflow to its generated pipeline step. Annotation publication failure emits a warning without failing the importer. Group labels are static across events. Groups and replacement steps depend on the importer, while group child jobs omit that redundant dependency.
+All directly runnable workflows are represented in one artifact and pipeline transaction. Each successfully compiled workflow becomes an aggregate group labeled `:github: <workflow-name>`, with its canonical path as the fallback for an unnamed workflow. An explicit non-empty `run-name` appends its resolved value: `:github: <workflow-name> — <run-name>`. A workflow that declares the effective event compiles into child jobs. Each child publishes a provider check named `<workflow-name-or-path> / <job-id> (<effective-event>)`; matrix instances append their sorted matrix values to the job ID. GitHub events publish GitHub checks. Origin events publish Origin checks keyed by the jobs' stable generated identities. A workflow that does not declare the event becomes one top-level skipped command step with no plan artifacts and a check named `<workflow-name-or-path> (<effective-event>)`. After upload, an importer-scoped info annotation lists workflows skipped by event or trigger filters, explains each mismatch, and links each workflow to its generated pipeline step. Annotation publication failure emits a warning without failing the importer. Workflow names, group keys, and provider check names remain stable across events; only the appended run title can vary. Groups and replacement steps depend on the importer, while group child jobs omit that redundant dependency.
 
-Reusable-only `workflow_call` files remain available to local callers but do not create groups. Selecting only reusable workflows is an error. Every directly runnable workflow is selected against the effective event. A workflow with safe compilation or trigger-translation errors is replaced by one failing top-level command step labeled `:github: <workflow-name-or-path>`. The replacement step publishes all redacted diagnostics as a job-scoped Buildkite annotation and exits with status 1. The provider check title is `Workflow could not be run`, and its summary lists redacted errors with workflow, job, and step context. Summaries are truncated at 65,535 bytes. A compiler failure takes precedence if the workflow also has a skip reason. Other workflows continue compiling and successful workflows retain their normal groups and jobs. Parse, event-input, admission, artifact, and upload failures still abort the whole transaction; no partial pipeline is uploaded.
+Reusable-only `workflow_call` files remain available to local callers but do not create groups. Selecting only reusable workflows is an error. Every directly runnable workflow is selected against the effective event. A workflow with safe compilation or trigger-translation errors is replaced by one failing top-level command step labeled `:github: <workflow-name-or-path>`, with the resolved run title appended when present. The replacement step publishes all redacted diagnostics as a job-scoped Buildkite annotation and exits with status 1. The provider check title is `Workflow could not be run`, and its summary lists redacted errors with workflow, job, and step context. Summaries are truncated at 65,535 bytes. A compiler failure takes precedence if the workflow also has a skip reason. Other workflows continue compiling and successful workflows retain their normal groups and jobs. Parse, event-input, admission, artifact, and upload failures still abort the whole transaction; no partial pipeline is uploaded.
 
 ### Compatibility diagnostics
 
@@ -82,7 +82,7 @@ Each diagnostic separates user guidance from implementation information. `messag
 | Key | Status | Behavior |
 | --- | --- | --- |
 | `name` | ✅ Supported | Available as `github.workflow` and used to name generated work. |
-| `run-name` | ➖ Accepted, no effect | Buildkite names the build. The value is not retained. |
+| `run-name` | 🟡 Supported subset | An explicit non-empty value is resolved with the supported compile-time expression syntax over `github` and `inputs`, then appended to the workflow's Buildkite group label. It does not change the overall Buildkite build message or provider check names. Omitted and blank values have no effect. |
 | `on` | 🟡 Supported subset | Does not create a Buildkite build. Selects and filters aggregate groups for the effective event as described below. |
 
 A workflow name is retained in generated work:
@@ -90,6 +90,27 @@ A workflow name is retained in generated work:
 ```yaml
 name: CI
 ```
+
+An explicit run name distinguishes runs without changing the stable workflow or check name:
+
+```yaml
+name: Deploy
+run-name: Deploy ${{ inputs.target }} by @${{ github.actor }}
+```
+
+For a `production` deployment by `octocat`, the Buildkite group changes from:
+
+```text
+:github: Deploy
+```
+
+to:
+
+```text
+:github: Deploy — Deploy production by @octocat
+```
+
+The provider check remains `Deploy / <job-id> (<event>)`. Buildkite owns the containing build and its message, so an aggregate upload can show a different run title for each workflow without renaming the build.
 
 Buildkite controls when a build starts. The trigger declaration controls whether and under which condition the workflow group participates in that existing build:
 
