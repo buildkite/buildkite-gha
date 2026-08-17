@@ -2638,6 +2638,20 @@ func TestResolveActionInputsExposesScopedTokenToMetadataDefaults(t *testing.T) {
 	}
 }
 
+func TestResolveActionInputsUsesRunnerDebugDefaultUnlessExplicitlySupplied(t *testing.T) {
+	debugDefault := "${{ runner.debug }}"
+	action := metadata.Metadata{Inputs: map[string]metadata.Input{"debug": {Default: &debugDefault}}}
+
+	inputs, err := resolveActionInputs(action, nil, expression.Context{})
+	if err != nil || inputs["debug"] != "false" {
+		t.Fatalf("runner.debug default = %#v, %v; want false", inputs, err)
+	}
+	inputs, err = resolveActionInputs(action, map[string]string{"DEBUG": "true"}, expression.Context{})
+	if err != nil || inputs["debug"] != "true" {
+		t.Fatalf("explicit debug input = %#v, %v; want true", inputs, err)
+	}
+}
+
 func TestStepExpressionContextExposesScopedTokenWithoutMutatingJobContext(t *testing.T) {
 	eval := expression.Context{
 		GitHub:  map[string]any{"actor": "octocat"},

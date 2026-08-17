@@ -157,6 +157,8 @@ func TestRunnerDirectReferencesWorkAcrossRuntimeEvaluationSurfaces(t *testing.T)
 func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *testing.T) {
 	for _, template := range []string{
 		"${{ github.server_url == 'https://github.com' && github.token || '' }}",
+		"${{ runner.debug }}",
+		"${{ runner.debug == '1' }}",
 		"${{ job.status }}",
 		"${{ toJSON(matrix) }}",
 		"${{ true && 'quoted }} braces' || '' }}",
@@ -166,10 +168,44 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
+	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
+	}
+}
+
+func TestEvaluateActionInputDefaultTreatsRunnerDebugAsFalse(t *testing.T) {
+	for _, test := range []struct {
+		template string
+		want     string
+	}{
+		{template: "${{ runner.debug }}", want: "false"},
+		{template: "${{ runner.debug == '1' }}", want: "false"},
+	} {
+		got, err := EvaluateActionInputDefault(test.template, Context{})
+		if err != nil || got != test.want {
+			t.Errorf("EvaluateActionInputDefault(%q) = %q, %v; want %q", test.template, got, err, test.want)
+		}
+	}
+}
+
+func TestRunnerDebugRemainsUnavailableOutsideActionInputDefaults(t *testing.T) {
+	template := "${{ runner.debug }}"
+	if err := ValidateRuntimeTemplate(template); err == nil {
+		t.Fatal("ValidateRuntimeTemplate() accepted runner.debug")
+	}
+	if _, err := Evaluate(template, Context{}); err == nil {
+		t.Fatal("Evaluate() accepted runner.debug")
+	}
+	if _, err := EvaluateStep(template, Context{}); err == nil {
+		t.Fatal("EvaluateStep() accepted runner.debug")
+	}
+	if _, err := EvaluateCondition("runner.debug", ConditionContext{}); err == nil {
+		t.Fatal("EvaluateCondition() accepted runner.debug")
+	}
+	if _, err := EvaluateActionLifecycleCondition("runner.debug", ConditionContext{}); err == nil {
+		t.Fatal("EvaluateActionLifecycleCondition() accepted runner.debug")
 	}
 }
 

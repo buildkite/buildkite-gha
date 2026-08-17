@@ -28,8 +28,11 @@ func ValidateActionInputDefault(template string) error {
 
 func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 	validator := newSemanticValidator(actionInputDefaultSurface)
-	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
+	validator.validateReference = func(node actionlint.ExprNode, root string, path []string) error {
 		if isJobStatusReference(root, path) {
+			return nil
+		}
+		if isDirectRunnerDebug(node, root, path) {
 			return nil
 		}
 		kind := classifyRuntimeReference(root, path)
@@ -68,6 +71,11 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 // supported only in action metadata input defaults.
 func EvaluateActionInputDefault(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateActionInputDefaultNode)
+}
+
+func isDirectRunnerDebug(node actionlint.ExprNode, root string, path []string) bool {
+	_, direct := node.(*actionlint.ObjectDerefNode)
+	return direct && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug")
 }
 
 // ActionInputDefaultRequiresGitHubToken reports whether a metadata default can
@@ -123,6 +131,10 @@ func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, er
 }
 
 func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (any, error) {
+	root, path, err := referencePath(node)
+	if err == nil && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug") && !isDirectRunnerDebug(node, root, path) {
+		return nil, fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+	}
 	evaluator := newSemanticEvaluator(actionInputDefaultSurface)
 	evaluator.resolve = func(root string, path []string) (any, error) {
 		if isJobStatusReference(root, path) {
@@ -130,6 +142,9 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 				return nil, fmt.Errorf("expression references unavailable job.status")
 			}
 			return context.JobStatus, nil
+		}
+		if strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug") {
+			return "false", nil
 		}
 		return resolveRuntimeReferenceWithMissingMembers(root, path, context)
 	}
