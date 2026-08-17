@@ -570,7 +570,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				return tolerateJobSetupFailure(runCtx, job, jobResult, mountErr)
 			}
 		}
-		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, *job.Container, services, evaluatedServiceOrder, containerMounts...)
+		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, job.Container, services, evaluatedServiceOrder, containerMounts...)
 		if setupErr != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
@@ -583,7 +583,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}
 		}()
 	} else if len(services) != 0 {
-		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, plan.Container{}, services, evaluatedServiceOrder)
+		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, nil, services, evaluatedServiceOrder)
 		if setupErr != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
@@ -893,11 +893,11 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	return scrubJobResult(jobResult, sensitiveValues), runErr
 }
 
-func evaluateServices(services map[string]plan.Container, eval expression.Context) (map[string]plan.Container, error) {
+func evaluateServices(services map[string]plan.ServiceContainer, eval expression.Context) (map[string]plan.ServiceContainer, error) {
 	if len(services) == 0 {
 		return services, nil
 	}
-	result := make(map[string]plan.Container, len(services))
+	result := make(map[string]plan.ServiceContainer, len(services))
 	for name, service := range services {
 		service.Env = maps.Clone(service.Env)
 		service.Ports = append([]string(nil), service.Ports...)
@@ -949,7 +949,7 @@ func evaluateServices(services map[string]plan.Container, eval expression.Contex
 	return result, nil
 }
 
-func serviceOrder(services map[string]plan.Container, preferred []string) []string {
+func serviceOrder(services map[string]plan.ServiceContainer, preferred []string) []string {
 	result := make([]string, 0, len(services))
 	seen := make(map[string]bool, len(services))
 	for _, name := range preferred {
@@ -966,7 +966,7 @@ func serviceOrder(services map[string]plan.Container, preferred []string) []stri
 	return result
 }
 
-func evaluateServiceMap(static map[string]plan.Container, staticOrder []string, source string, eval expression.Context) (map[string]plan.Container, []string, error) {
+func evaluateServiceMap(static map[string]plan.ServiceContainer, staticOrder []string, source string, eval expression.Context) (map[string]plan.ServiceContainer, []string, error) {
 	if source == "" {
 		services, err := evaluateServices(static, eval)
 		return services, serviceOrder(services, staticOrder), err
@@ -978,14 +978,14 @@ func evaluateServiceMap(static map[string]plan.Container, staticOrder []string, 
 	if len(entries) > 32 {
 		return nil, nil, fmt.Errorf("services expression has more than 32 entries")
 	}
-	services := make(map[string]plan.Container, len(entries))
+	services := make(map[string]plan.ServiceContainer, len(entries))
 	order := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		name, raw := entry.Name, entry.Value
 		if !plan.ValidateServiceName(name) {
 			return nil, nil, fmt.Errorf("service name %q must be lowercase and valid", name)
 		}
-		var service plan.Container
+		var service plan.ServiceContainer
 		if image, ok := raw.(string); ok {
 			service.Image = image
 		} else {

@@ -79,13 +79,15 @@ func privateDocker(r Runner) (string, string, map[string]string, error) {
 	return docker, config, map[string]string{"DOCKER_CONFIG": config}, nil
 }
 
-func (r Runner) startJobContainer(ctx context.Context, processor *commandProcessor, workspace, temp string, spec plan.Container, services map[string]plan.Container, extra ...containerMount) (_ *jobContainerBackend, err error) {
+func (r Runner) startJobContainer(ctx context.Context, processor *commandProcessor, workspace, temp string, spec *plan.Container, services map[string]plan.ServiceContainer, extra ...containerMount) (_ *jobContainerBackend, err error) {
 	return r.startJobContainerOrdered(ctx, processor, workspace, temp, spec, services, sortedKeys(services), extra...)
 }
 
-func (r Runner) startJobContainerOrdered(ctx context.Context, processor *commandProcessor, workspace, temp string, spec plan.Container, services map[string]plan.Container, serviceOrder []string, extra ...containerMount) (_ *jobContainerBackend, err error) {
-	if err := validateEnvironmentNames(spec.Env); err != nil {
-		return nil, fmt.Errorf("job container environment: %w", err)
+func (r Runner) startJobContainerOrdered(ctx context.Context, processor *commandProcessor, workspace, temp string, spec *plan.Container, services map[string]plan.ServiceContainer, serviceOrder []string, extra ...containerMount) (_ *jobContainerBackend, err error) {
+	if spec != nil {
+		if err := validateEnvironmentNames(spec.Env); err != nil {
+			return nil, fmt.Errorf("job container environment: %w", err)
+		}
 	}
 	for serviceID, service := range services {
 		if err := validateEnvironmentNames(service.Env); err != nil {
@@ -103,7 +105,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 	}
 	id := hex.EncodeToString(nonce[:])
 	b := &jobContainerBackend{runner: r, processor: processor, docker: docker, env: env, config: config, owner: "com.buildkite.gha.owner." + id + "=true", network: "buildkite-gha-network-" + id, workspace: workspace, temp: temp, servicePorts: make(map[string]expression.ServiceContext)}
-	if spec.Image != "" {
+	if spec != nil {
 		b.container = "buildkite-gha-job-" + id
 	}
 	b.mounts = []containerMount{{host: workspace, target: jobContainerWorkspace}, {host: temp, target: jobContainerTemp}}
@@ -147,7 +149,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 		return nil, err
 	}
 	var runtimeExecutable string
-	if spec.Image != "" {
+	if spec != nil {
 		runtimeExecutable = r.RuntimeExecutable
 		if runtimeExecutable == "" {
 			runtimeExecutable, err = os.Executable()
@@ -171,7 +173,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 		}
 		b.existingVolumes = lineSet(volumes)
 	}
-	if spec.Image != "" {
+	if spec != nil {
 		if err = r.pullContainerImage(ctx, processor, env, docker, spec.Image); err != nil {
 			return nil, fmt.Errorf("pull job container image: %w", err)
 		}
@@ -294,7 +296,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 		}
 		service.ready = true
 	}
-	if spec.Image != "" {
+	if spec != nil {
 		args := []string{"create", "--name", b.container, "--label", "com.buildkite.gha=true", "--label", b.owner, "--network", b.network,
 			"--mount", "type=bind,source=" + workspace + ",target=" + jobContainerWorkspace,
 			"--mount", "type=bind,source=" + temp + ",target=" + jobContainerTemp,

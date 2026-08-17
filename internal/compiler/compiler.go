@@ -616,11 +616,11 @@ instances:
 				job.Container = &plan.Container{Image: instance.Container.Image, Env: cloneMap(instance.Container.Env), Ports: append([]string(nil), instance.Container.Ports...)}
 			}
 			if len(instance.Services) != 0 {
-				job.Services = make(map[string]plan.Container, len(instance.Services))
+				job.Services = make(map[string]plan.ServiceContainer, len(instance.Services))
 				job.ServiceOrder = make([]string, 0, len(instance.Services))
 			}
 			for _, service := range instance.Services {
-				container := plan.Container{
+				container := plan.ServiceContainer{
 					Image: service.Container.Image, Env: cloneMap(service.Container.Env), Ports: append([]string(nil), service.Container.Ports...),
 					Volumes: append([]string(nil), service.Container.Volumes...), Options: service.Container.Options,
 					Command: service.Container.Command, Entrypoint: service.Container.Entrypoint,

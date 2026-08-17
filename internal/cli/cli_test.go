@@ -7180,9 +7180,9 @@ func TestUnprivilegedUploadAdmitsCompilerVerifiedContainerProvenance(t *testing.
 		sources []string
 	}{
 		{name: "job", job: plan.Job{Container: &plan.Container{Image: "node:24"}}, sources: []string{"job-containers"}},
-		{name: "service", job: plan.Job{Services: map[string]plan.Container{"redis": {Image: "redis:7"}}}, sources: []string{"service-containers"}},
+		{name: "service", job: plan.Job{Services: map[string]plan.ServiceContainer{"redis": {Image: "redis:7"}}}, sources: []string{"service-containers"}},
 		{name: "dynamic services", job: plan.Job{ServicesExpression: "${{ fromJSON(needs.build.outputs.services) }}"}, sources: []string{"service-containers"}},
-		{name: "all", job: plan.Job{Container: &plan.Container{Image: "node:24"}, Services: map[string]plan.Container{"redis": {Image: "redis:7"}}}, sources: []string{"dockerfile-actions", "job-containers", "service-containers"}},
+		{name: "all", job: plan.Job{Container: &plan.Container{Image: "node:24"}, Services: map[string]plan.ServiceContainer{"redis": {Image: "redis:7"}}}, sources: []string{"dockerfile-actions", "job-containers", "service-containers"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
