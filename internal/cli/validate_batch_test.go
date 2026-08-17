@@ -175,6 +175,36 @@ func TestValidateBatchRemoteActionStillUsesResolutionSnapshotCacheKey(t *testing
 	}
 }
 
+func TestBatchValidationCacheTracksRepositoryRootAction(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "ci.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "action.yml"), []byte("runs:\n  using: node24\n  main: index.js\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(root, "index.js")
+	if err := os.WriteFile(sourcePath, []byte("console.log('before')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := batchValidationRecord{Source: workflowPath}
+	before, err := captureBatchValidationRecord(record)
+	if err != nil || !before.resumable {
+		t.Fatalf("initial capture = %#v, %v", before, err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("console.log('after')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := captureBatchValidationRecord(record)
+	if err != nil || !after.resumable || after.contentID == before.contentID {
+		t.Fatalf("changed capture = %#v, %v; want new resumable identity", after, err)
+	}
+}
+
 func TestBatchValidationDisablesResumptionForUnresolvedLocalDependencies(t *testing.T) {
 	for _, test := range []struct {
 		name     string

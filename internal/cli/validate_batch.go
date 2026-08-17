@@ -350,7 +350,7 @@ func localCompilationDependencyDigest(workflowPath string, contents []byte) (str
 				}
 				if strings.HasPrefix(step.Uses, "./") {
 					path := strings.TrimPrefix(step.Uses, "./")
-					if path == "" || filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))) != path || strings.Contains(path, "\\") {
+					if path != "" && (filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))) != path || strings.Contains(path, "\\")) {
 						return false
 					}
 					actions[path] = true
@@ -394,7 +394,7 @@ func localCompilationDependencyDigest(workflowPath string, contents []byte) (str
 				continue
 			}
 			nested := strings.TrimPrefix(step.Uses, "./")
-			if nested == "" || filepath.ToSlash(filepath.Clean(filepath.FromSlash(nested))) != nested || strings.Contains(nested, "\\") || !visitAction(nested, depth+1) {
+			if nested != "" && (filepath.ToSlash(filepath.Clean(filepath.FromSlash(nested))) != nested || strings.Contains(nested, "\\")) || !visitAction(nested, depth+1) {
 				return false
 			}
 		}
