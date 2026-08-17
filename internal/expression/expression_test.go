@@ -1337,7 +1337,13 @@ func TestEvaluateConditionFailsClosed(t *testing.T) {
 
 func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 	context := CompileContext{
-		GitHub: map[string]any{"event_name": "push", "event": map[string]any{"action": "opened"}},
+		GitHub: map[string]any{
+			"base_ref":   "main",
+			"event_name": "push",
+			"event":      map[string]any{"action": "opened"},
+			"ref_name":   "42/merge",
+			"ref_type":   "branch",
+		},
 		Event:  map[string]any{"action": "opened"},
 		Vars:   map[string]string{"RUNNERS": `["ubuntu-24.04","ubuntu-22.04"]`},
 		Matrix: map[string]any{"os": "ubuntu-24.04"},
@@ -1347,6 +1353,9 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		want       any
 	}{
 		{expression: "${{ github.event_name }}", want: "push"},
+		{expression: "${{ github.ref_name }}", want: "42/merge"},
+		{expression: "${{ github.ref_type }}", want: "branch"},
+		{expression: "${{ github.base_ref }}", want: "main"},
 		{expression: "${{ github.event.action }}", want: "opened"},
 		{expression: "${{ event.action }}", want: "opened"},
 		{expression: "${{ matrix.os }}", want: "ubuntu-24.04"},
@@ -1403,6 +1412,33 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 	runners, ok := got.([]any)
 	if !ok || len(runners) != 2 || runners[0] != "ubuntu-24.04" {
 		t.Fatalf("fromJSON runners = %#v", got)
+	}
+}
+
+func TestEvaluateCompileTemplateSupportsGitHubRefScalars(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{
+		"base_ref": "main",
+		"ref_name": "42/merge",
+		"ref_type": "branch",
+	}}
+	got, err := EvaluateCompileTemplate("${{ github.ref_type }}-${{ github.ref_name }}-${{ github.base_ref }}", context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "branch-42/merge-main" {
+		t.Fatalf("EvaluateCompileTemplate() = %q, want branch-42/merge-main", got)
+	}
+
+	got, err = EvaluateCompileTemplate("base-${{ github.base_ref }}", CompileContext{GitHub: map[string]any{"base_ref": ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "base-" {
+		t.Fatalf("EvaluateCompileTemplate() empty base_ref = %q, want base-", got)
+	}
+
+	if _, err := EvaluateCompileTemplate("${{ github.run_id }}", CompileContext{GitHub: map[string]any{"run_id": "123"}}); err == nil {
+		t.Fatal("EvaluateCompileTemplate() admitted unsupported github.run_id")
 	}
 }
 
@@ -1492,8 +1528,13 @@ func TestEvaluateCompileConditionUsesEventSnapshot(t *testing.T) {
 	if err != nil || !usesEvent {
 		t.Fatalf("ReferencesGitHubEvent() = %v, %v", usesEvent, err)
 	}
-	if usesEvent, err := ReferencesGitHubEvent("github.event_name == 'push'"); err != nil || usesEvent {
-		t.Fatalf("ReferencesGitHubEvent(event_name) = %v, %v", usesEvent, err)
+	for _, source := range []string{"github.event_name == 'push'", "github.ref == 'refs/heads/main'"} {
+		if usesEvent, err := ReferencesGitHubEvent(source); err != nil || usesEvent {
+			t.Fatalf("ReferencesGitHubEvent(%q) = %v, %v", source, usesEvent, err)
+		}
+	}
+	if usesEvent, err := ReferencesGitHubEvent("github.ref_type == 'branch' && github.ref_name && github.base_ref == ''"); err != nil || !usesEvent {
+		t.Fatalf("ReferencesGitHubEvent(ref scalars) = %v, %v", usesEvent, err)
 	}
 }
 

@@ -1761,6 +1761,159 @@ jobs:
 	})
 }
 
+func TestExpandMatrixPreservesRegressedStaticExpressionValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{
+			name: "unit_tests.yml",
+			source: `on: [push, pull_request]
+jobs:
+  build:
+    needs: setup
+    runs-on: ${{ matrix.os || 'ubuntu-24.04' }}
+    strategy:
+      matrix:
+        python: ['3.10']
+        modules_tool:
+          - ${{ needs.setup.outputs.lmod8 }}
+          - ${{ needs.setup.outputs.modules4 }}
+          - ${{ needs.setup.outputs.modules5 }}
+        include:
+          - python: '3.6.1'
+            modules_tool: ${{ needs.setup.outputs.lmod8 }}
+            use_pyenv: '2.6.15'
+          - python: '3.7'
+            modules_tool: ${{ needs.setup.outputs.lmod8 }}
+            os: ubuntu-22.04
+    steps: [{run: true}]
+`,
+		},
+		{
+			name: "product-creation-tests.yml",
+			source: `on: pull_request
+jobs:
+  e2e-tests:
+    needs: [check-secrets, resolve-versions]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        test-group: [plugin-events, product-crud, product-batch, product-category]
+        version-set: [supported, latest]
+        include:
+          - version-set: supported
+            wp-version: ${{ needs.resolve-versions.outputs.wp-supported }}
+            wc-version: ${{ needs.resolve-versions.outputs.wc-supported }}
+            version-label: Currently supported
+          - version-set: latest
+            wp-version: latest
+            wc-version: latest
+            version-label: Latest
+    steps: [{run: true}]
+`,
+		},
+		{
+			name: "apis-v21.yaml",
+			source: `on: push
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [coordinator-4_0, coordinator-dse-68]
+    steps: [{run: true}]
+  test:
+    needs: resolve-coordinator-docker
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project: [sgv2-docsapi, sgv2-graphqlapi, sgv2-restapi]
+        name: [cassandra-40, dse-68]
+        include:
+          - name: cassandra-40
+            image-cache-key: docker-coordinator-4_0-${{ needs.resolve-coordinator-docker.outputs.sha }}
+            image-file: coordinator-4_0-${{ needs.resolve-coordinator-docker.outputs.sha }}.tar
+          - name: dse-68
+            image-cache-key: docker-coordinator-dse-68-${{ needs.resolve-coordinator-docker.outputs.sha }}
+            image-file: coordinator-dse-68-${{ needs.resolve-coordinator-docker.outputs.sha }}.tar
+    steps: [{run: true}]
+`,
+		},
+		{
+			name: "php-unit-tests.yml",
+			source: `on: workflow_dispatch
+jobs:
+  tests:
+    needs: GetMatrix
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: [8.2]
+        wp-version: [latest]
+        wc-versions: ['${{ join(fromJson(needs.GetMatrix.outputs.wc-versions)) }}']
+        include:
+          - php: 7.4
+            wp-version: ${{ fromJson(needs.GetMatrix.outputs.wp-versions)[1] }}
+            wc-versions: ${{ fromJson(needs.GetMatrix.outputs.wc-versions)[1] }}
+          - php: 8.3
+            wp-version: latest
+            wc-versions: latest
+    steps: [{run: true}]
+`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parsed, err := workflow.Parse(test.name, []byte(test.source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			matrixJobs := 0
+			for _, job := range parsed.Jobs {
+				if job.Matrix == nil {
+					continue
+				}
+				matrixJobs++
+				matrices, err := expandMatrix(test.name, job, expression.CompileContext{})
+				if err != nil {
+					t.Fatalf("expandMatrix(%q): %v", job.ID, err)
+				}
+				if len(matrices) == 0 {
+					t.Fatalf("expandMatrix(%q) returned no combinations", job.ID)
+				}
+			}
+			if matrixJobs == 0 {
+				t.Fatal("fixture has no matrix jobs")
+			}
+		})
+	}
+}
+
+func TestCompileResolvesGitHubRefNameInMatrixDimension(t *testing.T) {
+	workflow := []byte(`on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        target: ${{ fromJSON(format('["{0}"]', github.ref_name)) }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ matrix.target }}
+`)
+	result, err := Compile("matrix.yml", workflow, readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 1 || ir.Jobs[0].Matrix["target"] != "main" {
+		t.Fatalf("resolved github.ref_name matrix value = %#v", ir.Jobs)
+	}
+}
+
 func TestCompileRejectsFlattenedReusableJobIDCollisions(t *testing.T) {
 	repository := t.TempDir()
 	suffix, err := matrixDigest(map[string]any{"target": "linux"})
@@ -2170,7 +2323,7 @@ jobs:
 	}
 }
 
-func TestCompileRetainsGitHubRuntimeEventIdentity(t *testing.T) {
+func TestCompileFoldsGitHubRefIdentityInConditions(t *testing.T) {
 	workflow := []byte(`on: [push, pull_request, pull_request_target]
 jobs:
   test:
@@ -2180,13 +2333,13 @@ jobs:
       - run: true
 `)
 	tests := []struct {
-		name, event, ref, payload, wantBaseRef string
+		name, event, ref, payload, wantBaseRef, wantCondition string
 	}{
-		{name: "branch", event: "push", ref: "refs/heads/feature/runtime", payload: `{}`},
-		{name: "tag", event: "push", ref: "refs/tags/v1.2.3", payload: `{}`},
-		{name: "pull request", event: "pull_request", ref: "refs/pull/42/merge", payload: `{"pull_request":{"base":{"ref":"main"},"head":{"ref":"feature/pr"}}}`, wantBaseRef: "main"},
-		{name: "pull request target", event: "pull_request_target", ref: "refs/heads/main", payload: `{"pull_request":{"base":{"ref":"main"},"head":{"ref":"feature/target"}}}`, wantBaseRef: "main"},
-		{name: "missing pull request shape", event: "pull_request", ref: "refs/pull/42/merge", payload: `{}`},
+		{name: "branch", event: "push", ref: "refs/heads/feature/runtime", payload: `{}`, wantCondition: "(always() && true)"},
+		{name: "tag", event: "push", ref: "refs/tags/v1.2.3", payload: `{}`, wantCondition: "(always() && true)"},
+		{name: "pull request", event: "pull_request", ref: "refs/pull/42/merge", payload: `{"pull_request":{"base":{"ref":"main"},"head":{"ref":"feature/pr"}}}`, wantBaseRef: "main", wantCondition: "(always() && false)"},
+		{name: "pull request target", event: "pull_request_target", ref: "refs/heads/main", payload: `{"pull_request":{"base":{"ref":"main"},"head":{"ref":"feature/target"}}}`, wantBaseRef: "main", wantCondition: "(always() && false)"},
+		{name: "missing pull request shape", event: "pull_request", ref: "refs/pull/42/merge", payload: `{}`, wantCondition: "(always() && true)"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -2203,8 +2356,8 @@ jobs:
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(plans) != 1 || plans[0].Event.BaseRef != test.wantBaseRef || !strings.Contains(plans[0].Condition, "github.repository_owner") {
-				t.Fatalf("runtime event identity plan = %#v", plans)
+			if len(plans) != 1 || plans[0].Event.BaseRef != test.wantBaseRef || plans[0].Condition != test.wantCondition {
+				t.Fatalf("compile-time event identity plan = %#v", plans)
 			}
 		})
 	}

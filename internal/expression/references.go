@@ -348,15 +348,14 @@ func ReferencesJobStatus(template string) (bool, error) {
 	return found, err
 }
 
-// ReferencesGitHubEvent reports whether a condition reads the event payload
-// through github.event. The compiler can fold those conditions before the
-// immutable runtime boundary, which deliberately omits the payload body.
+// ReferencesGitHubEvent reports whether a condition reads the event payload or
+// an event-derived GitHub ref scalar that the compiler must fold.
 func ReferencesGitHubEvent(source string) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return false, err
 	}
-	return nodeReferencesGitHubEvent(node), nil
+	return nodeReferencesCompileGitHubEvent(node), nil
 }
 
 // TemplateReferencesGitHubEvent reports whether an interpolated template
@@ -364,13 +363,35 @@ func ReferencesGitHubEvent(source string) (bool, error) {
 func TemplateReferencesGitHubEvent(template string) (bool, error) {
 	found := false
 	err := visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
-		found = found || nodeReferencesGitHubEvent(node)
+		found = found || nodeReferencesGitHubEventPayload(node)
 		return nil
 	})
 	return found, err
 }
 
-func nodeReferencesGitHubEvent(node actionlint.ExprNode) bool {
+func nodeReferencesCompileGitHubEvent(node actionlint.ExprNode) bool {
+	return nodeReferencesGitHub(node, func(path []string) bool {
+		if len(path) == 0 {
+			return false
+		}
+		switch strings.ToLower(path[0]) {
+		case "base_ref", "ref_name", "ref_type":
+			return len(path) == 1
+		case "event":
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+func nodeReferencesGitHubEventPayload(node actionlint.ExprNode) bool {
+	return nodeReferencesGitHub(node, func(path []string) bool {
+		return len(path) != 0 && strings.EqualFold(path[0], "event")
+	})
+}
+
+func nodeReferencesGitHub(node actionlint.ExprNode, matches func([]string) bool) bool {
 	found := false
 	actionlint.VisitExprNode(node, func(node, _ actionlint.ExprNode, entering bool) {
 		if !entering || found {
@@ -382,7 +403,7 @@ func nodeReferencesGitHubEvent(node actionlint.ExprNode) bool {
 			return
 		}
 		root, path, pathErr := referencePath(node)
-		found = pathErr == nil && strings.EqualFold(root, "github") && len(path) != 0 && strings.EqualFold(path[0], "event")
+		found = pathErr == nil && strings.EqualFold(root, "github") && matches(path)
 	})
 	return found
 }
