@@ -3012,6 +3012,17 @@ func TestProcessingAnnotationIsBoundedAndEscapesHTML(t *testing.T) {
 	}
 }
 
+func TestProcessingAnnotationOmitsUnknownActionRuntime(t *testing.T) {
+	report := compatibility.NewProcessingReport("ci.yml", "")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Message: "Action runtime behavior was not evaluated.",
+	})
+	style, body := processingAnnotation(report, sourceLinkContext{})
+	if style != "" || body != "" {
+		t.Fatalf("processingAnnotation() = %q, %q, want no Buildkite annotation", style, body)
+	}
+}
+
 func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "")
 	probe := compatibility.Diagnostic{Level: "warning", Code: "W_LARGE", Message: "a"}
