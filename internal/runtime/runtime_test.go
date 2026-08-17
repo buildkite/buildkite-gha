@@ -3150,15 +3150,17 @@ if [ "${1##*/}" = main.js ] && [ "${FAIL_MAIN:-false}" = true ]; then exit 9; fi
 
 func TestRustCachePostConditionUsesFinalStatusAndMainEnvironment(t *testing.T) {
 	tests := []struct {
-		name       string
-		failJob    bool
-		cacheValue string
-		wantPost   bool
+		name            string
+		failJob         bool
+		cacheValue      string
+		finalCacheValue string
+		wantPost        bool
 	}{
 		{name: "success", wantPost: true},
 		{name: "failure default", failJob: true},
 		{name: "failure disabled", failJob: true, cacheValue: "false"},
 		{name: "failure enabled", failJob: true, cacheValue: "true", wantPost: true},
+		{name: "later environment wins", failJob: true, cacheValue: "true", finalCacheValue: "false"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -3190,6 +3192,9 @@ esac
 			}
 			marker := filepath.Join(workspace, "post")
 			steps := []plan.Step{{ID: "cache", Kind: "uses", Uses: "./.github/actions/rust-cache"}}
+			if test.finalCacheValue != "" {
+				steps = append(steps, plan.Step{ID: "override", Kind: "run", Command: fmt.Sprintf("printf 'CACHE_ON_FAILURE=%s\\n' >> \"$GITHUB_ENV\"", test.finalCacheValue)})
+			}
 			if test.failJob {
 				steps = append(steps, plan.Step{ID: "fail", Kind: "run", Command: "exit 7"})
 			}
@@ -3225,7 +3230,7 @@ runs:
   using: node24
   main: main.js
   post: post.js
-  post-if: (success() || env.CACHE_ON_FAILURE == 'true') && steps.finalize.conclusion == 'success'
+  post-if: (success() || env.CACHE_ON_FAILURE == 'true') && env.PARENT_FLAG == 'true' && steps.finalize.conclusion == 'success'
 `)
 	writeFixtureFile(t, workspace, ".github/actions/rust-cache/main.js", "")
 	writeFixtureFile(t, workspace, ".github/actions/rust-cache/post.js", "")
@@ -3243,7 +3248,7 @@ esac
 	}
 	marker := filepath.Join(workspace, "post")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
-		{ID: "setup", Kind: "uses", Uses: "./.github/actions/setup-rust-toolchain"},
+		{ID: "setup", Kind: "uses", Uses: "./.github/actions/setup-rust-toolchain", Env: map[string]string{"PARENT_FLAG": "true"}},
 		{ID: "not-yet", Kind: "run", Command: `test ! -e "$POST_MARKER"`},
 		{ID: "finalize", Kind: "run", Command: "exit 7"},
 	})
@@ -3254,6 +3259,42 @@ esac
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("nested rust-cache post did not run during teardown: %v", err)
+	}
+}
+
+func TestJavaScriptPostConditionUsesWorkflowInputsAndPostHashFiles(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: lifecycle hashFiles\n")
+	writeFixtureFile(t, workspace, "Cargo.lock", "locked")
+	writeFixtureFile(t, workspace, ".github/actions/cache/action.yml", `name: cache
+runs:
+  using: node24
+  main: main.js
+  post: post.js
+  post-if: inputs.cache == true && hashFiles('Cargo.lock') != ''
+`)
+	writeFixtureFile(t, workspace, ".github/actions/cache/main.js", "")
+	writeFixtureFile(t, workspace, ".github/actions/cache/post.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+if [ "$(basename "$1")" = post.js ]; then touch "$POST_MARKER"; fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(workspace, "post")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "cache", Kind: "uses", Uses: "./.github/actions/cache"}})
+	job.Inputs = map[string]any{"cache": true}
+	job.Env = map[string]string{"POST_MARKER": marker}
+	result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("post did not run: %v", err)
 	}
 }
 

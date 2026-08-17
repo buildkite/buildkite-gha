@@ -959,6 +959,8 @@ func TestValidateActionLifecycleCondition(t *testing.T) {
 		"success() || env.CACHE_ON_FAILURE == 'true'",
 		"${{ failure() && matrix.allow_failure }}",
 		"steps.build.conclusion == 'success' && runner.os == 'Linux'",
+		"inputs.cache == true && hashFiles('Cargo.lock') != ''",
+		"inputs['cache'] == true",
 	} {
 		if err := ValidateActionLifecycleCondition(condition); err != nil {
 			t.Errorf("ValidateActionLifecycleCondition(%q) error = %v", condition, err)
@@ -967,12 +969,33 @@ func TestValidateActionLifecycleCondition(t *testing.T) {
 	for _, condition := range []string{
 		"success() || secrets.TOKEN != ''",
 		"success() || needs.build.result == 'success'",
-		"hashFiles('go.mod') != ''",
+		"needs[env.JOB].result == 'success'",
+		"vars[env.FLAG] == 'true'",
+		"steps[env.STEP].conclusion == 'success'",
+		"inputs[env.INPUT] == true",
 		"unknown()",
 	} {
 		if err := ValidateActionLifecycleCondition(condition); err == nil {
 			t.Errorf("ValidateActionLifecycleCondition(%q) accepted unsupported expression", condition)
 		}
+	}
+}
+
+func TestEvaluateActionLifecycleConditionUsesWorkflowInputsAndHashFiles(t *testing.T) {
+	var patterns []string
+	context := ConditionContext{
+		Inputs: map[string]any{"cache": true},
+		HashFiles: func(got []string) (string, error) {
+			patterns = append([]string(nil), got...)
+			return "digest", nil
+		},
+	}
+	got, err := EvaluateActionLifecycleCondition("inputs.cache && hashFiles('Cargo.lock') != ''", context)
+	if err != nil || !got {
+		t.Fatalf("EvaluateActionLifecycleCondition() = %v, %v, want true", got, err)
+	}
+	if !reflect.DeepEqual(patterns, []string{"Cargo.lock"}) {
+		t.Fatalf("hashFiles patterns = %#v, want [Cargo.lock]", patterns)
 	}
 }
 

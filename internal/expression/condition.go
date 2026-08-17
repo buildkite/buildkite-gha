@@ -115,10 +115,7 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 			}
 			return nil
 		case "hashfiles":
-			if scope == actionLifecycleCondition {
-				return fmt.Errorf("condition function %q is unsupported in action lifecycle conditions", node.Callee)
-			}
-			if scope != StepCondition {
+			if scope != StepCondition && scope != actionLifecycleCondition {
 				return fmt.Errorf("condition function %q is unavailable in job conditions", node.Callee)
 			}
 			if len(node.Args) == 0 || len(node.Args) > 255 {
@@ -209,7 +206,7 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 	}
 	if scope == actionLifecycleCondition {
 		switch strings.ToLower(root) {
-		case "env", "github", "job", "matrix", "runner", "steps":
+		case "env", "github", "inputs", "job", "matrix", "runner", "steps":
 		default:
 			return fmt.Errorf("lifecycle condition context %q is unsupported", root)
 		}
@@ -238,6 +235,11 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			return nil
 		}
 		return fmt.Errorf("condition reference %q is unsupported; expected vars.<name>", reference)
+	case "inputs":
+		if len(path) == 1 {
+			return nil
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected inputs.<name>", reference)
 	case "matrix":
 		// Matrix values may be objects or arrays, so nested references such
 		// as matrix.config.os are valid.
@@ -276,6 +278,21 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 
 func validateConditionAccessNode(validator *semanticValidator, node actionlint.ExprNode, scope ConditionScope) error {
 	root := strings.ToLower(referenceRoot(node))
+	if scope == actionLifecycleCondition {
+		switch root {
+		case "env", "github", "inputs", "job", "matrix", "runner", "steps":
+		default:
+			return fmt.Errorf("lifecycle condition context %q is unsupported", root)
+		}
+		if _, whole := node.(*actionlint.VariableNode); whole {
+			return fmt.Errorf("whole lifecycle condition context %q is unsupported", root)
+		}
+		staticRoot, path, err := referencePath(node)
+		if err != nil {
+			return fmt.Errorf("dynamic lifecycle condition access is unsupported")
+		}
+		return validateConditionReference(staticRoot, path, scope)
+	}
 	switch root {
 	case "":
 		switch node := node.(type) {

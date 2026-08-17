@@ -773,7 +773,7 @@ func TestCompileActionLocksDeterministic(t *testing.T) {
 
 func TestCompileActionLocksValidatesJavaScriptLifecycleConditions(t *testing.T) {
 	workspace := t.TempDir()
-	writeAction(t, workspace, "rust-cache", "name: rust-cache\nruns:\n  using: node24\n  main: index.js\n  post: index.js\n  post-if: success() || env.CACHE_ON_FAILURE == 'true'\n")
+	writeAction(t, workspace, "rust-cache", "name: rust-cache\nruns:\n  using: node24\n  main: index.js\n  post: index.js\n  post-if: (success() || env.CACHE_ON_FAILURE == 'true') && inputs.cache == true && hashFiles('Cargo.lock') != ''\n")
 	writeAction(t, workspace, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./rust-cache\n")
 	if _, _, _, _, err := compileActionLocks(context.Background(), workspace, nil, []string{"./parent"}); err != nil {
 		t.Fatalf("compileActionLocks() rejected rust-cache lifecycle condition: %v", err)
@@ -784,8 +784,9 @@ func TestCompileActionLocksValidatesJavaScriptLifecycleConditions(t *testing.T) 
 		t.Fatalf("direct lifecycle validation error = %v", err)
 	}
 
-	writeAction(t, workspace, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./broken\n")
-	if _, _, _, _, err := compileActionLocks(context.Background(), workspace, nil, []string{"./parent"}); err == nil || !strings.Contains(err.Error(), `child action "./broken"`) || !strings.Contains(err.Error(), "pre-if") {
+	writeAction(t, workspace, "nested-broken", "name: broken\nruns:\n  using: node24\n  main: index.js\n  post: index.js\n  post-if: needs[env.JOB].result == 'success'\n")
+	writeAction(t, workspace, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./nested-broken\n")
+	if _, _, _, _, err := compileActionLocks(context.Background(), workspace, nil, []string{"./parent"}); err == nil || !strings.Contains(err.Error(), `child action "./nested-broken"`) || !strings.Contains(err.Error(), "post-if") || !strings.Contains(err.Error(), `context "needs"`) {
 		t.Fatalf("nested lifecycle validation error = %v", err)
 	}
 }
