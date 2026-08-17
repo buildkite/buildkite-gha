@@ -2110,6 +2110,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 	inheritedUnsuccessful := inheritedFailure || inheritedCancelled
 	var runErr error
 	for i, step := range action.Runs.Steps {
+		childInvocationID := fmt.Sprintf("%s/%d", invocationID, i)
 		failure := inheritedFailure || runErr != nil
 		cancelled := inheritedCancelled || ctx.Err() != nil
 		unsuccessful := inheritedUnsuccessful || runErr != nil
@@ -2132,6 +2133,11 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		if !run {
 			if id != "" {
 				eval.Steps[id] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
+			}
+			if invocation := prepared[childInvocationID]; invocation != nil && invocation.isolated {
+				// Pre hooks register posts before composite execution. If main is
+				// skipped, retain this composite's live final step scope for post-if.
+				invocation.eval.Steps = eval.Steps
 			}
 			continue
 		}
@@ -2158,7 +2164,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 				}
 			}
 			if childErr == nil {
-				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, fmt.Sprintf("%s/%d", invocationID, i), childJobEnv, childEnv, childWith, eval, posts, actions, prepared, actionStack, lifecycleEnvOverlay)
+				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, childInvocationID, childJobEnv, childEnv, childWith, eval, posts, actions, prepared, actionStack, lifecycleEnvOverlay)
 			}
 		} else if strings.TrimSpace(step.Run) == "" {
 			childErr = fmt.Errorf("composite action step %d has no run command", i+1)

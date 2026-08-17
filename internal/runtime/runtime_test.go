@@ -5152,7 +5152,11 @@ func TestRemoteActionPreHooksRunBeforeJobMainInDepthFirstOrder(t *testing.T) {
 		if i == 0 {
 			using = "node20"
 		}
-		writeFixtureFile(t, remote, name+"/action.yml", "name: "+name+"\nruns:\n  using: "+using+"\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+		postIf := ""
+		if name == "skipped" {
+			postIf = "  post-if: steps.failed.outcome == 'failure' && steps.skipped.outcome == 'skipped' && steps.second.outcome == 'success'\n"
+		}
+		writeFixtureFile(t, remote, name+"/action.yml", "name: "+name+"\nruns:\n  using: "+using+"\n  pre: pre.js\n  main: main.js\n  post: post.js\n"+postIf)
 		for _, phase := range []string{"pre", "main", "post"} {
 			writeFixtureFile(t, remote, name+"/"+phase+".js", "")
 		}
@@ -5176,9 +5180,14 @@ runs:
 runs:
   using: composite
   steps:
-    - if: failure()
+    - id: failed
+      shell: sh
+      run: exit 7
+    - id: skipped
       uses: owner/repo/skipped@v1
-    - uses: owner/repo/second@v1
+    - id: second
+      if: always()
+      uses: owner/repo/second@v1
 `)
 	lifecycle := filepath.Join(workspace, "lifecycle.log")
 	preBin := filepath.Join(workspace, "pre-bin")
@@ -5252,7 +5261,7 @@ printf '%s\n' 'job:main' >> "$LIFECYCLE_LOG"`},
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	var logs bytes.Buffer
 	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
-	if err != nil || result.Conclusion != "success" {
+	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
 	events, err := os.ReadFile(lifecycle)
