@@ -36,9 +36,9 @@ const (
 	JobCondition ConditionScope = iota
 	// StepCondition is evaluated while a job is running.
 	StepCondition
-	// ActionLifecycleCondition is evaluated for action pre-if and post-if
+	// actionLifecycleCondition is evaluated for action pre-if and post-if
 	// metadata. It has its own context policy and no implicit success guard.
-	ActionLifecycleCondition
+	actionLifecycleCondition
 )
 
 // ValidateCondition verifies that a job or step condition uses only expression
@@ -60,7 +60,7 @@ func ValidateActionLifecycleCondition(source string) error {
 	if err := validateLifecycleDelimiters(source); err != nil {
 		return err
 	}
-	return validateCondition(source, ActionLifecycleCondition, nil, false)
+	return validateCondition(source, actionLifecycleCondition, nil, false)
 }
 
 func validateLifecycleDelimiters(source string) error {
@@ -115,7 +115,7 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 			}
 			return nil
 		case "hashfiles":
-			if scope == ActionLifecycleCondition {
+			if scope == actionLifecycleCondition {
 				return fmt.Errorf("condition function %q is unsupported in action lifecycle conditions", node.Callee)
 			}
 			if scope != StepCondition {
@@ -207,7 +207,7 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 	if len(path) != 0 {
 		reference += "." + strings.Join(path, ".")
 	}
-	if scope == ActionLifecycleCondition {
+	if scope == actionLifecycleCondition {
 		switch strings.ToLower(root) {
 		case "env", "github", "job", "matrix", "runner", "steps":
 		default:
@@ -343,7 +343,7 @@ func EvaluateActionLifecycleCondition(source string, context ConditionContext) (
 	}
 	// Validate before evaluation so short-circuiting cannot hide an
 	// unsupported context or function in an unselected branch.
-	if err := validateConditionNode(node, ActionLifecycleCondition, nil, false); err != nil {
+	if err := validateConditionNode(node, actionLifecycleCondition, nil, false); err != nil {
 		return false, err
 	}
 	value, err := evaluateConditionNode(node, context)

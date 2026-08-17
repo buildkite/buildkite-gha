@@ -818,7 +818,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 		postEval.Env = mergeStringMaps(jobResult.Env, invocation.env)
 		unsuccessful, cancelled := runErr != nil, runCtx.Err() != nil
-		condition := lifecycleConditionContext(postEval, postEval.Env, unsuccessful, cancelled)
+		condition := lifecycleConditionContext(postEval, unsuccessful, cancelled)
 		runPost, conditionErr := expression.EvaluateActionLifecycleCondition(post.condition, condition)
 		if conditionErr != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("post action %q condition: %w", action.Name, conditionErr))
@@ -1103,12 +1103,10 @@ func stepExpressionContext(context expression.Context) expression.Context {
 	return context
 }
 
-func lifecycleConditionContext(eval expression.Context, env map[string]string, unsuccessful, cancelled bool) expression.ConditionContext {
+func lifecycleConditionContext(eval expression.Context, unsuccessful, cancelled bool) expression.ConditionContext {
 	return expression.ConditionContext{
-		Needs:        eval.Needs,
 		Steps:        eval.Steps,
-		Env:          env,
-		Vars:         eval.Vars,
+		Env:          eval.Env,
 		Matrix:       eval.Matrix,
 		GitHub:       eval.GitHub,
 		Runner:       eval.Runner,
@@ -1715,7 +1713,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 				}
 				invocationEval.Env = mergeStringMaps(invocationEval.Env, stepEnv)
 			}
-			condition := lifecycleConditionContext(invocationEval, invocationEval.Env, status.unsuccessful, ctx.Err() != nil)
+			condition := lifecycleConditionContext(invocationEval, status.unsuccessful, ctx.Err() != nil)
 			runPre, err := expression.EvaluateActionLifecycleCondition(action.Runs.PreIf, condition)
 			if err != nil {
 				return result, fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err)
@@ -2008,8 +2006,18 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		}
 		lifecycleEval := cloneExpressionContext(eval)
 		lifecycleEval.Env = mergeStringMaps(lifecycleEval.Env, stepEnv)
+		isolated := len(actionStack) > 1
+		if invocation != nil {
+			isolated = invocation.isolated
+		}
+		if isolated {
+			// Composite steps execute sequentially and own a per-invocation
+			// map. Retain that map so post-if sees its final state without
+			// exposing workflow or sibling-composite steps.
+			lifecycleEval.Steps = eval.Steps
+		}
 		if invocation == nil {
-			invocation = &preparedInvocation{action: javascript, state: state, node: node, eval: lifecycleEval, env: cloneStrings(stepEnv), isolated: len(actionStack) > 1}
+			invocation = &preparedInvocation{action: javascript, state: state, node: node, eval: lifecycleEval, env: cloneStrings(stepEnv), isolated: isolated}
 		}
 		if !invocation.postRegistered {
 			posts.register(postForInvocation(invocation, action.Runs.PostIf))
@@ -2018,7 +2026,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if javascript.Pre != "" && !wasPrepared {
 			cancelled := eval.JobStatus == "cancelled"
 			unsuccessful := eval.JobStatus == "failure" || cancelled
-			condition := lifecycleConditionContext(lifecycleEval, lifecycleEval.Env, unsuccessful, cancelled)
+			condition := lifecycleConditionContext(lifecycleEval, unsuccessful, cancelled)
 			runPre, err := expression.EvaluateActionLifecycleCondition(action.Runs.PreIf, condition)
 			if err != nil {
 				return result, fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err)

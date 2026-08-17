@@ -3216,13 +3216,16 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/rust-cache
+    - id: finalize
+      shell: sh
+      run: "true"
 `)
 	writeFixtureFile(t, workspace, ".github/actions/rust-cache/action.yml", `name: rust-cache
 runs:
   using: node24
   main: main.js
   post: post.js
-  post-if: success() || env.CACHE_ON_FAILURE == 'true'
+  post-if: (success() || env.CACHE_ON_FAILURE == 'true') && steps.finalize.conclusion == 'success'
 `)
 	writeFixtureFile(t, workspace, ".github/actions/rust-cache/main.js", "")
 	writeFixtureFile(t, workspace, ".github/actions/rust-cache/post.js", "")
@@ -3242,7 +3245,7 @@ esac
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
 		{ID: "setup", Kind: "uses", Uses: "./.github/actions/setup-rust-toolchain"},
 		{ID: "not-yet", Kind: "run", Command: `test ! -e "$POST_MARKER"`},
-		{ID: "fail", Kind: "run", Command: "exit 7"},
+		{ID: "finalize", Kind: "run", Command: "exit 7"},
 	})
 	job.Env = map[string]string{"POST_MARKER": marker}
 	result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
