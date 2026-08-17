@@ -123,6 +123,11 @@ steps:
               version: "2026.5.12"
         command: "mise run corpus:starter-profile"
 
+      - label: ":pipeline: Load public actions runtime proof"
+        key: "public-actions-ci-loader"
+        if: build.env("DEMO_SUITE") != "plugin" && build.env("SMOKE_PROBE") != "hosted" && build.env("COMPATIBILITY_PROOF") == null
+        command: "buildkite-agent pipeline upload .buildkite/public-actions-proof.yml"
+
       - label: ":github: Exact-source plugin smoke"
         key: "plugin-source-smoke-importer"
         if: build.env("DEMO_SUITE") != "plugin"

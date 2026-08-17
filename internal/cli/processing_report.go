@@ -234,6 +234,9 @@ func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLin
 	style = "warning"
 	diagnostics := make([]compatibility.Diagnostic, 0, len(report.Diagnostics))
 	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Code == "W_ACTION_RUNTIME_UNKNOWN" {
+			continue
+		}
 		if diagnostic.Level != "warning" && diagnostic.Level != "error" {
 			continue
 		}
