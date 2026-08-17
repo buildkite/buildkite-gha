@@ -828,6 +828,9 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		if !runPost {
 			continue
 		}
+		// The post process uses the same live final environment and declared
+		// invocation overlays as its condition, not the main-time snapshot.
+		action.Env = cloneStrings(invocation.envOverlay)
 		if len(action.jobStatusInputs) != 0 {
 			action.Inputs = cloneStrings(action.Inputs)
 			status := jobStatusValue(runErr != nil, runCtx.Err() != nil)

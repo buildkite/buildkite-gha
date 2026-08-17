@@ -3161,6 +3161,7 @@ func TestRustCachePostConditionUsesFinalStatusAndMainEnvironment(t *testing.T) {
 		{name: "failure disabled", failJob: true, cacheValue: "false"},
 		{name: "failure enabled", failJob: true, cacheValue: "true", wantPost: true},
 		{name: "later environment wins", failJob: true, cacheValue: "true", finalCacheValue: "false"},
+		{name: "post process sees later environment", cacheValue: "true", finalCacheValue: "false", wantPost: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -3184,7 +3185,7 @@ case "$(basename "$1")" in
   main.js)
     if [ -n "${CACHE_SETTING:-}" ]; then printf 'CACHE_ON_FAILURE=%s\n' "$CACHE_SETTING" >> "$GITHUB_ENV"; fi
     ;;
-  post.js) touch "$POST_MARKER" ;;
+  post.js) printf '%s' "${CACHE_ON_FAILURE:-}" > "$POST_MARKER" ;;
 esac
 `)
 			if err := os.Chmod(fakeNode, 0o700); err != nil {
@@ -3207,6 +3208,12 @@ esac
 			_, statErr := os.Stat(marker)
 			if got := statErr == nil; got != test.wantPost {
 				t.Fatalf("post ran = %v, want %v (stat error %v)", got, test.wantPost, statErr)
+			}
+			if test.wantPost && test.finalCacheValue != "" {
+				value, err := os.ReadFile(marker)
+				if err != nil || string(value) != test.finalCacheValue {
+					t.Fatalf("post environment = %q, %v, want %q", value, err, test.finalCacheValue)
+				}
 			}
 		})
 	}
