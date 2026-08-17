@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -742,26 +743,63 @@ func TestContainerContract(t *testing.T) {
 	job := validJob()
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Container = &Container{Image: "node:24", Env: map[string]string{"NODE_ENV": "test"}, Ports: []string{"8080"}}
-	job.Services = map[string]Container{"redis": {Image: "redis:7", Ports: []string{"6379:6379"}}}
-	job.ServiceOrder = []string{"redis"}
+	job.Services = map[string]ServiceContainer{"database": {
+		Image:       "postgres:16",
+		Credentials: &ContainerCredentials{Username: "user", Password: "password"},
+		Env:         map[string]string{"POSTGRES_DB": "app"},
+		Ports:       []string{"5432:5432"},
+		Volumes:     []string{"database:/data"},
+		Options:     "--health-retries 5",
+		Command:     "postgres -c fsync=off",
+		Entrypoint:  "docker-entrypoint.sh",
+	}}
+	job.ServiceOrder = []string{"database"}
 	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "workspace", Path: "actions/build", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Decode(encoded); err != nil {
+	decoded, err := Decode(encoded)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if !reflect.DeepEqual(decoded.Container, job.Container) || !reflect.DeepEqual(decoded.Services, job.Services) {
+		t.Fatalf("decoded containers = %#v, %#v", decoded.Container, decoded.Services)
+	}
 	validateJobPlanSchema(t, encoded)
+	wire, err := json.Marshal(struct {
+		Container *Container                  `json:"container"`
+		Services  map[string]ServiceContainer `json:"services"`
+	}{Container: job.Container, Services: job.Services})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"container":{"image":"node:24","env":{"NODE_ENV":"test"},"ports":["8080"]},"services":{"database":{"image":"postgres:16","credentials":{"username":"user","password":"password"},"env":{"POSTGRES_DB":"app"},"ports":["5432:5432"],"volumes":["database:/data"],"options":"--health-retries 5","command":"postgres -c fsync=off","entrypoint":"docker-entrypoint.sh"}}}`
+	if string(wire) != want {
+		t.Fatalf("encoded containers = %s, want %s", wire, want)
+	}
 }
 
-func TestJobContainerRejectsServiceCredentials(t *testing.T) {
-	job := validJob()
-	job.RequiredCapabilities = []string{"docker", "network"}
-	job.Container = &Container{Image: "node:24", Credentials: &ContainerCredentials{Username: "user", Password: "password"}}
-	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "service-only fields") {
-		t.Fatalf("Validate() error = %v, want service-only fields", err)
+func TestContainerModelFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		typeOf reflect.Type
+		fields []string
+	}{
+		{name: "job", typeOf: reflect.TypeFor[Container](), fields: []string{"Image:image", "Env:env,omitempty", "Ports:ports,omitempty"}},
+		{name: "service", typeOf: reflect.TypeFor[ServiceContainer](), fields: []string{"Image:image", "Credentials:credentials,omitempty", "Env:env,omitempty", "Ports:ports,omitempty", "Volumes:volumes,omitempty", "Options:options,omitempty", "Command:command,omitempty", "Entrypoint:entrypoint,omitempty"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var got []string
+			for field := range test.typeOf.Fields() {
+				got = append(got, field.Name+":"+string(field.Tag.Get("json")))
+			}
+			if !slices.Equal(got, test.fields) {
+				t.Fatalf("fields = %#v, want %#v", got, test.fields)
+			}
+		})
 	}
 }
 

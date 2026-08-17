@@ -229,6 +229,17 @@ type Step struct {
 }
 
 type Container struct {
+	Image string            `json:"image"`
+	Env   map[string]string `json:"env,omitempty"`
+	Ports []string          `json:"ports,omitempty"`
+}
+
+type ContainerCredentials struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type ServiceContainer struct {
 	Image       string                `json:"image"`
 	Credentials *ContainerCredentials `json:"credentials,omitempty"`
 	Env         map[string]string     `json:"env,omitempty"`
@@ -238,13 +249,6 @@ type Container struct {
 	Command     string                `json:"command,omitempty"`
 	Entrypoint  string                `json:"entrypoint,omitempty"`
 }
-
-type ContainerCredentials struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-type ServiceContainer = Container
 
 // GitHubToken describes one synthetic secrets.GITHUB_TOKEN value. Workflow is
 // the top-level policy filename. Permissions are API-normalized and
@@ -294,11 +298,11 @@ type Job struct {
 	Steps                   []Step            `json:"steps"`
 	Actions                 []ActionLock      `json:"actions,omitempty"`
 	// RequiresMise is the compiler's explicit action-runtime decision.
-	RequiresMise       *bool                `json:"requires_mise,omitempty"`
-	Container          *Container           `json:"container,omitempty"`
-	Services           map[string]Container `json:"services,omitempty"`
-	ServiceOrder       []string             `json:"service_order,omitempty"`
-	ServicesExpression string               `json:"services_expression,omitempty"`
+	RequiresMise       *bool                       `json:"requires_mise,omitempty"`
+	Container          *Container                  `json:"container,omitempty"`
+	Services           map[string]ServiceContainer `json:"services,omitempty"`
+	ServiceOrder       []string                    `json:"service_order,omitempty"`
+	ServicesExpression string                      `json:"services_expression,omitempty"`
 }
 
 // NeedsMise reports whether a generated job needs the managed action runtime.
@@ -537,9 +541,6 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job containers and services require network capability")
 		}
 		if job.Container != nil {
-			if job.Container.Credentials != nil || len(job.Container.Volumes) != 0 || job.Container.Options != "" || job.Container.Command != "" || job.Container.Entrypoint != "" {
-				return fmt.Errorf("job container contains service-only fields")
-			}
 			if err := validateContainer(job.Container.Image, job.Container.Env, job.Container.Ports); err != nil {
 				return fmt.Errorf("job container: %w", err)
 			}

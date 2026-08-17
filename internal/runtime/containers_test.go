@@ -694,7 +694,7 @@ func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 	w := t.TempDir()
 	j := jobContainerPlan(t, w, nil)
 	j.Container.Ports = []string{"8080", "5432:5432", "9000:90/udp"}
-	j.Services = map[string]plan.Container{
+	j.Services = map[string]plan.ServiceContainer{
 		"z-cache": {Image: "redis:7", Env: map[string]string{"Z": "last", "A": "first"}, Ports: j.Container.Ports},
 		"a-db":    {Image: "postgres:16", Env: map[string]string{"B": "two"}},
 	}
@@ -766,7 +766,7 @@ func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 
 func TestRunServiceContainerAutoRemoveCleanup(t *testing.T) {
 	f := newJobDocker(t, "service-auto-remove")
-	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Options: "--rm"}})
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), nil, map[string]plan.ServiceContainer{"database": {Image: "postgres:16", Options: "--rm"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -792,7 +792,7 @@ func TestRunServiceContainerAutoRemoveCleanup(t *testing.T) {
 
 func TestRunServiceContainerAlreadyAutoRemovedCleanup(t *testing.T) {
 	f := newJobDocker(t, "")
-	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Options: "--rm"}})
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), nil, map[string]plan.ServiceContainer{"database": {Image: "postgres:16", Options: "--rm"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -813,7 +813,7 @@ func TestRunServiceContainerAlreadyAutoRemovedCleanup(t *testing.T) {
 
 func TestRunServiceContainerAutoRemoveBetweenQueryAndStop(t *testing.T) {
 	f := newJobDocker(t, "service-auto-remove-before-stop")
-	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Options: "--rm"}})
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), nil, map[string]plan.ServiceContainer{"database": {Image: "postgres:16", Options: "--rm"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -870,13 +870,13 @@ func TestServiceOptionsRejectOnlyNetworkOverride(t *testing.T) {
 func TestRunServiceContainerCompleteArguments(t *testing.T) {
 	f := newJobDocker(t, "")
 	w, tmp := t.TempDir(), t.TempDir()
-	service := plan.Container{
+	service := plan.ServiceContainer{
 		Image: "postgres:16", Env: map[string]string{"POSTGRES_PASSWORD": "test"}, Ports: []string{"5432"},
 		Volumes: []string{"database:/var/lib/postgresql/data:ro"},
 		Options: `--health-cmd "pg_isready -U postgres" --health-retries 5`,
 		Command: `postgres -c "fsync = off"`, Entrypoint: "docker-entrypoint.sh",
 	}
-	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), w, tmp, plan.Container{}, map[string]plan.Container{"database": service})
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), w, tmp, nil, map[string]plan.ServiceContainer{"database": service})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -906,8 +906,8 @@ func TestRunServiceContainersUseDeclaredOrderAndEmitSuccessfulLogs(t *testing.T)
 	var output bytes.Buffer
 	processor := newCommandProcessor(&output, &output)
 	b, err := (Runner{Docker: f.path}).startJobContainerOrdered(
-		context.Background(), processor, t.TempDir(), t.TempDir(), plan.Container{},
-		map[string]plan.Container{"alpha": {Image: "one"}, "zed": {Image: "two"}}, []string{"zed", "alpha"},
+		context.Background(), processor, t.TempDir(), t.TempDir(), nil,
+		map[string]plan.ServiceContainer{"alpha": {Image: "one"}, "zed": {Image: "two"}}, []string{"zed", "alpha"},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -937,8 +937,8 @@ func TestRunServiceContainersUseDeclaredOrderAndEmitSuccessfulLogs(t *testing.T)
 
 func TestRunServiceContainerRegistryCredentialsUsePasswordStdin(t *testing.T) {
 	f := newJobDocker(t, "fail-login-once")
-	service := plan.Container{Image: "registry.example.test/team/postgres:16", Credentials: &plan.ContainerCredentials{Username: "registry-user", Password: "registry-password"}}
-	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": service})
+	service := plan.ServiceContainer{Image: "registry.example.test/team/postgres:16", Credentials: &plan.ContainerCredentials{Username: "registry-user", Password: "registry-password"}}
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), nil, map[string]plan.ServiceContainer{"database": service})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -996,11 +996,11 @@ func TestDockerRegistryMatchesRunnerInference(t *testing.T) {
 func TestRunServiceContainerPullsSameImagePerCredentialIdentity(t *testing.T) {
 	f := newJobDocker(t, "")
 	image := "registry.example/team/postgres:16"
-	services := map[string]plan.Container{
+	services := map[string]plan.ServiceContainer{
 		"a": {Image: image, Credentials: &plan.ContainerCredentials{Username: "user-a", Password: "password-a"}},
 		"b": {Image: image, Credentials: &plan.ContainerCredentials{Username: "user-b", Password: "password-b"}},
 	}
-	b, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{Image: image}, services)
+	b, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), &plan.Container{Image: image}, services)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1025,7 +1025,7 @@ func TestRunServiceContainerPullsSameImagePerCredentialIdentity(t *testing.T) {
 func TestRunServiceContainerPartialRegistryCredentialsDoNotLogin(t *testing.T) {
 	for _, credentials := range []*plan.ContainerCredentials{{Username: "registry-user"}, {Password: "registry-password"}} {
 		f := newJobDocker(t, "")
-		b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "registry.example.test/postgres:16", Credentials: credentials}})
+		b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), nil, map[string]plan.ServiceContainer{"database": {Image: "registry.example.test/postgres:16", Credentials: credentials}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1049,7 +1049,7 @@ func TestRemoveDockerConfigReportsCleanupFailure(t *testing.T) {
 }
 
 func TestEvaluateServicesResolvesNeedsAndSkipsEmptyImages(t *testing.T) {
-	services := map[string]plan.Container{
+	services := map[string]plan.ServiceContainer{
 		"database": {
 			Image:      "postgres:${{ needs.build.outputs.version }}",
 			Env:        map[string]string{"SOURCE": "${{ needs.build.outputs.source }}"},
@@ -1115,7 +1115,7 @@ func TestEvaluateServiceMapExpressionRejectsUnsafeShapes(t *testing.T) {
 }
 
 func TestEvaluateServicesDoesNotHideErrorsBehindEmptyImage(t *testing.T) {
-	_, err := evaluateServices(map[string]plan.Container{"optional": {Image: "${{ needs.build.outputs.image }}", Env: map[string]string{"VALUE": "${{ needs.build.outputs.value"}}}, expression.Context{Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{"image": ""}}}})
+	_, err := evaluateServices(map[string]plan.ServiceContainer{"optional": {Image: "${{ needs.build.outputs.image }}", Env: map[string]string{"VALUE": "${{ needs.build.outputs.value"}}}, expression.Context{Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{"image": ""}}}})
 	if err == nil || !strings.Contains(err.Error(), "unterminated") {
 		t.Fatalf("error = %v, want unterminated expression error", err)
 	}
@@ -1136,7 +1136,7 @@ func TestRunServiceContainerRemovesOnlyNewNamedVolumes(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Volumes: []string{test.volume}}})
+			b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), t.TempDir(), t.TempDir(), nil, map[string]plan.ServiceContainer{"database": {Image: "postgres:16", Volumes: []string{test.volume}}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1156,7 +1156,7 @@ func TestRunServiceContainerRemovesOnlyNewNamedVolumes(t *testing.T) {
 
 func TestRunServiceContainerReportsLeftoverNamedVolume(t *testing.T) {
 	f := newJobDocker(t, "volume-leftover")
-	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Volumes: []string{"database:/data"}}})
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), t.TempDir(), t.TempDir(), nil, map[string]plan.ServiceContainer{"database": {Image: "postgres:16", Volumes: []string{"database:/data"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1167,7 +1167,7 @@ func TestRunServiceContainerReportsLeftoverNamedVolume(t *testing.T) {
 
 func TestRunServiceContainerReadsBroadDockerPortOutput(t *testing.T) {
 	f := newJobDocker(t, "broad-port")
-	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Ports: []string{"8000-8001:80-81"}, Options: "--publish 8002:82/sctp"}})
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), t.TempDir(), t.TempDir(), nil, map[string]plan.ServiceContainer{"database": {Image: "postgres:16", Ports: []string{"8000-8001:80-81"}, Options: "--publish 8002:82/sctp"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1180,7 +1180,7 @@ func TestRunServiceContainerReadsBroadDockerPortOutput(t *testing.T) {
 
 func TestRunServiceContainerOptionNameUsesCreatedReference(t *testing.T) {
 	f := newJobDocker(t, "")
-	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Options: "--name custom-service"}})
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), t.TempDir(), t.TempDir(), nil, map[string]plan.ServiceContainer{"database": {Image: "postgres:16", Options: "--name custom-service"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1199,7 +1199,7 @@ func TestRunJobContainerServiceFailureDiagnosticsAreMasked(t *testing.T) {
 	var output bytes.Buffer
 	p := newCommandProcessor(&output, &output)
 	p.addMask("sibling-secret")
-	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(context.Background(), p, w, tmp, plan.Container{Image: "alpine"}, map[string]plan.Container{"db": {Image: "postgres"}})
+	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(context.Background(), p, w, tmp, &plan.Container{Image: "alpine"}, map[string]plan.ServiceContainer{"db": {Image: "postgres"}})
 	if err == nil || !strings.Contains(err.Error(), `service "db"`) || !strings.Contains(err.Error(), `status "unhealthy"`) {
 		t.Fatalf("error=%v", err)
 	}
@@ -1212,7 +1212,7 @@ func TestRunJobContinueOnErrorToleratesServiceStartupFailure(t *testing.T) {
 	f := newJobDocker(t, "service-unhealthy")
 	w := t.TempDir()
 	job := jobContainerPlan(t, w, nil)
-	job.Services = map[string]plan.Container{"db": {Image: "postgres"}}
+	job.Services = map[string]plan.ServiceContainer{"db": {Image: "postgres"}}
 	job.ServiceOrder = []string{"db"}
 	job.ContinueOnError = true
 
@@ -1226,7 +1226,7 @@ func TestRunJobContinueOnErrorDoesNotTolerateServiceStartupTimeout(t *testing.T)
 	f := newJobDocker(t, "service-starting")
 	w := t.TempDir()
 	job := jobContainerPlan(t, w, nil)
-	job.Services = map[string]plan.Container{"db": {Image: "postgres"}}
+	job.Services = map[string]plan.ServiceContainer{"db": {Image: "postgres"}}
 	job.ServiceOrder = []string{"db"}
 	job.ContinueOnError = true
 	job.TimeoutMinutes = 0.001
@@ -1241,7 +1241,7 @@ func TestRunJobContinueOnErrorDoesNotTolerateMalformedServicePortEvidence(t *tes
 	f := newJobDocker(t, "malformed-port")
 	w := t.TempDir()
 	job := jobContainerPlan(t, w, nil)
-	job.Services = map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"6379"}}}
+	job.Services = map[string]plan.ServiceContainer{"db": {Image: "postgres", Ports: []string{"6379"}}}
 	job.ServiceOrder = []string{"db"}
 	job.ContinueOnError = true
 
@@ -1257,7 +1257,7 @@ func TestRunJobContainerMalformedServicePortsIncludeMaskedDiagnostics(t *testing
 	var output bytes.Buffer
 	p := newCommandProcessor(&output, &output)
 	p.addMask("sibling-secret")
-	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(context.Background(), p, w, tmp, plan.Container{}, map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"6379"}}})
+	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(context.Background(), p, w, tmp, nil, map[string]plan.ServiceContainer{"db": {Image: "postgres", Ports: []string{"6379"}}})
 	if err == nil || !strings.Contains(err.Error(), `service "db" has malformed Docker port output`) {
 		t.Fatalf("error=%v", err)
 	}
@@ -1269,7 +1269,7 @@ func TestRunJobContainerMalformedServicePortsIncludeMaskedDiagnostics(t *testing
 func TestRunJobContainerLaterServiceCreateFailureCleansExactServices(t *testing.T) {
 	f := newJobDocker(t, "fail-later-service-create")
 	w, tmp := t.TempDir(), t.TempDir()
-	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), w, tmp, plan.Container{Image: "alpine"}, map[string]plan.Container{"a": {Image: "one"}, "b": {Image: "two"}})
+	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), w, tmp, &plan.Container{Image: "alpine"}, map[string]plan.ServiceContainer{"a": {Image: "one"}, "b": {Image: "two"}})
 	if err == nil || !strings.Contains(err.Error(), `create service "b"`) {
 		t.Fatalf("error=%v, want second service create failure", err)
 	}
@@ -1296,7 +1296,7 @@ func TestRunJobContainerServiceReadinessCancellationCleansEverything(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(ctx, newCommandProcessor(os.Stdout, os.Stderr), w, tmp, plan.Container{Image: "alpine"}, map[string]plan.Container{"db": {Image: "postgres"}})
+		_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(ctx, newCommandProcessor(os.Stdout, os.Stderr), w, tmp, &plan.Container{Image: "alpine"}, map[string]plan.ServiceContainer{"db": {Image: "postgres"}})
 		done <- err
 	}()
 	deadline := time.Now().Add(10 * time.Second)
@@ -1320,7 +1320,7 @@ func TestRunHostJobServiceReadinessCancellationCleansEverything(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := (Runner{Docker: f.path}).startJobContainer(ctx, newCommandProcessor(os.Stdout, os.Stderr), w, tmp, plan.Container{}, map[string]plan.Container{"db": {Image: "postgres"}})
+		_, err := (Runner{Docker: f.path}).startJobContainer(ctx, newCommandProcessor(os.Stdout, os.Stderr), w, tmp, nil, map[string]plan.ServiceContainer{"db": {Image: "postgres"}})
 		done <- err
 	}()
 	deadline := time.Now().Add(10 * time.Second)
@@ -1349,7 +1349,7 @@ func TestRunJobHostServicesLifecycle(t *testing.T) {
 	w := t.TempDir()
 	j := jobContainerPlan(t, w, nil)
 	j.Container = nil
-	j.Services = map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"6379"}}}
+	j.Services = map[string]plan.ServiceContainer{"db": {Image: "postgres", Ports: []string{"6379"}}}
 	j.ServiceOrder = []string{"db"}
 	j.Steps = []plan.Step{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 49152`}}
 	if _, err := (Runner{Docker: f.path}).RunJob(context.Background(), j, w); err != nil {
@@ -1372,7 +1372,7 @@ func TestRunHostJobServicesExposePortsAndNetworkToDockerActions(t *testing.T) {
 	})
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
-	job.Services = map[string]plan.Container{"redis": {Image: "redis:7", Ports: []string{"6379"}}}
+	job.Services = map[string]plan.ServiceContainer{"redis": {Image: "redis:7", Ports: []string{"6379"}}}
 	job.ServiceOrder = []string{"redis"}
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "actions/docker", SourceDigest: digestTree(t, filepath.Join(workspace, "actions/docker"))}}
 	if _, err := (Runner{Docker: f.path}).RunJob(context.Background(), job, workspace); err != nil {
@@ -1406,7 +1406,7 @@ func TestRunJobHostServicePortProtocolCollisionIsDeterministic(t *testing.T) {
 	w := t.TempDir()
 	j := jobContainerPlan(t, w, nil)
 	j.Container = nil
-	j.Services = map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"41001:6379/tcp", "41002:6379/udp"}}}
+	j.Services = map[string]plan.ServiceContainer{"db": {Image: "postgres", Ports: []string{"41001:6379/tcp", "41002:6379/udp"}}}
 	j.ServiceOrder = []string{"db"}
 	j.Steps = []plan.Step{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 41002`}}
 	if _, err := (Runner{Docker: f.path}).RunJob(context.Background(), j, w); err != nil {
@@ -1501,7 +1501,7 @@ func TestRunJobContainerToleratesWorkflowFailureAfterSuccessfulCleanup(t *testin
 func startTestBackend(t *testing.T, f fakeJobDocker) (*jobContainerBackend, string) {
 	w := t.TempDir()
 	tmp := t.TempDir()
-	b, e := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), w, tmp, plan.Container{Image: "alpine:3.20"}, nil)
+	b, e := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), w, tmp, &plan.Container{Image: "alpine:3.20"}, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -2663,7 +2663,7 @@ func TestLiveAuthenticatedServiceRegistry(t *testing.T) {
 	job := runtimePlan(t, workspace, ".github/workflows/authenticated.yml", []plan.Step{{ID: "verify", Kind: "run", Shell: "sh", Command: "true"}})
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
-	job.Services = map[string]plan.Container{"private": {Image: privateImage, Credentials: &plan.ContainerCredentials{Username: "service-user", Password: "service-password"}, Command: "sleep 300"}}
+	job.Services = map[string]plan.ServiceContainer{"private": {Image: privateImage, Credentials: &plan.ContainerCredentials{Username: "service-user", Password: "service-password"}, Command: "sleep 300"}}
 	job.ServiceOrder = []string{"private"}
 	before := liveDockerOwnedResources(t, docker)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -2796,7 +2796,7 @@ CMD ["sh", "-c", "echo container-runtime-health-diagnostic >&2; sleep 300"]
 	job := runtimePlan(t, workspace, ".github/workflows/health.yml", []plan.Step{{ID: "unreachable", Kind: "run", Shell: "sh", Command: "true"}})
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
-	job.Services = map[string]plan.Container{"unhealthy": {Image: image}}
+	job.Services = map[string]plan.ServiceContainer{"unhealthy": {Image: image}}
 	job.ServiceOrder = []string{"unhealthy"}
 	var logs bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
