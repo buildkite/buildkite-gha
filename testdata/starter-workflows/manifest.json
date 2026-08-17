@@ -42,7 +42,8 @@
     {
       "id": "cmake-multi-platform",
       "template": "ci/cmake-multi-platform.yml",
-      "template_sha256": "251f58c701753102802d0cb9a45f217d68ee1599475dcce1114641f3b42eacc0"
+      "template_sha256": "251f58c701753102802d0cb9a45f217d68ee1599475dcce1114641f3b42eacc0",
+      "disabled_reason": "requires a Windows runner"
     },
     {
       "id": "rubyonrails",
