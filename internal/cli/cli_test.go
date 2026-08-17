@@ -1373,6 +1373,25 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
+	t.Run("validate all events applies hosted runner policy", func(t *testing.T) {
+		workflow := filepath.Join(t.TempDir(), "events.yml")
+		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  test:\n    runs-on: macOS-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		args := []string{"validate", "--profile", "hosted", "--all-events", "--format", "json", workflow}
+		if code := Run(args, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		var report compatibility.ProcessingReportV3
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Result != "admitted" || report.Validation.Result != "compilable" || len(report.Validation.Diagnostics) != 0 || len(report.Evaluations) != 1 || report.Evaluations[0].Report.Result != "admitted" {
+			t.Fatalf("aggregate report = %#v", report)
+		}
+	})
+
 	t.Run("validate all events stops before admission on a malformed trigger", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
 		if err := os.WriteFile(workflow, []byte("on:\n  push:\n    paths: ['!src/**']\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
