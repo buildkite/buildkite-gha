@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -201,6 +203,64 @@ func TestBatchValidationDisablesResumptionForUnresolvedLocalDependencies(t *test
 			}
 		})
 	}
+}
+
+func TestBatchValidationDependencyWalkUsesCompilerDepthBounds(t *testing.T) {
+	t.Run("reusable workflows", func(t *testing.T) {
+		root := t.TempDir()
+		workflowDir := filepath.Join(root, ".github", "workflows")
+		if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for depth := 0; depth <= compiler.MaxReusableWorkflowDepth+1; depth++ {
+			name := fmt.Sprintf("depth-%d.yml", depth)
+			source := "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
+			if depth <= compiler.MaxReusableWorkflowDepth {
+				source = fmt.Sprintf("on: workflow_call\njobs:\n  call:\n    uses: ./.github/workflows/depth-%d.yml\n", depth+1)
+			}
+			if err := os.WriteFile(filepath.Join(workflowDir, name), []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		captured, err := captureBatchValidationRecord(batchValidationRecord{Source: filepath.Join(workflowDir, "depth-0.yml")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if captured.resumable {
+			t.Fatal("workflow beyond compiler depth bound was resumable")
+		}
+	})
+
+	t.Run("local actions", func(t *testing.T) {
+		root := t.TempDir()
+		workflowPath := filepath.Join(root, ".github", "workflows", "ci.yml")
+		if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./action-0\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for depth := 0; depth <= metadata.MaxNestedActionDepth+1; depth++ {
+			actionDir := filepath.Join(root, fmt.Sprintf("action-%d", depth))
+			if err := os.Mkdir(actionDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			source := "runs:\n  using: node24\n  main: index.js\n"
+			if depth <= metadata.MaxNestedActionDepth {
+				source = fmt.Sprintf("runs:\n  using: composite\n  steps:\n    - uses: ./action-%d\n", depth+1)
+			}
+			if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		captured, err := captureBatchValidationRecord(batchValidationRecord{Source: workflowPath})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if captured.resumable {
+			t.Fatal("action beyond compiler depth bound was resumable")
+		}
+	})
 }
 
 func TestBatchValidationReusesActionResolutionAcrossWorkflows(t *testing.T) {

@@ -1578,7 +1578,7 @@ func TestCompileRejectsReusableWorkflowCyclesAndDepthOverflow(t *testing.T) {
 
 	t.Run("depth", func(t *testing.T) {
 		repository := t.TempDir()
-		for i := 0; i <= maxReusableWorkflowDepth; i++ {
+		for i := 0; i <= MaxReusableWorkflowDepth; i++ {
 			on := "workflow_call"
 			if i == 0 {
 				on = "push"
@@ -1587,7 +1587,7 @@ func TestCompileRejectsReusableWorkflowCyclesAndDepthOverflow(t *testing.T) {
 		}
 		path := filepath.Join(repository, ".github", "workflows", "0.yml")
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds maximum depth %d", maxReusableWorkflowDepth)) {
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds maximum depth %d", MaxReusableWorkflowDepth)) {
 			t.Fatalf("Compile() error = %v, want explicit depth limit", err)
 		}
 	})

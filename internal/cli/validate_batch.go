@@ -22,6 +22,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
+	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
@@ -314,8 +315,8 @@ func localCompilationDependencyDigest(workflowPath string, contents []byte) (str
 	hash := sha256.New()
 	seenWorkflows := map[string]bool{}
 	actions := map[string]bool{}
-	var visit func(string, []byte) bool
-	visit = func(path string, source []byte) bool {
+	var visit func(string, []byte, int) bool
+	visit = func(path string, source []byte, depth int) bool {
 		relative, err := filepath.Rel(root, path)
 		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || seenWorkflows[relative] {
 			return err == nil && seenWorkflows[relative]
@@ -329,6 +330,9 @@ func localCompilationDependencyDigest(workflowPath string, contents []byte) (str
 		_, _ = hash.Write(source)
 		for _, job := range parsed.Jobs {
 			if job.Reusable != nil {
+				if depth >= compiler.MaxReusableWorkflowDepth {
+					return false
+				}
 				uses := job.Reusable.Uses
 				relative := filepath.Clean(filepath.FromSlash(strings.TrimPrefix(uses, "./")))
 				if !strings.HasPrefix(uses, "./") || strings.Contains(uses, "${{") || filepath.Dir(relative) != filepath.Join(".github", "workflows") {
@@ -336,7 +340,7 @@ func localCompilationDependencyDigest(workflowPath string, contents []byte) (str
 				}
 				callee := filepath.Join(root, relative)
 				calleeSource, err := os.ReadFile(callee)
-				if err != nil || !visit(callee, calleeSource) {
+				if err != nil || !visit(callee, calleeSource, depth+1) {
 					return false
 				}
 			}
@@ -355,7 +359,7 @@ func localCompilationDependencyDigest(workflowPath string, contents []byte) (str
 		}
 		return true
 	}
-	if !visit(absPath, contents) {
+	if !visit(absPath, contents, 0) {
 		return "", false
 	}
 	paths := make([]string, 0, len(actions))
@@ -364,8 +368,11 @@ func localCompilationDependencyDigest(workflowPath string, contents []byte) (str
 	}
 	sort.Strings(paths)
 	seenActions := map[string]bool{}
-	var visitAction func(string) bool
-	visitAction = func(path string) bool {
+	var visitAction func(string, int) bool
+	visitAction = func(path string, depth int) bool {
+		if depth > metadata.MaxNestedActionDepth {
+			return false
+		}
 		if seenActions[path] {
 			return true
 		}
@@ -387,14 +394,14 @@ func localCompilationDependencyDigest(workflowPath string, contents []byte) (str
 				continue
 			}
 			nested := strings.TrimPrefix(step.Uses, "./")
-			if nested == "" || filepath.ToSlash(filepath.Clean(filepath.FromSlash(nested))) != nested || strings.Contains(nested, "\\") || !visitAction(nested) {
+			if nested == "" || filepath.ToSlash(filepath.Clean(filepath.FromSlash(nested))) != nested || strings.Contains(nested, "\\") || !visitAction(nested, depth+1) {
 				return false
 			}
 		}
 		return true
 	}
 	for _, path := range paths {
-		if !visitAction(path) {
+		if !visitAction(path, 0) {
 			return "", false
 		}
 	}
