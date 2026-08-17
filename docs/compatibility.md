@@ -180,11 +180,11 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Nested calls up to four levels.
 - Caller-visible aggregate results.
 - Outputs mapped directly from `jobs.<job>.outputs.<name>`.
+- Call-level `if` over caller `github`, `vars`, `inputs`, direct `needs`, and status functions.
 
 **❌ Unsupported:**
 
 - Remote or dynamic workflow paths.
-- Call-level `if`.
 - `secrets: inherit`, explicit secret mappings, or required called-workflow secrets.
 - `needs`-dependent inputs or dynamic matrices.
 - Input defaults that reference `inputs`.
@@ -192,6 +192,8 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Top-level concurrency in the called workflow.
 
 Job-level `uses`, `with`, and `secrets` follow these boundaries.
+
+A call condition runs in caller scope before static call-matrix expansion. It keeps the implicit `success()` guard. A false condition skips every flattened descendant, including jobs with `if: always()`, and exposes `skipped` with empty outputs to downstream `needs`. Nested calls evaluate ordered outer-to-inner guards. Callee job results do not change an outer guard. Call conditions cannot use `matrix`, `strategy`, callee inputs or needs, `steps`, `env`, `runner`, or `secrets`.
 
 The called workflow declares its inputs and outputs:
 
@@ -564,6 +566,8 @@ Conditions support computed object indexes, numeric array indexes, whole `matrix
 | `secrets` and other contexts | ❌ No | ❌ No |
 
 An event-backed condition is reduced from the immutable event snapshot before runtime validation. Resolvable `github.event` subtrees become literals; supported runtime-dependent subtrees remain for job or step evaluation. Every branch is validated before reduction, so short-circuiting cannot hide an unsupported function, context, or concrete matrix type error. A residual condition cannot carry `github.event` into the runtime.
+
+Reusable-workflow call conditions use the same operators and status functions but only the caller contexts listed in [Reusable workflows](#reusable-workflows). The runtime evaluates their ordered guards before the called job's own condition.
 
 ### Runtime interpolation
 

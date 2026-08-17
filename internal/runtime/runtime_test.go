@@ -2441,6 +2441,60 @@ func TestJobConditionConsumesNeedResultAndOutput(t *testing.T) {
 	}
 }
 
+func TestReusableWorkflowCallGuardsRunBeforeCapabilitiesAndJobConditions(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	marker := filepath.Join(workspace, "ran")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Condition: "always()", Command: "touch " + marker}})
+	job.CallGuards = []plan.CallGuard{{Condition: "false"}, {Condition: "always()"}}
+	job.RequiredCapabilities = []string{"secrets"}
+	job.RequiredSecrets = []string{"TOKEN"}
+	job.Condition = "always()"
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "skipped" || len(result.Outputs) != 0 {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outer false guard allowed descendant always() step to run: %v", err)
+	}
+}
+
+func TestReusableWorkflowCallGuardUsesOnlyCallerNeeds(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
+	job.CallGuards = []plan.CallGuard{{
+		Condition: "success() && needs.caller.result == 'success' && needs.caller.outputs.ready",
+		Needs:     map[string]plan.Need{"caller": {Result: "success", Outputs: map[string]string{"ready": "true"}}},
+	}}
+	job.Needs = map[string]plan.Need{"internal": {Result: "failure"}}
+	job.Condition = "always()"
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+
+	job.CallGuards[0].Condition = ""
+	job.CallGuards[0].Needs["caller"] = plan.Need{Result: "failure"}
+	if err := job.Validate(); err == nil {
+		t.Fatal("Validate() accepted an empty call guard condition")
+	}
+	job.CallGuards[0].Condition = "needs.caller.outputs.ready"
+	result, err = (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "skipped" {
+		t.Fatalf("implicit success guard result = %#v, error = %v", result, err)
+	}
+	job.CallGuards[0].Condition = "failure()"
+	result, err = (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("failure() guard result = %#v, error = %v", result, err)
+	}
+}
+
 func TestJobRuntimeFieldsEvaluateCompoundExpressions(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

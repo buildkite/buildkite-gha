@@ -36,6 +36,9 @@ const (
 	JobCondition ConditionScope = iota
 	// StepCondition is evaluated while a job is running.
 	StepCondition
+	// CallCondition is evaluated in the caller scope before a local reusable
+	// workflow's flattened jobs are allowed to start.
+	CallCondition
 	// actionLifecycleCondition is evaluated for action pre-if and post-if
 	// metadata. It has its own context policy and no implicit success guard.
 	actionLifecycleCondition
@@ -52,6 +55,22 @@ func ValidateCondition(source string, scope ConditionScope) error {
 // types against one concrete, statically expanded matrix instance.
 func ValidateConditionWithMatrix(source string, scope ConditionScope, matrix map[string]any) error {
 	return validateCondition(source, scope, matrix, true)
+}
+
+// ValidateCallCondition verifies the caller-only runtime surface of a local
+// reusable-workflow call condition.
+func ValidateCallCondition(source string) error {
+	return validateCondition(source, CallCondition, nil, false)
+}
+
+// ValidateCompileCallCondition verifies every branch of a call condition
+// before event-backed values are reduced by the compiler.
+func ValidateCompileCallCondition(source string, context CompileContext) error {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return err
+	}
+	return validateCompileConditionNode(node, CallCondition, context, nil)
 }
 
 // ValidateActionLifecycleCondition verifies an action pre-if or post-if
@@ -209,6 +228,13 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 		case "env", "github", "inputs", "job", "matrix", "runner", "steps":
 		default:
 			return fmt.Errorf("lifecycle condition context %q is unsupported", root)
+		}
+	}
+	if scope == CallCondition {
+		switch strings.ToLower(root) {
+		case "github", "vars", "inputs", "needs":
+		default:
+			return fmt.Errorf("reusable-workflow call condition context %q is unsupported", root)
 		}
 	}
 	switch strings.ToLower(root) {

@@ -96,6 +96,7 @@ type JobInstance struct {
 	Needs                   []string                `json:"needs,omitempty"`
 	NeedGroups              map[string][]string     `json:"need_groups,omitempty"`
 	NeedOutputs             map[string][]NeedOutput `json:"need_outputs,omitempty"`
+	CallGuards              []CallGuard             `json:"call_guards,omitempty"`
 	RunsOn                  []string                `json:"runs_on"`
 	Queue                   string                  `json:"queue"`
 	Platform                Platform                `json:"-"`
@@ -124,6 +125,15 @@ type JobInstance struct {
 	secretAuthority         bool
 	tokenPolicyNarrowed     bool
 	reusableCall            workflow.Position
+}
+
+// CallGuard is one immutable caller-scoped condition inherited by a flattened
+// local reusable-workflow job.
+type CallGuard struct {
+	Condition   string                  `json:"condition"`
+	Inputs      map[string]any          `json:"inputs,omitempty"`
+	NeedGroups  map[string][]string     `json:"need_groups,omitempty"`
+	NeedOutputs map[string][]NeedOutput `json:"need_outputs,omitempty"`
 }
 
 // NeedOutput selects one caller-visible output from a concrete prerequisite.
@@ -526,6 +536,31 @@ instances:
 					}
 				}
 			}
+			callGuards := make([]plan.CallGuard, len(instance.CallGuards))
+			for guardIndex, guard := range instance.CallGuards {
+				planGuard := plan.CallGuard{Condition: guard.Condition, Inputs: cloneAnyMap(guard.Inputs)}
+				if len(guard.NeedGroups) != 0 {
+					planGuard.NeedSources = make(map[string][]plan.NeedSource, len(guard.NeedGroups))
+					for _, logicalNeed := range sortedKeys(guard.NeedGroups) {
+						for _, dependency := range guard.NeedGroups[logicalNeed] {
+							digest, ok := planDigests[dependency]
+							if !ok {
+								return fmt.Errorf("build plan for job %q: call guard prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
+							}
+							planGuard.NeedSources[logicalNeed] = append(planGuard.NeedSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
+						}
+					}
+				}
+				if len(guard.NeedOutputs) != 0 {
+					planGuard.NeedOutputs = make(map[string][]plan.NeedOutput, len(guard.NeedOutputs))
+					for _, logicalNeed := range sortedKeys(guard.NeedOutputs) {
+						for _, output := range guard.NeedOutputs[logicalNeed] {
+							planGuard.NeedOutputs[logicalNeed] = append(planGuard.NeedOutputs[logicalNeed], plan.NeedOutput{Name: output.Name, StepKey: output.StepKey, Output: output.Output})
+						}
+					}
+				}
+				callGuards[guardIndex] = planGuard
+			}
 			secrets, referencesGitHubToken, err := requiredSecrets(instance, actionRequiredSecrets, actionInputsInspected)
 			if err != nil {
 				return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
@@ -602,6 +637,7 @@ instances:
 				Dependencies:            append([]string(nil), instance.Needs...),
 				NeedSources:             needSources,
 				NeedOutputs:             needOutputs,
+				CallGuards:              callGuards,
 				Env:                     instance.Env,
 				Condition:               instance.If,
 				ContinueOnError:         instance.ContinueOnError,
@@ -1179,7 +1215,13 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	}
 	topologyJobs := make(map[string]workflow.Job, len(accepted))
 	for _, sourced := range accepted {
-		topologyJobs[sourced.ID] = sourced.Job
+		job := sourced.Job
+		for _, guard := range sourced.callGuards {
+			job.Needs = append(job.Needs, bindingMembers(guard.needBindings)...)
+		}
+		sort.Strings(job.Needs)
+		job.Needs = slices.Compact(job.Needs)
+		topologyJobs[sourced.ID] = job
 	}
 	order, err := topologicalOrder(path, topologyJobs)
 	if err != nil {
@@ -1249,6 +1291,15 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				}
 			}
 		}
+		for _, guard := range sourced.callGuards {
+			for _, binding := range guard.needBindings {
+				for _, member := range binding.members {
+					if failedJobs[member] {
+						jobBlocked = true
+					}
+				}
+			}
+		}
 		jobFailed := failedJobs[id]
 		matrices := matricesByJob[id]
 		concurrencyGroups := make(map[string]struct{}, len(matrices))
@@ -1311,6 +1362,11 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				secretAuthority:         sourced.secretAuthority,
 				tokenPolicyNarrowed:     sourced.tokenPolicyNarrowed,
 				reusableCall:            sourced.reusableCall,
+			}
+			for _, guard := range sourced.callGuards {
+				candidate.CallGuards = append(candidate.CallGuards, CallGuard{
+					Condition: guard.condition, Inputs: cloneAnyMap(guard.inputs),
+				})
 			}
 			result.candidates = append(result.candidates, candidate)
 
@@ -1425,6 +1481,17 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 					instance.NeedOutputs[need] = projected
 				}
 			}
+			for guardIndex, guard := range sourced.callGuards {
+				groups, outputs, dependencies, guardErr := resolveCallGuardBindings(guard.needBindings, byLogicalID)
+				if guardErr != nil {
+					diagnostics = append(diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve reusable-workflow call guard: %v", guardErr))))
+					dependencyFailed = true
+					break
+				}
+				instance.CallGuards[guardIndex].NeedGroups = groups
+				instance.CallGuards[guardIndex].NeedOutputs = outputs
+				instance.Needs = append(instance.Needs, dependencies...)
+			}
 			if dependencyFailed {
 				jobFailed = true
 				continue
@@ -1447,6 +1514,60 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	}
 	result.instances = instances
 	return result, errors.Join(diagnostics...)
+}
+
+func resolveCallGuardBindings(bindings map[string]needBinding, byLogicalID map[string][]JobInstance) (map[string][]string, map[string][]NeedOutput, []string, error) {
+	if len(bindings) == 0 {
+		return nil, nil, nil, nil
+	}
+	groups := make(map[string][]string, len(bindings))
+	var projected map[string][]NeedOutput
+	var dependencies []string
+	for _, name := range sortedKeys(bindings) {
+		binding := bindings[name]
+		var members []string
+		for _, member := range binding.members {
+			for _, producer := range byLogicalID[member] {
+				members = append(members, producer.Key)
+			}
+		}
+		sort.Strings(members)
+		if len(members) == 0 {
+			return nil, nil, nil, fmt.Errorf("prerequisite %q has no expanded instances", name)
+		}
+		groups[name] = members
+		dependencies = append(dependencies, members...)
+		if !binding.projectOutputs {
+			continue
+		}
+		if projected == nil {
+			projected = make(map[string][]NeedOutput)
+		}
+		outputs := []NeedOutput{}
+		for _, output := range binding.outputs {
+			producers := byLogicalID[output.member]
+			if len(producers) == 0 {
+				return nil, nil, nil, fmt.Errorf("output %q selects unexpanded job %q", output.name, output.member)
+			}
+			if len(outputs)+len(producers) > plan.MaxNeedOutputs {
+				return nil, nil, nil, fmt.Errorf("output %q expands projections beyond the maximum of %d", output.name, plan.MaxNeedOutputs)
+			}
+			for _, producer := range producers {
+				outputs = append(outputs, NeedOutput{Name: output.name, StepKey: producer.Key, Output: output.output})
+			}
+		}
+		sort.Slice(outputs, func(i, j int) bool {
+			if outputs[i].Name != outputs[j].Name {
+				return outputs[i].Name < outputs[j].Name
+			}
+			if outputs[i].StepKey != outputs[j].StepKey {
+				return outputs[i].StepKey < outputs[j].StepKey
+			}
+			return outputs[i].Output < outputs[j].Output
+		})
+		projected[name] = outputs
+	}
+	return groups, projected, dependencies, nil
 }
 
 func resolveCompileServices(services []workflow.Service, context expression.CompileContext) ([]workflow.Service, error) {

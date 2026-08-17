@@ -32,6 +32,41 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 	validateJobPlanSchema(t, source)
 }
 
+func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
+	job := validJob()
+	digest := "sha256:" + strings.Repeat("1", 64)
+	job.Dependencies = []string{"gha-prepare"}
+	job.CallGuards = []CallGuard{{
+		Condition: "always() && needs.prepare.result == 'failure' && needs.prepare.outputs.ready && inputs.enabled",
+		Inputs:    map[string]any{"enabled": true},
+		NeedSources: map[string][]NeedSource{
+			"prepare": {{StepKey: "gha-prepare", PlanDigest: digest}},
+		},
+		NeedOutputs: map[string][]NeedOutput{
+			"prepare": {{Name: "ready", StepKey: "gha-prepare", Output: "ready"}},
+		},
+	}}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJobPlanSchema(t, encoded)
+	decoded, err := Decode(encoded)
+	if err != nil || !reflect.DeepEqual(decoded.CallGuards, job.CallGuards) {
+		t.Fatalf("Decode() call guards = %#v, %v", decoded.CallGuards, err)
+	}
+
+	job.CallGuards[0].Condition = "matrix.os"
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), `call condition context "matrix" is unsupported`) {
+		t.Fatalf("Validate() unavailable call context error = %v", err)
+	}
+	job.CallGuards[0].Condition = "true"
+	job.CallGuards[0].NeedSources["prepare"][0].PlanDigest = "sha256:tampered"
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "producer identity") {
+		t.Fatalf("Validate() tampered call producer error = %v", err)
+	}
+}
+
 func TestEventHeadRefSizeLimit(t *testing.T) {
 	job := validJob()
 	job.Event.HeadRef = strings.Repeat("a", 1024)

@@ -20,6 +20,7 @@ const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json
 
 const MaxNeedProducers = 1024
 const MaxNeedOutputs = 64
+const MaxCallGuards = 4
 const maxStepTargets = 256
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -197,6 +198,16 @@ type NeedOutput struct {
 	Output  string `json:"output"`
 }
 
+// CallGuard is one immutable caller-scoped reusable-workflow condition. Needs
+// is hydrated only from its independently verified producer manifests.
+type CallGuard struct {
+	Condition   string                  `json:"condition"`
+	Inputs      map[string]any          `json:"inputs,omitempty"`
+	NeedSources map[string][]NeedSource `json:"need_sources,omitempty"`
+	NeedOutputs map[string][]NeedOutput `json:"need_outputs,omitempty"`
+	Needs       map[string]Need         `json:"-"`
+}
+
 type Position struct {
 	Line   int `json:"line"`
 	Column int `json:"column"`
@@ -285,6 +296,7 @@ type Job struct {
 	Dependencies         []string                `json:"dependencies,omitempty"`
 	NeedSources          map[string][]NeedSource `json:"need_sources,omitempty"`
 	NeedOutputs          map[string][]NeedOutput `json:"need_outputs,omitempty"`
+	CallGuards           []CallGuard             `json:"call_guards,omitempty"`
 	// Needs is populated only from verified producer-attributed manifests at
 	// runtime. It is never accepted from or encoded into an immutable plan.
 	Needs                   map[string]Need   `json:"-"`
@@ -498,22 +510,8 @@ func (job Job) Validate() error {
 	if len(job.Condition) > 65536 || len(job.RequiredSecrets) > 128 {
 		return fmt.Errorf("job plan condition or required secrets exceed their size limit")
 	}
-	if len(job.Inputs) > 25 {
-		return fmt.Errorf("job plan inputs exceed their size limit")
-	}
-	for name, value := range job.Inputs {
-		if name == "" || len(name) > 255 {
-			return fmt.Errorf("job plan has invalid input name")
-		}
-		switch value := value.(type) {
-		case string:
-			if len(value) > 65536 {
-				return fmt.Errorf("job plan input %q exceeds its size limit", name)
-			}
-		case bool, json.Number, int, int64, uint64, float64:
-		default:
-			return fmt.Errorf("job plan input %q has unsupported type %T", name, value)
-		}
+	if err := validateInputs(job.Inputs); err != nil {
+		return err
 	}
 	capabilities := make(map[string]struct{}, len(job.RequiredCapabilities))
 	if !sort.StringsAreSorted(job.RequiredCapabilities) {
@@ -666,9 +664,6 @@ func (job Job) Validate() error {
 			sourcedDependencies[key] = struct{}{}
 		}
 	}
-	if len(sourcedDependencies) != len(dependencies) {
-		return fmt.Errorf("job plan dependencies and prerequisite producers differ")
-	}
 	needSourcesByName := make(map[string]map[string]struct{}, len(job.NeedSources))
 	for name, sources := range job.NeedSources {
 		steps := make(map[string]struct{}, len(sources))
@@ -708,6 +703,30 @@ func (job Job) Validate() error {
 			}
 			seen[key] = struct{}{}
 		}
+	}
+	if len(job.CallGuards) > MaxCallGuards {
+		return fmt.Errorf("job plan has more than %d reusable-workflow call guards", MaxCallGuards)
+	}
+	for i, guard := range job.CallGuards {
+		if strings.TrimSpace(guard.Condition) == "" || len(guard.Condition) > 65536 {
+			return fmt.Errorf("job plan call guard %d has an invalid condition", i+1)
+		}
+		if err := expression.ValidateCallCondition(guard.Condition); err != nil {
+			return fmt.Errorf("job plan call guard %d condition: %w", i+1, err)
+		}
+		if err := validateInputs(guard.Inputs); err != nil {
+			return fmt.Errorf("job plan call guard %d: %w", i+1, err)
+		}
+		guardDependencies, err := validateCallGuardNeeds(guard, dependencies)
+		if err != nil {
+			return fmt.Errorf("job plan call guard %d: %w", i+1, err)
+		}
+		for dependency := range guardDependencies {
+			sourcedDependencies[dependency] = struct{}{}
+		}
+	}
+	if len(sourcedDependencies) != len(dependencies) {
+		return fmt.Errorf("job plan dependencies and prerequisite producers differ")
 	}
 	if len(job.Steps) == 0 {
 		return fmt.Errorf("job plan contains no steps")
@@ -788,6 +807,81 @@ func (job Job) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validateInputs(inputs map[string]any) error {
+	if len(inputs) > 25 {
+		return fmt.Errorf("job plan inputs exceed their size limit")
+	}
+	for name, value := range inputs {
+		if name == "" || len(name) > 255 {
+			return fmt.Errorf("job plan has invalid input name")
+		}
+		switch value := value.(type) {
+		case string:
+			if len(value) > 65536 {
+				return fmt.Errorf("job plan input %q exceeds its size limit", name)
+			}
+		case bool, json.Number, int, int64, uint64, float64:
+		default:
+			return fmt.Errorf("job plan input %q has unsupported type %T", name, value)
+		}
+	}
+	return nil
+}
+
+func validateCallGuardNeeds(guard CallGuard, dependencies map[string]struct{}) (map[string]struct{}, error) {
+	sourced := make(map[string]struct{})
+	names := make(map[string]map[string]struct{}, len(guard.NeedSources))
+	for name, sources := range guard.NeedSources {
+		if len(name) > 255 || !logicalJobIDPattern.MatchString(name) || len(sources) == 0 || len(sources) > MaxNeedProducers {
+			return nil, fmt.Errorf("contains invalid prerequisite %q", name)
+		}
+		lowerName := strings.ToLower(name)
+		if _, exists := names[lowerName]; exists {
+			return nil, fmt.Errorf("contains duplicate prerequisite %q", name)
+		}
+		steps := make(map[string]struct{}, len(sources))
+		for i, source := range sources {
+			if !targetPattern.MatchString(source.StepKey) || !digestPattern.MatchString(source.PlanDigest) || i > 0 && sources[i-1].StepKey >= source.StepKey {
+				return nil, fmt.Errorf("prerequisite %q has invalid, repeated, or unsorted producer identity", name)
+			}
+			key := strings.ToLower(source.StepKey)
+			if _, exists := dependencies[key]; !exists {
+				return nil, fmt.Errorf("prerequisite %q producer %q is not a dependency", name, source.StepKey)
+			}
+			if _, exists := sourced[key]; exists {
+				return nil, fmt.Errorf("dependency %q has multiple logical owners", source.StepKey)
+			}
+			steps[key] = struct{}{}
+			sourced[key] = struct{}{}
+		}
+		names[lowerName] = steps
+	}
+	seenOutputNeeds := make(map[string]struct{}, len(guard.NeedOutputs))
+	for name, outputs := range guard.NeedOutputs {
+		lowerName := strings.ToLower(name)
+		producers, exists := names[lowerName]
+		if !exists {
+			return nil, fmt.Errorf("prerequisite output projection %q has no matching prerequisite", name)
+		}
+		if _, exists := seenOutputNeeds[lowerName]; exists || len(outputs) > MaxNeedOutputs {
+			return nil, fmt.Errorf("prerequisite %q has duplicate or excessive output projections", name)
+		}
+		seenOutputNeeds[lowerName] = struct{}{}
+		for i, output := range outputs {
+			if !targetPattern.MatchString(output.Name) || !targetPattern.MatchString(output.StepKey) || !targetPattern.MatchString(output.Output) {
+				return nil, fmt.Errorf("prerequisite %q has invalid output projection", name)
+			}
+			if _, exists := producers[strings.ToLower(output.StepKey)]; !exists {
+				return nil, fmt.Errorf("prerequisite %q output %q selects unknown producer %q", name, output.Name, output.StepKey)
+			}
+			if i > 0 && compareNeedOutput(outputs[i-1], output) >= 0 {
+				return nil, fmt.Errorf("prerequisite %q output projections must be unique and sorted", name)
+			}
+		}
+	}
+	return sourced, nil
 }
 
 func validateServiceContainer(service ServiceContainer, templates bool) error {

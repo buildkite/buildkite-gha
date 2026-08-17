@@ -1106,6 +1106,7 @@ func TestCompileExpandsMatrixReusableCallsDeterministically(t *testing.T) {
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
   delegated:
+    if: github.ref == 'refs/heads/main'
     strategy:
       matrix:
         target: [ubuntu-22.04, ubuntu-24.04]
@@ -1150,6 +1151,9 @@ jobs:
 	if len(ir.Jobs) != 3 || ir.Jobs[0].LogicalJobID == ir.Jobs[1].LogicalJobID || ir.Jobs[0].Key == ir.Jobs[1].Key {
 		t.Fatalf("matrix reusable jobs = %#v, want two namespaced identities", ir.Jobs)
 	}
+	if len(ir.Jobs[0].CallGuards) != 1 || len(ir.Jobs[1].CallGuards) != 1 || ir.Jobs[0].CallGuards[0].Condition != "true" || ir.Jobs[1].CallGuards[0].Condition != "true" {
+		t.Fatalf("matrix reusable call guards = %#v / %#v", ir.Jobs[0].CallGuards, ir.Jobs[1].CallGuards)
+	}
 	if !reflect.DeepEqual(ir.Jobs[2].NeedGroups, map[string][]string{"delegated": {ir.Jobs[0].Key, ir.Jobs[1].Key}}) || !reflect.DeepEqual(ir.Jobs[2].NeedOutputs, map[string][]NeedOutput{"delegated": {}}) {
 		t.Fatalf("matrix reusable caller projection = %#v / %#v", ir.Jobs[2].NeedGroups, ir.Jobs[2].NeedOutputs)
 	}
@@ -1172,6 +1176,91 @@ jobs:
 	}
 	if len(plans[2].NeedSources["delegated"]) != 2 || !reflect.DeepEqual(plans[2].NeedOutputs, map[string][]plan.NeedOutput{"delegated": {}}) {
 		t.Fatalf("matrix reusable plan projection = %#v / %#v", plans[2].NeedSources, plans[2].NeedOutputs)
+	}
+}
+
+func TestCompileBindsNestedReusableCallGuardsToCallerNeeds(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.emit.outputs.ready }}
+    steps:
+      - id: emit
+        run: echo ready=true >> "$GITHUB_OUTPUT"
+  delegated:
+    needs: prepare
+    if: github.ref == 'refs/heads/main' && needs.prepare.outputs.ready
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  first:
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: false
+  nested:
+    needs: first
+    if: always() && needs.first.result == 'failure'
+    uses: ./.github/workflows/leaf.yml
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on: workflow_call
+jobs:
+  leaf:
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+
+	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 3 || len(plans[1].CallGuards) != 1 || len(plans[2].CallGuards) != 2 {
+		t.Fatalf("nested plans/guards = %#v", plans)
+	}
+	outer := plans[2].CallGuards[0]
+	inner := plans[2].CallGuards[1]
+	if outer.Condition != "(true && needs.prepare.outputs.ready)" || len(outer.NeedSources["prepare"]) != 1 || outer.NeedSources["prepare"][0].StepKey != plans[0].Target.StepKey {
+		t.Fatalf("outer guard = %#v", outer)
+	}
+	if inner.Condition != "(always() && (needs.first.result == 'failure'))" || len(inner.NeedSources["first"]) != 1 || inner.NeedSources["first"][0].StepKey != plans[1].Target.StepKey {
+		t.Fatalf("inner guard = %#v", inner)
+	}
+	wantDependencies := []string{plans[0].Target.StepKey, plans[1].Target.StepKey}
+	sort.Strings(wantDependencies)
+	if !reflect.DeepEqual(plans[2].Dependencies, wantDependencies) {
+		t.Fatalf("nested guard dependencies = %#v", plans[2].Dependencies)
+	}
+	encoded, err := plan.Encode(plans[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := plan.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reencoded, err := plan.Encode(decoded)
+	if err != nil || !bytes.Equal(reencoded, encoded) {
+		t.Fatalf("call guard plan round trip changed bytes: %v", err)
+	}
+}
+
+func TestCompileRejectsUnavailableReusableCallConditionContexts(t *testing.T) {
+	for _, contextName := range []string{"matrix.target", "strategy.job-index", "secrets.TOKEN", "env.FLAG", "runner.os", "steps.build.outcome"} {
+		t.Run(contextName, func(t *testing.T) {
+			repository := t.TempDir()
+			callerPath := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  delegated:\n    if: "+contextName+"\n    uses: ./.github/workflows/reusable.yml\n")
+			writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+			_, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+			if err == nil || !strings.Contains(err.Error(), "reusable-workflow call condition context") {
+				t.Fatalf("Compile() error = %v", err)
+			}
+		})
 	}
 }
 
@@ -1580,9 +1669,16 @@ jobs:
 		repository := t.TempDir()
 		path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    if: github.ref == 'refs/heads/main'\n    uses: ./.github/workflows/reusable.yml\n")
 		writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
-		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-		if err == nil || !strings.Contains(err.Error(), "reusable-workflow call conditions are unsupported") {
-			t.Fatalf("Compile() error = %v, want explicit call-condition rejection", err)
+		compiled, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ir IR
+		if err := json.Unmarshal(compiled, &ir); err != nil {
+			t.Fatal(err)
+		}
+		if len(ir.Jobs) != 1 || len(ir.Jobs[0].CallGuards) != 1 || ir.Jobs[0].CallGuards[0].Condition != "true" {
+			t.Fatalf("compiled call guards = %#v", ir.Jobs)
 		}
 	})
 

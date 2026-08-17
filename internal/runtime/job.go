@@ -272,6 +272,15 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			return JobResult{}, fmt.Errorf("capability %q is unsupported in the job runtime", capability)
 		}
 	}
+	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}, Artifacts: []transport.ResultArtifact{}}
+	guardsPass, err := evaluateCallGuards(job)
+	if err != nil {
+		return jobResult, err
+	}
+	if !guardsPass {
+		jobResult.Conclusion = "skipped"
+		return jobResult, nil
+	}
 	if job.HasCapability("provider-token-read") {
 		usesCheckout, err := validateJobCheckoutAdapters(job)
 		if err != nil {
@@ -346,8 +355,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}
 		}
 	}
-	if len(job.Dependencies) != 0 && len(job.Needs) == 0 {
-		return JobResult{}, fmt.Errorf("job has %d static dependencies but no hydrated prerequisite results", len(job.Dependencies))
+	if len(job.NeedSources) != 0 && len(job.Needs) == 0 {
+		return jobResult, fmt.Errorf("job has prerequisite sources but no hydrated prerequisite results")
 	}
 	processor := newCommandProcessor(r.stdout(), r.stderr())
 	r.node16Warnings = &node16DeprecationWarnings{}
@@ -361,7 +370,6 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		JobStatus:      "success",
 		Runner:         runnerContext,
 	}
-	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}, Artifacts: []transport.ResultArtifact{}}
 	for _, name := range sortedKeys(job.Needs) {
 		need := job.Needs[name]
 		if need.Result == "" {
@@ -891,6 +899,37 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		runErr = &toleratedJobFailure{err: runErr}
 	}
 	return scrubJobResult(jobResult, sensitiveValues), runErr
+}
+
+func evaluateCallGuards(job plan.Job) (bool, error) {
+	github := githubContext(job)
+	for i, guard := range job.CallGuards {
+		if len(guard.NeedSources) != 0 && len(guard.Needs) == 0 {
+			return false, fmt.Errorf("evaluate reusable-workflow call guard %d: prerequisite results are missing", i+1)
+		}
+		condition := expression.ConditionContext{Inputs: guard.Inputs, Needs: needStatuses(guard.Needs), Vars: job.Vars, GitHub: github}
+		for name, need := range guard.Needs {
+			if need.Result == "" {
+				return false, fmt.Errorf("evaluate reusable-workflow call guard %d: prerequisite result %q is missing", i+1, name)
+			}
+			switch need.Result {
+			case "success", "failure", "cancelled", "skipped":
+			default:
+				return false, fmt.Errorf("evaluate reusable-workflow call guard %d: prerequisite %q has invalid result %q", i+1, name, need.Result)
+			}
+			condition.Failure = condition.Failure || need.Result == "failure"
+			condition.Cancelled = condition.Cancelled || need.Result == "cancelled"
+			condition.Unsuccessful = condition.Unsuccessful || need.Result != "success"
+		}
+		run, err := expression.EvaluateCondition(guard.Condition, condition)
+		if err != nil {
+			return false, fmt.Errorf("evaluate reusable-workflow call guard %d: %w", i+1, err)
+		}
+		if !run {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func evaluateServices(services map[string]plan.ServiceContainer, eval expression.Context) (map[string]plan.ServiceContainer, error) {

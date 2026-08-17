@@ -44,7 +44,11 @@ func TestPublishResultCoversTerminalConclusionsAndKeepsMetadataAdvisory(t *testi
 	for _, conclusion := range []string{"success", "failure", "skipped"} {
 		t.Run(conclusion, func(t *testing.T) {
 			runner := &resultRunner{failMetadata: true}
-			manifest := resultManifest(testJobID, "gha-producer", Digest([]byte("plan")), conclusion, Output{Name: "message", Value: "bounded"})
+			var outputs []Output
+			if conclusion != "skipped" {
+				outputs = []Output{{Name: "message", Value: "bounded"}}
+			}
+			manifest := resultManifest(testJobID, "gha-producer", Digest([]byte("plan")), conclusion, outputs...)
 			publication, err := PublishResult(context.Background(), Agent{Runner: runner}, t.TempDir(), "shell", "producer", manifest)
 			if err != nil {
 				t.Fatal(err)
@@ -61,6 +65,18 @@ func TestPublishResultCoversTerminalConclusionsAndKeepsMetadataAdvisory(t *testi
 				}
 			}
 		})
+	}
+}
+
+func TestSkippedResultManifestRejectsOutputsAndArtifacts(t *testing.T) {
+	manifest := resultManifest(testJobID, "gha-producer", Digest([]byte("plan")), "skipped", Output{Name: "leaked", Value: "value"})
+	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "empty outputs and artifacts") {
+		t.Fatalf("MarshalResultManifest() error = %v", err)
+	}
+	manifest.Outputs = nil
+	manifest.Artifacts = []ResultArtifact{resultArtifact("leaked", "1", strings.Repeat("a", 64))}
+	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "empty outputs and artifacts") {
+		t.Fatalf("MarshalResultManifest() artifact error = %v", err)
 	}
 }
 
@@ -202,6 +218,9 @@ func TestLoadNeedsRetainsOneConditionalMatrixArtifact(t *testing.T) {
 }
 
 func TestAggregateResultTreatsMixedSuccessAndSkippedAsSuccess(t *testing.T) {
+	if got := aggregateResult("skipped", "skipped"); got != "skipped" {
+		t.Fatalf("aggregateResult() = %q, want skipped", got)
+	}
 	if got := aggregateResult("skipped", "success"); got != "success" {
 		t.Fatalf("aggregateResult() = %q, want success", got)
 	}

@@ -140,6 +140,9 @@ func MarshalResultManifest(manifest ResultManifest) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("invalid logical result %q", manifest.Result)
 	}
+	if manifest.Result == "skipped" && (len(manifest.Outputs) != 0 || len(manifest.Artifacts) != 0) {
+		return nil, errors.New("skipped result manifest must have empty outputs and artifacts")
+	}
 	if len(manifest.Outputs) > MaxResultOutputs {
 		return nil, fmt.Errorf("result manifest has %d outputs, maximum is %d", len(manifest.Outputs), MaxResultOutputs)
 	}
