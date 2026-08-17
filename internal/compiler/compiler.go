@@ -1068,44 +1068,39 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		runtimeMatrixBoundary: runtimeMatrixBoundary,
 		notEvaluatedJobs:      make(map[string]bool), notEvaluatedInstances: make(map[string]bool),
 	}
-	jobs := make(map[string]workflow.Job, len(resolved))
-	sourcePaths := make(map[string]string, len(resolved))
-	sourceDigests := make(map[string]string, len(resolved))
-	sourceRoots := make(map[string]string, len(resolved))
-	secretAuthorities := make(map[string]bool, len(resolved))
-	needBindings := make(map[string]map[string]needBinding, len(resolved))
-	inputs := make(map[string]map[string]any, len(resolved))
+	accepted := make([]sourcedJob, 0, len(resolved))
+	acceptedIndex := make(map[string]int, len(resolved))
 	var diagnostics []error
 	failedJobs := make(map[string]bool, len(resolved))
 	for _, sourced := range resolved {
 		job := sourced.Job
-		if _, exists := jobs[job.ID]; exists {
+		if _, exists := acceptedIndex[job.ID]; exists {
 			diagnostics = append(diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", sourced.path, 0, 0, job.ID, "", "", 0, jobError(sourced.path, job, fmt.Sprintf("flattened job id %q collides with another job", job.ID))))
 			continue
 		}
-		jobs[job.ID] = job
-		sourcePaths[job.ID] = sourced.path
-		sourceDigests[job.ID] = sourced.digest
-		sourceRoots[job.ID] = sourced.root
-		secretAuthorities[job.ID] = sourced.secretAuthority
-		needBindings[job.ID] = sourced.needBindings
-		inputs[job.ID] = sourced.inputs
+		acceptedIndex[job.ID] = len(accepted)
+		accepted = append(accepted, sourced)
 		if err := supported(sourced.path, job); err != nil {
 			diagnostics = append(diagnostics, err)
 			failedJobs[job.ID] = true
 		}
 	}
-	order, err := topologicalOrder(path, jobs)
+	topologyJobs := make(map[string]workflow.Job, len(accepted))
+	for _, sourced := range accepted {
+		topologyJobs[sourced.ID] = sourced.Job
+	}
+	order, err := topologicalOrder(path, topologyJobs)
 	if err != nil {
 		diagnostics = append(diagnostics, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err))
-		order = sortedKeys(jobs)
+		order = sortedKeys(topologyJobs)
 	}
 
-	matricesByJob := make(map[string][]map[string]any, len(jobs))
+	matricesByJob := make(map[string][]map[string]any, len(accepted))
 	failedMatrices := make(map[string]bool)
 	for _, id := range order {
-		job := jobs[id]
-		descriptor, deferred, matrixErr := describeRuntimeMatrix(job, sourcePaths[id], sourceDigests[id], needBindings[id], jobs, matricesByJob)
+		sourced := accepted[acceptedIndex[id]]
+		job := sourced.Job
+		descriptor, deferred, matrixErr := describeRuntimeMatrix(job, sourced.path, sourced.digest, sourced.needBindings, topologyJobs, matricesByJob)
 		var matrices []map[string]any
 		if deferred {
 			result.runtimeMatrixBoundary = true
@@ -1119,9 +1114,9 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				result.runtimeMatrices = append(result.runtimeMatrices, descriptor)
 				matrixErr = errors.New("runtime matrix source is valid, but continuation upload is disabled because Buildkite transport has no authoritative current-attempt fence and durable idempotency boundary")
 			}
-			matrixErr = locatedJobError(sourcePaths[id], job, position.Line, position.Column, matrixErr.Error())
+			matrixErr = locatedJobError(sourced.path, job, position.Line, position.Column, matrixErr.Error())
 		} else if !deferred {
-			matrices, matrixErr = expandMatrix(sourcePaths[id], job, context)
+			matrices, matrixErr = expandMatrix(sourced.path, job, context)
 		}
 		if matrixErr != nil {
 			line, column := job.Span.Start.Line, job.Span.Start.Column
@@ -1135,7 +1130,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			}
 			diagnostics = append(diagnostics, &ProcessingFinding{
 				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
-				Path: sourcePaths[id], Line: line, Column: column, Job: job.ID,
+				Path: sourced.path, Line: line, Column: column, Job: job.ID,
 				Message: "matrix could not be expanded or validated", Err: matrixErr,
 			})
 			failedMatrices[id] = true
@@ -1145,16 +1140,17 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		matricesByJob[id] = matrices
 	}
 
-	byLogicalID := make(map[string][]JobInstance, len(jobs))
+	byLogicalID := make(map[string][]JobInstance, len(accepted))
 	instanceKeys := make(map[string]string)
 	for _, id := range order {
-		job := jobs[id]
-		jobPath := sourcePaths[id]
+		sourced := accepted[acceptedIndex[id]]
+		job := sourced.Job
+		jobPath := sourced.path
 		if failedMatrices[id] {
 			continue
 		}
 		jobBlocked := false
-		for _, binding := range needBindings[id] {
+		for _, binding := range sourced.needBindings {
 			for _, member := range binding.members {
 				if failedJobs[member] {
 					jobBlocked = true
@@ -1201,7 +1197,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				Key:                     key,
 				LogicalJobID:            job.ID,
 				Matrix:                  matrix,
-				Inputs:                  cloneAnyMap(inputs[id]),
+				Inputs:                  cloneAnyMap(sourced.inputs),
 				FailFast:                job.FailFast,
 				MaxParallel:             job.MaxParallel,
 				Steps:                   append([]workflow.Step(nil), instanceJob.Steps...),
@@ -1217,10 +1213,10 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				Services:                resolvedServices,
 				ServicesExpression:      instanceJob.ServicesExpression,
 				SourcePath:              jobPath,
-				SourceDigest:            sourceDigests[id],
-				RepositoryRoot:          sourceRoots[id],
+				SourceDigest:            sourced.digest,
+				RepositoryRoot:          sourced.root,
 				Source:                  job.Span,
-				secretAuthority:         secretAuthorities[id],
+				secretAuthority:         sourced.secretAuthority,
 			}
 			result.candidates = append(result.candidates, candidate)
 
@@ -1285,8 +1281,8 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			instance.RuntimeImage = target.Image
 			instance.ConcurrencyGroup = concurrencyGroup
 			dependencyFailed := false
-			for _, need := range sortedKeys(needBindings[id]) {
-				binding := needBindings[id][need]
+			for _, need := range sortedKeys(sourced.needBindings) {
+				binding := sourced.needBindings[need]
 				var members []string
 				for _, member := range binding.members {
 					for _, prerequisite := range byLogicalID[member] {
@@ -1300,7 +1296,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 					break
 				}
 				if instance.NeedGroups == nil {
-					instance.NeedGroups = make(map[string][]string, len(needBindings[id]))
+					instance.NeedGroups = make(map[string][]string, len(sourced.needBindings))
 				}
 				instance.NeedGroups[need] = members
 				instance.Needs = append(instance.Needs, members...)
