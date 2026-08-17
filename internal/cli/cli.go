@@ -1903,35 +1903,36 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if workflows[i].ReusableOnly {
 			continue
 		}
-		runName, runNameErr := compiler.ResolveWorkflowRunName(workflows[i].Path, workflows[i].Parsed, effectiveEvent.Event)
-		if runNameErr != nil {
-			workflows[i].Applicable = true
-			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
-			processingReports[i] = triggerProcessingReport(workflows[i].Path, workflows[i].Source)
-			processingReports[i].AddFailure(workflows[i].Path, string(compiler.StageExpressions), compiler.CodeExpressionInvalid, "compatibility", runNameErr)
-			processingReports[i].Result = "incompatible"
-			continue
-		}
-		workflows[i].RunName = runName
 		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
-		if triggerErr != nil {
+		switch {
+		case triggerErr != nil:
 			workflows[i].Applicable = true
 			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
 			processingReports[i] = triggerFailureProcessingReport(workflows[i], triggerErr)
-			continue
-		}
-		if workflows[i].PathFiltersError != "" && selection.AnnotationReason == "" {
+		case workflows[i].PathFiltersError != "" && selection.AnnotationReason == "":
 			workflows[i].Applicable = true
 			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
 			processingReports[i] = triggerFailureProcessingReport(workflows[i], &buildkitepipeline.UnsupportedPathFiltersError{
 				Event: effectiveEvent.Event.Event, Reason: workflows[i].PathFiltersError,
 			})
+		default:
+			workflows[i].Applicable = selection.Applicable
+			workflows[i].TriggerCondition = selection.Condition
+			workflows[i].SkipReason = selection.SkipReason
+			workflows[i].AnnotationReason = selection.AnnotationReason
+		}
+		runName, runNameErr := compiler.ResolveWorkflowRunName(workflows[i].Path, workflows[i].Parsed, effectiveEvent.Event)
+		if runNameErr != nil {
+			if workflows[i].Applicable {
+				if len(processingReports[i].Stages) == 0 {
+					processingReports[i] = triggerProcessingReport(workflows[i].Path, workflows[i].Source)
+				}
+				processingReports[i].AddFailure(workflows[i].Path, string(compiler.StageExpressions), compiler.CodeExpressionInvalid, "compatibility", runNameErr)
+				processingReports[i].Result = "incompatible"
+			}
 			continue
 		}
-		workflows[i].Applicable = selection.Applicable
-		workflows[i].TriggerCondition = selection.Condition
-		workflows[i].SkipReason = selection.SkipReason
-		workflows[i].AnnotationReason = selection.AnnotationReason
+		workflows[i].RunName = runName
 	}
 	for i, input := range workflows {
 		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
