@@ -2679,6 +2679,7 @@ func TestGitHubContextExposesRuntimeEventIdentity(t *testing.T) {
 	}{
 		{name: "branch", event: plan.Event{Repository: "acme/widgets", Ref: "refs/heads/feature/runtime"}, wantOwner: "acme", wantRefName: "feature/runtime", wantRefType: "branch"},
 		{name: "tag", event: plan.Event{Repository: "acme/widgets", Ref: "refs/tags/v1.2.3"}, wantOwner: "acme", wantRefName: "v1.2.3", wantRefType: "tag"},
+		{name: "release", event: plan.Event{Name: "release", Repository: "acme/widgets", Ref: "refs/tags/v1.2.3", SHA: strings.Repeat("a", 40)}, wantOwner: "acme", wantRefName: "v1.2.3", wantRefType: "tag"},
 		{name: "pull request merge", event: plan.Event{Repository: "acme/widgets", Ref: "refs/pull/42/merge", HeadRef: "feature/runtime", BaseRef: "main"}, wantOwner: "acme", wantRefName: "42/merge", wantRefType: "branch", wantBaseRef: "main"},
 		{name: "pull request head", event: plan.Event{Repository: "acme/widgets", Ref: "refs/pull/42/head", HeadRef: "feature/runtime", BaseRef: "main"}, wantOwner: "acme", wantRefName: "42/head", wantRefType: "branch", wantBaseRef: "main"},
 		{name: "unavailable", event: plan.Event{}},
@@ -2693,6 +2694,12 @@ func TestGitHubContextExposesRuntimeEventIdentity(t *testing.T) {
 			got, err := expression.EvaluateCondition(condition, expression.ConditionContext{GitHub: github})
 			if err != nil || !got {
 				t.Fatalf("EvaluateCondition(%q) = %v, %v", condition, got, err)
+			}
+			if test.name == "release" {
+				env := standardEnvironment(plan.Job{Event: test.event}, "/workspace", "/tmp", "/tool-cache")
+				if env["GITHUB_EVENT_NAME"] != "release" || env["GITHUB_REF"] != "refs/tags/v1.2.3" || env["GITHUB_SHA"] != strings.Repeat("a", 40) {
+					t.Fatalf("release environment = %#v", env)
+				}
 			}
 		})
 	}

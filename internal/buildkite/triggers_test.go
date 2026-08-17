@@ -10,7 +10,7 @@ import (
 func TestTranslateTriggerCondition(t *testing.T) {
 	got, err := TranslateTriggerCondition([]workflow.Trigger{
 		{Event: "push", Branches: []string{"main", "releases/**", "!releases/**-alpha", "releases/v[0-9]+"}},
-		{Event: "pull_request"}, {Event: "merge_group", Branches: []string{"main"}}, {Event: "workflow_dispatch"}, {Event: "schedule"}, {Event: "workflow_call"},
+		{Event: "pull_request"}, {Event: "merge_group", Branches: []string{"main"}}, {Event: "release", Types: []string{"published", "released"}}, {Event: "workflow_dispatch"}, {Event: "schedule"}, {Event: "workflow_call"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -18,6 +18,11 @@ func TestTranslateTriggerCondition(t *testing.T) {
 	for _, want := range []string{`build.source_event == "push"`, `build.branch =~ /^main$/`, `releases\/.*`, `build.source_event == "pull_request"`, `build.source_action == "opened"`, `build.source_action == "synchronize"`, `build.source_event == "merge_group"`, `build.merge_queue.base_branch =~ /^main$/`, `build.source_action == "checks_requested"`, `build.source == "ui"`, `build.source == "schedule"`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("condition missing %q:\n%s", want, got)
+		}
+	}
+	for _, want := range []string{`build.source_event == "release"`, `build.source_action == "published"`, `build.source_action == "released"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("release condition missing %q:\n%s", want, got)
 		}
 	}
 }
@@ -35,6 +40,13 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 		{name: "unsupported PR type", triggers: []workflow.Trigger{{Event: "pull_request", Types: []string{"not-real"}}}, want: "cannot be mapped exactly"},
 		{name: "unsupported merge group type", triggers: []workflow.Trigger{{Event: "merge_group", Types: []string{"destroyed"}}}, want: "cannot be mapped exactly"},
 		{name: "merge group paths", triggers: []workflow.Trigger{{Event: "merge_group", Paths: []string{"src/**"}}}, want: "path filters are unsupported"},
+		{name: "bare release", triggers: []workflow.Trigger{{Event: "release"}}, want: "requires explicit types"},
+		{name: "release unpublished", triggers: []workflow.Trigger{{Event: "release", Types: []string{"unpublished"}}}, want: "cannot be mapped exactly"},
+		{name: "release edited", triggers: []workflow.Trigger{{Event: "release", Types: []string{"edited"}}}, want: "cannot be mapped exactly"},
+		{name: "release deleted", triggers: []workflow.Trigger{{Event: "release", Types: []string{"deleted"}}}, want: "cannot be mapped exactly"},
+		{name: "release prereleased", triggers: []workflow.Trigger{{Event: "release", Types: []string{"prereleased"}}}, want: "cannot be mapped exactly"},
+		{name: "release branch filter", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Branches: []string{"main"}}}, want: "unsupported filters"},
+		{name: "release paths", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Paths: []string{"src/**"}}}, want: "path filters are unsupported"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -67,6 +79,35 @@ func TestTranslateEventTriggerConditionUsesMergeGroupSnapshot(t *testing.T) {
 		if !strings.Contains(condition, want) {
 			t.Fatalf("merge_group condition missing %q: %s", want, condition)
 		}
+	}
+}
+
+func TestTranslateEventTriggerConditionUsesReleaseSnapshot(t *testing.T) {
+	action := "released"
+	expressions := TriggerConditionExpressions{
+		EventPredicate: `build.source == "webhook"`,
+		ReleaseAction:  `"released"`,
+	}
+	snapshot := TriggerEventSnapshot{
+		ReleaseAction: &action,
+	}
+	condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{{
+		Event: "release", Types: []string{"published", "released"},
+	}}, "release", expressions, snapshot)
+	if err != nil || !applicable {
+		t.Fatalf("condition/applicable/error = %q / %t / %v", condition, applicable, err)
+	}
+	for _, want := range []string{`build.source == "webhook"`, `"released" == "published"`, `"released" == "released"`} {
+		if !strings.Contains(condition, want) {
+			t.Fatalf("release condition missing %q: %s", want, condition)
+		}
+	}
+	reason, err := TriggerFilterMismatchReason(
+		[]workflow.Trigger{{Event: "release", Types: []string{"published"}}},
+		"release", snapshot,
+	)
+	if err != nil || !strings.Contains(reason, `"released"`) {
+		t.Fatalf("release mismatch reason = %q, %v", reason, err)
 	}
 }
 

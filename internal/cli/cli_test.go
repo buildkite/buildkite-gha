@@ -1182,6 +1182,51 @@ func TestNormalizePluginCommit(t *testing.T) {
 	})
 }
 
+func TestPluginNormalizesReleaseCommitBeforeEventConstruction(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"release.yml": "on:\n  release:\n    types: [published]\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	configuration, err := json.Marshal(map[string]any{"workflow": ".github/workflows/release.yml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	setCLIPluginBuildkiteEnvironment(t, "release-importer")
+	t.Setenv("BUILDKITE_COMMIT", "HEAD")
+	t.Setenv("BUILDKITE_BRANCH", "v1.2.3")
+	t.Setenv("BUILDKITE_TAG", "v1.2.3")
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "release")
+	t.Setenv("BUILDKITE_GITHUB_ACTION", "published")
+	commit := strings.Repeat("a", 40)
+	runner := &cliCaptureRunner{
+		gitOutput: []byte(commit + "\n"),
+		webhook:   []byte(`{"action":"published","release":{"tag_name":"v1.2.3","draft":false,"prerelease":false}}`),
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	found := false
+	for path, source := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		job, err := plan.Decode(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found = true
+		if job.Event.Name != "release" || job.Event.Ref != "refs/tags/v1.2.3" || job.Event.SHA != commit {
+			t.Fatalf("release plan event = %#v", job.Event)
+		}
+	}
+	if !found {
+		t.Fatal("plugin uploaded no release job plan")
+	}
+}
+
 func setCLIPluginBuildkiteEnvironment(t *testing.T, stepKey string) {
 	t.Helper()
 	t.Setenv("BUILDKITE", "true")
@@ -1217,6 +1262,9 @@ func TestRunValidateAndCompile(t *testing.T) {
 			{name: "mixed branch filters", trigger: "push:\n    branches: [main]\n    branches-ignore: [release]", want: "include and ignore filters cannot be combined"},
 			{name: "pull request tag filter", trigger: "pull_request:\n    tags: [v1]", want: "pull_request tag filters are unsupported"},
 			{name: "pull request activity", trigger: "pull_request:\n    types: [auto_merge_enabled, submitted]", want: `activity type "submitted" cannot be mapped exactly`},
+			{name: "bare release", trigger: "release", want: "release requires explicit types"},
+			{name: "unsupported release activity", trigger: "release:\n    types: [edited]", want: `release activity type "edited" cannot be mapped exactly`},
+			{name: "release branch filter", trigger: "release:\n    types: [published]\n    branches: [main]", want: "release has unsupported filters"},
 		}
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
@@ -1328,10 +1376,10 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile with generated events", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		for _, event := range []string{"push", "pull_request", "merge_group", "workflow_dispatch", "schedule"} {
+		for _, event := range []string{"push", "pull_request", "merge_group", "release", "workflow_dispatch", "schedule"} {
 			t.Run(event, func(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				args := []string{"validate", "--profile", "hosted", "--event", event, "--format", "json", workflow}
@@ -1351,7 +1399,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile with all generated events", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n  workflow_call:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n  workflow_call:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -1363,10 +1411,10 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Schema != compatibility.ProcessingSchemaV3 || report.Result != "admitted" || report.Status != compatibility.Passed || report.Validation.Result != "compilable" || len(report.Evaluations) != 5 {
+		if report.Schema != compatibility.ProcessingSchemaV3 || report.Result != "admitted" || report.Status != compatibility.Passed || report.Validation.Result != "compilable" || len(report.Evaluations) != 6 {
 			t.Fatalf("aggregate report = %#v", report)
 		}
-		for i, event := range []string{"push", "pull_request", "merge_group", "workflow_dispatch", "schedule"} {
+		for i, event := range []string{"push", "pull_request", "merge_group", "release", "workflow_dispatch", "schedule"} {
 			if report.Evaluations[i].Event != event || report.Evaluations[i].Source != "generated" || report.Evaluations[i].Report.Result != "admitted" {
 				t.Fatalf("evaluation %d = %#v", i, report.Evaluations[i])
 			}
@@ -4299,6 +4347,7 @@ func TestNewEffectiveEventSeparatesExpressionsAndSnapshot(t *testing.T) {
 		PullRequestAction:     "null",
 		MergeGroupBaseBranch:  "null",
 		MergeGroupAction:      "null",
+		ReleaseAction:         "null",
 	}
 	branch := "main"
 	wantSnapshot := buildkitepipeline.TriggerEventSnapshot{Branch: &branch}
@@ -4324,7 +4373,7 @@ func TestNewEffectiveEventSeparatesExpressionsAndSnapshot(t *testing.T) {
 func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "multi-trigger.yml")
-	workflowSource := "name: Active event\non:\n  push:\n  pull_request:\n  merge_group:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
+	workflowSource := "name: Active event\non:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
 	if err := os.WriteFile(workflowPath, []byte(workflowSource), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -4341,6 +4390,7 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 		{name: "push fallback", source: "webhook", wantEvent: "push", wantCondition: `build.source == "webhook"`},
 		{name: "pull request webhook metadata", source: "webhook", githubEvent: "pull_request", webhook: []byte(`{"action":"opened","pull_request":{"base":{"ref":"main"}}}`), wantEvent: "pull_request", wantCondition: `build.source == "webhook"`},
 		{name: "merge group webhook metadata", source: "webhook", githubEvent: "merge_group", webhook: []byte(`{"action":"checks_requested","merge_group":{"head_ref":"refs/heads/gh-readonly-queue/main/pr-1-deadbeef","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_ref":"refs/heads/main","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`), wantEvent: "merge_group", wantCondition: `build.source == "webhook"`},
+		{name: "release webhook metadata", source: "webhook", githubEvent: "release", webhook: []byte(`{"action":"published","release":{"tag_name":"v1.2.3","draft":false,"prerelease":false}}`), wantEvent: "release", wantCondition: `build.source == "webhook"`},
 		{name: "UI fallback", source: "ui", wantEvent: "workflow_dispatch", wantCondition: `build.source == "ui"`},
 		{name: "API fallback", source: "api", wantEvent: "workflow_dispatch", wantCondition: `build.source == "api"`},
 		{name: "schedule fallback", source: "schedule", wantEvent: "schedule", wantCondition: `build.source == "schedule"`},
@@ -4356,10 +4406,16 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 			t.Setenv("BUILDKITE_PULL_REQUEST", "false")
 			t.Setenv("BUILDKITE_SOURCE", test.source)
 			t.Setenv("BUILDKITE_GITHUB_EVENT", test.githubEvent)
+			t.Setenv("BUILDKITE_GITHUB_ACTION", "")
 			if test.githubEvent == "merge_group" {
 				t.Setenv("BUILDKITE_BRANCH", "gh-readonly-queue/main/pr-1-deadbeef")
 				t.Setenv("BUILDKITE_MERGE_QUEUE_BASE_BRANCH", "main")
 				t.Setenv("BUILDKITE_MERGE_QUEUE_BASE_COMMIT", strings.Repeat("b", 40))
+			}
+			if test.githubEvent == "release" {
+				t.Setenv("BUILDKITE_BRANCH", "v1.2.3")
+				t.Setenv("BUILDKITE_TAG", "v1.2.3")
+				t.Setenv("BUILDKITE_GITHUB_ACTION", "published")
 			}
 			runner := &cliCaptureRunner{webhook: test.webhook}
 			args := []string{"upload"}

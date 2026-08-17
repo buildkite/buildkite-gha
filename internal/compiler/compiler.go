@@ -953,6 +953,11 @@ func parseEvent(source []byte) (Event, error) {
 			return Event{}, err
 		}
 	}
+	if input.Event == "release" {
+		if err := validateReleaseEvent(input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
 	return Event{
 		Provider: input.Provider, Event: input.Event, Repository: input.Repository,
 		Ref: input.Ref, SHA: input.SHA, Actor: input.Actor, Payload: input.Payload,
@@ -982,6 +987,36 @@ func validateMergeGroupEvent(ref, sha string, payload map[string]any) error {
 	}
 	if ref != headRef || sha != headSHA {
 		return fmt.Errorf("merge_group event snapshot ref and sha must match payload.merge_group head_ref and head_sha")
+	}
+	return nil
+}
+
+func validateReleaseEvent(ref, sha string, payload map[string]any) error {
+	action, _ := payload["action"].(string)
+	if action != "published" && action != "created" && action != "released" {
+		return fmt.Errorf("release event snapshot requires payload.action to be published, created, or released")
+	}
+	release, ok := payload["release"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("release event snapshot requires payload.release")
+	}
+	tag, tagOK := release["tag_name"].(string)
+	draft, draftOK := release["draft"].(bool)
+	_, prereleaseOK := release["prerelease"].(bool)
+	if !tagOK || strings.TrimSpace(tag) == "" || !draftOK || !prereleaseOK {
+		return fmt.Errorf("release event snapshot requires payload.release tag_name, draft, and prerelease")
+	}
+	if draft {
+		if action == "created" {
+			return fmt.Errorf("release event snapshot draft created activity does not trigger GitHub Actions")
+		}
+		return fmt.Errorf("release event snapshot %s activity requires a non-draft release", action)
+	}
+	if ref != "refs/tags/"+tag {
+		return fmt.Errorf("release event snapshot ref must match payload.release.tag_name")
+	}
+	if !validEventCommit(sha) {
+		return fmt.Errorf("release event snapshot requires a full lowercase sha")
 	}
 	return nil
 }

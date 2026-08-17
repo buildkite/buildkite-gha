@@ -23,6 +23,7 @@ type TriggerConditionExpressions struct {
 	PullRequestAction     string
 	MergeGroupBaseBranch  string
 	MergeGroupAction      string
+	ReleaseAction         string
 }
 
 // ChangedPathEvaluation records either the available changed paths or why
@@ -45,6 +46,7 @@ type TriggerEventSnapshot struct {
 	PullRequestAction     *string
 	MergeGroupBaseBranch  *string
 	MergeGroupAction      *string
+	ReleaseAction         *string
 	ChangedPaths          ChangedPathEvaluation
 }
 
@@ -73,6 +75,7 @@ func LiveTriggerConditionExpressions(eventPredicate string) TriggerConditionExpr
 		PullRequestAction:     "build.source_action",
 		MergeGroupBaseBranch:  "build.merge_queue.base_branch",
 		MergeGroupAction:      "build.source_action",
+		ReleaseAction:         "build.source_action",
 	}
 }
 
@@ -239,6 +242,15 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 			if snapshot.MergeGroupAction != nil && *snapshot.MergeGroupAction != "checks_requested" {
 				return fmt.Sprintf("Merge group activity %q does not match this workflow's merge_group activity filters.", *snapshot.MergeGroupAction), nil
 			}
+		case "release":
+			if snapshot.ReleaseAction != nil {
+				for _, action := range trigger.Types {
+					if action == *snapshot.ReleaseAction {
+						return "", nil
+					}
+				}
+				return fmt.Sprintf("Release activity %q does not match this workflow's release activity filters.", *snapshot.ReleaseAction), nil
+			}
 		}
 		return "", nil
 	}
@@ -259,7 +271,7 @@ func liveTriggerExpressions(event string) TriggerConditionExpressions {
 		predicate = `(build.source == "ui" || build.source == "api")`
 	case "schedule":
 		predicate = `build.source == "schedule"`
-	case "push", "pull_request", "merge_group":
+	case "push", "pull_request", "merge_group", "release":
 		predicate = `build.source_event == ` + yamlScalar(event)
 	}
 	return LiveTriggerConditionExpressions(predicate)
@@ -445,6 +457,30 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 			}
 		}
 		return strings.Join(parts, " && "), true, nil
+	case "release":
+		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Paths != nil || t.PathsIgnore != nil || t.Workflows != nil {
+			return "", false, fmt.Errorf("release has unsupported filters")
+		}
+		if expressions.EventPredicate == "" || expressions.ReleaseAction == "" {
+			return "", false, fmt.Errorf("release requires effective event and action expressions")
+		}
+		if expressions.ReleaseAction == "null" {
+			return "", false, fmt.Errorf("release event snapshot requires payload.action")
+		}
+		if t.Types == nil {
+			return "", false, fmt.Errorf("release requires explicit types because bare release includes unsupported GitHub activities")
+		}
+		if len(t.Types) == 0 {
+			return "", false, fmt.Errorf("release types is explicitly empty")
+		}
+		actions := make([]string, 0, len(t.Types))
+		for _, action := range t.Types {
+			if action != "published" && action != "created" && action != "released" {
+				return "", false, fmt.Errorf("release activity type %q cannot be mapped exactly", action)
+			}
+			actions = append(actions, expressions.ReleaseAction+` == `+yamlScalar(action))
+		}
+		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	default:
 		return "", false, fmt.Errorf("unsupported GitHub trigger event %q", t.Event)
 	}

@@ -84,7 +84,7 @@ Pull-request path filters require a linked Buildkite webhook and a verified, bou
 
 Sample metadata is written to `records/<record-id>/samples/<sample-key>/validate-tally.json`; per-workflow v3 reports are under `reports/<record-id>/samples/<sample-key>/<validator-digest>/`. Full-corpus tallies and reports retain their existing paths.
 
-Admission covers generated event snapshots, not arbitrary real payloads or action execution. The action-resolution snapshot pins action revisions only. Preserve the snapshot, corpus record, sample seed, and sample size when comparing compatibility across commits.
+Admission covers generated event snapshots, not arbitrary real payloads or action execution. Generated release validation uses one stable `published` event, so corpus results do not prove every supported release activity. Adding release can only raise the corpus compatibility ceiling for workflows whose explicit release types are limited to `published`, `created`, and `released`; bare and broader release triggers remain incompatible. The action-resolution snapshot pins action revisions only. Preserve the snapshot, corpus record, sample seed, and sample size when comparing compatibility across commits.
 
 ## Verify runtime behavior
 
