@@ -4270,7 +4270,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 		return name + "on: " + trigger + "\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
 	}
 	sources := map[string]string{
-		"a.yml":        runnable("name: 'Shared \"checks\"'\nrun-name: Run ${{ github.ref_name }} by @${{ github.actor }}\n", "push"),
+		"a.yml":        runnable("name: 'Shared \"checks\"'\nrun-name: Run ${{ inputs.target }} on ${{ github.ref_name }} by @${{ github.actor }}\n", "\n  push:\n  workflow_dispatch:\n    inputs:\n      target:\n        default: production"),
 		"b.yml":        runnable("name: 'Shared \"checks\"'\nrun-name: Skipped ${{ github.event_name }} run\n", "pull_request"),
 		"c.yml":        runnable("name: Manual deploy\nrun-name: Deploy ${{ inputs.target }}\n", "workflow_dispatch"),
 		"unnamed.yml":  runnable("run-name: '   '\n", "\n  push:\n    branches-ignore: [main]"),
@@ -4337,7 +4337,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	want := []struct {
 		group, checkName, condition, skip string
 	}{
-		{group: `:github: Shared "checks" — Run main by @buildkite-gha-smoke`, checkName: `Shared "checks" / test (push)`, condition: `(true)`},
+		{group: `:github: Shared "checks" — Run  on main by @buildkite-gha-smoke`, checkName: `Shared "checks" / test (push)`, condition: `(true)`},
 		{group: `:github: Shared "checks" — Skipped push run`, checkName: `Shared "checks" (push)`, skip: "This workflow is not triggered by a `push` event"},
 		{group: ":github: Manual deploy", checkName: "Manual deploy (push)", skip: "This workflow is not triggered by a `push` event"},
 		{group: ":github: .github/workflows/unnamed.yml", checkName: ".github/workflows/unnamed.yml / test (push)", condition: `!("main" =~ /^main$/)`},

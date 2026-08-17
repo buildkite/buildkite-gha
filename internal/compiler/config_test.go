@@ -84,6 +84,33 @@ jobs:
 	}
 }
 
+func TestCompileResolvesMissingDispatchInputAsEmptyOnPush(t *testing.T) {
+	workflow := []byte(`name: Deploy
+run-name: Deploy ${{ inputs.target }} from ${{ github.ref_name }}
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      target:
+        default: production
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	compiled, err := CompileWithOptions("deploy.yml", workflow, pushEvent(t), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if ir.Workflow.RunName != "Deploy  from main" {
+		t.Fatalf("push run-name = %q, want missing dispatch input rendered as empty", ir.Workflow.RunName)
+	}
+}
+
 func TestCompileTreatsBlankRunNameAsAbsentAndLocatesUnsupportedContext(t *testing.T) {
 	workflow := []byte("name: CI\nrun-name: '   '\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 	compiled, err := CompileWithOptions("blank.yml", workflow, pushEvent(t), defaultOptions())

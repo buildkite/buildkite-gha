@@ -1104,9 +1104,6 @@ func compileContext(event Event, vars map[string]string, workflowPath, workflowN
 }
 
 func workflowDispatchInputs(parsed *workflow.Workflow, event Event) map[string]any {
-	if event.Event != "workflow_dispatch" && event.Event != "validation" {
-		return nil
-	}
 	var declarations []workflow.DispatchInput
 	for _, trigger := range parsed.Triggers {
 		if trigger.Event == "workflow_dispatch" && trigger.Dispatch != nil {
@@ -1114,8 +1111,14 @@ func workflowDispatchInputs(parsed *workflow.Workflow, event Event) map[string]a
 			break
 		}
 	}
-	provided, _ := event.Payload["inputs"].(map[string]any)
 	result := make(map[string]any, len(declarations))
+	if event.Event != "workflow_dispatch" && event.Event != "validation" {
+		for _, declaration := range declarations {
+			result[declaration.Name] = zeroInputValue(declaration.Type)
+		}
+		return result
+	}
+	provided, _ := event.Payload["inputs"].(map[string]any)
 	for _, declaration := range declarations {
 		value, ok := provided[declaration.Name]
 		if !ok {
