@@ -87,7 +87,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		owned.Concurrency.CancelInProgress = true
 		owned.Concurrency.CancelInProgressPosition = *workflowCancellation
 	}
-	owned.Permissions, err = adaptPermissions(path, parsed.Permissions)
+	owned.Permissions, err = adaptPermissions(path, parsed.Permissions, true)
 	if err != nil {
 		return nil, err
 	}
@@ -520,7 +520,7 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		return Job{}, err
 	}
 	out.Concurrency = ownedConcurrency
-	permissions, err := adaptPermissions(path, in.Permissions)
+	permissions, err := adaptPermissions(path, in.Permissions, false)
 	if err != nil {
 		return Job{}, err
 	}
@@ -800,11 +800,18 @@ func adaptConcurrency(path, jobID string, in *actionlint.Concurrency) (*Concurre
 	}, nil
 }
 
-func adaptPermissions(path string, in *actionlint.Permissions) (*Permissions, error) {
+func adaptPermissions(path string, in *actionlint.Permissions, allowReadAll bool) (*Permissions, error) {
 	if in == nil {
 		return nil, nil
 	}
 	if in.All != nil {
+		if allowReadAll && in.All.Value == "read-all" {
+			scopes := make(map[string]string, len(topLevelReadAllPermissionNames))
+			for _, name := range topLevelReadAllPermissionNames {
+				scopes[name] = "read"
+			}
+			return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
+		}
 		return nil, locatedError(path, in.All.Pos, "permissions", "permission aliases are unsupported; declare each required permission explicitly")
 	}
 	scopes := make(map[string]string, len(in.Scopes))
@@ -830,6 +837,11 @@ func adaptPermissions(path string, in *actionlint.Permissions) (*Permissions, er
 		}
 	}
 	return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
+}
+
+var topLevelReadAllPermissionNames = []string{
+	"actions", "artifact-metadata", "attestations", "checks", "contents", "deployments", "discussions",
+	"issues", "packages", "pages", "pull-requests", "security-events", "statuses",
 }
 
 func supportedGitHubTokenPermission(name string) bool {
