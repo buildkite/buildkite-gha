@@ -1868,8 +1868,8 @@ func TestProcessingAnnotationLeadsWithTheActionableDiagnostic(t *testing.T) {
 		{
 			name: "token configuration",
 			diagnostic: compatibility.Diagnostic{Code: "E_PROFILE",
-				Message: `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported.`},
-			want: `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported.`,
+				Message: `Job "test" needs GITHUB_TOKEN, but its workflow path is unsupported.`},
+			want: `Job "test" needs GITHUB_TOKEN, but its workflow path is unsupported.`,
 		},
 		{
 			name: "Docker provenance",
@@ -1895,7 +1895,7 @@ func TestProcessingAnnotationLeadsWithTheActionableDiagnostic(t *testing.T) {
 }
 
 func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testing.T) {
-	const message = `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported. Move permissions to the workflow level.`
+	const message = `Job "test" needs GITHUB_TOKEN, but its workflow path is unsupported. Move the workflow under .github/workflows.`
 	const detail = `Effective permissions: contents: read.`
 	report := compatibility.NewProcessingReport("ci.yml", "hosted")
 	for _, instance := range []string{"gha-test-a", "gha-test-b"} {
@@ -1923,8 +1923,8 @@ func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testin
 	}
 	_, annotation := processingAnnotation(report, sourceLinkContext{})
 	if strings.Count(textOutput.String(), message) != 1 || strings.Count(textOutput.String(), "detail: "+detail) != 1 ||
-		strings.Count(annotation, `Job &#34;test&#34; needs GITHUB_TOKEN, but job-level permissions are unsupported.`) != 1 ||
-		strings.Count(annotation, `Move permissions to the workflow level.`) != 1 ||
+		strings.Count(annotation, `Job &#34;test&#34; needs GITHUB_TOKEN, but its workflow path is unsupported.`) != 1 ||
+		strings.Count(annotation, `Move the workflow under .github/workflows.`) != 1 ||
 		strings.Count(annotation, `<summary>Diagnostic detail</summary>`) != 1 || strings.Count(annotation, detail) != 1 {
 		t.Fatalf("text = %q; annotation = %q", textOutput.String(), annotation)
 	}

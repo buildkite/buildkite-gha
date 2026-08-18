@@ -733,22 +733,6 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedWorkflowToken(t *testing.T)
 	}
 }
 
-func TestGitHubTokenAdmissionDiagnosticSeparatesGuidanceFromDetail(t *testing.T) {
-	artifact := compiler.PlanArtifact{
-		Job: plan.Job{
-			Workflow:    plan.Workflow{LogicalJobID: "build"},
-			GitHubToken: &plan.GitHubToken{Workflow: "build.yml", Permissions: map[string]string{"contents": "read", "pull_requests": "write"}},
-		},
-		Authorization: compiler.PlanAuthorization{GitHubTokenActions: []string{"owner/action@v1"}},
-	}
-	wantMessage := `Job "build" needs GITHUB_TOKEN, but job-level permissions are unsupported for hosted GITHUB_TOKEN issuance. Move the permissions map to the workflow top level.`
-	wantDetail := `Cause: action "owner/action@v1" defaults an input to github.token. Effective permissions: contents: read, pull-requests: write.`
-	message, detail := githubTokenAdmissionDiagnostic(artifact, "GitHub workflow access tokens do not support job-level permissions")
-	if message != wantMessage || detail != wantDetail {
-		t.Fatalf("githubTokenAdmissionDiagnostic() = %q, %q", message, detail)
-	}
-}
-
 func TestUnprivilegedUploadAllowsPublicAndDockerfileActionCapabilities(t *testing.T) {
 	for _, capabilities := range [][]string{nil, {"network"}, {"docker"}, {"docker", "network"}} {
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{

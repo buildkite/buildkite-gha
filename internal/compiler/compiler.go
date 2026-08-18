@@ -85,6 +85,7 @@ type WorkflowSource struct {
 	ConcurrencyGroup              string             `json:"concurrency_group,omitempty"`
 	Triggers                      []workflow.Trigger `json:"-"`
 	WorkflowTokenPolicyFilename   string             `json:"-"`
+	WorkflowTokenPermissions      map[string]string  `json:"-"`
 	WorkflowTokenPolicyDiagnostic string             `json:"-"`
 }
 
@@ -124,6 +125,7 @@ type JobInstance struct {
 	Source                  workflow.Span           `json:"source"`
 	secretAuthority         bool
 	tokenPolicyNarrowed     bool
+	jobPermissionsIgnored   bool
 	reusableCall            workflow.Position
 }
 
@@ -570,18 +572,12 @@ instances:
 			if referencesGitHubTokenSecret {
 				secrets = slices.DeleteFunc(secrets, func(name string) bool { return name == "GITHUB_TOKEN" })
 			}
-			githubPermissions := make(map[string]string, len(instance.Permissions))
-			for name, access := range instance.Permissions {
-				if name != "id-token" {
-					githubPermissions[name] = access
-				}
-			}
 			if referencesGitHubTokenSecret || referencesGitHubToken || actionRequiresGitHubToken {
 				policyWorkflow := ir.Workflow.WorkflowTokenPolicyFilename
 				if policyWorkflow == "" {
 					policyWorkflow = filepath.Base(instance.SourcePath)
 				}
-				if len(githubPermissions) == 0 {
+				if len(ir.Workflow.WorkflowTokenPermissions) == 0 {
 					reference := "an action input default that references github.token"
 					if referencesGitHubTokenSecret {
 						reference = "secrets.GITHUB_TOKEN"
@@ -590,11 +586,7 @@ instances:
 					}
 					return fmt.Errorf("%s:%d:%d: job %q references %s but has no effective permissions", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, reference)
 				}
-				permissions := make(map[string]string, len(githubPermissions))
-				for name, access := range githubPermissions {
-					permissions[strings.ReplaceAll(name, "-", "_")] = access
-				}
-				githubToken = &plan.GitHubToken{Workflow: policyWorkflow, Permissions: permissions}
+				githubToken = &plan.GitHubToken{Workflow: policyWorkflow, Permissions: cloneMap(ir.Workflow.WorkflowTokenPermissions)}
 				capabilities = append(capabilities, "provider-token-write")
 				authorization.ProviderTokenWriteCapabilitySources = []string{"effective-permissions"}
 				authorization.WorkflowTokenPolicyFilename = ir.Workflow.WorkflowTokenPolicyFilename
@@ -870,7 +862,7 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	if err != nil {
 		return IR{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
-	workflowTokenPolicyFilename, workflowTokenPolicyDiagnostic := workflowTokenPolicyEvidence(path, parsed)
+	workflowTokenPolicyFilename, workflowTokenPermissions, workflowTokenPolicyDiagnostic := workflowTokenPolicyEvidence(path, parsed)
 	event, err := parseEvent(eventSource)
 	if err != nil {
 		return IR{}, processingFinding(StageEventValidation, CodeEventInvalid, "environment", err)
@@ -889,7 +881,7 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 		Schema: schema,
 		Workflow: WorkflowSource{
 			Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
-			WorkflowTokenPolicyFilename: workflowTokenPolicyFilename, WorkflowTokenPolicyDiagnostic: workflowTokenPolicyDiagnostic,
+			WorkflowTokenPolicyFilename: workflowTokenPolicyFilename, WorkflowTokenPermissions: workflowTokenPermissions, WorkflowTokenPolicyDiagnostic: workflowTokenPolicyDiagnostic,
 		},
 		Event:    event,
 		Vars:     vars,
@@ -903,14 +895,8 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	return ir, errors.Join(concurrencyErr, cancellationErr, expandErr)
 }
 
-func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string, string) {
-	filename, err := plan.GitHubWorkflowPolicyFilename(canonicalWorkflowName(path))
-	if err != nil {
-		return "", err.Error()
-	}
-	if parsed.Permissions != nil && len(parsed.Permissions.Scopes) == 0 {
-		return "", "GitHub workflow access tokens require explicit non-empty top-level permissions"
-	}
+func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string, map[string]string, string) {
+	filename, filenameErr := plan.GitHubWorkflowPolicyFilename(canonicalWorkflowName(path))
 	permissions := defaultGitHubTokenPermissions().Scopes
 	if parsed.Permissions != nil {
 		permissions = parsed.Permissions.Scopes
@@ -922,15 +908,16 @@ func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string
 		}
 		normalizedPermissions[strings.ReplaceAll(name, "-", "_")] = access
 	}
+	if filenameErr != nil {
+		return "", normalizedPermissions, filenameErr.Error()
+	}
+	if parsed.Permissions != nil && len(parsed.Permissions.Scopes) == 0 {
+		return "", nil, "GitHub workflow access tokens require explicit non-empty top-level permissions"
+	}
 	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(normalizedPermissions); err != nil {
-		return "", err.Error()
+		return "", normalizedPermissions, err.Error()
 	}
-	for _, job := range parsed.Jobs {
-		if job.Permissions != nil {
-			return "", "GitHub workflow access tokens do not support job-level permissions"
-		}
-	}
-	return filename, ""
+	return filename, normalizedPermissions, ""
 }
 
 func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warning {
@@ -953,6 +940,15 @@ func reusableWorkflowTokenWarning(position workflow.Position) Warning {
 		Line:    position.Line,
 		Column:  position.Column,
 		Message: "jobs expanded from local reusable workflows use the top-level requesting workflow permissions for GITHUB_TOKEN; permissions declared in called workflows are not enforced",
+	}
+}
+
+func jobWorkflowTokenWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "job-level repository permissions are ignored for hosted GITHUB_TOKEN; the top-level requesting workflow permissions apply",
 	}
 }
 
@@ -1361,6 +1357,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				Source:                  job.Span,
 				secretAuthority:         sourced.secretAuthority,
 				tokenPolicyNarrowed:     sourced.tokenPolicyNarrowed,
+				jobPermissionsIgnored:   sourced.jobPermissionsIgnored,
 				reusableCall:            sourced.reusableCall,
 			}
 			for _, guard := range sourced.callGuards {

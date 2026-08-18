@@ -382,9 +382,6 @@ func githubTokenAdmissionDiagnostic(artifact compiler.PlanArtifact, reason strin
 	limitation := reason
 	fix := "Use a supported workflow-level permissions map or remove the GITHUB_TOKEN dependency."
 	switch {
-	case strings.Contains(reason, "job-level permissions"):
-		limitation = "job-level permissions are unsupported for hosted GITHUB_TOKEN issuance"
-		fix = "Move the permissions map to the workflow top level."
 	case strings.Contains(reason, "reusable-workflow jobs"):
 		limitation = "workflows containing reusable-workflow jobs cannot receive a hosted GITHUB_TOKEN"
 		fix = "Inline the reusable job or remove the GITHUB_TOKEN dependency; runner configuration cannot enable this shape."

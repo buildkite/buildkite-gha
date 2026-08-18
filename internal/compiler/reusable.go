@@ -28,15 +28,16 @@ var callOutputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 
 type sourcedJob struct {
 	workflow.Job
-	path                string
-	digest              string
-	root                string
-	inputs              map[string]any
-	secretAuthority     bool
-	needBindings        map[string]needBinding
-	tokenPolicyNarrowed bool
-	reusableCall        workflow.Position
-	callGuards          []sourcedCallGuard
+	path                  string
+	digest                string
+	root                  string
+	inputs                map[string]any
+	secretAuthority       bool
+	needBindings          map[string]needBinding
+	tokenPolicyNarrowed   bool
+	jobPermissionsIgnored bool
+	reusableCall          workflow.Position
+	callGuards            []sourcedCallGuard
 }
 
 type sourcedCallGuard struct {
@@ -199,7 +200,9 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 	var resolved []sourcedJob
 	for _, id := range order {
 		job := jobs[id]
+		declaredJobPermissions := job.Permissions
 		job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, permissionCeiling, depth != 0)
+		jobPermissionsIgnored := declaredJobPermissions != nil && repositoryPermissionsDiffer(resolver.rootPermissions, declaredJobPermissions)
 		jobTokenPolicyNarrowed := tokenPolicyNarrowed
 		if depth != 0 {
 			jobTokenPolicyNarrowed = jobTokenPolicyNarrowed || repositoryPermissionsNarrowed(resolver.rootPermissions, job.Permissions)
@@ -252,7 +255,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			resolved = append(resolved, sourcedJob{
 				Job: job, path: path, digest: digest, root: resolver.root, inputs: cloneAnyMap(inputs),
 				secretAuthority: secretAuthority, needBindings: needBindings,
-				tokenPolicyNarrowed: jobTokenPolicyNarrowed, reusableCall: reusableCallPosition,
+				tokenPolicyNarrowed: jobTokenPolicyNarrowed, jobPermissionsIgnored: jobPermissionsIgnored, reusableCall: reusableCallPosition,
 				callGuards: cloneSourcedCallGuards(callGuards),
 			})
 			replacements[id] = needBinding{members: []string{job.ID}}
@@ -384,6 +387,11 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 						fmt.Sprintf("resolve local reusable workflow %q: %v", call.Uses, err)),
 				}
 			}
+			if jobPermissionsIgnored {
+				for i := range calleeResolution.jobs {
+					calleeResolution.jobs[i].jobPermissionsIgnored = true
+				}
+			}
 			resolved = append(resolved, calleeResolution.jobs...)
 			callOutputs = append(callOutputs, calleeResolution.outputs...)
 			for _, calleeJob := range calleeResolution.jobs {
@@ -459,6 +467,10 @@ func repositoryPermissionsNarrowed(root, effective *workflow.Permissions) bool {
 		}
 	}
 	return false
+}
+
+func repositoryPermissionsDiffer(left, right *workflow.Permissions) bool {
+	return repositoryPermissionsNarrowed(left, right) || repositoryPermissionsNarrowed(right, left)
 }
 
 func replacementNeeds(needs []string, replacements map[string]needBinding) map[string]needBinding {
