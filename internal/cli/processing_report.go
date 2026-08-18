@@ -191,6 +191,7 @@ type skippedWorkflow struct {
 	label  string
 	key    string
 	reason string
+	events []string
 }
 
 func (o processingOutput) annotateSkippedWorkflows(parent context.Context, event string, workflows []skippedWorkflow) {
@@ -220,7 +221,15 @@ func skippedWorkflowsAnnotation(event string, workflows []skippedWorkflow, build
 		annotationURL := fmt.Sprintf("%s/canvas?key=%s&open=false", strings.TrimRight(buildURL, "/"), url.QueryEscape(workflow.key))
 		label := annotationHTML(strings.Join(strings.Fields(workflow.label), " "))
 		label = strings.NewReplacer("\\", "\\\\", "[", "\\[", "]", "\\]").Replace(label)
-		_, _ = fmt.Fprintf(&out, "* [:github: %s](%s) — %s\n", label, annotationURL, annotationHTML(workflow.reason))
+		events := ""
+		if len(workflow.events) > 0 {
+			escaped := make([]string, len(workflow.events))
+			for i, event := range workflow.events {
+				escaped[i] = annotationHTML(event)
+			}
+			events = " (" + strings.Join(escaped, ", ") + ")"
+		}
+		_, _ = fmt.Fprintf(&out, "* [:github: %s](%s)%s — %s\n", label, annotationURL, events, annotationHTML(workflow.reason))
 	}
 	return out.String()
 }
