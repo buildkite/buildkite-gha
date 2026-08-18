@@ -5918,6 +5918,44 @@ runs:
 	}
 }
 
+func TestCompositeRunSupportsCompoundInputExpression(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/rust/action.yml", `name: Rust setup expression
+inputs:
+  toolchain:
+    required: false
+  components:
+    required: false
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: echo "downgrade=${{contains(inputs.toolchain, 'nightly') && inputs.components && ' --allow-downgrade' || ''}}" > "$RESULT"
+`)
+	output := filepath.Join(workspace, "result")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:   "rust",
+		Kind: "uses",
+		Uses: "./.github/actions/rust",
+		With: map[string]string{"toolchain": "nightly", "components": "rustfmt"},
+	}})
+	job.Env = map[string]string{"RESULT": output}
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	contents, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(contents), "downgrade= --allow-downgrade\n"; got != want {
+		t.Fatalf("compound composite run expression = %q, want %q", got, want)
+	}
+}
+
 func TestRuntimeRejectsRecursiveAndOverDepthCompositeActions(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
