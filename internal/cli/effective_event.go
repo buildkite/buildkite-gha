@@ -30,6 +30,7 @@ type effectiveEventSelection struct {
 	Source             []byte
 	Event              compiler.Event
 	Origin             effectiveEventOrigin
+	BuildSource        string
 	TriggerExpressions buildkitepipeline.TriggerConditionExpressions
 	TriggerSnapshot    buildkitepipeline.TriggerEventSnapshot
 }
@@ -71,6 +72,9 @@ func newEffectiveEvent(source []byte, origin effectiveEventOrigin) (effectiveEve
 		return effective, nil
 	}
 	effective.TriggerExpressions.EventPredicate = buildkitepipeline.LiveEventPredicate(event.Event)
+	if origin == effectiveEventFromBuild {
+		effective.BuildSource = strings.TrimSpace(os.Getenv("BUILDKITE_SOURCE"))
+	}
 	return effective, nil
 }
 
