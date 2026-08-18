@@ -1365,7 +1365,6 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 					Condition: guard.condition, Inputs: cloneAnyMap(guard.inputs),
 				})
 			}
-			result.candidates = append(result.candidates, candidate)
 
 			valid := true
 			if serviceErr != nil {
@@ -1383,6 +1382,8 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, key, "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, runsOnErr.Error())))
 				valid = false
 			}
+			candidate.RunsOn = labels
+			result.candidates = append(result.candidates, candidate)
 			var target RunnerTarget
 			if runsOnErr == nil {
 				target, err = options.Runners.resolve(labels, options.EventTrust)
@@ -1422,7 +1423,6 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			}
 			instance := candidate
 			instance.Label = instanceLabel(job, matrix, context)
-			instance.RunsOn = labels
 			instance.Queue = target.Queue
 			instance.Platform = target.Platform
 			instance.RuntimeImage = target.Image
