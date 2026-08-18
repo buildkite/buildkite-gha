@@ -136,6 +136,12 @@ type preparedInvocation struct {
 
 type remotePreparations map[string]*preparedInvocation
 
+func bindCompositeInvocationSteps(invocation *preparedInvocation, steps map[string]expression.StepStatus) {
+	if invocation != nil && invocation.isolated {
+		invocation.eval.Steps = steps
+	}
+}
+
 type remotePreparationStatus struct {
 	unsuccessful bool
 }
@@ -2084,6 +2090,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if invocation != nil && invocation.preFailure != nil {
 			invocation.eval = lifecycleEval
 			invocation.envOverlay = lifecycleEnvOverlay
+			bindCompositeInvocationSteps(invocation, eval.Steps)
 			return result, invocation.preFailure
 		}
 		if invocation == nil {
@@ -2190,16 +2197,17 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			if execution.conclusion != "success" {
 				runErr = errors.Join(runErr, childErr)
 			}
+			bindCompositeInvocationSteps(prepared[childInvocationID], eval.Steps)
 			continue
 		}
 		if !run {
 			if id != "" {
 				eval.Steps[id] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
 			}
-			if invocation := prepared[childInvocationID]; invocation != nil && invocation.isolated {
+			if invocation := prepared[childInvocationID]; invocation != nil {
 				// Pre hooks register posts before composite execution. If main is
 				// skipped, retain this composite's live final step scope for post-if.
-				invocation.eval.Steps = eval.Steps
+				bindCompositeInvocationSteps(invocation, eval.Steps)
 			}
 			continue
 		}
