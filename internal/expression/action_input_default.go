@@ -32,6 +32,9 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 		if isJobStatusReference(root, path) {
 			return nil
 		}
+		if isRunnerTempReference(root, path) {
+			return fmt.Errorf("action input defaults cannot reference runner.temp")
+		}
 		if isDirectRunnerDebug(node, root, path) {
 			return nil
 		}
@@ -76,6 +79,10 @@ func EvaluateActionInputDefault(template string, context Context) (string, error
 func isDirectRunnerDebug(node actionlint.ExprNode, root string, path []string) bool {
 	_, direct := node.(*actionlint.ObjectDerefNode)
 	return direct && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug")
+}
+
+func isRunnerTempReference(root string, path []string) bool {
+	return strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "temp")
 }
 
 // ActionInputDefaultRequiresGitHubToken reports whether a metadata default can
@@ -142,6 +149,9 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 				return nil, fmt.Errorf("expression references unavailable job.status")
 			}
 			return context.JobStatus, nil
+		}
+		if isRunnerTempReference(root, path) {
+			return nil, fmt.Errorf("action input defaults cannot reference runner.temp")
 		}
 		if strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug") {
 			return "false", nil

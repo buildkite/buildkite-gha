@@ -602,7 +602,7 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 
 func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 	switch {
-	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch")):
+	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") || strings.EqualFold(path[0], "temp")):
 		return runtimeReferenceRunner
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return runtimeReferenceServicePort

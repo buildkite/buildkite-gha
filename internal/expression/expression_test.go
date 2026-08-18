@@ -137,12 +137,21 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 }
 
 func TestRunnerDirectReferencesWorkAcrossRuntimeEvaluationSurfaces(t *testing.T) {
-	runner := map[string]string{"os": "macOS", "arch": "ARM64"}
+	runner := map[string]string{"os": "macOS", "arch": "ARM64", "temp": "/runner/temp"}
 	if got, err := Evaluate("${{ runner.os }}/${{ RUNNER.ARCH }}", Context{Runner: runner}); err != nil || got != "macOS/ARM64" {
 		t.Fatalf("Evaluate() = %q, %v", got, err)
 	}
+	if got, err := EvaluateStep("${{ runner.temp }}", Context{Runner: runner}); err != nil || got != "/runner/temp" {
+		t.Fatalf("EvaluateStep() runner.temp = %q, %v", got, err)
+	}
 	if got, err := EvaluateCondition("runner.os == 'macOS' && runner.arch == 'ARM64'", ConditionContext{Runner: runner}); err != nil || !got {
 		t.Fatalf("EvaluateCondition() = %v, %v", got, err)
+	}
+	if err := ValidateCondition("runner.temp != ''", StepCondition); err != nil {
+		t.Fatalf("ValidateCondition() step runner.temp = %v", err)
+	}
+	if err := ValidateCondition("runner.temp != ''", JobCondition); err == nil {
+		t.Fatal("ValidateCondition() accepted runner.temp before job setup")
 	}
 	if got, err := EvaluateActionInputDefault("${{ runner.os == 'macOS' && runner.arch || 'X64' }}", Context{Runner: runner}); err != nil || got != "ARM64" {
 		t.Fatalf("EvaluateActionInputDefault() = %q, %v", got, err)
@@ -168,10 +177,13 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
+	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
+	}
+	if _, err := EvaluateActionInputDefault("${{ runner.temp || '' }}", Context{Runner: map[string]string{"temp": "/runner/temp"}}); err == nil {
+		t.Fatal("EvaluateActionInputDefault() accepted runner.temp")
 	}
 }
 

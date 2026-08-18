@@ -610,6 +610,10 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}
 		}()
 	}
+	runnerContext["temp"] = runnerTemp
+	if r.jobContainer != nil {
+		runnerContext["temp"] = r.jobContainer.containerPath(runnerTemp)
+	}
 	runtimeEnv := standardEnvironment(job, workspace, runnerTemp, toolCache)
 	jobResult.Env = mergeStepEnvironment(runtimeEnv, jobEnv)
 	if r.jobContainer != nil && !explicitJobPATH {
