@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -225,6 +226,20 @@ func TestRunsOnPolicyFailsClosedWithLocatedDiagnostics(t *testing.T) {
 				t.Fatalf("CompileWithOptions() error = %v, want located %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestValidateEventRetainsResolvedRunsOnWhenRunnerPolicyRejectsIt(t *testing.T) {
+	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: macos-26\n    steps:\n      - run: true\n")
+	report, err := ValidateEventWithOptions("policy.yml", workflow, pushEvent(t), Options{
+		EventTrust: EventTrusted,
+		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
+	})
+	if err == nil {
+		t.Fatal("ValidateEventWithOptions() error = nil, want runner policy rejection")
+	}
+	if len(report.Jobs) != 1 || !slices.Equal(report.Jobs[0].RunsOn, []string{"macos-26"}) {
+		t.Fatalf("resolved runs-on = %#v", report.Jobs)
 	}
 }
 

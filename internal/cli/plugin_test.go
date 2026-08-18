@@ -44,6 +44,22 @@ func TestPluginTelemetryReportsUnprovenActionRuntime(t *testing.T) {
 
 	events := make(chan telemetry.Properties, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/github-actions/runners") {
+			var body struct {
+				Requirements []struct {
+					ID string `json:"id"`
+				} `json:"requirements"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode runner requirements: %v", err)
+			}
+			resolutions := make([]map[string]any, len(body.Requirements))
+			for i, requirement := range body.Requirements {
+				resolutions[i] = map[string]any{"id": requirement.ID, "error": map[string]string{"code": "unmapped_labels", "message": "No compatible runner is configured."}}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"resolutions": resolutions})
+			return
+		}
 		var received struct {
 			Properties telemetry.Properties `json:"properties"`
 		}
@@ -408,7 +424,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	requireImporterHost(t)
 	const fullCommit = "0123456789abcdef0123456789abcdef01234567"
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"mixed.yml": "on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  macos:\n    needs: linux\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n",
+		"mixed.yml": "on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  macos:\n    needs: linux\n    runs-on: macos-26\n    steps:\n      - run: echo macos\n",
 	})
 	t.Chdir(repository)
 	workflowPath := filepath.Join(".github", "workflows", "mixed.yml")
@@ -435,21 +451,55 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 		"workflow": workflowPath,
 		"runners": []map[string]any{
 			{"runs-on": "ubuntu-latest", "queue": "linux", "image": image},
-			{"runs-on": "macos-15", "queue": "macos"},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	resolutionRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resolutionRequests++
+		if r.URL.Path != "/v3/jobs/"+cliTestJobID+"/github-actions/runners" || r.Header.Get("Authorization") != "Token job-token" {
+			t.Errorf("runner resolution request = %s, authorization %q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		var body struct {
+			Requirements []struct {
+				ID       string `json:"id"`
+				Selector struct {
+					Labels []string `json:"labels"`
+				} `json:"selector"`
+			} `json:"requirements"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		resolutions := make([]map[string]any, len(body.Requirements))
+		for i, requirement := range body.Requirements {
+			if slices.Equal(requirement.Selector.Labels, []string{"macos-26"}) {
+				resolutions[i] = map[string]any{"id": requirement.ID, "target": map[string]string{"queue": "macos-26-medium", "platform": "darwin/arm64"}}
+			} else {
+				resolutions[i] = map[string]any{"id": requirement.ID, "error": map[string]string{"code": "unmapped_labels", "message": "No compatible runner is configured."}}
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"resolutions": resolutions})
+	}))
+	defer server.Close()
 	t.Setenv(pluginConfigurationEnvironment, string(configuration))
 	_ = linuxPath // The plugin's Linux runtime is always its running executable.
 	t.Setenv(pluginDevDarwinRuntimeEnvironment, darwinPath)
 	setCLIPluginBuildkiteEnvironment(t, "plugin-mixed")
 	t.Setenv("BUILDKITE_COMMIT", "HEAD")
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "true")
 	runner := &cliCaptureRunner{gitOutput: []byte(fullCommit + "\n")}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if resolutionRequests != 1 {
+		t.Fatalf("runner resolution requests = %d, want 1", resolutionRequests)
 	}
 	darwinDigest := transport.Digest(darwinContents)
 	planRuntimes := map[string]string{}
@@ -520,7 +570,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	if linux.Queue != "linux" || linux.Image != image || !strings.Contains(linux.Command, "--hosted-tool-cache") || !strings.Contains(linux.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
 		t.Fatalf("Linux pipeline step = %#v", linux)
 	}
-	if macos.Queue != "macos" || macos.Image != "" || strings.Contains(macos.Command, "--hosted-tool-cache") || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) {
+	if macos.Queue != "macos-26-medium" || macos.Image != "" || strings.Contains(macos.Command, "--hosted-tool-cache") || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) {
 		t.Fatalf("Darwin pipeline step = %#v", macos)
 	}
 }

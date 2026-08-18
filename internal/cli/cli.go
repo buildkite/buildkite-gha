@@ -247,15 +247,47 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		workflows[i].SkipReason = selection.SkipReason
 		workflows[i].AnnotationReason = selection.AnnotationReason
 	}
+	validations := make([]compiler.Report, len(workflows))
+	validationErrs := make([]error, len(workflows))
 	for i, input := range workflows {
 		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 			continue
 		}
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.StepKeyNamespace = input.StepKeyNamespace
-		validation, validationErr := compiler.ValidateEventWithOptions(input.Path, input.Source, effectiveEvent.Source, validationOptions)
-		processingReports[i] = compatibility.InitialProcessingReport(input.Path, hostedProfile, true, validation, validationErr)
-		if validationErr != nil {
+		validations[i], validationErrs[i] = compiler.ValidateEventWithOptions(input.Path, input.Source, effectiveEvent.Source, validationOptions)
+	}
+	suggestedTargets, err := suggestedRunnerTargets(ctx, validations)
+	if err != nil {
+		if ctx.Err() != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", ctx.Err())
+			return 1
+		}
+	}
+	if len(suggestedTargets) != 0 {
+		runnerTargets := make(map[string]compiler.RunnerTarget, len(uploadArguments.runnerTargets)+len(suggestedTargets))
+		for label, target := range uploadArguments.runnerTargets {
+			runnerTargets[label] = target
+		}
+		for label, target := range suggestedTargets {
+			runnerTargets[label] = target
+		}
+		uploadArguments.runnerTargets = runnerTargets
+		for i, input := range workflows {
+			if !input.Applicable || processingReportHasErrors(processingReports[i]) {
+				continue
+			}
+			validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
+			validationOptions.StepKeyNamespace = input.StepKeyNamespace
+			validations[i], validationErrs[i] = compiler.ValidateEventWithOptions(input.Path, input.Source, effectiveEvent.Source, validationOptions)
+		}
+	}
+	for i, input := range workflows {
+		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
+			continue
+		}
+		processingReports[i] = compatibility.InitialProcessingReport(input.Path, hostedProfile, true, validations[i], validationErrs[i])
+		if validationErrs[i] != nil {
 			processingReports[i].Result = "incompatible"
 		}
 	}
