@@ -1,14 +1,56 @@
 package cli
 
 import (
+	"context"
+	"errors"
+	"os"
 	"slices"
+	"time"
 
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 )
 
 const maxCommandTelemetryDiagnostics = 20
+
+func emitCommandTelemetry(command telemetry.Command, outcome telemetry.Outcome, version string, duration time.Duration, details telemetry.Details) {
+	client, err := telemetry.New(telemetry.Config{
+		Endpoint:      os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+		JobID:         os.Getenv("BUILDKITE_JOB_ID"),
+		JobToken:      os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+		ClientVersion: version,
+		Disabled:      os.Getenv("BUILDKITE_GHA_TELEMETRY_DISABLED") == "true",
+	})
+	if err != nil || client == nil {
+		return
+	}
+	_ = client.Emit(command, outcome, duration, details)
+}
+
+func telemetryOutcome(code int, conclusion string, contextErr error) telemetry.Outcome {
+	if code == 2 {
+		return telemetry.OutcomeUsageError
+	}
+	if code == buildkitepipeline.ContinueOnErrorExitStatus {
+		return telemetry.OutcomeToleratedFailure
+	}
+	switch conclusion {
+	case "cancelled":
+		return telemetry.OutcomeCancelled
+	}
+	if errors.Is(contextErr, context.Canceled) || errors.Is(contextErr, context.DeadlineExceeded) {
+		return telemetry.OutcomeCancelled
+	}
+	if code != 0 || conclusion == "failure" {
+		return telemetry.OutcomeFailure
+	}
+	if conclusion == "skipped" {
+		return telemetry.OutcomeSkipped
+	}
+	return telemetry.OutcomeSuccess
+}
 
 type commandTelemetryDetails struct {
 	failurePhase telemetry.FailurePhase
