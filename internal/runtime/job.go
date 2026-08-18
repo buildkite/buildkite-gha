@@ -131,9 +131,16 @@ type preparedInvocation struct {
 	envOverlay     map[string]string
 	isolated       bool
 	postRegistered bool
+	preFailure     error
 }
 
 type remotePreparations map[string]*preparedInvocation
+
+func bindCompositeInvocationSteps(invocation *preparedInvocation, steps map[string]expression.StepStatus) {
+	if invocation != nil && invocation.isolated {
+		invocation.eval.Steps = steps
+	}
+}
 
 type remotePreparationStatus struct {
 	unsuccessful bool
@@ -1756,24 +1763,28 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}, eval: invocationEval, isolated: !workflowStep}
 		prepared[invocationID] = invocation
 		if javascript.Pre != "" {
+			failPre := func(err error) (Result, error) {
+				invocation.preFailure = err
+				return result, err
+			}
 			stepEnv := map[string]string{}
 			if inheritedEvalErr == nil {
 				stepEnv, err = evaluate(step.Env, eval)
 				if err != nil {
-					return result, err
+					return failPre(err)
 				}
 				invocationEval.Env = mergeStringMaps(invocationEval.Env, stepEnv)
 			}
 			condition := lifecycleConditionContext(invocationEval, status.unsuccessful, ctx.Err() != nil)
 			runPre, err := expression.EvaluateActionLifecycleCondition(action.Runs.PreIf, condition)
 			if err != nil {
-				return result, fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err)
+				return failPre(fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err))
 			}
 			if !runPre {
 				return result, nil
 			}
 			if inheritedEvalErr != nil {
-				return result, inheritedEvalErr
+				return failPre(inheritedEvalErr)
 			}
 			eval.Env = mergeStringMaps(eval.Env, stepEnv)
 			phaseCtx := ctx
@@ -1781,23 +1792,23 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			if workflowStep {
 				resolvedStep, err := evaluateStepTimeout(step, eval)
 				if err != nil {
-					return result, fmt.Errorf("controls: %w", err)
+					return failPre(fmt.Errorf("controls: %w", err))
 				}
 				phaseCtx, cancelPhase = stepContext(ctx, resolvedStep.TimeoutMinutes)
 			} else if inheritedTimeout != nil {
 				phaseCtx, err = inheritedTimeout.context()
 				if err != nil {
-					return result, err
+					return failPre(err)
 				}
 			}
 			defer cancelPhase()
 			inputs, err := evaluate(step.With, eval)
 			if err != nil {
-				return result, err
+				return failPre(err)
 			}
 			inputs, err = resolveActionInputs(action, inputs, eval)
 			if err != nil {
-				return result, err
+				return failPre(err)
 			}
 			javascript.Inputs = inputs
 			javascript.Env = mergeStepEnvironment(jobEnv, stepEnv)
@@ -1806,13 +1817,13 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			invocation.envOverlay = mergeStringMaps(inheritedEnvOverlay, stepEnv)
 			node, err := r.discoverNode(phaseCtx, major, explicit)
 			if err != nil {
-				return result, err
+				return failPre(err)
 			}
 			invocation.node = node
 			posts.register(postForInvocation(invocation, action.Runs.PostIf))
 			invocation.postRegistered = true
 			if err := r.runJavaScriptPhase(phaseCtx, processor, workspace, node, javascript, javascript.Pre, nil, invocation.state, &result); err != nil {
-				return result, err
+				return failPre(err)
 			}
 		}
 		return result, nil
@@ -1850,6 +1861,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			child := plan.Step{ID: childStep.ID, Name: childStep.Name, Kind: "uses", Uses: childStep.Uses, With: childStep.With, Env: childStep.Env, Action: &plan.ActionSelector{Lock: selector.Lock}}
 			childProcessEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 			eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
+			wasUnsuccessful := status.unsuccessful
 			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, false, compositeEvalErr, preparationTimeout, lifecycleEnvOverlay)
 			mergeInto(result.Env, childResult.Env)
 			if childResult.pathBaseSet {
@@ -1861,8 +1873,17 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			mergeInto(result.State, childResult.State)
 			appendJobSummary(&result.Summary, &result.summaryTruncated, childResult.Summary, childResult.summaryTruncated)
 			if childErr != nil {
-				status.unsuccessful = true
-				err = errors.Join(err, fmt.Errorf("composite action step %d: %w", i+1, childErr))
+				classificationCtx := ctx
+				if preparationTimeout != nil && preparationTimeout.bounded != nil {
+					classificationCtx = preparationTimeout.bounded
+				}
+				execution := classifyStepExecution(classificationCtx, classificationCtx, plan.Step{ContinueOnError: childStep.ContinueOnError}, childResult, childErr)
+				if execution.conclusion != "success" {
+					status.unsuccessful = true
+					err = errors.Join(err, fmt.Errorf("composite action step %d: %w", i+1, childErr))
+				} else {
+					status.unsuccessful = wasUnsuccessful
+				}
 			}
 		}
 		return result, err
@@ -2070,6 +2091,12 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			// exposing workflow or sibling-composite steps.
 			lifecycleEval.Steps = eval.Steps
 		}
+		if invocation != nil && invocation.preFailure != nil {
+			invocation.eval = lifecycleEval
+			invocation.envOverlay = lifecycleEnvOverlay
+			bindCompositeInvocationSteps(invocation, eval.Steps)
+			return result, invocation.preFailure
+		}
 		if invocation == nil {
 			invocation = &preparedInvocation{action: javascript, state: state, node: node, eval: lifecycleEval, envOverlay: lifecycleEnvOverlay, isolated: isolated}
 		}
@@ -2159,6 +2186,18 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		// rebuilding the map so a child's declared env cannot leak to siblings.
 		eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
 		id := strings.ToLower(step.ID)
+		if invocation := prepared[childInvocationID]; invocation != nil && invocation.preFailure != nil {
+			childErr := invocation.preFailure
+			execution := classifyStepExecution(ctx, ctx, plan.Step{ContinueOnError: step.ContinueOnError}, newResult(), childErr)
+			if id != "" {
+				eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: map[string]string{}}
+			}
+			if execution.conclusion != "success" {
+				runErr = errors.Join(runErr, childErr)
+			}
+			bindCompositeInvocationSteps(invocation, eval.Steps)
+			continue
+		}
 		inputs := make(map[string]any, len(eval.Inputs))
 		for name, value := range eval.Inputs {
 			inputs[name] = value
@@ -2166,17 +2205,25 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, Steps: eval.Steps, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
 		run, err := expression.EvaluateCondition(step.If, condition)
 		if err != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d condition: %w", i+1, err))
+			childErr := fmt.Errorf("composite action step %d condition: %w", i+1, err)
+			execution := classifyStepExecution(ctx, ctx, plan.Step{ContinueOnError: step.ContinueOnError}, newResult(), childErr)
+			if id != "" {
+				eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: map[string]string{}}
+			}
+			if execution.conclusion != "success" {
+				runErr = errors.Join(runErr, childErr)
+			}
+			bindCompositeInvocationSteps(prepared[childInvocationID], eval.Steps)
 			continue
 		}
 		if !run {
 			if id != "" {
 				eval.Steps[id] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
 			}
-			if invocation := prepared[childInvocationID]; invocation != nil && invocation.isolated {
+			if invocation := prepared[childInvocationID]; invocation != nil {
 				// Pre hooks register posts before composite execution. If main is
 				// skipped, retain this composite's live final step scope for post-if.
-				invocation.eval.Steps = eval.Steps
+				bindCompositeInvocationSteps(invocation, eval.Steps)
 			}
 			continue
 		}
@@ -2235,14 +2282,11 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		result.Artifacts = append(result.Artifacts, stepResult.Artifacts...)
 		mergeInto(result.State, stepResult.State)
 		appendJobSummary(&result.Summary, &result.summaryTruncated, stepResult.Summary, stepResult.summaryTruncated)
+		execution := classifyStepExecution(ctx, ctx, plan.Step{ContinueOnError: step.ContinueOnError}, stepResult, childErr)
 		if id != "" {
-			outcome := "success"
-			if childErr != nil {
-				outcome = "failure"
-			}
-			eval.Steps[id] = expression.StepStatus{Outcome: outcome, Conclusion: outcome, Outputs: stepResult.Outputs}
+			eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: stepResult.Outputs}
 		}
-		if childErr != nil {
+		if execution.conclusion != "success" {
 			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d: %w", i+1, childErr))
 		}
 	}
