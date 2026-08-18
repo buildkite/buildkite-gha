@@ -1000,6 +1000,9 @@ permissions:
 jobs:
   direct:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps: [{run: true}]
@@ -1037,8 +1040,8 @@ jobs:
 			t.Fatalf("job %q id-token permission = %q, want %q", artifact.Job.Workflow.LogicalJobID, artifact.Job.IDTokenPermission, wantIDTokenPermission)
 		}
 	}
-	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS" {
-		t.Fatalf("warnings = %#v, want reusable workflow token warning", bundle.IR.Warnings)
+	if len(bundle.IR.Warnings) != 2 || bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS" || bundle.IR.Warnings[1].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" {
+		t.Fatalf("warnings = %#v, want reusable workflow and job permission warnings", bundle.IR.Warnings)
 	}
 }
 
@@ -1144,25 +1147,72 @@ func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
 	}
 }
 
-func TestCompileBundleJobPermissionsReplaceWorkflowPermissions(t *testing.T) {
-	source := []byte(`on: push
+func TestCompileBundleGitHubTokenIgnoresJobPermissions(t *testing.T) {
+	for _, test := range []struct {
+		name, jobPermissions, idToken string
+	}{
+		{name: "narrower", jobPermissions: "    permissions:\n      contents: read\n"},
+		{name: "broader", jobPermissions: "    permissions:\n      pull-requests: write\n"},
+		{name: "empty", jobPermissions: "    permissions: {}\n"},
+		{name: "none", jobPermissions: "    permissions:\n      contents: none\n"},
+		{name: "ID token", jobPermissions: "    permissions:\n      contents: read\n      id-token: write\n", idToken: "write"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := []byte(`on: push
 permissions:
-  contents: read
+  contents: write
 jobs:
   token:
     runs-on: ubuntu-latest
+` + test.jobPermissions + `    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps: [{run: true}]
+`)
+			bundle, err := CompileBundle(".github/workflows/workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := bundle.Plans[0].Job
+			if job.GitHubToken == nil || !reflect.DeepEqual(job.GitHubToken.Permissions, map[string]string{"contents": "write"}) {
+				t.Fatalf("GITHUB_TOKEN = %#v, want workflow permissions", job.GitHubToken)
+			}
+			if job.IDTokenPermission != test.idToken {
+				t.Fatalf("ID token permission = %q, want %q", job.IDTokenPermission, test.idToken)
+			}
+			if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" {
+				t.Fatalf("warnings = %#v, want ignored job permissions warning", bundle.IR.Warnings)
+			}
+		})
+	}
+}
+
+func TestCompileBundleGitHubTokenWarnsForIgnoredReusableCallPermissions(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  delegated:
     permissions:
-      pull-requests: write
+      contents: read
+      issues: write
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  token:
+    runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps: [{run: true}]
 `)
-	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := bundle.Plans[0].Job.GitHubToken.Permissions; !reflect.DeepEqual(got, map[string]string{"pull_requests": "write"}) {
-		t.Fatalf("effective job permissions = %#v", got)
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" || bundle.IR.Warnings[0].Line != 9 {
+		t.Fatalf("warnings = %#v, want ignored reusable call permissions warning", bundle.IR.Warnings)
 	}
 }
 

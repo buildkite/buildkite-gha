@@ -750,10 +750,10 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 	}
 }
 
-func TestPluginAdmissionFailurePrintsDiagnosticsBeforeSummaryAndAnnotatesDetails(t *testing.T) {
+func TestPluginIgnoresJobPermissionsForHostedGitHubToken(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"secret.yml": "name: Secret\non: push\njobs:\n  secret:\n    permissions:\n      contents: read\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets.GITHUB_TOKEN }}\n    steps: [{run: true}]\n",
+		"secret.yml": "name: Secret\non: push\npermissions:\n  contents: write\njobs:\n  secret:\n    permissions:\n      contents: read\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets.GITHUB_TOKEN }}\n    steps: [{run: true}]\n",
 	})
 	t.Chdir(repository)
 	configuration, err := json.Marshal(map[string]any{"workflow": ".github/workflows/secret.yml"})
@@ -761,38 +761,31 @@ func TestPluginAdmissionFailurePrintsDiagnosticsBeforeSummaryAndAnnotatesDetails
 		t.Fatal(err)
 	}
 	t.Setenv(pluginConfigurationEnvironment, string(configuration))
-	setCLIPluginBuildkiteEnvironment(t, "plugin-admission-failure")
+	setCLIPluginBuildkiteEnvironment(t, "plugin-job-permissions")
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 {
-		t.Fatalf("run() code = %d, want 1; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, want 0; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
 	}
-	output := stderr.String()
-	diagnostic := strings.Index(output, "x [E_PROFILE]")
-	summary := strings.Index(output, "Compilation: compilable. Admission: not-admitted.")
-	if !strings.HasPrefix(output, "^^^ +++\n") || diagnostic == -1 || summary <= diagnostic ||
-		!strings.Contains(output, "workflow=.github/workflows/secret.yml") ||
-		!strings.Contains(output, "stage=hosted-profile-admission") ||
-		!strings.Contains(output, "job=secret") {
-		t.Fatalf("plugin failure output = %q", output)
+	if !strings.Contains(stdout.String(), "Uploaded 1 job") {
+		t.Fatalf("stdout = %q", stdout.String())
 	}
-	for _, verbose := range []string{"Schema:", "- Workflow parsing:", "  job secret:"} {
-		if strings.Contains(output, verbose) {
-			t.Fatalf("plugin failure output contains verbose inventory %q: %q", verbose, output)
+	for path, contents := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
 		}
-	}
-	var annotation *cliCommand
-	for i := range runner.commands {
-		if len(runner.commands[i].args) != 0 && runner.commands[i].args[0] == "annotate" {
-			annotation = &runner.commands[i]
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatal(err)
 		}
+		if job.GitHubToken == nil || !reflect.DeepEqual(job.GitHubToken.Permissions, map[string]string{"contents": "write"}) {
+			t.Fatalf("GITHUB_TOKEN = %#v, want workflow permissions", job.GitHubToken)
+		}
+		return
 	}
-	if annotation == nil || !strings.Contains(string(annotation.stdin), "job-level permissions are unsupported") ||
-		!strings.Contains(string(annotation.stdin), `href="https://github.com/buildkite/buildkite-gha/blob/0123456789abcdef0123456789abcdef01234567/.github/workflows/secret.yml#L`) {
-		t.Fatalf("admission failure annotation = %#v", annotation)
-	}
+	t.Fatalf("uploaded artifacts = %#v, want job plan", runner.uploaded)
 }
 
 func TestPluginUploadsPluralWorkflowList(t *testing.T) {
@@ -3456,8 +3449,8 @@ func TestProcessingAnnotationLeadsWithTheActionableDiagnostic(t *testing.T) {
 		{
 			name: "token configuration",
 			diagnostic: compatibility.Diagnostic{Code: "E_PROFILE",
-				Message: `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported.`},
-			want: `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported.`,
+				Message: `Job "test" needs GITHUB_TOKEN, but its workflow path is unsupported.`},
+			want: `Job "test" needs GITHUB_TOKEN, but its workflow path is unsupported.`,
 		},
 		{
 			name: "Docker provenance",
@@ -3483,7 +3476,7 @@ func TestProcessingAnnotationLeadsWithTheActionableDiagnostic(t *testing.T) {
 }
 
 func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testing.T) {
-	const message = `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported. Move permissions to the workflow level.`
+	const message = `Job "test" needs GITHUB_TOKEN, but its workflow path is unsupported. Move the workflow under .github/workflows.`
 	const detail = `Effective permissions: contents: read.`
 	report := compatibility.NewProcessingReport("ci.yml", "hosted")
 	for _, instance := range []string{"gha-test-a", "gha-test-b"} {
@@ -3511,8 +3504,8 @@ func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testin
 	}
 	_, annotation := processingAnnotation(report, sourceLinkContext{})
 	if strings.Count(textOutput.String(), message) != 1 || strings.Count(textOutput.String(), "detail: "+detail) != 1 ||
-		strings.Count(annotation, `Job &#34;test&#34; needs GITHUB_TOKEN, but job-level permissions are unsupported.`) != 1 ||
-		strings.Count(annotation, `Move permissions to the workflow level.`) != 1 ||
+		strings.Count(annotation, `Job &#34;test&#34; needs GITHUB_TOKEN, but its workflow path is unsupported.`) != 1 ||
+		strings.Count(annotation, `Move the workflow under .github/workflows.`) != 1 ||
 		strings.Count(annotation, `<summary>Diagnostic detail</summary>`) != 1 || strings.Count(annotation, detail) != 1 {
 		t.Fatalf("text = %q; annotation = %q", textOutput.String(), annotation)
 	}
@@ -7168,22 +7161,6 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedWorkflowToken(t *testing.T)
 				t.Fatalf("validateUnprivilegedBundle() error = %v", err)
 			}
 		})
-	}
-}
-
-func TestGitHubTokenAdmissionDiagnosticSeparatesGuidanceFromDetail(t *testing.T) {
-	artifact := compiler.PlanArtifact{
-		Job: plan.Job{
-			Workflow:    plan.Workflow{LogicalJobID: "build"},
-			GitHubToken: &plan.GitHubToken{Workflow: "build.yml", Permissions: map[string]string{"contents": "read", "pull_requests": "write"}},
-		},
-		Authorization: compiler.PlanAuthorization{GitHubTokenActions: []string{"owner/action@v1"}},
-	}
-	wantMessage := `Job "build" needs GITHUB_TOKEN, but job-level permissions are unsupported for hosted GITHUB_TOKEN issuance. Move the permissions map to the workflow top level.`
-	wantDetail := `Cause: action "owner/action@v1" defaults an input to github.token. Effective permissions: contents: read, pull-requests: write.`
-	message, detail := githubTokenAdmissionDiagnostic(artifact, "GitHub workflow access tokens do not support job-level permissions")
-	if message != wantMessage || detail != wantDetail {
-		t.Fatalf("githubTokenAdmissionDiagnostic() = %q, %q", message, detail)
 	}
 }
 
