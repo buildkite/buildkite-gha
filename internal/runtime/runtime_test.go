@@ -5144,6 +5144,55 @@ if [ "$(basename "$(dirname "$1")")/$(basename "$1")" = child/pre.js ]; then sle
 	}
 }
 
+func TestNestedRemoteCompositePreSupportsCompoundStepFields(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: nested pre expressions\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "root/action.yml", `name: root
+inputs:
+  targets:
+    required: false
+  target:
+    required: false
+runs:
+  using: composite
+  steps:
+    - uses: owner/repo/child@v1
+      with:
+        message: ${{ inputs.targets || inputs.target || '' }}
+      env:
+        TARGETS: ${{ inputs.targets || inputs.target || '' }}
+`)
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\ninputs:\n  message:\n    required: false\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "child/pre.js", "")
+	writeFixtureFile(t, remote, "child/main.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+test -z "$INPUT_MESSAGE"
+test -z "$TARGETS"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	rootID, childID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
 func TestSkippedRemoteCompositeWithoutPreDoesNotEvaluateTimeout(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -6152,7 +6201,7 @@ runs:
 	}
 }
 
-func TestCompositeRunSupportsCompoundInputExpression(t *testing.T) {
+func TestCompositeStepSupportsCompoundInputExpression(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
@@ -6162,11 +6211,21 @@ inputs:
     required: false
   components:
     required: false
+  targets:
+    required: false
+  target:
+    required: false
 runs:
   using: composite
   steps:
     - shell: sh
-      run: echo "downgrade=${{contains(inputs.toolchain, 'nightly') && inputs.components && ' --allow-downgrade' || ''}}" > "$RESULT"
+      env:
+        targets: ${{ inputs.targets || inputs.target || '' }}
+        owner: ${{ github.repository_owner }}
+      run: |
+        echo "downgrade=${{contains(inputs.toolchain, 'nightly') && inputs.components && ' --allow-downgrade' || ''}}" > "$RESULT"
+        echo "targets=$targets" >> "$RESULT"
+        echo "owner=$owner" >> "$RESULT"
 `)
 	output := filepath.Join(workspace, "result")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
@@ -6176,6 +6235,7 @@ runs:
 		With: map[string]string{"toolchain": "nightly", "components": "rustfmt"},
 	}})
 	job.Env = map[string]string{"RESULT": output}
+	job.Event.Repository = "buildkite/buildkite-gha"
 
 	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
@@ -6185,8 +6245,8 @@ runs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(contents), "downgrade= --allow-downgrade\n"; got != want {
-		t.Fatalf("compound composite run expression = %q, want %q", got, want)
+	if got, want := string(contents), "downgrade= --allow-downgrade\ntargets=\nowner=buildkite\n"; got != want {
+		t.Fatalf("compound composite step expressions = %q, want %q", got, want)
 	}
 }
 

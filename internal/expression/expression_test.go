@@ -692,6 +692,19 @@ func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
 	}
 }
 
+func TestEvaluateStepSupportsGitHubEventIdentity(t *testing.T) {
+	context := Context{GitHub: map[string]any{
+		"repository_owner": "buildkite",
+		"ref_name":         "42/merge",
+		"ref_type":         "branch",
+		"base_ref":         "main",
+	}}
+	got, err := EvaluateStep("${{ github.repository_owner }}:${{ github.ref_name }}:${{ github.ref_type }}:${{ github.base_ref }}", context)
+	if err != nil || got != "buildkite:42/merge:branch:main" {
+		t.Fatalf("EvaluateStep() GitHub event identity = %q, %v", got, err)
+	}
+}
+
 func TestExpressionMapProjectionIsDeterministic(t *testing.T) {
 	context := Context{Matrix: map[string]any{"zed": "last", "alpha": "first", "middle": "second"}}
 	for range 100 {

@@ -1709,10 +1709,8 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProcessor, workspace string, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error, inheritedTimeout *remotePreparationTimeout, inheritedEnvOverlay map[string]string) (Result, error) {
 	result := newResult()
 	eval.JobStatus = jobStatusValue(status.unsuccessful, ctx.Err() != nil)
-	evaluate := evaluateMap
-	if workflowStep {
-		evaluate = evaluateStepMap
-	} else {
+	evaluate := evaluateStepMap
+	if !workflowStep {
 		eval.HashFiles = nil
 	}
 	source, err := actions.source(*step.Action)
@@ -2232,13 +2230,13 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		childJobEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 		childJobEnv["GITHUB_ACTION_PATH"] = actionPath
 		if step.Uses != "" {
-			// Composite metadata remains direct-reference-only. Resolve its child
-			// fields before entering workflow-authored action evaluation.
+			// Resolve composite child fields before entering workflow-authored
+			// action evaluation.
 			var childEnv map[string]string
-			childEnv, childErr = evaluateMap(step.Env, eval)
+			childEnv, childErr = evaluateStepMap(step.Env, eval)
 			var childWith map[string]string
 			if childErr == nil {
-				childWith, childErr = evaluateMap(step.With, eval)
+				childWith, childErr = evaluateStepMap(step.With, eval)
 			}
 			child := plan.Step{ID: step.ID, Name: step.Name, Kind: "uses", Uses: step.Uses, With: step.With, Env: step.Env}
 			if actionLock != nil {
@@ -2258,7 +2256,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			var script, dir string
 			var args []string
 			var env map[string]string
-			env, childErr = evaluateMap(step.Env, eval)
+			env, childErr = evaluateStepMap(step.Env, eval)
 			if childErr == nil {
 				script, childErr = expression.EvaluateStep(step.Run, eval)
 			}
