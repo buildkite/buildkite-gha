@@ -828,7 +828,7 @@ The token is not added to the initial job environment. Direct workflow-authored 
 
 ### Other secrets and OIDC
 
-**🟡 Supported subset.** Direct jobs can use statically named `${{ secrets.NAME }}` references. The compiler records names only in job plans. At runtime, the destination job runs `buildkite-agent secret get NAME` with its existing authenticated Agent session and registers each value with both the Buildkite Agent redactor and the local workflow-command redactor before use. Missing or denied secrets fail the job without printing the value or Agent error output. Secret values do not appear in plans or generated pipeline YAML.
+**🟡 Supported subset.** Direct jobs can use statically named `${{ secrets.NAME }}` references. The compiler records names only in job plans. At runtime, the destination job runs `buildkite-agent secret get NAME` with its existing authenticated Agent session and registers each value with both the Buildkite Agent redactor and the local workflow-command redactor before use. Missing or denied secrets fail the job without printing the value or Agent error output. The failed job includes an annotation with steps to create or migrate the secret and check its access policy. Secret values do not appear in plans or generated pipeline YAML.
 
 These are Buildkite secrets available to the destination job, not GitHub repository, environment, event, or fork-scoped secrets. Buildkite Secret access policies are the authorization boundary. A workflow can access any named secret that its destination job's Buildkite identity and secret policy permit, just as arbitrary code in that job can run `buildkite-agent secret get`.
 

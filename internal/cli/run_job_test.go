@@ -410,6 +410,56 @@ func TestRunJobDisabledWorkflowTokenLinksPipelineSettings(t *testing.T) {
 	}
 }
 
+func TestRunJobAnnotatesUnavailableBuildkiteSecretWithMigrationGuidance(t *testing.T) {
+	job := cliRunJobPlan()
+	job.RequiredCapabilities = []string{"secrets"}
+	job.RequiredSecrets = []string{"EXAMPLE_SECRET"}
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	agentPath := filepath.Join(t.TempDir(), "buildkite-agent")
+	if err := os.WriteFile(agentPath, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE_GHA_AGENT", agentPath)
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 {
+		t.Fatalf("run() code = %d, stderr = %q, want 1", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `resolve secret "EXAMPLE_SECRET": buildkite Agent secret request failed`) {
+		t.Fatalf("stderr = %q, want secret resolution failure", stderr.String())
+	}
+	var annotations []cliCommand
+	for _, command := range runner.commands {
+		if len(command.args) > 0 && command.args[0] == "annotate" {
+			annotations = append(annotations, command)
+		}
+	}
+	wantArgs := []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", secretResolutionAnnotationContext, "--style", "error"}
+	if len(annotations) != 1 || !slices.Equal(annotations[0].args, wantArgs) {
+		t.Fatalf("annotations = %#v, want one secret resolution annotation", annotations)
+	}
+	body := string(annotations[0].stdin)
+	for _, want := range []string{
+		"#### Missing secret",
+		"Buildkite secret <code>EXAMPLE_SECRET</code>",
+		`<a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets" target="_blank">Create or migrate the secret into Buildkite</a>`,
+		`<a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets/access-policies" target="_blank">grant this job access with its access policy</a>`,
+		"> ℹ️ GitHub does not expose an existing secret's value after creation",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("annotation = %q, want %q", body, want)
+		}
+	}
+	if strings.Contains(body, "Retry the job") {
+		t.Errorf("annotation = %q, does not want retry guidance", body)
+	}
+	if last := runner.commands[len(runner.commands)-1]; len(last.args) == 0 || last.args[0] != "annotate" {
+		t.Fatalf("last command = %#v, want guidance annotation after authoritative publication", last)
+	}
+}
+
 func TestRunJobPublishesWorkflowCommandsAsAdvisoryJobAnnotations(t *testing.T) {
 	diagnostics := "printf '%s\\n' '::warning title=Lint::warning body'; printf '%s\\n' '::error file=main.go,line=7::error body' >&2"
 	tests := []struct {
