@@ -1709,10 +1709,8 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProcessor, workspace string, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error, inheritedTimeout *remotePreparationTimeout, inheritedEnvOverlay map[string]string) (Result, error) {
 	result := newResult()
 	eval.JobStatus = jobStatusValue(status.unsuccessful, ctx.Err() != nil)
-	evaluate := evaluateMap
-	if workflowStep {
-		evaluate = evaluateStepMap
-	} else {
+	evaluate := evaluateStepMap
+	if !workflowStep {
 		eval.HashFiles = nil
 	}
 	source, err := actions.source(*step.Action)
