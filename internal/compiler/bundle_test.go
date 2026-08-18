@@ -990,6 +990,22 @@ func TestCompileBundleGitHubTokenUsesRestrictedDefaultPermissions(t *testing.T) 
 	}
 }
 
+func TestCompileBundleGitHubTokenExpandsTopLevelReadAllPermissions(t *testing.T) {
+	source := []byte("on: push\npermissions: read-all\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
+	bundle, err := CompileBundle(".github/workflows/workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"actions": "read", "artifact_metadata": "read", "attestations": "read", "checks": "read", "contents": "read",
+		"deployments": "read", "discussions": "read", "issues": "read", "packages": "read", "pages": "read",
+		"pull_requests": "read", "security_events": "read", "statuses": "read",
+	}
+	if token := bundle.Plans[0].Job.GitHubToken; token == nil || !reflect.DeepEqual(token.Permissions, want) {
+		t.Fatalf("read-all GitHub workflow token = %#v, want %#v", token, want)
+	}
+}
+
 func TestCompileBundleReusableWorkflowTokensUseRootPermissions(t *testing.T) {
 	repository := t.TempDir()
 	caller := writeWorkflow(t, repository, "caller.yml", `on: push
@@ -1039,6 +1055,25 @@ jobs:
 	}
 	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS" {
 		t.Fatalf("warnings = %#v, want reusable workflow token warning", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleReusableWorkflowTokensUseRootReadAllPermissions(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", "on: push\npermissions: read-all\njobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n")
+	writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\npermissions:\n  contents: read\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token := bundle.Plans[0].Job.GitHubToken; token == nil || len(token.Permissions) != 13 || token.Permissions["contents"] != "read" || token.Permissions["artifact_metadata"] != "read" {
+		t.Fatalf("reusable read-all GitHub workflow token = %#v", token)
+	}
+	for _, excluded := range []string{"id_token", "models", "repository_projects", "code_quality", "metadata", "vulnerability_alerts"} {
+		if _, ok := bundle.Plans[0].Job.GitHubToken.Permissions[excluded]; ok {
+			t.Errorf("reusable read-all token included excluded scope %q", excluded)
+		}
 	}
 }
 

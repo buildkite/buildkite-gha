@@ -3,6 +3,7 @@ package workflow
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -120,6 +121,26 @@ jobs:
 	}
 }
 
+func TestParseExpandsTopLevelReadAllPermissions(t *testing.T) {
+	parsed, err := Parse("permissions.yml", []byte("on: push\npermissions: read-all\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"actions": "read", "artifact-metadata": "read", "attestations": "read", "checks": "read", "contents": "read",
+		"deployments": "read", "discussions": "read", "issues": "read", "packages": "read", "pages": "read",
+		"pull-requests": "read", "security-events": "read", "statuses": "read",
+	}
+	if parsed.Permissions == nil || !reflect.DeepEqual(parsed.Permissions.Scopes, want) {
+		t.Fatalf("workflow permissions = %#v, want %#v", parsed.Permissions, want)
+	}
+	for _, excluded := range []string{"id-token", "models", "repository-projects", "code-quality", "metadata", "vulnerability-alerts"} {
+		if _, ok := parsed.Permissions.Scopes[excluded]; ok {
+			t.Errorf("read-all included excluded scope %q", excluded)
+		}
+	}
+}
+
 func TestParseAcceptsIDTokenPermissions(t *testing.T) {
 	for _, access := range []string{"read", "write", "none"} {
 		t.Run(access, func(t *testing.T) {
@@ -144,7 +165,6 @@ func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
 	for _, test := range []struct {
 		name, declaration, want string
 	}{
-		{name: "read all", declaration: "permissions: read-all\n", want: "permissions.yml:2:14: job \"permissions\": permission aliases are unsupported"},
 		{name: "write all", declaration: "permissions: write-all\n", want: "permissions.yml:2:14: job \"permissions\": permission aliases are unsupported"},
 		{name: "non-canonical name", declaration: "permissions:\n  pull_requests: write\n", want: "permissions.yml:3:3: job \"permissions\": unsupported permission \"pull_requests\""},
 	} {
@@ -153,6 +173,19 @@ func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
 			_, err := Parse("permissions.yml", source)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestParseRejectsJobPermissionAliases(t *testing.T) {
+	for _, alias := range []string{"read-all", "write-all"} {
+		t.Run(alias, func(t *testing.T) {
+			source := []byte("on: push\njobs:\n  test:\n    permissions: " + alias + "\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+			_, err := Parse("permissions.yml", source)
+			want := "permissions.yml:4:18: job \"permissions\": permission aliases are unsupported"
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("Parse() error = %v, want %q", err, want)
 			}
 		})
 	}

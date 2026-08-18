@@ -904,10 +904,22 @@ func TestValidateGitHubWorkflowAccessTokenPermissions(t *testing.T) {
 	if err := ValidateGitHubWorkflowAccessTokenPermissions(map[string]string{"contents": "read", "pull_requests": "write"}); err != nil {
 		t.Fatal(err)
 	}
+	readAll := map[string]string{
+		"actions": "read", "artifact_metadata": "read", "attestations": "read", "checks": "read", "contents": "read",
+		"deployments": "read", "discussions": "read", "issues": "read", "packages": "read", "pages": "read",
+		"pull_requests": "read", "security_events": "read", "statuses": "read",
+	}
+	if err := ValidateGitHubWorkflowAccessTokenPermissions(readAll); err != nil {
+		t.Fatalf("ValidateGitHubWorkflowAccessTokenPermissions(read-all) = %v", err)
+	}
 	for _, permissions := range []map[string]string{
 		nil,
 		{"models": "read"},
 		{"repository_projects": "read"},
+		{"id_token": "read"},
+		{"code_quality": "read"},
+		{"metadata": "read"},
+		{"vulnerability_alerts": "read"},
 		{"contents": "admin"},
 	} {
 		if err := ValidateGitHubWorkflowAccessTokenPermissions(permissions); err == nil {
