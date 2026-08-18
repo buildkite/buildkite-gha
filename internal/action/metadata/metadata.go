@@ -85,6 +85,7 @@ type CompositeStep struct {
 	Env              map[string]string `yaml:"env"`
 	If               string            `yaml:"if"`
 	With             map[string]string `yaml:"with"`
+	ContinueOnError  bool              `yaml:"continue-on-error"`
 }
 
 // Runtime identifies one supported action execution model.
