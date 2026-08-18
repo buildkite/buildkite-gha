@@ -1388,15 +1388,21 @@ func githubContext(job plan.Job) map[string]any {
 		"actor":            job.Event.Actor,
 		"event_name":       job.Event.Name,
 		"server_url":       plan.EventServerURL(job.Event.Provider),
+		"workflow":         workflowDisplayName(job),
+		"job":              job.Workflow.LogicalJobID,
 	}
+}
+
+func workflowDisplayName(job plan.Job) string {
+	if job.Workflow.Name != "" {
+		return job.Workflow.Name
+	}
+	return job.Workflow.Path
 }
 
 func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string) map[string]string {
 	runner, _ := canonicalRunnerContext(goruntime.GOOS, goruntime.GOARCH)
-	workflowName := job.Workflow.Name
-	if workflowName == "" {
-		workflowName = job.Workflow.Path
-	}
+	workflowName := workflowDisplayName(job)
 	env := map[string]string{
 		"CI":                "true",
 		"GITHUB_ACTIONS":    "true",
@@ -1845,6 +1851,14 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			defer preparationTimeout.close()
 		}
 		eval.Inputs = inputs
+		// github.action_path scopes to this composite invocation for child pre
+		// hooks too, mirroring the main-phase overlay in runCompositeMetadata.
+		contextActionPath := action.Path
+		if r.jobContainer != nil {
+			contextActionPath = r.jobContainer.containerPath(action.Path)
+		}
+		eval.GitHub = cloneAnyMap(eval.GitHub)
+		eval.GitHub["action_path"] = contextActionPath
 		compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
 		compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
 		lifecycleEnvOverlay := mergeStringMaps(inheritedEnvOverlay, stepEnv)
@@ -2168,6 +2182,15 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 	eval.Steps = make(map[string]expression.StepStatus)
 	compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
 	compositeProcessEnv["GITHUB_ACTION_PATH"] = actionPath
+	// github.action_path is scoped to this composite invocation; nested
+	// composites overlay their own path on entry. Job-container executions
+	// interpolate the mounted path because the script runs in the container.
+	contextActionPath := actionPath
+	if r.jobContainer != nil {
+		contextActionPath = r.jobContainer.containerPath(actionPath)
+	}
+	eval.GitHub = cloneAnyMap(eval.GitHub)
+	eval.GitHub["action_path"] = contextActionPath
 	compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
 	inheritedFailure := eval.JobStatus == "failure"
 	inheritedCancelled := eval.JobStatus == "cancelled"
