@@ -2213,7 +2213,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			var env map[string]string
 			env, childErr = evaluateMap(step.Env, eval)
 			if childErr == nil {
-				script, childErr = expression.Evaluate(step.Run, eval)
+				script, childErr = expression.EvaluateStep(step.Run, eval)
 			}
 			if childErr == nil {
 				dir, childErr = workspacePath(workspace, step.WorkingDirectory)
