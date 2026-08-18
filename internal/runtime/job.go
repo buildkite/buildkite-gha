@@ -1951,7 +1951,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if err != nil {
 			return result, err
 		}
-		dir, err := workspacePath(workspace, workingDirectory)
+		dir, err := stepWorkingDirectory(workspace, workingDirectory)
 		if err != nil {
 			return result, err
 		}
@@ -2288,7 +2288,11 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 				script, childErr = expression.EvaluateStep(step.Run, eval)
 			}
 			if childErr == nil {
-				dir, childErr = workspacePath(workspace, step.WorkingDirectory)
+				var workingDirectory string
+				workingDirectory, childErr = expression.EvaluateStep(step.WorkingDirectory, eval)
+				if childErr == nil {
+					dir, childErr = stepWorkingDirectory(workspace, workingDirectory)
+				}
 			}
 			if childErr == nil {
 				args, childErr = shellCommand(step.Shell, script)
@@ -2453,6 +2457,20 @@ func shellCommand(shell, script string) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("shell %q is unsupported in the supported runtime subset", shell)
 	}
+}
+
+// stepWorkingDirectory resolves a run step's working directory and requires it
+// to exist. Failing here names the directory instead of surfacing the child
+// process's chdir failure as a misleading "fork/exec <shell>" error.
+func stepWorkingDirectory(root, path string) (string, error) {
+	resolved, err := workspacePath(root, path)
+	if err != nil {
+		return "", err
+	}
+	if info, statErr := os.Stat(resolved); statErr != nil || !info.IsDir() {
+		return "", fmt.Errorf("working directory %q does not exist in the workspace", path)
+	}
+	return resolved, nil
 }
 
 func workspacePath(root, path string) (string, error) {

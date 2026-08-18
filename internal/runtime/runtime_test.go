@@ -5019,6 +5019,46 @@ runs:
 	}
 }
 
+func TestCompositeStepWorkingDirectoryEvaluatesExpressions(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", `name: Working-directory composite
+inputs:
+  dir:
+    required: false
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      working-directory: ${{ inputs.dir || '.' }}
+      run: test "$(basename "$PWD")" = sub
+    - shell: bash
+      working-directory: literal-dir
+      run: test "$(basename "$PWD")" = literal-dir
+`)
+	for _, directory := range []string{"sub", "literal-dir"} {
+		if err := os.Mkdir(filepath.Join(workspace, directory), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", With: map[string]string{"dir": "sub"}}})
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestRunStepMissingWorkingDirectoryFailsClearly(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Shell: "sh", Command: "true", WorkingDirectory: "missing"}})
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), `working directory "missing" does not exist`) {
+		t.Fatalf("RunJob() error = %v, want missing working directory diagnostic", err)
+	}
+}
+
 func TestNestedCompositeEvaluatesEnvironmentOnceAndIsolatesStepScopes(t *testing.T) {
 	workspace := canonicalTempDir(t)
 	workflowPath := ".github/workflows/test.yml"
