@@ -424,7 +424,7 @@ func publishSecretResolutionAnnotation(agent transport.Agent, jobID string, runE
 	if !errors.As(runErr, &secretError) {
 		return nil
 	}
-	body := fmt.Sprintf(`## Missing secret
+	body := fmt.Sprintf(`#### Missing secret
 
 This job could not retrieve the Buildkite secret %s.
 

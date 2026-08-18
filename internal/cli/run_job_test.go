@@ -442,7 +442,7 @@ func TestRunJobAnnotatesUnavailableBuildkiteSecretWithMigrationGuidance(t *testi
 	}
 	body := string(annotations[0].stdin)
 	for _, want := range []string{
-		"## Missing secret",
+		"#### Missing secret",
 		"Buildkite secret <code>EXAMPLE_SECRET</code>",
 		`<a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets" target="_blank">Create or migrate the secret into Buildkite</a>`,
 		`<a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets/access-policies" target="_blank">grant this job access with its access policy</a>`,
