@@ -5108,7 +5108,7 @@ func TestExpressionTimeoutBoundsNestedCompositePre(t *testing.T) {
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: nested pre timeout\n")
 	remote := t.TempDir()
-	writeFixtureFile(t, remote, "root/action.yml", "name: root\nruns:\n  using: composite\n  steps:\n    - uses: "+remoteLifecycleUses("child")+"\n")
+	writeFixtureFile(t, remote, "root/action.yml", "name: root\nruns:\n  using: composite\n  steps:\n    - uses: "+remoteLifecycleUses("child")+"\n      continue-on-error: true\n")
 	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
 	writeFixtureFile(t, remote, "child/pre.js", "")
 	writeFixtureFile(t, remote, "child/main.js", "")
@@ -5676,7 +5676,7 @@ func TestRemoteCompositeSoftPreFailurePreservesSuccessForLaterPre(t *testing.T) 
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: softened composite pre failure\n")
 	remote := t.TempDir()
-	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\noutputs:\n  status:\n    value: ${{ steps.child.outcome }}-${{ steps.child.conclusion }}\nruns:\n  using: composite\n  steps:\n    - id: child\n      uses: owner/repo/child@v1\n      continue-on-error: true\n    - id: finalize\n      shell: sh\n      run: touch \"$COMPOSITE_MARKER\"\n")
+	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\noutputs:\n  status:\n    value: ${{ steps.child.outcome }}-${{ steps.child.conclusion }}\nruns:\n  using: composite\n  steps:\n    - id: child\n      if: false\n      uses: owner/repo/child@v1\n      continue-on-error: true\n    - id: finalize\n      shell: sh\n      run: touch \"$COMPOSITE_MARKER\"\n")
 	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n  post-if: steps.finalize.conclusion == 'success'\n")
 	writeFixtureFile(t, remote, "child/pre.js", "")
 	writeFixtureFile(t, remote, "child/main.js", "")

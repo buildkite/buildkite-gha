@@ -1873,7 +1873,11 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			mergeInto(result.State, childResult.State)
 			appendJobSummary(&result.Summary, &result.summaryTruncated, childResult.Summary, childResult.summaryTruncated)
 			if childErr != nil {
-				execution := classifyStepExecution(ctx, ctx, plan.Step{ContinueOnError: childStep.ContinueOnError}, childResult, childErr)
+				classificationCtx := ctx
+				if preparationTimeout != nil && preparationTimeout.bounded != nil {
+					classificationCtx = preparationTimeout.bounded
+				}
+				execution := classifyStepExecution(classificationCtx, classificationCtx, plan.Step{ContinueOnError: childStep.ContinueOnError}, childResult, childErr)
 				if execution.conclusion != "success" {
 					status.unsuccessful = true
 					err = errors.Join(err, fmt.Errorf("composite action step %d: %w", i+1, childErr))
@@ -2182,6 +2186,18 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		// rebuilding the map so a child's declared env cannot leak to siblings.
 		eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
 		id := strings.ToLower(step.ID)
+		if invocation := prepared[childInvocationID]; invocation != nil && invocation.preFailure != nil {
+			childErr := invocation.preFailure
+			execution := classifyStepExecution(ctx, ctx, plan.Step{ContinueOnError: step.ContinueOnError}, newResult(), childErr)
+			if id != "" {
+				eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: map[string]string{}}
+			}
+			if execution.conclusion != "success" {
+				runErr = errors.Join(runErr, childErr)
+			}
+			bindCompositeInvocationSteps(invocation, eval.Steps)
+			continue
+		}
 		inputs := make(map[string]any, len(eval.Inputs))
 		for name, value := range eval.Inputs {
 			inputs[name] = value
