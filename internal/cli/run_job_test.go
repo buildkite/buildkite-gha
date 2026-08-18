@@ -443,13 +443,16 @@ func TestRunJobAnnotatesUnavailableBuildkiteSecretWithMigrationGuidance(t *testi
 	body := string(annotations[0].stdin)
 	for _, want := range []string{
 		"Buildkite secret <code>EXAMPLE_SECRET</code> is unavailable",
-		"Create or migrate the secret into Buildkite",
-		"grant this job access with its access policy",
-		"GitHub does not expose an existing secret's value after creation",
+		`<a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets" target="_blank">Create or migrate the secret into Buildkite</a>`,
+		`<a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets/access-policies" target="_blank">grant this job access with its access policy</a>`,
+		"> ℹ️ GitHub does not expose an existing secret's value after creation",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("annotation = %q, want %q", body, want)
 		}
+	}
+	if strings.Contains(body, "Retry the job") {
+		t.Errorf("annotation = %q, does not want retry guidance", body)
 	}
 	if last := runner.commands[len(runner.commands)-1]; len(last.args) == 0 || last.args[0] != "annotate" {
 		t.Fatalf("last command = %#v, want guidance annotation after authoritative publication", last)

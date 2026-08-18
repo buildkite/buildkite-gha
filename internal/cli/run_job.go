@@ -428,11 +428,10 @@ func publishSecretResolutionAnnotation(agent transport.Agent, jobID string, runE
 
 This job could not retrieve the Buildkite secret %s.
 
-1. [Create or migrate the secret into Buildkite](https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets).
-1. If the secret already exists, [grant this job access with its access policy](https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets/access-policies).
-1. Retry the job.
+1. <a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets" target="_blank">Create or migrate the secret into Buildkite</a>.
+1. If the secret already exists, <a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets/access-policies" target="_blank">grant this job access with its access policy</a>.
 
-GitHub does not expose an existing secret's value after creation. Copy or rotate the value manually. GitHub repository and environment secrets are not available directly to this job.
+> ℹ️ GitHub does not expose an existing secret's value after creation. Copy or rotate the value manually. GitHub repository and environment secrets are not available directly to this job.
 `, annotationCode(secretError.Name), annotationCode(secretError.Name))
 	ctx, cancel := context.WithTimeout(context.Background(), resultPublicationTimeout)
 	defer cancel()
