@@ -6152,7 +6152,7 @@ runs:
 	}
 }
 
-func TestCompositeRunSupportsCompoundInputExpression(t *testing.T) {
+func TestCompositeStepSupportsCompoundInputExpression(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
@@ -6162,11 +6162,19 @@ inputs:
     required: false
   components:
     required: false
+  targets:
+    required: false
+  target:
+    required: false
 runs:
   using: composite
   steps:
     - shell: sh
-      run: echo "downgrade=${{contains(inputs.toolchain, 'nightly') && inputs.components && ' --allow-downgrade' || ''}}" > "$RESULT"
+      env:
+        targets: ${{ inputs.targets || inputs.target || '' }}
+      run: |
+        echo "downgrade=${{contains(inputs.toolchain, 'nightly') && inputs.components && ' --allow-downgrade' || ''}}" > "$RESULT"
+        echo "targets=$targets" >> "$RESULT"
 `)
 	output := filepath.Join(workspace, "result")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
@@ -6185,8 +6193,8 @@ runs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(contents), "downgrade= --allow-downgrade\n"; got != want {
-		t.Fatalf("compound composite run expression = %q, want %q", got, want)
+	if got, want := string(contents), "downgrade= --allow-downgrade\ntargets=\n"; got != want {
+		t.Fatalf("compound composite step expressions = %q, want %q", got, want)
 	}
 }
 
