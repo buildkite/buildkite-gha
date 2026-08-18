@@ -557,6 +557,7 @@ Conditions support computed object indexes, numeric array indexes, whole `matrix
 | --- | --- | --- |
 | `github.actor`, `github.base_ref`, `github.event_name`, `github.head_ref`, `github.ref`, `github.ref_name`, `github.ref_type`, `github.repository`, `github.repository_owner`, `github.sha` | ✅ Yes | ✅ Yes |
 | `runner.os`, `runner.arch` | ✅ Yes | ✅ Yes |
+| `runner.temp` | ❌ No | ✅ Yes |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
 | `vars.<name>`, `matrix.<name>` | ✅ Yes | ✅ Yes |
 | `inputs.<name>` and computed input indexes | ✅ Yes | ✅ Yes |
@@ -588,11 +589,13 @@ Expression-valued `continue-on-error` must produce a Boolean. Expression-valued 
 
 Direct `github.token` references are step-only. Whole, filtered, or dynamically indexed `github` access fails closed because the compiler cannot prove token authority.
 
-The only runner references are `runner.os` and `runner.arch`. They resolve to
-`Linux`/`X64` or `macOS`/`ARM64`. Other runner fields and compile-time positions
-that require runner identity are unsupported. Action metadata input defaults
-may also use direct `runner.debug`, which resolves to the string `false` because
-Buildkite has no equivalent step-debug mode.
+`runner.os` and `runner.arch` resolve to `Linux`/`X64` or `macOS`/`ARM64`.
+After runner setup, step runtime fields and job outputs can also use
+`runner.temp`, which resolves to the canonical temporary directory exposed as
+`RUNNER_TEMP`. Other runner fields and compile-time positions that require
+runner identity are unsupported. Action metadata input defaults may also use
+direct `runner.debug`, which resolves to the string `false` because Buildkite
+has no equivalent step-debug mode.
 
 A runtime interpolation can read a verified upstream output directly:
 

@@ -239,10 +239,18 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 	}
 	switch strings.ToLower(root) {
 	case "runner":
-		if len(path) == 1 && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch")) {
-			return nil
+		if len(path) == 1 {
+			if strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") {
+				return nil
+			}
+			if strings.EqualFold(path[0], "temp") && scope != JobCondition && scope != CallCondition {
+				return nil
+			}
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected runner.os or runner.arch", reference)
+		if scope == JobCondition {
+			return fmt.Errorf("condition reference %q is unsupported; expected runner.os or runner.arch", reference)
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, or runner.temp", reference)
 	case "github":
 		if len(path) == 1 {
 			switch strings.ToLower(path[0]) {

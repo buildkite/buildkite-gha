@@ -6322,6 +6322,7 @@ runs:
         targets: ${{ inputs.targets || inputs.target || '' }}
         owner: ${{ github.repository_owner }}
       run: |
+        test "${{ runner.temp }}" = "$RUNNER_TEMP"
         echo "downgrade=${{contains(inputs.toolchain, 'nightly') && inputs.components && ' --allow-downgrade' || ''}}" > "$RESULT"
         echo "targets=$targets" >> "$RESULT"
         echo "owner=$owner" >> "$RESULT"
