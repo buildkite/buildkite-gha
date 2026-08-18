@@ -173,7 +173,7 @@ func hostedOptions(groupLabel string, configuredTargets map[string]compiler.Runn
 
 // hostedRunnerTargets is the runner preset shared by hosted validation and
 // production upload. RunnerPolicy resolves these labels case-insensitively.
-// Keep version-specific and organization-provided targets out of this preset.
+// Keep API-resolved and organization-provided targets out of this preset.
 func hostedRunnerTargets() map[string]compiler.RunnerTarget {
 	return map[string]compiler.RunnerTarget{
 		"ubuntu-latest": {Platform: compiler.PlatformLinuxAMD64, Image: defaultNobleRunnerImage},
@@ -505,7 +505,7 @@ func supportedRunnerTarget(label string) (string, compiler.Platform, error) {
 	}
 	switch canonical {
 	case "macos-15", "macos-14":
-		// Version-specific macOS labels require an organization-provided queue.
+		// These remain available as local fallbacks when the Agent API is absent.
 		return canonical, compiler.PlatformDarwinARM64, nil
 	default:
 		return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q", label)
