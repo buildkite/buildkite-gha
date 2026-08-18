@@ -5676,16 +5676,18 @@ func TestRemoteCompositeSoftPreFailurePreservesSuccessForLaterPre(t *testing.T) 
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: softened composite pre failure\n")
 	remote := t.TempDir()
-	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\noutputs:\n  status:\n    value: ${{ steps.child.outcome }}-${{ steps.child.conclusion }}\nruns:\n  using: composite\n  steps:\n    - id: child\n      uses: owner/repo/child@v1\n      continue-on-error: true\n    - shell: sh\n      run: touch \"$COMPOSITE_MARKER\"\n")
-	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\noutputs:\n  status:\n    value: ${{ steps.child.outcome }}-${{ steps.child.conclusion }}\nruns:\n  using: composite\n  steps:\n    - id: child\n      uses: owner/repo/child@v1\n      continue-on-error: true\n    - id: finalize\n      shell: sh\n      run: touch \"$COMPOSITE_MARKER\"\n")
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n  post-if: steps.finalize.conclusion == 'success'\n")
 	writeFixtureFile(t, remote, "child/pre.js", "")
 	writeFixtureFile(t, remote, "child/main.js", "")
+	writeFixtureFile(t, remote, "child/post.js", "")
 	writeFixtureFile(t, remote, "after/action.yml", "name: after\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: success()\n  main: main.js\n")
 	writeFixtureFile(t, remote, "after/pre.js", "")
 	writeFixtureFile(t, remote, "after/main.js", "")
 	marker := filepath.Join(workspace, "observed")
 	compositeMarker := filepath.Join(workspace, "composite-observed")
 	childMainMarker := filepath.Join(workspace, "child-main-observed")
+	childPostMarker := filepath.Join(workspace, "child-post-observed")
 	fakeNode := filepath.Join(workspace, "node24")
 	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
 set -eu
@@ -5694,6 +5696,7 @@ action=$(basename "$(dirname "$1")")
 phase=$(basename "$1" .js)
 if [ "$action:$phase" = child:pre ]; then exit 7; fi
 if [ "$action:$phase" = child:main ]; then touch "$CHILD_MAIN_MARKER"; fi
+if [ "$action:$phase" = child:post ]; then touch "$CHILD_POST_MARKER"; fi
 if [ "$action:$phase" = after:pre ]; then touch "$MARKER"; fi
 `)
 	if err := os.Chmod(fakeNode, 0o700); err != nil {
@@ -5707,7 +5710,7 @@ if [ "$action:$phase" = after:pre ]; then touch "$MARKER"; fi
 	})
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
-	job.Env = map[string]string{"MARKER": marker, "COMPOSITE_MARKER": compositeMarker, "CHILD_MAIN_MARKER": childMainMarker}
+	job.Env = map[string]string{"MARKER": marker, "COMPOSITE_MARKER": compositeMarker, "CHILD_MAIN_MARKER": childMainMarker, "CHILD_POST_MARKER": childPostMarker}
 	job.Outputs = map[string]string{"status": "${{ steps.parent.outputs.status }}"}
 	job.Actions = []plan.ActionLock{
 		remoteLifecycleLock(parentID, "parent", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
@@ -5730,6 +5733,101 @@ if [ "$action:$phase" = after:pre ]; then touch "$MARKER"; fi
 	}
 	if _, err := os.Stat(childMainMarker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("child main ran after its pre failed: %v", err)
+	}
+	if _, err := os.Stat(childPostMarker); err != nil {
+		t.Fatalf("child post did not see the final composite step status: %v", err)
+	}
+}
+
+func TestRemoteCompositeSoftPreIfFailureSkipsMain(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: softened composite pre-if failure\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: owner/repo/child@v1\n      continue-on-error: true\n    - shell: sh\n      run: touch \"$LATER_STEP_MARKER\"\n")
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: runner.debug == 'true'\n  main: main.js\n")
+	writeFixtureFile(t, remote, "child/pre.js", "")
+	writeFixtureFile(t, remote, "child/main.js", "")
+	laterStepMarker := filepath.Join(workspace, "later-step-observed")
+	childMainMarker := filepath.Join(workspace, "child-main-observed")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+if [ "$action:$phase" = child:main ]; then touch "$CHILD_MAIN_MARKER"; fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	parentID, childID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "parent", Kind: "uses", Uses: remoteLifecycleUses("parent"), Action: &plan.ActionSelector{Lock: parentID}}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"LATER_STEP_MARKER": laterStepMarker, "CHILD_MAIN_MARKER": childMainMarker}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(parentID, "parent", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(laterStepMarker); err != nil {
+		t.Fatalf("later composite step did not run: %v", err)
+	}
+	if _, err := os.Stat(childMainMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("child main ran after its pre-if failed: %v", err)
+	}
+}
+
+func TestRemoteCompositeSoftNestedPreparationFailurePreservesSuccessForLaterPre(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: softened nested composite preparation failure\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: owner/repo/nested@v1\n      continue-on-error: true\n    - uses: owner/repo/after@v1\n")
+	writeFixtureFile(t, remote, "nested/action.yml", "name: nested\nruns:\n  using: composite\n  steps:\n    - uses: owner/repo/child@v1\n")
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "after/action.yml", "name: after\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: success()\n  main: main.js\n")
+	for _, path := range []string{"child/pre.js", "child/main.js", "after/pre.js", "after/main.js"} {
+		writeFixtureFile(t, remote, path, "")
+	}
+	marker := filepath.Join(workspace, "later-pre-observed")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+if [ "$action:$phase" = child:pre ]; then exit 7; fi
+if [ "$action:$phase" = after:pre ]; then touch "$MARKER"; fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	parentID, nestedID, childID, afterID := remoteLifecycleLockID(1), remoteLifecycleLockID(2), remoteLifecycleLockID(3), remoteLifecycleLockID(4)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "parent", Kind: "uses", Uses: remoteLifecycleUses("parent"), Action: &plan.ActionSelector{Lock: parentID}}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"MARKER": marker}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(parentID, "parent", digest, map[string]plan.ActionSelector{remoteLifecycleUses("nested"): {Lock: nestedID}, remoteLifecycleUses("after"): {Lock: afterID}}),
+		remoteLifecycleLock(nestedID, "nested", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+		remoteLifecycleLock(afterID, "after", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("later pre-if: success() did not run: %v", err)
 	}
 }
 

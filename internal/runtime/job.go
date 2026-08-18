@@ -1757,24 +1757,28 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}, eval: invocationEval, isolated: !workflowStep}
 		prepared[invocationID] = invocation
 		if javascript.Pre != "" {
+			failPre := func(err error) (Result, error) {
+				invocation.preFailure = err
+				return result, err
+			}
 			stepEnv := map[string]string{}
 			if inheritedEvalErr == nil {
 				stepEnv, err = evaluate(step.Env, eval)
 				if err != nil {
-					return result, err
+					return failPre(err)
 				}
 				invocationEval.Env = mergeStringMaps(invocationEval.Env, stepEnv)
 			}
 			condition := lifecycleConditionContext(invocationEval, status.unsuccessful, ctx.Err() != nil)
 			runPre, err := expression.EvaluateActionLifecycleCondition(action.Runs.PreIf, condition)
 			if err != nil {
-				return result, fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err)
+				return failPre(fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err))
 			}
 			if !runPre {
 				return result, nil
 			}
 			if inheritedEvalErr != nil {
-				return result, inheritedEvalErr
+				return failPre(inheritedEvalErr)
 			}
 			eval.Env = mergeStringMaps(eval.Env, stepEnv)
 			phaseCtx := ctx
@@ -1782,23 +1786,23 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			if workflowStep {
 				resolvedStep, err := evaluateStepTimeout(step, eval)
 				if err != nil {
-					return result, fmt.Errorf("controls: %w", err)
+					return failPre(fmt.Errorf("controls: %w", err))
 				}
 				phaseCtx, cancelPhase = stepContext(ctx, resolvedStep.TimeoutMinutes)
 			} else if inheritedTimeout != nil {
 				phaseCtx, err = inheritedTimeout.context()
 				if err != nil {
-					return result, err
+					return failPre(err)
 				}
 			}
 			defer cancelPhase()
 			inputs, err := evaluate(step.With, eval)
 			if err != nil {
-				return result, err
+				return failPre(err)
 			}
 			inputs, err = resolveActionInputs(action, inputs, eval)
 			if err != nil {
-				return result, err
+				return failPre(err)
 			}
 			javascript.Inputs = inputs
 			javascript.Env = mergeStepEnvironment(jobEnv, stepEnv)
@@ -1807,14 +1811,13 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			invocation.envOverlay = mergeStringMaps(inheritedEnvOverlay, stepEnv)
 			node, err := r.discoverNode(phaseCtx, major, explicit)
 			if err != nil {
-				return result, err
+				return failPre(err)
 			}
 			invocation.node = node
 			posts.register(postForInvocation(invocation, action.Runs.PostIf))
 			invocation.postRegistered = true
 			if err := r.runJavaScriptPhase(phaseCtx, processor, workspace, node, javascript, javascript.Pre, nil, invocation.state, &result); err != nil {
-				invocation.preFailure = err
-				return result, err
+				return failPre(err)
 			}
 		}
 		return result, nil
@@ -1852,6 +1855,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			child := plan.Step{ID: childStep.ID, Name: childStep.Name, Kind: "uses", Uses: childStep.Uses, With: childStep.With, Env: childStep.Env, Action: &plan.ActionSelector{Lock: selector.Lock}}
 			childProcessEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 			eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
+			wasUnsuccessful := status.unsuccessful
 			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, false, compositeEvalErr, preparationTimeout, lifecycleEnvOverlay)
 			mergeInto(result.Env, childResult.Env)
 			if childResult.pathBaseSet {
@@ -1867,6 +1871,8 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 				if execution.conclusion != "success" {
 					status.unsuccessful = true
 					err = errors.Join(err, fmt.Errorf("composite action step %d: %w", i+1, childErr))
+				} else {
+					status.unsuccessful = wasUnsuccessful
 				}
 			}
 		}
@@ -2061,9 +2067,6 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			javascript.Inputs = inputs
 			javascript.Env = environment.process()
 			invocation.action = javascript
-			if invocation.preFailure != nil {
-				return result, invocation.preFailure
-			}
 		}
 		lifecycleEval := cloneExpressionContext(eval)
 		bindHashFilesContext(ctx, &lifecycleEval)
@@ -2077,6 +2080,11 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			// map. Retain that map so post-if sees its final state without
 			// exposing workflow or sibling-composite steps.
 			lifecycleEval.Steps = eval.Steps
+		}
+		if invocation != nil && invocation.preFailure != nil {
+			invocation.eval = lifecycleEval
+			invocation.envOverlay = lifecycleEnvOverlay
+			return result, invocation.preFailure
 		}
 		if invocation == nil {
 			invocation = &preparedInvocation{action: javascript, state: state, node: node, eval: lifecycleEval, envOverlay: lifecycleEnvOverlay, isolated: isolated}
