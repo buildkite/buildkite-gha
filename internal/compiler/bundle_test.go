@@ -1196,6 +1196,7 @@ jobs:
     permissions:
       contents: read
       issues: write
+      id-token: write
     uses: ./.github/workflows/reusable.yml
 `)
 	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
@@ -1211,8 +1212,46 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" || bundle.IR.Warnings[0].Line != 9 {
+	if bundle.Plans[0].Job.IDTokenPermission != "write" {
+		t.Fatalf("called job id-token permission = %q, want job-level permission", bundle.Plans[0].Job.IDTokenPermission)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" || bundle.IR.Warnings[0].Line != 10 {
 		t.Fatalf("warnings = %#v, want ignored reusable call permissions warning", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleGitHubTokenWarnsForIgnoredNestedReusableCallPermissions(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  delegated:
+    uses: ./.github/workflows/middle.yml
+`)
+	writeWorkflow(t, repository, "middle.yml", `on: workflow_call
+jobs:
+  delegated:
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps: [{run: true}]
+`)
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" || bundle.IR.Warnings[0].Line != 6 {
+		t.Fatalf("warnings = %#v, want ignored nested reusable call permissions warning", bundle.IR.Warnings)
 	}
 }
 

@@ -202,7 +202,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 		job := jobs[id]
 		declaredJobPermissions := job.Permissions
 		job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, permissionCeiling, depth != 0)
-		jobPermissionsIgnored := declaredJobPermissions != nil && repositoryPermissionsDiffer(resolver.rootPermissions, job.Permissions)
+		jobPermissionsIgnored := declaredJobPermissions != nil && repositoryPermissionsDiffer(resolver.rootPermissions, declaredJobPermissions)
 		jobTokenPolicyNarrowed := tokenPolicyNarrowed
 		if depth != 0 {
 			jobTokenPolicyNarrowed = jobTokenPolicyNarrowed || repositoryPermissionsNarrowed(resolver.rootPermissions, job.Permissions)
