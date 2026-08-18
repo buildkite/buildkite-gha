@@ -70,7 +70,7 @@ func TestWorkflowTokenPolicyEvidence(t *testing.T) {
 			source: "on: push\npermissions:\n  contents: none\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		},
 		{
-			name: "job permissions", path: ".github/workflows/ci.yml", diagnostic: "job-level",
+			name: "job permissions", path: ".github/workflows/ci.yml", want: "ci.yml",
 			source: "on: push\npermissions:\n  contents: read\njobs:\n  test:\n    permissions:\n      contents: read\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		},
 		{
@@ -91,7 +91,7 @@ func TestWorkflowTokenPolicyEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			filename, diagnostic := workflowTokenPolicyEvidence(test.path, parsed)
+			filename, _, diagnostic := workflowTokenPolicyEvidence(test.path, parsed)
 			if filename != test.want || !strings.Contains(diagnostic, test.diagnostic) {
 				t.Fatalf("workflowTokenPolicyEvidence() = %q, %q", filename, diagnostic)
 			}

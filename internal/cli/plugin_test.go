@@ -299,10 +299,10 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 	}
 }
 
-func TestPluginAdmissionFailurePrintsDiagnosticsBeforeSummaryAndAnnotatesDetails(t *testing.T) {
+func TestPluginIgnoresJobPermissionsForHostedGitHubToken(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"secret.yml": "name: Secret\non: push\njobs:\n  secret:\n    permissions:\n      contents: read\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets.GITHUB_TOKEN }}\n    steps: [{run: true}]\n",
+		"secret.yml": "name: Secret\non: push\npermissions:\n  contents: write\njobs:\n  secret:\n    permissions:\n      contents: read\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets.GITHUB_TOKEN }}\n    steps: [{run: true}]\n",
 	})
 	t.Chdir(repository)
 	configuration, err := json.Marshal(map[string]any{"workflow": ".github/workflows/secret.yml"})
@@ -310,38 +310,31 @@ func TestPluginAdmissionFailurePrintsDiagnosticsBeforeSummaryAndAnnotatesDetails
 		t.Fatal(err)
 	}
 	t.Setenv(pluginConfigurationEnvironment, string(configuration))
-	setCLIPluginBuildkiteEnvironment(t, "plugin-admission-failure")
+	setCLIPluginBuildkiteEnvironment(t, "plugin-job-permissions")
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 {
-		t.Fatalf("run() code = %d, want 1; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, want 0; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
 	}
-	output := stderr.String()
-	diagnostic := strings.Index(output, "x [E_PROFILE]")
-	summary := strings.Index(output, "Compilation: compilable. Admission: not-admitted.")
-	if !strings.HasPrefix(output, "^^^ +++\n") || diagnostic == -1 || summary <= diagnostic ||
-		!strings.Contains(output, "workflow=.github/workflows/secret.yml") ||
-		!strings.Contains(output, "stage=hosted-profile-admission") ||
-		!strings.Contains(output, "job=secret") {
-		t.Fatalf("plugin failure output = %q", output)
+	if !strings.Contains(stdout.String(), "Uploaded 1 job") {
+		t.Fatalf("stdout = %q", stdout.String())
 	}
-	for _, verbose := range []string{"Schema:", "- Workflow parsing:", "  job secret:"} {
-		if strings.Contains(output, verbose) {
-			t.Fatalf("plugin failure output contains verbose inventory %q: %q", verbose, output)
+	for path, contents := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
 		}
-	}
-	var annotation *cliCommand
-	for i := range runner.commands {
-		if len(runner.commands[i].args) != 0 && runner.commands[i].args[0] == "annotate" {
-			annotation = &runner.commands[i]
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatal(err)
 		}
+		if job.GitHubToken == nil || !reflect.DeepEqual(job.GitHubToken.Permissions, map[string]string{"contents": "write"}) {
+			t.Fatalf("GITHUB_TOKEN = %#v, want workflow permissions", job.GitHubToken)
+		}
+		return
 	}
-	if annotation == nil || !strings.Contains(string(annotation.stdin), "job-level permissions are unsupported") ||
-		!strings.Contains(string(annotation.stdin), `href="https://github.com/buildkite/buildkite-gha/blob/0123456789abcdef0123456789abcdef01234567/.github/workflows/secret.yml#L`) {
-		t.Fatalf("admission failure annotation = %#v", annotation)
-	}
+	t.Fatalf("uploaded artifacts = %#v, want job plan", runner.uploaded)
 }
 
 func TestPluginUploadsPluralWorkflowList(t *testing.T) {

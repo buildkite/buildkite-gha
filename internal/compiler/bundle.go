@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"strings"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
@@ -91,10 +92,23 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	if len(plans) != len(ir.Jobs) || len(authorizations) != len(plans) {
 		return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("compiler produced %d plans and %d authorizations for %d job instances", len(plans), len(authorizations), len(ir.Jobs)))
 	}
+	warnedReusablePermissions := false
+	warnedJobPermissions := false
 	for i, job := range plans {
-		if job.GitHubToken != nil && ir.Jobs[i].tokenPolicyNarrowed {
+		if job.GitHubToken == nil {
+			continue
+		}
+		if ir.Jobs[i].tokenPolicyNarrowed && !warnedReusablePermissions {
 			bundle.IR.Warnings = append(bundle.IR.Warnings, reusableWorkflowTokenWarning(ir.Jobs[i].reusableCall))
-			break
+			warnedReusablePermissions = true
+		}
+		if (ir.Jobs[i].jobPermissionsIgnored || jobPermissionsIgnored(job.GitHubToken.Permissions, ir.Jobs[i].Permissions)) && !warnedJobPermissions {
+			position := ir.Jobs[i].Source.Start
+			if ir.Jobs[i].jobPermissionsIgnored && ir.Jobs[i].reusableCall.Line != 0 {
+				position = ir.Jobs[i].reusableCall
+			}
+			bundle.IR.Warnings = append(bundle.IR.Warnings, jobWorkflowTokenWarning(position))
+			warnedJobPermissions = true
 		}
 	}
 
@@ -124,6 +138,16 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	bundle.Plans = artifacts
 	bundle.Processing.PlansConstructed = true
 	return bundle, nil
+}
+
+func jobPermissionsIgnored(workflowPermissions, effectivePermissions map[string]string) bool {
+	normalized := make(map[string]string, len(effectivePermissions))
+	for name, access := range effectivePermissions {
+		if name != "id-token" {
+			normalized[strings.ReplaceAll(name, "-", "_")] = access
+		}
+	}
+	return !maps.Equal(workflowPermissions, normalized)
 }
 
 // GenerateBundlePipeline emits pipeline bytes only after plan construction and
