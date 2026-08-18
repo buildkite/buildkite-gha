@@ -582,7 +582,7 @@ Job-level expressions support the same operators and pure functions with these f
 | `defaults.run` | `github`, `needs`, `matrix`, `env`, `vars`, `inputs` |
 | `outputs` | `github`, `needs`, `matrix`, `runner`, `env`, `vars`, `secrets`, `steps`, `inputs` |
 
-These workflow step fields support `hashFiles()`; job-level fields do not. General runtime interpolation and action metadata keep the direct-reference-only rule. The GitHub-authorized `strategy` context, and `job` in job outputs, remain unsupported because the runtime does not carry equivalent context values. Computed, whole, and projected `steps` and `needs` access also remains unsupported in job-level fields.
+These workflow step fields support `hashFiles()`; composite action step fields and job-level fields do not. Composite action step `run`, `env`, and `with` support the listed runtime operators and pure functions. Other action metadata follows the field-specific behavior in [Actions](#actions). The GitHub-authorized `strategy` context, and `job` in job outputs, remain unsupported because the runtime does not carry equivalent context values. Computed, whole, and projected `steps` and `needs` access also remains unsupported in job-level fields.
 
 Expression-valued `continue-on-error` must produce a Boolean. Expression-valued `timeout-minutes` must produce a number greater than 0 and at most 360.
 
