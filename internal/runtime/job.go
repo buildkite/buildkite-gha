@@ -2182,7 +2182,14 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, Steps: eval.Steps, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
 		run, err := expression.EvaluateCondition(step.If, condition)
 		if err != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d condition: %w", i+1, err))
+			childErr := fmt.Errorf("composite action step %d condition: %w", i+1, err)
+			execution := classifyStepExecution(ctx, ctx, plan.Step{ContinueOnError: step.ContinueOnError}, newResult(), childErr)
+			if id != "" {
+				eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: map[string]string{}}
+			}
+			if execution.conclusion != "success" {
+				runErr = errors.Join(runErr, childErr)
+			}
 			continue
 		}
 		if !run {

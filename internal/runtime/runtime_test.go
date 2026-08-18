@@ -6028,6 +6028,45 @@ runs:
 	}
 }
 
+func TestCompositeContinueOnErrorToleratesConditionFailure(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/soft-condition/action.yml", `name: Soft condition failure composite
+outputs:
+  status:
+    value: ${{ steps.failed.outcome }}-${{ steps.failed.conclusion }}
+runs:
+  using: composite
+  steps:
+    - id: failed
+      if: runner.debug == 'true'
+      shell: sh
+      run: touch "$SHOULD_NOT_RUN"
+      continue-on-error: true
+    - shell: sh
+      run: touch "$LATER_STEP_RAN"
+`)
+	laterStep := filepath.Join(workspace, "later-step-ran")
+	shouldNotRun := filepath.Join(workspace, "should-not-run")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/soft-condition"}})
+	job.Env = map[string]string{"LATER_STEP_RAN": laterStep, "SHOULD_NOT_RUN": shouldNotRun}
+	job.Outputs = map[string]string{"status": "${{ steps.composite.outputs.status }}"}
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v, want soft condition failure", result, err)
+	}
+	if result.Outputs["status"] != "failure-success" {
+		t.Fatalf("RunJob() outputs = %#v, want retained soft-failure status", result.Outputs)
+	}
+	if _, statErr := os.Stat(laterStep); statErr != nil {
+		t.Fatalf("later composite step did not run: %v", statErr)
+	}
+	if _, statErr := os.Stat(shouldNotRun); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("condition-failed child ran: %v", statErr)
+	}
+}
+
 func TestCompositeChildConditionUsesActionInputs(t *testing.T) {
 	for _, enabled := range []string{"true", "false"} {
 		t.Run(enabled, func(t *testing.T) {
