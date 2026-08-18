@@ -30,6 +30,7 @@ type effectiveEventSelection struct {
 	Source             []byte
 	Event              compiler.Event
 	Origin             effectiveEventOrigin
+	BuildSource        string
 	TriggerExpressions buildkitepipeline.TriggerConditionExpressions
 	TriggerSnapshot    buildkitepipeline.TriggerEventSnapshot
 }
@@ -71,8 +72,12 @@ func newEffectiveEvent(source []byte, origin effectiveEventOrigin, getenv func(s
 		return effective, nil
 	}
 	predicate := "true"
-	if buildSource := strings.TrimSpace(getenv("BUILDKITE_SOURCE")); buildSource != "" {
+	buildSource := strings.TrimSpace(getenv("BUILDKITE_SOURCE"))
+	if buildSource != "" {
 		predicate = "build.source == " + triggerConditionLiteral(buildSource)
+	}
+	if origin == effectiveEventFromBuild {
+		effective.BuildSource = buildSource
 	}
 	effective.TriggerExpressions.EventPredicate = predicate
 	return effective, nil
