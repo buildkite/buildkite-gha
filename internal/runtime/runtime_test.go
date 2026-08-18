@@ -5103,6 +5103,59 @@ printf '%s\n' 'result=nested-ok' >> "$GITHUB_OUTPUT"
 	}
 }
 
+func TestCompositeGitHubActionPathExpressionIsInvocationScoped(t *testing.T) {
+	workspace := canonicalTempDir(t)
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/inner/action.yml", `name: Inner
+inputs:
+  caller-path:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        ENV_ACTION_PATH: ${{ github.action_path }}
+        WITH_CALLER_PATH: ${{ inputs.caller-path }}
+      run: |
+        test "${{ github.action_path }}" = "$EXPECTED_INNER_PATH"
+        test "$ENV_ACTION_PATH" = "$EXPECTED_INNER_PATH"
+        test "$WITH_CALLER_PATH" = "$EXPECTED_OUTER_PATH"
+`)
+	writeFixtureFile(t, workspace, ".github/actions/outer/action.yml", `name: Outer
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: |
+        test "${{ github.action_path }}" = "$EXPECTED_OUTER_PATH"
+        test "${{ github.action_path }}" = "$GITHUB_ACTION_PATH"
+        test -f "${{ github.action_path }}/action.yml"
+        test "${{ github.workflow }}" = "$EXPECTED_WORKFLOW"
+        test "${{ github.job }}" = fixture
+    - uses: ./.github/actions/inner
+      with:
+        caller-path: ${{ github.action_path }}
+    - shell: sh
+      run: test "${{ github.action_path }}" = "$EXPECTED_OUTER_PATH"
+`)
+	steps := []plan.Step{
+		{ID: "composite", Kind: "uses", Uses: "./.github/actions/outer"},
+		{ID: "top", Kind: "run", Command: `test -z "${{ github.action_path }}"`},
+	}
+	job := runtimePlan(t, workspace, workflowPath, steps)
+	job.Env = map[string]string{
+		"EXPECTED_OUTER_PATH": filepath.Join(workspace, ".github", "actions", "outer"),
+		"EXPECTED_INNER_PATH": filepath.Join(workspace, ".github", "actions", "inner"),
+		"EXPECTED_WORKFLOW":   workflowPath,
+	}
+	var logs bytes.Buffer
+	if _, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace); err != nil {
+		t.Fatalf("RunJob() error = %v\nlogs: %s", err, logs.String())
+	}
+}
+
 func TestExpressionTimeoutBoundsNestedCompositePre(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -5190,6 +5243,52 @@ test -z "$TARGETS"
 	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestRemoteCompositePreExposesActionPathToChild(t *testing.T) {
+	workspace := canonicalTempDir(t)
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: pre action path\n")
+	remote := canonicalTempDir(t)
+	writeFixtureFile(t, remote, "root/action.yml", `name: root
+runs:
+  using: composite
+  steps:
+    - uses: owner/repo/child@v1
+      with:
+        caller_path: ${{ github.action_path }}
+      env:
+        CALLER_PATH_ENV: ${{ github.action_path }}
+`)
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\ninputs:\n  caller_path:\n    required: false\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "child/pre.js", "")
+	writeFixtureFile(t, remote, "child/main.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+test "$INPUT_CALLER_PATH" = "$EXPECTED_ROOT_PATH"
+test "$CALLER_PATH_ENV" = "$EXPECTED_ROOT_PATH"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	rootID, childID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"EXPECTED_ROOT_PATH": filepath.Join(remote, "root")}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	var logs bytes.Buffer
+	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v\nlogs: %s", result, err, logs.String())
 	}
 }
 

@@ -2053,6 +2053,36 @@ printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
 	}
 }
 
+func TestRunJobContainerCompositeActionPathExpressionUsesContainerPath(t *testing.T) {
+	t.Parallel()
+
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: container action path\n")
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", `name: Action path
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: test "${{ github.action_path }}" = "`+jobContainerWorkspace+`/.github/actions/composite"
+`)
+	compositeID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{
+		{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", Action: &plan.ActionSelector{Lock: compositeID}},
+	})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+	job.Actions = []plan.ActionLock{{
+		ID: compositeID, Source: "workspace", Path: ".github/actions/composite",
+		SourceDigest: digestTree(t, filepath.Join(workspace, ".github/actions/composite")),
+	}}
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("container composite action path result = %#v, error = %v", result, err)
+	}
+}
+
 func TestRunJobContainerRemoteActionsMountedReadOnly(t *testing.T) {
 	t.Parallel()
 
