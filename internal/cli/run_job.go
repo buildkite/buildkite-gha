@@ -424,7 +424,7 @@ func publishSecretResolutionAnnotation(agent transport.Agent, jobID string, runE
 	if !errors.As(runErr, &secretError) {
 		return nil
 	}
-	body := fmt.Sprintf(`## Buildkite secret %s is unavailable
+	body := fmt.Sprintf(`## Missing secret
 
 This job could not retrieve the Buildkite secret %s.
 
@@ -432,7 +432,7 @@ This job could not retrieve the Buildkite secret %s.
 1. If the secret already exists, <a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets/access-policies" target="_blank">grant this job access with its access policy</a>.
 
 > ℹ️ GitHub does not expose an existing secret's value after creation. Copy or rotate the value manually. GitHub repository and environment secrets are not available directly to this job.
-`, annotationCode(secretError.Name), annotationCode(secretError.Name))
+`, annotationCode(secretError.Name))
 	ctx, cancel := context.WithTimeout(context.Background(), resultPublicationTimeout)
 	defer cancel()
 	return agent.AnnotateJob(ctx, jobID, secretResolutionAnnotationContext, "error", body)
