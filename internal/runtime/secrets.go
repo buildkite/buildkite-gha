@@ -20,6 +20,21 @@ type SecretResolver interface {
 	ResolveSecret(context.Context, string) (string, error)
 }
 
+// SecretResolutionError identifies a plan-declared secret that could not be
+// retrieved.
+type SecretResolutionError struct {
+	Name string
+	Err  error
+}
+
+func (e *SecretResolutionError) Error() string {
+	return fmt.Sprintf("resolve secret %q: %v", e.Name, e.Err)
+}
+
+func (e *SecretResolutionError) Unwrap() error {
+	return e.Err
+}
+
 // Redactor registers a secret with the log sink before any step can run.
 type Redactor interface {
 	AddRedaction(context.Context, string) error

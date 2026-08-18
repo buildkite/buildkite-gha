@@ -27,6 +27,7 @@ const (
 	resultPublicationTimeout                    = 10 * time.Second
 	repositoryProviderGitCredentialsEnvironment = "BUILDKITE_USE_REPOSITORY_PROVIDER_GIT_CREDENTIALS"
 	legacyGitHubAppGitCredentialsEnvironment    = "BUILDKITE_USE_GITHUB_APP_GIT_CREDENTIALS"
+	secretResolutionAnnotationContext           = "buildkite-gha-secret-resolution"
 )
 
 func repositoryProviderGitCredentialsEnabled(getenv func(string) string) bool {
@@ -297,6 +298,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	if publish {
 		_, _ = fmt.Fprintln(stdout, "~~~ :package: Publish GitHub Actions result")
 		publication, err := publishTerminalResult(agent, artifactRoot, job, planDigest, producer, result)
+		secretAnnotationError := publishSecretResolutionAnnotation(agent, producer.JobID, runErr)
 		if publication.MetadataMirrorError != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: result metadata mirror: %v\n", publication.MetadataMirrorError)
 		}
@@ -309,7 +311,10 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		if publication.ErrorAnnotationError != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: workflow error annotation: %v\n", publication.ErrorAnnotationError)
 		}
-		if err != nil || publication.MetadataMirrorError != nil || publication.SummaryAnnotationError != nil || publication.WarningAnnotationError != nil || publication.ErrorAnnotationError != nil {
+		if secretAnnotationError != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: secret resolution annotation: %v\n", secretAnnotationError)
+		}
+		if err != nil || publication.MetadataMirrorError != nil || publication.SummaryAnnotationError != nil || publication.WarningAnnotationError != nil || publication.ErrorAnnotationError != nil || secretAnnotationError != nil {
 			_, _ = fmt.Fprintln(stdout, "^^^ +++")
 			failureVisible = true
 		}
@@ -412,6 +417,26 @@ func publishTerminalResult(agent transport.Agent, root string, job plan.Job, pla
 	defer cancel()
 	workflow := strings.TrimPrefix(job.Workflow.Digest, "sha256:")
 	return gharuntime.PublishJobResult(ctx, agent, root, workflow, job.Target.StepKey, planDigest, producer, result)
+}
+
+func publishSecretResolutionAnnotation(agent transport.Agent, jobID string, runErr error) error {
+	var secretError *gharuntime.SecretResolutionError
+	if !errors.As(runErr, &secretError) {
+		return nil
+	}
+	body := fmt.Sprintf(`## Buildkite secret %s is unavailable
+
+This job could not retrieve the Buildkite secret %s.
+
+1. [Create or migrate the secret into Buildkite](https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets).
+1. If the secret already exists, [grant this job access with its access policy](https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets/access-policies).
+1. Retry the job.
+
+GitHub does not expose an existing secret's value after creation. Copy or rotate the value manually. GitHub repository and environment secrets are not available directly to this job.
+`, annotationCode(secretError.Name), annotationCode(secretError.Name))
+	ctx, cancel := context.WithTimeout(context.Background(), resultPublicationTimeout)
+	defer cancel()
+	return agent.AnnotateJob(ctx, jobID, secretResolutionAnnotationContext, "error", body)
 }
 
 type runJobOptions struct {

@@ -1257,7 +1257,7 @@ func (r Runner) resolveSecrets(ctx context.Context, processor *commandProcessor,
 	for _, name := range names {
 		value, err := r.Secrets.ResolveSecret(ctx, name)
 		if err != nil {
-			return nil, fmt.Errorf("resolve secret %q: %w", name, err)
+			return nil, &SecretResolutionError{Name: name, Err: err}
 		}
 		if value != "" {
 			processor.addMask(value)
