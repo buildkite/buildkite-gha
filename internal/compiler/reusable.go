@@ -645,7 +645,9 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 			if err != nil {
 				detail := fmt.Sprintf("Reusable-workflow input %q is not statically resolvable: %v", name, err)
 				message := fmt.Sprintf("Reusable workflow input %q uses a value that is unavailable before jobs run. Replace it with a literal or an expression that does not depend on job results.", name)
-				if strings.Contains(err.Error(), `unsupported compile-time context "needs"`) {
+				if need, _, ok := deferredNeedReference(text); ok {
+					message = fmt.Sprintf("Reusable workflow input %q references job %q, but the call does not list it in needs. Add %q to the reusable-workflow call's needs.", name, need, need)
+				} else if strings.Contains(err.Error(), `unsupported compile-time context "needs"`) {
 					message = fmt.Sprintf("Reusable workflow input %q uses an unsupported needs expression. Use exactly needs.<job>.outputs.<name> for a string input.", name)
 				}
 				return reusableInputs{}, &ProcessingFinding{
@@ -723,23 +725,23 @@ func forwardedDeferredInput(value string, deferred map[string]needBinding) (need
 }
 
 func deferredNeedInput(value string, needs map[string]needBinding) (needBinding, bool) {
-	root, path, err := expression.ReferencePath(value)
-	if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") {
+	need, outputName, ok := deferredNeedReference(value)
+	if !ok {
 		return needBinding{}, false
 	}
-	for name, binding := range needs {
-		if !strings.EqualFold(name, path[0]) {
+	for existing, binding := range needs {
+		if !strings.EqualFold(existing, need) {
 			continue
 		}
 		deferred := needBinding{members: append([]string(nil), binding.members...), projectOutputs: true}
 		if !binding.projectOutputs {
 			for _, member := range binding.members {
-				deferred.outputs = append(deferred.outputs, needOutputBinding{name: "value", member: member, output: path[2]})
+				deferred.outputs = append(deferred.outputs, needOutputBinding{name: "value", member: member, output: outputName})
 			}
 			return deferred, true
 		}
 		for _, output := range binding.outputs {
-			if !strings.EqualFold(output.name, path[2]) {
+			if !strings.EqualFold(output.name, outputName) {
 				continue
 			}
 			output.name = "value"
@@ -748,6 +750,14 @@ func deferredNeedInput(value string, needs map[string]needBinding) (needBinding,
 		return deferred, true
 	}
 	return needBinding{}, false
+}
+
+func deferredNeedReference(value string) (need, output string, ok bool) {
+	root, path, err := expression.ReferencePath(value)
+	if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") {
+		return "", "", false
+	}
+	return path[0], path[2], true
 }
 
 func evaluateStaticCallValue(value string, inputs, matrix map[string]any, context expression.CompileContext) (any, error) {

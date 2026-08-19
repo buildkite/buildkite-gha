@@ -1777,7 +1777,7 @@ jobs:
 			t.Fatalf("Compile() error = %v, want source-located runtime input rejection", err)
 		}
 		var finding *ProcessingFinding
-		if !errors.As(err, &finding) || finding.Message != `Reusable workflow input "target" uses an unsupported needs expression. Use exactly needs.<job>.outputs.<name> for a string input.` || !strings.Contains(finding.Detail, `Reusable-workflow input "target" is not statically resolvable`) || !strings.Contains(finding.Detail, `unsupported compile-time context "needs"`) {
+		if !errors.As(err, &finding) || finding.Message != `Reusable workflow input "target" references job "prepare", but the call does not list it in needs. Add "prepare" to the reusable-workflow call's needs.` || !strings.Contains(finding.Detail, `Reusable-workflow input "target" is not statically resolvable`) || !strings.Contains(finding.Detail, `unsupported compile-time context "needs"`) {
 			t.Fatalf("Compile() finding = %#v", finding)
 		}
 	})
