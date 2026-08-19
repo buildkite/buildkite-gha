@@ -204,7 +204,8 @@ to one explicit path or `workflows` to a non-empty array of explicit paths; the
 fields are mutually exclusive. Every path must identify a regular, tracked
 `.yml` or `.yaml` file inside the repository; directories and glob patterns are
 rejected. It also accepts the plugin-owned `version`, `source-ref`, and
-`minimum-release-age` fields, plus the boolean `experimental-runner-user` field.
+`minimum-release-age` fields, plus the boolean `experimental-runner-user` and
+`private-reusable-workflows` fields.
 The optional `oidc` object accepts `claims`, `aws-session-tags`, and
 `subject-claim`; configured lists and strings must be non-empty. Unknown fields
 and invalid values are rejected before upload.
@@ -228,6 +229,8 @@ Every operand must name one regular `.yml` or `.yaml` file. When uploading more 
 `--` ends option parsing and is required when a path operand begins with `-`; options must appear before it. Without `--`, a leading-dash operand is an unknown option. The CLI does not split shell strings or decode a JSON or YAML list from one argument: custom wrappers should pass each path as a separate argument and use `--` before externally supplied operands.
 
 All selected directly runnable workflows are represented in one atomic pipeline upload. Each successfully compiled workflow becomes an aggregate group whose label is `:github: <workflow-name>` or, for an unnamed workflow, its canonical path. The group depends on the importer; child jobs do not repeat that dependency. Each child publishes a provider check named `<workflow-name-or-path> / <job-id> (<effective-event>)`. A skipped workflow becomes one top-level skipped command step with a check named `<workflow-name-or-path> (<effective-event>)`. GitHub events publish GitHub checks; Origin events publish Origin checks. A reusable-only `workflow_call` file may be selected so local callers can resolve it, but it does not create a group. An input set containing only reusable workflows is an error.
+
+Private reusable workflows are disabled by default. Set the plugin's `private-reusable-workflows: true` field, or pass `upload --private-reusable-workflows` from a custom importer. Before validating remote calls, the importer tries the bounded anonymous source, then fetches inaccessible repositories with Git over HTTPS. Git uses the importer's existing credential helpers and environment. The Buildkite Agent repository-provider helper can grant same-repository or approved cross-repository access. Credentials stay in Git and are not included in plans, generated pipeline YAML, or runtime jobs.
 
 Every directly runnable workflow is selected against the effective event. A workflow with safe compilation or trigger-translation errors is replaced by one failing top-level command step labeled `:github: <workflow-name-or-path>`. The replacement step publishes all redacted diagnostics as a job-scoped Buildkite annotation, then exits with status 1. Its provider check presents the failure reasons as described in [Aggregate workflow upload](compatibility.md#aggregate-workflow-upload). A compiler failure takes precedence if the workflow also has a skip reason. Compilation continues for later workflows, and successfully compiled workflows retain their normal groups and jobs. Parse, event-input, admission, artifact, and upload failures still abort the aggregate transaction. No partially compiled pipeline is uploaded.
 

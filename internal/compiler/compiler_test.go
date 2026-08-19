@@ -1639,7 +1639,7 @@ func TestCompileRejectsUnsafeOrDynamicReusableWorkflowCalls(t *testing.T) {
 		repository := t.TempDir()
 		path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: owner/repository/.github/workflows/reusable.yml@main\n")
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-		if err == nil || !strings.Contains(err.Error(), "public reusable workflow source is not configured") || !strings.Contains(err.Error(), "./.github/workflows/caller.yml:4:11") {
+		if err == nil || !strings.Contains(err.Error(), "remote reusable workflow source is not configured") || !strings.Contains(err.Error(), "./.github/workflows/caller.yml:4:11") {
 			t.Fatalf("Compile() error = %v, want source-located missing source rejection", err)
 		}
 	})

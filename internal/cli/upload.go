@@ -127,17 +127,33 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: workflow paths matched only reusable workflow_call workflows; there is nothing to upload")
 		return 1
 	}
-	anonymousSource, cleanupAnonymousSource, sourceErr := newHostedActionSource(ctx, "", nil, nil)
+	var privateSourceOptions []actionsource.Option
+	if uploadArguments.privateReusableWorkflows {
+		git, gitErr := exec.LookPath("git")
+		if gitErr == nil {
+			git, gitErr = filepath.Abs(git)
+		}
+		if gitErr != nil {
+			for _, input := range workflows {
+				if !input.ReusableOnly {
+					return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "private repository source could not be configured"), fmt.Errorf("resolve Git executable: %w", gitErr))
+				}
+			}
+			return 1
+		}
+		privateSourceOptions = []actionsource.Option{actionsource.WithGitRepositorySource(git)}
+	}
+	initialSource, cleanupInitialSource, sourceErr := newHostedActionSource(ctx, "", privateSourceOptions, privateSourceOptions)
 	if sourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "public repository source could not be configured"), sourceErr)
+				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "repository source could not be configured"), sourceErr)
 			}
 		}
 		return 1
 	}
-	defer cleanupAnonymousSource()
-	sourceSwitch := &repositorySourceSwitch{source: anonymousSource}
+	defer cleanupInitialSource()
+	sourceSwitch := &repositorySourceSwitch{source: initialSource}
 	repositorySource := compiler.MemoizeRepositorySource(sourceSwitch)
 	for _, input := range workflows {
 		if input.ReusableOnly {
@@ -175,17 +191,17 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		return 1
 	}
 	authentication := importerJobActionSourceAuthentication(stderr)
-	var sourceOptions []actionsource.Option
+	sourceOptions := append([]actionsource.Option(nil), privateSourceOptions...)
 	if effectiveEvent.Event.Provider == "github" {
 		if authenticationOption := authentication.option(effectiveEvent.Event.Repository.Owner + "/" + effectiveEvent.Event.Repository.Name); authenticationOption != nil {
 			sourceOptions = append(sourceOptions, authenticationOption)
 		}
 	}
-	authenticatedSource, cleanupSource, sourceErr := newHostedActionSource(ctx, "", sourceOptions, nil)
+	authenticatedSource, cleanupSource, sourceErr := newHostedActionSource(ctx, "", sourceOptions, privateSourceOptions)
 	if sourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "public repository source could not be configured"), sourceErr)
+				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "repository source could not be configured"), sourceErr)
 			}
 		}
 		return 1
@@ -696,6 +712,7 @@ type parsedUploadArgs struct {
 	runnerTargets            map[string]compiler.RunnerTarget
 	oidc                     *plan.OIDCConfiguration
 	experimentalRunnerUser   bool
+	privateReusableWorkflows bool
 	pluginAcquisition        *pluginRuntimeAcquisition
 	importerPlatform         compiler.Platform
 	telemetry                *commandTelemetryDetails
@@ -718,6 +735,8 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 	deprecatedPrivateCheckoutSeen := false
 	experimentalRunnerUser := true
 	experimentalRunnerUserSeen := false
+	privateReusableWorkflows := false
+	privateReusableWorkflowsSeen := false
 	optionsEnded := false
 	for i := 0; i < len(args); i++ {
 		if optionsEnded {
@@ -745,6 +764,14 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 				return parsedUploadArgs{}, fmt.Errorf("--private-checkout may only be specified once")
 			}
 			deprecatedPrivateCheckoutSeen = true
+			continue
+		}
+		if args[i] == "--private-reusable-workflows" {
+			if privateReusableWorkflowsSeen {
+				return parsedUploadArgs{}, fmt.Errorf("--private-reusable-workflows may only be specified once")
+			}
+			privateReusableWorkflowsSeen = true
+			privateReusableWorkflows = true
 			continue
 		}
 		if args[i] == "--experimental-runner-user" || strings.HasPrefix(args[i], "--experimental-runner-user=") {
@@ -847,5 +874,8 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 			return parsedUploadArgs{}, fmt.Errorf("--runner-image for %q requires --runner-queue", label)
 		}
 	}
-	return parsedUploadArgs{workflowOperands: workflowOperands, eventPath: eventPath, runtimeDistributionPaths: runtimeDistributionPaths, runnerTargets: runnerTargets, experimentalRunnerUser: experimentalRunnerUser}, nil
+	return parsedUploadArgs{
+		workflowOperands: workflowOperands, eventPath: eventPath, runtimeDistributionPaths: runtimeDistributionPaths,
+		runnerTargets: runnerTargets, experimentalRunnerUser: experimentalRunnerUser, privateReusableWorkflows: privateReusableWorkflows,
+	}, nil
 }

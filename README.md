@@ -89,8 +89,8 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 | Good fit | Not currently supported |
 | --- | --- |
 | Linux x86-64 and native macOS arm64 jobs using `bash`, `sh`, or `python` | Windows, Linux arm64, or macOS x86-64 |
-| Local and public JavaScript and composite actions; verified Dockerfile actions on Linux | Private actions or private reusable workflows, and Dockerfile actions on macOS |
-| Static matrices, `needs`, outputs, and local or literal public reusable workflows | Dynamic reusable calls, matrices, and expressions outside the documented subset |
+| Local and public JavaScript and composite actions; verified Dockerfile actions on Linux | Private actions and Dockerfile actions on macOS |
+| Static matrices, `needs`, outputs, and local, public, or approved private reusable workflows | Dynamic reusable calls, matrices, and expressions outside the documented subset |
 | Exact-commit checkout, including managed private repository access | GitHub environment secrets, GitHub-issued OIDC claims, or protected queues |
 | Static Buildkite job-accessible secrets | Dynamic or reusable-workflow secret forwarding |
 | Scoped `GITHUB_TOKEN` and step `github.token` use allowed by Buildkite policy | Ambient token injection or dynamic token access |

@@ -2507,6 +2507,7 @@ func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
 	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
 	parsed, err := parseUploadArgs([]string{
 		"--experimental-runner-user",
+		"--private-reusable-workflows",
 		"--runner-queue", "ubuntu-latest=hosted",
 		"--runner-image", "ubuntu-latest=" + image,
 		"--runner-queue", "macos-14=macos-sonoma-arm64",
@@ -2518,7 +2519,7 @@ func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(parsed.workflowOperands, []string{"workflow.yml"}) || parsed.eventPath != "event.json" || parsed.runtimeDistributionPaths[compiler.PlatformLinuxAMD64] != "/tmp/buildkite-gha-linux" || parsed.runtimeDistributionPaths[compiler.PlatformDarwinARM64] != "/tmp/buildkite-gha-darwin" || !parsed.experimentalRunnerUser {
+	if !slices.Equal(parsed.workflowOperands, []string{"workflow.yml"}) || parsed.eventPath != "event.json" || parsed.runtimeDistributionPaths[compiler.PlatformLinuxAMD64] != "/tmp/buildkite-gha-linux" || parsed.runtimeDistributionPaths[compiler.PlatformDarwinARM64] != "/tmp/buildkite-gha-darwin" || !parsed.experimentalRunnerUser || !parsed.privateReusableWorkflows {
 		t.Fatalf("parseUploadArgs() = %#v", parsed)
 	}
 	if got := parsed.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {
