@@ -208,8 +208,6 @@ func actionNodeMajor(runtime metadata.Runtime) (int, bool) {
 	switch runtime {
 	case metadata.RuntimeNode16:
 		return 16, true
-	case metadata.RuntimeNode20:
-		return 20, true
 	case metadata.RuntimeNode24:
 		return 24, true
 	default:
@@ -1759,7 +1757,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 	}
 
 	switch runtime {
-	case metadata.RuntimeNode16, metadata.RuntimeNode20, metadata.RuntimeNode24:
+	case metadata.RuntimeNode16, metadata.RuntimeNode24:
 		if err := expression.ValidateActionLifecycleCondition(action.Runs.PreIf); err != nil {
 			return result, fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err)
 		}
@@ -2066,7 +2064,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 	actionEval := eval
 	actionEval.Inputs = inputs
 	switch actionRuntime {
-	case metadata.RuntimeNode16, metadata.RuntimeNode20, metadata.RuntimeNode24:
+	case metadata.RuntimeNode16, metadata.RuntimeNode24:
 		if action.Runs.Main == "" {
 			return result, fmt.Errorf("JavaScript action %q has no main entry point", step.Uses)
 		}
