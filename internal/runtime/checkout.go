@@ -218,11 +218,11 @@ func remoteWorkflowRefMatches(ref string, remote plan.RemoteWorkflowSource) bool
 }
 
 func remoteWorkflowCheckoutAlias(locks []plan.ActionLock, path string) bool {
-	if !plan.ValidSourceWorkspaceAlias(path) {
-		return false
-	}
 	for _, lock := range locks {
-		if strings.EqualFold(lock.WorkspaceAlias, path) {
+		// Locks contain validated portable aliases. Compare before validating the
+		// checkout spelling so a filesystem-equivalent Unicode spelling cannot
+		// fall through to event-checkout semantics on macOS.
+		if lock.WorkspaceAlias != "" && strings.EqualFold(lock.WorkspaceAlias, path) {
 			return true
 		}
 	}
