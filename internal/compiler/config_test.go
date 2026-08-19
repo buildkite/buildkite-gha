@@ -256,7 +256,7 @@ func TestRunnerRejectionDiagnosticIsActionableWithoutResolvedLabel(t *testing.T)
 	}{
 		{name: "no labels", trust: EventTrusted, want: "Set runs-on"},
 		{name: "duplicate label", labels: []string{"ubuntu-24.04", "ubuntu-24.04"}, trust: EventTrusted, want: "Remove duplicate labels"},
-		{name: "unsupported operating system", labels: []string{"windows-latest"}, trust: EventTrusted, want: "Use a Linux or macOS runner label"},
+		{name: "unsupported operating system", labels: []string{"windows-latest"}, trust: EventTrusted, want: `change runs-on to "ubuntu-latest"`},
 		{name: "unmapped label", labels: []string{"macos-15"}, trust: EventTrusted, want: "Configure a mapping"},
 		{name: "conflicting queues", labels: []string{"self-hosted", "linux"}, trust: EventTrusted, want: "Use labels that map to one runner target"},
 		{name: "conflicting targets", labels: []string{"ubuntu-24.04", "macos"}, trust: EventTrusted, want: "Use labels that map to one runner target"},
@@ -301,14 +301,16 @@ func TestRunnerRejectionDiagnosticSeparatesStaticLabelFromAllowlist(t *testing.T
 	tests := []struct {
 		label       string
 		wantMessage string
+		wantDetail  string
 	}{
 		{
 			label:       "windows-latest",
-			wantMessage: `Runner label "windows-latest" requires Windows, which is unsupported. Use a Linux or macOS runner label.`,
+			wantMessage: `Windows runners aren't supported yet. Buildkite hosted agents run Linux and macOS only, so this job can't be imported to one. If the job can run on Linux, change "windows-latest" to "ubuntu-latest". If it needs Windows, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.`,
 		},
 		{
 			label:       "macos-latest",
 			wantMessage: `Runner label "macos-latest" has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.`,
+			wantDetail:  "Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest.",
 		},
 	}
 	policy := RunnerPolicy{Targets: map[string]RunnerTarget{
@@ -322,7 +324,7 @@ func TestRunnerRejectionDiagnosticSeparatesStaticLabelFromAllowlist(t *testing.T
 			t.Fatalf("resolve(%q) error = nil", test.label)
 		}
 		message, detail := runnerRejectionDiagnostic(err, []string{test.label}, supported, nil)
-		if message != test.wantMessage || detail != "Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest." {
+		if message != test.wantMessage || detail != test.wantDetail {
 			t.Fatalf("runnerRejectionDiagnostic(%q) = %q, %q", test.label, message, detail)
 		}
 		if strings.Contains(message, "ubuntu-22.04") {
