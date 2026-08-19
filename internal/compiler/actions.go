@@ -566,6 +566,9 @@ func (b *actionLockBuilder) describeSourceBackedLocalAction(ctx context.Context,
 		return "", plan.ActionLock{}, "", "", fmt.Errorf("local action %q matches multiple paths in immutable remote workflow source", workspacePath)
 	}
 	selected := matches[0]
+	if !plan.ValidSourceWorkspaceAlias(selected.alias) {
+		return "", plan.ActionLock{}, "", "", fmt.Errorf("source-backed local action workspace alias %q is not portable", selected.alias)
+	}
 	if _, err := metadata.Load(repositoryRoot, selected.path); err != nil {
 		return "", plan.ActionLock{}, "", "", err
 	}

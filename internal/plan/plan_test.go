@@ -107,6 +107,7 @@ func TestSourceBackedWorkspaceActionRequiresRemoteWorkflowProvenance(t *testing.
 		{name: "different commit", edit: func(j *Job) { j.Actions[1].Commit = strings.Repeat("c", 40) }, want: "does not match remote workflow provenance"},
 		{name: "workspace source", edit: func(j *Job) { j.Actions[1].Source = "workspace" }, want: "invalid workspace identity"},
 		{name: "different alias", edit: func(j *Job) { j.Actions[1].WorkspaceAlias = "other" }, want: "does not match source-backed workspace identity"},
+		{name: "nonportable alias", edit: func(j *Job) { j.Actions[1].WorkspaceAlias = "checkéd-out" }, want: "invalid GitHub identity"},
 		{name: "different parent source", edit: func(j *Job) { j.Actions[0].SourceDigest = "sha256:" + strings.Repeat("d", 64) }, want: "does not match source-backed workspace identity"},
 	}
 	for _, test := range tests {

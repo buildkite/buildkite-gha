@@ -1308,7 +1308,7 @@ func validateLockIdentity(lock ActionLock) error {
 			return fmt.Errorf("invalid workspace identity")
 		}
 	case "github":
-		if lock.Repository == "" || len(lock.Repository) > 140 || lock.Repository != strings.ToLower(lock.Repository) || lock.RequestedRef == "" || len(lock.RequestedRef) > 1024 || !utf8.ValidString(lock.RequestedRef) || hasControl(lock.RequestedRef) || !commitPattern.MatchString(lock.Commit) || lock.Path != "" && !cleanActionPath(lock.Path) || lock.WorkspaceAlias != "" && (lock.Path == "" || !cleanActionPath(lock.WorkspaceAlias)) {
+		if lock.Repository == "" || len(lock.Repository) > 140 || lock.Repository != strings.ToLower(lock.Repository) || lock.RequestedRef == "" || len(lock.RequestedRef) > 1024 || !utf8.ValidString(lock.RequestedRef) || hasControl(lock.RequestedRef) || !commitPattern.MatchString(lock.Commit) || lock.Path != "" && !cleanActionPath(lock.Path) || lock.WorkspaceAlias != "" && (lock.Path == "" || !ValidSourceWorkspaceAlias(lock.WorkspaceAlias)) {
 			return fmt.Errorf("invalid GitHub identity")
 		}
 		r, err := source.Parse(lock.Repository + "@x")
@@ -1375,6 +1375,20 @@ func cleanActionPath(value string) bool {
 	}
 	for _, segment := range strings.Split(value, "/") {
 		if segment == "" || segment == "." || segment == ".." || len(segment) > 255 {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidSourceWorkspaceAlias reports whether an alias has one portable,
+// filesystem-stable representation across supported Linux and macOS workers.
+func ValidSourceWorkspaceAlias(value string) bool {
+	if value == "" || len(value) > 255 || value == "." || value == ".." || strings.EqualFold(value, ".git") {
+		return false
+	}
+	for i := range len(value) {
+		if value[i] < 0x20 || value[i] > 0x7e || value[i] == '/' || value[i] == '\\' {
 			return false
 		}
 	}

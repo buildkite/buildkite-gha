@@ -101,6 +101,7 @@
     "span": {"type": "object", "additionalProperties": false, "required": ["start", "end"], "properties": {"start": {"$ref": "#/$defs/position"}, "end": {"$ref": "#/$defs/position"}}},
     "selector": {"type": "object", "additionalProperties": false, "required": ["lock"], "properties": {"lock": {"type": "string", "pattern": "^a-[0-9a-f]{16}$"}}},
     "path": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^/\\\\\\x00-\\x1f\\x7f]{1,255}(?:/[^/\\\\\\x00-\\x1f\\x7f]{1,255})*$", "not": {"pattern": "(^|/)\\.\\.?(/|$)"}},
+    "sourceWorkspaceAlias": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[\\x20-\\x7e]+$", "not": {"pattern": "^(?:\\.{1,2}|\\.[Gg][Ii][Tt]|.*[/\\\\].*)$"}},
     "repository": {"type": "string", "maxLength": 140, "pattern": "^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?/[a-z0-9](?:[a-z0-9_.-]{0,98}[a-z0-9])?$"},
     "actionLock": {
       "type": "object", "additionalProperties": false,
@@ -108,7 +109,7 @@
       "properties": {
         "id": {"type": "string", "pattern": "^a-[0-9a-f]{16}$"}, "source": {"enum": ["workspace", "github"]},
         "repository": {"$ref": "#/$defs/repository"}, "requested_ref": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\x00-\\x1f\\x7f]+$"},
-        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "path": {"$ref": "#/$defs/path"}, "workspace_alias": {"$ref": "#/$defs/path"}, "source_digest": {"$ref": "#/$defs/digest"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "path": {"$ref": "#/$defs/path"}, "workspace_alias": {"$ref": "#/$defs/sourceWorkspaceAlias"}, "source_digest": {"$ref": "#/$defs/digest"},
         "children": {"type": "object", "maxProperties": 1024, "propertyNames": {"minLength": 1, "maxLength": 2048, "pattern": "^[^\\x00-\\x1f\\x7f]+$"}, "additionalProperties": {"$ref": "#/$defs/selector"}}
       },
       "allOf": [

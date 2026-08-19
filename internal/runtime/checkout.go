@@ -218,7 +218,7 @@ func remoteWorkflowRefMatches(ref string, remote plan.RemoteWorkflowSource) bool
 }
 
 func remoteWorkflowCheckoutAlias(locks []plan.ActionLock, path string) bool {
-	if !actionintegration.ValidCheckoutPath(path) {
+	if !plan.ValidSourceWorkspaceAlias(path) {
 		return false
 	}
 	for _, lock := range locks {

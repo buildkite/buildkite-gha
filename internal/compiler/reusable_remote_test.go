@@ -110,6 +110,9 @@ func TestBindRemoteWorkflowCheckoutInputsRequiresProvenanceForBoundAlias(t *test
 			t.Fatalf("bindRemoteWorkflowCheckoutInputs(%#v) = bound %t, error %v", inputs, bound, err)
 		}
 	}
+	if _, bound, err := bindRemoteWorkflowCheckoutInputs(remote, locks, nil); bound || err != nil {
+		t.Fatalf("ordinary default checkout = bound %t, error %v", bound, err)
+	}
 }
 
 func TestCompilePublicReusableWorkflowWithNestedPinnedLocalCall(t *testing.T) {
