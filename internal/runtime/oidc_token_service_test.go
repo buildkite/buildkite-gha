@@ -47,7 +47,7 @@ func TestAgentOIDCTokensMintsRequestedAudienceAndConfiguredClaims(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := provider.OIDCToken(context.Background(), "sts.amazonaws.com")
+	got, err := provider.OIDCToken(t.Context(), "sts.amazonaws.com")
 	if err != nil || got != token {
 		t.Fatalf("OIDCToken() = %q, %v", got, err)
 	}
@@ -105,7 +105,7 @@ func TestAgentOIDCTokensRejectsAuthFailuresAndMalformedResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = provider.OIDCToken(context.Background(), "audience")
+			_, err = provider.OIDCToken(t.Context(), "audience")
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), secret) {
 				t.Fatalf("OIDCToken() error = %v, want %q without response body", err, test.want)
 			}
@@ -135,12 +135,12 @@ func TestIDTokenServiceWireContract(t *testing.T) {
 	provider := &testOIDCTokenProvider{token: "header.payload.signature", requireLiveContext: true}
 	redactor := &testRedactor{}
 	processor := newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{})
-	service, err := startIDTokenService(context.Background(), provider, redactor, processor)
+	service, err := startIDTokenService(t.Context(), provider, redactor, processor)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = service.Close() }()
-	env, revoke, err := service.actionEnvironment(context.Background(), nil)
+	env, revoke, err := service.actionEnvironment(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,12 +181,12 @@ func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			provider := &testOIDCTokenProvider{err: oidcTokenStatusError(status)}
-			service, err := startIDTokenService(context.Background(), provider, &testRedactor{}, newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{}))
+			service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{}))
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer func() { _ = service.Close() }()
-			env, revoke, err := service.actionEnvironment(context.Background(), nil)
+			env, revoke, err := service.actionEnvironment(t.Context(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -276,7 +276,7 @@ if (process.env.no_proxy !== "lower.example,127.0.0.1") throw new Error("no_prox
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
 	provider := &testOIDCTokenProvider{token: "header.payload.signature"}
 	redactor := &testRedactor{}
-	result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: redactor}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() = %#v, %v", result, err)
 	}
@@ -312,7 +312,7 @@ const core = require("@actions/core");
 	job.IDTokenPermission = "write"
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
 	provider := &testOIDCTokenProvider{token: "header.payload.signature", requireLiveContext: true}
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: &testRedactor{}}).RunJob(ctx, job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" {
@@ -356,7 +356,7 @@ const core = require("@actions/core");
 		Action: &plan.ActionSelector{Lock: lockID},
 	}})
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
-	result, err := (Runner{Node24: node}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: node}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() = %#v, %v", result, err)
 	}

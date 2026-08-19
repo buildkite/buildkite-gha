@@ -37,17 +37,17 @@ func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"pull_requests": "write", "contents": "read"})
+	token, err := provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"pull_requests": "write", "contents": "read"})
 	if err != nil || token != statelessToken {
 		t.Fatalf("WorkflowToken() = %q, %v", token, err)
 	}
 	for _, permissions := range []map[string]string{nil, {}, {"contents": "admin"}, {"administration": "write"}, {"models": "write"}} {
-		if _, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", permissions); err == nil {
+		if _, err := provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", permissions); err == nil {
 			t.Fatalf("WorkflowToken(%#v) succeeded", permissions)
 		}
 	}
 	for _, permissions := range []map[string]string{{"models": "read"}, {"repository_projects": "read"}} {
-		if _, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", permissions); err == nil {
+		if _, err := provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", permissions); err == nil {
 			t.Fatalf("WorkflowToken(%#v) succeeded", permissions)
 		}
 	}
@@ -75,7 +75,7 @@ func TestAgentGitHubTokensMintsExactReadAllWorkflowPermissions(t *testing.T) {
 		"deployments": "read", "discussions": "read", "issues": "read", "packages": "read", "pages": "read",
 		"pull_requests": "read", "security_events": "read", "statuses": "read",
 	}
-	if token, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", permissions); err != nil || token != "ghs_read_all" {
+	if token, err := provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", permissions); err != nil || token != "ghs_read_all" {
 		t.Fatalf("WorkflowToken(read-all) = %q, %v", token, err)
 	}
 }
@@ -102,7 +102,7 @@ func TestAgentGitHubTokensMintsActionSourceTokenWithRepositoryOnly(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if token, err := provider.ActionSourceToken(context.Background(), "actions/checkout"); err != nil || token != "ghs_action_source" {
+	if token, err := provider.ActionSourceToken(t.Context(), "actions/checkout"); err != nil || token != "ghs_action_source" {
 		t.Fatalf("ActionSourceToken() = %q, %v", token, err)
 	}
 }
@@ -116,7 +116,7 @@ func TestAgentGitHubTokensRejectsInvalidWorkflowBeforeNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, workflow := range []string{"", "../ci.yml", "nested/ci.yml", ".ci.yml", "ci.json"} {
-		if _, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", workflow, map[string]string{"contents": "read"}); err == nil {
+		if _, err := provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", workflow, map[string]string{"contents": "read"}); err == nil {
 			t.Errorf("WorkflowToken(%q) succeeded", workflow)
 		}
 	}
@@ -167,10 +167,10 @@ func TestAgentGitHubTokensRejectsUnsafeConfigurationAndRepository(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, repository := range []string{"", "other", "../other/repo", "owner/..", "owner/repo/extra", "owner/repo?permission=write"} {
-		if _, err := provider.WorkflowToken(context.Background(), repository, "ci.yml", map[string]string{"contents": "read"}); err == nil {
+		if _, err := provider.WorkflowToken(t.Context(), repository, "ci.yml", map[string]string{"contents": "read"}); err == nil {
 			t.Fatalf("WorkflowToken(%q) succeeded", repository)
 		}
-		if _, err := provider.ActionSourceToken(context.Background(), repository); err == nil {
+		if _, err := provider.ActionSourceToken(t.Context(), repository); err == nil {
 			t.Fatalf("ActionSourceToken(%q) succeeded", repository)
 		}
 	}
@@ -212,7 +212,7 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
+			_, err = provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), secret) {
 				t.Fatalf("WorkflowToken() error = %v, want %q without response data", err, test.want)
 			}
@@ -233,7 +233,7 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"}); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
+	if _, err := provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"}); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
 		t.Fatalf("redirect WorkflowToken() error/redirected = %v / %v", err, redirected)
 	}
 }
@@ -282,7 +282,7 @@ func TestAgentGitHubTokensDisabledWorkflowTokenGuidance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
+			_, err = provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
 			if err == nil || err.Error() != test.want {
 				t.Fatalf("WorkflowToken() error = %q, want %q", err, test.want)
 			}
@@ -291,7 +291,7 @@ func TestAgentGitHubTokensDisabledWorkflowTokenGuidance(t *testing.T) {
 }
 
 func TestAgentGitHubTokensHonorsCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: "https://agent.invalid/v3", JobID: testCacheJobID, JobToken: "job-token"})
 	if err != nil {
@@ -306,7 +306,7 @@ func TestAgentGitHubTokensAuthenticateUnrelatedPublicRepository(t *testing.T) {
 	if os.Getenv("BUILDKITE_GHA_LIVE_REQUIRED") != "1" {
 		t.Skip("set BUILDKITE_GHA_LIVE_REQUIRED=1 to verify job-scoped public GitHub access")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{
 		Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),

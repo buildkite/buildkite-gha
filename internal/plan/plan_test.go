@@ -669,7 +669,7 @@ func TestWorkspaceRootActionAndSharedChildDAG(t *testing.T) {
 	base := "manyletters/repository@v1"
 	for i := range 256 {
 		variant := []byte(base)
-		for bit := 0; bit < 8; bit++ {
+		for bit := range 8 {
 			if i&(1<<bit) != 0 {
 				variant[bit] -= 'a' - 'A'
 			}

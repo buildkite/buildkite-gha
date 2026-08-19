@@ -519,11 +519,12 @@ func validatedProcessingReport(out processingOutput, workflowPath, profile strin
 func validatedProcessingReportWithOptions(out processingOutput, workflowPath, profile string, source, event []byte, eventEvaluated bool, options *compiler.Options) (compatibility.ProcessingReport, bool) {
 	var validation compiler.Report
 	var err error
-	if eventEvaluated && options != nil {
+	switch {
+	case eventEvaluated && options != nil:
 		validation, err = compiler.ValidateEventWithOptions(workflowPath, source, event, *options)
-	} else if eventEvaluated {
+	case eventEvaluated:
 		validation, err = compiler.ValidateEvent(workflowPath, source, event)
-	} else {
+	default:
 		validation, err = compiler.Validate(workflowPath, source)
 	}
 	report := compatibility.InitialProcessingReport(workflowPath, profile, eventEvaluated, validation, err)

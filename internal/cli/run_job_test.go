@@ -149,14 +149,7 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_STEP_KEY", job.Target.StepKey)
 	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", job.Target.Queue)
-	oldDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(workspace); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldDirectory) })
+	t.Chdir(workspace)
 
 	var stdout, stderr bytes.Buffer
 	runner := &cliCaptureRunner{}
@@ -567,7 +560,7 @@ func TestRunJobPublishesEveryTerminalResultAfterCancellation(t *testing.T) {
 			planPath, planDigest := writeCLIJobPlan(t, job)
 			setCLIJobIdentity(t, job, planDigest)
 			runner := &cliCaptureRunner{}
-			ctx := context.Background()
+			ctx := t.Context()
 			if test.cancel {
 				cancelled, cancel := context.WithCancel(ctx)
 				cancel()
@@ -843,14 +836,7 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 	if err := os.WriteFile(planPath, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	oldDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(workspace); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldDirectory) })
+	t.Chdir(workspace)
 
 	var stdout, stderr bytes.Buffer
 	if code := Run([]string{"run-job", "--plan", planPath, "--result", resultPath}, &stdout, &stderr, "dev"); code != 0 {

@@ -346,7 +346,7 @@ func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, 
 	return Resolved{Reference: ref, Commit: v.SHA}, nil
 }
 func (r *Resolver) peel(ctx context.Context, ref Reference, typ, sha string) (string, error) {
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if !shaRE.MatchString(sha) {
 			return "", fmt.Errorf("GitHub returned malformed object SHA")
 		}
@@ -409,7 +409,7 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	if len(body) > 1<<20 {
 		return fmt.Errorf("GitHub API response too large")
 	}
-	if resp.StatusCode == 404 {
+	if resp.StatusCode == http.StatusNotFound {
 		return &NotPublicError{}
 	}
 	if rate := rateLimitError(resp, body); rate != nil {
@@ -449,7 +449,7 @@ func actionSourceToken(cfg config, parts []string) string {
 	return cfg.credential.token
 }
 func rateLimitError(resp *http.Response, body []byte) error {
-	if resp.StatusCode != 429 && (resp.StatusCode != 403 || (resp.Header.Get("X-RateLimit-Remaining") != "0" && !strings.Contains(strings.ToLower(string(body)), "rate limit"))) {
+	if resp.StatusCode != http.StatusTooManyRequests && (resp.StatusCode != http.StatusForbidden || (resp.Header.Get("X-RateLimit-Remaining") != "0" && !strings.Contains(strings.ToLower(string(body)), "rate limit"))) {
 		return nil
 	}
 	var reset time.Time
@@ -711,10 +711,10 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) err
 	if !validArchiveURL(resp.Request.URL, s.cfg.finalHosts) {
 		return fmt.Errorf("archive final URL denied")
 	}
-	if resp.StatusCode == 404 {
+	if resp.StatusCode == http.StatusNotFound {
 		return &NotPublicError{}
 	}
-	if resp.StatusCode == 403 || resp.StatusCode == 429 {
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if readErr != nil {
 			return fmt.Errorf("read archive error response: %w", readErr)
@@ -967,11 +967,12 @@ func extractTar(r io.Reader, dst string, c config) error {
 				if e == nil {
 					n, ce := io.CopyN(f, tr, h.Size)
 					cl := f.Close()
-					if ce != nil || n != h.Size {
+					switch {
+					case ce != nil || n != h.Size:
 						e = fmt.Errorf("short archive file")
-					} else if cl != nil {
+					case cl != nil:
 						e = cl
-					} else {
+					default:
 						mode := os.FileMode(0o644)
 						if h.Mode&0o100 != 0 {
 							mode = 0o755

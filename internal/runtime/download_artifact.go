@@ -455,7 +455,7 @@ func reserveDownloadMemberPath(root *os.Root, name string) error {
 }
 
 func downloadPathLess(left, right string) bool {
-	for i := 0; i < min(len(left), len(right)); i++ {
+	for i := range min(len(left), len(right)) {
 		if left[i] == right[i] {
 			continue
 		}
@@ -631,7 +631,7 @@ func preflightZIPExtraFields(fields []byte) error {
 		if fieldSize > len(fields)-4 {
 			return fmt.Errorf("artifact ZIP extra field is malformed")
 		}
-		if binary.LittleEndian.Uint16(fields[:]) == 0x0001 {
+		if binary.LittleEndian.Uint16(fields) == 0x0001 {
 			return fmt.Errorf("ZIP64 artifact member is unsupported")
 		}
 		fields = fields[4+fieldSize:]
