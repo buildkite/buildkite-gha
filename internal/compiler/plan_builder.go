@@ -217,7 +217,7 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 		if !ok {
 			return built, fmt.Errorf("build plan for job %q: action lock %q is missing", instance.LogicalJobID, selector.Lock)
 		}
-		if err := b.validateActionAdapter(instance, stepIndex, lock, &built); err != nil {
+		if err := b.validateActionAdapter(instance, stepIndex, lock, compiled.locks, &built); err != nil {
 			return built, err
 		}
 	}
@@ -233,11 +233,15 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 	return built, nil
 }
 
-func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, built *builtPlanActions) error {
+func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, locks []plan.ActionLock, built *builtPlanActions) error {
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
 	switch descriptor.Adapter {
 	case actionintegration.AdapterCheckoutExactEventSHA:
 		checkoutInputs := cloneMap(instance.Steps[stepIndex].With)
+		if err := actionintegration.ValidateCheckoutInputNames(checkoutInputs); err != nil {
+			span := instance.Steps[stepIndex].Span.Start
+			return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+		}
 		for name, value := range checkoutInputs {
 			if !strings.EqualFold(name, "ref") {
 				continue
@@ -247,6 +251,13 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 				strings.EqualFold(root, "needs") && len(path) == 3 && strings.EqualFold(path[1], "outputs")) {
 				checkoutInputs[name] = b.ir.Event.SHA
 			}
+		}
+		if sourceInputs, ok := bindRemoteWorkflowCheckoutInputs(instance.RemoteWorkflow, locks, checkoutInputs); ok {
+			if err := actionintegration.ValidateCheckoutInputs(lock.Commit, sourceInputs, instance.RemoteWorkflow.Repository, instance.RemoteWorkflow.Commit); err != nil {
+				span := instance.Steps[stepIndex].Span.Start
+				return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+			}
+			return nil
 		}
 		if err := actionintegration.ValidateCheckoutInputs(lock.Commit, checkoutInputs, b.ir.Event.Repository.Owner+"/"+b.ir.Event.Repository.Name, b.ir.Event.SHA); err != nil {
 			span := instance.Steps[stepIndex].Span.Start
@@ -270,6 +281,56 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 		}
 	}
 	return nil
+}
+
+func bindRemoteWorkflowCheckoutInputs(remote *RemoteWorkflowSource, locks []plan.ActionLock, inputs map[string]string) (map[string]string, bool) {
+	if remote == nil {
+		return nil, false
+	}
+	value := func(wanted string) string {
+		for name, value := range inputs {
+			if strings.EqualFold(name, wanted) {
+				return value
+			}
+		}
+		return ""
+	}
+	if !strings.EqualFold(value("repository"), remote.Repository) || !remoteWorkflowCheckoutRefMatches(value("ref"), *remote) {
+		return nil, false
+	}
+	checkoutPath := value("path")
+	aliasMatches := false
+	for _, lock := range locks {
+		if lock.WorkspaceAlias == checkoutPath {
+			aliasMatches = true
+			break
+		}
+	}
+	if !aliasMatches {
+		return nil, false
+	}
+	normalized := cloneMap(inputs)
+	for name := range normalized {
+		switch {
+		case strings.EqualFold(name, "token"):
+			delete(normalized, name)
+		case strings.EqualFold(name, "repository"):
+			normalized[name] = remote.Repository
+		case strings.EqualFold(name, "ref"):
+			normalized[name] = remote.Commit
+		}
+	}
+	return normalized, true
+}
+
+func remoteWorkflowCheckoutRefMatches(ref string, remote RemoteWorkflowSource) bool {
+	if ref == remote.Commit || ref == remote.RequestedRef {
+		return true
+	}
+	if strings.HasPrefix(remote.RequestedRef, "refs/") {
+		return false
+	}
+	return ref == "refs/heads/"+remote.RequestedRef || ref == "refs/tags/"+remote.RequestedRef
 }
 
 func addContainerCapabilities(instance JobInstance, actionRefs []string, built *builtPlanActions) error {

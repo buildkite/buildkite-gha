@@ -246,13 +246,21 @@ jobs:
     needs: detect-env
     runs-on: ubuntu-latest
     steps:
+      - name: Check out builder directly
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: slsa-framework/slsa-github-generator
+          ref: refs/tags/v2.1.0
+          path: __DIRECT_BUILDER_CHECKOUT__
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Run directly checked out local action
+        uses: ./__DIRECT_BUILDER_CHECKOUT__/.github/actions/direct-check
       - name: Generate builder
         uses: slsa-framework/slsa-github-generator/.github/actions/generate-builder@v2.1.0
         with:
           repository: ${{ needs.detect-env.outputs.repository }}
           ref: ${{ needs.detect-env.outputs.ref }}
-      - name: Run source-checked local action
-        uses: ./__BUILDER_CHECKOUT_DIR__/.github/actions/compute-sha256
       - env:
           UNTRUSTED_SUBJECTS: ${{ inputs.base64-subjects }}
         run: test -n "$UNTRUSTED_SUBJECTS"
@@ -302,7 +310,8 @@ runs:
 `)
 	writeAction(t, remoteRoot, ".github/actions/privacy-check", "name: Privacy check\ninputs:\n  token: {}\nruns:\n  using: node20\n  main: index.js\n")
 	writeAction(t, remoteRoot, ".github/actions/compute-sha256", "name: Compute SHA256\nruns:\n  using: node20\n  main: index.js\n")
-	for _, actionPath := range []string{"privacy-check", "compute-sha256"} {
+	writeAction(t, remoteRoot, ".github/actions/direct-check", "name: Direct check\nruns:\n  using: node20\n  main: index.js\n")
+	for _, actionPath := range []string{"privacy-check", "compute-sha256", "direct-check"} {
 		if err := os.WriteFile(filepath.Join(remoteRoot, ".github", "actions", actionPath, "index.js"), []byte("console.log('ok')\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -353,6 +362,9 @@ runs:
 	wantAlias := "__BUILDER_CHECKOUT_DIR__"
 	if aliases[".github/actions/privacy-check"] != wantAlias || aliases[".github/actions/compute-sha256"] != wantAlias {
 		t.Fatalf("source-backed local action aliases = %#v", aliases)
+	}
+	if aliases[".github/actions/direct-check"] != "__DIRECT_BUILDER_CHECKOUT__" {
+		t.Fatalf("direct source-backed local action aliases = %#v", aliases)
 	}
 	if _, err := os.Lstat(filepath.Join(callerRoot, wantAlias)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("caller workspace unexpectedly contains builder checkout: %v", err)
