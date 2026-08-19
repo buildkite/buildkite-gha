@@ -204,7 +204,11 @@ func remoteWorkflowCheckoutInputs(job plan.Job, commit string, inputs map[string
 }
 
 func remoteWorkflowRefMatches(ref string, remote plan.RemoteWorkflowSource) bool {
-	return ref == remote.Commit || ref == remote.RequestedRef || ref == remote.ResolvedRef
+	// Checkout gives a bare branch precedence over a same-named tag, while a
+	// reusable-workflow reference does the opposite. Bare names are safe only
+	// when workflow provenance selected that branch.
+	return ref == remote.Commit || ref == remote.ResolvedRef ||
+		ref == remote.RequestedRef && !strings.HasPrefix(ref, "refs/") && remote.ResolvedRef == "refs/heads/"+remote.RequestedRef
 }
 
 func remoteWorkflowCheckoutAlias(locks []plan.ActionLock, path string) bool {

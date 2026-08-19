@@ -683,7 +683,7 @@ Mutable refs work only while they resolve to the upstream `main` snapshot or a k
 
 The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean top-level directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to each fetch command and verified submodule fetch command and are never persisted.
 
-The table below describes event-repository checkouts. The [source-backed reusable-workflow checkout](#reusable-workflows) is the only exception: its repository, ref, and path must match immutable workflow provenance and a local-action alias. Buildkite discards its `token` input and fetches the exact commit anonymously.
+The table below describes event-repository checkouts. The [source-backed reusable-workflow checkout](#reusable-workflows) is the only exception: its repository, ref, and path must match immutable workflow provenance and a local-action alias. A tag checkout must use the exact `refs/tags/...` ref or commit; Buildkite rejects the bare tag because `actions/checkout` gives a same-named branch precedence. Buildkite discards its `token` input and fetches the exact commit anonymously.
 
 | Input | Supported values |
 | --- | --- |

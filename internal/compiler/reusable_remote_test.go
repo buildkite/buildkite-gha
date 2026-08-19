@@ -80,13 +80,19 @@ func (s *fakeReusableRepositorySource) references() []actionsource.Reference {
 
 func TestRemoteWorkflowCheckoutRefMatchesResolvedNamespace(t *testing.T) {
 	remote := RemoteWorkflowSource{RequestedRef: "v1", ResolvedRef: "refs/tags/v1", Commit: strings.Repeat("a", 40)}
-	for _, ref := range []string{"v1", "refs/tags/v1", remote.Commit} {
+	for _, ref := range []string{"refs/tags/v1", remote.Commit} {
 		if !remoteWorkflowCheckoutRefMatches(ref, remote) {
 			t.Errorf("remoteWorkflowCheckoutRefMatches(%q) = false", ref)
 		}
 	}
-	if remoteWorkflowCheckoutRefMatches("refs/heads/v1", remote) {
-		t.Error("remoteWorkflowCheckoutRefMatches() accepted a different Git namespace")
+	for _, ref := range []string{"v1", "refs/heads/v1"} {
+		if remoteWorkflowCheckoutRefMatches(ref, remote) {
+			t.Errorf("remoteWorkflowCheckoutRefMatches(%q) accepted ambiguous or different Git namespace", ref)
+		}
+	}
+	branch := RemoteWorkflowSource{RequestedRef: "main", ResolvedRef: "refs/heads/main", Commit: remote.Commit}
+	if !remoteWorkflowCheckoutRefMatches("main", branch) {
+		t.Error("remoteWorkflowCheckoutRefMatches() rejected a bare resolved branch")
 	}
 }
 

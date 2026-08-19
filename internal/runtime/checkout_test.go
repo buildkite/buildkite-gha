@@ -261,8 +261,9 @@ func TestRemoteWorkflowCheckoutInputsBindImmutableSource(t *testing.T) {
 	}{
 		{name: "other repository remains unsupported", inputs: map[string]string{"repository": "other/repository"}},
 		{name: "different ref", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "refs/tags/v2.2.0", "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "does not match immutable workflow provenance"},
+		{name: "ambiguous bare tag", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "v2.1.0", "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "does not match immutable workflow provenance"},
 		{name: "different namespace", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "refs/heads/v2.1.0", "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "does not match immutable workflow provenance"},
-		{name: "unbound path", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "v2.1.0", "path": "other"}, remote: true, want: "does not match a source-backed local action"},
+		{name: "unbound path", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "refs/tags/v2.1.0", "path": "other"}, remote: true, want: "does not match a source-backed local action"},
 		{name: "duplicate input", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "Repository": job.Event.Repository}, remote: true, want: "duplicate case-insensitive input"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
