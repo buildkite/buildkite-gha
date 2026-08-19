@@ -104,6 +104,7 @@ func TestBindRemoteWorkflowCheckoutInputsRequiresProvenanceForBoundAlias(t *test
 	for _, inputs := range []map[string]string{
 		{"ref": remote.Commit, "path": "checked-out"},
 		{"repository": "owner/caller", "ref": strings.Repeat("b", 40), "path": "checked-out"},
+		{"repository": "owner/caller", "ref": strings.Repeat("b", 40), "path": "CHECKED-OUT"},
 	} {
 		if _, bound, err := bindRemoteWorkflowCheckoutInputs(remote, locks, inputs); !bound || err == nil || !strings.Contains(err.Error(), "repository does not match immutable workflow provenance") {
 			t.Fatalf("bindRemoteWorkflowCheckoutInputs(%#v) = bound %t, error %v", inputs, bound, err)

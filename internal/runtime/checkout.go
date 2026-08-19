@@ -222,7 +222,7 @@ func remoteWorkflowCheckoutAlias(locks []plan.ActionLock, path string) bool {
 		return false
 	}
 	for _, lock := range locks {
-		if lock.WorkspaceAlias == path {
+		if strings.EqualFold(lock.WorkspaceAlias, path) {
 			return true
 		}
 	}
