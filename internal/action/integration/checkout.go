@@ -118,16 +118,14 @@ func sortedCheckoutCommits() []string {
 // ValidateCheckoutInputs enforces the release-specific input contract
 // implemented by the tokenless event-repository checkout adapter.
 func ValidateCheckoutInputs(commit string, inputs map[string]string, repository, sha string) error {
+	if err := ValidateCheckoutInputNames(inputs); err != nil {
+		return err
+	}
 	names := sortedNames(inputs)
-	seen := make(map[string]bool, len(names))
 	generation := checkoutGeneration(commit)
 	for _, name := range names {
 		value := inputs[name]
 		normalized := strings.ToLower(name)
-		if seen[normalized] {
-			return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
-		}
-		seen[normalized] = true
 		if checkoutInputIntroduced[normalized] > generation {
 			return fmt.Errorf("explicit input %q is unsupported by this actions/checkout release", name)
 		}
@@ -195,6 +193,20 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 			}
 		}
 		return fmt.Errorf("explicit input %q value is unsupported", name)
+	}
+	return nil
+}
+
+// ValidateCheckoutInputNames rejects names whose case-insensitive lookup would be ambiguous.
+func ValidateCheckoutInputNames(inputs map[string]string) error {
+	names := sortedNames(inputs)
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		normalized := strings.ToLower(name)
+		if seen[normalized] {
+			return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
+		}
+		seen[normalized] = true
 	}
 	return nil
 }

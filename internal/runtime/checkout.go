@@ -165,6 +165,11 @@ func (r Runner) runCheckoutTarget(ctx context.Context, processor *commandProcess
 
 func remoteWorkflowCheckoutInputs(job plan.Job, commit string, inputs map[string]string) (map[string]string, string, bool, error) {
 	remote := job.Workflow.Remote
+	if remote != nil {
+		if err := actionintegration.ValidateCheckoutInputNames(inputs); err != nil {
+			return nil, "", true, err
+		}
+	}
 	repository := checkoutInput(inputs, "repository")
 	if remote == nil || repository == "" || !strings.EqualFold(repository, remote.Repository) {
 		return nil, "", false, nil
