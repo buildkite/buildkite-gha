@@ -1490,7 +1490,7 @@ func TestProcessingAnnotationsUseActiveBoundedContext(t *testing.T) {
 		{
 			name: "skipped workflow",
 			publish: func(ctx context.Context, out processingOutput) {
-				out.annotateSkippedWorkflows(ctx, "push", []skippedWorkflow{{label: "CI", key: "ci", reason: "not applicable"}})
+				out.annotateSkippedWorkflows(ctx, "push", "", true, []skippedWorkflow{{label: "CI", key: "ci", reason: "not applicable"}})
 			},
 		},
 	} {

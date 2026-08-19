@@ -1436,8 +1436,8 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 		t.Fatalf("ignored-only pipeline = %#v", pipeline.Steps)
 	}
 	wantAnnotationArgs := []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", skippedWorkflowsContext, "--style", "info"}
-	wantWorkflows := []skippedWorkflow{{label: wantLabel, key: pipeline.Steps[0].Key, reason: "This workflow is not triggered by a `push` event"}}
-	if annotation == nil || !slices.Equal(annotation.args, wantAnnotationArgs) || string(annotation.stdin) != skippedWorkflowsAnnotation("push", wantWorkflows, "https://buildkite.com/acme/widgets/builds/42") {
+	wantWorkflows := []skippedWorkflow{{label: wantLabel, key: pipeline.Steps[0].Key, reason: "This workflow is not triggered by a `push` event", events: []string{"pull_request"}}}
+	if annotation == nil || !slices.Equal(annotation.args, wantAnnotationArgs) || string(annotation.stdin) != skippedWorkflowsAnnotation("push", "", true, wantWorkflows, "https://buildkite.com/acme/widgets/builds/42") {
 		t.Fatalf("skipped workflow annotation = %#v", annotation)
 	}
 	for path := range runner.uploaded {
@@ -1478,32 +1478,52 @@ func TestRunUploadExplainsWhenWorkflowTriggerFiltersDoNotMatch(t *testing.T) {
 
 func TestSkippedWorkflowsAnnotation(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		workflows []skippedWorkflow
-		want      string
+		name        string
+		event       string
+		buildSource string
+		allSkipped  bool
+		workflows   []skippedWorkflow
+		want        string
 	}{
 		{
 			name:      "singular",
-			workflows: []skippedWorkflow{{label: "CI", key: "gha-workflow-ci", reason: "This workflow is not triggered by a `push` event"}},
+			event:     "push",
+			workflows: []skippedWorkflow{{label: "CI", key: "gha-workflow-ci", reason: "This workflow is not triggered by a `push` event", events: []string{"workflow_dispatch", "pull_request"}}},
 			want: "#### 1 workflow was skipped\n\n" +
 				"The current <code>push</code> event does not match these workflows:\n\n" +
-				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) — This workflow is not triggered by a `push` event\n",
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) (workflow_dispatch, pull_request) — This workflow is not triggered by a `push` event\n",
 		},
 		{
-			name: "plural",
+			name:  "plural",
+			event: "push",
 			workflows: []skippedWorkflow{
-				{label: "CI", key: "gha-workflow-ci", reason: "Only runs on `main` or `development`."},
-				{label: "Release [production]", key: "gha-workflow-release?production", reason: "This workflow is not triggered by a `push` event"},
+				{label: "CI", key: "gha-workflow-ci", reason: "Only runs on `main` or `development`.", events: []string{"push", "pull_request"}},
+				{label: "Release [production]", key: "gha-workflow-release?production", reason: "This workflow is not triggered by a `push` event", events: []string{"release"}},
 			},
 			want: "#### 2 workflows were skipped\n\n" +
 				"The current <code>push</code> event does not match these workflows:\n\n" +
-				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) — Only runs on `main` or `development`.\n" +
-				"* [:github: Release \\[production\\]](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-release%3Fproduction&open=false) — This workflow is not triggered by a `push` event\n",
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) (push, pull_request) — Only runs on `main` or `development`.\n" +
+				"* [:github: Release \\[production\\]](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-release%3Fproduction&open=false) (release) — This workflow is not triggered by a `push` event\n",
+		},
+		{
+			name:        "manual build with no matching workflows",
+			event:       "workflow_dispatch",
+			buildSource: "ui",
+			allSkipped:  true,
+			workflows: []skippedWorkflow{
+				{label: "CI", key: "gha-workflow-ci", reason: "This workflow is not triggered by a `workflow_dispatch` event", events: []string{"push", "pull_request"}},
+			},
+			want: "#### 1 workflow was skipped, so this build ran nothing\n\n" +
+				"You started this build from the Buildkite UI, which is a manual run. In GitHub Actions terms, this maps to a <code>workflow_dispatch</code> event, and these workflows don't accept it:\n\n" +
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) (push, pull_request) — This workflow is not triggered by a `workflow_dispatch` event\n\n" +
+				"Push a commit or open a pull request to run workflows configured for those events. Or add <code>workflow_dispatch:</code> to the <code>on:</code> block to make a workflow runnable from here. [Learn about event mapping →](https://github.com/buildkite/buildkite-gha/blob/main/docs/cli.md#select-the-effective-event)\n",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			body := skippedWorkflowsAnnotation(
-				"push",
+				test.event,
+				test.buildSource,
+				test.allSkipped,
 				test.workflows,
 				"https://buildkite.com/acme/widgets/builds/42",
 			)
