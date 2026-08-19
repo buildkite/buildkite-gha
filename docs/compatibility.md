@@ -35,7 +35,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, and `python`. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
-| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local and literal public GitHub workflows with static inputs and direct job-output mappings. Secret forwarding is unsupported. |
+| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local and literal public GitHub workflows with static inputs, deferred string inputs from direct needs outputs, and direct job-output mappings. Secret forwarding is unsupported. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Reusable-workflow jobs use the top-level workflow permissions. |
@@ -177,6 +177,7 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Literal public references to a `.yml` or `.yaml` file directly under `owner/repository/.github/workflows/`.
 - `boolean`, `number`, and `string` inputs.
 - Static input values. Caller values may use graph-time `github`, `vars`, matrix, and parent reusable-workflow inputs with the supported operators and pure functions.
+- String inputs passed as exactly `${{ needs.<job>.outputs.<name> }}`. The call must list the job in `needs`. Buildkite resolves the verified output before each flattened callee job runs.
 - Literal defaults and expression defaults over graph-time `github` and `vars` values.
 - Nested calls up to four levels.
 - Caller-visible aggregate results.
@@ -187,7 +188,7 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 - Dynamic workflow paths and private repositories.
 - `secrets: inherit`, explicit secret mappings, or required called-workflow secrets.
-- `needs`-dependent inputs or dynamic matrices.
+- Compound `needs`-dependent inputs or dynamic matrices.
 - Input defaults that reference `inputs`.
 - Literal or compound output expressions.
 - Top-level concurrency in the called workflow.
@@ -219,7 +220,7 @@ jobs:
         run: echo "value=app-${{ inputs.target }}" >> "$GITHUB_OUTPUT"
 ```
 
-The caller passes a static input:
+The caller can pass a static input:
 
 ```yaml
 jobs:
@@ -227,6 +228,17 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       target: production
+```
+
+Or defer a string input until a prerequisite publishes its output:
+
+```yaml
+jobs:
+  call:
+    needs: prepare
+    uses: ./.github/workflows/build.yml
+    with:
+      target: ${{ needs.prepare.outputs.target }}
 ```
 
 ### Permissions

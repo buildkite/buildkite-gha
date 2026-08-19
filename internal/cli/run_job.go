@@ -266,6 +266,15 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			runErr = fmt.Errorf("hydrate prerequisite results: %w", runErr)
 		}
 	}
+	if runErr == nil && len(job.DeferredInputs) != 0 {
+		inputs, err := gharuntime.ResolveDeferredInputs(ctx, agent, artifactRoot, producer.BuildID, job.DeferredInputs)
+		if err != nil {
+			details.setFailurePhase(telemetry.FailurePhaseSourceResolution)
+			runErr = fmt.Errorf("hydrate reusable-workflow inputs: %w", err)
+		} else {
+			job.DeferredInputValues = inputs
+		}
+	}
 	if runErr == nil && len(job.CallGuards) != 0 {
 		job.CallGuards, runErr = gharuntime.ResolveCallGuards(ctx, agent, artifactRoot, producer.BuildID, job.CallGuards)
 		if runErr != nil {

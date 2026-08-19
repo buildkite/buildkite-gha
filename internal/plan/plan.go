@@ -212,11 +212,13 @@ type NeedOutput struct {
 // CallGuard is one immutable caller-scoped reusable-workflow condition. Needs
 // is hydrated only from its independently verified producer manifests.
 type CallGuard struct {
-	Condition   string                  `json:"condition"`
-	Inputs      map[string]any          `json:"inputs,omitempty"`
-	NeedSources map[string][]NeedSource `json:"need_sources,omitempty"`
-	NeedOutputs map[string][]NeedOutput `json:"need_outputs,omitempty"`
-	Needs       map[string]Need         `json:"-"`
+	Condition           string                   `json:"condition"`
+	Inputs              map[string]any           `json:"inputs,omitempty"`
+	DeferredInputs      map[string]DeferredInput `json:"deferred_inputs,omitempty"`
+	DeferredInputValues map[string]any           `json:"-"`
+	NeedSources         map[string][]NeedSource  `json:"need_sources,omitempty"`
+	NeedOutputs         map[string][]NeedOutput  `json:"need_outputs,omitempty"`
+	Needs               map[string]Need          `json:"-"`
 }
 
 type Position struct {
@@ -272,6 +274,13 @@ type ServiceContainer struct {
 	Entrypoint  string                `json:"entrypoint,omitempty"`
 }
 
+// DeferredInput binds one string workflow_call input to exact, verified
+// prerequisite outputs. The runtime resolves it before evaluating callee fields.
+type DeferredInput struct {
+	Sources []NeedSource `json:"sources"`
+	Outputs []NeedOutput `json:"outputs,omitempty"`
+}
+
 // GitHubToken describes one synthetic secrets.GITHUB_TOKEN value. Workflow is
 // the top-level policy filename. Permissions are API-normalized and
 // compiler-owned; the repository always comes from Event.
@@ -290,24 +299,26 @@ type OIDCConfiguration struct {
 
 // Job is one immutable, compiler-selected workflow job instance.
 type Job struct {
-	Schema               string                  `json:"schema"`
-	Compiler             Compiler                `json:"compiler"`
-	Runtime              *Runtime                `json:"runtime,omitempty"`
-	Workflow             Workflow                `json:"workflow"`
-	Event                Event                   `json:"event"`
-	Target               Target                  `json:"target"`
-	RequiredCapabilities []string                `json:"required_capabilities"`
-	RequiredSecrets      []string                `json:"required_secrets,omitempty"`
-	GitHubToken          *GitHubToken            `json:"github_token,omitempty"`
-	IDTokenPermission    string                  `json:"id_token_permission,omitempty"`
-	OIDC                 *OIDCConfiguration      `json:"oidc,omitempty"`
-	Matrix               map[string]any          `json:"matrix,omitempty"`
-	Inputs               map[string]any          `json:"inputs,omitempty"`
-	Vars                 map[string]string       `json:"vars,omitempty"`
-	Dependencies         []string                `json:"dependencies,omitempty"`
-	NeedSources          map[string][]NeedSource `json:"need_sources,omitempty"`
-	NeedOutputs          map[string][]NeedOutput `json:"need_outputs,omitempty"`
-	CallGuards           []CallGuard             `json:"call_guards,omitempty"`
+	Schema               string                   `json:"schema"`
+	Compiler             Compiler                 `json:"compiler"`
+	Runtime              *Runtime                 `json:"runtime,omitempty"`
+	Workflow             Workflow                 `json:"workflow"`
+	Event                Event                    `json:"event"`
+	Target               Target                   `json:"target"`
+	RequiredCapabilities []string                 `json:"required_capabilities"`
+	RequiredSecrets      []string                 `json:"required_secrets,omitempty"`
+	GitHubToken          *GitHubToken             `json:"github_token,omitempty"`
+	IDTokenPermission    string                   `json:"id_token_permission,omitempty"`
+	OIDC                 *OIDCConfiguration       `json:"oidc,omitempty"`
+	Matrix               map[string]any           `json:"matrix,omitempty"`
+	Inputs               map[string]any           `json:"inputs,omitempty"`
+	DeferredInputs       map[string]DeferredInput `json:"deferred_inputs,omitempty"`
+	DeferredInputValues  map[string]any           `json:"-"`
+	Vars                 map[string]string        `json:"vars,omitempty"`
+	Dependencies         []string                 `json:"dependencies,omitempty"`
+	NeedSources          map[string][]NeedSource  `json:"need_sources,omitempty"`
+	NeedOutputs          map[string][]NeedOutput  `json:"need_outputs,omitempty"`
+	CallGuards           []CallGuard              `json:"call_guards,omitempty"`
 	// Needs is populated only from verified producer-attributed manifests at
 	// runtime. It is never accepted from or encoded into an immutable plan.
 	Needs                   map[string]Need   `json:"-"`
@@ -718,6 +729,13 @@ func (job Job) Validate() error {
 			seen[key] = struct{}{}
 		}
 	}
+	deferredDependencies, err := validateDeferredInputs(job.Inputs, job.DeferredInputs, dependencies)
+	if err != nil {
+		return fmt.Errorf("job plan deferred inputs: %w", err)
+	}
+	for dependency := range deferredDependencies {
+		sourcedDependencies[dependency] = struct{}{}
+	}
 	if len(job.CallGuards) > MaxCallGuards {
 		return fmt.Errorf("job plan has more than %d reusable-workflow call guards", MaxCallGuards)
 	}
@@ -736,6 +754,13 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job plan call guard %d: %w", i+1, err)
 		}
 		for dependency := range guardDependencies {
+			sourcedDependencies[dependency] = struct{}{}
+		}
+		guardInputDependencies, err := validateDeferredInputs(guard.Inputs, guard.DeferredInputs, dependencies)
+		if err != nil {
+			return fmt.Errorf("job plan call guard %d deferred inputs: %w", i+1, err)
+		}
+		for dependency := range guardInputDependencies {
 			sourcedDependencies[dependency] = struct{}{}
 		}
 	}
@@ -861,6 +886,57 @@ func validateInputs(inputs map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func validateDeferredInputs(inputs map[string]any, deferred map[string]DeferredInput, dependencies map[string]struct{}) (map[string]struct{}, error) {
+	if len(inputs)+len(deferred) > 25 {
+		return nil, fmt.Errorf("inputs exceed their size limit")
+	}
+	names := make(map[string]struct{}, len(inputs)+len(deferred))
+	for name := range inputs {
+		names[strings.ToLower(name)] = struct{}{}
+	}
+	sourced := make(map[string]struct{})
+	for name, input := range deferred {
+		lowerName := strings.ToLower(name)
+		if name == "" || len(name) > 255 {
+			return nil, fmt.Errorf("has invalid input name")
+		}
+		if _, exists := names[lowerName]; exists {
+			return nil, fmt.Errorf("repeats input %q", name)
+		}
+		names[lowerName] = struct{}{}
+		if len(input.Sources) == 0 || len(input.Sources) > MaxNeedProducers {
+			return nil, fmt.Errorf("input %q has no valid producers", name)
+		}
+		producers := make(map[string]struct{}, len(input.Sources))
+		for i, source := range input.Sources {
+			if !targetPattern.MatchString(source.StepKey) || !digestPattern.MatchString(source.PlanDigest) || i > 0 && input.Sources[i-1].StepKey >= source.StepKey {
+				return nil, fmt.Errorf("input %q has invalid, repeated, or unsorted producer identity", name)
+			}
+			key := strings.ToLower(source.StepKey)
+			if _, exists := dependencies[key]; !exists {
+				return nil, fmt.Errorf("input %q producer %q is not a dependency", name, source.StepKey)
+			}
+			producers[key] = struct{}{}
+			sourced[key] = struct{}{}
+		}
+		if len(input.Outputs) > MaxNeedOutputs {
+			return nil, fmt.Errorf("input %q has too many output projections", name)
+		}
+		for i, output := range input.Outputs {
+			if output.Name != "value" || !targetPattern.MatchString(output.StepKey) || !targetPattern.MatchString(output.Output) {
+				return nil, fmt.Errorf("input %q has invalid output projection", name)
+			}
+			if _, exists := producers[strings.ToLower(output.StepKey)]; !exists {
+				return nil, fmt.Errorf("input %q output selects unknown producer %q", name, output.StepKey)
+			}
+			if i > 0 && compareNeedOutput(input.Outputs[i-1], output) >= 0 {
+				return nil, fmt.Errorf("input %q output projections must be unique and sorted", name)
+			}
+		}
+	}
+	return sourced, nil
 }
 
 func validateCallGuardNeeds(guard CallGuard, dependencies map[string]struct{}) (map[string]struct{}, error) {

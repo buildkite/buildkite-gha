@@ -126,7 +126,9 @@ func (e *jobGraphExpansion) orderJobs() {
 		job := sourced.Job
 		for _, guard := range sourced.callGuards {
 			job.Needs = append(job.Needs, bindingMembers(guard.needBindings)...)
+			job.Needs = append(job.Needs, bindingMembers(guard.inputs.deferred)...)
 		}
+		job.Needs = append(job.Needs, bindingMembers(sourced.inputs.deferred)...)
 		sort.Strings(job.Needs)
 		job.Needs = slices.Compact(job.Needs)
 		e.topologyJobs[sourced.ID] = job
@@ -213,15 +215,17 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 	jobFailed := e.failedJobs[id]
 	matrices := e.matricesByJob[id]
 	concurrencyGroups := make(map[string]struct{}, len(matrices))
+	jobContext := e.context
+	jobContext.Inputs = sourced.inputs.values
 	for matrixIndex, matrix := range matrices {
 		strategy := matrixStrategy(job, matrixIndex, len(matrices))
-		instanceContext := e.context
+		instanceContext := jobContext
 		instanceContext.Matrix = matrix
 		instanceContext.Strategy = strategy
-		compileConditionErr := supportedCompileTimeConditions(jobPath, job, e.context, matrix)
-		instanceJob := resolveCompileTimeConditions(job, e.context, matrix)
+		compileConditionErr := supportedCompileTimeConditions(jobPath, job, jobContext, matrix)
+		instanceJob := resolveCompileTimeConditions(job, jobContext, matrix)
 		conditionValidationJob := instanceJob
-		conditionContext := e.context
+		conditionContext := jobContext
 		conditionContext.Matrix = matrix
 		if resolved, err := expression.EvaluateCompileCondition(instanceJob.If, conditionContext); err == nil && !resolved {
 			instanceJob.If = "false"
@@ -253,7 +257,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, err))
 			valid = false
 		}
-		labels, runsOnErr := resolveRunsOn(job, e.context, matrix)
+		labels, runsOnErr := resolveRunsOn(job, jobContext, matrix)
 		if runsOnErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, key, "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, runsOnErr.Error())))
 			valid = false
@@ -274,7 +278,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 				valid = false
 			}
 		}
-		concurrencyGroup, concurrencyErr := resolveConcurrency(jobPath, job.ID, job.Concurrency, e.context, matrix)
+		concurrencyGroup, concurrencyErr := resolveConcurrency(jobPath, job.ID, job.Concurrency, jobContext, matrix)
 		if concurrencyErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, concurrencyErr))
 			valid = false
@@ -329,7 +333,7 @@ func matrixStrategy(job workflow.Job, index, total int) map[string]any {
 
 func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any, key string, services []workflow.Service) JobInstance {
 	candidate := JobInstance{
-		Key: key, LogicalJobID: job.ID, Matrix: matrix, Inputs: cloneAnyMap(sourced.inputs),
+		Key: key, LogicalJobID: job.ID, Matrix: matrix, Inputs: cloneAnyMap(sourced.inputs.values),
 		FailFast: job.FailFast, MaxParallel: job.MaxParallel, Steps: append([]workflow.Step(nil), job.Steps...),
 		Env: cloneMap(job.Env), Permissions: permissionScopes(job.Permissions), If: job.If,
 		ContinueOnError: job.ContinueOnError, TimeoutMinutes: job.TimeoutMinutes,
@@ -341,25 +345,28 @@ func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any
 		jobPermissionsIgnored: sourced.jobPermissionsIgnored, reusableCall: sourced.reusableCall,
 	}
 	for _, guard := range sourced.callGuards {
-		candidate.CallGuards = append(candidate.CallGuards, CallGuard{Condition: guard.condition, Inputs: cloneAnyMap(guard.inputs)})
+		candidate.CallGuards = append(candidate.CallGuards, CallGuard{Condition: guard.condition, Inputs: cloneAnyMap(guard.inputs.values)})
 	}
 	return candidate
 }
 
 func (e *jobGraphExpansion) jobBlocked(sourced sourcedJob) bool {
-	for _, binding := range sourced.needBindings {
-		for _, member := range binding.members {
-			if e.failedJobs[member] {
-				return true
-			}
-		}
+	if bindingsFailed(sourced.needBindings, e.failedJobs) || bindingsFailed(sourced.inputs.deferred, e.failedJobs) {
+		return true
 	}
 	for _, guard := range sourced.callGuards {
-		for _, binding := range guard.needBindings {
-			for _, member := range binding.members {
-				if e.failedJobs[member] {
-					return true
-				}
+		if bindingsFailed(guard.needBindings, e.failedJobs) || bindingsFailed(guard.inputs.deferred, e.failedJobs) {
+			return true
+		}
+	}
+	return false
+}
+
+func bindingsFailed(bindings map[string]needBinding, failedJobs map[string]bool) bool {
+	for _, binding := range bindings {
+		for _, member := range binding.members {
+			if failedJobs[member] {
+				return true
 			}
 		}
 	}
@@ -389,6 +396,13 @@ func (e *jobGraphExpansion) bindInstanceDependencies(sourced sourcedJob, job wor
 			e.projectNeedOutputs(sourced, need, binding, instance)
 		}
 	}
+	deferredInputs, dependencies, err := resolveDeferredInputBindings(sourced.inputs.deferred, e.byLogicalID)
+	if err != nil {
+		e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", sourced.path, 0, 0, job.ID, key, "", 0, jobError(sourced.path, job, fmt.Sprintf("resolve deferred reusable-workflow inputs: %v", err))))
+		return true
+	}
+	instance.DeferredInputs = deferredInputs
+	instance.Needs = append(instance.Needs, dependencies...)
 	for guardIndex, guard := range sourced.callGuards {
 		groups, outputs, dependencies, err := resolveCallGuardBindings(guard.needBindings, e.byLogicalID)
 		if err != nil {
@@ -397,6 +411,12 @@ func (e *jobGraphExpansion) bindInstanceDependencies(sourced sourcedJob, job wor
 		}
 		instance.CallGuards[guardIndex].NeedGroups = groups
 		instance.CallGuards[guardIndex].NeedOutputs = outputs
+		instance.Needs = append(instance.Needs, dependencies...)
+		instance.CallGuards[guardIndex].DeferredInputs, dependencies, err = resolveDeferredInputBindings(guard.inputs.deferred, e.byLogicalID)
+		if err != nil {
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", sourced.path, 0, 0, job.ID, key, "", 0, jobError(sourced.path, job, fmt.Sprintf("resolve reusable-workflow call guard inputs: %v", err))))
+			return true
+		}
 		instance.Needs = append(instance.Needs, dependencies...)
 	}
 	sort.Strings(instance.Needs)
@@ -425,6 +445,52 @@ func (e *jobGraphExpansion) projectNeedOutputs(sourced sourcedJob, need string, 
 	}
 	sortNeedOutputs(projected)
 	instance.NeedOutputs[need] = projected
+}
+
+func resolveDeferredInputBindings(bindings map[string]needBinding, byLogicalID map[string][]JobInstance) (map[string]DeferredInput, []string, error) {
+	if len(bindings) == 0 {
+		return nil, nil, nil
+	}
+	resolved := make(map[string]DeferredInput, len(bindings))
+	var dependencies []string
+	for _, name := range sortedKeys(bindings) {
+		input, err := resolveDeferredInputBinding(bindings[name], byLogicalID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("input %q: %w", name, err)
+		}
+		resolved[name] = input
+		dependencies = append(dependencies, input.Sources...)
+	}
+	return resolved, dependencies, nil
+}
+
+func resolveDeferredInputBinding(binding needBinding, byLogicalID map[string][]JobInstance) (DeferredInput, error) {
+	var deferred DeferredInput
+	for _, member := range binding.members {
+		producers := byLogicalID[member]
+		if len(producers) == 0 {
+			return DeferredInput{}, fmt.Errorf("source job %q has no expanded instances", member)
+		}
+		for _, producer := range producers {
+			deferred.Sources = append(deferred.Sources, producer.Key)
+		}
+	}
+	sort.Strings(deferred.Sources)
+	deferred.Sources = slices.Compact(deferred.Sources)
+	if len(deferred.Sources) > plan.MaxNeedProducers {
+		return DeferredInput{}, fmt.Errorf("has %d producers, maximum is %d", len(deferred.Sources), plan.MaxNeedProducers)
+	}
+	for _, output := range binding.outputs {
+		producers := byLogicalID[output.member]
+		if len(deferred.Outputs)+len(producers) > plan.MaxNeedOutputs {
+			return DeferredInput{}, fmt.Errorf("output %q expands beyond the maximum of %d projections", output.output, plan.MaxNeedOutputs)
+		}
+		for _, producer := range producers {
+			deferred.Outputs = append(deferred.Outputs, NeedOutput{Name: output.name, StepKey: producer.Key, Output: output.output})
+		}
+	}
+	sortNeedOutputs(deferred.Outputs)
+	return deferred, nil
 }
 
 func resolveCallGuardBindings(bindings map[string]needBinding, byLogicalID map[string][]JobInstance) (map[string][]string, map[string][]NeedOutput, []string, error) {

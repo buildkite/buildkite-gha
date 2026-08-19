@@ -97,7 +97,7 @@ type Permissions struct {
 	Span   Span              `json:"span"`
 }
 
-// CallInput declares one statically resolvable workflow_call input.
+// CallInput declares one typed workflow_call input.
 type CallInput struct {
 	Type     string `json:"type"`
 	Required bool   `json:"required,omitempty"`
