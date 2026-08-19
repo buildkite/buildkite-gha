@@ -110,6 +110,10 @@ type Options struct {
 	Runners    RunnerPolicy
 	EventTrust EventTrust
 	OIDC       *plan.OIDCConfiguration
+	// RepositorySource resolves public repositories used by static remote
+	// reusable-workflow calls. Callers should share one memoized source for the
+	// complete validate, compile, and upload operation.
+	RepositorySource RepositorySource
 	// ResolveActions enables immutable remote action locking independently of
 	// event trust. Workspace-local actions are always locked without network
 	// access. ActionSource is required only when a workflow uses remote actions.
@@ -144,6 +148,10 @@ func defaultOptions() Options {
 		}, AllowUntrustedDefaultQueue: true},
 	}
 }
+
+// DefaultOptions returns the options used by convenience compiler entry
+// points. Callers may add a RepositorySource before compilation.
+func DefaultOptions() Options { return defaultOptions() }
 
 func (options Options) validate() error {
 	if options.EventTrust != EventTrusted && options.EventTrust != EventUntrusted {

@@ -121,6 +121,7 @@ type JobInstance struct {
 	ServicesExpression      string                  `json:"services_expression,omitempty"`
 	SourcePath              string                  `json:"source_path"`
 	SourceDigest            string                  `json:"source_digest"`
+	RemoteWorkflow          *RemoteWorkflowSource   `json:"remote_workflow,omitempty"`
 	RepositoryRoot          string                  `json:"-"`
 	Source                  workflow.Span           `json:"source"`
 	secretAuthority         bool
@@ -130,7 +131,7 @@ type JobInstance struct {
 }
 
 // CallGuard is one immutable caller-scoped condition inherited by a flattened
-// local reusable-workflow job.
+// reusable-workflow job.
 type CallGuard struct {
 	Condition   string                  `json:"condition"`
 	Inputs      map[string]any          `json:"inputs,omitempty"`
@@ -204,7 +205,7 @@ func processingJobs(path string, parsed *workflow.Workflow, resolved []sourcedJo
 // ParseWorkflow reports only event-independent workflow syntax and job
 // identities. Later stages deliberately remain unevaluated.
 func ParseWorkflow(path string, source []byte) (Report, error) {
-	parsed, err := workflow.Parse(path, source)
+	parsed, err := parseReusableWorkflow(path, source)
 	if err != nil {
 		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
@@ -229,6 +230,12 @@ func Validate(path string, source []byte) (Report, error) {
 // ValidateWithOptions validates the static graph against an explicit runner
 // policy without requiring an event snapshot.
 func ValidateWithOptions(path string, source []byte, options Options) (Report, error) {
+	return ValidateWithOptionsContext(context.Background(), path, source, options)
+}
+
+// ValidateWithOptionsContext validates the static graph and permits
+// cancellation while resolving public reusable-workflow source.
+func ValidateWithOptionsContext(ctx context.Context, path string, source []byte, options Options) (Report, error) {
 	var optionsErr error
 	if err := options.validate(); err != nil {
 		optionsErr = &ProcessingFinding{
@@ -236,7 +243,7 @@ func ValidateWithOptions(path string, source []byte, options Options) (Report, e
 			Message: "workflow-processing configuration is invalid", Err: err,
 		}
 	}
-	parsed, parseErr := workflow.Parse(path, source)
+	parsed, parseErr := parseReusableWorkflow(path, source)
 	parseErr = processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", parseErr)
 	if parseErr != nil {
 		return Report{}, errors.Join(parseErr, optionsErr)
@@ -255,7 +262,7 @@ func ValidateWithOptions(path string, source []byte, options Options) (Report, e
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expand(path, source, parsed, context, options)
+	expanded, expandErr := expand(ctx, path, source, parsed, context, options)
 	if err := errors.Join(optionsErr, triggerErr, concurrencyErr, cancellationErr, expandErr); err != nil {
 		return expansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
@@ -270,6 +277,12 @@ func ValidateEvent(path string, source, eventSource []byte) (Report, error) {
 // ValidateEventWithOptions validates the graph against explicit variables and
 // runner policy without producing compiler output.
 func ValidateEventWithOptions(path string, source, eventSource []byte, options Options) (Report, error) {
+	return ValidateEventWithOptionsContext(context.Background(), path, source, eventSource, options)
+}
+
+// ValidateEventWithOptionsContext validates the graph and event while
+// permitting cancellation during public source resolution.
+func ValidateEventWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) (Report, error) {
 	var optionsErr error
 	if err := options.validate(); err != nil {
 		optionsErr = &ProcessingFinding{
@@ -277,7 +290,7 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 			Message: "workflow-processing configuration is invalid", Err: err,
 		}
 	}
-	parsed, parseErr := workflow.Parse(path, source)
+	parsed, parseErr := parseReusableWorkflow(path, source)
 	parseErr = processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", parseErr)
 	event, eventErr := parseEvent(eventSource)
 	eventErr = processingFinding(StageEventValidation, CodeEventInvalid, "environment", eventErr)
@@ -301,7 +314,7 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expand(path, source, parsed, context, options)
+	expanded, expandErr := expand(ctx, path, source, parsed, context, options)
 	if err := errors.Join(concurrencyErr, cancellationErr, expandErr); err != nil {
 		return expansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
@@ -317,7 +330,13 @@ func Compile(path string, source, eventSource []byte) ([]byte, error) {
 // CompileWithOptions compiles using an explicit non-secret variable snapshot,
 // event trust classification, and runner policy.
 func CompileWithOptions(path string, source, eventSource []byte, options Options) ([]byte, error) {
-	ir, err := compile(path, source, eventSource, options)
+	return CompileWithOptionsContext(context.Background(), path, source, eventSource, options)
+}
+
+// CompileWithOptionsContext compiles a workflow and permits cancellation while
+// resolving public reusable-workflow source.
+func CompileWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) ([]byte, error) {
+	ir, err := compile(ctx, path, source, eventSource, options)
 	if err != nil {
 		return nil, err
 	}
@@ -611,6 +630,7 @@ instances:
 					Name:         workflowName,
 					Digest:       instance.SourceDigest,
 					LogicalJobID: instance.LogicalJobID,
+					Remote:       planRemoteWorkflowSource(instance.RemoteWorkflow),
 				},
 				Event: plan.Event{
 					Provider: ir.Event.Provider, Name: ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(eventDigest[:]),
@@ -851,14 +871,23 @@ func planSpan(span workflow.Span) plan.Span {
 	}
 }
 
-func compile(path string, source, eventSource []byte, options Options) (IR, error) {
+func planRemoteWorkflowSource(source *RemoteWorkflowSource) *plan.RemoteWorkflowSource {
+	if source == nil {
+		return nil
+	}
+	return &plan.RemoteWorkflowSource{
+		Repository: source.Repository, RequestedRef: source.RequestedRef, Commit: source.Commit, SourceDigest: source.SourceDigest,
+	}
+}
+
+func compile(ctx context.Context, path string, source, eventSource []byte, options Options) (IR, error) {
 	if err := options.validate(); err != nil {
 		return IR{}, &ProcessingFinding{
 			Code: CodeEnvironment, Category: "environment",
 			Message: "workflow-processing configuration is invalid", Err: err,
 		}
 	}
-	parsed, err := workflow.Parse(path, source)
+	parsed, err := parseReusableWorkflow(path, source)
 	if err != nil {
 		return IR{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
@@ -875,7 +904,7 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expand(path, source, parsed, context, options)
+	expanded, expandErr := expand(ctx, path, source, parsed, context, options)
 	digest := sha256.Sum256(source)
 	ir := IR{
 		Schema: schema,
@@ -1187,8 +1216,8 @@ func canonicalWorkflowName(path string) string {
 	return filepath.ToSlash(filepath.Clean(path))
 }
 
-func expand(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (expansionResult, error) {
-	resolved, runtimeMatrixBoundary, err := resolveReusableWorkflows(path, source, parsed, context)
+func expand(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (expansionResult, error) {
+	resolved, runtimeMatrixBoundary, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource)
 	if err != nil {
 		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
 		for _, job := range parsed.Jobs {
@@ -1362,6 +1391,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				ServicesExpression:      instanceJob.ServicesExpression,
 				SourcePath:              jobPath,
 				SourceDigest:            sourced.digest,
+				RemoteWorkflow:          cloneRemoteWorkflowSource(sourced.remote),
 				RepositoryRoot:          sourced.root,
 				Source:                  job.Span,
 				secretAuthority:         sourced.secretAuthority,
@@ -2396,4 +2426,11 @@ func jobError(path string, job workflow.Job, message string) error {
 
 func locatedJobError(path string, job workflow.Job, line, column int, message string) error {
 	return fmt.Errorf("%s:%d:%d: job %q: %s", path, line, column, job.ID, message)
+}
+
+func locatedJobWrappedError(path string, job workflow.Job, line, column int, message string, err error) error {
+	if message == "" {
+		return fmt.Errorf("%s:%d:%d: job %q: %w", path, line, column, job.ID, err)
+	}
+	return fmt.Errorf("%s:%d:%d: job %q: %s: %w", path, line, column, job.ID, message, err)
 }

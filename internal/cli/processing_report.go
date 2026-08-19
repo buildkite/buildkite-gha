@@ -517,13 +517,19 @@ func validatedProcessingReport(out processingOutput, workflowPath, profile strin
 }
 
 func validatedProcessingReportWithOptions(out processingOutput, workflowPath, profile string, source, event []byte, eventEvaluated bool, options *compiler.Options) (compatibility.ProcessingReport, bool) {
+	return validatedProcessingReportWithOptionsContext(context.Background(), out, workflowPath, profile, source, event, eventEvaluated, options)
+}
+
+func validatedProcessingReportWithOptionsContext(ctx context.Context, out processingOutput, workflowPath, profile string, source, event []byte, eventEvaluated bool, options *compiler.Options) (compatibility.ProcessingReport, bool) {
 	var validation compiler.Report
 	var err error
 	switch {
 	case eventEvaluated && options != nil:
-		validation, err = compiler.ValidateEventWithOptions(workflowPath, source, event, *options)
+		validation, err = compiler.ValidateEventWithOptionsContext(ctx, workflowPath, source, event, *options)
 	case eventEvaluated:
 		validation, err = compiler.ValidateEvent(workflowPath, source, event)
+	case options != nil:
+		validation, err = compiler.ValidateWithOptionsContext(ctx, workflowPath, source, *options)
 	default:
 		validation, err = compiler.Validate(workflowPath, source)
 	}

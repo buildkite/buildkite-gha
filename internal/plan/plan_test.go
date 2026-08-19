@@ -32,6 +32,47 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 	validateJobPlanSchema(t, source)
 }
 
+func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
+	job := validJob()
+	job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v1"
+	job.Workflow.Remote = &RemoteWorkflowSource{
+		Repository: "owner/repository", RequestedRef: "v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
+	}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJobPlanSchema(t, encoded)
+	decoded, err := Decode(encoded)
+	if err != nil || !reflect.DeepEqual(decoded.Workflow, job.Workflow) {
+		t.Fatalf("Decode() remote workflow = %#v, %v", decoded.Workflow, err)
+	}
+
+	tests := []struct {
+		name string
+		edit func(*Job)
+		want string
+	}{
+		{name: "repository case", edit: func(job *Job) { job.Workflow.Remote.Repository = "Owner/repository" }, want: "invalid immutable source provenance"},
+		{name: "path repository", edit: func(job *Job) { job.Workflow.Path = "other/repository/.github/workflows/ci.yml@v1" }, want: "path does not match"},
+		{name: "path ref", edit: func(job *Job) { job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v2" }, want: "path does not match"},
+		{name: "nested path", edit: func(job *Job) { job.Workflow.Path = "owner/repository/.github/workflows/nested/ci.yml@v1" }, want: "path does not match"},
+		{name: "commit", edit: func(job *Job) { job.Workflow.Remote.Commit = strings.Repeat("A", 40) }, want: "invalid immutable source provenance"},
+		{name: "tree digest", edit: func(job *Job) { job.Workflow.Remote.SourceDigest = "sha256:invalid" }, want: "invalid immutable source provenance"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := job
+			remote := *job.Workflow.Remote
+			invalid.Workflow.Remote = &remote
+			test.edit(&invalid)
+			if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 	job := validJob()
 	digest := "sha256:" + strings.Repeat("1", 64)

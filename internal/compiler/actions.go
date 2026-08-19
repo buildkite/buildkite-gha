@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -21,10 +20,13 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
-// ActionSource resolves and materializes tokenless public GitHub actions.
-type ActionSource interface {
+// RepositorySource resolves and materializes tokenless public GitHub repositories.
+// ActionSource remains an alias for callers that use it only for action locking.
+type RepositorySource interface {
 	Fetch(context.Context, source.Reference) (source.Resolved, source.Materialized, error)
 }
+
+type ActionSource = RepositorySource
 
 // PublicActionSource joins the public resolver and immutable source store.
 type PublicActionSource struct {
@@ -487,21 +489,9 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 		return "", plan.ActionLock{}, "", "", err
 	}
 	b.materialized = append(b.materialized, materialized)
-	repositoryRoot, err := filepath.Abs(materialized.RepositoryRoot)
+	repositoryRoot, err := canonicalMaterializedRepositoryRoot(materialized.RepositoryRoot)
 	if err != nil {
-		return "", plan.ActionLock{}, "", "", fmt.Errorf("resolve materialized repository root: %w", err)
-	}
-	logicalInfo, err := os.Lstat(repositoryRoot)
-	if err != nil || !logicalInfo.IsDir() || logicalInfo.Mode()&os.ModeSymlink != 0 {
-		return "", plan.ActionLock{}, "", "", fmt.Errorf("materialized repository root is not a non-symlink directory")
-	}
-	repositoryRoot, err = filepath.EvalSymlinks(repositoryRoot)
-	if err != nil {
-		return "", plan.ActionLock{}, "", "", fmt.Errorf("canonicalize materialized repository root: %w", err)
-	}
-	canonicalInfo, err := os.Stat(repositoryRoot)
-	if err != nil || !os.SameFile(logicalInfo, canonicalInfo) {
-		return "", plan.ActionLock{}, "", "", fmt.Errorf("materialized repository root changed while canonicalizing")
+		return "", plan.ActionLock{}, "", "", err
 	}
 	commit := strings.ToLower(resolved.Commit)
 	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: ref.Ref, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest}
@@ -521,10 +511,17 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 }
 
 type memoizedActionSource struct {
-	source ActionSource
-	mu     sync.Mutex
-	cache  map[string]memoizedAction
-	active map[string]*memoizedActionCall
+	source    ActionSource
+	mu        sync.Mutex
+	cache     map[string]memoizedAction
+	active    map[string]*memoizedActionCall
+	pins      map[string]memoizedRepositoryPin
+	pinActive map[string]chan struct{}
+}
+
+type memoizedRepositoryPin struct {
+	commit string
+	digest string
 }
 
 type memoizedAction struct {
@@ -543,7 +540,10 @@ func newMemoizedActionSource(actionSource ActionSource) ActionSource {
 	if actionSource == nil {
 		return nil
 	}
-	return &memoizedActionSource{source: actionSource, cache: map[string]memoizedAction{}, active: map[string]*memoizedActionCall{}}
+	return &memoizedActionSource{
+		source: actionSource, cache: map[string]memoizedAction{}, active: map[string]*memoizedActionCall{},
+		pins: map[string]memoizedRepositoryPin{}, pinActive: map[string]chan struct{}{},
+	}
 }
 
 // MemoizeActionSource reuses successful action resolutions and materializations
@@ -552,8 +552,15 @@ func MemoizeActionSource(actionSource ActionSource) ActionSource {
 	return newMemoizedActionSource(actionSource)
 }
 
+// MemoizeRepositorySource pins mutable repository references and reuses
+// materializations across compiler invocations that share the returned source.
+func MemoizeRepositorySource(repositorySource RepositorySource) RepositorySource {
+	return newMemoizedActionSource(repositorySource)
+}
+
 func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) (source.Resolved, source.Materialized, error) {
-	key := strings.ToLower(ref.Owner+"/"+ref.Repository) + "\x00" + ref.Path + "\x00" + ref.Ref
+	repositoryKey := strings.ToLower(ref.Owner+"/"+ref.Repository) + "\x00" + ref.Ref
+	key := repositoryKey + "\x00" + ref.Path
 	s.mu.Lock()
 	if cached, ok := s.cache[key]; ok {
 		s.mu.Unlock()
@@ -576,16 +583,58 @@ func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) 
 			return active.resolved, materialized, err
 		}
 	}
+	pin, pinned := s.pins[repositoryKey]
+	if !pinned {
+		if active := s.pinActive[repositoryKey]; active != nil {
+			s.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return source.Resolved{}, source.Materialized{}, ctx.Err()
+			case <-active:
+				return s.Fetch(ctx, ref)
+			}
+		}
+		s.pinActive[repositoryKey] = make(chan struct{})
+	}
 	call := &memoizedActionCall{done: make(chan struct{})}
 	s.active[key] = call
 	s.mu.Unlock()
-	call.resolved, call.materialized, call.err = s.source.Fetch(ctx, ref)
+	fetchRef := ref
+	if pinned && ref.Ref != pin.commit {
+		fetchRef, call.err = exactRepositoryReference(ref, pin.commit)
+	}
+	if call.err == nil {
+		call.resolved, call.materialized, call.err = s.source.Fetch(ctx, fetchRef)
+	}
+	if call.err == nil {
+		call.resolved.Reference = ref
+		if pinned && (call.resolved.Commit != pin.commit || call.materialized.SourceDigest != pin.digest) {
+			call.materialized.Release()
+			call.materialized = source.Materialized{}
+			call.err = fmt.Errorf("repository source changed after immutable pin")
+		}
+	}
 	s.mu.Lock()
 	delete(s.active, key)
 	if call.err == nil {
+		if !pinned {
+			s.pins[repositoryKey] = memoizedRepositoryPin{commit: call.resolved.Commit, digest: call.materialized.SourceDigest}
+		}
 		s.cache[key] = memoizedAction{resolved: call.resolved, materialized: call.materialized}
+	}
+	if !pinned {
+		close(s.pinActive[repositoryKey])
+		delete(s.pinActive, repositoryKey)
 	}
 	close(call.done)
 	s.mu.Unlock()
 	return call.resolved, call.materialized, call.err
+}
+
+func exactRepositoryReference(ref source.Reference, commit string) (source.Reference, error) {
+	raw := ref.Owner + "/" + ref.Repository
+	if ref.Path != "" {
+		raw += "/" + ref.Path
+	}
+	return source.Parse(raw + "@" + commit)
 }

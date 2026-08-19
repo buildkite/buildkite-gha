@@ -78,6 +78,24 @@ type actionSourceAuthentication struct {
 	err        error
 }
 
+type repositorySourceSwitch struct {
+	mu     sync.RWMutex
+	source compiler.RepositorySource
+}
+
+func (s *repositorySourceSwitch) Fetch(ctx context.Context, ref actionsource.Reference) (actionsource.Resolved, actionsource.Materialized, error) {
+	s.mu.RLock()
+	source := s.source
+	s.mu.RUnlock()
+	return source.Fetch(ctx, ref)
+}
+
+func (s *repositorySourceSwitch) set(source compiler.RepositorySource) {
+	s.mu.Lock()
+	s.source = source
+	s.mu.Unlock()
+}
+
 func importerJobActionSourceAuthentication(warnings io.Writer) *actionSourceAuthentication {
 	authentication := &actionSourceAuthentication{
 		redactor: gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
@@ -199,7 +217,25 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
 	options.StepKeyNamespace = stepKeyNamespace
 	options.OIDC = oidc
-	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, options)
+	repositorySource := sharedActionSource
+	cleanup := func() {}
+	if repositorySource == nil {
+		var sourceOptions []actionsource.Option
+		if event, eventErr := compiler.ParseEvent(eventSource); eventErr == nil && event.Provider == "github" {
+			authenticationOption := actionAuthentication.option(event.Repository.Owner + "/" + event.Repository.Name)
+			if authenticationOption != nil {
+				sourceOptions = append(sourceOptions, authenticationOption)
+			}
+		}
+		var err error
+		repositorySource, cleanup, err = newHostedActionSource(actionCacheDir, sourceOptions, nil)
+		if err != nil {
+			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, err)
+		}
+	}
+	defer cleanup()
+	options.RepositorySource = repositorySource
+	preflight, err := compiler.CompileWithOptionsContext(ctx, workflowPath, workflowSource, eventSource, options)
 	if err != nil {
 		return hostedCompilation{}, hostedError(hostedEvaluationFailure, err)
 	}
@@ -209,24 +245,8 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 	}
 	hasActions := irUsesActions(ir)
 	if hasActions {
-		actionSource := sharedActionSource
-		cleanup := func() {}
-		if actionSource == nil {
-			var sourceOptions []actionsource.Option
-			if ir.Event.Provider == "github" {
-				authenticationOption := actionAuthentication.option(ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name)
-				if authenticationOption != nil {
-					sourceOptions = append(sourceOptions, authenticationOption)
-				}
-			}
-			actionSource, cleanup, err = newHostedActionSource(actionCacheDir, sourceOptions, nil)
-			if err != nil {
-				return hostedCompilation{}, hostedError(hostedEnvironmentFailure, err)
-			}
-		}
-		defer cleanup()
 		options.ResolveActions = true
-		options.ActionSource = actionSource
+		options.ActionSource = repositorySource
 	}
 	bundle, err := compiler.CompileBundlePlansContext(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, options)
 	if err != nil {

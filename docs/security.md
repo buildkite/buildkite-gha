@@ -22,20 +22,22 @@ Job and service containers also share the job's Docker daemon and host resource 
 
 Workflow files, action metadata, event snapshots, and job plans are untrusted inputs. They may describe work and request permissions. Buildkite configuration and server-side policy choose the queue and decide what authority is available.
 
-Digests and immutable action locks detect changed code. They do not make code trusted or grant credentials.
+Digests and immutable source locks detect changed code. They do not make code trusted or grant credentials.
+
+Public reusable workflows use the same bounded repository source and cache as public actions. Each requested ref resolves once per validation, compilation, or upload operation to an immutable commit and repository digest. Plans also bind each selected workflow file digest. Runtime jobs do not load remote workflow YAML from the caller workspace.
 
 Push and pull request path-filter admission uses Buildkite's reserved linked-webhook metadata only after binding it to the Buildkite repository and commit and matching local Git history. Missing, shallow, ambiguous, oversized, or mismatched evidence prevents admission. Explicit and generated snapshots cannot grant this admission. This check controls workflow selection; it does not make the selected workflow trusted.
 
 Release ingestion also requires reserved linked-webhook metadata. It binds the webhook activity to `BUILDKITE_GITHUB_ACTION`, the release tag to both `BUILDKITE_TAG` and `BUILDKITE_BRANCH`, and the event SHA to the checked-out commit after the plugin resolves Buildkite's symbolic `HEAD`. Environment fallback cannot invent a release event. Enable **Additional Webhooks** > **Releases** only with **Code** trigger mode.
 
-Local reusable-workflow call conditions are immutable plan guards evaluated in caller scope. Direct `needs` values come only from producer-attributed, digest-bound result manifests; a missing or changed manifest stops the job with an error. A false guard skips the flattened job before secret retrieval, workflow-token minting, OIDC startup, action materialization, containers, or steps.
+Reusable-workflow call conditions are immutable plan guards evaluated in caller scope. Direct `needs` values come only from producer-attributed, digest-bound result manifests; a missing or changed manifest stops the job with an error. A false guard skips the flattened job before secret retrieval, workflow-token minting, OIDC startup, action materialization, containers, or steps.
 
 ## Credential boundaries
 
 | Credential | Current boundary |
 | --- | --- |
 | Repository checkout | The verified adapter checks the event repository and exact commit. Buildkite authorizes managed private access; credentials are command-scoped and not persisted. |
-| `GITHUB_TOKEN` | Supported static uses receive one short-lived token for the event repository and top-level requesting workflow permissions. Omitted workflow permissions mean exactly `contents: read`; GitHub repository and organization settings are not inherited. Local reusable-workflow jobs receive the same permissions because Buildkite does not inspect called workflow permission maps. Buildkite verifies the pipeline repository, immutable commit, top-level workflow policy, and build provenance. Pull requests are limited to `contents: read`; merge queues are denied. The token is not ambient. |
+| `GITHUB_TOKEN` | Supported static uses receive one short-lived token for the event repository and top-level requesting workflow permissions. Omitted workflow permissions mean exactly `contents: read`; GitHub repository and organization settings are not inherited. Reusable-workflow jobs receive the same permissions because Buildkite does not inspect called workflow permission maps. Buildkite verifies the pipeline repository, immutable commit, top-level workflow policy, and build provenance. Pull requests are limited to `contents: read`; merge queues are denied. The token is not ambient. |
 | Cache token | When caching is configured, every JavaScript or Docker action lifecycle receives a fresh job-bound token. This includes compatible clients such as `actions/setup-go`, not only `actions/cache`. Shell steps do not receive it. |
 | Ordinary workflow secrets | Static names are resolved with `buildkite-agent secret get` in the destination job. The job's Buildkite identity and Secret access policies are the sole authorization boundary. Values are registered with Agent and local redaction before use. |
 | Service registry credentials | Explicit credentials can be literal or use supported `github`, `vars`, `secrets`, and `env` expressions. Ordinary secrets use the destination job's Buildkite Secret access policy. Secret-derived values stay out of plans and generated pipeline YAML; authored literal values do not. Passwords pass to Docker through standard input. Authentication uses a private per-job Docker configuration that cleanup verifies is removed. Ambient Docker configuration and implicit GHCR authentication are unavailable. |

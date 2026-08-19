@@ -234,6 +234,13 @@ func (r *postRegistry) snapshot() []registeredPost {
 
 // verifyWorkflow binds a plan to the workflow bytes in the supplied workspace.
 func verifyWorkflow(job plan.Job, workspace string) error {
+	if job.Workflow.Remote != nil {
+		// Remote workflow bytes were read from the immutable repository tree
+		// recorded in the content-addressed plan. They are not part of the
+		// caller workspace; Job.Validate binds their path, commit, tree digest,
+		// and file digest instead.
+		return nil
+	}
 	path, err := workspacePath(workspace, job.Workflow.Path)
 	if err != nil {
 		return fmt.Errorf("verify workflow binding: %w", err)

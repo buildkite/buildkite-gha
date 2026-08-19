@@ -75,7 +75,7 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	if !strings.HasPrefix(compilerDistributionDigest, "sha256:") {
 		return Bundle{}, fmt.Errorf("compiler distribution digest is required")
 	}
-	ir, err := compile(path, source, eventSource, options)
+	ir, err := compile(ctx, path, source, eventSource, options)
 	if err != nil {
 		return Bundle{IR: ir}, err
 	}
