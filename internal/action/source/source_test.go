@@ -1026,6 +1026,77 @@ func TestGitRepositorySourcePreservesArchiveLimits(t *testing.T) {
 	}
 }
 
+func TestGitRepositorySourceRejectsRefspecBeforeFetch(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	invocations := filepath.Join(root, "invocations")
+	t.Setenv("GIT_INVOCATIONS", invocations)
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GIT_INVOCATIONS\"\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), WithGitRepositorySource(wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const maliciousRef = "refs/heads/*:refs/heads/*"
+	ref, err := Parse("o/r/.github/workflows/ci.yml@" + maliciousRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) || strings.Contains(err.Error(), maliciousRef) {
+		t.Fatalf("Resolve() error = %v, want non-enumerating invalid-ref denial", err)
+	}
+	log, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), " fetch ") {
+		t.Fatalf("invalid ref reached Git fetch: %s", log)
+	}
+}
+
+func TestGitRepositorySourceBoundsFetchPackInput(t *testing.T) {
+	git, _, _, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": strings.Repeat("x", 256),
+	})
+	root := t.TempDir()
+	invocations := filepath.Join(root, "invocations")
+	t.Setenv("GIT_INVOCATIONS", invocations)
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GIT_INVOCATIONS\"\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), WithGitRepositorySource(wrapper), WithLimits(100, 1<<20, 1<<20, 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	if _, err := resolver.Resolve(t.Context(), ref); err == nil || !strings.Contains(err.Error(), "compressed size limit") {
+		t.Fatalf("Resolve() error = %v, want acquisition-time compressed limit", err)
+	}
+	log, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "index-pack --max-input-size=100") {
+		t.Fatalf("Git pack input was not bounded: %s", log)
+	}
+}
+
 func configureGitRepositorySource(t *testing.T, files map[string]string) (git, work, remote, commit string) {
 	t.Helper()
 	git, err := exec.LookPath("git")

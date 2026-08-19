@@ -197,7 +197,7 @@ Private references work for the pipeline repository and cross-repository sources
 
 Job-level `uses`, `with`, and `secrets` follow these boundaries.
 
-Upload configures Git fallback before validating remote calls. After anonymous access fails, Git fetches a canonical credential-free HTTPS URL and uses the importer's existing credential configuration. Git output is suppressed, interactive prompting is disabled, and credential material is never added to plans, generated pipeline YAML, workflow environments, or runtime jobs. Private actions remain unsupported.
+Upload configures Git fallback before validating remote calls. After anonymous access fails, Git fetches a canonical credential-free HTTPS URL and uses the importer's existing credential configuration. Git pack input and extracted trees retain the anonymous source size and entry limits. Git output is suppressed, interactive prompting is disabled, and credential material is never added to plans, generated pipeline YAML, workflow environments, or runtime jobs. Private actions remain unsupported.
 
 A call condition runs in caller scope before static call-matrix expansion. It keeps the implicit `success()` guard. A false condition skips every flattened descendant, including jobs with `if: always()`, and exposes `skipped` with empty outputs to downstream `needs`. Nested calls evaluate ordered outer-to-inner guards. Callee job results do not change an outer guard. Call conditions cannot use `matrix`, `strategy`, callee inputs or needs, `steps`, `env`, `runner`, or `secrets`.
 

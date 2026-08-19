@@ -529,6 +529,12 @@ func fetchWithGit(ctx context.Context, cfg config, ref Reference, requestedRef s
 	if !ref.RepositoryRoot || cfg.git == "" {
 		return "", cleanup, &NotPublicError{}
 	}
+	if err := runGit(ctx, cfg.git, "", io.Discard, "check-ref-format", "--allow-onelevel", requestedRef); err != nil {
+		if ctx.Err() != nil {
+			return "", cleanup, ctx.Err()
+		}
+		return "", cleanup, &NotPublicError{}
+	}
 	root, err := os.MkdirTemp("", "buildkite-gha-repository-source-")
 	if err != nil {
 		return "", cleanup, fmt.Errorf("create Git repository source: %w", err)
@@ -542,17 +548,30 @@ func fetchWithGit(ctx context.Context, cfg config, ref Reference, requestedRef s
 		}
 		return "", func() {}, fmt.Errorf("initialize Git repository source")
 	}
+	boundedEnvironment, err := boundedGitEnvironment(ctx, cfg.git, root, cfg.maxCompressed)
+	if err != nil {
+		cleanup()
+		if ctx.Err() != nil {
+			return "", func() {}, ctx.Err()
+		}
+		return "", func() {}, fmt.Errorf("configure bounded Git repository source")
+	}
 	remote := "https://github.com/" + ref.Owner + "/" + ref.Repository + ".git"
 	refs := []string{"refs/tags/" + requestedRef, "refs/heads/" + requestedRef, requestedRef}
 	fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	fetched := false
 	for _, candidate := range refs {
-		err = runGit(fetchCtx, cfg.git, repository, io.Discard,
-			"fetch", "--quiet", "--force", "--no-tags", "--depth=1", "--no-recurse-submodules", "--", remote, candidate)
+		limitError := &containsWriter{needle: []byte("pack exceeds maximum allowed size")}
+		err = runGitEnvironment(fetchCtx, cfg.git, repository, io.Discard, limitError, boundedEnvironment,
+			"-c", "fetch.unpackLimit=1", "fetch", "--quiet", "--force", "--no-tags", "--depth=1", "--no-recurse-submodules", "--no-auto-maintenance", "--", remote, candidate)
 		if err == nil {
 			fetched = true
 			break
+		}
+		if limitError.found {
+			cleanup()
+			return "", func() {}, fmt.Errorf("git repository source exceeds compressed size limit")
 		}
 		if fetchCtx.Err() != nil {
 			cleanup()
@@ -613,15 +632,107 @@ func gitObjectLimit(repository string, limit int64) error {
 	return nil
 }
 
+// Git fetch does not expose the pack plumbing's max-input-size option. Its
+// internal Git commands use GIT_EXEC_PATH, so replace only that dispatcher in
+// a private mirror of Git's trusted executable directory.
+const boundedGitWrapper = `#!/bin/sh
+if [ "$1" = index-pack ] || [ "$1" = unpack-objects ]; then
+	subcommand=$1
+	shift
+	exec "$BUILDKITE_GHA_GIT_EXECUTABLE" "$subcommand" "--max-input-size=$BUILDKITE_GHA_GIT_MAX_INPUT_SIZE" "$@"
+fi
+if [ "$1" = --shallow-file ] && { [ "$3" = index-pack ] || [ "$3" = unpack-objects ]; }; then
+	global_option=$1
+	global_value=$2
+	subcommand=$3
+	shift 3
+	exec "$BUILDKITE_GHA_GIT_EXECUTABLE" "$global_option" "$global_value" "$subcommand" "--max-input-size=$BUILDKITE_GHA_GIT_MAX_INPUT_SIZE" "$@"
+fi
+exec "$BUILDKITE_GHA_GIT_EXECUTABLE" "$@"
+`
+
+func boundedGitEnvironment(ctx context.Context, executable, root string, limit int64) ([]string, error) {
+	var output bytes.Buffer
+	if err := runGit(ctx, executable, "", &output, "--exec-path"); err != nil {
+		return nil, err
+	}
+	execPath := strings.TrimSpace(output.String())
+	if !filepath.IsAbs(execPath) || hasControl(execPath) {
+		return nil, fmt.Errorf("git returned invalid executable path")
+	}
+	entries, err := os.ReadDir(execPath)
+	if err != nil {
+		return nil, err
+	}
+	boundedExecPath := filepath.Join(root, "git-exec")
+	if err := os.Mkdir(boundedExecPath, 0o700); err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.Name() == "git" {
+			continue
+		}
+		if err := os.Symlink(filepath.Join(execPath, entry.Name()), filepath.Join(boundedExecPath, entry.Name())); err != nil {
+			return nil, err
+		}
+	}
+	if err := os.WriteFile(filepath.Join(boundedExecPath, "git"), []byte(boundedGitWrapper), 0o700); err != nil {
+		return nil, err
+	}
+	environment := gitEnvironment()
+	filtered := environment[:0]
+	for _, value := range environment {
+		if strings.HasPrefix(value, "GIT_EXEC_PATH=") ||
+			strings.HasPrefix(value, "BUILDKITE_GHA_GIT_EXECUTABLE=") ||
+			strings.HasPrefix(value, "BUILDKITE_GHA_GIT_MAX_INPUT_SIZE=") ||
+			strings.HasPrefix(value, "LC_ALL=") ||
+			strings.HasPrefix(value, "LANGUAGE=") {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	return append(filtered,
+		"GIT_EXEC_PATH="+boundedExecPath,
+		"BUILDKITE_GHA_GIT_EXECUTABLE="+executable,
+		"BUILDKITE_GHA_GIT_MAX_INPUT_SIZE="+strconv.FormatInt(limit, 10),
+		"LC_ALL=C",
+	), nil
+}
+
+type containsWriter struct {
+	needle []byte
+	tail   []byte
+	found  bool
+}
+
+func (w *containsWriter) Write(p []byte) (int, error) {
+	combined := make([]byte, 0, len(w.tail)+len(p))
+	combined = append(combined, w.tail...)
+	combined = append(combined, p...)
+	if bytes.Contains(combined, w.needle) {
+		w.found = true
+	}
+	keep := len(w.needle) - 1
+	if keep > len(combined) {
+		keep = len(combined)
+	}
+	w.tail = append(w.tail[:0], combined[len(combined)-keep:]...)
+	return len(p), nil
+}
+
 func runGit(ctx context.Context, executable, repository string, stdout io.Writer, args ...string) error {
+	return runGitEnvironment(ctx, executable, repository, stdout, io.Discard, gitEnvironment(), args...)
+}
+
+func runGitEnvironment(ctx context.Context, executable, repository string, stdout, stderr io.Writer, environment []string, args ...string) error {
 	base := []string{"-c", "core.hooksPath=/dev/null", "-c", "credential.interactive=false"}
 	if repository != "" {
 		base = append(base, "-C", repository)
 	}
 	cmd := exec.CommandContext(ctx, executable, append(base, args...)...)
-	cmd.Env = gitEnvironment()
+	cmd.Env = environment
 	cmd.Stdout = stdout
-	cmd.Stderr = io.Discard
+	cmd.Stderr = stderr
 	return cmd.Run()
 }
 
