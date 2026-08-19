@@ -650,10 +650,12 @@ Pre conditions use the status and action-scoped environment available when prepa
 
 ### Checkout action
 
-**🟡 Supported subset.** The final v3.7.0 release commit is admitted exactly. Resolved commits in the v4-and-later range of the static [`actions/checkout` upstream `main` snapshot](https://github.com/actions/checkout/tree/f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a) are also admitted. The following known releases remain admitted even when their commits aren't reachable from that snapshot:
+**🟡 Supported subset.** The final v1.2.0, v2.8.0, and v3.7.0 release commits are admitted exactly. Resolved commits in the v4-and-later range of the static [`actions/checkout` upstream `main` snapshot](https://github.com/actions/checkout/tree/f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a) are also admitted. The following known releases remain admitted even when their commits aren't reachable from that snapshot:
 
 | Release | Commit |
 | --- | --- |
+| v1.2.0 | [`50fbc622fc4ef5163becd7fab6573eac35f8462e`](https://github.com/actions/checkout/tree/50fbc622fc4ef5163becd7fab6573eac35f8462e) |
+| v2.8.0 | [`0717577d45739eb3c851188b29f50ed6c0b2194e`](https://github.com/actions/checkout/tree/0717577d45739eb3c851188b29f50ed6c0b2194e) |
 | v3.7.0 | [`a37ce9120846195fa4ece8f58b268e6043cb2f26`](https://github.com/actions/checkout/tree/a37ce9120846195fa4ece8f58b268e6043cb2f26) |
 | v4 | [`11d5960a326750d5838078e36cf38b85af677262`](https://github.com/actions/checkout/tree/11d5960a326750d5838078e36cf38b85af677262) |
 | v5 | [`fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09`](https://github.com/actions/checkout/tree/fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09) |
@@ -661,7 +663,7 @@ Pre conditions use the status and action-scoped environment available when prepa
 | v7.0.0 corpus pin | [`9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`](https://github.com/actions/checkout/tree/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0) |
 | v7.0.1 | [`3d3c42e5aac5ba805825da76410c181273ba90b1`](https://github.com/actions/checkout/tree/3d3c42e5aac5ba805825da76410c181273ba90b1) |
 
-Mutable refs work only while they resolve to the upstream `main` snapshot or a known release above. Every admitted commit uses the native adapter; the upstream JavaScript doesn't run. v1, v2, pre-v3.7.0 commits, and unknown commits are unsupported. Maintainers can update the v4-and-later snapshot with `go generate ./internal/action/integration`; this doesn't widen v3 admission.
+Mutable refs work only while they resolve to the upstream `main` snapshot or a known release above. Every admitted commit uses the native adapter; the upstream JavaScript doesn't run. Each admitted release accepts only the inputs it declares, so earlier releases reject later inputs. Other pre-v3.7.0 commits and unknown commits are unsupported. Compilation emits `W_CHECKOUT_LEGACY_RELEASE` for v1.2.0 and v2.8.0 to nudge an upgrade to v4 or later. Maintainers can update the v4-and-later snapshot with `go generate ./internal/action/integration`; this doesn't widen release admission.
 
 The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean top-level directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to each fetch command and verified submodule fetch command and are never persisted.
 
@@ -670,25 +672,25 @@ The adapter checks out a detached commit or static branch from the event reposit
 | `repository` | Omitted, or the event `owner/repo`. |
 | `ref` | Omitted, empty, a lowercase 40-hex commit, or a static branch in the event repository. A direct `github.sha` or `needs.<job>.outputs.<name>` expression must resolve at runtime to the exact event SHA. |
 | `token` | Omitted only. |
-| `ssh-key`, `ssh-known-hosts` | Omitted or empty. |
-| `ssh-strict` | Omitted or `true`. |
-| `ssh-user` | v4 and later: omitted or `git`. v3.7.0: omitted. |
-| `persist-credentials` | Omitted or `false`. |
+| `ssh-key`, `ssh-known-hosts` | v2.8.0 and later: omitted or empty. v1.2.0: omitted. |
+| `ssh-strict` | v2.8.0 and later: omitted or `true`. v1.2.0: omitted. |
+| `ssh-user` | v4 and later: omitted or `git`. Earlier releases: omitted. |
+| `persist-credentials` | v2.8.0 and later: omitted or `false`. v1.2.0: omitted. |
 | `path` | Omitted, empty, or one clean non-`.git` top-level workspace directory. |
 | `clean` | Omitted or `true`; the root workspace or selected path must be empty or absent. |
-| `filter` | v4 and later: omitted or empty. v3.7.0: omitted. |
-| `sparse-checkout` | Omitted or empty. |
-| `sparse-checkout-cone-mode` | Omitted or `true`. |
-| `fetch-depth` | Omitted or a nonnegative integer; `0` fetches full history. |
-| `fetch-tags` | Omitted, `true`, or `false`. |
-| `show-progress` | v4 and later: omitted, `true`, or `false`. v3.7.0: omitted. |
+| `filter` | v4 and later: omitted or empty. Earlier releases: omitted. |
+| `sparse-checkout` | v3.7.0 and later: omitted or empty. Earlier releases: omitted. |
+| `sparse-checkout-cone-mode` | v3.7.0 and later: omitted or `true`. Earlier releases: omitted. |
+| `fetch-depth` | Omitted or a nonnegative integer; `0` fetches full history. v1.2.0 fetches full history when omitted. |
+| `fetch-tags` | v3.7.0 and later: omitted, `true`, or `false`. Earlier releases: omitted. |
+| `show-progress` | v4 and later: omitted, `true`, or `false`. Earlier releases: omitted. |
 | `lfs` | Omitted or `false`. |
 | `submodules` | Omitted, `false`, `true`, or `recursive`; whitespace is trimmed and casing is ignored. |
-| `set-safe-directory` | Omitted or `true`. |
-| `github-server-url` | Omitted, empty, or `https://github.com`. |
-| `allow-unsafe-pr-checkout` | Omitted or `false`. |
+| `set-safe-directory` | v2.8.0 and later: omitted or `true`. v1.2.0: omitted. |
+| `github-server-url` | v3.7.0 and later: omitted, empty, or `https://github.com`. Earlier releases: omitted. |
+| `allow-unsafe-pr-checkout` | v2.8.0 and later: omitted or `false`. v1.2.0: omitted. |
 
-The `ref` and `commit` outputs are unavailable for v3.7.0. Upstream added them in v4.2.0.
+The `ref` and `commit` outputs are unavailable for v1.2.0, v2.8.0, and v3.7.0. Upstream added them in v4.2.0.
 
 The `false` value and omission do not run submodule commands. The `true` value runs native Git for direct children, and `recursive` includes nested children. Relative URLs and `fetch-depth` follow native Git behavior. Public and private GitHub submodules are supported under the job's repository access; external HTTPS submodules are anonymous. `git@github.com:` URLs are rewritten to HTTPS. Other SSH and non-HTTPS transports are unsupported.
 

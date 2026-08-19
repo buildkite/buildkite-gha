@@ -75,6 +75,71 @@ func (f *fakeActionSource) Fetch(_ context.Context, r source.Reference) (source.
 	return source.Resolved{Reference: r, Commit: commit}, source.Materialized{RepositoryRoot: f.root, ActionRoot: filepath.Join(f.root, r.Path), SourceDigest: d}, err
 }
 
+// checkoutV1LegacyManifest and checkoutV2LegacyManifest mirror the real
+// actions/checkout manifests at the admitted v1.2.0 and v2.8.0 release
+// commits: v1.2.0 declares runs.plugin with no runs.using and v2.8.0 declares
+// the retired node12 runtime, so neither passes generic metadata admission.
+const checkoutV1LegacyManifest = `name: 'Checkout'
+description: 'Checkout a Git repository.'
+inputs:
+  repository:
+    description: 'Repository name'
+  ref:
+    description: 'Ref to checkout (SHA, branch, tag)'
+  token:
+    description: 'Access token for clone repository'
+  fetch-depth:
+    description: 'The depth of commits to ask Git to fetch; defaults to no limit'
+  path:
+    description: 'Optional path to check out source code'
+runs:
+  # Plugins live on the runner and are only available to a certain set of first party actions.
+  plugin: 'checkout'
+`
+
+const checkoutV2LegacyManifest = `name: 'Checkout'
+description: 'Checkout a Git repository at a particular version'
+inputs:
+  repository:
+    description: 'Repository name with owner. For example, actions/checkout'
+    default: ${{ github.repository }}
+  token:
+    description: 'Personal access token (PAT) used to fetch the repository.'
+    default: ${{ github.token }}
+  fetch-depth:
+    description: 'Number of commits to fetch. 0 indicates all history for all branches and tags.'
+    default: 1
+  path:
+    description: 'Relative path under $GITHUB_WORKSPACE to place the repository'
+runs:
+  using: node12
+  main: dist/index.js
+  post: dist/index.js
+`
+
+func checkoutTestManifest(commit string) string {
+	switch commit {
+	case actionintegration.CheckoutV1Commit:
+		return checkoutV1LegacyManifest
+	case actionintegration.CheckoutV2Commit:
+		return checkoutV2LegacyManifest
+	default:
+		return "name: checkout\nruns:\n  using: node24\n  main: index.js\n"
+	}
+}
+
+type commitActionSource struct{ roots map[string]string }
+
+func (s commitActionSource) Fetch(_ context.Context, r source.Reference) (source.Resolved, source.Materialized, error) {
+	commit := strings.ToLower(r.Ref)
+	root, ok := s.roots[commit]
+	if !ok {
+		return source.Resolved{}, source.Materialized{}, fmt.Errorf("no fixture tree for ref %q", r.Ref)
+	}
+	d, err := source.DigestTree(filepath.Join(root, r.Path))
+	return source.Resolved{Reference: r, Commit: commit}, source.Materialized{RepositoryRoot: root, ActionRoot: filepath.Join(root, r.Path), SourceDigest: d}, err
+}
+
 func writeAction(t *testing.T, root, name, body string) {
 	t.Helper()
 	d := filepath.Join(root, name)
@@ -1014,7 +1079,6 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
 	options := Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
@@ -1025,6 +1089,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
 	}
 	compile := func(commit, with string) ([]plan.Job, error) {
+		writeAction(t, remote, "", checkoutTestManifest(commit))
 		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@" + commit + "\n" + with)
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
@@ -1071,15 +1136,22 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		})
 	}
 
-	if _, err := compile(actionintegration.CheckoutV3Commit, "        with:\n          show-progress: false\n"); err == nil || !strings.Contains(err.Error(), "explicit input \"show-progress\" value is unsupported") {
+	if _, err := compile(actionintegration.CheckoutV3Commit, "        with:\n          show-progress: false\n"); err == nil || !strings.Contains(err.Error(), "explicit input \"show-progress\" is unsupported by this actions/checkout release") {
 		t.Fatalf("v3.7.0 later-contract input error = %v", err)
+	}
+	if _, err := compile(actionintegration.CheckoutV2Commit, "        with:\n          fetch-tags: 'true'\n"); err == nil || !strings.Contains(err.Error(), "explicit input \"fetch-tags\" is unsupported by this actions/checkout release") {
+		t.Fatalf("v2.8.0 later-contract input error = %v", err)
+	}
+	if _, err := compile(actionintegration.CheckoutV1Commit, "        with:\n          persist-credentials: false\n"); err == nil || !strings.Contains(err.Error(), "explicit input \"persist-credentials\" is unsupported by this actions/checkout release") {
+		t.Fatalf("v1.2.0 later-contract input error = %v", err)
 	}
 }
 
 func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
-	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
 	for version, commit := range map[string]string{
+		"v1.2.0":     actionintegration.CheckoutV1Commit,
+		"v2.8.0":     actionintegration.CheckoutV2Commit,
 		"v3.7.0":     actionintegration.CheckoutV3Commit,
 		"v4":         actionintegration.CheckoutV4Commit,
 		"v5":         actionintegration.CheckoutV5Commit,
@@ -1089,6 +1161,7 @@ func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 		"v7.0.1":     actionintegration.CheckoutV7Commit,
 	} {
 		t.Run(version, func(t *testing.T) {
+			writeAction(t, remote, "", checkoutTestManifest(commit))
 			actionSource := &fakeActionSource{root: remote, commit: commit, calls: map[string]int{}}
 			_, locks, _, _, err := compileActionLocks(context.Background(), workspace, actionSource, []string{"actions/checkout@" + version})
 			if err != nil || len(locks) != 1 || locks[0].Commit != commit {
@@ -1098,6 +1171,7 @@ func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 	}
 
 	unknown := strings.Repeat("0", 40)
+	writeAction(t, remote, "", checkoutTestManifest(unknown))
 	actionSource := &fakeActionSource{root: remote, commit: unknown, calls: map[string]int{}}
 	if _, _, _, _, err := compileActionLocks(context.Background(), workspace, actionSource, []string{"actions/checkout@v7"}); err == nil || !strings.Contains(err.Error(), "does not admit") {
 		t.Fatalf("unknown checkout commit error = %v", err)
@@ -1147,6 +1221,56 @@ func TestCheckoutCapabilityRequiresVerifiedRootAdapter(t *testing.T) {
 	_, err = compile("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "        with:\n          token: '${{ github.token }}'\n")
 	if err == nil || !strings.Contains(err.Error(), "checkout adapter") {
 		t.Fatalf("workflow token input error = %v", err)
+	}
+}
+
+func TestCompileBundleLegacyCheckoutWarning(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roots := map[string]string{}
+	for _, commit := range []string{actionintegration.CheckoutV1Commit, actionintegration.CheckoutV2Commit, actionintegration.CheckoutV4Commit} {
+		root := t.TempDir()
+		writeAction(t, root, "", checkoutTestManifest(commit))
+		roots[commit] = root
+	}
+	compile := func(steps string) Bundle {
+		t.Helper()
+		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n" + steps)
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions: true,
+			ActionSource:   commitActionSource{roots: roots},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bundle
+	}
+
+	bundle := compile("      - uses: actions/checkout@" + actionintegration.CheckoutV1Commit + "\n" +
+		"      - uses: actions/checkout@" + actionintegration.CheckoutV1Commit + "\n" +
+		"        with:\n          path: again\n" +
+		"      - uses: actions/checkout@" + actionintegration.CheckoutV2Commit + "\n" +
+		"        with:\n          path: legacy\n")
+	if len(bundle.IR.Warnings) != 2 ||
+		bundle.IR.Warnings[0].Code != "W_CHECKOUT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[0].Message, "v1.2.0") || bundle.IR.Warnings[0].Line == 0 ||
+		bundle.IR.Warnings[1].Code != "W_CHECKOUT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[1].Message, "v2.8.0") {
+		t.Fatalf("legacy checkout warnings = %#v", bundle.IR.Warnings)
+	}
+
+	bundle = compile("      - uses: actions/checkout@" + actionintegration.CheckoutV4Commit + "\n")
+	if len(bundle.IR.Warnings) != 0 {
+		t.Fatalf("warnings = %#v, want none", bundle.IR.Warnings)
 	}
 }
 
