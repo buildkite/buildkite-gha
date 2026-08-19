@@ -171,14 +171,20 @@ func remoteWorkflowCheckoutInputs(job plan.Job, commit string, inputs map[string
 		}
 	}
 	repository := checkoutInput(inputs, "repository")
-	if remote == nil || repository == "" || !strings.EqualFold(repository, remote.Repository) {
+	if remote == nil {
 		return nil, "", "", false, nil
 	}
 	ref := checkoutInput(inputs, "ref")
 	refMatches := remoteWorkflowRefMatches(ref, *remote)
 	path := checkoutInput(inputs, "path")
 	aliasMatches := remoteWorkflowCheckoutAlias(job.Actions, path)
-	if (!refMatches || !aliasMatches) && strings.EqualFold(repository, job.Event.Repository) {
+	if aliasMatches && !strings.EqualFold(repository, remote.Repository) {
+		return nil, "", "", true, fmt.Errorf("remote workflow source checkout repository does not match immutable workflow provenance")
+	}
+	if aliasMatches && !refMatches {
+		return nil, "", "", true, fmt.Errorf("remote workflow source checkout ref does not match immutable workflow provenance")
+	}
+	if repository == "" || !strings.EqualFold(repository, remote.Repository) || !aliasMatches && strings.EqualFold(repository, job.Event.Repository) {
 		return nil, "", "", false, nil
 	}
 	if !refMatches {

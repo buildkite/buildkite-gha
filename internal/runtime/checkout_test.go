@@ -239,6 +239,11 @@ func TestRemoteWorkflowCheckoutInputsBindImmutableSource(t *testing.T) {
 	if err != nil || !sameRepositoryRemote {
 		t.Fatalf("same-repository remote checkout binding = %t, %v", sameRepositoryRemote, err)
 	}
+	sameRepositoryInputs := maps.Clone(inputs)
+	sameRepositoryInputs["ref"] = strings.Repeat("b", 40)
+	if _, _, _, bound, err := remoteWorkflowCheckoutInputs(sameRepositoryJob, actionintegration.CheckoutV4Commit, sameRepositoryInputs); !bound || err == nil || !strings.Contains(err.Error(), "ref does not match immutable workflow provenance") {
+		t.Fatalf("same-repository mismatched ref binding = %t, %v", bound, err)
+	}
 	branchJob := job
 	branchRemote := *job.Workflow.Remote
 	branchRemote.RequestedRef = "main"
@@ -260,6 +265,8 @@ func TestRemoteWorkflowCheckoutInputsBindImmutableSource(t *testing.T) {
 		want   string
 	}{
 		{name: "other repository remains unsupported", inputs: map[string]string{"repository": "other/repository"}},
+		{name: "bound alias without repository", inputs: map[string]string{"ref": job.Workflow.Remote.Commit, "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "repository does not match immutable workflow provenance"},
+		{name: "bound alias from event repository", inputs: map[string]string{"repository": job.Event.Repository, "ref": strings.Repeat("b", 40), "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "repository does not match immutable workflow provenance"},
 		{name: "different ref", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "refs/tags/v2.2.0", "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "does not match immutable workflow provenance"},
 		{name: "ambiguous bare tag", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "v2.1.0", "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "does not match immutable workflow provenance"},
 		{name: "different namespace", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "refs/heads/v2.1.0", "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "does not match immutable workflow provenance"},

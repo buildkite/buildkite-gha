@@ -96,6 +96,21 @@ func TestRemoteWorkflowCheckoutRefMatchesResolvedNamespace(t *testing.T) {
 	}
 }
 
+func TestBindRemoteWorkflowCheckoutInputsRequiresProvenanceForBoundAlias(t *testing.T) {
+	remote := &RemoteWorkflowSource{
+		Repository: "owner/workflows", RequestedRef: "v1", ResolvedRef: "refs/tags/v1", Commit: strings.Repeat("a", 40),
+	}
+	locks := []plan.ActionLock{{WorkspaceAlias: "checked-out", Path: ".github/actions/local"}}
+	for _, inputs := range []map[string]string{
+		{"ref": remote.Commit, "path": "checked-out"},
+		{"repository": "owner/caller", "ref": strings.Repeat("b", 40), "path": "checked-out"},
+	} {
+		if _, bound, err := bindRemoteWorkflowCheckoutInputs(remote, locks, inputs); !bound || err == nil || !strings.Contains(err.Error(), "repository does not match immutable workflow provenance") {
+			t.Fatalf("bindRemoteWorkflowCheckoutInputs(%#v) = bound %t, error %v", inputs, bound, err)
+		}
+	}
+}
+
 func TestCompilePublicReusableWorkflowWithNestedPinnedLocalCall(t *testing.T) {
 	callerRoot := t.TempDir()
 	callerPath := writeWorkflow(t, callerRoot, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: Octo/Workflows/.github/workflows/ci.yml@v1\n")

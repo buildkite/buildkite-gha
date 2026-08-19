@@ -252,7 +252,12 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 				checkoutInputs[name] = b.ir.Event.SHA
 			}
 		}
-		if sourceInputs, ok := bindRemoteWorkflowCheckoutInputs(instance.RemoteWorkflow, locks, checkoutInputs); ok {
+		sourceInputs, sourceCheckout, err := bindRemoteWorkflowCheckoutInputs(instance.RemoteWorkflow, locks, checkoutInputs)
+		if err != nil {
+			span := instance.Steps[stepIndex].Span.Start
+			return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+		}
+		if sourceCheckout {
 			if err := actionintegration.ValidateCheckoutInputs(lock.Commit, sourceInputs, instance.RemoteWorkflow.Repository, instance.RemoteWorkflow.Commit); err != nil {
 				span := instance.Steps[stepIndex].Span.Start
 				return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
@@ -283,9 +288,9 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 	return nil
 }
 
-func bindRemoteWorkflowCheckoutInputs(remote *RemoteWorkflowSource, locks []plan.ActionLock, inputs map[string]string) (map[string]string, bool) {
+func bindRemoteWorkflowCheckoutInputs(remote *RemoteWorkflowSource, locks []plan.ActionLock, inputs map[string]string) (map[string]string, bool, error) {
 	if remote == nil {
-		return nil, false
+		return nil, false, nil
 	}
 	value := func(wanted string) string {
 		for name, value := range inputs {
@@ -294,9 +299,6 @@ func bindRemoteWorkflowCheckoutInputs(remote *RemoteWorkflowSource, locks []plan
 			}
 		}
 		return ""
-	}
-	if !strings.EqualFold(value("repository"), remote.Repository) || !remoteWorkflowCheckoutRefMatches(value("ref"), *remote) {
-		return nil, false
 	}
 	checkoutPath := value("path")
 	aliasMatches := false
@@ -307,7 +309,13 @@ func bindRemoteWorkflowCheckoutInputs(remote *RemoteWorkflowSource, locks []plan
 		}
 	}
 	if !aliasMatches {
-		return nil, false
+		return nil, false, nil
+	}
+	if !strings.EqualFold(value("repository"), remote.Repository) {
+		return nil, true, fmt.Errorf("remote workflow source checkout repository does not match immutable workflow provenance")
+	}
+	if !remoteWorkflowCheckoutRefMatches(value("ref"), *remote) {
+		return nil, true, fmt.Errorf("remote workflow source checkout ref does not match immutable workflow provenance")
 	}
 	normalized := cloneMap(inputs)
 	for name := range normalized {
@@ -320,7 +328,7 @@ func bindRemoteWorkflowCheckoutInputs(remote *RemoteWorkflowSource, locks []plan
 			normalized[name] = remote.Commit
 		}
 	}
-	return normalized, true
+	return normalized, true, nil
 }
 
 func remoteWorkflowCheckoutRefMatches(ref string, remote RemoteWorkflowSource) bool {
