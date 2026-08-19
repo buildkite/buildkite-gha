@@ -56,7 +56,7 @@ func loadEffectiveEventSource(ctx context.Context, eventPath string, agent trans
 	}
 }
 
-func newEffectiveEvent(source []byte, origin effectiveEventOrigin, getenv func(string) string) (effectiveEventSelection, error) {
+func newEffectiveEvent(source []byte, origin effectiveEventOrigin) (effectiveEventSelection, error) {
 	event, err := compiler.ParseEvent(source)
 	if err != nil {
 		return effectiveEventSelection{}, err
@@ -70,11 +70,7 @@ func newEffectiveEvent(source []byte, origin effectiveEventOrigin, getenv func(s
 	if origin == effectiveEventFromPath {
 		return effective, nil
 	}
-	predicate := "true"
-	if buildSource := strings.TrimSpace(getenv("BUILDKITE_SOURCE")); buildSource != "" {
-		predicate = "build.source == " + triggerConditionLiteral(buildSource)
-	}
-	effective.TriggerExpressions.EventPredicate = predicate
+	effective.TriggerExpressions.EventPredicate = buildkitepipeline.LiveEventPredicate(event.Event)
 	return effective, nil
 }
 

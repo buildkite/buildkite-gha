@@ -114,9 +114,9 @@ Upload selects one authoritative effective event, in this order:
 
 1. The event in an explicit `--event-path` snapshot.
 1. The GitHub event name accompanying Buildkite's reserved linked-webhook metadata.
-1. A Buildkite environment fallback: pull request builds use `pull_request`; `ui` and `api` use `workflow_dispatch`; `schedule` uses `schedule`; and every other source, including `trigger_job`, uses `push`.
+1. A Buildkite environment fallback: `BUILDKITE_GITHUB_EVENT` preserves `push`, `pull_request`, `workflow_dispatch`, and `schedule` across rebuilds. Without one of those values, pull request builds use `pull_request`; `ui` and `api` use `workflow_dispatch`; `schedule` uses `schedule`; and every other source, including `trigger_job`, uses `push`.
 
-An explicit event snapshot never consults contradictory live Buildkite event fields. Linked `merge_group` webhooks must match the Buildkite merge queue head and base refs and commits. Linked `release` webhooks must match the Buildkite event, action, branch, and tag; the plugin normalizes Buildkite's symbolic `HEAD` commit to the checked-out peeled tag commit first. The fallback cannot infer a merge group or release without linked webhook data and can classify `trigger_job` as `push` even when `build.source_event` is absent. The selected snapshot is then used consistently for applicability, event-dependent validation and compilation, the group condition, and the event suffix in its provider check.
+An explicit event snapshot never consults contradictory live Buildkite event fields. Linked `merge_group` webhooks must match the Buildkite merge queue head and base refs and commits. Linked `release` webhooks must match the Buildkite event, action, branch, and tag; the plugin normalizes Buildkite's symbolic `HEAD` commit to the checked-out peeled tag commit first. The fallback cannot infer a merge group or release without linked webhook data. The selected snapshot is then used consistently for applicability, event-dependent validation and compilation, the `BUILDKITE_GITHUB_EVENT` group condition with its non-webhook fallback, and the event suffix in its provider check.
 
 | Event | Supported trigger behavior |
 | --- | --- |
