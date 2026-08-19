@@ -12,7 +12,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
-type expansionResult struct {
+type jobGraphExpansionResult struct {
 	instances             []JobInstance
 	candidates            []JobInstance
 	runtimeMatrixBoundary bool
@@ -22,11 +22,13 @@ type expansionResult struct {
 	notEvaluatedInstances map[string]bool
 }
 
-type graphExpansion struct {
+// jobGraphExpansion carries state while a flattened logical job graph is
+// ordered, expanded into matrix instances, and bound to instance dependencies.
+type jobGraphExpansion struct {
 	path           string
 	context        expression.CompileContext
 	options        Options
-	result         expansionResult
+	result         jobGraphExpansionResult
 	accepted       []sourcedJob
 	acceptedIndex  map[string]int
 	topologyJobs   map[string]workflow.Job
@@ -63,7 +65,7 @@ func processingJobs(path string, parsed *workflow.Workflow, resolved []sourcedJo
 	return jobs
 }
 
-func expansionReport(expanded expansionResult, warnings []Warning) Report {
+func jobGraphExpansionReport(expanded jobGraphExpansionResult, warnings []Warning) Report {
 	return Report{
 		LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates),
 		Jobs: expanded.candidates, RuntimeMatrixBoundary: expanded.runtimeMatrixBoundary,
@@ -72,18 +74,20 @@ func expansionReport(expanded expansionResult, warnings []Warning) Report {
 	}
 }
 
-func expand(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (expansionResult, error) {
+// expandJobGraph resolves reusable workflow calls, then turns the parsed
+// logical job graph into deterministic JobInstance values and report data.
+func expandJobGraph(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (jobGraphExpansionResult, error) {
 	resolved, runtimeMatrixBoundary, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource)
 	if err != nil {
 		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
 		for _, job := range parsed.Jobs {
 			notEvaluatedJobs[job.ID] = true
 		}
-		return expansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs, runtimeMatrixBoundary: runtimeMatrixBoundary}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
+		return jobGraphExpansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs, runtimeMatrixBoundary: runtimeMatrixBoundary}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
 	}
-	expansion := graphExpansion{
+	expansion := jobGraphExpansion{
 		path: path, context: context, options: options,
-		result: expansionResult{
+		result: jobGraphExpansionResult{
 			jobs: processingJobs(path, parsed, resolved), runtimeMatrixBoundary: runtimeMatrixBoundary,
 			notEvaluatedJobs: make(map[string]bool), notEvaluatedInstances: make(map[string]bool),
 		},
@@ -99,7 +103,7 @@ func expand(ctx context.Context, path string, source []byte, parsed *workflow.Wo
 	return expansion.result, errors.Join(expansion.diagnostics...)
 }
 
-func (e *graphExpansion) acceptJobs(resolved []sourcedJob) {
+func (e *jobGraphExpansion) acceptJobs(resolved []sourcedJob) {
 	e.accepted = make([]sourcedJob, 0, len(resolved))
 	for _, sourced := range resolved {
 		job := sourced.Job
@@ -116,7 +120,7 @@ func (e *graphExpansion) acceptJobs(resolved []sourcedJob) {
 	}
 }
 
-func (e *graphExpansion) orderJobs() {
+func (e *jobGraphExpansion) orderJobs() {
 	e.topologyJobs = make(map[string]workflow.Job, len(e.accepted))
 	for _, sourced := range e.accepted {
 		job := sourced.Job
@@ -135,7 +139,7 @@ func (e *graphExpansion) orderJobs() {
 	e.order = order
 }
 
-func (e *graphExpansion) expandMatrices() {
+func (e *jobGraphExpansion) expandMatrices() {
 	e.matricesByJob = make(map[string][]map[string]any, len(e.accepted))
 	for _, id := range e.order {
 		sourced := e.accepted[e.acceptedIndex[id]]
@@ -188,7 +192,7 @@ func matrixErrorPosition(job workflow.Job) (int, int) {
 	return line, column
 }
 
-func (e *graphExpansion) expandInstances() {
+func (e *jobGraphExpansion) expandInstances() {
 	e.byLogicalID = make(map[string][]JobInstance, len(e.accepted))
 	for _, id := range e.order {
 		if e.failedMatrices[id] {
@@ -201,7 +205,7 @@ func (e *graphExpansion) expandInstances() {
 	}
 }
 
-func (e *graphExpansion) expandJobInstances(id string) {
+func (e *jobGraphExpansion) expandJobInstances(id string) {
 	sourced := e.accepted[e.acceptedIndex[id]]
 	job := sourced.Job
 	jobPath := sourced.path
@@ -342,7 +346,7 @@ func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any
 	return candidate
 }
 
-func (e *graphExpansion) jobBlocked(sourced sourcedJob) bool {
+func (e *jobGraphExpansion) jobBlocked(sourced sourcedJob) bool {
 	for _, binding := range sourced.needBindings {
 		for _, member := range binding.members {
 			if e.failedJobs[member] {
@@ -362,7 +366,7 @@ func (e *graphExpansion) jobBlocked(sourced sourcedJob) bool {
 	return false
 }
 
-func (e *graphExpansion) bindInstanceDependencies(sourced sourcedJob, job workflow.Job, key string, instance *JobInstance) bool {
+func (e *jobGraphExpansion) bindInstanceDependencies(sourced sourcedJob, job workflow.Job, key string, instance *JobInstance) bool {
 	for _, need := range sortedKeys(sourced.needBindings) {
 		binding := sourced.needBindings[need]
 		var members []string
@@ -400,7 +404,7 @@ func (e *graphExpansion) bindInstanceDependencies(sourced sourcedJob, job workfl
 	return false
 }
 
-func (e *graphExpansion) projectNeedOutputs(sourced sourcedJob, need string, binding needBinding, instance *JobInstance) {
+func (e *jobGraphExpansion) projectNeedOutputs(sourced sourcedJob, need string, binding needBinding, instance *JobInstance) {
 	if instance.NeedOutputs == nil {
 		instance.NeedOutputs = make(map[string][]NeedOutput)
 	}

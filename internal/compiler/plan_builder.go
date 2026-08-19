@@ -18,6 +18,8 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
+// planBuilder lowers expanded job instances into validated execution-plan
+// contracts and derives the authorization metadata emitted beside each plan.
 type planBuilder struct {
 	ctx                        context.Context
 	ir                         IR

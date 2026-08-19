@@ -188,11 +188,11 @@ func ValidateWithOptionsContext(ctx context.Context, path string, source []byte,
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expand(ctx, path, source, parsed, context, options)
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
 	if err := errors.Join(optionsErr, triggerErr, concurrencyErr, cancellationErr, expandErr); err != nil {
-		return expansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
+		return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
-	return expansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), nil
+	return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), nil
 }
 
 // ValidateEvent validates both the supported static graph and its event input.
@@ -240,11 +240,11 @@ func ValidateEventWithOptionsContext(ctx context.Context, path string, source, e
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expand(ctx, path, source, parsed, context, options)
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
 	if err := errors.Join(concurrencyErr, cancellationErr, expandErr); err != nil {
-		return expansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
+		return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
-	return expansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), nil
+	return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), nil
 }
 
 // Compile parses a workflow and event, expands its static graph, and returns
@@ -300,7 +300,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
-	expanded, expandErr := expand(ctx, path, source, parsed, context, options)
+	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
 	digest := sha256.Sum256(source)
 	ir := IR{
 		Schema: schema,
