@@ -1437,7 +1437,7 @@ func TestContainerPreparationSkipsNativeCheckoutClassification(t *testing.T) {
 			}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
 			actions := newActionLockResolver(job, t.TempDir(), materializer)
-			runner := &Runner{}
+			runner := newJobRun(Runner{})
 			if err := runner.verifyRemoteActionTree(t.Context(), actions, plan.ActionSelector{Lock: checkoutID}, nil); err != nil {
 				t.Fatalf("verifyRemoteActionTree() error = %v", err)
 			}
