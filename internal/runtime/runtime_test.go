@@ -2479,11 +2479,13 @@ func TestDeferredReusableWorkflowInputFlowsFromVerifiedOutputToCalleeStep(t *tes
 	workflowPath := ".github/workflows/generator_generic_slsa3.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
-		ID:      "create-file",
-		Kind:    "run",
-		Env:     map[string]string{"UNTRUSTED_SUBJECTS": "${{ inputs.base64-subjects }}"},
-		Command: `test "$UNTRUSTED_SUBJECTS" = "` + value + `"`,
+		ID:        "create-file",
+		Kind:      "run",
+		Env:       map[string]string{"UNTRUSTED_SUBJECTS": "${{ inputs.base64-subjects }}"},
+		Condition: "inputs.base64-subjects != ''",
+		Command:   `test "$UNTRUSTED_SUBJECTS" = "` + value + `" && echo ran=yes >> "$GITHUB_OUTPUT"`,
 	}})
+	job.Outputs = map[string]string{"ran": "${{ steps.create-file.outputs.ran }}"}
 	job.Dependencies = []string{stepKey}
 	job.DeferredInputs = map[string]plan.DeferredInput{
 		"base64-subjects": {
@@ -2504,7 +2506,7 @@ func TestDeferredReusableWorkflowInputFlowsFromVerifiedOutputToCalleeStep(t *tes
 	}
 	job.CallGuards[0].DeferredInputValues = inputs
 	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
-	if err != nil || result.Conclusion != "success" {
+	if err != nil || result.Conclusion != "success" || result.Outputs["ran"] != "yes" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 }

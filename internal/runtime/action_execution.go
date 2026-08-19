@@ -76,6 +76,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			return jobResult, fmt.Errorf("deferred reusable-workflow inputs were not hydrated")
 		}
 		job.Inputs = mergeWorkflowInputs(job.Inputs, job.DeferredInputValues)
+		r.job = job
 	}
 	guardsPass, err := evaluateCallGuards(job)
 	if err != nil {
