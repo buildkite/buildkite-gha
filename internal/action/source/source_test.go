@@ -64,8 +64,28 @@ func TestResolverTagPeelingAndHeaders(t *testing.T) {
 	}
 	ref, _ := Parse("owner/repo@v1")
 	got, err := r.Resolve(t.Context(), ref)
-	if err != nil || got.Commit != testSHA || len(calls) != 2 {
+	if err != nil || got.Commit != testSHA || got.ResolvedRef != "refs/tags/v1" || len(calls) != 2 {
 		t.Fatalf("Resolve = %#v, %v; calls %v", got, err, calls)
+	}
+}
+
+func TestResolverRetainsBranchNamespace(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/git/ref/heads/") {
+			_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":"%s"}}`, testSHA)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+	resolver, err := NewResolver(ts.Client(), WithTestEndpoints(ts.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("owner/repo@main")
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != testSHA || resolved.ResolvedRef != "refs/heads/main" {
+		t.Fatalf("Resolve() = %#v, %v", resolved, err)
 	}
 }
 
@@ -230,12 +250,12 @@ func TestResolverCachesMutableRefsWithBoundedFreshness(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolved, err := resolver.Resolve(t.Context(), ref)
-	if err != nil || resolved.Commit != testSHA || calls.Load() != 1 {
+	if err != nil || resolved.Commit != testSHA || resolved.ResolvedRef != "refs/tags/v1" || calls.Load() != 1 {
 		t.Fatalf("cached Resolve() = %#v, %v; calls = %d", resolved, err, calls.Load())
 	}
 	time.Sleep(60 * time.Millisecond)
 	resolved, err = resolver.Resolve(t.Context(), ref)
-	if err != nil || resolved.Commit != commit || calls.Load() != 2 {
+	if err != nil || resolved.Commit != commit || resolved.ResolvedRef != "refs/tags/v1" || calls.Load() != 2 {
 		t.Fatalf("revalidated Resolve() = %#v, %v; calls = %d", resolved, err, calls.Load())
 	}
 }
@@ -1107,14 +1127,14 @@ func TestActionResolutionSnapshotPinsAndRefreshesMutableRefs(t *testing.T) {
 	ref, _ := Parse("owner/repo@v1")
 	first := newResolver(false)
 	resolved, err := first.Resolve(t.Context(), ref)
-	if err != nil || resolved.Commit != testSHA || requests.Load() != 1 {
+	if err != nil || resolved.Commit != testSHA || resolved.ResolvedRef != "refs/tags/v1" || requests.Load() != 1 {
 		t.Fatalf("first resolution = %#v, %v; requests %d", resolved, err, requests.Load())
 	}
 	firstGeneration := first.ResolutionSnapshotID()
 	refreshed.Store(true)
 	second := newResolver(false)
 	resolved, err = second.Resolve(t.Context(), ref)
-	if err != nil || resolved.Commit != testSHA || requests.Load() != 1 || second.ResolutionSnapshotID() != firstGeneration {
+	if err != nil || resolved.Commit != testSHA || resolved.ResolvedRef != "refs/tags/v1" || requests.Load() != 1 || second.ResolutionSnapshotID() != firstGeneration {
 		t.Fatalf("reused resolution = %#v, %v; requests %d; generation %q", resolved, err, requests.Load(), second.ResolutionSnapshotID())
 	}
 	if err := os.Remove(second.cfg.resolutionSnapshot.entryPath(ref)); err != nil {
@@ -1128,7 +1148,7 @@ func TestActionResolutionSnapshotPinsAndRefreshesMutableRefs(t *testing.T) {
 	}
 	third := newResolver(true)
 	resolved, err = third.Resolve(t.Context(), ref)
-	if err != nil || resolved.Commit != nextSHA || requests.Load() != 2 || third.ResolutionSnapshotID() == firstGeneration {
+	if err != nil || resolved.Commit != nextSHA || resolved.ResolvedRef != "refs/tags/v1" || requests.Load() != 2 || third.ResolutionSnapshotID() == firstGeneration {
 		t.Fatalf("refreshed resolution = %#v, %v; requests %d; generation %q", resolved, err, requests.Load(), third.ResolutionSnapshotID())
 	}
 }

@@ -203,6 +203,99 @@ func TestRepositoryProviderCheckoutCredentialArgsUseProviderHost(t *testing.T) {
 	}
 }
 
+func TestRemoteWorkflowCheckoutInputsBindImmutableSource(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	job := plan.Job{
+		Workflow: plan.Workflow{Remote: &plan.RemoteWorkflowSource{
+			Repository: "slsa-framework/slsa-github-generator", RequestedRef: "v2.1.0", ResolvedRef: "refs/tags/v2.1.0", Commit: commit,
+		}},
+		Event: plan.Event{Repository: "owner/caller"},
+		Actions: []plan.ActionLock{
+			{
+				Source: "github", Repository: "slsa-framework/slsa-github-generator", RequestedRef: "v2.1.0", Commit: commit,
+				Path: ".github/actions/privacy-check", WorkspaceAlias: "__BUILDER_CHECKOUT_DIR__",
+			},
+			{
+				Source: "github", Repository: "slsa-framework/slsa-github-generator", RequestedRef: "v2.1.0", Commit: commit,
+				Path: ".github/actions/other", WorkspaceAlias: "source;dir",
+			},
+			{
+				Source: "github", Repository: "slsa-framework/slsa-github-generator", RequestedRef: "v2.1.0", Commit: commit,
+				Path: ".github/actions/folded", WorkspaceAlias: "source-ff-dir",
+			},
+		},
+	}
+	inputs := map[string]string{
+		"repository":          "slsa-framework/slsa-github-generator",
+		"ref":                 "refs/tags/v2.1.0",
+		"path":                "__BUILDER_CHECKOUT_DIR__",
+		"token":               "discarded-secret",
+		"persist-credentials": "false",
+		"fetch-depth":         "1",
+	}
+	normalized, refOutput, pinnedRef, remote, err := remoteWorkflowCheckoutInputs(job, actionintegration.CheckoutV4Commit, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !remote || refOutput != "refs/tags/v2.1.0" || pinnedRef != "refs/tags/v2.1.0" || checkoutInput(normalized, "repository") != job.Workflow.Remote.Repository || checkoutInput(normalized, "ref") != commit || checkoutInput(normalized, "path") != "__BUILDER_CHECKOUT_DIR__" {
+		t.Fatalf("remote checkout binding = %#v, %q, %q, %t", normalized, refOutput, pinnedRef, remote)
+	}
+	if checkoutInput(normalized, "token") != "" || inputs["token"] != "discarded-secret" {
+		t.Fatalf("remote checkout token handling mutated source or retained token: normalized=%#v source=%#v", normalized, inputs)
+	}
+	sameRepositoryJob := job
+	sameRepositoryJob.Event.Repository = job.Workflow.Remote.Repository
+	_, _, _, sameRepositoryRemote, err := remoteWorkflowCheckoutInputs(sameRepositoryJob, actionintegration.CheckoutV4Commit, inputs)
+	if err != nil || !sameRepositoryRemote {
+		t.Fatalf("same-repository remote checkout binding = %t, %v", sameRepositoryRemote, err)
+	}
+	sameRepositoryInputs := maps.Clone(inputs)
+	sameRepositoryInputs["ref"] = strings.Repeat("b", 40)
+	if _, _, _, bound, err := remoteWorkflowCheckoutInputs(sameRepositoryJob, actionintegration.CheckoutV4Commit, sameRepositoryInputs); !bound || err == nil || !strings.Contains(err.Error(), "ref does not match immutable workflow provenance") {
+		t.Fatalf("same-repository mismatched ref binding = %t, %v", bound, err)
+	}
+	branchJob := job
+	branchRemote := *job.Workflow.Remote
+	branchRemote.RequestedRef = "main"
+	branchRemote.ResolvedRef = "refs/heads/main"
+	branchJob.Workflow.Remote = &branchRemote
+	branchJob.Actions = append([]plan.ActionLock(nil), job.Actions...)
+	branchJob.Actions[0].RequestedRef = "main"
+	branchInputs := maps.Clone(inputs)
+	branchInputs["ref"] = "main"
+	_, branchOutput, branchPinnedRef, branch, err := remoteWorkflowCheckoutInputs(branchJob, actionintegration.CheckoutV4Commit, branchInputs)
+	if err != nil || !branch || branchOutput != "main" || branchPinnedRef != "refs/heads/main" {
+		t.Fatalf("branch remote checkout binding = %q, %q, %t, %v", branchOutput, branchPinnedRef, branch, err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		inputs map[string]string
+		remote bool
+		want   string
+	}{
+		{name: "other repository remains unsupported", inputs: map[string]string{"repository": "other/repository"}},
+		{name: "bound alias without repository", inputs: map[string]string{"ref": job.Workflow.Remote.Commit, "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "repository does not match immutable workflow provenance"},
+		{name: "bound alias from event repository", inputs: map[string]string{"repository": job.Event.Repository, "ref": strings.Repeat("b", 40), "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "repository does not match immutable workflow provenance"},
+		{name: "case-folded bound alias from event repository", inputs: map[string]string{"repository": job.Event.Repository, "ref": strings.Repeat("b", 40), "path": "__builder_checkout_dir__"}, remote: true, want: "repository does not match immutable workflow provenance"},
+		{name: "unicode-folded bound alias from event repository", inputs: map[string]string{"repository": job.Event.Repository, "ref": strings.Repeat("b", 40), "path": "__BUILDER_CHEC\u212aOUT_DIR__"}, remote: true, want: "repository does not match immutable workflow provenance"},
+		{name: "canonically normalized bound alias from event repository", inputs: map[string]string{"repository": job.Event.Repository, "ref": strings.Repeat("b", 40), "path": "source\u037edir"}, remote: true, want: "repository does not match immutable workflow provenance"},
+		{name: "multi-rune folded bound alias from event repository", inputs: map[string]string{"repository": job.Event.Repository, "ref": strings.Repeat("b", 40), "path": "source-\ufb00-dir"}, remote: true, want: "repository does not match immutable workflow provenance"},
+		{name: "different ref", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "refs/tags/v2.2.0", "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "does not match immutable workflow provenance"},
+		{name: "ambiguous bare tag", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "v2.1.0", "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "does not match immutable workflow provenance"},
+		{name: "different namespace", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "refs/heads/v2.1.0", "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "does not match immutable workflow provenance"},
+		{name: "unbound path", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "refs/tags/v2.1.0", "path": "other"}, remote: true, want: "does not match a source-backed local action"},
+		{name: "duplicate input", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "Repository": job.Event.Repository}, remote: true, want: "duplicate case-insensitive input"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, _, gotRemote, err := remoteWorkflowCheckoutInputs(job, actionintegration.CheckoutV4Commit, test.inputs)
+			if gotRemote != test.remote || test.want == "" && err != nil || test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("remoteWorkflowCheckoutInputs() remote/error = %t, %v, want %t / %q", gotRemote, err, test.remote, test.want)
+			}
+		})
+	}
+}
+
 func TestOriginCheckoutUsesExactRemoteAndCredentialHost(t *testing.T) {
 	workspace := t.TempDir()
 	sha := strings.Repeat("a", 40)

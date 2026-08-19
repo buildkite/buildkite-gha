@@ -32,11 +32,30 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 	validateJobPlanSchema(t, source)
 }
 
+func TestEqualSourceWorkspaceAlias(t *testing.T) {
+	for _, test := range []struct {
+		alias string
+		value string
+		want  bool
+	}{
+		{alias: "source-dir", value: "SOURCE-DIR", want: true},
+		{alias: "sourceKdir", value: "source\u212adir", want: true},
+		{alias: "source;dir", value: "source\u037edir", want: true},
+		{alias: "source-ff-dir", value: "source-\ufb00-dir", want: true},
+		{alias: "", value: "", want: false},
+		{alias: "source-dir", value: "other-dir", want: false},
+	} {
+		if got := EqualSourceWorkspaceAlias(test.alias, test.value); got != test.want {
+			t.Errorf("EqualSourceWorkspaceAlias(%q, %q) = %t, want %t", test.alias, test.value, got, test.want)
+		}
+	}
+}
+
 func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 	job := validJob()
 	job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v1"
 	job.Workflow.Remote = &RemoteWorkflowSource{
-		Repository: "owner/repository", RequestedRef: "v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
+		Repository: "owner/repository", RequestedRef: "v1", ResolvedRef: "refs/tags/v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
 	}
 	encoded, err := Encode(job)
 	if err != nil {
@@ -57,6 +76,8 @@ func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 		{name: "path repository", edit: func(job *Job) { job.Workflow.Path = "other/repository/.github/workflows/ci.yml@v1" }, want: "path does not match"},
 		{name: "path ref", edit: func(job *Job) { job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v2" }, want: "path does not match"},
 		{name: "nested path", edit: func(job *Job) { job.Workflow.Path = "owner/repository/.github/workflows/nested/ci.yml@v1" }, want: "path does not match"},
+		{name: "resolved ref name", edit: func(job *Job) { job.Workflow.Remote.ResolvedRef = "refs/heads/v2" }, want: "invalid immutable source provenance"},
+		{name: "invalid resolved ref", edit: func(job *Job) { job.Workflow.Remote.ResolvedRef = "refs/pull/1/head" }, want: "invalid immutable source provenance"},
 		{name: "commit", edit: func(job *Job) { job.Workflow.Remote.Commit = strings.Repeat("A", 40) }, want: "invalid immutable source provenance"},
 		{name: "tree digest", edit: func(job *Job) { job.Workflow.Remote.SourceDigest = "sha256:invalid" }, want: "invalid immutable source provenance"},
 	}
@@ -70,6 +91,59 @@ func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestSourceBackedWorkspaceActionRequiresRemoteWorkflowProvenance(t *testing.T) {
+	job := validJob()
+	commit := strings.Repeat("a", 40)
+	digest := "sha256:" + strings.Repeat("b", 64)
+	job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v1"
+	job.Workflow.Remote = &RemoteWorkflowSource{Repository: "owner/repository", RequestedRef: "v1", ResolvedRef: "refs/tags/v1", Commit: commit, SourceDigest: digest}
+	job.Steps = []Step{{ID: "remote", Kind: "uses", Uses: "owner/repository/root@v1", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Actions = []ActionLock{
+		{
+			ID: "a-0000000000000001", Source: "github", Repository: "owner/repository", RequestedRef: "v1", Commit: commit, Path: "root", SourceDigest: digest,
+			Children: map[string]ActionSelector{"./checked-out/.github/actions/privacy": {Lock: "a-0000000000000002"}},
+		},
+		{
+			ID: "a-0000000000000002", Source: "github", Repository: "owner/repository", RequestedRef: "v1", Commit: commit,
+			Path: ".github/actions/privacy", WorkspaceAlias: "checked-out", SourceDigest: digest,
+		},
+	}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJobPlanSchema(t, encoded)
+
+	tests := []struct {
+		name string
+		edit func(*Job)
+		want string
+	}{
+		{name: "missing remote workflow", edit: func(j *Job) { j.Workflow.Remote = nil }, want: "does not match remote workflow provenance"},
+		{name: "different commit", edit: func(j *Job) { j.Actions[1].Commit = strings.Repeat("c", 40) }, want: "does not match remote workflow provenance"},
+		{name: "workspace source", edit: func(j *Job) { j.Actions[1].Source = "workspace" }, want: "invalid workspace identity"},
+		{name: "different alias", edit: func(j *Job) { j.Actions[1].WorkspaceAlias = "other" }, want: "does not match source-backed workspace identity"},
+		{name: "nonportable alias", edit: func(j *Job) { j.Actions[1].WorkspaceAlias = "checkéd-out" }, want: "invalid GitHub identity"},
+		{name: "different parent source", edit: func(j *Job) { j.Actions[0].SourceDigest = "sha256:" + strings.Repeat("d", 64) }, want: "does not match source-backed workspace identity"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := job
+			invalid.Actions = append([]ActionLock(nil), job.Actions...)
+			test.edit(&invalid)
+			if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	topLevel := job
+	topLevel.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./checked-out/.github/actions/privacy", Action: &ActionSelector{Lock: "a-0000000000000002"}}}
+	topLevel.Actions = []ActionLock{job.Actions[1]}
+	if err := topLevel.Validate(); err != nil {
+		t.Fatalf("Validate() top-level source-backed local action error = %v", err)
 	}
 }
 

@@ -27,6 +27,10 @@ const (
 	CheckoutV6Commit        = "d23441a48e516b6c34aea4fa41551a30e30af803"
 	CheckoutV7InitialCommit = "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
 	CheckoutV7Commit        = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+
+	// The bounded adapter accepts 20 input names. A source checkout may also
+	// author token, which is discarded before adapter validation.
+	maxCheckoutInputNames = 21
 )
 
 var checkoutCommits = map[string]string{
@@ -118,16 +122,14 @@ func sortedCheckoutCommits() []string {
 // ValidateCheckoutInputs enforces the release-specific input contract
 // implemented by the tokenless event-repository checkout adapter.
 func ValidateCheckoutInputs(commit string, inputs map[string]string, repository, sha string) error {
+	if err := ValidateCheckoutInputNames(inputs); err != nil {
+		return err
+	}
 	names := sortedNames(inputs)
-	seen := make(map[string]bool, len(names))
 	generation := checkoutGeneration(commit)
 	for _, name := range names {
 		value := inputs[name]
 		normalized := strings.ToLower(name)
-		if seen[normalized] {
-			return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
-		}
-		seen[normalized] = true
 		if checkoutInputIntroduced[normalized] > generation {
 			return fmt.Errorf("explicit input %q is unsupported by this actions/checkout release", name)
 		}
@@ -137,7 +139,7 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 				continue
 			}
 		case "ref":
-			if value == "" || ValidCheckoutSHA(value) || validCheckoutBranch(value) {
+			if value == "" || ValidCheckoutSHA(value) || ValidCheckoutBranch(value) {
 				continue
 			}
 		case "persist-credentials":
@@ -170,7 +172,7 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 				continue
 			}
 		case "path":
-			if value == "" || validCheckoutPath(value) {
+			if value == "" || ValidCheckoutPath(value) {
 				continue
 			}
 		case "ssh-key", "ssh-known-hosts", "sparse-checkout":
@@ -199,7 +201,24 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 	return nil
 }
 
-func validCheckoutBranch(value string) bool {
+// ValidateCheckoutInputNames rejects names whose case-insensitive lookup would be ambiguous.
+func ValidateCheckoutInputNames(inputs map[string]string) error {
+	if len(inputs) > maxCheckoutInputNames {
+		return fmt.Errorf("more than %d explicit checkout inputs is unsupported", maxCheckoutInputNames)
+	}
+	names := sortedNames(inputs)
+	for index, name := range names {
+		for _, previous := range names[:index] {
+			if strings.EqualFold(name, previous) {
+				return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidCheckoutBranch reports whether value is a bounded branch-like Git ref.
+func ValidCheckoutBranch(value string) bool {
 	if strings.HasPrefix(value, "refs/heads/") {
 		value = strings.TrimPrefix(value, "refs/heads/")
 	} else if strings.HasPrefix(value, "refs/") {
@@ -243,6 +262,7 @@ func ValidCheckoutSHA(value string) bool {
 	return true
 }
 
-func validCheckoutPath(value string) bool {
+// ValidCheckoutPath reports whether value is one safe top-level checkout directory.
+func ValidCheckoutPath(value string) bool {
 	return len(value) <= 255 && value != "." && value != ".." && !strings.EqualFold(value, ".git") && !strings.Contains(value, "/") && !strings.Contains(value, "\\") && !strings.ContainsAny(value, "\r\n\x00") && filepath.IsLocal(value)
 }

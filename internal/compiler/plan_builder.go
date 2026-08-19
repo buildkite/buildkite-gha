@@ -197,7 +197,7 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 		built.capabilities = capabilities
 		return built, nil
 	}
-	compiled, err := compileActionInvocations(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs)
+	compiled, err := compileActionInvocationsForSource(b.ctx, instance.RepositoryRoot, instance.RemoteWorkflow, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs)
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -217,7 +217,7 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 		if !ok {
 			return built, fmt.Errorf("build plan for job %q: action lock %q is missing", instance.LogicalJobID, selector.Lock)
 		}
-		if err := b.validateActionAdapter(instance, stepIndex, lock, &built); err != nil {
+		if err := b.validateActionAdapter(instance, stepIndex, lock, compiled.locks, &built); err != nil {
 			return built, err
 		}
 	}
@@ -233,11 +233,15 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 	return built, nil
 }
 
-func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, built *builtPlanActions) error {
+func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, locks []plan.ActionLock, built *builtPlanActions) error {
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
 	switch descriptor.Adapter {
 	case actionintegration.AdapterCheckoutExactEventSHA:
 		checkoutInputs := cloneMap(instance.Steps[stepIndex].With)
+		if err := actionintegration.ValidateCheckoutInputNames(checkoutInputs); err != nil {
+			span := instance.Steps[stepIndex].Span.Start
+			return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+		}
 		for name, value := range checkoutInputs {
 			if !strings.EqualFold(name, "ref") {
 				continue
@@ -247,6 +251,18 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 				strings.EqualFold(root, "needs") && len(path) == 3 && strings.EqualFold(path[1], "outputs")) {
 				checkoutInputs[name] = b.ir.Event.SHA
 			}
+		}
+		sourceInputs, sourceCheckout, err := bindRemoteWorkflowCheckoutInputs(instance.RemoteWorkflow, locks, checkoutInputs)
+		if err != nil {
+			span := instance.Steps[stepIndex].Span.Start
+			return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+		}
+		if sourceCheckout {
+			if err := actionintegration.ValidateCheckoutInputs(lock.Commit, sourceInputs, instance.RemoteWorkflow.Repository, instance.RemoteWorkflow.Commit); err != nil {
+				span := instance.Steps[stepIndex].Span.Start
+				return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+			}
+			return nil
 		}
 		if err := actionintegration.ValidateCheckoutInputs(lock.Commit, checkoutInputs, b.ir.Event.Repository.Owner+"/"+b.ir.Event.Repository.Name, b.ir.Event.SHA); err != nil {
 			span := instance.Steps[stepIndex].Span.Start
@@ -270,6 +286,57 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 		}
 	}
 	return nil
+}
+
+func bindRemoteWorkflowCheckoutInputs(remote *RemoteWorkflowSource, locks []plan.ActionLock, inputs map[string]string) (map[string]string, bool, error) {
+	if remote == nil {
+		return nil, false, nil
+	}
+	value := func(wanted string) string {
+		for name, value := range inputs {
+			if strings.EqualFold(name, wanted) {
+				return value
+			}
+		}
+		return ""
+	}
+	checkoutPath := value("path")
+	aliasMatches := false
+	for _, lock := range locks {
+		if plan.EqualSourceWorkspaceAlias(lock.WorkspaceAlias, checkoutPath) {
+			aliasMatches = true
+			break
+		}
+	}
+	if !aliasMatches {
+		return nil, false, nil
+	}
+	if !strings.EqualFold(value("repository"), remote.Repository) {
+		return nil, true, fmt.Errorf("remote workflow source checkout repository does not match immutable workflow provenance")
+	}
+	if !remoteWorkflowCheckoutRefMatches(value("ref"), *remote) {
+		return nil, true, fmt.Errorf("remote workflow source checkout ref does not match immutable workflow provenance")
+	}
+	normalized := cloneMap(inputs)
+	for name := range normalized {
+		switch {
+		case strings.EqualFold(name, "token"):
+			delete(normalized, name)
+		case strings.EqualFold(name, "repository"):
+			normalized[name] = remote.Repository
+		case strings.EqualFold(name, "ref"):
+			normalized[name] = remote.Commit
+		}
+	}
+	return normalized, true, nil
+}
+
+func remoteWorkflowCheckoutRefMatches(ref string, remote RemoteWorkflowSource) bool {
+	// Checkout gives a bare branch precedence over a same-named tag, while a
+	// reusable-workflow reference does the opposite. Bare names are safe only
+	// when workflow provenance selected that branch.
+	return ref == remote.Commit || ref == remote.ResolvedRef ||
+		ref == remote.RequestedRef && !strings.HasPrefix(ref, "refs/") && remote.ResolvedRef == "refs/heads/"+remote.RequestedRef
 }
 
 func addContainerCapabilities(instance JobInstance, actionRefs []string, built *builtPlanActions) error {
@@ -648,6 +715,6 @@ func planRemoteWorkflowSource(source *RemoteWorkflowSource) *plan.RemoteWorkflow
 		return nil
 	}
 	return &plan.RemoteWorkflowSource{
-		Repository: source.Repository, RequestedRef: source.RequestedRef, Commit: source.Commit, SourceDigest: source.SourceDigest,
+		Repository: source.Repository, RequestedRef: source.RequestedRef, ResolvedRef: source.ResolvedRef, Commit: source.Commit, SourceDigest: source.SourceDigest,
 	}
 }

@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -74,6 +75,23 @@ func TestValidateCheckoutInputs(t *testing.T) {
 				t.Fatalf("ValidateCheckoutInputs(%#v) = %v, want unsupported-capability rejection", inputs, err)
 			}
 		})
+	}
+}
+
+func TestValidateCheckoutInputNamesRejectsEqualFoldCollision(t *testing.T) {
+	inputs := map[string]string{"repository": "one", "repo\u017Fitory": "two"}
+	if err := ValidateCheckoutInputNames(inputs); err == nil || !strings.Contains(err.Error(), "duplicate case-insensitive input") {
+		t.Fatalf("ValidateCheckoutInputNames(%#v) = %v, want duplicate-name rejection", inputs, err)
+	}
+}
+
+func TestValidateCheckoutInputNamesRejectsOversizedMap(t *testing.T) {
+	inputs := make(map[string]string, maxCheckoutInputNames+1)
+	for index := range maxCheckoutInputNames + 1 {
+		inputs[fmt.Sprintf("input-%d", index)] = ""
+	}
+	if err := ValidateCheckoutInputNames(inputs); err == nil || !strings.Contains(err.Error(), "explicit checkout inputs") {
+		t.Fatalf("ValidateCheckoutInputNames(%d inputs) = %v, want input-count rejection", len(inputs), err)
 	}
 }
 

@@ -26,6 +26,7 @@ const (
 type RemoteWorkflowSource struct {
 	Repository   string `json:"repository"`
 	RequestedRef string `json:"requested_ref"`
+	ResolvedRef  string `json:"resolved_ref"`
 	Commit       string `json:"commit"`
 	SourceDigest string `json:"source_digest"`
 }
@@ -162,6 +163,9 @@ func (resolver *reusableResolver) loadRemoteReusableWorkflow(ctx context.Context
 	if len(commit) != 40 || strings.Trim(commit, "0123456789abcdef") != "" {
 		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve public reusable workflow %q: source returned a non-immutable commit", uses)
 	}
+	if resolved.ResolvedRef != commit && resolved.ResolvedRef != "refs/tags/"+ref.Ref && resolved.ResolvedRef != "refs/heads/"+ref.Ref {
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve public reusable workflow %q: source returned invalid resolved ref provenance", uses)
+	}
 	if len(materialized.SourceDigest) != 71 || !strings.HasPrefix(materialized.SourceDigest, "sha256:") || strings.Trim(materialized.SourceDigest[7:], "0123456789abcdef") != "" {
 		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve public reusable workflow %q: source returned an invalid repository digest", uses)
 	}
@@ -186,7 +190,7 @@ func (resolver *reusableResolver) loadRemoteReusableWorkflow(ctx context.Context
 	}
 	repository := strings.ToLower(ref.Owner + "/" + ref.Repository)
 	remote := &RemoteWorkflowSource{
-		Repository: repository, RequestedRef: ref.Ref, Commit: commit, SourceDigest: materialized.SourceDigest,
+		Repository: repository, RequestedRef: ref.Ref, ResolvedRef: resolved.ResolvedRef, Commit: commit, SourceDigest: materialized.SourceDigest,
 	}
 	return reusableWorkflowSource{
 		identity:       reusableSourceIdentity{kind: "github", repository: repository, commit: commit, path: workflowPath},

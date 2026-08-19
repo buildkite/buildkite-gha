@@ -70,16 +70,29 @@ func validCheckoutRepository(repository string) bool {
 }
 
 func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, commit string, inputs map[string]string) (Result, error) {
-	result := newResult()
 	const adapter = "checkout adapter"
-	credentialed := job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil
-	url, credentialHost, validProvider := checkoutRepositoryURL(job.Event.Provider, job.Event.Repository)
+	remoteInputs, remoteRefOutput, remotePinnedRef, remote, err := remoteWorkflowCheckoutInputs(job, commit, inputs)
+	if err != nil {
+		return newResult(), fmt.Errorf("%s: %w", adapter, err)
+	}
+	if remote {
+		return r.runCheckoutTarget(ctx, processor, workspace, commit, remoteInputs, "github", job.Workflow.Remote.Repository, job.Workflow.Remote.Commit, remoteRefOutput, remotePinnedRef, false)
+	}
+	_, _, validProvider := checkoutRepositoryURL(job.Event.Provider, job.Event.Repository)
 	if !validProvider || !actionintegration.ValidCheckoutSHA(job.Event.SHA) {
-		return result, fmt.Errorf("%s requires a valid GitHub or Origin event repository and exact SHA; other event sources are unsupported", adapter)
+		return newResult(), fmt.Errorf("%s requires a valid GitHub or Origin event repository and exact SHA; other event sources are unsupported", adapter)
 	}
 	if err := actionintegration.ValidateCheckoutInputs(commit, inputs, job.Event.Repository, job.Event.SHA); err != nil {
-		return result, fmt.Errorf("%s: %w", adapter, err)
+		return newResult(), fmt.Errorf("%s: %w", adapter, err)
 	}
+	credentialed := job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil
+	return r.runCheckoutTarget(ctx, processor, workspace, commit, inputs, job.Event.Provider, job.Event.Repository, job.Event.SHA, checkoutRefOutput(inputs, job.Event.Ref), "", credentialed)
+}
+
+func (r Runner) runCheckoutTarget(ctx context.Context, processor *commandProcessor, workspace string, commit string, inputs map[string]string, provider, repository, sha, refOutput, pinnedRef string, credentialed bool) (Result, error) {
+	result := newResult()
+	const adapter = "checkout adapter"
+	url, credentialHost, _ := checkoutRepositoryURL(provider, repository)
 	inputs = checkoutInputsWithReleaseDefaults(commit, inputs)
 	checkoutDirectory, err := prepareCheckoutDirectory(workspace, inputs)
 	if err != nil {
@@ -118,7 +131,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	if err := run(env, "remote", "add", "origin", url); err != nil {
 		return result, err
 	}
-	fetchArgs := checkoutFetchArgs(inputs, job.Event.SHA)
+	fetchArgs := checkoutFetchArgs(inputs, sha)
 	if credentialed {
 		if err := r.runRepositoryProviderCheckoutFetch(ctx, processor, checkoutDirectory, env, git, base, fetchArgs, credentialHost); err != nil {
 			return result, fmt.Errorf("%s git fetch: %w", adapter, err)
@@ -126,9 +139,14 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	} else if err := run(env, fetchArgs...); err != nil {
 		return result, err
 	}
-	checkoutTarget := checkoutRevision(inputs, job.Event.SHA)
+	checkoutTarget := checkoutRevision(inputs, sha)
 	if err := run(env, "checkout", "--detach", checkoutTarget); err != nil {
 		return result, err
+	}
+	if pinnedRef != "" && pinnedRef != sha {
+		if err := run(env, "update-ref", pinnedRef, sha); err != nil {
+			return result, err
+		}
 	}
 	mode := checkoutSubmoduleMode(inputs)
 	if mode != "" {
@@ -141,8 +159,93 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	if err != nil || !actionintegration.ValidCheckoutSHA(headSHA) || actionintegration.ValidCheckoutSHA(checkoutTarget) && headSHA != checkoutTarget {
 		return result, fmt.Errorf("%s did not produce the requested detached revision", adapter)
 	}
-	setCheckoutOutputs(result.Outputs, commit, checkoutRefOutput(inputs, job.Event.Ref), headSHA)
+	setCheckoutOutputs(result.Outputs, commit, refOutput, headSHA)
 	return result, nil
+}
+
+func remoteWorkflowCheckoutInputs(job plan.Job, commit string, inputs map[string]string) (map[string]string, string, string, bool, error) {
+	remote := job.Workflow.Remote
+	if remote != nil {
+		if err := actionintegration.ValidateCheckoutInputNames(inputs); err != nil {
+			return nil, "", "", true, err
+		}
+	}
+	repository := checkoutInput(inputs, "repository")
+	if remote == nil {
+		return nil, "", "", false, nil
+	}
+	ref := checkoutInput(inputs, "ref")
+	refMatches := remoteWorkflowRefMatches(ref, *remote)
+	path := checkoutInput(inputs, "path")
+	aliasMatches := remoteWorkflowCheckoutAlias(job.Actions, path)
+	if aliasMatches && !strings.EqualFold(repository, remote.Repository) {
+		return nil, "", "", true, fmt.Errorf("remote workflow source checkout repository does not match immutable workflow provenance")
+	}
+	if aliasMatches && !refMatches {
+		return nil, "", "", true, fmt.Errorf("remote workflow source checkout ref does not match immutable workflow provenance")
+	}
+	if repository == "" || !strings.EqualFold(repository, remote.Repository) || !aliasMatches && strings.EqualFold(repository, job.Event.Repository) {
+		return nil, "", "", false, nil
+	}
+	if !refMatches {
+		return nil, "", "", true, fmt.Errorf("remote workflow source checkout ref does not match immutable workflow provenance")
+	}
+	if !aliasMatches {
+		return nil, "", "", true, fmt.Errorf("remote workflow source checkout path does not match a source-backed local action")
+	}
+	normalized := maps.Clone(inputs)
+	deleteCheckoutInput(normalized, "token")
+	setCheckoutInput(normalized, "repository", remote.Repository)
+	setCheckoutInput(normalized, "ref", remote.Commit)
+	if err := actionintegration.ValidateCheckoutInputs(commit, normalized, remote.Repository, remote.Commit); err != nil {
+		return nil, "", "", true, err
+	}
+	pinnedRef := remote.ResolvedRef
+	if pinnedRef == remote.Commit {
+		pinnedRef = ""
+	} else if !validPinnedCheckoutRef(pinnedRef) {
+		return nil, "", "", true, fmt.Errorf("remote workflow source checkout ref is invalid")
+	}
+	return normalized, checkoutRefOutput(inputs, ""), pinnedRef, true, nil
+}
+
+func remoteWorkflowRefMatches(ref string, remote plan.RemoteWorkflowSource) bool {
+	// Checkout gives a bare branch precedence over a same-named tag, while a
+	// reusable-workflow reference does the opposite. Bare names are safe only
+	// when workflow provenance selected that branch.
+	return ref == remote.Commit || ref == remote.ResolvedRef ||
+		ref == remote.RequestedRef && !strings.HasPrefix(ref, "refs/") && remote.ResolvedRef == "refs/heads/"+remote.RequestedRef
+}
+
+func remoteWorkflowCheckoutAlias(locks []plan.ActionLock, path string) bool {
+	for _, lock := range locks {
+		if plan.EqualSourceWorkspaceAlias(lock.WorkspaceAlias, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func validPinnedCheckoutRef(ref string) bool {
+	for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
+		if strings.HasPrefix(ref, prefix) {
+			return actionintegration.ValidCheckoutBranch(strings.TrimPrefix(ref, prefix))
+		}
+	}
+	return false
+}
+
+func deleteCheckoutInput(inputs map[string]string, target string) {
+	for name := range inputs {
+		if strings.EqualFold(name, target) {
+			delete(inputs, name)
+		}
+	}
+}
+
+func setCheckoutInput(inputs map[string]string, target, value string) {
+	deleteCheckoutInput(inputs, target)
+	inputs[target] = value
 }
 
 func setCheckoutOutputs(outputs map[string]string, commit, ref, headSHA string) {

@@ -35,6 +35,24 @@ type blockingActionSource struct {
 	release chan struct{}
 }
 
+type namespaceActionSource struct {
+	root   string
+	commit string
+	calls  []source.Reference
+}
+
+func (s *namespaceActionSource) Fetch(_ context.Context, ref source.Reference) (source.Resolved, source.Materialized, error) {
+	s.calls = append(s.calls, ref)
+	resolvedRef := s.commit
+	if ref.Ref == "v1" {
+		resolvedRef = "refs/tags/v1"
+	}
+	digest, err := source.DigestTree(s.root)
+	return source.Resolved{Reference: ref, Commit: s.commit, ResolvedRef: resolvedRef}, source.Materialized{
+		RepositoryRoot: s.root, ActionRoot: filepath.Join(s.root, ref.Path), SourceDigest: digest,
+	}, err
+}
+
 func (s *blockingActionSource) Fetch(_ context.Context, ref source.Reference) (source.Resolved, source.Materialized, error) {
 	if s.calls.Add(1) == 1 {
 		close(s.started)
@@ -533,6 +551,38 @@ runs:
 	}
 	if fake.calls["owner/action@v1"] != 1 {
 		t.Fatalf("remote action resolutions = %d, want one shared resolution", fake.calls["owner/action@v1"])
+	}
+}
+
+func TestMemoizeRepositorySourceRetainsNamespaceAfterActionPathFetch(t *testing.T) {
+	root := t.TempDir()
+	writeAction(t, root, "action", "name: action\nruns:\n  using: node24\n  main: index.js\n")
+	commit := strings.Repeat("a", 40)
+	fake := &namespaceActionSource{root: root, commit: commit}
+	shared := MemoizeRepositorySource(fake)
+	actionRef, err := source.Parse("owner/repository/action@v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, materialized, err := shared.Fetch(t.Context(), actionRef); err != nil {
+		t.Fatal(err)
+	} else {
+		materialized.Release()
+	}
+	repositoryRef, err := source.Parse("owner/repository@v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, materialized, err := shared.Fetch(t.Context(), repositoryRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized.Release()
+	if resolved.Reference != repositoryRef || resolved.Commit != commit || resolved.ResolvedRef != "refs/tags/v1" {
+		t.Fatalf("memoized repository resolution = %#v", resolved)
+	}
+	if len(fake.calls) != 2 || fake.calls[0] != actionRef || fake.calls[1].Ref != commit || fake.calls[1].Path != "" {
+		t.Fatalf("underlying repository source calls = %#v", fake.calls)
 	}
 }
 

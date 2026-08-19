@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -62,6 +63,8 @@ func (s PublicActionSource) Fetch(ctx context.Context, ref source.Reference) (so
 type actionLockBuilder struct {
 	workspace    string
 	source       ActionSource
+	remote       *RemoteWorkflowSource
+	remoteRoot   string
 	nodes        map[string]*actionNode
 	ids          map[string]string
 	active       map[string]bool
@@ -109,7 +112,7 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 				evidence.ActionResolutionComplete = false
 				continue
 			}
-			_, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, plan.EventServerURL(ir.Event.Provider), []string{step.Uses}, []map[string]string{step.With})
+			_, err := compileActionInvocationsForSource(ctx, instance.RepositoryRoot, instance.RemoteWorkflow, actionSource, plan.EventServerURL(ir.Event.Provider), []string{step.Uses}, []map[string]string{step.With})
 			evaluation := ActionEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Reference: step.Uses, Step: i + 1, Passed: err == nil}
 			evidence.Actions = append(evidence.Actions, evaluation)
 			if err == nil {
@@ -215,6 +218,10 @@ func compileActionLocks(ctx context.Context, workspace string, actionSource Acti
 }
 
 func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
+	return compileActionInvocationsForSource(ctx, workspace, nil, actionSource, serverURL, refs, suppliedInputs)
+}
+
+func compileActionInvocationsForSource(ctx context.Context, workspace string, remote *RemoteWorkflowSource, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
 	if workspace == "" {
 		return actionCompilation{}, fmt.Errorf("workflow path must identify a repository root")
 	}
@@ -225,7 +232,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	if err != nil {
 		return actionCompilation{}, fmt.Errorf("resolve workspace: %w", err)
 	}
-	b := &actionLockBuilder{workspace: abs, source: actionSource, nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
+	b := &actionLockBuilder{workspace: abs, source: actionSource, remote: cloneRemoteWorkflowSource(remote), nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
 	defer func() {
 		for _, materialized := range b.materialized {
 			materialized.Release()
@@ -234,7 +241,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	selectors := make([]plan.ActionSelector, 0, len(refs))
 	roots := make([]*actionNode, 0, len(refs))
 	for _, ref := range refs {
-		n, err := b.add(ctx, ref, 1)
+		n, err := b.add(ctx, ref, 1, nil)
 		if err != nil {
 			return actionCompilation{}, err
 		}
@@ -281,11 +288,11 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	}, nil
 }
 
-func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*actionNode, error) {
+func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, parent *actionNode) (*actionNode, error) {
 	if depth > metadata.MaxNestedActionDepth {
 		return nil, fmt.Errorf("action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, raw)
 	}
-	key, lock, root, loadPath, err := b.describe(ctx, raw)
+	key, lock, root, loadPath, err := b.describe(ctx, raw, parent)
 	if err != nil {
 		return nil, fmt.Errorf("compile action %q: %w", raw, err)
 	}
@@ -355,7 +362,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 			if step.Uses == "" {
 				continue
 			}
-			child, err := b.add(ctx, step.Uses, depth+1)
+			child, err := b.add(ctx, step.Uses, depth+1, n)
 			if err != nil {
 				return nil, &actionChildError{child: step.Uses, err: err}
 			}
@@ -459,18 +466,28 @@ func hasActionInput(inputs map[string]string, name string) bool {
 	return false
 }
 
-func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, plan.ActionLock, string, string, error) {
+func (b *actionLockBuilder) describe(ctx context.Context, raw string, parent *actionNode) (string, plan.ActionLock, string, string, error) {
 	if strings.HasPrefix(raw, "./") {
 		p := strings.TrimPrefix(raw, "./")
 		if p == "." || p != "" && (path.Clean(p) != p || strings.Contains(p, "\\") || strings.HasPrefix(p, "/")) {
 			return "", plan.ActionLock{}, "", "", fmt.Errorf("invalid local action path")
 		}
 		m, err := metadata.Load(b.workspace, p)
-		if err != nil {
+		if err == nil {
+			digest, err := source.DigestTree(m.Path)
+			return "workspace:" + p, plan.ActionLock{Source: "workspace", Path: p, SourceDigest: digest}, b.workspace, p, err
+		}
+		if _, statErr := os.Lstat(filepath.Join(b.workspace, filepath.FromSlash(p))); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
 			return "", plan.ActionLock{}, "", "", err
 		}
-		digest, err := source.DigestTree(m.Path)
-		return "workspace:" + p, plan.ActionLock{Source: "workspace", Path: p, SourceDigest: digest}, b.workspace, p, err
+		key, lock, root, loadPath, sourceErr := b.describeSourceBackedLocalAction(ctx, p, parent)
+		if sourceErr != nil {
+			return "", plan.ActionLock{}, "", "", sourceErr
+		}
+		if key == "" {
+			return "", plan.ActionLock{}, "", "", err
+		}
+		return key, lock, root, loadPath, nil
 	}
 	ref, err := source.Parse(raw)
 	if err != nil {
@@ -510,6 +527,85 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 	return key, lock, repositoryRoot, ref.Path, nil
 }
 
+func (b *actionLockBuilder) describeSourceBackedLocalAction(ctx context.Context, workspacePath string, parent *actionNode) (string, plan.ActionLock, string, string, error) {
+	remote := b.remote
+	if remote == nil || b.source == nil {
+		return "", plan.ActionLock{}, "", "", nil
+	}
+	if parent != nil && (parent.lock.Source != "github" || parent.lock.Repository != remote.Repository || parent.lock.Commit != remote.Commit || parent.lock.SourceDigest != remote.SourceDigest) {
+		return "", plan.ActionLock{}, "", "", nil
+	}
+	repositoryRoot, err := b.remoteRepositoryRoot(ctx)
+	if err != nil {
+		return "", plan.ActionLock{}, "", "", err
+	}
+	parts := strings.Split(workspacePath, "/")
+	type match struct{ alias, path string }
+	var matches []match
+	for i := 1; i < len(parts); i++ {
+		candidate := strings.Join(parts[i:], "/")
+		hasManifest := false
+		for _, name := range []string{"action.yml", "action.yaml"} {
+			_, statErr := os.Lstat(filepath.Join(repositoryRoot, filepath.FromSlash(candidate), name))
+			switch {
+			case statErr == nil:
+				hasManifest = true
+			case errors.Is(statErr, os.ErrNotExist):
+			default:
+				return "", plan.ActionLock{}, "", "", fmt.Errorf("inspect remote workflow action candidate %q: %w", candidate, statErr)
+			}
+		}
+		if hasManifest {
+			matches = append(matches, match{alias: strings.Join(parts[:i], "/"), path: candidate})
+		}
+	}
+	if len(matches) == 0 {
+		return "", plan.ActionLock{}, "", "", nil
+	}
+	if len(matches) != 1 {
+		return "", plan.ActionLock{}, "", "", fmt.Errorf("local action %q matches multiple paths in immutable remote workflow source", workspacePath)
+	}
+	selected := matches[0]
+	if !plan.ValidSourceWorkspaceAlias(selected.alias) {
+		return "", plan.ActionLock{}, "", "", fmt.Errorf("source-backed local action workspace alias %q is not portable", selected.alias)
+	}
+	if _, err := metadata.Load(repositoryRoot, selected.path); err != nil {
+		return "", plan.ActionLock{}, "", "", err
+	}
+	lock := plan.ActionLock{
+		Source: "github", Repository: remote.Repository, RequestedRef: remote.RequestedRef, Commit: remote.Commit,
+		Path: selected.path, WorkspaceAlias: selected.alias, SourceDigest: remote.SourceDigest,
+	}
+	b.caps["network"] = true
+	key := "github-workspace:" + remote.Repository + "/" + selected.path + "@" + remote.Commit + "\x00" + selected.alias
+	return key, lock, repositoryRoot, selected.path, nil
+}
+
+func (b *actionLockBuilder) remoteRepositoryRoot(ctx context.Context) (string, error) {
+	if b.remoteRoot != "" {
+		return b.remoteRoot, nil
+	}
+	remote := b.remote
+	ref, err := source.Parse(remote.Repository + "@" + remote.Commit)
+	if err != nil {
+		return "", fmt.Errorf("resolve remote workflow action source: %w", err)
+	}
+	resolved, materialized, err := b.source.Fetch(ctx, ref)
+	if err != nil {
+		return "", fmt.Errorf("resolve remote workflow action source: %w", err)
+	}
+	b.materialized = append(b.materialized, materialized)
+	if strings.ToLower(resolved.Commit) != remote.Commit || materialized.SourceDigest != remote.SourceDigest {
+		return "", fmt.Errorf("remote workflow action source does not match immutable workflow provenance")
+	}
+	repositoryRoot, err := canonicalMaterializedRepositoryRoot(materialized.RepositoryRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve remote workflow action source: %w", err)
+	}
+	b.remoteRoot = repositoryRoot
+	return repositoryRoot, nil
+}
+
 type memoizedActionSource struct {
 	source    ActionSource
 	mu        sync.Mutex
@@ -520,8 +616,9 @@ type memoizedActionSource struct {
 }
 
 type memoizedRepositoryPin struct {
-	commit string
-	digest string
+	commit      string
+	resolvedRef string
+	digest      string
 }
 
 type memoizedAction struct {
@@ -608,17 +705,20 @@ func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) 
 	}
 	if call.err == nil {
 		call.resolved.Reference = ref
-		if pinned && (call.resolved.Commit != pin.commit || call.materialized.SourceDigest != pin.digest) {
-			call.materialized.Release()
-			call.materialized = source.Materialized{}
-			call.err = fmt.Errorf("repository source changed after immutable pin")
+		if pinned {
+			call.resolved.ResolvedRef = pin.resolvedRef
+			if call.resolved.Commit != pin.commit || call.materialized.SourceDigest != pin.digest {
+				call.materialized.Release()
+				call.materialized = source.Materialized{}
+				call.err = fmt.Errorf("repository source changed after immutable pin")
+			}
 		}
 	}
 	s.mu.Lock()
 	delete(s.active, key)
 	if call.err == nil {
 		if !pinned {
-			s.pins[repositoryKey] = memoizedRepositoryPin{commit: call.resolved.Commit, digest: call.materialized.SourceDigest}
+			s.pins[repositoryKey] = memoizedRepositoryPin{commit: call.resolved.Commit, resolvedRef: call.resolved.ResolvedRef, digest: call.materialized.SourceDigest}
 		}
 		s.cache[key] = memoizedAction{resolved: call.resolved, materialized: call.materialized}
 	}

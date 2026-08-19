@@ -24,7 +24,7 @@ Workflow files, action metadata, event snapshots, and job plans are untrusted in
 
 Digests and immutable source locks detect changed code. They do not make code trusted or grant credentials.
 
-Public reusable workflows use the same bounded repository source and cache as public actions. Each requested ref resolves once per validation, compilation, or upload operation to an immutable commit and repository digest. Plans also bind each selected workflow file digest. Runtime jobs do not load remote workflow YAML from the caller workspace.
+Public reusable workflows use the same bounded repository source and cache as public actions. Each requested ref resolves once per validation, compilation, or upload operation to an immutable commit and repository digest. Plans retain the branch or tag namespace when applicable and bind each selected workflow file digest. Runtime jobs do not load remote workflow YAML from the caller workspace. Source-checked local actions use the same provenance: the runtime verifies the caller-workspace alias against the immutable action directory, then executes the verified source copy. See [Reusable workflows](compatibility.md#reusable-workflows).
 
 Push and pull request path-filter admission uses Buildkite's reserved linked-webhook metadata only after binding it to the Buildkite repository and commit and matching local Git history. Missing, shallow, ambiguous, oversized, or mismatched evidence prevents admission. Explicit and generated snapshots cannot grant this admission. This check controls workflow selection; it does not make the selected workflow trusted.
 
@@ -36,7 +36,7 @@ Reusable-workflow call conditions are immutable plan guards evaluated in caller 
 
 | Credential | Current boundary |
 | --- | --- |
-| Repository checkout | The verified adapter checks the event repository and exact commit. Buildkite authorizes managed private access; credentials are command-scoped and not persisted. |
+| Repository checkout | The verified adapter checks the event repository and exact commit. A source-checked public reusable workflow may instead anonymously check out its provenance-bound public repository at the exact commit. Buildkite authorizes managed private access only for the event repository; credentials are command-scoped and not persisted. |
 | `GITHUB_TOKEN` | Supported static uses receive one short-lived token for the event repository and top-level requesting workflow permissions. Omitted workflow permissions mean exactly `contents: read`; GitHub repository and organization settings are not inherited. Reusable-workflow jobs receive the same permissions because Buildkite does not inspect called workflow permission maps. Buildkite verifies the pipeline repository, immutable commit, top-level workflow policy, and build provenance. Pull requests are limited to `contents: read`; merge queues are denied. The token is not ambient. |
 | Cache token | When caching is configured, every JavaScript or Docker action lifecycle receives a fresh job-bound token. This includes compatible clients such as `actions/setup-go`, not only `actions/cache`. Shell steps do not receive it. |
 | Ordinary workflow secrets | Static names are resolved with `buildkite-agent secret get` in the destination job. The job's Buildkite identity and Secret access policies are the sole authorization boundary. Values are registered with Agent and local redaction before use. |
