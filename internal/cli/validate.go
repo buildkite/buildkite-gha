@@ -40,18 +40,20 @@ func validate(args []string, stdout, stderr io.Writer, version string, agent tra
 	if profile != "" && eventPath == "" && eventName == "" && !allEvents {
 		return usageError(stderr, "validate: --profile hosted requires --event, --event-path, or --all-events; use bare validate <workflow> for event-independent syntax and trigger compatibility validation")
 	}
-	out := newProcessingOutput(context.Background(), "validate", format, stdout, stderr, agent)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	out := newProcessingOutput(ctx, "validate", format, stdout, stderr, agent)
 	if allEvents {
-		return validateAllEvents(out, workflowPath, version, actionCacheDir, nil, stderr)
+		return validateAllEvents(ctx, out, workflowPath, version, actionCacheDir, nil, stderr)
 	}
-	return validateOne(out, workflowPath, eventPath, eventName, profile, version, actionCacheDir, nil, stderr)
+	return validateOne(ctx, out, workflowPath, eventPath, eventName, profile, version, actionCacheDir, nil, stderr)
 }
 
-func validateOne(out processingOutput, workflowPath, eventPath, eventName, profile, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
-	return validateOneSource(out, workflowPath, nil, eventPath, eventName, profile, version, actionCacheDir, runtime, stderr)
+func validateOne(ctx context.Context, out processingOutput, workflowPath, eventPath, eventName, profile, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
+	return validateOneSource(ctx, out, workflowPath, nil, eventPath, eventName, profile, version, actionCacheDir, runtime, stderr)
 }
 
-func validateOneSource(out processingOutput, workflowPath string, workflowSource []byte, eventPath, eventName, profile, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
+func validateOneSource(ctx context.Context, out processingOutput, workflowPath string, workflowSource []byte, eventPath, eventName, profile, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
 	contextRequired := false
 	var loadEvent func() ([]byte, error)
 	if eventPath != "" {
@@ -67,15 +69,13 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 	var source, event []byte
 	var ok bool
 	if workflowSource == nil {
-		source, event, ok = loadProcessingInputs(out, workflowPath, profile, "event input could not be read", loadEvent)
+		source, event, ok = loadProcessingInputs(ctx, out, workflowPath, profile, "event input could not be read", loadEvent)
 	} else {
-		source, event, ok = loadProcessingInputsSource(out, workflowPath, profile, workflowSource, "event input could not be read", loadEvent)
+		source, event, ok = loadProcessingInputsSource(ctx, out, workflowPath, profile, workflowSource, "event input could not be read", loadEvent)
 	}
 	if !ok {
 		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	repositorySource := compiler.RepositorySource(nil)
 	if runtime != nil {
 		repositorySource = runtime.actionSource
@@ -83,7 +83,7 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 	cleanupSource := func() {}
 	if repositorySource == nil {
 		var sourceErr error
-		repositorySource, cleanupSource, sourceErr = newHostedActionSource(actionCacheDir, nil, nil)
+		repositorySource, cleanupSource, sourceErr = newHostedActionSource(ctx, actionCacheDir, nil, nil)
 		if sourceErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: configure public repository source: %v\n", sourceErr)
 			return 1
@@ -109,13 +109,13 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 				}
 				if !contextRequired {
 					report := triggerFailureProcessingReport(workflowInput{Path: workflowPath, Source: source}, triggerErr)
-					_ = out.write(report)
+					_ = out.write(ctx, report)
 					return 1
 				}
 			} else if !selection.Applicable {
 				report := triggerProcessingReport(workflowPath, source)
 				report.Result = "not-applicable"
-				if out.write(report) != nil {
+				if out.write(ctx, report) != nil {
 					return 1
 				}
 				return 0
@@ -129,7 +129,7 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 		validationOptions = hostedOptions("", nil, nil)
 	}
 	validationOptions.RepositorySource = repositorySource
-	processingReport, ok := validatedProcessingReportWithOptionsContext(ctx, out, workflowPath, profile, source, event, loadEvent != nil, &validationOptions)
+	processingReport, ok := validatedProcessingReportWithOptions(ctx, out, workflowPath, profile, source, event, loadEvent != nil, &validationOptions)
 	if !ok {
 		return 1
 	}
@@ -144,7 +144,7 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 		if executableErr != nil {
 			processingReport.AddEnvironmentFailure("compiler executable could not be inspected")
 			processingReport.Result = "indeterminate"
-			_ = out.write(processingReport)
+			_ = out.write(ctx, processingReport)
 			return 1
 		}
 		// Profile validation never executes generated plans, so the importer
@@ -161,7 +161,7 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 				return 1
 			}
 			processingReport.Result = classifyHostedFailure(&processingReport, workflowPath, profileErr)
-			_ = out.write(processingReport)
+			_ = out.write(ctx, processingReport)
 			return 1
 		}
 		if preflight.HasActions {
@@ -178,7 +178,7 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 				Message: "Push and pull request path filters require linked Buildkite webhook data and a verified local git diff before admission can be determined.",
 			})
 			processingReport.Result = "context-required"
-			if out.write(processingReport) != nil {
+			if out.write(ctx, processingReport) != nil {
 				return 1
 			}
 			return 1
@@ -186,13 +186,13 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 		processingReport.SetStage(string(compiler.StageAdmission), compatibility.Passed)
 		processingReport.Admission.Result = "admitted"
 		processingReport.Result = "admitted"
-		if out.write(processingReport) != nil {
+		if out.write(ctx, processingReport) != nil {
 			return 1
 		}
 		return 0
 	}
 	processingReport.Result = "compilable"
-	if out.write(processingReport) != nil {
+	if out.write(ctx, processingReport) != nil {
 		return 1
 	}
 	return 0
@@ -204,27 +204,27 @@ type profileValidationRuntime struct {
 	executableErr      error
 }
 
-func validateAllEvents(out processingOutput, workflowPath, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
+func validateAllEvents(ctx context.Context, out processingOutput, workflowPath, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
 	source, err := os.ReadFile(workflowPath)
 	if err != nil {
 		validation := compatibility.EnvironmentProcessingReport(workflowPath, "", "workflow input could not be read")
 		report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validation)
-		_ = out.writeV3(report)
+		_ = out.writeV3(ctx, report)
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", err)
 		return 1
 	}
-	return validateAllEventsSource(out, workflowPath, source, version, actionCacheDir, runtime, stderr)
+	return validateAllEventsSource(ctx, out, workflowPath, source, version, actionCacheDir, runtime, stderr)
 }
 
-func validateAllEventsSource(out processingOutput, workflowPath string, source []byte, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
+func validateAllEventsSource(ctx context.Context, out processingOutput, workflowPath string, source []byte, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
 	cleanup := func() {}
 	if runtime == nil || runtime.actionSource == nil {
-		actionSource, sourceCleanup, sourceErr := newHostedActionSource(actionCacheDir, nil, nil)
+		actionSource, sourceCleanup, sourceErr := newHostedActionSource(ctx, actionCacheDir, nil, nil)
 		cleanup = sourceCleanup
 		if sourceErr != nil {
 			validationReport := compatibility.EnvironmentProcessingReport(workflowPath, hostedProfile, "public repository source could not be configured")
 			report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
-			_ = out.writeV3(report)
+			_ = out.writeV3(ctx, report)
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", sourceErr)
 			cleanup()
 			return 1
@@ -241,12 +241,12 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 	defer cleanup()
 	validationOptions := hostedOptions("", nil, nil)
 	validationOptions.RepositorySource = runtime.actionSource
-	validation, validationErr := compiler.ValidateWithOptionsContext(context.Background(), workflowPath, source, validationOptions)
+	validation, validationErr := compiler.ValidateWithOptionsContext(ctx, workflowPath, source, validationOptions)
 	validationReport := compatibility.InitialProcessingReport(workflowPath, "", false, validation, validationErr)
 	if validationErr != nil {
 		validationReport.Result = "incompatible"
 		report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
-		if out.writeV3(report) != nil {
+		if out.writeV3(ctx, report) != nil {
 			return 1
 		}
 		return 1
@@ -271,7 +271,7 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 			command: "validate", format: "json", reports: io.Discard, stderr: stderr,
 			observe: func(observed compatibility.ProcessingReport) { eventReport = &observed },
 		}
-		if code := validateOneSource(eventOut, workflowPath, source, "", event, hostedProfile, version, actionCacheDir, runtime, stderr); code != 0 {
+		if code := validateOneSource(ctx, eventOut, workflowPath, source, "", event, hostedProfile, version, actionCacheDir, runtime, stderr); code != 0 {
 			failed = true
 		}
 		if eventReport == nil {
@@ -281,7 +281,7 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 			Event: event, Source: "generated", Report: *eventReport,
 		})
 	}
-	if out.writeV3(report) != nil {
+	if out.writeV3(ctx, report) != nil {
 		return 1
 	}
 	if failed {

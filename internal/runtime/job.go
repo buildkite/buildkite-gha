@@ -147,7 +147,6 @@ type remotePreparationStatus struct {
 }
 
 type remotePreparationTimeout struct {
-	ctx      context.Context
 	step     plan.Step
 	eval     expression.Context
 	resolved bool
@@ -155,13 +154,13 @@ type remotePreparationTimeout struct {
 	cancel   context.CancelFunc
 }
 
-func (t *remotePreparationTimeout) context() (context.Context, error) {
+func (t *remotePreparationTimeout) context(parent context.Context) (context.Context, error) {
 	if !t.resolved {
 		step, err := evaluateStepTimeout(t.step, t.eval)
 		if err != nil {
 			return nil, fmt.Errorf("controls: %w", err)
 		}
-		t.bounded, t.cancel = stepContext(t.ctx, step.TimeoutMinutes)
+		t.bounded, t.cancel = stepContext(parent, step.TimeoutMinutes)
 		t.resolved = true
 	}
 	return t.bounded, nil
@@ -422,7 +421,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			cancelService()
 			return jobResult, err
 		}
-		defer func() { runJobErr = errors.Join(runJobErr, r.idTokenService.Close()) }()
+		defer func() { runJobErr = errors.Join(runJobErr, r.idTokenService.Close(runCtx)) }()
 		defer cancelService()
 	}
 	if r.Mise == "" && r.ResolveMise != nil {
@@ -598,7 +597,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		r.jobDocker = backend
 		eval.Services = backend.servicePorts
 		defer func() {
-			if err := backend.cleanup(); err != nil {
+			if err := backend.cleanup(runCtx); err != nil {
 				runJobErr = errors.Join(runJobErr, err)
 			}
 		}()
@@ -610,7 +609,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		r.jobDocker = backend
 		eval.Services = backend.servicePorts
 		defer func() {
-			if err := backend.cleanup(); err != nil {
+			if err := backend.cleanup(runCtx); err != nil {
 				runJobErr = errors.Join(runJobErr, err)
 			}
 		}()
@@ -1803,21 +1802,23 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 				return failPre(inheritedEvalErr)
 			}
 			eval.Env = mergeStringMaps(eval.Env, stepEnv)
-			phaseCtx := ctx
-			cancelPhase := func() {}
+			phaseCtx, cancelPhase := context.WithCancel(ctx)
+			defer func() { cancelPhase() }()
 			if workflowStep {
 				resolvedStep, err := evaluateStepTimeout(step, eval)
 				if err != nil {
 					return failPre(fmt.Errorf("controls: %w", err))
 				}
+				cancelPhase()
 				phaseCtx, cancelPhase = stepContext(ctx, resolvedStep.TimeoutMinutes)
 			} else if inheritedTimeout != nil {
-				phaseCtx, err = inheritedTimeout.context()
+				cancelPhase()
+				phaseCtx, err = inheritedTimeout.context(ctx)
+				cancelPhase = func() {}
 				if err != nil {
 					return failPre(err)
 				}
 			}
-			defer cancelPhase()
 			inputs, err := evaluate(step.With, eval)
 			if err != nil {
 				return failPre(err)
@@ -1859,7 +1860,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		}
 		preparationTimeout := inheritedTimeout
 		if workflowStep && compositeEvalErr == nil {
-			preparationTimeout = &remotePreparationTimeout{ctx: ctx, step: step, eval: eval}
+			preparationTimeout = &remotePreparationTimeout{step: step, eval: eval}
 			defer preparationTimeout.close()
 		}
 		eval.Inputs = inputs
@@ -1897,11 +1898,16 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			mergeInto(result.State, childResult.State)
 			appendJobSummary(&result.Summary, &result.summaryTruncated, childResult.Summary, childResult.summaryTruncated)
 			if childErr != nil {
-				classificationCtx := ctx
+				classificationCtx, cancelClassification := context.WithCancel(ctx)
 				if preparationTimeout != nil && preparationTimeout.bounded != nil {
-					classificationCtx = preparationTimeout.bounded
+					// contextcheck cannot trace the cached timeout context back to ctx.
+					// Classification only needs its cancellation state.
+					if preparationTimeout.bounded.Err() != nil {
+						cancelClassification()
+					}
 				}
 				execution := classifyStepExecution(classificationCtx, classificationCtx, plan.Step{ContinueOnError: childStep.ContinueOnError}, childResult, childErr)
+				cancelClassification()
 				if execution.conclusion != "success" {
 					status.unsuccessful = true
 					err = errors.Join(err, fmt.Errorf("composite action step %d: %w", i+1, childErr))
@@ -2588,7 +2594,7 @@ func (r Runner) postActionTimeout() time.Duration {
 // Cancellation still permits the existing short cleanup grace before stopping
 // an in-flight post action.
 func postPhaseContext(parent context.Context, timeout, cancelGrace time.Duration) (context.Context, context.CancelFunc) {
-	postCtx, cancelPosts := context.WithTimeout(context.Background(), timeout)
+	postCtx, cancelPosts := context.WithTimeout(context.WithoutCancel(parent), timeout)
 	postDone := make(chan struct{})
 	var once sync.Once
 	go func() {

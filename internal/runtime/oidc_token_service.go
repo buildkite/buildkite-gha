@@ -208,8 +208,8 @@ func startIDTokenService(ctx context.Context, provider OIDCTokenProvider, redact
 	return service, nil
 }
 
-func (s *idTokenService) Close() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (s *idTokenService) Close(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 	defer cancel()
 	return s.server.Shutdown(ctx)
 }

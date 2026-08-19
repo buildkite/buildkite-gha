@@ -15,7 +15,7 @@ import (
 
 const maxCommandTelemetryDiagnostics = 20
 
-func emitCommandTelemetry(command telemetry.Command, outcome telemetry.Outcome, version string, duration time.Duration, details telemetry.Details) {
+func emitCommandTelemetry(ctx context.Context, command telemetry.Command, outcome telemetry.Outcome, version string, duration time.Duration, details telemetry.Details) {
 	client, err := telemetry.New(telemetry.Config{
 		Endpoint:      os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
 		JobID:         os.Getenv("BUILDKITE_JOB_ID"),
@@ -26,7 +26,7 @@ func emitCommandTelemetry(command telemetry.Command, outcome telemetry.Outcome, 
 	if err != nil || client == nil {
 		return
 	}
-	_ = client.Emit(command, outcome, duration, details)
+	_ = client.EmitContext(context.WithoutCancel(ctx), command, outcome, duration, details)
 }
 
 func telemetryOutcome(code int, conclusion string, contextErr error) telemetry.Outcome {

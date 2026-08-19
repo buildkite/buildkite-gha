@@ -595,6 +595,7 @@ func TestPublishTerminalResultAnnotatesCancelledJobWithFreshContext(t *testing.T
 	}
 
 	publication, err := publishTerminalResult(
+		t.Context(),
 		transport.Agent{Runner: runner},
 		t.TempDir(),
 		job,

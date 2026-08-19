@@ -355,7 +355,7 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 	image, container := "buildkite-gha-image-"+id, "buildkite-gha-container-"+id
 	built, ran := false, false
 	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), r.cleanupTimeout())
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.cleanupTimeout())
 		defer cancel()
 		var cleanupErr error
 		if ran {

@@ -87,7 +87,7 @@ func newProcessingOutput(ctx context.Context, command, format string, reports, s
 }
 
 // write emits the report, reporting write failures on stderr.
-func (o processingOutput) write(report compatibility.ProcessingReport) error {
+func (o processingOutput) write(ctx context.Context, report compatibility.ProcessingReport) error {
 	if o.observe != nil {
 		o.observe(report)
 	}
@@ -101,11 +101,11 @@ func (o processingOutput) write(report compatibility.ProcessingReport) error {
 		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: write report: %v\n", o.command, err)
 		return err
 	}
-	o.annotate(report)
+	o.annotate(ctx, report)
 	return nil
 }
 
-func (o processingOutput) writeV3(report compatibility.ProcessingReportV3) error {
+func (o processingOutput) writeV3(ctx context.Context, report compatibility.ProcessingReportV3) error {
 	if err := compatibility.WriteProcessingV3(o.reports, o.format, report); err != nil {
 		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: write report: %v\n", o.command, err)
 		return err
@@ -119,7 +119,7 @@ func (o processingOutput) writeV3(report compatibility.ProcessingReportV3) error
 			combined.Diagnostics = append(combined.Diagnostics, diagnostic)
 		}
 	}
-	o.annotate(combined)
+	o.annotate(ctx, combined)
 	return nil
 }
 
@@ -170,7 +170,7 @@ func writePluginProcessing(w io.Writer, report compatibility.ProcessingReport) e
 	return nil
 }
 
-func (o processingOutput) annotate(report compatibility.ProcessingReport) {
+func (o processingOutput) annotate(parent context.Context, report compatibility.ProcessingReport) {
 	if o.annotationJob == "" {
 		return
 	}
@@ -180,7 +180,7 @@ func (o processingOutput) annotate(report compatibility.ProcessingReport) {
 	}
 	digest := sha256.Sum256([]byte(report.Workflow))
 	annotationContext := fmt.Sprintf("%s-%x", processingAnnotationContext, digest[:6])
-	ctx, cancel := context.WithTimeout(o.context, processingAnnotationTimeout)
+	ctx, cancel := context.WithTimeout(parent, processingAnnotationTimeout)
 	defer cancel()
 	if err := o.agent.AnnotateJob(ctx, o.annotationJob, annotationContext, style, body); err != nil {
 		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: warning: processing annotation: %v\n", o.command, err)
@@ -193,12 +193,12 @@ type skippedWorkflow struct {
 	reason string
 }
 
-func (o processingOutput) annotateSkippedWorkflows(event string, workflows []skippedWorkflow) {
+func (o processingOutput) annotateSkippedWorkflows(parent context.Context, event string, workflows []skippedWorkflow) {
 	body := skippedWorkflowsAnnotation(event, workflows, o.buildURL)
 	if o.annotationJob == "" || body == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(o.context, processingAnnotationTimeout)
+	ctx, cancel := context.WithTimeout(parent, processingAnnotationTimeout)
 	defer cancel()
 	if err := o.agent.AnnotateJob(ctx, o.annotationJob, skippedWorkflowsContext, "info", body); err != nil {
 		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: warning: skipped workflows annotation: %v\n", o.command, err)
@@ -479,8 +479,8 @@ func annotationHTML(value string) string {
 }
 
 // fail emits the report and the failure that ended the command.
-func (o processingOutput) fail(report compatibility.ProcessingReport, err error) int {
-	_ = o.write(report)
+func (o processingOutput) fail(ctx context.Context, report compatibility.ProcessingReport, err error) int {
+	_ = o.write(ctx, report)
 	_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: %v\n", o.command, err)
 	return 1
 }
@@ -488,22 +488,22 @@ func (o processingOutput) fail(report compatibility.ProcessingReport, err error)
 // loadProcessingInputs reads the workflow source and acquires the optional
 // event snapshot, emitting the standard failure report when either input is
 // unavailable. A nil loadEvent means the command runs without an event.
-func loadProcessingInputs(out processingOutput, workflowPath, profile, eventFailureMessage string, loadEvent func() ([]byte, error)) (source, event []byte, ok bool) {
+func loadProcessingInputs(ctx context.Context, out processingOutput, workflowPath, profile, eventFailureMessage string, loadEvent func() ([]byte, error)) (source, event []byte, ok bool) {
 	source, err := os.ReadFile(workflowPath)
 	if err != nil {
-		out.fail(compatibility.EnvironmentProcessingReport(workflowPath, profile, "workflow input could not be read"), err)
+		out.fail(ctx, compatibility.EnvironmentProcessingReport(workflowPath, profile, "workflow input could not be read"), err)
 		return nil, nil, false
 	}
-	return loadProcessingInputsSource(out, workflowPath, profile, source, eventFailureMessage, loadEvent)
+	return loadProcessingInputsSource(ctx, out, workflowPath, profile, source, eventFailureMessage, loadEvent)
 }
 
-func loadProcessingInputsSource(out processingOutput, workflowPath, profile string, source []byte, eventFailureMessage string, loadEvent func() ([]byte, error)) ([]byte, []byte, bool) {
+func loadProcessingInputsSource(ctx context.Context, out processingOutput, workflowPath, profile string, source []byte, eventFailureMessage string, loadEvent func() ([]byte, error)) ([]byte, []byte, bool) {
 	if loadEvent == nil {
 		return source, nil, true
 	}
 	event, err := loadEvent()
 	if err != nil {
-		out.fail(compatibility.EventInputProcessingReport(workflowPath, profile, source, eventFailureMessage), err)
+		out.fail(ctx, compatibility.EventInputProcessingReport(workflowPath, profile, source, eventFailureMessage), err)
 		return nil, nil, false
 	}
 	return source, event, true
@@ -512,31 +512,27 @@ func loadProcessingInputsSource(out processingOutput, workflowPath, profile stri
 // validatedProcessingReport validates the workflow, against the event when
 // one was evaluated, and starts the processing report. It emits the report
 // when validation rejects the workflow.
-func validatedProcessingReport(out processingOutput, workflowPath, profile string, source, event []byte, eventEvaluated bool) (compatibility.ProcessingReport, bool) {
-	return validatedProcessingReportWithOptions(out, workflowPath, profile, source, event, eventEvaluated, nil)
+func validatedProcessingReport(ctx context.Context, out processingOutput, workflowPath, profile string, source, event []byte, eventEvaluated bool) (compatibility.ProcessingReport, bool) {
+	return validatedProcessingReportWithOptions(ctx, out, workflowPath, profile, source, event, eventEvaluated, nil)
 }
 
-func validatedProcessingReportWithOptions(out processingOutput, workflowPath, profile string, source, event []byte, eventEvaluated bool, options *compiler.Options) (compatibility.ProcessingReport, bool) {
-	return validatedProcessingReportWithOptionsContext(context.Background(), out, workflowPath, profile, source, event, eventEvaluated, options)
-}
-
-func validatedProcessingReportWithOptionsContext(ctx context.Context, out processingOutput, workflowPath, profile string, source, event []byte, eventEvaluated bool, options *compiler.Options) (compatibility.ProcessingReport, bool) {
+func validatedProcessingReportWithOptions(ctx context.Context, out processingOutput, workflowPath, profile string, source, event []byte, eventEvaluated bool, options *compiler.Options) (compatibility.ProcessingReport, bool) {
 	var validation compiler.Report
 	var err error
 	switch {
 	case eventEvaluated && options != nil:
 		validation, err = compiler.ValidateEventWithOptionsContext(ctx, workflowPath, source, event, *options)
 	case eventEvaluated:
-		validation, err = compiler.ValidateEvent(workflowPath, source, event)
+		validation, err = compiler.ValidateEventWithOptionsContext(ctx, workflowPath, source, event, compiler.DefaultOptions())
 	case options != nil:
 		validation, err = compiler.ValidateWithOptionsContext(ctx, workflowPath, source, *options)
 	default:
-		validation, err = compiler.Validate(workflowPath, source)
+		validation, err = compiler.ValidateWithOptionsContext(ctx, workflowPath, source, compiler.DefaultOptions())
 	}
 	report := compatibility.InitialProcessingReport(workflowPath, profile, eventEvaluated, validation, err)
 	if err != nil {
 		report.Result = "incompatible"
-		_ = out.write(report)
+		_ = out.write(ctx, report)
 		return report, false
 	}
 	return report, true

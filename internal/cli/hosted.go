@@ -228,7 +228,7 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 			}
 		}
 		var err error
-		repositorySource, cleanup, err = newHostedActionSource(actionCacheDir, sourceOptions, nil)
+		repositorySource, cleanup, err = newHostedActionSource(ctx, actionCacheDir, sourceOptions, nil)
 		if err != nil {
 			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, err)
 		}
@@ -265,12 +265,12 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 	return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, nil
 }
 
-func newHostedActionSource(actionCacheDir string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), error) {
-	actionSource, cleanup, _, err := newHostedActionSourceWithSnapshot(actionCacheDir, resolverOptions, storeOptions)
+func newHostedActionSource(ctx context.Context, actionCacheDir string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), error) {
+	actionSource, cleanup, _, err := newHostedActionSourceWithSnapshot(ctx, actionCacheDir, resolverOptions, storeOptions)
 	return actionSource, cleanup, err
 }
 
-func newHostedActionSourceWithSnapshot(actionCacheDir string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), string, error) {
+func newHostedActionSourceWithSnapshot(ctx context.Context, actionCacheDir string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), string, error) {
 	actionRoot := actionCacheDir
 	cleanup := func() {}
 	if actionRoot == "" {
@@ -286,7 +286,7 @@ func newHostedActionSourceWithSnapshot(actionCacheDir string, resolverOptions, s
 		cleanup()
 		return nil, func() {}, "", fmt.Errorf("configure public action resolver: %w", err)
 	}
-	store, err := actionsource.NewStore(actionRoot, nil, storeOptions...)
+	store, err := actionsource.NewStoreContext(ctx, actionRoot, nil, storeOptions...)
 	if err != nil {
 		cleanup()
 		return nil, func() {}, "", fmt.Errorf("configure public action source store: %w", err)

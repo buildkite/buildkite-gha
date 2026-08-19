@@ -31,7 +31,7 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	details := &commandTelemetryDetails{}
 	defer func() {
 		outcome := telemetryOutcome(code, "", ctx.Err())
-		emitCommandTelemetry(telemetry.CommandPluginImport, outcome, clientVersion, time.Since(started), details.forOutcome(outcome))
+		emitCommandTelemetry(ctx, telemetry.CommandPluginImport, outcome, clientVersion, time.Since(started), details.forOutcome(outcome))
 	}()
 	if len(args) != 0 {
 		return usageError(stderr, "plugin does not accept arguments")

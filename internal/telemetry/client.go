@@ -159,6 +159,10 @@ func New(config Config) (*Client, error) {
 }
 
 func (c *Client) Emit(command Command, outcome Outcome, duration time.Duration, details Details) error {
+	return c.EmitContext(context.Background(), command, outcome, duration, details)
+}
+
+func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outcome, duration time.Duration, details Details) error {
 	if c == nil {
 		return nil
 	}
@@ -197,9 +201,9 @@ func (c *Client) Emit(command Command, outcome Outcome, duration time.Duration, 
 	if err != nil {
 		return fmt.Errorf("encode telemetry event: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	requestCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.eventsURL, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.eventsURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create telemetry request: %v", err)
 	}
