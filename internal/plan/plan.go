@@ -337,7 +337,7 @@ func (job Job) RuntimeDistributionDigest() string {
 	return ""
 }
 
-// Decode rejects unknown fields and trailing JSON so schema drift fails closed.
+// Decode rejects unknown fields and trailing JSON to stop on schema drift.
 func Decode(source []byte) (Job, error) {
 	if err := rejectDuplicateKeys(source); err != nil {
 		return Job{}, fmt.Errorf("decode job plan: %w", err)

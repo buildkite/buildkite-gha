@@ -620,7 +620,7 @@ func TestRemoteCompositeLocalChildUsesWorkspaceIdentity(t *testing.T) {
 	}
 }
 
-func TestActionSelectorsAndPathsFailClosed(t *testing.T) {
+func TestActionSelectorsAndPathsRejectInvalidValues(t *testing.T) {
 	local := func() Job {
 		job := validJob()
 		requiresMise := true

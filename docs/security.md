@@ -24,11 +24,11 @@ Workflow files, action metadata, event snapshots, and job plans are untrusted in
 
 Digests and immutable action locks detect changed code. They do not make code trusted or grant credentials.
 
-Push and pull request path-filter admission uses Buildkite's reserved linked-webhook metadata only after binding it to the Buildkite repository and commit and matching local Git history. Missing, shallow, ambiguous, oversized, or mismatched evidence fails closed. Explicit and generated snapshots cannot grant this admission. This check controls workflow selection; it does not make the selected workflow trusted.
+Push and pull request path-filter admission uses Buildkite's reserved linked-webhook metadata only after binding it to the Buildkite repository and commit and matching local Git history. Missing, shallow, ambiguous, oversized, or mismatched evidence prevents admission. Explicit and generated snapshots cannot grant this admission. This check controls workflow selection; it does not make the selected workflow trusted.
 
 Release ingestion also requires reserved linked-webhook metadata. It binds the webhook activity to `BUILDKITE_GITHUB_ACTION`, the release tag to both `BUILDKITE_TAG` and `BUILDKITE_BRANCH`, and the event SHA to the checked-out commit after the plugin resolves Buildkite's symbolic `HEAD`. Environment fallback cannot invent a release event. Enable **Additional Webhooks** > **Releases** only with **Code** trigger mode.
 
-Local reusable-workflow call conditions are immutable plan guards evaluated in caller scope. Direct `needs` values come only from producer-attributed, digest-bound result manifests; missing or changed manifests fail closed. A false guard skips the flattened job before secret retrieval, workflow-token minting, OIDC startup, action materialization, containers, or steps.
+Local reusable-workflow call conditions are immutable plan guards evaluated in caller scope. Direct `needs` values come only from producer-attributed, digest-bound result manifests; a missing or changed manifest stops the job with an error. A false guard skips the flattened job before secret retrieval, workflow-token minting, OIDC startup, action materialization, containers, or steps.
 
 ## Credential boundaries
 

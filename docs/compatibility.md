@@ -138,7 +138,7 @@ For a linked GitHub branch push, the importer binds the webhook repository, ref,
 
 Normal and force pushes use GitHub's two-dot `before..after` comparison. A new branch uses the parent of its oldest pushed commit when the complete webhook commit set forms one unambiguous, single-parent boundary. Matching added, modified, deleted, and type-changed paths are admitted. Path patterns use the same ordered matching described below.
 
-Admission fails closed for deleted refs, non-GitHub repositories, missing or shallow history, a stale or mismatched checkout, origin, remote branch, workflow, ref, repository, commit set, or force state, and ambiguous new-branch history. It also fails closed for more than 1,000 pushed commits, more than 300 changed files, combined additions and deletions, renames, malformed Git output, invalid patterns, and local non-matches. GitHub runs automatically after its 1,000-commit or diff-timeout fallback, but the importer does not manufacture that admission without matching changed-path evidence.
+The importer rejects admission for deleted refs, non-GitHub repositories, missing or shallow history, a stale or mismatched checkout, origin, remote branch, workflow, ref, repository, commit set, or force state, and ambiguous new-branch history. It also rejects admission for more than 1,000 pushed commits, more than 300 changed files, combined additions and deletions, renames, malformed Git output, invalid patterns, and local non-matches. GitHub runs automatically after its 1,000-commit or diff-timeout fallback, but the importer does not manufacture that admission without matching changed-path evidence.
 
 Tag pushes do not evaluate path filters, matching GitHub. Explicit and generated event snapshots, and Buildkite environment fallbacks, cannot admit push path filters because they are not linked webhook evidence.
 
@@ -156,14 +156,14 @@ on:
 
 Before upload, the importer compares the pull request merge base with its head using the local checkout. It admits a workflow only when a changed path matches and the linked webhook, commits, synthetic merge, base branch, and workflow file all agree. It uses the checkout's existing Git access for public, private, and fork pull requests. It does not call GitHub or use Buildkite `if_changed`.
 
-| Admitted | Fails closed |
+| Admitted | Rejected |
 | --- | --- |
 | A matching added, modified, deleted, or type-changed path | No local match |
 | A copied destination that matches | A rename, or a diff containing both additions and deletions |
 | At most 300 changed files from complete local history | Missing or shallow history, multiple merge bases, or more than 300 files |
 | A mergeable pull request with matching webhook and workflow data | A conflict, stale data, changed merge workflow, path or pattern containing a backslash, invalid pattern, or malformed Git output |
 
-A local non-match fails closed because GitHub does not report whether its diff timed out and ran the workflow anyway. Unfiltered `closed` workflows remain supported; filtered `closed` workflows fail closed when GitHub supplies an actual merge, squash, or rebase commit instead of a synthetic merge. Other unsupported or inexact trigger filters replace the affected workflow with a failing step rather than broadening when it runs.
+A local non-match is rejected because GitHub does not report whether its diff timed out and ran the workflow anyway. Unfiltered `closed` workflows remain supported; filtered `closed` workflows are rejected when GitHub supplies an actual merge, squash, or rebase commit instead of a synthetic merge. Other unsupported or inexact trigger filters replace the affected workflow with a failing step rather than broadening when it runs.
 
 A top-level workflow that does not declare the effective event is excluded before event-dependent validation or compilation and represented by one top-level skipped command step. A workflow that declares that event remains represented by a group even when a same-event branch, tag, base-branch, or action condition evaluates false in Buildkite. If no directly runnable workflow declares the event, upload succeeds with a skipped-only pipeline.
 
@@ -311,7 +311,7 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 | `needs` | ✅ Supported | Accepts a string or list of static job IDs. Matrix fan-out and fan-in are automatic. |
 | `runs-on` | 🟡 Supported subset | The hosted importer asks the Agent API to resolve each selector before using configured mappings or its local preset. The preset accepts `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04`, and `macos-latest`; configured fallbacks can map `macos-14` and `macos-15`. Labels are case-insensitive. Static expressions may resolve to an accepted label or list whose labels map to the same complete queue, platform, and image target. |
 | `if` | 🟡 Supported subset | Runs before the job starts. See [Conditions](#conditions). |
-| `outputs` | 🟡 Supported subset | Maps step outputs for consumption through `needs`. A job may publish 64 outputs of up to 1 KiB each. Ambiguous matrix output values fail closed. |
+| `outputs` | 🟡 Supported subset | Maps step outputs for consumption through `needs`. A job may publish 64 outputs of up to 1 KiB each. Ambiguous matrix output values stop the job with an error. |
 | `env`, `defaults.run` | 🟡 Supported subset | Uses the [workflow-level behavior](#environment-and-defaults). |
 | `timeout-minutes` | 🟡 Supported subset | Accepts literal timeouts up to 360 minutes. Expressions are rejected. |
 | `continue-on-error` | 🟡 Supported subset | Accepts literal booleans. Expressions are rejected. A tolerated failure remains visible as a Buildkite soft failure and reports `success` through downstream `needs`. |
@@ -549,7 +549,7 @@ Three expression modes intentionally support different syntax.
 
 ### Conditions
 
-Job and step `if` conditions support literals and the syntax listed above. Values use GitHub's truthiness, loose numeric coercion, case-insensitive string comparison, and operand-returning `&&` and `||` semantics. String functions convert primitive arguments; `contains()` also searches arrays. `case()` takes 3–255 odd-numbered arguments, requires Boolean predicates, and evaluates values lazily through the first match. Missing properties in an available `github` or matrix context evaluate to null; unavailable contexts still fail closed. Other functions are unsupported. `hashFiles()` accepts 1–255 literal or direct-reference arguments in step and JavaScript action lifecycle conditions.
+Job and step `if` conditions support literals and the syntax listed above. Values use GitHub's truthiness, loose numeric coercion, case-insensitive string comparison, and operand-returning `&&` and `||` semantics. String functions convert primitive arguments; `contains()` also searches arrays. `case()` takes 3–255 odd-numbered arguments, requires Boolean predicates, and evaluates values lazily through the first match. Missing properties in an available `github` or matrix context evaluate to null; unavailable contexts return an error. Other functions are unsupported. `hashFiles()` accepts 1–255 literal or direct-reference arguments in step and JavaScript action lifecycle conditions.
 
 Conditions support computed object indexes, numeric array indexes, whole `matrix`, `needs`, and step-scoped `steps` objects, and `.*` projections. Missing and out-of-range indexes evaluate to null. Projections omit missing children; a later wildcard flattens one collection level. The equivalent `[*]` spelling is unsupported by the current expression parser. Whole or dynamic `github` access, whole `inputs`, and the `strategy` context remain unsupported.
 
@@ -573,7 +573,7 @@ Reusable-workflow call conditions use the same operators and status functions bu
 
 ### Runtime interpolation
 
-Workflow step `run`, `env`, `with`, `name`, explicit `shell`, explicit `working-directory`, `continue-on-error`, and `timeout-minutes` fields support the operators and pure functions listed above. They also support computed indexes and projections over available `matrix`, `vars`, `inputs`, `env`, and `runner` values. Computed, whole, and projected `steps` and `needs` access remains unsupported so unavailable background outputs fail closed.
+Workflow step `run`, `env`, `with`, `name`, explicit `shell`, explicit `working-directory`, `continue-on-error`, and `timeout-minutes` fields support the operators and pure functions listed above. They also support computed indexes and projections over available `matrix`, `vars`, `inputs`, `env`, and `runner` values. Computed, whole, and projected `steps` and `needs` access remains unsupported, so attempting to access an unavailable background output returns an error.
 
 Job-level expressions support the same operators and pure functions with these field-specific contexts:
 
@@ -587,7 +587,7 @@ These workflow step fields support `hashFiles()`; composite action step fields a
 
 Expression-valued `continue-on-error` must produce a Boolean. Expression-valued `timeout-minutes` must produce a number greater than 0 and at most 360.
 
-Direct `github.token` references are step-only. Whole, filtered, or dynamically indexed `github` access fails closed because the compiler cannot prove token authority.
+Direct `github.token` references are step-only. The compiler rejects whole, filtered, or dynamically indexed `github` access because it cannot prove token authority.
 
 `runner.os` and `runner.arch` resolve to `Linux`/`X64` or `macOS`/`ARM64`.
 After runner setup, step runtime fields and job outputs can also use
@@ -644,7 +644,7 @@ Action metadata parsing remains strict for every other unknown top-level field a
 
 Pre, main, and post phases; inputs; outputs; state; and LIFO post ordering are supported. Other Node declarations are rejected.
 
-JavaScript action `pre-if` and `post-if` metadata uses the condition operators, status functions, pure functions, and `hashFiles()` described in [Conditions](#conditions). Lifecycle conditions can read direct properties from workflow `inputs`, `env`, `github`, `job.services`, `matrix`, `runner`, and `steps`. Other contexts and dynamic or whole-context access fail closed. An empty lifecycle condition always runs and does not receive an implicit `success()` guard.
+JavaScript action `pre-if` and `post-if` metadata uses the condition operators, status functions, pure functions, and `hashFiles()` described in [Conditions](#conditions). Lifecycle conditions can read direct properties from workflow `inputs`, `env`, `github`, `job.services`, `matrix`, `runner`, and `steps`. Other contexts and dynamic or whole-context access return an error. An empty lifecycle condition always runs and does not receive an implicit `success()` guard.
 
 Pre conditions use the status and action-scoped environment available when preparation reaches the action. Post conditions run during job teardown and use the final job status and environment, including `GITHUB_ENV` changes from main. Root action posts also see final workflow step state. Nested composite actions retain their isolated step context. Cancellation remains distinct from failure, and posts keep LIFO order.
 

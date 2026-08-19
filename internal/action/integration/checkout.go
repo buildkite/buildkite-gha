@@ -94,7 +94,7 @@ func LegacyCheckoutRelease(commit string) (string, bool) {
 
 // validateCheckoutCommit admits known releases and a static snapshot of
 // commits reachable from upstream main. Mutable references are resolved before
-// this check, so changes after the snapshot remain fail-closed until regeneration.
+// this check, so changes after the snapshot are rejected until regeneration.
 func validateCheckoutCommit(commit string) error {
 	if _, ok := checkoutCommits[commit]; ok {
 		return nil

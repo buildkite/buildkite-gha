@@ -772,7 +772,7 @@ type manifestFile struct {
 
 // DigestTree returns the canonical source digest for a local action directory.
 // It uses the same bounded manifest and file-mode model as immutable remote
-// action source. Symlinks and other special files fail closed.
+// action source. It rejects symlinks and other special files.
 func DigestTree(root string) (string, error) {
 	info, err := os.Stat(root)
 	if err != nil {

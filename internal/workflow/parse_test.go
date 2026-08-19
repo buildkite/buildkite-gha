@@ -622,7 +622,7 @@ jobs:
 	}
 }
 
-func TestParseConcurrentControlsFailClosed(t *testing.T) {
+func TestParseConcurrentControlsRejectInvalidInput(t *testing.T) {
 	tests := []struct {
 		name  string
 		steps string

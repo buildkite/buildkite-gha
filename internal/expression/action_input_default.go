@@ -87,7 +87,7 @@ func isRunnerTempReference(root string, path []string) bool {
 
 // ActionInputDefaultRequiresGitHubToken reports whether a metadata default can
 // reach github.token for the event provider. Defaults involving any other
-// runtime value fail closed because those values are not known during
+// runtime value require the token because those values are not known during
 // compilation.
 func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, error) {
 	referencesToken, err := ReferencesGitHubToken(template)

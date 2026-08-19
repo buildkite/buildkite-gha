@@ -1534,7 +1534,7 @@ func TestProviderTokenReadPreflightRejectsAnyUnknownCheckoutCommit(t *testing.T)
 		},
 	}
 	if found, err := validateJobCheckoutAdapters(job); err == nil || found || !strings.Contains(err.Error(), "does not admit") {
-		t.Fatalf("validateJobCheckoutAdapters() = %t, %v, want fail-closed rejection", found, err)
+		t.Fatalf("validateJobCheckoutAdapters() = %t, %v, want unknown commit rejection", found, err)
 	}
 }
 
