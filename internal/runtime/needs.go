@@ -49,19 +49,43 @@ func ResolveNeeds(ctx context.Context, agent transport.Agent, root, buildID stri
 	return needs, nil
 }
 
+// ResolveDeferredInputs loads exact producer outputs into workflow_call string
+// inputs without adding the caller's needs context to the callee expression scope.
+func ResolveDeferredInputs(ctx context.Context, agent transport.Agent, root, buildID string, deferred map[string]plan.DeferredInput) (map[string]any, error) {
+	inputs := make(map[string]any, len(deferred))
+	for _, name := range sortedKeys(deferred) {
+		input := deferred[name]
+		needs, err := ResolveNeeds(ctx, agent, root, buildID,
+			map[string][]plan.NeedSource{"input": input.Sources},
+			map[string][]plan.NeedOutput{"input": input.Outputs},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("input %q: %w", name, err)
+		}
+		inputs[name] = needs["input"].Outputs["value"]
+	}
+	return inputs, nil
+}
+
 // ResolveCallGuards hydrates each caller scope independently so nested guards
 // cannot observe a callee job's needs or another call boundary's producers.
 func ResolveCallGuards(ctx context.Context, agent transport.Agent, root, buildID string, guards []plan.CallGuard) ([]plan.CallGuard, error) {
 	resolved := append([]plan.CallGuard(nil), guards...)
 	for i := range resolved {
-		if len(resolved[i].NeedSources) == 0 {
-			continue
+		if len(resolved[i].NeedSources) != 0 {
+			needs, err := ResolveNeeds(ctx, agent, root, buildID, resolved[i].NeedSources, resolved[i].NeedOutputs)
+			if err != nil {
+				return nil, fmt.Errorf("call guard %d: %w", i+1, err)
+			}
+			resolved[i].Needs = needs
 		}
-		needs, err := ResolveNeeds(ctx, agent, root, buildID, resolved[i].NeedSources, resolved[i].NeedOutputs)
-		if err != nil {
-			return nil, fmt.Errorf("call guard %d: %w", i+1, err)
+		if len(resolved[i].DeferredInputs) != 0 {
+			inputs, err := ResolveDeferredInputs(ctx, agent, root, buildID, resolved[i].DeferredInputs)
+			if err != nil {
+				return nil, fmt.Errorf("call guard %d: %w", i+1, err)
+			}
+			resolved[i].DeferredInputValues = inputs
 		}
-		resolved[i].Needs = needs
 	}
 	return resolved, nil
 }

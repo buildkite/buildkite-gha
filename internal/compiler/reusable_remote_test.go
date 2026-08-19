@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 type fakeReusableRepositorySource struct {
@@ -135,6 +137,73 @@ jobs:
 	}
 	if calls := fake.references(); len(calls) != 1 || calls[0].Raw != "Octo/Workflows/.github/workflows/ci.yml@v1" || calls[0].Path != ".github/workflows/ci.yml" || !calls[0].RepositoryRoot {
 		t.Fatalf("repository source calls = %#v, want one exact workflow authorization", calls)
+	}
+}
+
+func TestCompilePublicReusableWorkflowDefersCallerNeedOutputInput(t *testing.T) {
+	callerRoot := t.TempDir()
+	callerPath := writeWorkflow(t, callerRoot, "caller.yml", `on: push
+jobs:
+  hash:
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - id: hash
+        run: echo hashes=c2hhMjU2ICBzdWJqZWN0Cg== >> "$GITHUB_OUTPUT"
+  call-remote:
+    needs: hash
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.hash.outputs.hashes }}
+`)
+	remoteRoot := t.TempDir()
+	writeWorkflow(t, remoteRoot, "generator_generic_slsa3.yml", `on:
+  workflow_call:
+    inputs:
+      base64-subjects:
+        required: false
+        type: string
+jobs:
+  generator:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create subject file
+        env:
+          UNTRUSTED_SUBJECTS: ${{ inputs.base64-subjects }}
+        run: test -n "$UNTRUSTED_SUBJECTS"
+`)
+	fake := newFakeReusableRepositorySource(t, map[string]string{"slsa-framework/slsa-github-generator": remoteRoot})
+	options := defaultOptions()
+	options.RepositorySource = MemoizeRepositorySource(fake)
+
+	plans, err := compilePlansForTest(t.Context(), callerPath, readFile(t, callerPath), pushEvent(t), "0.0.0-test", testDistributionDigest, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %d, want producer and flattened remote job", len(plans))
+	}
+	producer, callee := plans[0], plans[1]
+	producerPlan, err := plan.Encode(producer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferred, ok := callee.DeferredInputs["base64-subjects"]
+	if !ok || len(deferred.Sources) != 1 || deferred.Sources[0] != (plan.NeedSource{StepKey: producer.Target.StepKey, PlanDigest: transport.Digest(producerPlan)}) {
+		t.Fatalf("deferred input sources = %#v", callee.DeferredInputs)
+	}
+	if len(deferred.Outputs) != 1 || deferred.Outputs[0] != (plan.NeedOutput{Name: "value", StepKey: producer.Target.StepKey, Output: "hashes"}) {
+		t.Fatalf("deferred input outputs = %#v", deferred.Outputs)
+	}
+	if len(callee.Dependencies) != 1 || callee.Dependencies[0] != producer.Target.StepKey || len(callee.NeedSources["hash"]) != 1 || len(callee.NeedOutputs["hash"]) != 0 {
+		t.Fatalf("callee dependencies = %#v, needs = %#v / %#v", callee.Dependencies, callee.NeedSources, callee.NeedOutputs)
+	}
+	if _, exists := callee.Inputs["base64-subjects"]; exists || callee.Steps[0].Env["UNTRUSTED_SUBJECTS"] != "${{ inputs.base64-subjects }}" {
+		t.Fatalf("callee deferred input boundary = inputs %#v, step %#v", callee.Inputs, callee.Steps[0])
+	}
+	if callee.Workflow.Remote == nil || callee.Workflow.Remote.Repository != "slsa-framework/slsa-github-generator" || callee.Workflow.Remote.RequestedRef != "v2.1.0" {
+		t.Fatalf("remote provenance = %#v", callee.Workflow.Remote)
 	}
 }
 
