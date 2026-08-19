@@ -613,8 +613,9 @@ type memoizedActionSource struct {
 }
 
 type memoizedRepositoryPin struct {
-	commit string
-	digest string
+	commit      string
+	resolvedRef string
+	digest      string
 }
 
 type memoizedAction struct {
@@ -701,17 +702,20 @@ func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) 
 	}
 	if call.err == nil {
 		call.resolved.Reference = ref
-		if pinned && (call.resolved.Commit != pin.commit || call.materialized.SourceDigest != pin.digest) {
-			call.materialized.Release()
-			call.materialized = source.Materialized{}
-			call.err = fmt.Errorf("repository source changed after immutable pin")
+		if pinned {
+			call.resolved.ResolvedRef = pin.resolvedRef
+			if call.resolved.Commit != pin.commit || call.materialized.SourceDigest != pin.digest {
+				call.materialized.Release()
+				call.materialized = source.Materialized{}
+				call.err = fmt.Errorf("repository source changed after immutable pin")
+			}
 		}
 	}
 	s.mu.Lock()
 	delete(s.active, key)
 	if call.err == nil {
 		if !pinned {
-			s.pins[repositoryKey] = memoizedRepositoryPin{commit: call.resolved.Commit, digest: call.materialized.SourceDigest}
+			s.pins[repositoryKey] = memoizedRepositoryPin{commit: call.resolved.Commit, resolvedRef: call.resolved.ResolvedRef, digest: call.materialized.SourceDigest}
 		}
 		s.cache[key] = memoizedAction{resolved: call.resolved, materialized: call.materialized}
 	}
