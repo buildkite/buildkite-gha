@@ -683,6 +683,8 @@ Mutable refs work only while they resolve to the upstream `main` snapshot or a k
 
 The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean top-level directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to each fetch command and verified submodule fetch command and are never persisted.
 
+The table below describes event-repository checkouts. The [source-backed reusable-workflow checkout](#reusable-workflows) is the only exception: its repository, ref, and path must match immutable workflow provenance and a local-action alias. Buildkite discards its `token` input and fetches the exact commit anonymously.
+
 | Input | Supported values |
 | --- | --- |
 | `repository` | Omitted, or the event `owner/repo`. |
@@ -712,7 +714,7 @@ The `false` value and omission do not run submodule commands. The `true` value r
 
 See the [security model](security.md#checkout-and-submodules) for credential, Git, and job-isolation boundaries.
 
-Alternate repositories, tags, non-event dynamic commits, LFS, sparse checkout, GitHub Enterprise Server, and credential persistence remain unsupported. Commit and branch checkouts remain detached and confined to the event repository.
+Outside the source-backed reusable-workflow exception, alternate repositories, tags, non-event dynamic commits, LFS, sparse checkout, GitHub Enterprise Server, and credential persistence remain unsupported. Commit and branch checkouts remain detached and confined to the event repository.
 
 ### Upload artifact action
 
