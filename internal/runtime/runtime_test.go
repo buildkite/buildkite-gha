@@ -1328,24 +1328,24 @@ func TestBackgroundSummariesAreBoundedInCommitOrder(t *testing.T) {
 	summaryBytes := maxJobSummaryBytes * 3 / 4
 
 	supervisor.start(t.Context(), first.ID,
-		func(context.Context) stepExecution {
+		func(ctx context.Context) stepExecution {
 			<-releaseFirst
 			completionOrder <- first.ID
 			result := newResult()
 			result.Summary = strings.Repeat("a", summaryBytes)
-			return classifyStepExecution(t.Context(), t.Context(), first, result, nil)
+			return classifyStepExecution(ctx, ctx, first, result, nil)
 		},
 		func(ctx context.Context) stepExecution {
 			return cancelledStepExecution(t.Context(), ctx, first)
 		},
 	)
 	supervisor.start(t.Context(), second.ID,
-		func(context.Context) stepExecution {
+		func(ctx context.Context) stepExecution {
 			completionOrder <- second.ID
 			close(releaseFirst)
 			result := newResult()
 			result.Summary = strings.Repeat("b", summaryBytes)
-			return classifyStepExecution(t.Context(), t.Context(), second, result, nil)
+			return classifyStepExecution(ctx, ctx, second, result, nil)
 		},
 		func(ctx context.Context) stepExecution {
 			return cancelledStepExecution(t.Context(), ctx, second)

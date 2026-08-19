@@ -20,16 +20,17 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 	if eventPath == "" {
 		return usageError(stderr, "compile: --event-path is required")
 	}
-	out := newProcessingOutput(context.Background(), "compile", "text", stderr, stderr, agent)
+	ctx := context.Background()
+	out := newProcessingOutput(ctx, "compile", "text", stderr, stderr, agent)
 	event, eventErr := os.ReadFile(eventPath)
 	if parsedEvent, parseErr := compiler.ParseEvent(event); eventErr == nil && parseErr == nil {
 		out.sourceLinks = sourceLinksForEvent(parsedEvent)
 	}
-	source, event, ok := loadProcessingInputs(out, workflowPath, "", "event input could not be read", func() ([]byte, error) { return event, eventErr })
+	source, event, ok := loadProcessingInputs(ctx, out, workflowPath, "", "event input could not be read", func() ([]byte, error) { return event, eventErr })
 	if !ok {
 		return 1
 	}
-	processingReport, ok := validatedProcessingReport(out, workflowPath, "", source, event, true)
+	processingReport, ok := validatedProcessingReport(ctx, out, workflowPath, "", source, event, true)
 	if !ok {
 		return 1
 	}
@@ -50,7 +51,7 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 		if digestErr != nil {
 			processingReport.AddEnvironmentFailure("compiler executable could not be inspected")
 			processingReport.Result = "indeterminate"
-			_ = out.write(processingReport)
+			_ = out.write(ctx, processingReport)
 			return 1
 		}
 		bundle, compileErr := compiler.CompileBundle(workflowPath, source, event, version, digest, "gha-importer")
@@ -62,11 +63,11 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 	if err != nil {
 		processingReport.AddFailure(workflowPath, string(compiler.StagePlans), compiler.CodePlanConstruction, "compatibility", err)
 		processingReport.Result = "incompatible"
-		_ = out.write(processingReport)
+		_ = out.write(ctx, processingReport)
 		return 1
 	}
 	processingReport.Result = "compilable"
-	_ = out.write(processingReport)
+	_ = out.write(ctx, processingReport)
 	writeCompilerWarnings(stderr, "compile", workflowPath, warnings)
 	if _, err := stdout.Write(result); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: write output: %v\n", err)

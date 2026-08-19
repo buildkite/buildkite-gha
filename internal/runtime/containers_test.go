@@ -810,7 +810,7 @@ func TestRunServiceContainerAutoRemoveCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.cleanup(); err != nil {
+	if err := b.cleanup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	createdWithAutoRemove, queriedByID := false, false
@@ -841,7 +841,7 @@ func TestRunServiceContainerAlreadyAutoRemovedCleanup(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.cleanup(); err != nil {
+	if err := b.cleanup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	for _, call := range f.calls(t) {
@@ -857,7 +857,7 @@ func TestRunServiceContainerAutoRemoveBetweenQueryAndStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.cleanup(); err != nil {
+	if err := b.cleanup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if jobDockerCallIndex(f.calls(t), "stop", "--time", "2", b.services[0].name) < 0 {
@@ -929,7 +929,7 @@ func TestRunServiceContainerCompleteArguments(t *testing.T) {
 		if !strings.Contains(joined, strings.Join(want, "\x00")) {
 			t.Fatalf("service create argv = %#v; missing ordered %#v", call.Args, want)
 		}
-		if err := b.cleanup(); err != nil {
+		if err := b.cleanup(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 		removed, err := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
@@ -952,7 +952,7 @@ func TestRunServiceContainersUseDeclaredOrderAndEmitSuccessfulLogs(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.cleanup(); err != nil {
+	if err := b.cleanup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	var aliases, removed []string
@@ -982,7 +982,7 @@ func TestRunServiceContainerRegistryCredentialsUsePasswordStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = b.cleanup() })
+	t.Cleanup(func() { _ = b.cleanup(t.Context()) })
 	calls := f.calls(t)
 	login := jobDockerCallIndex(calls, "login", "registry.example.test", "--username", "registry-user", "--password-stdin")
 	pull := jobDockerCallIndex(calls, "pull", service.Image)
@@ -1044,7 +1044,7 @@ func TestRunServiceContainerPullsSameImagePerCredentialIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = b.cleanup() })
+	t.Cleanup(func() { _ = b.cleanup(t.Context()) })
 	logins, logouts, pulls := 0, 0, 0
 	for _, call := range f.calls(t) {
 		if len(call.Args) != 0 && call.Args[0] == "login" {
@@ -1069,7 +1069,7 @@ func TestRunServiceContainerPartialRegistryCredentialsDoNotLogin(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := b.cleanup(); err != nil {
+		if err := b.cleanup(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 		if jobDockerCallIndex(f.calls(t), "login") >= 0 {
@@ -1180,7 +1180,7 @@ func TestRunServiceContainerRemovesOnlyNewNamedVolumes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := b.cleanup(); err != nil {
+			if err := b.cleanup(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 			removed, err := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
@@ -1200,7 +1200,7 @@ func TestRunServiceContainerReportsLeftoverNamedVolume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.cleanup(); err == nil || !strings.Contains(err.Error(), `leftover volume "database"`) {
+	if err := b.cleanup(t.Context()); err == nil || !strings.Contains(err.Error(), `leftover volume "database"`) {
 		t.Fatalf("cleanup error = %v", err)
 	}
 }
@@ -1211,7 +1211,7 @@ func TestRunServiceContainerReadsBroadDockerPortOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = b.cleanup() })
+	t.Cleanup(func() { _ = b.cleanup(t.Context()) })
 	want := map[string]string{"80": "8000", "81": "8001", "82": "8002"}
 	if !maps.Equal(b.servicePorts["database"].Ports, want) {
 		t.Fatalf("service ports = %#v, want %#v", b.servicePorts["database"], want)
@@ -1224,7 +1224,7 @@ func TestRunServiceContainerOptionNameUsesCreatedReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.cleanup(); err != nil {
+	if err := b.cleanup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	calls := f.calls(t)
@@ -1554,7 +1554,7 @@ func TestRunJobContainerCancellationTargetsProcessTree(t *testing.T) {
 
 	f := newJobDocker(t, "")
 	b, w := startTestBackend(t, f)
-	t.Cleanup(func() { _ = b.cleanup() })
+	t.Cleanup(func() { _ = b.cleanup(t.Context()) })
 	marker := filepath.Join(w, "alive")
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -1618,7 +1618,7 @@ func TestRunJobContainerConcurrentExecUsesUniquePIDFiles(t *testing.T) {
 	x()
 	<-d1
 	<-d2
-	_ = b.cleanup()
+	_ = b.cleanup(t.Context())
 	runs := map[string]bool{}
 	terms := map[string]bool{}
 	for _, c := range f.calls(t) {

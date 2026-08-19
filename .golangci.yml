@@ -15,6 +15,7 @@ linters:
     - testifylint
     - sloglint
     - thelper
+    - contextcheck
   settings:
     usetesting:
       context-background: true

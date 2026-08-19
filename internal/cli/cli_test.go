@@ -1416,20 +1416,20 @@ func (r *annotationContextRunner) Run(ctx context.Context, _ string, _ string, _
 func TestProcessingAnnotationsUseActiveBoundedContext(t *testing.T) {
 	for _, path := range []struct {
 		name    string
-		publish func(processingOutput)
+		publish func(context.Context, processingOutput)
 	}{
 		{
 			name: "processing",
-			publish: func(out processingOutput) {
+			publish: func(ctx context.Context, out processingOutput) {
 				report := compatibility.NewProcessingReport("ci.yml", "")
 				report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{Level: "warning", Message: "test warning"})
-				out.annotate(report)
+				out.annotate(ctx, report)
 			},
 		},
 		{
 			name: "skipped workflow",
-			publish: func(out processingOutput) {
-				out.annotateSkippedWorkflows("push", []skippedWorkflow{{label: "CI", key: "ci", reason: "not applicable"}})
+			publish: func(ctx context.Context, out processingOutput) {
+				out.annotateSkippedWorkflows(ctx, "push", []skippedWorkflow{{label: "CI", key: "ci", reason: "not applicable"}})
 			},
 		},
 	} {
@@ -1441,7 +1441,7 @@ func TestProcessingAnnotationsUseActiveBoundedContext(t *testing.T) {
 			t.Setenv("BUILDKITE_BUILD_URL", "https://buildkite.com/acme/widgets/builds/42")
 			runner := &annotationContextRunner{}
 			out := newProcessingOutput(active, "test", "text", io.Discard, io.Discard, transport.Agent{Runner: runner})
-			path.publish(out)
+			path.publish(active, out)
 			if len(runner.contexts) != 1 {
 				t.Fatalf("annotation calls = %d, want 1", len(runner.contexts))
 			}

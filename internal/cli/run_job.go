@@ -46,7 +46,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	details := &commandTelemetryDetails{}
 	defer func() {
 		outcome := telemetryOutcome(code, result.Conclusion, ctx.Err())
-		emitCommandTelemetry(telemetry.CommandRunJob, outcome, clientVersion, time.Since(started), details.forOutcome(outcome))
+		emitCommandTelemetry(ctx, telemetry.CommandRunJob, outcome, clientVersion, time.Since(started), details.forOutcome(outcome))
 	}()
 	options, err := runJobArgs(args)
 	if err != nil {
@@ -136,7 +136,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			return 1
 		}
 		defer func() { _ = os.RemoveAll(actionCache) }()
-		store, err := actionsource.NewStore(actionCache, nil)
+		store, err := actionsource.NewStoreContext(ctx, actionCache, nil)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure action cache: %v\n", err)
 			return 1
@@ -297,8 +297,8 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	}
 	if publish {
 		_, _ = fmt.Fprintln(stdout, "~~~ :package: Publish GitHub Actions result")
-		publication, err := publishTerminalResult(agent, artifactRoot, job, planDigest, producer, result)
-		secretAnnotationError := publishSecretResolutionAnnotation(agent, producer.JobID, runErr)
+		publication, err := publishTerminalResult(ctx, agent, artifactRoot, job, planDigest, producer, result)
+		secretAnnotationError := publishSecretResolutionAnnotation(ctx, agent, producer.JobID, runErr)
 		if publication.MetadataMirrorError != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: result metadata mirror: %v\n", publication.MetadataMirrorError)
 		}
@@ -412,14 +412,14 @@ func terminalErrorConclusion(ctx context.Context) string {
 	return "failure"
 }
 
-func publishTerminalResult(agent transport.Agent, root string, job plan.Job, planDigest string, producer transport.Producer, result gharuntime.JobResult) (transport.Publication, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), resultPublicationTimeout)
+func publishTerminalResult(parent context.Context, agent transport.Agent, root string, job plan.Job, planDigest string, producer transport.Producer, result gharuntime.JobResult) (transport.Publication, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), resultPublicationTimeout)
 	defer cancel()
 	workflow := strings.TrimPrefix(job.Workflow.Digest, "sha256:")
 	return gharuntime.PublishJobResult(ctx, agent, root, workflow, job.Target.StepKey, planDigest, producer, result)
 }
 
-func publishSecretResolutionAnnotation(agent transport.Agent, jobID string, runErr error) error {
+func publishSecretResolutionAnnotation(parent context.Context, agent transport.Agent, jobID string, runErr error) error {
 	var secretError *gharuntime.SecretResolutionError
 	if !errors.As(runErr, &secretError) {
 		return nil
@@ -433,7 +433,7 @@ This job could not retrieve the Buildkite secret %s.
 
 > ℹ️ GitHub does not expose an existing secret's value after creation. Copy or rotate the value manually. GitHub repository and environment secrets are not available directly to this job.
 `, annotationCode(secretError.Name))
-	ctx, cancel := context.WithTimeout(context.Background(), resultPublicationTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), resultPublicationTimeout)
 	defer cancel()
 	return agent.AnnotateJob(ctx, jobID, secretResolutionAnnotationContext, "error", body)
 }

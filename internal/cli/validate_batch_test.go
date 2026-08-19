@@ -351,7 +351,7 @@ func TestBatchValidationReusesActionResolutionAcrossWorkflows(t *testing.T) {
 			t.Fatal(err)
 		}
 		out := processingOutput{command: "validate-batch", format: "json", reports: io.Discard, stderr: io.Discard}
-		if code := validateAllEvents(out, path, "dev", "", runtime, io.Discard); code != 0 {
+		if code := validateAllEvents(t.Context(), out, path, "dev", "", runtime, io.Discard); code != 0 {
 			t.Fatalf("validateAllEvents(%s) = %d", name, code)
 		}
 	}
@@ -374,7 +374,7 @@ func TestBatchValidationUsesCapturedWorkflowForEveryEvent(t *testing.T) {
 	var reports bytes.Buffer
 	out := processingOutput{command: "validate-batch", format: "json", reports: &reports, stderr: io.Discard}
 	runtime := &profileValidationRuntime{distributionDigest: distributionDigest}
-	if code := validateAllEventsSource(out, path, captured, "dev", "", runtime, io.Discard); code != 0 {
+	if code := validateAllEventsSource(t.Context(), out, path, captured, "dev", "", runtime, io.Discard); code != 0 {
 		t.Fatalf("validateAllEventsSource() = %d", code)
 	}
 	var report compatibility.ProcessingReportV3

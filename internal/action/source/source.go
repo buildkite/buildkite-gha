@@ -484,6 +484,10 @@ type Store struct {
 }
 
 func NewStore(root string, client *http.Client, opts ...Option) (*Store, error) {
+	return NewStoreContext(context.Background(), root, client, opts...)
+}
+
+func NewStoreContext(ctx context.Context, root string, client *http.Client, opts ...Option) (*Store, error) {
 	c, e := makeConfig(opts)
 	if e != nil {
 		return nil, e
@@ -512,7 +516,7 @@ func NewStore(root string, client *http.Client, opts ...Option) (*Store, error) 
 	}
 	store := &Store{root: root, client: client, cfg: c}
 	if c.cacheMaxBytes > 0 {
-		if err := store.maintain(context.Background()); err != nil {
+		if err := store.maintain(ctx); err != nil {
 			return nil, fmt.Errorf("maintain action source cache: %w", err)
 		}
 	}
@@ -542,7 +546,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	m, verifyErr := s.verify(base, resolved)
 	if verifyErr == nil {
 		s.touch(base)
-		return s.materializedLease(entryLock, resolved, tree, parsed.Path, m.Digest)
+		return s.materializedLease(ctx, entryLock, resolved, tree, parsed.Path, m.Digest)
 	}
 	if _, statErr := os.Stat(base); statErr == nil {
 		// The initial verification may have raced a publisher between its
@@ -550,7 +554,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 		// publication again before treating it as corrupt.
 		if m, retryErr := s.verify(base, resolved); retryErr == nil {
 			s.touch(base)
-			return s.materializedLease(entryLock, resolved, tree, parsed.Path, m.Digest)
+			return s.materializedLease(ctx, entryLock, resolved, tree, parsed.Path, m.Digest)
 		}
 		entryLock.unlock()
 		return Materialized{}, fmt.Errorf("verify action source cache: %w", verifyErr)
@@ -627,7 +631,7 @@ func (s *Store) lockMissingEntry(ctx context.Context, base, tree, actionPath str
 			m, verifyErr := s.verify(base, resolved)
 			if verifyErr == nil {
 				s.touch(base)
-				materialized, leaseErr := s.materializedLease(shared, resolved, tree, actionPath, m.Digest)
+				materialized, leaseErr := s.materializedLease(ctx, shared, resolved, tree, actionPath, m.Digest)
 				return nil, &materialized, leaseErr
 			}
 			shared.unlock()
@@ -652,7 +656,7 @@ func (s *Store) reacquireMaterializedLease(ctx context.Context, exclusive *actio
 		return s.Materialize(ctx, resolved)
 	}
 	s.touch(base)
-	return s.materializedLease(shared, resolved, tree, actionPath, m.Digest)
+	return s.materializedLease(ctx, shared, resolved, tree, actionPath, m.Digest)
 }
 
 func materialized(tree, p, digest string) (Materialized, error) {
