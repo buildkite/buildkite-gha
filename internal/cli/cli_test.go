@@ -1434,7 +1434,7 @@ func TestProcessingAnnotationsUseActiveBoundedContext(t *testing.T) {
 		},
 	} {
 		t.Run(path.name, func(t *testing.T) {
-			active, cancel := context.WithCancel(context.Background())
+			active, cancel := context.WithCancel(t.Context())
 			cancel()
 			t.Setenv("BUILDKITE", "true")
 			t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)

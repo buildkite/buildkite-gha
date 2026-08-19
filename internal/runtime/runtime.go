@@ -1258,9 +1258,10 @@ func verifyManagedNodeExecutable(ctx context.Context, major int, path, want stri
 // major. It deliberately does not fall back to PATH.
 func discoverNodeContext(ctx context.Context, major int, explicit, managedRoot string) (string, error) {
 	var candidates []string
-	if explicit != "" {
+	switch {
+	case explicit != "":
 		candidates = append(candidates, explicit)
-	} else if managedRoot != "" {
+	case managedRoot != "":
 		name := "node"
 		if runtime.GOOS == "windows" {
 			name = "node.exe"
@@ -1271,7 +1272,7 @@ func discoverNodeContext(ctx context.Context, major int, explicit, managedRoot s
 			filepath.Join(managedRoot, "node", version, "bin", name),
 			filepath.Join(managedRoot, "bin", name),
 		)
-	} else {
+	default:
 		return "", fmt.Errorf("node %d is not configured: set the matching Runner.Node field or Runner.ManagedNodeRoot", major)
 	}
 

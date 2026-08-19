@@ -355,7 +355,7 @@ func dockerLogin(ctx context.Context, env map[string]string, docker, registry, u
 		args = append(args, registry)
 	}
 	args = append(args, "--username", username, "--password-stdin")
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := range 3 {
 		cmd := exec.CommandContext(ctx, docker, args...)
 		cmd.Env = processEnv(env)
 		cmd.Stdin = strings.NewReader(password + "\n")
@@ -381,7 +381,7 @@ func dockerLogin(ctx context.Context, env map[string]string, docker, registry, u
 
 func (r Runner) pullContainerImage(ctx context.Context, processor *commandProcessor, env map[string]string, docker, image string) error {
 	var err error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := range 3 {
 		if err = r.runStreaming(ctx, processor, "", env, docker, "pull", image); err == nil {
 			return nil
 		}
@@ -803,7 +803,7 @@ func (b *jobContainerBackend) cleanup() error {
 		}
 	}
 	b.emitReadyServiceLogs(ctx)
-	for i := 0; i < len(b.services); i++ {
+	for i := range len(b.services) {
 		service := b.services[i]
 		if service.created {
 			name := service.name

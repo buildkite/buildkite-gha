@@ -50,7 +50,8 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		event = "workflow_dispatch"
 	}
 	payload := map[string]any{}
-	if pullRequest != "" && pullRequest != "false" {
+	switch {
+	case pullRequest != "" && pullRequest != "false":
 		number, parseErr := strconv.Atoi(pullRequest)
 		if parseErr != nil || number <= 0 {
 			return nil, fmt.Errorf("BUILDKITE_PULL_REQUEST must be false or a positive integer")
@@ -89,10 +90,10 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		// head rather than a distinct GitHub delivery. Use synchronize to give
 		// that compatibility snapshot deterministic head-update semantics.
 		payload["action"], payload["number"], payload["pull_request"] = "synchronize", number, pr
-	} else if strings.TrimSpace(tag) != "" {
+	case strings.TrimSpace(tag) != "":
 		ref = "refs/tags/" + tag
 		payload["ref"] = ref
-	} else {
+	default:
 		if strings.TrimSpace(branch) == "" {
 			return nil, fmt.Errorf("BUILDKITE_BRANCH or BUILDKITE_TAG is required")
 		}

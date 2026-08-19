@@ -2,7 +2,6 @@ package compiler
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -130,7 +129,7 @@ func TestCompilePlansCarriesPluginOIDCConfigurationToEveryJob(t *testing.T) {
 	}
 	options := defaultOptions()
 	options.OIDC = configuration
-	plans, err := compilePlansForTest(context.Background(), "oidc.yml", []byte(`on: push
+	plans, err := compilePlansForTest(t.Context(), "oidc.yml", []byte(`on: push
 jobs:
   mint:
     permissions:
@@ -2072,7 +2071,7 @@ func TestCompileBoundsReusableWorkflowGraphExpansion(t *testing.T) {
 	path := writeWorkflow(t, repository, "caller.yml", fmt.Sprintf("on: push\njobs:\n  call:\n    strategy:\n      matrix:\n        value: [%s]\n    uses: ./.github/workflows/reusable.yml\n", strings.Join(values, ", ")))
 	var callee strings.Builder
 	callee.WriteString("on: workflow_call\njobs:\n")
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		_, _ = fmt.Fprintf(&callee, "  job%d:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n", i)
 	}
 	writeWorkflow(t, repository, "reusable.yml", callee.String())
@@ -2626,7 +2625,7 @@ func TestCompileReusableInputDiagnosticsAreDeterministic(t *testing.T) {
 	repository := t.TempDir()
 	path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    with:\n      zed: z\n      alpha: a\n")
 	writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
 		if err == nil || !strings.Contains(err.Error(), `input "alpha" is not declared`) {
 			t.Fatalf("Compile() error = %v, want alphabetically first input diagnostic", err)
@@ -3427,7 +3426,7 @@ jobs:
 `)
 	options := defaultOptions()
 	options.Vars.Buildkite = map[string]string{"SERVICE_PORT": "5432", "REGISTRY_USER": "registry-user"}
-	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), options)
+	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3493,7 +3492,7 @@ jobs:
         image: ${{ matrix.image }}
     steps: [{run: true}]
 `)
-	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3536,7 +3535,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, eventSource, "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, eventSource, "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3581,7 +3580,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, err := compilePlansForTest(context.Background(), "dispatch.yml", workflowSource, eventSource, "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	plans, err := compilePlansForTest(t.Context(), "dispatch.yml", workflowSource, eventSource, "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3609,7 +3608,7 @@ jobs:
         image: ${{ needs.producer.outputs.image }}
     steps: [{run: true}]
 `)
-	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3634,7 +3633,7 @@ jobs:
     services: ${{ fromJSON(needs.producer.outputs.services) }}
     steps: [{run: true}]
 `)
-	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3663,7 +3662,7 @@ jobs:
           INVALID: ${{ needs.producer.result }}
     steps: [{run: true}]
 `)
-	_, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	_, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
 	if err == nil || !strings.Contains(err.Error(), "service runtime expression must directly reference needs") {
 		t.Fatalf("error = %v", err)
 	}

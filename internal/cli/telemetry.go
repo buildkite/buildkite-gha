@@ -36,8 +36,7 @@ func telemetryOutcome(code int, conclusion string, contextErr error) telemetry.O
 	if code == buildkitepipeline.ContinueOnErrorExitStatus {
 		return telemetry.OutcomeToleratedFailure
 	}
-	switch conclusion {
-	case "cancelled":
+	if conclusion == "cancelled" {
 		return telemetry.OutcomeCancelled
 	}
 	if errors.Is(contextErr, context.Canceled) || errors.Is(contextErr, context.DeadlineExceeded) {

@@ -202,10 +202,10 @@ func (r *captureRunner) Run(_ context.Context, dir, name string, args []string, 
 func TestAgentUsesExactProducerAndSafeUploadFlags(t *testing.T) {
 	runner := &captureRunner{}
 	agent := Agent{Runner: runner}
-	if err := agent.DownloadArtifact(context.Background(), "result.json", ".", "gha-producer"); err != nil {
+	if err := agent.DownloadArtifact(t.Context(), "result.json", ".", "gha-producer"); err != nil {
 		t.Fatal(err)
 	}
-	if err := agent.UploadPipeline(context.Background(), []byte("steps: []\n")); err != nil {
+	if err := agent.UploadPipeline(t.Context(), []byte("steps: []\n")); err != nil {
 		t.Fatal(err)
 	}
 	want := []capturedCommand{
@@ -221,7 +221,7 @@ func TestAgentPublishesBoundedJobAnnotationThroughStdin(t *testing.T) {
 	runner := &captureRunner{}
 	agent := Agent{Runner: runner}
 	body := "### Job summary\n\nPassed.\n"
-	if err := agent.AnnotateJob(context.Background(), testJobID, "buildkite-gha-job-summary", "info", body); err != nil {
+	if err := agent.AnnotateJob(t.Context(), testJobID, "buildkite-gha-job-summary", "info", body); err != nil {
 		t.Fatal(err)
 	}
 	want := capturedCommand{
@@ -247,7 +247,7 @@ func TestAgentPublishesBoundedJobAnnotationThroughStdin(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			validationRunner := &captureRunner{}
-			err := (Agent{Runner: validationRunner}).AnnotateJob(context.Background(), test.jobID, test.context, test.style, test.body)
+			err := (Agent{Runner: validationRunner}).AnnotateJob(t.Context(), test.jobID, test.context, test.style, test.body)
 			if err == nil || len(validationRunner.commands) != 0 {
 				t.Fatalf("AnnotateJob() error = %v, commands = %#v", err, validationRunner.commands)
 			}
@@ -262,7 +262,7 @@ func TestUploadArtifactsMaterializesContentBeforePipeline(t *testing.T) {
 	distribution := Artifact{Path: ".buildkite-gha/distributions/bin/buildkite-gha", Contents: []byte("binary")}
 	distribution.Digest = Digest(distribution.Contents)
 	runner := &captureRunner{}
-	if err := UploadArtifacts(context.Background(), Agent{Runner: runner}, root, []Artifact{plan, distribution}, []byte("steps: []\n")); err != nil {
+	if err := UploadArtifacts(t.Context(), Agent{Runner: runner}, root, []Artifact{plan, distribution}, []byte("steps: []\n")); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.commands) != 3 {
@@ -303,7 +303,7 @@ func TestUploadArtifactsFailsBeforePipeline(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &captureRunner{failAt: test.failAt}
-			err := UploadArtifacts(context.Background(), Agent{Runner: runner}, t.TempDir(), test.artifacts, []byte("steps: []\n"))
+			err := UploadArtifacts(t.Context(), Agent{Runner: runner}, t.TempDir(), test.artifacts, []byte("steps: []\n"))
 			if err == nil {
 				t.Fatal("UploadArtifacts() succeeded")
 			}
@@ -317,14 +317,14 @@ func TestUploadArtifactsFailsBeforePipeline(t *testing.T) {
 func TestUploadArtifactsIdentifiesPipelineFailure(t *testing.T) {
 	artifact := Artifact{Path: ".buildkite-gha/plans/plan.json", Contents: []byte("plan")}
 	artifact.Digest = Digest(artifact.Contents)
-	err := UploadArtifacts(context.Background(), Agent{Runner: &captureRunner{failAt: 2}}, t.TempDir(), []Artifact{artifact}, []byte("steps: []\n"))
+	err := UploadArtifacts(t.Context(), Agent{Runner: &captureRunner{failAt: 2}}, t.TempDir(), []Artifact{artifact}, []byte("steps: []\n"))
 	if !errors.Is(err, ErrPipelineUpload) || !strings.Contains(err.Error(), "upload pipeline") {
 		t.Fatalf("UploadArtifacts() error = %v", err)
 	}
 }
 
 func TestCommandRunnerBoundsOutputWhileReading(t *testing.T) {
-	stdout, _, err := (CommandRunner{}).RunBounded(context.Background(), "", "sh", []string{"-c", "printf 123456789"}, nil, 8)
+	stdout, _, err := (CommandRunner{}).RunBounded(t.Context(), "", "sh", []string{"-c", "printf 123456789"}, nil, 8)
 	if err == nil || !strings.Contains(err.Error(), "exceeds 8 bytes") || len(stdout) != 0 {
 		t.Fatalf("runBounded() stdout = %q, error = %v", stdout, err)
 	}
@@ -350,7 +350,7 @@ func TestGetMetadataBoundedClassifiesOnlyExpectedWebhookAbsence(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", dir)
-			_, err := (Agent{Runner: CommandRunner{}}).GetMetadataBounded(context.Background(), "buildkite:webhook", 1024)
+			_, err := (Agent{Runner: CommandRunner{}}).GetMetadataBounded(t.Context(), "buildkite:webhook", 1024)
 			if got := errors.Is(err, ErrMetadataUnavailable); got != test.wantAbsent {
 				t.Fatalf("GetMetadataBounded() error = %v, absent = %t, want %t", err, got, test.wantAbsent)
 			}

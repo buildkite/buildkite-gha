@@ -94,7 +94,7 @@ func TestActionLockResolverGitHubExactSourceSingleFlightAndTampering(t *testing.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, _, err := r.resolve(context.Background(), plan.ActionSelector{Lock: "lock"}); err != nil {
+			if _, _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err != nil {
 				t.Errorf("resolve: %v", err)
 			}
 		}()
@@ -108,7 +108,7 @@ func TestActionLockResolverGitHubExactSourceSingleFlightAndTampering(t *testing.
 	if err := os.WriteFile(filepath.Join(repo, "nested", "index.js"), []byte("tampered\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.resolve(context.Background(), plan.ActionSelector{Lock: "lock"}); err == nil {
+	if _, _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err == nil {
 		t.Fatal("resolve after repository tampering succeeded")
 	}
 }
@@ -125,7 +125,7 @@ func TestActionLockResolverHardensOnlyNonContextMaterializationFailures(t *testi
 		{name: "integrity error racing deadline", err: errors.New("cache digest mismatch"), wantHard: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 0)
+			ctx, cancel := context.WithTimeout(t.Context(), 0)
 			defer cancel()
 			materializer := &fakeActionMaterializer{err: tc.err}
 
@@ -153,7 +153,7 @@ func TestActionLockResolverAllowsOnlyAuditedCacheCommitsAndEntryPoints(t *testin
 				lock := plan.ActionLock{ID: "cache", Source: "github", Repository: "actions/cache", Commit: commit, Path: path, SourceDigest: digest}
 				job := plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock}}
 				materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: repo, SourceDigest: digest}}
-				if _, resolved, err := newActionLockResolver(job, "", materializer).resolve(context.Background(), plan.ActionSelector{Lock: lock.ID}); err != nil || !reflect.DeepEqual(resolved, lock) {
+				if _, resolved, err := newActionLockResolver(job, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: lock.ID}); err != nil || !reflect.DeepEqual(resolved, lock) {
 					t.Fatalf("resolve() = %#v, %v", resolved, err)
 				}
 				if materializer.calls != 1 || materializer.resolved.Commit != commit || materializer.resolved.Reference.Path != path || materializer.resolved.SourceDigest != digest {
@@ -165,7 +165,7 @@ func TestActionLockResolverAllowsOnlyAuditedCacheCommitsAndEntryPoints(t *testin
 
 	lock := plan.ActionLock{ID: "cache", Source: "github", Repository: "actions/cache", Commit: strings.Repeat("0", 40), SourceDigest: digest}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: repo, SourceDigest: digest}}
-	if _, _, err := newActionLockResolver(plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock}}, "", materializer).resolve(context.Background(), plan.ActionSelector{Lock: lock.ID}); err == nil {
+	if _, _, err := newActionLockResolver(plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock}}, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: lock.ID}); err == nil {
 		t.Fatal("unproved cache commit resolved")
 	}
 	if materializer.calls != 0 {
@@ -195,7 +195,7 @@ func TestActionLockResolverAllowsSymlinkedRepositoryAncestor(t *testing.T) {
 		ActionRoot:     filepath.Join(repository, "nested"),
 		SourceDigest:   digest,
 	}}
-	resolved, _, err := newActionLockResolver(job, "", materializer).resolve(context.Background(), plan.ActionSelector{Lock: "lock"})
+	resolved, _, err := newActionLockResolver(job, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: "lock"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestActionLockResolverAllowsSymlinkedRepositoryAncestor(t *testing.T) {
 		t.Fatal(err)
 	}
 	materializer.result.RepositoryRoot = linkedRepository
-	if _, _, err := newActionLockResolver(job, "", materializer).resolve(context.Background(), plan.ActionSelector{Lock: "lock"}); err == nil || !strings.Contains(err.Error(), "non-symlink directory") {
+	if _, _, err := newActionLockResolver(job, "", materializer).resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err == nil || !strings.Contains(err.Error(), "non-symlink directory") {
 		t.Fatalf("resolver accepted symlink repository root: %v", err)
 	}
 }
@@ -262,7 +262,7 @@ func TestActionLockResolverDownloadsExactCommitDirectlyFromCodeload(t *testing.T
 		}},
 	}
 	resolver := newActionLockResolver(job, "", store)
-	if _, _, err := resolver.resolve(context.Background(), plan.ActionSelector{Lock: "lock"}); err != nil {
+	if _, _, err := resolver.resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err != nil {
 		t.Fatal(err)
 	}
 	if apiRequests != 0 || archiveRequests != 1 || tokenProvisions != 0 {
@@ -308,17 +308,17 @@ func TestActionLockResolverWorkspaceLazyAndReverified(t *testing.T) {
 	writeAction(t, fixture, "")
 	job.Actions = []plan.ActionLock{{ID: "local", Source: "workspace", Path: "actions/local", SourceDigest: digestTree(t, fixture)}}
 	r := newActionLockResolver(job, workspace, nil)
-	if _, _, err := r.resolve(context.Background(), plan.ActionSelector{Lock: "local"}); err == nil {
+	if _, _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "local"}); err == nil {
 		t.Fatal("missing workspace action succeeded")
 	}
 	writeAction(t, workspace, "actions/local")
-	if _, _, err := r.resolve(context.Background(), plan.ActionSelector{Lock: "local"}); err != nil {
+	if _, _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "local"}); err != nil {
 		t.Fatalf("populated workspace action: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(action, "index.js"), []byte("tampered\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.resolve(context.Background(), plan.ActionSelector{Lock: "local"}); err == nil {
+	if _, _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "local"}); err == nil {
 		t.Fatal("tampered workspace action succeeded")
 	}
 }
@@ -326,7 +326,7 @@ func TestActionLockResolverWorkspaceLazyAndReverified(t *testing.T) {
 func TestActionLockResolverFailsClosed(t *testing.T) {
 	r := newActionLockResolver(plan.Job{Actions: []plan.ActionLock{{ID: "x", Source: "github", Repository: "owner/other", Commit: strings.Repeat("b", 40), SourceDigest: "sha256:" + strings.Repeat("0", 64)}}}, "", nil)
 	for _, selector := range []plan.ActionSelector{{}, {Lock: "missing"}, {Lock: "x"}} {
-		if _, _, err := r.resolve(context.Background(), selector); err == nil {
+		if _, _, err := r.resolve(t.Context(), selector); err == nil {
 			t.Fatalf("selector %#v unexpectedly succeeded", selector)
 		}
 	}
@@ -392,7 +392,7 @@ runs:
 		RequiresMise: &requiresMise,
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
-	result, err := (Runner{Actions: materializer}).RunJob(context.Background(), job, "")
+	result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, "")
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}

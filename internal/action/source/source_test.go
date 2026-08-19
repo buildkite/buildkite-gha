@@ -63,7 +63,7 @@ func TestResolverTagPeelingAndHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref, _ := Parse("owner/repo@v1")
-	got, err := r.Resolve(context.Background(), ref)
+	got, err := r.Resolve(t.Context(), ref)
 	if err != nil || got.Commit != testSHA || len(calls) != 2 {
 		t.Fatalf("Resolve = %#v, %v; calls %v", got, err, calls)
 	}
@@ -118,7 +118,7 @@ func TestResolverOptionalAuthenticationAndVisibility(t *testing.T) {
 				t.Fatal(err)
 			}
 			ref, _ := Parse("o/r@v1")
-			_, err = resolver.Resolve(context.Background(), ref)
+			_, err = resolver.Resolve(t.Context(), ref)
 			if tt.wantNotPublic {
 				var notPublic *NotPublicError
 				if !errors.As(err, &notPublic) || refRequests != 0 {
@@ -162,7 +162,7 @@ func TestResolverFullSHADirectAndRefEncoding(t *testing.T) {
 			}
 			resolver, _ := NewResolver(ts.Client(), opts...)
 			ref, _ := Parse("o/r@" + tt.ref)
-			if _, err := resolver.Resolve(context.Background(), ref); err != nil {
+			if _, err := resolver.Resolve(t.Context(), ref); err != nil {
 				t.Fatal(err)
 			}
 			if fmt.Sprint(calls) != fmt.Sprint(tt.calls) || provisions != 0 {
@@ -192,7 +192,7 @@ func TestResolverOnlyTreatsLowercaseFullSHAAsResolved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := resolver.Resolve(context.Background(), ref)
+	resolved, err := resolver.Resolve(t.Context(), ref)
 	if err != nil || resolved.Commit != testSHA || !slices.Equal(calls, []string{"/repos/o/r/git/ref/tags/" + upperSHA, "/repos/o/r/git/ref/heads/" + upperSHA, "/repos/o/r/commits/" + upperSHA}) {
 		t.Fatalf("Resolve() = %#v, %v; calls = %v", resolved, err, calls)
 	}
@@ -217,7 +217,7 @@ func TestResolverCachesMutableRefsWithBoundedFreshness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolver.Resolve(context.Background(), ref); err != nil {
+	if _, err := resolver.Resolve(t.Context(), ref); err != nil {
 		t.Fatal(err)
 	}
 	commit = strings.Repeat("a", 40)
@@ -229,12 +229,12 @@ func TestResolverCachesMutableRefsWithBoundedFreshness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := resolver.Resolve(context.Background(), ref)
+	resolved, err := resolver.Resolve(t.Context(), ref)
 	if err != nil || resolved.Commit != testSHA || calls.Load() != 1 {
 		t.Fatalf("cached Resolve() = %#v, %v; calls = %d", resolved, err, calls.Load())
 	}
 	time.Sleep(60 * time.Millisecond)
-	resolved, err = resolver.Resolve(context.Background(), ref)
+	resolved, err = resolver.Resolve(t.Context(), ref)
 	if err != nil || resolved.Commit != commit || calls.Load() != 2 {
 		t.Fatalf("revalidated Resolve() = %#v, %v; calls = %d", resolved, err, calls.Load())
 	}
@@ -263,7 +263,7 @@ func TestResolverMutableRefCacheCoalescesConcurrentProcesses(t *testing.T) {
 				resolver.cfg.mutableRefs, err = newMutableRefCache(cache, time.Hour)
 			}
 			if err == nil {
-				_, err = resolver.Resolve(context.Background(), ref)
+				_, err = resolver.Resolve(t.Context(), ref)
 			}
 			errors <- err
 		}()
@@ -299,13 +299,13 @@ func TestResolverFallbackErrorsAndCancellation(t *testing.T) {
 	t.Run("rate limit", func(t *testing.T) {
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-RateLimit-Remaining", "0")
-			w.WriteHeader(403)
+			w.WriteHeader(http.StatusForbidden)
 		}))
 		defer ts.Close()
 		resolver, _ := NewResolver(ts.Client(), WithTestEndpoints(ts.URL))
 		ref, _ := Parse("o/r@v1")
 		var rate *RateLimitError
-		if _, err := resolver.Resolve(context.Background(), ref); !errors.As(err, &rate) {
+		if _, err := resolver.Resolve(t.Context(), ref); !errors.As(err, &rate) {
 			t.Fatalf("error = %v", err)
 		}
 	})
@@ -314,12 +314,12 @@ func TestResolverFallbackErrorsAndCancellation(t *testing.T) {
 		defer ts.Close()
 		resolver, _ := NewResolver(ts.Client(), WithTestEndpoints(ts.URL))
 		ref, _ := Parse("o/r@v1")
-		if _, err := resolver.Resolve(context.Background(), ref); err == nil {
+		if _, err := resolver.Resolve(t.Context(), ref); err == nil {
 			t.Fatal("expected malformed response error")
 		}
 	})
 	t.Run("cancelled", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		resolver, _ := NewResolver(nil)
 		ref, _ := Parse("o/r@v1")
@@ -578,6 +578,7 @@ func tarBytes(t *testing.T, entries []tar.Header) []byte {
 	return b.Bytes()
 }
 func tgz(t *testing.T, entries []tar.Header) []byte {
+	t.Helper()
 	var b bytes.Buffer
 	gz := gzip.NewWriter(&b)
 	_, _ = gz.Write(tarBytes(t, entries))
@@ -604,7 +605,7 @@ func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 	}
 	ref, _ := Parse("Owner/Repo/action@v1")
 	resolved := Resolved{Reference: ref, Commit: testSHA}
-	first, err := store.Materialize(context.Background(), resolved)
+	first, err := store.Materialize(t.Context(), resolved)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +615,7 @@ func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 	if !strings.HasPrefix(first.SourceDigest, "sha256:") || first.RepositoryRoot == first.ActionRoot {
 		t.Fatalf("materialized identity = %#v", first)
 	}
-	second, err := store.Materialize(context.Background(), resolved)
+	second, err := store.Materialize(t.Context(), resolved)
 	if err != nil || second.RepositoryRoot != first.RepositoryRoot || second.ActionRoot != first.ActionRoot || second.SourceDigest != first.SourceDigest || requests.Load() != 1 {
 		t.Fatalf("second = %v, %v; requests=%d", second, err, requests.Load())
 	}
@@ -658,7 +659,7 @@ func TestStoreRejectsInvalidUTF8ArchiveMetadataOnEveryMaterialization(t *testing
 			ref, _ := Parse("Owner/Repo@v1")
 			resolved := Resolved{Reference: ref, Commit: testSHA}
 			for attempt := 1; attempt <= 2; attempt++ {
-				materialized, err := store.Materialize(context.Background(), resolved)
+				materialized, err := store.Materialize(t.Context(), resolved)
 				if err == nil || !strings.Contains(err.Error(), "invalid UTF-8") {
 					materialized.Release()
 					t.Fatalf("materialization %d error = %v, want invalid UTF-8 rejection", attempt, err)
@@ -716,12 +717,12 @@ func TestStoreExpectedDigestAndManifestRejectTampering(t *testing.T) {
 	store, _ := NewStore(root, ts.Client(), WithTestEndpoints(ts.URL, ts.URL))
 	ref, _ := Parse("Owner/Repo@v1")
 	r := Resolved{Reference: ref, Commit: testSHA}
-	got, err := store.Materialize(context.Background(), r)
+	got, err := store.Materialize(t.Context(), r)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.SourceDigest = "sha256:" + strings.Repeat("0", 64)
-	if _, err = store.Materialize(context.Background(), r); err == nil || !strings.Contains(err.Error(), "source digest mismatch") {
+	if _, err = store.Materialize(t.Context(), r); err == nil || !strings.Contains(err.Error(), "source digest mismatch") {
 		t.Fatalf("digest mismatch error = %v", err)
 	}
 	manifestPath := filepath.Join(filepath.Dir(got.RepositoryRoot), manifestName)
@@ -729,7 +730,7 @@ func TestStoreExpectedDigestAndManifestRejectTampering(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.SourceDigest = got.SourceDigest
-	if _, err = store.Materialize(context.Background(), r); err == nil || !strings.Contains(err.Error(), "verify action source cache") {
+	if _, err = store.Materialize(t.Context(), r); err == nil || !strings.Contains(err.Error(), "verify action source cache") {
 		t.Fatalf("tamper error = %v", err)
 	}
 }
@@ -751,7 +752,7 @@ func TestStoreArchiveHTTPClassification(t *testing.T) {
 			defer ts.Close()
 			store, _ := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, ts.URL))
 			ref, _ := Parse("o/r@v1")
-			_, err := store.Materialize(context.Background(), Resolved{Reference: ref, Commit: testSHA})
+			_, err := store.Materialize(t.Context(), Resolved{Reference: ref, Commit: testSHA})
 			if tt.rate {
 				var rate *RateLimitError
 				if !errors.As(err, &rate) || rate.Reset.IsZero() {
@@ -798,7 +799,7 @@ func TestStoreExactCommitDownloadsDirectlyFromCodeloadWithoutCredentials(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Materialize(context.Background(), resolved); err != nil {
+	if _, err := store.Materialize(t.Context(), resolved); err != nil {
 		t.Fatal(err)
 	}
 	if apiRequests != 0 || archiveRequests != 1 || tokenProvisions != 0 {
@@ -830,7 +831,7 @@ func TestStoreCodeloadRedirectPolicy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.Materialize(context.Background(), resolved); err != nil {
+		if _, err := store.Materialize(t.Context(), resolved); err != nil {
 			t.Fatal(err)
 		}
 		if requests != 2 {
@@ -851,7 +852,7 @@ func TestStoreCodeloadRedirectPolicy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.Materialize(context.Background(), resolved); err == nil || !strings.Contains(err.Error(), "archive redirect denied") {
+		if _, err := store.Materialize(t.Context(), resolved); err == nil || !strings.Contains(err.Error(), "archive redirect denied") {
 			t.Fatalf("Materialize() error = %v, want denied redirect", err)
 		}
 		if deniedRequests != 0 {
@@ -878,7 +879,7 @@ func TestStoreConcurrentMaterialize(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			got, err := store.Materialize(context.Background(), resolved)
+			got, err := store.Materialize(t.Context(), resolved)
 			results <- got
 			errs <- err
 		}()
@@ -914,30 +915,30 @@ func TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref, _ := Parse("o/r@v1")
-	materialized, err := store.Materialize(context.Background(), Resolved{Reference: ref, Commit: testSHA})
+	materialized, err := store.Materialize(t.Context(), Resolved{Reference: ref, Commit: testSHA})
 	if err != nil {
 		t.Fatal(err)
 	}
 	base := filepath.Dir(materialized.RepositoryRoot)
-	if err := store.maintain(context.Background()); err != nil {
+	if err := store.maintain(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(base); err != nil {
 		t.Fatalf("leased entry was evicted: %v", err)
 	}
-	retained, err := materialized.Retain(context.Background())
+	retained, err := materialized.Retain(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	materialized.Release()
-	if err := store.maintain(context.Background()); err != nil {
+	if err := store.maintain(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(base); err != nil {
 		t.Fatalf("retained entry was evicted: %v", err)
 	}
 	retained.Release()
-	if err := store.maintain(context.Background()); err != nil {
+	if err := store.maintain(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(base); !errors.Is(err, os.ErrNotExist) {
@@ -978,7 +979,7 @@ func TestStoreMaintenanceUsesLRUAndCleansOnlyUnlockedPartials(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	activeLock, err := lockActionCache(context.Background(), filepath.Join(activePartial, ".lock"), actionCacheLockExclusive, false)
+	activeLock, err := lockActionCache(t.Context(), filepath.Join(activePartial, ".lock"), actionCacheLockExclusive, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1023,7 +1024,7 @@ func TestStoreConcurrentBoundedEviction(t *testing.T) {
 		go func() {
 			defer workers.Done()
 			commit := fmt.Sprintf("%040x", i+1)
-			materialized, err := stores[i%len(stores)].Materialize(context.Background(), Resolved{Reference: ref, Commit: commit})
+			materialized, err := stores[i%len(stores)].Materialize(t.Context(), Resolved{Reference: ref, Commit: commit})
 			if err == nil {
 				_, err = os.Stat(filepath.Join(materialized.ActionRoot, "action.yml"))
 				materialized.Release()
@@ -1038,7 +1039,7 @@ func TestStoreConcurrentBoundedEviction(t *testing.T) {
 			t.Fatalf("concurrent bounded materialization: %v", err)
 		}
 	}
-	if err := stores[0].maintain(context.Background()); err != nil {
+	if err := stores[0].maintain(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	entries, _, err := stores[0].cacheEntries()
@@ -1057,7 +1058,7 @@ func TestStoreBoundedEvictionProtectsUnboundedReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref, _ := Parse("o/r@v1")
-	active, err := unbounded.Materialize(context.Background(), Resolved{Reference: ref, Commit: strings.Repeat("a", 40)})
+	active, err := unbounded.Materialize(t.Context(), Resolved{Reference: ref, Commit: strings.Repeat("a", 40)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1070,7 +1071,7 @@ func TestStoreBoundedEvictionProtectsUnboundedReader(t *testing.T) {
 		t.Fatalf("bounded maintenance evicted an unbounded reader: %v", err)
 	}
 	active.Release()
-	if err := bounded.maintain(context.Background()); err != nil {
+	if err := bounded.maintain(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(active.ActionRoot); !errors.Is(err, os.ErrNotExist) {
@@ -1105,28 +1106,28 @@ func TestActionResolutionSnapshotPinsAndRefreshesMutableRefs(t *testing.T) {
 	}
 	ref, _ := Parse("owner/repo@v1")
 	first := newResolver(false)
-	resolved, err := first.Resolve(context.Background(), ref)
+	resolved, err := first.Resolve(t.Context(), ref)
 	if err != nil || resolved.Commit != testSHA || requests.Load() != 1 {
 		t.Fatalf("first resolution = %#v, %v; requests %d", resolved, err, requests.Load())
 	}
 	firstGeneration := first.ResolutionSnapshotID()
 	refreshed.Store(true)
 	second := newResolver(false)
-	resolved, err = second.Resolve(context.Background(), ref)
+	resolved, err = second.Resolve(t.Context(), ref)
 	if err != nil || resolved.Commit != testSHA || requests.Load() != 1 || second.ResolutionSnapshotID() != firstGeneration {
 		t.Fatalf("reused resolution = %#v, %v; requests %d; generation %q", resolved, err, requests.Load(), second.ResolutionSnapshotID())
 	}
 	if err := os.Remove(second.cfg.resolutionSnapshot.entryPath(ref)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newResolver(false).Resolve(context.Background(), ref); err == nil || !strings.Contains(err.Error(), "snapshot entry is missing") {
+	if _, err := newResolver(false).Resolve(t.Context(), ref); err == nil || !strings.Contains(err.Error(), "snapshot entry is missing") {
 		t.Fatalf("missing snapshot entry error = %v", err)
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("missing snapshot entry caused %d requests, want 1", requests.Load())
 	}
 	third := newResolver(true)
-	resolved, err = third.Resolve(context.Background(), ref)
+	resolved, err = third.Resolve(t.Context(), ref)
 	if err != nil || resolved.Commit != nextSHA || requests.Load() != 2 || third.ResolutionSnapshotID() == firstGeneration {
 		t.Fatalf("refreshed resolution = %#v, %v; requests %d; generation %q", resolved, err, requests.Load(), third.ResolutionSnapshotID())
 	}
@@ -1201,11 +1202,11 @@ func TestActionResolutionSnapshotRetriesStorageFailures(t *testing.T) {
 				if operation == "entry short write" {
 					wantErr = io.ErrShortWrite
 				}
-				if _, err := snapshot.resolve(context.Background(), ref, resolve); !errors.Is(err, wantErr) {
+				if _, err := snapshot.resolve(t.Context(), ref, resolve); !errors.Is(err, wantErr) {
 					t.Fatalf("first resolution error = %v, want %v", err, wantErr)
 				}
 				actionResolutionSnapshotStorage = original
-				resolved, err := snapshot.resolve(context.Background(), ref, resolve)
+				resolved, err := snapshot.resolve(t.Context(), ref, resolve)
 				if err != nil || resolved.Commit != testSHA {
 					t.Fatalf("retry = %#v, %v", resolved, err)
 				}
@@ -1286,7 +1287,7 @@ func TestActionResolutionSnapshotRejectsMissingCurrentGeneration(t *testing.T) {
 	}
 	ref, _ := Parse("owner/repo@v1")
 	called := false
-	_, err = refreshed.cfg.resolutionSnapshot.resolve(context.Background(), ref, func(context.Context, Reference) (Resolved, error) {
+	_, err = refreshed.cfg.resolutionSnapshot.resolve(t.Context(), ref, func(context.Context, Reference) (Resolved, error) {
 		called = true
 		return Resolved{}, nil
 	})
@@ -1315,7 +1316,7 @@ func TestActionResolutionSnapshotPersistsOnlyDefinitiveMissingRefs(t *testing.T)
 		}
 		ref, _ := Parse("owner/repo@missing")
 		for range 2 {
-			_, err := resolver.Resolve(context.Background(), ref)
+			_, err := resolver.Resolve(t.Context(), ref)
 			var notPublic *NotPublicError
 			if !errors.As(err, &notPublic) {
 				t.Fatalf("resolution error = %v", err)
@@ -1344,11 +1345,11 @@ func TestActionResolutionSnapshotPersistsOnlyDefinitiveMissingRefs(t *testing.T)
 			t.Fatal(err)
 		}
 		ref, _ := Parse("owner/repo@v1")
-		if _, err := resolver.Resolve(context.Background(), ref); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		if _, err := resolver.Resolve(t.Context(), ref); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
 			t.Fatalf("transient resolution error = %v", err)
 		}
 		failed.Store(false)
-		resolved, err := resolver.Resolve(context.Background(), ref)
+		resolved, err := resolver.Resolve(t.Context(), ref)
 		if err != nil || resolved.Commit != testSHA || requests.Load() != 2 {
 			t.Fatalf("retried resolution = %#v, %v; requests %d", resolved, err, requests.Load())
 		}
@@ -1374,7 +1375,7 @@ func TestActionResolutionSnapshotCoalescesConcurrentResolution(t *testing.T) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			resolved, err := resolver.Resolve(context.Background(), ref)
+			resolved, err := resolver.Resolve(t.Context(), ref)
 			if err == nil && resolved.Commit != testSHA {
 				err = fmt.Errorf("commit = %s", resolved.Commit)
 			}
@@ -1407,7 +1408,7 @@ func TestActionResolutionSnapshotRejectsCorruptEntry(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolver.Resolve(context.Background(), ref); err == nil || !strings.Contains(err.Error(), "snapshot entry is invalid") {
+	if _, err := resolver.Resolve(t.Context(), ref); err == nil || !strings.Contains(err.Error(), "snapshot entry is invalid") {
 		t.Fatalf("corrupt snapshot error = %v", err)
 	}
 }

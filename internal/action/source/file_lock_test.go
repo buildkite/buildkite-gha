@@ -1,7 +1,6 @@
 package source
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"sync"
@@ -36,29 +35,29 @@ func TestLockFileUnlockIsIdempotent(t *testing.T) {
 
 func TestActionCacheLockSharedExclusiveNonblocking(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".lock")
-	first, err := lockActionCache(context.Background(), path, actionCacheLockShared, false)
+	first, err := lockActionCache(t.Context(), path, actionCacheLockShared, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := lockActionCache(context.Background(), path, actionCacheLockShared, true)
+	second, err := lockActionCache(t.Context(), path, actionCacheLockShared, true)
 	if err != nil {
 		first.unlock()
 		t.Fatal(err)
 	}
-	if _, err := lockActionCache(context.Background(), path, actionCacheLockExclusive, true); err != errActionCacheLockUnavailable {
+	if _, err := lockActionCache(t.Context(), path, actionCacheLockExclusive, true); err != errActionCacheLockUnavailable {
 		first.unlock()
 		second.unlock()
 		t.Fatalf("exclusive lock error = %v, want %v", err, errActionCacheLockUnavailable)
 	}
 	first.unlock()
 	first.unlock()
-	if _, err := lockActionCache(context.Background(), path, actionCacheLockExclusive, true); err != errActionCacheLockUnavailable {
+	if _, err := lockActionCache(t.Context(), path, actionCacheLockExclusive, true); err != errActionCacheLockUnavailable {
 		second.unlock()
 		t.Fatalf("exclusive lock with one shared holder error = %v, want %v", err, errActionCacheLockUnavailable)
 	}
 	second.unlock()
 	second.unlock()
-	exclusive, err := lockActionCache(context.Background(), path, actionCacheLockExclusive, true)
+	exclusive, err := lockActionCache(t.Context(), path, actionCacheLockExclusive, true)
 	if err != nil {
 		t.Fatal(err)
 	}

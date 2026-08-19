@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -23,15 +22,15 @@ func TestPluginDevCounterpartInjectionIsRequiredAndReleaseRejectsIt(t *testing.T
 	linux := runtimeDistribution{contents: []byte("linux"), digest: "sha256:linux"}
 	required := map[compiler.Platform]bool{compiler.PlatformDarwinARM64: true}
 	t.Setenv(pluginDevDarwinRuntimeEnvironment, "")
-	if _, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(context.Background(), required, compiler.PlatformLinuxAMD64, linux); err == nil || !strings.Contains(err.Error(), "required") {
+	if _, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(t.Context(), required, compiler.PlatformLinuxAMD64, linux); err == nil || !strings.Contains(err.Error(), "required") {
 		t.Fatalf("dev acquisition error = %v", err)
 	}
 	darwin := runtimeDistribution{contents: []byte("darwin"), digest: "sha256:darwin"}
-	if _, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(context.Background(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, compiler.PlatformDarwinARM64, darwin); err == nil || !strings.Contains(err.Error(), pluginDevLinuxRuntimeEnvironment) {
+	if _, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(t.Context(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, compiler.PlatformDarwinARM64, darwin); err == nil || !strings.Contains(err.Error(), pluginDevLinuxRuntimeEnvironment) {
 		t.Fatalf("Darwin-hosted dev acquisition error = %v", err)
 	}
 	t.Setenv(pluginDevDarwinRuntimeEnvironment, filepath.Join(t.TempDir(), "injected"))
-	if _, err := (&pluginRuntimeAcquisition{version: "1.2.3"}).acquire(context.Background(), map[compiler.Platform]bool{}, compiler.PlatformLinuxAMD64, linux); err == nil || !strings.Contains(err.Error(), "rejected") {
+	if _, err := (&pluginRuntimeAcquisition{version: "1.2.3"}).acquire(t.Context(), map[compiler.Platform]bool{}, compiler.PlatformLinuxAMD64, linux); err == nil || !strings.Contains(err.Error(), "rejected") {
 		t.Fatalf("release injection error = %v", err)
 	}
 }
@@ -51,7 +50,7 @@ func TestPluginAcquiresVerifiedLinuxRuntimeForDarwinHost(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	distribution, err := acquirePluginRuntime(context.Background(), "1.2.3", compiler.PlatformLinuxAMD64, server.Client(), server.URL, "")
+	distribution, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformLinuxAMD64, server.Client(), server.URL, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +75,7 @@ func pluginTestLinuxExecutable() []byte {
 func TestPluginAcquisitionIsLazyAndBindsVerifiedDarwinContents(t *testing.T) {
 	linux := runtimeDistribution{contents: []byte("running executable"), digest: "sha256:running"}
 	t.Setenv(pluginDevDarwinRuntimeEnvironment, "")
-	got, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(context.Background(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, compiler.PlatformLinuxAMD64, linux)
+	got, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(t.Context(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, compiler.PlatformLinuxAMD64, linux)
 	if err != nil || got[compiler.PlatformLinuxAMD64].digest != linux.digest {
 		t.Fatalf("Linux-only acquisition = %#v, %v", got, err)
 	}
@@ -98,7 +97,7 @@ func TestPluginAcquisitionIsLazyAndBindsVerifiedDarwinContents(t *testing.T) {
 	}))
 	defer server.Close()
 	cache := filepath.Join(canonicalTempDir(t), pluginDarwinAsset)
-	distribution, err := acquirePluginRuntime(context.Background(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, cache)
+	distribution, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +105,7 @@ func TestPluginAcquisitionIsLazyAndBindsVerifiedDarwinContents(t *testing.T) {
 	if distribution.digest != wantDigest || !bytes.Equal(distribution.contents, darwin) {
 		t.Fatalf("Darwin distribution = %q, %x", distribution.digest, distribution.contents)
 	}
-	if _, err := acquirePluginRuntime(context.Background(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, cache); err != nil {
+	if _, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, cache); err != nil {
 		t.Fatal(err)
 	}
 	if requests["/v1.2.3/checksums.txt"] != 2 || requests["/v1.2.3/"+pluginDarwinAsset] != 1 {
@@ -115,7 +114,7 @@ func TestPluginAcquisitionIsLazyAndBindsVerifiedDarwinContents(t *testing.T) {
 	if err := os.WriteFile(cache, []byte("untrusted cache"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := acquirePluginRuntime(context.Background(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, cache); err != nil {
+	if _, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, cache); err != nil {
 		t.Fatal(err)
 	}
 	if requests["/v1.2.3/checksums.txt"] != 3 || requests["/v1.2.3/"+pluginDarwinAsset] != 2 {
@@ -143,7 +142,7 @@ func TestPluginDarwinRejectsChecksumArchiveAndBinaryFailures(t *testing.T) {
 		_, _ = response.Write(wrong)
 	}))
 	defer server.Close()
-	if _, err := acquirePluginRuntime(context.Background(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, ""); err == nil || !strings.Contains(err.Error(), "Mach-O") {
+	if _, err := acquirePluginRuntime(t.Context(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, ""); err == nil || !strings.Contains(err.Error(), "Mach-O") {
 		t.Fatalf("wrong binary error = %v", err)
 	}
 }

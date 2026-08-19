@@ -328,11 +328,12 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		if err != nil {
 			return "", false, fmt.Errorf("push tags: %w", err)
 		}
-		if hasBranchFilter && hasTagFilter {
+		switch {
+		case hasBranchFilter && hasTagFilter:
 			parts = append(parts, "(("+expressions.Tag+" == null && ("+branch+")) || ("+expressions.Tag+" != null && ("+tag+")))")
-		} else if hasBranchFilter {
+		case hasBranchFilter:
 			parts = append(parts, expressions.Tag+" == null", branch)
-		} else if hasTagFilter {
+		case hasTagFilter:
 			parts = append(parts, expressions.Tag+" != null", tag)
 		}
 		if pathFilters && selected && snapshot.Tag == nil {
@@ -577,15 +578,14 @@ func refFilters(field string, include, exclude []string) (string, bool, error) {
 			return err
 		}
 		match := field + " =~ /" + r + "/"
-		if positive {
-			if state == "" {
-				state = match
-			} else {
-				state = "(" + state + " || " + match + ")"
-			}
-		} else if state == "" {
+		switch {
+		case positive && state == "":
+			state = match
+		case positive:
+			state = "(" + state + " || " + match + ")"
+		case state == "":
 			state = "!(" + match + ")"
-		} else {
+		default:
 			state = "(" + state + " && !(" + match + "))"
 		}
 		return nil
@@ -687,12 +687,13 @@ func githubGlob(glob string, pathPattern bool) (string, error) {
 		case '*':
 			if i+1 < len(runes) && runes[i+1] == '*' {
 				i++
-				if pathPattern && (i == 1 || runes[i-2] == '/') && i+1 < len(runes) && runes[i+1] == '/' {
+				switch {
+				case pathPattern && (i == 1 || runes[i-2] == '/') && i+1 < len(runes) && runes[i+1] == '/':
 					i++
 					atoms = append(atoms, atom{value: `((?s:.*)\/)?`})
-				} else if pathPattern {
+				case pathPattern:
 					atoms = append(atoms, atom{value: `(?s:.*)`})
-				} else {
+				default:
 					atoms = append(atoms, atom{value: ".*"})
 				}
 			} else {

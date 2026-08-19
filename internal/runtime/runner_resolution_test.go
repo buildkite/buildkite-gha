@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -49,7 +48,7 @@ func TestAgentRunnerResolverBatchesRequirementsAndReturnsSuggestions(t *testing.
 		requirements[i] = RunnerRequirement{ID: fmt.Sprintf("r%d", i), Labels: []string{"ubuntu-latest"}}
 	}
 	requirements[100].Labels = []string{"macos-26"}
-	suggestions, err := resolver.Resolve(context.Background(), requirements)
+	suggestions, err := resolver.Resolve(t.Context(), requirements)
 	if err != nil {
 		t.Fatal(err)
 	}

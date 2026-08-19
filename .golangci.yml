@@ -1,0 +1,57 @@
+version: "2"
+linters:
+  enable:
+    - errcheck
+    - bodyclose
+    - govet
+    - ineffassign
+    - intrange
+    - staticcheck
+    - unused
+    - gocritic
+    - usetesting
+    - usestdlibvars
+    - testifylint
+    - sloglint
+    - thelper
+  settings:
+    usetesting:
+      context-background: true
+      context-todo: true
+    testifylint:
+      disable-all: true
+      enable:
+        - require-error
+        - useless-assert
+        - len
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofmt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+    gofmt:
+      rewrite-rules:
+        - pattern: "interface{}"
+          replacement: "any"
+        - pattern: "a[b:len(a)]"
+          replacement: "a[b:]"
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

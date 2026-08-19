@@ -901,11 +901,12 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 		jobResult.Outputs[name] = value
 	}
-	if runCtx.Err() != nil {
+	switch {
+	case runCtx.Err() != nil:
 		jobResult.Conclusion = "cancelled"
-	} else if runErr == nil {
+	case runErr == nil:
 		jobResult.Conclusion = "success"
-	} else if job.ContinueOnError && !hardFailure && !isHardJobFailure(runErr) {
+	case job.ContinueOnError && !hardFailure && !isHardJobFailure(runErr):
 		jobResult.Conclusion = "success"
 		runErr = &toleratedJobFailure{err: runErr}
 	}
@@ -2254,7 +2255,8 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		childErr := error(nil)
 		childJobEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 		childJobEnv["GITHUB_ACTION_PATH"] = actionPath
-		if step.Uses != "" {
+		switch {
+		case step.Uses != "":
 			// Resolve composite child fields before entering workflow-authored
 			// action evaluation.
 			var childEnv map[string]string
@@ -2275,9 +2277,9 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			if childErr == nil {
 				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, childInvocationID, childJobEnv, childEnv, childWith, eval, posts, actions, prepared, actionStack, lifecycleEnvOverlay)
 			}
-		} else if strings.TrimSpace(step.Run) == "" {
+		case strings.TrimSpace(step.Run) == "":
 			childErr = fmt.Errorf("composite action step %d has no run command", i+1)
-		} else {
+		default:
 			var script, dir string
 			var env map[string]string
 			env, childErr = evaluateStepMap(step.Env, eval)
