@@ -36,7 +36,7 @@ func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 	job := validJob()
 	job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v1"
 	job.Workflow.Remote = &RemoteWorkflowSource{
-		Repository: "owner/repository", RequestedRef: "v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
+		Repository: "owner/repository", RequestedRef: "v1", ResolvedRef: "refs/tags/v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
 	}
 	encoded, err := Encode(job)
 	if err != nil {
@@ -57,6 +57,8 @@ func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 		{name: "path repository", edit: func(job *Job) { job.Workflow.Path = "other/repository/.github/workflows/ci.yml@v1" }, want: "path does not match"},
 		{name: "path ref", edit: func(job *Job) { job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v2" }, want: "path does not match"},
 		{name: "nested path", edit: func(job *Job) { job.Workflow.Path = "owner/repository/.github/workflows/nested/ci.yml@v1" }, want: "path does not match"},
+		{name: "resolved ref name", edit: func(job *Job) { job.Workflow.Remote.ResolvedRef = "refs/heads/v2" }, want: "invalid immutable source provenance"},
+		{name: "invalid resolved ref", edit: func(job *Job) { job.Workflow.Remote.ResolvedRef = "refs/pull/1/head" }, want: "invalid immutable source provenance"},
 		{name: "commit", edit: func(job *Job) { job.Workflow.Remote.Commit = strings.Repeat("A", 40) }, want: "invalid immutable source provenance"},
 		{name: "tree digest", edit: func(job *Job) { job.Workflow.Remote.SourceDigest = "sha256:invalid" }, want: "invalid immutable source provenance"},
 	}
@@ -78,7 +80,7 @@ func TestSourceBackedWorkspaceActionRequiresRemoteWorkflowProvenance(t *testing.
 	commit := strings.Repeat("a", 40)
 	digest := "sha256:" + strings.Repeat("b", 64)
 	job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v1"
-	job.Workflow.Remote = &RemoteWorkflowSource{Repository: "owner/repository", RequestedRef: "v1", Commit: commit, SourceDigest: digest}
+	job.Workflow.Remote = &RemoteWorkflowSource{Repository: "owner/repository", RequestedRef: "v1", ResolvedRef: "refs/tags/v1", Commit: commit, SourceDigest: digest}
 	job.Steps = []Step{{ID: "remote", Kind: "uses", Uses: "owner/repository/root@v1", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{
 		{

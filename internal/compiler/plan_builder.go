@@ -324,13 +324,7 @@ func bindRemoteWorkflowCheckoutInputs(remote *RemoteWorkflowSource, locks []plan
 }
 
 func remoteWorkflowCheckoutRefMatches(ref string, remote RemoteWorkflowSource) bool {
-	if ref == remote.Commit || ref == remote.RequestedRef {
-		return true
-	}
-	if strings.HasPrefix(remote.RequestedRef, "refs/") {
-		return false
-	}
-	return ref == "refs/heads/"+remote.RequestedRef || ref == "refs/tags/"+remote.RequestedRef
+	return ref == remote.Commit || ref == remote.RequestedRef || ref == remote.ResolvedRef
 }
 
 func addContainerCapabilities(instance JobInstance, actionRefs []string, built *builtPlanActions) error {
@@ -709,6 +703,6 @@ func planRemoteWorkflowSource(source *RemoteWorkflowSource) *plan.RemoteWorkflow
 		return nil
 	}
 	return &plan.RemoteWorkflowSource{
-		Repository: source.Repository, RequestedRef: source.RequestedRef, Commit: source.Commit, SourceDigest: source.SourceDigest,
+		Repository: source.Repository, RequestedRef: source.RequestedRef, ResolvedRef: source.ResolvedRef, Commit: source.Commit, SourceDigest: source.SourceDigest,
 	}
 }

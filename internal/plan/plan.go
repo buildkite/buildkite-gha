@@ -169,6 +169,7 @@ type Workflow struct {
 type RemoteWorkflowSource struct {
 	Repository   string `json:"repository"`
 	RequestedRef string `json:"requested_ref"`
+	ResolvedRef  string `json:"resolved_ref"`
 	Commit       string `json:"commit"`
 	SourceDigest string `json:"source_digest"`
 }
@@ -854,7 +855,7 @@ func validateRemoteWorkflowSource(workflow Workflow) error {
 		return nil
 	}
 	remote := workflow.Remote
-	if remote.Repository == "" || remote.Repository != strings.ToLower(remote.Repository) || len(remote.Repository) > 140 || remote.RequestedRef == "" || len(remote.RequestedRef) > 1024 || !utf8.ValidString(remote.RequestedRef) || hasControl(remote.RequestedRef) || !commitPattern.MatchString(remote.Commit) || !digestPattern.MatchString(remote.SourceDigest) {
+	if remote.Repository == "" || remote.Repository != strings.ToLower(remote.Repository) || len(remote.Repository) > 140 || remote.RequestedRef == "" || len(remote.RequestedRef) > 1024 || !utf8.ValidString(remote.RequestedRef) || hasControl(remote.RequestedRef) || !commitPattern.MatchString(remote.Commit) || remote.ResolvedRef != remote.Commit && remote.ResolvedRef != "refs/tags/"+remote.RequestedRef && remote.ResolvedRef != "refs/heads/"+remote.RequestedRef || !digestPattern.MatchString(remote.SourceDigest) {
 		return fmt.Errorf("job plan remote workflow has invalid immutable source provenance")
 	}
 	ref, err := source.Parse(workflow.Path)

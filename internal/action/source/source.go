@@ -45,10 +45,12 @@ var (
 // Reference is a parsed remote action reference.
 type Reference struct{ Owner, Repository, Path, Ref, Raw string }
 
-// Resolved pins a requested reference to an immutable commit.
+// Resolved pins a requested reference to an immutable commit and retains the
+// selected branch or tag namespace when one was resolved.
 type Resolved struct {
 	Reference    Reference
 	Commit       string
+	ResolvedRef  string
 	SourceDigest string
 }
 
@@ -283,7 +285,7 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 	}
 	ref = parsed
 	if shaRE.MatchString(ref.Ref) {
-		return Resolved{Reference: ref, Commit: ref.Ref}, nil
+		return Resolved{Reference: ref, Commit: ref.Ref, ResolvedRef: ref.Ref}, nil
 	}
 	if r.cfg.resolutionSnapshot != nil {
 		return r.cfg.resolutionSnapshot.resolve(ctx, ref, r.resolveMutable)
@@ -324,7 +326,7 @@ func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved,
 			if err != nil {
 				return Resolved{}, err
 			}
-			return Resolved{Reference: ref, Commit: sha}, nil
+			return Resolved{Reference: ref, Commit: sha, ResolvedRef: "refs/" + kind + "/" + ref.Ref}, nil
 		}
 		var nf *NotPublicError
 		if !errors.As(err, &nf) {
@@ -343,8 +345,13 @@ func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, 
 	if !shaRE.MatchString(v.SHA) {
 		return Resolved{}, fmt.Errorf("GitHub returned malformed commit SHA")
 	}
-	return Resolved{Reference: ref, Commit: v.SHA}, nil
+	return Resolved{Reference: ref, Commit: v.SHA, ResolvedRef: v.SHA}, nil
 }
+
+func validResolvedRef(ref Reference, commit, resolvedRef string) bool {
+	return shaRE.MatchString(commit) && (resolvedRef == commit || resolvedRef == "refs/tags/"+ref.Ref || resolvedRef == "refs/heads/"+ref.Ref)
+}
+
 func (r *Resolver) peel(ctx context.Context, ref Reference, typ, sha string) (string, error) {
 	for range 5 {
 		if !shaRE.MatchString(sha) {

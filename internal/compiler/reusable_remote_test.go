@@ -63,7 +63,11 @@ func (s *fakeReusableRepositorySource) Fetch(ctx context.Context, ref actionsour
 	if ref.Path != "" && s.driftPathDigest != "" {
 		digest = s.driftPathDigest
 	}
-	return actionsource.Resolved{Reference: ref, Commit: commit, SourceDigest: digest}, actionsource.Materialized{
+	resolvedRef := "refs/tags/" + ref.Ref
+	if ref.Ref == commit {
+		resolvedRef = commit
+	}
+	return actionsource.Resolved{Reference: ref, Commit: commit, ResolvedRef: resolvedRef, SourceDigest: digest}, actionsource.Materialized{
 		RepositoryRoot: root, ActionRoot: filepath.Join(root, filepath.FromSlash(ref.Path)), SourceDigest: digest,
 	}, nil
 }
@@ -72,6 +76,18 @@ func (s *fakeReusableRepositorySource) references() []actionsource.Reference {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]actionsource.Reference(nil), s.calls...)
+}
+
+func TestRemoteWorkflowCheckoutRefMatchesResolvedNamespace(t *testing.T) {
+	remote := RemoteWorkflowSource{RequestedRef: "v1", ResolvedRef: "refs/tags/v1", Commit: strings.Repeat("a", 40)}
+	for _, ref := range []string{"v1", "refs/tags/v1", remote.Commit} {
+		if !remoteWorkflowCheckoutRefMatches(ref, remote) {
+			t.Errorf("remoteWorkflowCheckoutRefMatches(%q) = false", ref)
+		}
+	}
+	if remoteWorkflowCheckoutRefMatches("refs/heads/v1", remote) {
+		t.Error("remoteWorkflowCheckoutRefMatches() accepted a different Git namespace")
+	}
 }
 
 func TestCompilePublicReusableWorkflowWithNestedPinnedLocalCall(t *testing.T) {

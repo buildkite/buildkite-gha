@@ -26,7 +26,11 @@ type batchCountingActionSource struct {
 func (s *batchCountingActionSource) Fetch(_ context.Context, ref actionsource.Reference) (actionsource.Resolved, actionsource.Materialized, error) {
 	s.calls++
 	commit := strings.Repeat("a", 40)
-	return actionsource.Resolved{Reference: ref, Commit: commit, SourceDigest: s.digest}, actionsource.Materialized{RepositoryRoot: s.root, ActionRoot: s.root, SourceDigest: s.digest}, nil
+	resolvedRef := "refs/tags/" + ref.Ref
+	if ref.Ref == commit {
+		resolvedRef = commit
+	}
+	return actionsource.Resolved{Reference: ref, Commit: commit, ResolvedRef: resolvedRef, SourceDigest: s.digest}, actionsource.Materialized{RepositoryRoot: s.root, ActionRoot: s.root, SourceDigest: s.digest}, nil
 }
 
 func TestValidateBatchWritesAndResumesAtomicReports(t *testing.T) {

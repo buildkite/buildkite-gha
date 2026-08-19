@@ -42,13 +42,14 @@ type actionResolutionSnapshotCurrent struct {
 }
 
 type actionResolutionSnapshotEntry struct {
-	Schema     string    `json:"schema"`
-	Owner      string    `json:"owner"`
-	Repository string    `json:"repository"`
-	Ref        string    `json:"ref"`
-	Commit     string    `json:"commit,omitempty"`
-	Missing    bool      `json:"missing,omitempty"`
-	ResolvedAt time.Time `json:"resolved_at"`
+	Schema      string    `json:"schema"`
+	Owner       string    `json:"owner"`
+	Repository  string    `json:"repository"`
+	Ref         string    `json:"ref"`
+	Commit      string    `json:"commit,omitempty"`
+	ResolvedRef string    `json:"resolved_ref,omitempty"`
+	Missing     bool      `json:"missing,omitempty"`
+	ResolvedAt  time.Time `json:"resolved_at"`
 }
 
 // WithActionResolutionSnapshot pins mutable refs to durable per-generation
@@ -213,12 +214,16 @@ func (s *actionResolutionSnapshot) resolve(ctx context.Context, ref Reference, r
 		return Resolved{}, err
 	}
 	resolved, err := resolve(ctx, ref)
+	if err == nil && resolved.ResolvedRef == "" {
+		resolved.ResolvedRef = resolved.Commit
+	}
 	entry := actionResolutionSnapshotEntry{
 		Schema: actionResolutionSnapshotSchema, Owner: strings.ToLower(ref.Owner),
 		Repository: strings.ToLower(ref.Repository), Ref: ref.Ref, ResolvedAt: time.Now().UTC(),
 	}
 	if err == nil {
 		entry.Commit = resolved.Commit
+		entry.ResolvedRef = resolved.ResolvedRef
 	} else {
 		var notPublic *NotPublicError
 		if !errors.As(err, &notPublic) {
@@ -292,7 +297,15 @@ func loadActionResolutionSnapshotEntry(path string, ref Reference) (Resolved, er
 	if entry.Missing {
 		return Resolved{}, &NotPublicError{}, true
 	}
-	return Resolved{Reference: ref, Commit: entry.Commit}, nil, true
+	if entry.ResolvedRef == "" {
+		// Entries created before resolved refs were recorded retain their exact
+		// commit but cannot grant a qualified branch or tag checkout.
+		entry.ResolvedRef = entry.Commit
+	}
+	if !validResolvedRef(ref, entry.Commit, entry.ResolvedRef) {
+		return Resolved{}, fmt.Errorf("action resolution snapshot entry is invalid"), true
+	}
+	return Resolved{Reference: ref, Commit: entry.Commit, ResolvedRef: entry.ResolvedRef}, nil, true
 }
 
 func loadActionResolutionJSON(path string, value any) bool {

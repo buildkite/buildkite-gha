@@ -71,12 +71,12 @@ func validCheckoutRepository(repository string) bool {
 
 func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, commit string, inputs map[string]string) (Result, error) {
 	const adapter = "checkout adapter"
-	remoteInputs, remoteRef, remote, err := remoteWorkflowCheckoutInputs(job, commit, inputs)
+	remoteInputs, remoteRefOutput, remotePinnedRef, remote, err := remoteWorkflowCheckoutInputs(job, commit, inputs)
 	if err != nil {
 		return newResult(), fmt.Errorf("%s: %w", adapter, err)
 	}
 	if remote {
-		return r.runCheckoutTarget(ctx, processor, workspace, commit, remoteInputs, "github", job.Workflow.Remote.Repository, job.Workflow.Remote.Commit, remoteRef, remoteRef, false)
+		return r.runCheckoutTarget(ctx, processor, workspace, commit, remoteInputs, "github", job.Workflow.Remote.Repository, job.Workflow.Remote.Commit, remoteRefOutput, remotePinnedRef, false)
 	}
 	_, _, validProvider := checkoutRepositoryURL(job.Event.Provider, job.Event.Repository)
 	if !validProvider || !actionintegration.ValidCheckoutSHA(job.Event.SHA) {
@@ -163,57 +163,48 @@ func (r Runner) runCheckoutTarget(ctx context.Context, processor *commandProcess
 	return result, nil
 }
 
-func remoteWorkflowCheckoutInputs(job plan.Job, commit string, inputs map[string]string) (map[string]string, string, bool, error) {
+func remoteWorkflowCheckoutInputs(job plan.Job, commit string, inputs map[string]string) (map[string]string, string, string, bool, error) {
 	remote := job.Workflow.Remote
 	if remote != nil {
 		if err := actionintegration.ValidateCheckoutInputNames(inputs); err != nil {
-			return nil, "", true, err
+			return nil, "", "", true, err
 		}
 	}
 	repository := checkoutInput(inputs, "repository")
 	if remote == nil || repository == "" || !strings.EqualFold(repository, remote.Repository) {
-		return nil, "", false, nil
+		return nil, "", "", false, nil
 	}
 	ref := checkoutInput(inputs, "ref")
 	refMatches := remoteWorkflowRefMatches(ref, *remote)
 	path := checkoutInput(inputs, "path")
 	aliasMatches := remoteWorkflowCheckoutAlias(job.Actions, path)
 	if (!refMatches || !aliasMatches) && strings.EqualFold(repository, job.Event.Repository) {
-		return nil, "", false, nil
+		return nil, "", "", false, nil
 	}
 	if !refMatches {
-		return nil, "", true, fmt.Errorf("remote workflow source checkout ref does not match immutable workflow provenance")
+		return nil, "", "", true, fmt.Errorf("remote workflow source checkout ref does not match immutable workflow provenance")
 	}
 	if !aliasMatches {
-		return nil, "", true, fmt.Errorf("remote workflow source checkout path does not match a source-backed local action")
+		return nil, "", "", true, fmt.Errorf("remote workflow source checkout path does not match a source-backed local action")
 	}
 	normalized := maps.Clone(inputs)
 	deleteCheckoutInput(normalized, "token")
 	setCheckoutInput(normalized, "repository", remote.Repository)
 	setCheckoutInput(normalized, "ref", remote.Commit)
 	if err := actionintegration.ValidateCheckoutInputs(commit, normalized, remote.Repository, remote.Commit); err != nil {
-		return nil, "", true, err
+		return nil, "", "", true, err
 	}
-	refOutput := ref
-	if refOutput != remote.Commit {
-		if !strings.HasPrefix(refOutput, "refs/heads/") && !strings.HasPrefix(refOutput, "refs/tags/") {
-			refOutput = "refs/tags/" + refOutput
-		}
-		if !validPinnedCheckoutRef(refOutput) {
-			return nil, "", true, fmt.Errorf("remote workflow source checkout ref is invalid")
-		}
+	pinnedRef := remote.ResolvedRef
+	if pinnedRef == remote.Commit {
+		pinnedRef = ""
+	} else if !validPinnedCheckoutRef(pinnedRef) {
+		return nil, "", "", true, fmt.Errorf("remote workflow source checkout ref is invalid")
 	}
-	return normalized, refOutput, true, nil
+	return normalized, checkoutRefOutput(inputs, ""), pinnedRef, true, nil
 }
 
 func remoteWorkflowRefMatches(ref string, remote plan.RemoteWorkflowSource) bool {
-	if ref == remote.Commit || ref == remote.RequestedRef {
-		return true
-	}
-	if strings.HasPrefix(remote.RequestedRef, "refs/") {
-		return false
-	}
-	return ref == "refs/heads/"+remote.RequestedRef || ref == "refs/tags/"+remote.RequestedRef
+	return ref == remote.Commit || ref == remote.RequestedRef || ref == remote.ResolvedRef
 }
 
 func remoteWorkflowCheckoutAlias(locks []plan.ActionLock, path string) bool {

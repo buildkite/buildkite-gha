@@ -453,7 +453,7 @@ runs:
 		Runtime: &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
 		Workflow: plan.Workflow{
 			Path: "slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0", Digest: workflowDigest, LogicalJobID: "call-remote.generator",
-			Remote: &plan.RemoteWorkflowSource{Repository: "slsa-framework/slsa-github-generator", RequestedRef: "v2.1.0", Commit: commit, SourceDigest: remoteDigest},
+			Remote: &plan.RemoteWorkflowSource{Repository: "slsa-framework/slsa-github-generator", RequestedRef: "v2.1.0", ResolvedRef: "refs/tags/v2.1.0", Commit: commit, SourceDigest: remoteDigest},
 		},
 		Event: plan.Event{
 			Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64), Repository: "owner/project", SHA: strings.Repeat("c", 40),

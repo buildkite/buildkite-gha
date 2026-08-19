@@ -19,12 +19,13 @@ type mutableRefCache struct {
 }
 
 type mutableRefEntry struct {
-	Schema     string    `json:"schema"`
-	Owner      string    `json:"owner"`
-	Repository string    `json:"repository"`
-	Ref        string    `json:"ref"`
-	Commit     string    `json:"commit"`
-	ResolvedAt time.Time `json:"resolved_at"`
+	Schema      string    `json:"schema"`
+	Owner       string    `json:"owner"`
+	Repository  string    `json:"repository"`
+	Ref         string    `json:"ref"`
+	Commit      string    `json:"commit"`
+	ResolvedRef string    `json:"resolved_ref"`
+	ResolvedAt  time.Time `json:"resolved_at"`
 }
 
 func newMutableRefCache(root string, freshness time.Duration) (*mutableRefCache, error) {
@@ -64,9 +65,12 @@ func (c *mutableRefCache) resolve(ctx context.Context, ref Reference, resolve fu
 	if err != nil {
 		return Resolved{}, err
 	}
+	if resolved.ResolvedRef == "" {
+		resolved.ResolvedRef = resolved.Commit
+	}
 	entry := mutableRefEntry{
 		Schema: "buildkite-gha-action-ref-resolution/v1", Owner: strings.ToLower(ref.Owner),
-		Repository: strings.ToLower(ref.Repository), Ref: ref.Ref, Commit: resolved.Commit, ResolvedAt: time.Now().UTC(),
+		Repository: strings.ToLower(ref.Repository), Ref: ref.Ref, Commit: resolved.Commit, ResolvedRef: resolved.ResolvedRef, ResolvedAt: time.Now().UTC(),
 	}
 	if err := c.store(path, entry); err != nil {
 		return resolved, nil
@@ -97,11 +101,11 @@ func (c *mutableRefCache) load(path string, ref Reference, now time.Time) (Resol
 	if decoder.Decode(&entry) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
 		entry.Schema != "buildkite-gha-action-ref-resolution/v1" ||
 		entry.Owner != strings.ToLower(ref.Owner) || entry.Repository != strings.ToLower(ref.Repository) ||
-		entry.Ref != ref.Ref || !shaRE.MatchString(entry.Commit) || entry.ResolvedAt.After(now) ||
+		entry.Ref != ref.Ref || !validResolvedRef(ref, entry.Commit, entry.ResolvedRef) || entry.ResolvedAt.After(now) ||
 		now.Sub(entry.ResolvedAt) >= c.freshness {
 		return Resolved{}, false
 	}
-	return Resolved{Reference: ref, Commit: entry.Commit}, true
+	return Resolved{Reference: ref, Commit: entry.Commit, ResolvedRef: entry.ResolvedRef}, true
 }
 
 func (c *mutableRefCache) store(path string, entry mutableRefEntry) error {
