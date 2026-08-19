@@ -2062,6 +2062,9 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, err := parseUploadArgs([]string{"--experimental-runner-user", "--experimental-runner-user", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("parseUploadArgs() error = %v, want duplicate experimental runner user error", err)
 	}
+	if _, err := parseUploadArgs([]string{"--private-reusable-workflows", "--private-reusable-workflows", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("parseUploadArgs() error = %v, want duplicate private reusable workflows error", err)
+	}
 	if parsed, err := parseUploadArgs([]string{"--experimental-runner-user=false", "workflow.yml"}); err != nil || parsed.experimentalRunnerUser {
 		t.Fatalf("parseUploadArgs() opt-out = %#v, %v", parsed, err)
 	}
@@ -2071,6 +2074,9 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	workflows, event, err := uploadArgs([]string{"workflow.yml"})
 	if err != nil || !slices.Equal(workflows, []string{"workflow.yml"}) || event != "" {
 		t.Fatalf("uploadArgs() default = %q, %q, %v", workflows, event, err)
+	}
+	if parsed, err := parseUploadArgs([]string{"workflow.yml"}); err != nil || parsed.privateReusableWorkflows {
+		t.Fatalf("parseUploadArgs() enabled private reusable workflows by default: %#v, %v", parsed, err)
 	}
 	if _, _, err := uploadArgs([]string{"--runtime-queue", "custom-runners", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
 		t.Fatalf("uploadArgs() error = %v, want legacy runtime queue error", err)

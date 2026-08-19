@@ -24,7 +24,11 @@ Workflow files, action metadata, event snapshots, and job plans are untrusted in
 
 Digests and immutable source locks detect changed code. They do not make code trusted or grant credentials.
 
-Public reusable workflows use the same bounded repository source and cache as public actions. Each requested ref resolves once per validation, compilation, or upload operation to an immutable commit and repository digest. Plans also bind each selected workflow file digest. Runtime jobs do not load remote workflow YAML from the caller workspace.
+Remote reusable workflows use the same bounded repository source and cache as public actions. Each requested ref resolves once per validation, compilation, or upload operation to an immutable commit and repository digest. Plans also bind each selected workflow file digest. Runtime jobs do not load remote workflow YAML from the caller workspace.
+
+Private reusable workflows use the separate, default-off `private-reusable-workflows` importer setting. After anonymous access fails, the importer passes Git a canonical credential-free HTTPS URL. Git inherits the importer's credential helpers, configuration, and environment; inherited URL rewrites can select another transport. The Buildkite Agent repository-provider helper requests access for the exact repository, but operators can also configure broader credentials. Denied repositories, refs, paths, and tenants remain indistinguishable from missing sources. Private action source access is separate and remains unsupported.
+
+This design reuses ambient importer Git authority instead of minting a workflow-path-scoped credential. Access is repository-wide: enabling it allows workflow source to select any workflow in any GitHub repository those credentials can read. Restrict the importer's Git credentials or use Buildkite's repository-provider access policy to approve only required repositories.
 
 Push and pull request path-filter admission uses Buildkite's reserved linked-webhook metadata only after binding it to the Buildkite repository and commit and matching local Git history. Missing, shallow, ambiguous, oversized, or mismatched evidence prevents admission. Explicit and generated snapshots cannot grant this admission. This check controls workflow selection; it does not make the selected workflow trusted.
 
@@ -37,6 +41,7 @@ Reusable-workflow call conditions are immutable plan guards evaluated in caller 
 | Credential | Current boundary |
 | --- | --- |
 | Repository checkout | The verified adapter checks the event repository and exact commit. Buildkite authorizes managed private access; credentials are command-scoped and not persisted. |
+| Private reusable workflow source | Git uses the importer's existing HTTPS credential helpers only during resolution. The importer passes no authenticated URL, captures no credential, suppresses Git output, and does not place credentials in workflow environments, action subprocesses, plans, generated pipeline YAML, or runtime jobs. |
 | `GITHUB_TOKEN` | Supported static uses receive one short-lived token for the event repository and top-level requesting workflow permissions. Omitted workflow permissions mean exactly `contents: read`; GitHub repository and organization settings are not inherited. Reusable-workflow jobs receive the same permissions because Buildkite does not inspect called workflow permission maps. Buildkite verifies the pipeline repository, immutable commit, top-level workflow policy, and build provenance. Pull requests are limited to `contents: read`; merge queues are denied. The token is not ambient. |
 | Cache token | When caching is configured, every JavaScript or Docker action lifecycle receives a fresh job-bound token. This includes compatible clients such as `actions/setup-go`, not only `actions/cache`. Shell steps do not receive it. |
 | Ordinary workflow secrets | Static names are resolved with `buildkite-agent secret get` in the destination job. The job's Buildkite identity and Secret access policies are the sole authorization boundary. Values are registered with Agent and local redaction before use. |
@@ -75,4 +80,4 @@ Command scoping limits accidental spread. It does not stop a hostile concurrent 
       .github/workflows/ci.yml
     ```
 
-1. Keep private actions and protected queues out of imported workflows. Configure OIDC trust for Buildkite's issuer and restrict subjects and audiences to the intended jobs.
+1. Keep private actions and protected queues out of imported workflows. Approve only required private reusable workflow sources. Configure OIDC trust for Buildkite's issuer and restrict subjects and audiences to the intended jobs.

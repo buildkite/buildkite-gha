@@ -124,6 +124,7 @@ func TestPluginRejectsUnknownAndNonBooleanConfigurationWithoutSideEffects(t *tes
 	}{
 		{name: "unknown field", source: `{"workflow":"ci.yml","unknown":true}`, want: "unknown field"},
 		{name: "non-boolean experiment", source: `{"workflow":"ci.yml","experimental-runner-user":"true"}`, want: "must be a boolean"},
+		{name: "non-boolean private reusable workflows", source: `{"workflow":"ci.yml","private-reusable-workflows":"true"}`, want: "must be a boolean"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv(pluginConfigurationEnvironment, test.source)
@@ -147,6 +148,7 @@ func TestParsePluginConfiguration(t *testing.T) {
   "source-ref": "0123456789abcdef0123456789abcdef01234567",
   "minimum-release-age": "24h",
   "experimental-runner-user": true,
+  "private-reusable-workflows": true,
   "oidc": {
     "claims": ["organization_id", "future_server_claim"],
     "aws-session-tags": ["organization_slug", "pipeline_id"],
@@ -160,7 +162,7 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(configuration.Workflows, []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}) || !configuration.ExperimentalRunnerUser || len(configuration.runnerTargets) != 2 {
+	if !slices.Equal(configuration.Workflows, []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}) || !configuration.ExperimentalRunnerUser || !configuration.PrivateReusableWorkflows || len(configuration.runnerTargets) != 2 {
 		t.Fatalf("configuration = %#v", configuration)
 	}
 	if configuration.OIDC == nil || !slices.Equal(configuration.OIDC.Claims, []string{"organization_id", "future_server_claim"}) || !slices.Equal(configuration.OIDC.AWSSessionTags, []string{"organization_slug", "pipeline_id"}) || configuration.OIDC.SubjectClaim != "pipeline_id" {
@@ -173,7 +175,7 @@ func TestParsePluginConfiguration(t *testing.T) {
 		t.Fatalf("Darwin target = %#v", got)
 	}
 	minimal, err := parsePluginConfiguration(`{"workflow":"workflow.yml"}`)
-	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || !minimal.ExperimentalRunnerUser || len(minimal.runnerTargets) != 0 {
+	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || !minimal.ExperimentalRunnerUser || minimal.PrivateReusableWorkflows || len(minimal.runnerTargets) != 0 {
 		t.Fatalf("minimal configuration = %#v, %v", minimal, err)
 	}
 	disabled, err := parsePluginConfiguration(`{"workflow":"workflow.yml","experimental-runner-user":false}`)
@@ -200,6 +202,9 @@ func TestParsePluginConfiguration(t *testing.T) {
 		{name: "string experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":"true"}`, want: "must be a boolean"},
 		{name: "numeric experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":1}`, want: "must be a boolean"},
 		{name: "null experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":null}`, want: "must be a boolean"},
+		{name: "string private reusable workflows", source: `{"workflow":"ci.yml","private-reusable-workflows":"true"}`, want: "must be a boolean"},
+		{name: "numeric private reusable workflows", source: `{"workflow":"ci.yml","private-reusable-workflows":1}`, want: "must be a boolean"},
+		{name: "null private reusable workflows", source: `{"workflow":"ci.yml","private-reusable-workflows":null}`, want: "must be a boolean"},
 		{name: "null oidc", source: `{"workflow":"ci.yml","oidc":null}`, want: "oidc must be a JSON object"},
 		{name: "array oidc", source: `{"workflow":"ci.yml","oidc":[]}`, want: "oidc must be a JSON object"},
 		{name: "unknown oidc field", source: `{"workflow":"ci.yml","oidc":{"subject_claim":"pipeline_id"}}`, want: "oidc contains unknown field"},

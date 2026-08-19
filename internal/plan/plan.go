@@ -163,7 +163,7 @@ type Workflow struct {
 	Remote       *RemoteWorkflowSource `json:"remote,omitempty"`
 }
 
-// RemoteWorkflowSource binds a workflow file to one immutable public
+// RemoteWorkflowSource binds a workflow file to one immutable remote
 // repository tree. Workflow.Digest binds the selected file bytes.
 type RemoteWorkflowSource struct {
 	Repository   string `json:"repository"`

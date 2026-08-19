@@ -50,22 +50,24 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	return uploadParsedContext(ctx, parsedUploadArgs{
-		workflowOperands:       configuration.Workflows,
-		explicitWorkflowPaths:  true,
-		runnerTargets:          configuration.runnerTargets,
-		oidc:                   configuration.OIDC,
-		experimentalRunnerUser: configuration.ExperimentalRunnerUser,
-		pluginAcquisition:      &pluginRuntimeAcquisition{version: version},
-		importerPlatform:       importerPlatform,
-		telemetry:              details,
+		workflowOperands:         configuration.Workflows,
+		explicitWorkflowPaths:    true,
+		runnerTargets:            configuration.runnerTargets,
+		oidc:                     configuration.OIDC,
+		experimentalRunnerUser:   configuration.ExperimentalRunnerUser,
+		privateReusableWorkflows: configuration.PrivateReusableWorkflows,
+		pluginAcquisition:        &pluginRuntimeAcquisition{version: version},
+		importerPlatform:         importerPlatform,
+		telemetry:                details,
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
 }
 
 type pluginConfiguration struct {
-	Workflows              []string
-	ExperimentalRunnerUser bool
-	OIDC                   *plan.OIDCConfiguration
-	runnerTargets          map[string]compiler.RunnerTarget
+	Workflows                []string
+	ExperimentalRunnerUser   bool
+	PrivateReusableWorkflows bool
+	OIDC                     *plan.OIDCConfiguration
+	runnerTargets            map[string]compiler.RunnerTarget
 }
 
 func parsePluginConfiguration(source string) (pluginConfiguration, error) {
@@ -89,7 +91,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	for key := range encoded {
 		switch key {
-		case "workflow", "workflows", "runners", "oidc", "version", "source-ref", "minimum-release-age", "experimental-runner-user":
+		case "workflow", "workflows", "runners", "oidc", "version", "source-ref", "minimum-release-age", "experimental-runner-user", "private-reusable-workflows":
 		default:
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
 		}
@@ -100,6 +102,14 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 		experimentalRunnerUser, ok = value.(bool)
 		if !ok {
 			return pluginConfiguration{}, fmt.Errorf("%s experimental-runner-user must be a boolean", pluginConfigurationEnvironment)
+		}
+	}
+	privateReusableWorkflows := false
+	if value, configured := encoded["private-reusable-workflows"]; configured {
+		var ok bool
+		privateReusableWorkflows, ok = value.(bool)
+		if !ok {
+			return pluginConfiguration{}, fmt.Errorf("%s private-reusable-workflows must be a boolean", pluginConfigurationEnvironment)
 		}
 	}
 	workflowValue, hasWorkflow := encoded["workflow"]
@@ -181,7 +191,10 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			return pluginConfiguration{}, err
 		}
 	}
-	return pluginConfiguration{Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, OIDC: oidc, runnerTargets: targets}, nil
+	return pluginConfiguration{
+		Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, PrivateReusableWorkflows: privateReusableWorkflows,
+		OIDC: oidc, runnerTargets: targets,
+	}, nil
 }
 
 func parsePluginOIDCConfiguration(value any) (*plan.OIDCConfiguration, error) {

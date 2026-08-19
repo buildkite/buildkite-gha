@@ -20,7 +20,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
-// RepositorySource resolves and materializes tokenless public GitHub repositories.
+// RepositorySource resolves and materializes immutable GitHub repositories.
 // ActionSource remains an alias for callers that use it only for action locking.
 type RepositorySource interface {
 	Fetch(context.Context, source.Reference) (source.Resolved, source.Materialized, error)
@@ -28,7 +28,7 @@ type RepositorySource interface {
 
 type ActionSource = RepositorySource
 
-// PublicActionSource joins the public resolver and immutable source store.
+// PublicActionSource joins a resolver and immutable source store.
 type PublicActionSource struct {
 	Resolver *source.Resolver
 	Store    *source.Store
@@ -560,7 +560,7 @@ func MemoizeRepositorySource(repositorySource RepositorySource) RepositorySource
 
 func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) (source.Resolved, source.Materialized, error) {
 	repositoryKey := strings.ToLower(ref.Owner+"/"+ref.Repository) + "\x00" + ref.Ref
-	key := repositoryKey + "\x00" + ref.Path
+	key := repositoryKey + "\x00" + ref.Path + "\x00" + fmt.Sprint(ref.RepositoryRoot)
 	s.mu.Lock()
 	if cached, ok := s.cache[key]; ok {
 		s.mu.Unlock()
@@ -601,7 +601,7 @@ func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) 
 	s.mu.Unlock()
 	fetchRef := ref
 	if pinned && ref.Ref != pin.commit {
-		fetchRef, call.err = exactRepositoryReference(ref, pin.commit)
+		fetchRef, call.err = source.PinReference(ref, pin.commit)
 	}
 	if call.err == nil {
 		call.resolved, call.materialized, call.err = s.source.Fetch(ctx, fetchRef)
@@ -629,12 +629,4 @@ func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) 
 	close(call.done)
 	s.mu.Unlock()
 	return call.resolved, call.materialized, call.err
-}
-
-func exactRepositoryReference(ref source.Reference, commit string) (source.Reference, error) {
-	raw := ref.Owner + "/" + ref.Repository
-	if ref.Path != "" {
-		raw += "/" + ref.Path
-	}
-	return source.Parse(raw + "@" + commit)
 }

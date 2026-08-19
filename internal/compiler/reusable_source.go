@@ -20,7 +20,7 @@ const (
 	MaxReusableWorkflowBytes = 1 << 20
 )
 
-// RemoteWorkflowSource is immutable provenance for a public reusable workflow.
+// RemoteWorkflowSource is immutable provenance for a remote reusable workflow.
 // Digest on the containing workflow identifies the selected file; SourceDigest
 // identifies the complete repository tree.
 type RemoteWorkflowSource struct {
@@ -82,7 +82,7 @@ func localReusableWorkflowSource(workflowPath string) (reusableWorkflowSource, e
 
 func (resolver *reusableResolver) loadReusableWorkflow(ctx context.Context, parent reusableWorkflowSource, uses string) (reusableWorkflowSource, []byte, error) {
 	if strings.Contains(uses, "${{") {
-		return reusableWorkflowSource{}, nil, fmt.Errorf("reusable workflow %q is runtime-dependent; only literal local or public GitHub references are supported", uses)
+		return reusableWorkflowSource{}, nil, fmt.Errorf("reusable workflow %q is runtime-dependent; only literal local or GitHub references are supported", uses)
 	}
 	if strings.HasPrefix(uses, "./") {
 		return resolver.loadLocalReusableWorkflow(parent, uses)
@@ -142,47 +142,40 @@ func (resolver *reusableResolver) loadRemoteReusableWorkflow(ctx context.Context
 		return reusableWorkflowSource{}, nil, fmt.Errorf("remote reusable workflow %q %w", uses, err)
 	}
 	if resolver.repositorySource == nil {
-		return reusableWorkflowSource{}, nil, fmt.Errorf("public reusable workflow source is not configured")
+		return reusableWorkflowSource{}, nil, fmt.Errorf("remote reusable workflow source is not configured")
 	}
-	repositoryRaw := ref.Owner + "/" + ref.Repository + "@" + ref.Ref
-	repositoryRef, err := actionsource.Parse(repositoryRaw)
-	if err != nil {
-		return reusableWorkflowSource{}, nil, fmt.Errorf("invalid remote reusable workflow %q: %w", uses, err)
-	}
-	resolved, materialized, err := resolver.repositorySource.Fetch(ctx, repositoryRef)
+	ref.RepositoryRoot = true
+	resolved, materialized, err := resolver.repositorySource.Fetch(ctx, ref)
 	if err != nil {
 		var notPublic *actionsource.NotPublicError
 		if errors.As(err, &notPublic) {
-			return reusableWorkflowSource{}, nil, fmt.Errorf("public reusable workflow %q was not found or is not public", uses)
+			return reusableWorkflowSource{}, nil, fmt.Errorf("reusable workflow %q was not found or access was denied", uses)
 		}
-		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve public reusable workflow %q: %w", uses, err)
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: %w", uses, err)
 	}
 	resolver.materialized = append(resolver.materialized, materialized)
 	commit := resolved.Commit
 	if len(commit) != 40 || strings.Trim(commit, "0123456789abcdef") != "" {
-		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve public reusable workflow %q: source returned a non-immutable commit", uses)
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: source returned a non-immutable commit", uses)
 	}
 	if len(materialized.SourceDigest) != 71 || !strings.HasPrefix(materialized.SourceDigest, "sha256:") || strings.Trim(materialized.SourceDigest[7:], "0123456789abcdef") != "" {
-		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve public reusable workflow %q: source returned an invalid repository digest", uses)
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: source returned an invalid repository digest", uses)
 	}
 	repositoryRoot, err := canonicalMaterializedRepositoryRoot(materialized.RepositoryRoot)
 	if err != nil {
-		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve public reusable workflow %q: %w", uses, err)
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: %w", uses, err)
 	}
 	filePath := filepath.Join(repositoryRoot, filepath.FromSlash(workflowPath))
 	if err := requireWithinRepository(repositoryRoot, filePath); err != nil {
-		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve public reusable workflow %q: %w", uses, err)
+		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: %w", uses, err)
 	}
 	info, err := os.Lstat(filePath)
 	if err != nil || !info.Mode().IsRegular() {
-		if err == nil {
-			err = fmt.Errorf("selected workflow is not a regular file")
-		}
-		return reusableWorkflowSource{}, nil, fmt.Errorf("read public reusable workflow %q: %w", uses, err)
+		return reusableWorkflowSource{}, nil, fmt.Errorf("reusable workflow %q was not found or access was denied", uses)
 	}
 	source, err := readReusableWorkflowFile(filePath)
 	if err != nil {
-		return reusableWorkflowSource{}, nil, fmt.Errorf("read public reusable workflow %q: %w", uses, err)
+		return reusableWorkflowSource{}, nil, fmt.Errorf("read reusable workflow %q: %w", uses, err)
 	}
 	repository := strings.ToLower(ref.Owner + "/" + ref.Repository)
 	remote := &RemoteWorkflowSource{

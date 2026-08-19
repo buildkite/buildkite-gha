@@ -110,7 +110,7 @@ type Options struct {
 	Runners    RunnerPolicy
 	EventTrust EventTrust
 	OIDC       *plan.OIDCConfiguration
-	// RepositorySource resolves public repositories used by static remote
+	// RepositorySource resolves repositories used by static remote
 	// reusable-workflow calls. Callers should share one memoized source for the
 	// complete validate, compile, and upload operation.
 	RepositorySource RepositorySource
