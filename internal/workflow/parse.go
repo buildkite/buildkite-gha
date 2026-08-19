@@ -215,6 +215,24 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	return owned, nil
 }
 
+func triggerPosition(event actionlint.Event) Position {
+	switch e := event.(type) {
+	case *actionlint.WebhookEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.ScheduledEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.WorkflowDispatchEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.RepositoryDispatchEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.WorkflowCallEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.ImageVersionEvent:
+		return pointSpan(e.Pos).Start
+	}
+	return Position{}
+}
+
 func adaptTriggers(events []actionlint.Event) []Trigger {
 	out := make([]Trigger, 0, len(events))
 	values := func(f *actionlint.WebhookEventFilter) []string {
@@ -238,7 +256,7 @@ func adaptTriggers(events []actionlint.Event) []Trigger {
 		return out
 	}
 	for _, event := range events {
-		t := Trigger{Event: event.EventName()}
+		t := Trigger{Event: event.EventName(), Position: triggerPosition(event)}
 		switch e := event.(type) {
 		case *actionlint.WebhookEvent:
 			t.Types, t.Branches, t.BranchesIgnore = stringsOf(e.Types), values(e.Branches), values(e.BranchesIgnore)

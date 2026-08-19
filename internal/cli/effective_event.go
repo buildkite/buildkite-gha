@@ -187,6 +187,7 @@ func triggerProcessingReport(path string, source []byte) compatibility.Processin
 	report.LogicalJobs = parsed.LogicalJobs
 	report.SetStage(string(compiler.StageWorkflowParsing), compatibility.Passed)
 	report.SetStage(string(compiler.StageEventValidation), compatibility.Passed)
+	report.ApplyWarnings(path, parsed.Warnings)
 	for _, job := range parsed.ParsedJobs {
 		report.Jobs = append(report.Jobs, compatibility.JobResult{
 			ID: job.ID, Result: compatibility.NotEvaluated,

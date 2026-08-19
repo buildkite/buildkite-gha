@@ -356,6 +356,11 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 				SkipReason: input.SkipReason,
 			})
 			skippedWorkflows = append(skippedWorkflows, skippedWorkflow{label: label, key: groupKey, reason: input.AnnotationReason})
+			parsed, _ := compiler.ParseWorkflow(input.Path, input.Source)
+			writeCompilerWarnings(stderr, "upload", input.CanonicalPath, parsed.Warnings)
+			if uploadArguments.telemetry != nil {
+				uploadArguments.telemetry.addWarnings(parsed.Warnings)
+			}
 			continue
 		}
 		if processingReportHasErrors(processingReports[i]) {

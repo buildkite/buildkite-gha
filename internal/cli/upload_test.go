@@ -1364,6 +1364,28 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	}
 }
 
+func TestRunUploadWarnsAboutUnsupportedTriggersOnSkippedWorkflows(t *testing.T) {
+	requireImporterHost(t)
+	workflowPath := filepath.Join(t.TempDir(), "cross-event.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: [pull_request, issues]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_BUILD_URL", "https://buildkite.com/acme/widgets/builds/42")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_ID", cliTestBuildID)
+	t.Setenv("BUILDKITE_STEP_KEY", "skipped-warning-importer")
+	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "W_TRIGGER_EVENT_UNSUPPORTED") || !strings.Contains(stderr.String(), "on.issues") {
+		t.Fatalf("skipped workflow upload stderr missing unsupported-trigger warning: %q", stderr.String())
+	}
+}
+
 func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "pull-request.yml")
