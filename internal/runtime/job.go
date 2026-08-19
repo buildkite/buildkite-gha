@@ -1957,12 +1957,8 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if err != nil {
 			return result, err
 		}
-		args, err := shellCommand(shell, script)
-		if err != nil {
-			return result, err
-		}
 		runEnv := environment.process()
-		err = r.runProcess(ctx, processor, dir, runEnv, &result, nil, args[0], args[1:]...)
+		err = r.runShellProcess(ctx, processor, dir, runEnv, &result, shell, script)
 		return result, err
 	}
 
@@ -2283,7 +2279,6 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			childErr = fmt.Errorf("composite action step %d has no run command", i+1)
 		} else {
 			var script, dir string
-			var args []string
 			var env map[string]string
 			env, childErr = evaluateStepMap(step.Env, eval)
 			if childErr == nil {
@@ -2297,10 +2292,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 				}
 			}
 			if childErr == nil {
-				args, childErr = shellCommand(step.Shell, script)
-			}
-			if childErr == nil {
-				childErr = r.runProcess(ctx, processor, dir, mergeStepEnvironment(childJobEnv, env), &stepResult, nil, args[0], args[1:]...)
+				childErr = r.runShellProcess(ctx, processor, dir, mergeStepEnvironment(childJobEnv, env), &stepResult, step.Shell, script)
 			}
 		}
 		mergeInto(result.Env, stepResult.Env)
@@ -2459,6 +2451,42 @@ func shellCommand(shell, script string) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("shell %q is unsupported in the supported runtime subset", shell)
 	}
+}
+
+func (r Runner) runShellProcess(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, result *Result, shell, script string) error {
+	if strings.TrimSpace(shell) != "python" {
+		args, err := shellCommand(shell, script)
+		if err != nil {
+			return err
+		}
+		return r.runProcess(ctx, processor, dir, env, result, nil, args[0], args[1:]...)
+	}
+
+	parent := ""
+	if r.jobContainer != nil {
+		parent = r.runnerTemp
+	}
+	file, err := os.CreateTemp(parent, "buildkite-gha-shell-*.py")
+	if err != nil {
+		return fmt.Errorf("create Python shell script: %w", err)
+	}
+	path := file.Name()
+	defer func(path string) { _ = os.Remove(path) }(path)
+	if _, err := file.WriteString(script); err != nil {
+		return errors.Join(fmt.Errorf("write Python shell script: %w", err), file.Close())
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close Python shell script: %w", err)
+	}
+	if r.jobContainer != nil {
+		// Job containers may declare any USER, so the mounted script must be
+		// readable without assuming a shared host UID or GID.
+		if err := os.Chmod(path, 0o644); err != nil {
+			return fmt.Errorf("make Python shell script container-readable: %w", err)
+		}
+		path = r.jobContainer.containerPath(path)
+	}
+	return r.runProcess(ctx, processor, dir, env, result, nil, "python", path)
 }
 
 // stepWorkingDirectory resolves a run step's working directory and requires it

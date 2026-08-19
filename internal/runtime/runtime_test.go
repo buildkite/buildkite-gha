@@ -5019,6 +5019,124 @@ runs:
 	}
 }
 
+func TestRunJobPythonShellUsesTemporaryScript(t *testing.T) {
+	installPythonShellTestCommand(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:    "python",
+		Kind:  "run",
+		Shell: "python",
+		Command: `import os
+from pathlib import Path
+
+assert Path.cwd() == Path(os.environ["GITHUB_WORKSPACE"])
+assert Path(__file__).suffix == ".py"
+with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+    output.write(f"script={__file__}\n")
+`,
+	}})
+	job.Outputs = map[string]string{"script": "${{ steps.python.outputs.script }}"}
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	script := result.Outputs["script"]
+	if !strings.HasSuffix(script, ".py") {
+		t.Fatalf("Python script path = %q, want .py suffix", script)
+	}
+	if _, err := os.Stat(script); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary Python script remains at %q: %v", script, err)
+	}
+}
+
+func TestCompositePythonShell(t *testing.T) {
+	installPythonShellTestCommand(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", `name: Python composite
+outputs:
+  value:
+    value: ${{ steps.python.outputs.value }}
+runs:
+  using: composite
+  steps:
+    - id: python
+      shell: python
+      run: |
+        import os
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write("value=python-composite\n")
+`)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
+	job.Outputs = map[string]string{"value": "${{ steps.composite.outputs.value }}"}
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	if result.Outputs["value"] != "python-composite" {
+		t.Fatalf("RunJob() output = %q, want python-composite", result.Outputs["value"])
+	}
+}
+
+func installPythonShellTestCommand(t *testing.T) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	python := filepath.Join(dir, "python")
+	wrapper := "#!/bin/sh\nBUILDKITE_GHA_TEST_PYTHON_HELPER=1 exec " + shellTestQuote(executable) + " -test.run '^TestPythonShellCommandHelper$' -- \"$@\"\n"
+	if err := os.WriteFile(python, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestPythonShellCommandHelper(t *testing.T) {
+	if os.Getenv("BUILDKITE_GHA_TEST_PYTHON_HELPER") == "" {
+		return
+	}
+	separator := slices.Index(os.Args, "--")
+	if separator < 0 || separator+1 >= len(os.Args) {
+		t.Fatalf("Python helper arguments = %#v", os.Args)
+	}
+	script := os.Args[separator+1]
+	source, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Ext(script) != ".py" {
+		t.Fatalf("Python script = %q, want .py suffix", script)
+	}
+	if cwd, err := os.Getwd(); err != nil || cwd != os.Getenv("GITHUB_WORKSPACE") {
+		t.Fatalf("working directory = %q, %v; workspace = %q", cwd, err, os.Getenv("GITHUB_WORKSPACE"))
+	}
+	var output string
+	switch {
+	case bytes.Contains(source, []byte(`script={__file__}`)):
+		output = "script=" + script + "\n"
+	case bytes.Contains(source, []byte(`value=python-composite`)):
+		output = "value=python-composite\n"
+	default:
+		t.Fatalf("unexpected Python source: %s", source)
+	}
+	file, err := os.OpenFile(os.Getenv("GITHUB_OUTPUT"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(output); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCompositeStepWorkingDirectoryEvaluatesExpressions(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
