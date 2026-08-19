@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
@@ -31,6 +33,7 @@ type sourcedJob struct {
 	path                  string
 	digest                string
 	root                  string
+	remote                *RemoteWorkflowSource
 	inputs                map[string]any
 	secretAuthority       bool
 	needBindings          map[string]needBinding
@@ -69,15 +72,17 @@ type reusableResolution struct {
 }
 
 type reusableResolver struct {
-	root                  string
-	stack                 []string
+	workspaceRoot         string
+	repositorySource      RepositorySource
+	stack                 []reusableSourceIdentity
+	materialized          []actionsource.Materialized
 	context               expression.CompileContext
 	rootPermissions       *workflow.Permissions
 	expanded              int
 	runtimeMatrixBoundary bool
 }
 
-func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext) ([]sourcedJob, bool, error) {
+func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource) ([]sourcedJob, bool, error) {
 	digest := "sha256:" + sha256Sum(source)
 	runtimeMatrixBoundary := hasRuntimeMatrixBoundary(parsed)
 	if !hasReusableCall(parsed) {
@@ -118,20 +123,21 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 		return jobs, runtimeMatrixBoundary, nil
 	}
 
-	root, canonicalPath, err := workflowRepository(path)
-	if err != nil {
-		return nil, runtimeMatrixBoundary, err
-	}
-	sourcePath, err := repositoryWorkflowPath(root, canonicalPath)
+	rootSource, err := localReusableWorkflowSource(path)
 	if err != nil {
 		return nil, runtimeMatrixBoundary, err
 	}
 	resolver := reusableResolver{
-		root: root, stack: []string{canonicalPath}, context: context,
+		workspaceRoot: rootSource.repositoryRoot, repositorySource: newMemoizedActionSource(repositorySource), stack: []reusableSourceIdentity{rootSource.identity}, context: context,
 		rootPermissions: effectivePermissions(nil, parsed.Permissions, nil, false), runtimeMatrixBoundary: runtimeMatrixBoundary,
 	}
-	resolver.discoverRuntimeMatrixBoundaries(parsed, 0, map[string]int{canonicalPath: 0})
-	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", context.Inputs, nil, nil, true, false, workflow.Position{}, nil, 0)
+	defer func() {
+		for _, materialized := range resolver.materialized {
+			materialized.Release()
+		}
+	}()
+	resolver.discoverRuntimeMatrixBoundaries(ctx, rootSource, parsed, 0, map[string]int{rootSource.identity.key(): 0})
+	resolution, err := resolver.resolve(ctx, rootSource, digest, parsed, "", "", context.Inputs, nil, nil, true, false, workflow.Position{}, nil, 0)
 	return resolution.jobs, resolver.runtimeMatrixBoundary, err
 }
 
@@ -144,7 +150,7 @@ func hasReusableCall(parsed *workflow.Workflow) bool {
 	return false
 }
 
-func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(parsed *workflow.Workflow, depth int, scannedAtDepth map[string]int) {
+func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(ctx context.Context, current reusableWorkflowSource, parsed *workflow.Workflow, depth int, scannedAtDepth map[string]int) {
 	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
 	if depth >= MaxReusableWorkflowDepth {
 		resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasReusableCall(parsed)
@@ -154,13 +160,14 @@ func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(parsed *workfl
 		if job.Reusable == nil {
 			continue
 		}
-		calleePath, err := resolver.localWorkflowPath(job.Reusable.Uses)
+		calleeSource, source, err := resolver.loadReusableWorkflow(ctx, current, job.Reusable.Uses)
 		if err != nil {
 			resolver.runtimeMatrixBoundary = true
 			continue
 		}
 		calleeDepth := depth + 1
-		previousDepth, scanned := scannedAtDepth[calleePath]
+		key := calleeSource.identity.key()
+		previousDepth, scanned := scannedAtDepth[key]
 		if scanned && previousDepth <= calleeDepth {
 			continue
 		}
@@ -170,22 +177,18 @@ func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(parsed *workfl
 			resolver.runtimeMatrixBoundary = true
 			return
 		}
-		scannedAtDepth[calleePath] = calleeDepth
-		source, err := os.ReadFile(calleePath)
+		scannedAtDepth[key] = calleeDepth
+		callee, err := parseReusableWorkflow(calleeSource.displayPath, source)
 		if err != nil {
 			resolver.runtimeMatrixBoundary = true
 			continue
 		}
-		callee, err := workflow.Parse(calleePath, source)
-		if err != nil {
-			resolver.runtimeMatrixBoundary = true
-			continue
-		}
-		resolver.discoverRuntimeMatrixBoundaries(callee, calleeDepth, scannedAtDepth)
+		resolver.discoverRuntimeMatrixBoundaries(ctx, calleeSource, callee, calleeDepth, scannedAtDepth)
 	}
 }
 
-func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secretAuthority, tokenPolicyNarrowed bool, reusableCallPosition workflow.Position, callGuards []sourcedCallGuard, depth int) (reusableResolution, error) {
+func (resolver *reusableResolver) resolve(ctx context.Context, current reusableWorkflowSource, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secretAuthority, tokenPolicyNarrowed bool, reusableCallPosition workflow.Position, callGuards []sourcedCallGuard, depth int) (reusableResolution, error) {
+	path := current.displayPath
 	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
 	for _, job := range parsed.Jobs {
@@ -253,7 +256,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow graph expands beyond %d jobs", maxFlattenedJobs))
 			}
 			resolved = append(resolved, sourcedJob{
-				Job: job, path: path, digest: digest, root: resolver.root, inputs: cloneAnyMap(inputs),
+				Job: job, path: path, digest: digest, root: resolver.workspaceRoot, remote: cloneRemoteWorkflowSource(current.remote), inputs: cloneAnyMap(inputs),
 				secretAuthority: secretAuthority, needBindings: needBindings,
 				tokenPolicyNarrowed: jobTokenPolicyNarrowed, jobPermissionsIgnored: jobPermissionsIgnored, reusableCall: reusableCallPosition,
 				callGuards: cloneSourcedCallGuards(callGuards),
@@ -292,35 +295,26 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 		if depth >= MaxReusableWorkflowDepth {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow nesting exceeds maximum depth %d", MaxReusableWorkflowDepth))
 		}
-		calleePath, err := resolver.localWorkflowPath(call.Uses)
+		calleeSource, source, err := resolver.loadReusableWorkflow(ctx, current, call.Uses)
 		if err != nil {
-			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, err.Error())
+			return reusableResolution{}, locatedJobWrappedError(path, job, call.Span.Start.Line, call.Span.Start.Column, "", err)
 		}
-		if cycle := resolver.cycle(calleePath); cycle != "" {
+		if cycle := resolver.cycle(calleeSource); cycle != "" {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow cycle detected: "+cycle)
 		}
-		source, err := os.ReadFile(calleePath)
-		if err != nil {
-			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("read local reusable workflow %q: %v", call.Uses, err))
-		}
-		callee, err := workflow.Parse(calleePath, source)
+		callee, err := parseReusableWorkflow(calleeSource.displayPath, source)
 		if err != nil {
 			return reusableResolution{}, err
 		}
 		resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(callee)
 		if !callee.Callable {
-			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("local reusable workflow %q does not declare on.workflow_call", call.Uses))
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable workflow %q does not declare on.workflow_call", call.Uses))
 		}
 		if len(callee.RequiredCallSecrets) != 0 {
-			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("local reusable workflow %q requires unsupported secret %q", call.Uses, callee.RequiredCallSecrets[0]))
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable workflow %q requires unsupported secret %q", call.Uses, callee.RequiredCallSecrets[0]))
 		}
-		calleeSourcePath, err := filepath.Rel(resolver.root, calleePath)
-		if err != nil {
-			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("locate local reusable workflow %q: %v", call.Uses, err))
-		}
-		calleeSourcePath = "./" + filepath.ToSlash(calleeSourcePath)
 		if callee.Concurrency != nil {
-			return reusableResolution{}, fmt.Errorf("%s:%d:%d: workflow concurrency in a called reusable workflow is unsupported", calleeSourcePath, callee.Concurrency.Span.Start.Line, callee.Concurrency.Span.Start.Column)
+			return reusableResolution{}, fmt.Errorf("%s:%d:%d: workflow concurrency in a called reusable workflow is unsupported", calleeSource.displayPath, callee.Concurrency.Span.Start.Line, callee.Concurrency.Span.Start.Column)
 		}
 		calleeDigest := "sha256:" + sha256Sum(source)
 
@@ -368,11 +362,11 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			if depth == 0 {
 				calleeCallPosition = call.Span.Start
 			}
-			resolver.stack = append(resolver.stack, calleePath)
-			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, secretAuthority && call.InheritSecrets, jobTokenPolicyNarrowed, calleeCallPosition, calleeGuards, depth+1)
+			resolver.stack = append(resolver.stack, calleeSource.identity)
+			calleeResolution, err := resolver.resolve(ctx, calleeSource, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, secretAuthority && call.InheritSecrets, jobTokenPolicyNarrowed, calleeCallPosition, calleeGuards, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {
-				message := "local reusable workflow could not be resolved"
+				message := "reusable workflow could not be resolved"
 				detail := ""
 				var finding *ProcessingFinding
 				if errors.As(err, &finding) {
@@ -383,8 +377,8 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 					Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
 					Path: path, Line: call.Span.Start.Line, Column: call.Span.Start.Column, Job: job.ID,
 					Message: message, Detail: detail,
-					Err: locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column,
-						fmt.Sprintf("resolve local reusable workflow %q: %v", call.Uses, err)),
+					Err: locatedJobWrappedError(path, job, call.Span.Start.Line, call.Span.Start.Column,
+						fmt.Sprintf("resolve reusable workflow %q", call.Uses), err),
 				}
 			}
 			if jobPermissionsIgnored {
@@ -1198,28 +1192,6 @@ func repositoryWorkflowPath(root, canonicalPath string) (string, error) {
 	return "./" + filepath.ToSlash(relative), nil
 }
 
-func (resolver *reusableResolver) localWorkflowPath(uses string) (string, error) {
-	if !strings.HasPrefix(uses, "./") {
-		return "", fmt.Errorf("reusable workflow %q is remote or runtime-dependent; only repository-local ./ paths are supported", uses)
-	}
-	relative := filepath.Clean(filepath.FromSlash(strings.TrimPrefix(uses, "./")))
-	if filepath.Dir(relative) != filepath.Join(".github", "workflows") {
-		return "", fmt.Errorf("local reusable workflow %q must name a file directly under .github/workflows", uses)
-	}
-	candidate := filepath.Join(resolver.root, relative)
-	if err := requireWithinRepository(resolver.root, candidate); err != nil {
-		return "", fmt.Errorf("resolve local reusable workflow %q: %w", uses, err)
-	}
-	resolved, err := filepath.EvalSymlinks(candidate)
-	if err != nil {
-		return "", fmt.Errorf("resolve local reusable workflow %q: %w", uses, err)
-	}
-	if err := requireWithinRepository(resolver.root, resolved); err != nil {
-		return "", fmt.Errorf("resolve local reusable workflow %q: %w", uses, err)
-	}
-	return resolved, nil
-}
-
 func requireWithinRepository(root, path string) error {
 	relative, err := filepath.Rel(root, path)
 	if err != nil {
@@ -1231,12 +1203,13 @@ func requireWithinRepository(root, path string) error {
 	return nil
 }
 
-func (resolver *reusableResolver) cycle(path string) string {
+func (resolver *reusableResolver) cycle(source reusableWorkflowSource) string {
 	for i, existing := range resolver.stack {
-		if existing == path {
-			chain := append(append([]string(nil), resolver.stack[i:]...), path)
-			for j := range chain {
-				chain[j] = filepath.ToSlash(strings.TrimPrefix(chain[j], resolver.root+string(filepath.Separator)))
+		if existing.key() == source.identity.key() {
+			identities := append(append([]reusableSourceIdentity(nil), resolver.stack[i:]...), source.identity)
+			chain := make([]string, len(identities))
+			for j, identity := range identities {
+				chain[j] = reusableSourceIdentityDisplay(identity)
 			}
 			return strings.Join(chain, " -> ")
 		}

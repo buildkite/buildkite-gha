@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -155,10 +156,20 @@ func EventServerURL(provider string) string {
 }
 
 type Workflow struct {
-	Path         string `json:"path"`
-	Name         string `json:"name,omitempty"`
-	Digest       string `json:"digest"`
-	LogicalJobID string `json:"logical_job_id"`
+	Path         string                `json:"path"`
+	Name         string                `json:"name,omitempty"`
+	Digest       string                `json:"digest"`
+	LogicalJobID string                `json:"logical_job_id"`
+	Remote       *RemoteWorkflowSource `json:"remote,omitempty"`
+}
+
+// RemoteWorkflowSource binds a workflow file to one immutable public
+// repository tree. Workflow.Digest binds the selected file bytes.
+type RemoteWorkflowSource struct {
+	Repository   string `json:"repository"`
+	RequestedRef string `json:"requested_ref"`
+	Commit       string `json:"commit"`
+	SourceDigest string `json:"source_digest"`
 }
 
 type Target struct {
@@ -492,8 +503,11 @@ func (job Job) Validate() error {
 	if len(job.Event.Repository) > 512 || len(job.Event.Ref) > 1024 || len(job.Event.HeadRef) > 1024 || len(job.Event.BaseRef) > 1024 || len(job.Event.SHA) > 128 || len(job.Event.Actor) > 256 {
 		return fmt.Errorf("job plan event identity exceeds its size limit")
 	}
-	if job.Workflow.Path == "" || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {
+	if job.Workflow.Path == "" || len(job.Workflow.Path) > 1024 || !utf8.ValidString(job.Workflow.Path) || hasControl(job.Workflow.Path) || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {
 		return fmt.Errorf("job plan requires a workflow path, sha256 digest, and logical job id")
+	}
+	if err := validateRemoteWorkflowSource(job.Workflow); err != nil {
+		return err
 	}
 	if len(job.Workflow.Name) > 1024 {
 		return fmt.Errorf("job plan workflow name exceeds its size limit")
@@ -805,6 +819,25 @@ func (job Job) Validate() error {
 		if err := validateActionLocks(job); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateRemoteWorkflowSource(workflow Workflow) error {
+	if workflow.Remote == nil {
+		return nil
+	}
+	remote := workflow.Remote
+	if remote.Repository == "" || remote.Repository != strings.ToLower(remote.Repository) || len(remote.Repository) > 140 || remote.RequestedRef == "" || len(remote.RequestedRef) > 1024 || !utf8.ValidString(remote.RequestedRef) || hasControl(remote.RequestedRef) || !commitPattern.MatchString(remote.Commit) || !digestPattern.MatchString(remote.SourceDigest) {
+		return fmt.Errorf("job plan remote workflow has invalid immutable source provenance")
+	}
+	ref, err := source.Parse(workflow.Path)
+	if err != nil || ref.Owner+"/"+ref.Repository != remote.Repository || ref.Ref != remote.RequestedRef || path.Dir(ref.Path) != ".github/workflows" || path.Ext(ref.Path) != ".yml" && path.Ext(ref.Path) != ".yaml" {
+		return fmt.Errorf("job plan remote workflow path does not match source provenance")
+	}
+	repositoryRef, err := source.Parse(remote.Repository + "@x")
+	if err != nil || strings.ToLower(repositoryRef.Owner+"/"+repositoryRef.Repository) != remote.Repository {
+		return fmt.Errorf("job plan remote workflow has invalid canonical repository")
 	}
 	return nil
 }

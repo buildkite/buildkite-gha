@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -20,7 +22,8 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 	if eventPath == "" {
 		return usageError(stderr, "compile: --event-path is required")
 	}
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	out := newProcessingOutput(ctx, "compile", "text", stderr, stderr, agent)
 	event, eventErr := os.ReadFile(eventPath)
 	if parsedEvent, parseErr := compiler.ParseEvent(event); eventErr == nil && parseErr == nil {
@@ -30,14 +33,22 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 	if !ok {
 		return 1
 	}
-	processingReport, ok := validatedProcessingReport(ctx, out, workflowPath, "", source, event, true)
+	repositorySource, cleanup, sourceErr := newHostedActionSource(ctx, "", nil, nil)
+	if sourceErr != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: configure public repository source: %v\n", sourceErr)
+		return 1
+	}
+	defer cleanup()
+	options := compiler.DefaultOptions()
+	options.RepositorySource = repositorySource
+	processingReport, ok := validatedProcessingReportWithOptions(ctx, out, workflowPath, "", source, event, true, &options)
 	if !ok {
 		return 1
 	}
 	var result []byte
 	var warnings []compiler.Warning
 	if format == "ir-json" {
-		result, err = compiler.Compile(workflowPath, source, event)
+		result, err = compiler.CompileWithOptionsContext(ctx, workflowPath, source, event, options)
 		if err == nil {
 			var ir compiler.IR
 			if decodeErr := json.Unmarshal(result, &ir); decodeErr != nil {
@@ -54,7 +65,7 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 			_ = out.write(ctx, processingReport)
 			return 1
 		}
-		bundle, compileErr := compiler.CompileBundle(workflowPath, source, event, version, digest, "gha-importer")
+		bundle, compileErr := compiler.CompileBundleContext(ctx, workflowPath, source, event, version, digest, "gha-importer", options)
 		processingReport.ApplyEvidence(bundle.Processing)
 		err = compileErr
 		result = bundle.Pipeline

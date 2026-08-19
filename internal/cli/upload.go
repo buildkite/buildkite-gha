@@ -18,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -106,6 +107,10 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			report := compatibility.EnvironmentProcessingReport(workflows[i].Path, hostedProfile, "workflow input could not be read")
 			return out.fail(ctx, report, fmt.Errorf("read workflow %s: %w", workflows[i].CanonicalPath, err))
 		}
+		if len(workflows[i].Source) > compiler.MaxReusableWorkflowBytes {
+			_, _ = validatedProcessingReport(ctx, out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false)
+			return 1
+		}
 		parsed, parseErr := workflow.Parse(workflows[i].Path, workflows[i].Source)
 		if parseErr != nil {
 			_, _ = validatedProcessingReport(ctx, out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false)
@@ -122,11 +127,25 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: workflow paths matched only reusable workflow_call workflows; there is nothing to upload")
 		return 1
 	}
+	anonymousSource, cleanupAnonymousSource, sourceErr := newHostedActionSource(ctx, "", nil, nil)
+	if sourceErr != nil {
+		for _, input := range workflows {
+			if !input.ReusableOnly {
+				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "public repository source could not be configured"), sourceErr)
+			}
+		}
+		return 1
+	}
+	defer cleanupAnonymousSource()
+	sourceSwitch := &repositorySourceSwitch{source: anonymousSource}
+	repositorySource := compiler.MemoizeRepositorySource(sourceSwitch)
 	for _, input := range workflows {
 		if input.ReusableOnly {
 			continue
 		}
-		validation, validationErr := compiler.Validate(input.Path, input.Source)
+		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
+		validationOptions.RepositorySource = repositorySource
+		validation, validationErr := compiler.ValidateWithOptionsContext(ctx, input.Path, input.Source, validationOptions)
 		if validation.RuntimeMatrixBoundary {
 			report := compatibility.InitialProcessingReport(input.Path, hostedProfile, false, validation, validationErr)
 			report.Result = "incompatible"
@@ -155,6 +174,24 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		return 1
 	}
+	authentication := importerJobActionSourceAuthentication(stderr)
+	var sourceOptions []actionsource.Option
+	if effectiveEvent.Event.Provider == "github" {
+		if authenticationOption := authentication.option(effectiveEvent.Event.Repository.Owner + "/" + effectiveEvent.Event.Repository.Name); authenticationOption != nil {
+			sourceOptions = append(sourceOptions, authenticationOption)
+		}
+	}
+	authenticatedSource, cleanupSource, sourceErr := newHostedActionSource(ctx, "", sourceOptions, nil)
+	if sourceErr != nil {
+		for _, input := range workflows {
+			if !input.ReusableOnly {
+				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "public repository source could not be configured"), sourceErr)
+			}
+		}
+		return 1
+	}
+	defer cleanupSource()
+	sourceSwitch.set(authenticatedSource)
 	populateChangedPaths(&effectiveEvent.TriggerSnapshot, effectiveEvent.Event, effectiveEvent.Origin, workflows)
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i := range workflows {
@@ -189,7 +226,8 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.StepKeyNamespace = input.StepKeyNamespace
-		validations[i], validationErrs[i] = compiler.ValidateEventWithOptions(input.Path, input.Source, effectiveEvent.Source, validationOptions)
+		validationOptions.RepositorySource = repositorySource
+		validations[i], validationErrs[i] = compiler.ValidateEventWithOptionsContext(ctx, input.Path, input.Source, effectiveEvent.Source, validationOptions)
 	}
 	suggestedTargets, err := suggestedRunnerTargets(ctx, validations)
 	if err != nil {
@@ -213,7 +251,8 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			}
 			validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 			validationOptions.StepKeyNamespace = input.StepKeyNamespace
-			validations[i], validationErrs[i] = compiler.ValidateEventWithOptions(input.Path, input.Source, effectiveEvent.Source, validationOptions)
+			validationOptions.RepositorySource = repositorySource
+			validations[i], validationErrs[i] = compiler.ValidateEventWithOptionsContext(ctx, input.Path, input.Source, effectiveEvent.Source, validationOptions)
 		}
 	}
 	for i, input := range workflows {
@@ -243,7 +282,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 			continue
 		}
-		platforms, platformErr := requiredRuntimePlatforms(input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets)
+		platforms, platformErr := requiredRuntimePlatforms(ctx, input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets, repositorySource)
 		if platformErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", platformErr)
 			return 1
@@ -258,7 +297,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", acquireErr)
 			return 1
 		}
-		return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, processingReports, out, runtimeDistributions)
+		return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, processingReports, out, runtimeDistributions, repositorySource, authentication)
 	}
 	requiredDistributionPaths := make(map[compiler.Platform]string, len(requiredPlatforms))
 	for platform := range requiredPlatforms {
@@ -287,15 +326,14 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: runtime distribution for %s is required by the selected workflows\n", platform)
 		return 1
 	}
-	return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, processingReports, out, runtimeDistributions)
+	return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, processingReports, out, runtimeDistributions, repositorySource, authentication)
 }
 
-func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent, workflows []workflowInput, effectiveEvent effectiveEventSelection, executablePath, distributionDigest, importerStep string, processingReports []compatibility.ProcessingReport, out processingOutput, runtimeDistributions map[compiler.Platform]runtimeDistribution) int {
+func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent, workflows []workflowInput, effectiveEvent effectiveEventSelection, executablePath, distributionDigest, importerStep string, processingReports []compatibility.ProcessingReport, out processingOutput, runtimeDistributions map[compiler.Platform]runtimeDistribution, repositorySource compiler.RepositorySource, authentication *actionSourceAuthentication) int {
 	runtimeDigests := make(map[compiler.Platform]string, len(runtimeDistributions))
 	for platform, runtimeDistribution := range runtimeDistributions {
 		runtimeDigests[platform] = runtimeDistribution.digest
 	}
-	authentication := importerJobActionSourceAuthentication(stderr)
 	generatedWorkflows := make([]buildkitepipeline.Workflow, 0, len(workflows))
 	skippedWorkflows := make([]skippedWorkflow, 0)
 	planArtifacts := make([]compiler.PlanArtifact, 0)
@@ -326,7 +364,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			failureArtifacts = append(failureArtifacts, artifacts...)
 			continue
 		}
-		preflight, err := compileHostedNamespaced(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, authentication)
+		preflight, err := compileHostedNamespacedWithActionCache(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, "", repositorySource, authentication)
 		applyHostedPreflight(&processingReports[i], preflight)
 		if err != nil {
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
@@ -521,8 +559,10 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 	return transport.Artifact{Path: path, Digest: digest, Contents: encoded}
 }
 
-func requiredRuntimePlatforms(workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget) (map[compiler.Platform]bool, error) {
-	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, hostedOptions(groupLabel, configuredTargets, nil))
+func requiredRuntimePlatforms(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, repositorySource compiler.RepositorySource) (map[compiler.Platform]bool, error) {
+	options := hostedOptions(groupLabel, configuredTargets, nil)
+	options.RepositorySource = repositorySource
+	preflight, err := compiler.CompileWithOptionsContext(ctx, workflowPath, workflowSource, eventSource, options)
 	if err != nil {
 		return nil, err
 	}

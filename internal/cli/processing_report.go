@@ -521,11 +521,13 @@ func validatedProcessingReportWithOptions(ctx context.Context, out processingOut
 	var err error
 	switch {
 	case eventEvaluated && options != nil:
-		validation, err = compiler.ValidateEventWithOptions(workflowPath, source, event, *options)
+		validation, err = compiler.ValidateEventWithOptionsContext(ctx, workflowPath, source, event, *options)
 	case eventEvaluated:
-		validation, err = compiler.ValidateEvent(workflowPath, source, event)
+		validation, err = compiler.ValidateEventWithOptionsContext(ctx, workflowPath, source, event, compiler.DefaultOptions())
+	case options != nil:
+		validation, err = compiler.ValidateWithOptionsContext(ctx, workflowPath, source, *options)
 	default:
-		validation, err = compiler.Validate(workflowPath, source)
+		validation, err = compiler.ValidateWithOptionsContext(ctx, workflowPath, source, compiler.DefaultOptions())
 	}
 	report := compatibility.InitialProcessingReport(workflowPath, profile, eventEvaluated, validation, err)
 	if err != nil {
