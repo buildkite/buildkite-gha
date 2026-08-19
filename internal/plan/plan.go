@@ -15,6 +15,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
+	"golang.org/x/text/unicode/norm"
 )
 
 const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json"
@@ -1393,6 +1394,13 @@ func ValidSourceWorkspaceAlias(value string) bool {
 		}
 	}
 	return true
+}
+
+// EqualSourceWorkspaceAlias compares an immutable portable alias with a
+// checkout spelling using the canonical normalization and case folding that
+// can make distinct strings name the same directory on macOS.
+func EqualSourceWorkspaceAlias(alias, value string) bool {
+	return alias != "" && len(value) <= 255 && strings.EqualFold(norm.NFD.String(alias), norm.NFD.String(value))
 }
 
 func hasControl(value string) bool {

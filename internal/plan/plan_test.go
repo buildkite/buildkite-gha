@@ -32,6 +32,24 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 	validateJobPlanSchema(t, source)
 }
 
+func TestEqualSourceWorkspaceAlias(t *testing.T) {
+	for _, test := range []struct {
+		alias string
+		value string
+		want  bool
+	}{
+		{alias: "source-dir", value: "SOURCE-DIR", want: true},
+		{alias: "sourceKdir", value: "source\u212adir", want: true},
+		{alias: "source;dir", value: "source\u037edir", want: true},
+		{alias: "", value: "", want: false},
+		{alias: "source-dir", value: "other-dir", want: false},
+	} {
+		if got := EqualSourceWorkspaceAlias(test.alias, test.value); got != test.want {
+			t.Errorf("EqualSourceWorkspaceAlias(%q, %q) = %t, want %t", test.alias, test.value, got, test.want)
+		}
+	}
+}
+
 func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 	job := validJob()
 	job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v1"

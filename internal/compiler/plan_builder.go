@@ -303,7 +303,7 @@ func bindRemoteWorkflowCheckoutInputs(remote *RemoteWorkflowSource, locks []plan
 	checkoutPath := value("path")
 	aliasMatches := false
 	for _, lock := range locks {
-		if lock.WorkspaceAlias != "" && strings.EqualFold(lock.WorkspaceAlias, checkoutPath) {
+		if plan.EqualSourceWorkspaceAlias(lock.WorkspaceAlias, checkoutPath) {
 			aliasMatches = true
 			break
 		}
