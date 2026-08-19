@@ -27,6 +27,10 @@ const (
 	CheckoutV6Commit        = "d23441a48e516b6c34aea4fa41551a30e30af803"
 	CheckoutV7InitialCommit = "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
 	CheckoutV7Commit        = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+
+	// The bounded adapter accepts 20 input names. A source checkout may also
+	// author token, which is discarded before adapter validation.
+	maxCheckoutInputNames = 21
 )
 
 var checkoutCommits = map[string]string{
@@ -199,6 +203,9 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 
 // ValidateCheckoutInputNames rejects names whose case-insensitive lookup would be ambiguous.
 func ValidateCheckoutInputNames(inputs map[string]string) error {
+	if len(inputs) > maxCheckoutInputNames {
+		return fmt.Errorf("more than %d explicit checkout inputs is unsupported", maxCheckoutInputNames)
+	}
 	names := sortedNames(inputs)
 	for index, name := range names {
 		for _, previous := range names[:index] {
