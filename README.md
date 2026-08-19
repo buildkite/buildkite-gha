@@ -88,7 +88,7 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 
 | Good fit | Not currently supported |
 | --- | --- |
-| Linux x86-64 and native macOS arm64 jobs using `bash` or `sh` | Windows, Linux arm64, or macOS x86-64 |
+| Linux x86-64 and native macOS arm64 jobs using `bash`, `sh`, or `python` | Windows, Linux arm64, or macOS x86-64 |
 | Local and public JavaScript and composite actions; verified Dockerfile actions on Linux | Private actions, Dockerfile actions on macOS, or arbitrary reusable-workflow source |
 | Static matrices, `needs`, outputs, and local reusable workflows | Dynamic matrices and expressions outside the documented subset |
 | Exact-commit checkout, including managed private repository access | GitHub environment secrets, GitHub-issued OIDC claims, or protected queues |

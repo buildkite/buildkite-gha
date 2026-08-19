@@ -5020,6 +5020,7 @@ runs:
 }
 
 func TestRunJobPythonShellUsesTemporaryScript(t *testing.T) {
+	installPythonShellTestCommand(t)
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
@@ -5051,6 +5052,7 @@ with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
 }
 
 func TestCompositePythonShell(t *testing.T) {
+	installPythonShellTestCommand(t)
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
@@ -5076,6 +5078,62 @@ runs:
 	}
 	if result.Outputs["value"] != "python-composite" {
 		t.Fatalf("RunJob() output = %q, want python-composite", result.Outputs["value"])
+	}
+}
+
+func installPythonShellTestCommand(t *testing.T) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	python := filepath.Join(dir, "python")
+	wrapper := "#!/bin/sh\nBUILDKITE_GHA_TEST_PYTHON_HELPER=1 exec " + shellTestQuote(executable) + " -test.run '^TestPythonShellCommandHelper$' -- \"$@\"\n"
+	if err := os.WriteFile(python, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestPythonShellCommandHelper(t *testing.T) {
+	if os.Getenv("BUILDKITE_GHA_TEST_PYTHON_HELPER") == "" {
+		return
+	}
+	separator := slices.Index(os.Args, "--")
+	if separator < 0 || separator+1 >= len(os.Args) {
+		t.Fatalf("Python helper arguments = %#v", os.Args)
+	}
+	script := os.Args[separator+1]
+	source, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Ext(script) != ".py" {
+		t.Fatalf("Python script = %q, want .py suffix", script)
+	}
+	if cwd, err := os.Getwd(); err != nil || cwd != os.Getenv("GITHUB_WORKSPACE") {
+		t.Fatalf("working directory = %q, %v; workspace = %q", cwd, err, os.Getenv("GITHUB_WORKSPACE"))
+	}
+	var output string
+	switch {
+	case bytes.Contains(source, []byte(`script={__file__}`)):
+		output = "script=" + script + "\n"
+	case bytes.Contains(source, []byte(`value=python-composite`)):
+		output = "value=python-composite\n"
+	default:
+		t.Fatalf("unexpected Python source: %s", source)
+	}
+	file, err := os.OpenFile(os.Getenv("GITHUB_OUTPUT"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(output); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

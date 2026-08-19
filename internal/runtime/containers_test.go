@@ -688,17 +688,21 @@ func TestRunJobContainerDefaultsRunStepsToSh(t *testing.T) {
 }
 
 func TestRunJobContainerPythonShellUsesMountedScript(t *testing.T) {
+	installPythonShellTestCommand(t)
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()
-	j := jobContainerPlan(t, workspace, []plan.Step{{
-		ID:    "python",
-		Kind:  "run",
-		Shell: "python",
-		Command: `import os
+	j := jobContainerPlan(t, workspace, []plan.Step{
+		{
+			ID:    "python",
+			Kind:  "run",
+			Shell: "python",
+			Command: `import os
 with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
     output.write(f"script={__file__}\n")
 `,
-	}})
+		},
+		{ID: "cleanup", Kind: "run", Shell: "sh", Command: `set -- "$RUNNER_TEMP"/buildkite-gha-shell-*.py; test ! -e "$1"`},
+	})
 	j.Outputs = map[string]string{"script": "${{ steps.python.outputs.script }}"}
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), j, workspace)
 	if err != nil {

@@ -2469,7 +2469,7 @@ func (r Runner) runShellProcess(ctx context.Context, processor *commandProcessor
 		return fmt.Errorf("create Python shell script: %w", err)
 	}
 	path := file.Name()
-	defer func() { _ = os.Remove(path) }()
+	defer func(path string) { _ = os.Remove(path) }(path)
 	if _, err := file.WriteString(script); err != nil {
 		return errors.Join(fmt.Errorf("write Python shell script: %w", err), file.Close())
 	}
