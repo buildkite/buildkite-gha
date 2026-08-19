@@ -177,7 +177,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		if err != nil {
 			return "", err
 		}
-		referencesEventAlias, err := expression.TemplateUsesStaticContextReference(reduced, "event")
+		referencesEventAlias, err := expression.TemplateUsesContext(reduced, "event")
 		if err != nil {
 			return "", err
 		}
@@ -268,7 +268,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		if step.If, err = reduceCondition(step.If); err != nil {
 			return JobInstance{}, err
 		}
-		for _, field := range []*string{&step.Name, &step.Run, &step.Uses, &step.Shell, &step.WorkingDirectory, &step.ContinueOnErrorExpression, &step.TimeoutMinutesExpression} {
+		for _, field := range []*string{&step.Name, &step.Run, &step.Shell, &step.WorkingDirectory, &step.ContinueOnErrorExpression, &step.TimeoutMinutesExpression} {
 			if *field, err = reduceTemplate(*field); err != nil {
 				return JobInstance{}, err
 			}

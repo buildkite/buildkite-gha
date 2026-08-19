@@ -1773,9 +1773,16 @@ func TestReduceAvailableCompileTemplateRejectsIntroducedExpressionSyntax(t *test
 
 func TestReduceAvailableCompileTemplateRejectsWholeEventAccess(t *testing.T) {
 	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"action": "opened"}}}
-	_, err := ReduceAvailableCompileTemplate("${{ toJSON(github.event) }}", context)
-	if err == nil || !strings.Contains(err.Error(), "whole github.event access is unsupported") {
-		t.Fatalf("ReduceAvailableCompileTemplate() error = %v", err)
+	context.Event = context.GitHub["event"].(map[string]any)
+	for _, template := range []string{
+		"${{ toJSON(github.event) }}",
+		"${{ toJSON(github.event.*) }}",
+		"${{ toJSON(event.*) }}",
+	} {
+		_, err := ReduceAvailableCompileTemplate(template, context)
+		if err == nil || !strings.Contains(err.Error(), "whole github.event access is unsupported") {
+			t.Errorf("ReduceAvailableCompileTemplate(%q) error = %v", template, err)
+		}
 	}
 }
 

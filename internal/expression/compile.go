@@ -451,7 +451,7 @@ func ReduceAvailableCompileTemplate(template string, context CompileContext) (st
 		if err != nil {
 			return "", err
 		}
-		if !nodeReferencesGitHubEventPayload(node) && !usesStaticContextReference(node, "event") {
+		if !nodeReferencesGitHubEventPayload(node) && !nodeReferencesContext(node, "event") {
 			reduced.WriteString(complete)
 			remaining = source[consumed:]
 			continue
@@ -485,7 +485,18 @@ func ReduceAvailableCompileTemplate(template string, context CompileContext) (st
 func referencesWholeEvent(expression actionlint.ExprNode) bool {
 	found := false
 	actionlint.VisitExprNode(expression, func(node, parent actionlint.ExprNode, entering bool) {
-		if !entering || found || referenceReceiver(node, parent) {
+		if !entering || found {
+			return
+		}
+		if projection, ok := node.(*actionlint.ArrayDerefNode); ok {
+			root, path, err := referencePath(projection.Receiver)
+			found = err == nil && (strings.EqualFold(root, "event") && len(path) == 0 ||
+				strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "event"))
+			if found {
+				return
+			}
+		}
+		if referenceReceiver(node, parent) {
 			return
 		}
 		switch node.(type) {
@@ -499,6 +510,15 @@ func referencesWholeEvent(expression actionlint.ExprNode) bool {
 		}
 		found = strings.EqualFold(root, "event") && len(path) == 0 ||
 			strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "event")
+	})
+	return found
+}
+
+func nodeReferencesContext(expression actionlint.ExprNode, contextName string) bool {
+	found := false
+	actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
+		variable, ok := node.(*actionlint.VariableNode)
+		found = found || entering && ok && strings.EqualFold(variable.Name, contextName)
 	})
 	return found
 }

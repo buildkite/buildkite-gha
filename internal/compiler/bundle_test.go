@@ -1423,6 +1423,26 @@ jobs:
 	}
 }
 
+func TestCompileBundleDoesNotReduceEventExpressionsInActionReferences(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ${{ github.event.action_ref }}
+`)
+	event := []byte(`{
+  "provider": "github", "event": "push",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"action_ref": "owner/action@1111111111111111111111111111111111111111"}
+}`)
+	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained") {
+		t.Fatalf("CompileBundle() error = %v, want static action reference rejection", err)
+	}
+}
+
 func TestCompileBundleReducesEventExpressionsAfterMatrixExpansion(t *testing.T) {
 	source := []byte(`on: push
 jobs:
