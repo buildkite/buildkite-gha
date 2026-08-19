@@ -654,7 +654,7 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	result.Env["MARKER"] = marker
 	result.Env["ACTIONS_RUNTIME_TOKEN"] = "workflow-token"
 	processor := newCommandProcessor(io.Discard, io.Discard)
-	runner := Runner{Cache: provider, Redactor: &testRedactor{}}
+	runner := newJobRun(Runner{Cache: provider, Redactor: &testRedactor{}})
 	if err := runner.runJavaScriptPhase(
 		t.Context(), processor, actionRoot, node,
 		javaScriptAction{Name: "ordinary", Path: actionRoot, Main: "main.js"}, "main.js", nil, nil, &result,
@@ -731,7 +731,7 @@ func TestCacheRedactorFailureAbortsBeforeExecutionAndScrubsToken(t *testing.T) {
 	processor := newCommandProcessor(&logs, &logs)
 	result := newResult()
 	result.Env["MARKER"] = marker
-	err := (Runner{Cache: provider, Redactor: failingCacheRedactor{token: token}}).runJavaScriptPhase(
+	err := newJobRun(Runner{Cache: provider, Redactor: failingCacheRedactor{token: token}}).runJavaScriptPhase(
 		t.Context(), processor, actionRoot, "node", javaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true}, "main.js", nil, nil, &result,
 	)
 	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") {
@@ -765,7 +765,7 @@ func TestActionRuntimeCacheTokenCommandFileEffectsAreDiscarded(t *testing.T) {
 			result.Summary = "existing summary\n"
 			result.Paths = []string{"/existing/path"}
 			state := map[string]string{"kept": "action state"}
-			err := (Runner{Cache: provider, Redactor: &testRedactor{}}).runJavaScriptPhase(
+			err := newJobRun(Runner{Cache: provider, Redactor: &testRedactor{}}).runJavaScriptPhase(
 				t.Context(), newCommandProcessor(io.Discard, io.Discard), actionRoot, node,
 				javaScriptAction{Name: "ordinary", Path: actionRoot, Main: "main.js"}, "main.js", nil, state, &result,
 			)
