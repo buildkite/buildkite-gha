@@ -321,6 +321,14 @@ func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, al
 		return fmt.Errorf("unsupported runtime logical operator %s", kind)
 	}
 	evaluator.call = func(evaluator *semanticEvaluator, call *actionlint.FuncCallNode) (any, error) {
+		if isToJSONGitHubCall(call) {
+			if !allowGitHubToken {
+				return nil, fmt.Errorf("github.token is unavailable in this field")
+			}
+			if _, err := resolveRuntimeReferenceWithMissingMembers("github", []string{"token"}, context); err != nil {
+				return nil, err
+			}
+		}
 		if value, recognized, err := evaluatePureFunction(evaluator, call); recognized {
 			return value, err
 		}
@@ -416,6 +424,15 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 	validator.validateCompare = func(actionlint.CompareOpNodeKind) error { return nil }
 	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
 	validator.validateCall = func(validator *semanticValidator, call *actionlint.FuncCallNode) error {
+		if isToJSONGitHubCall(call) {
+			if allowedContexts != nil && !allowedContexts["github"] {
+				return fmt.Errorf("runtime context %q is unavailable in this field", "github")
+			}
+			if !allowGitHubToken {
+				return fmt.Errorf("github.token is unavailable in this field")
+			}
+			return nil
+		}
 		if recognized, err := validatePureFunction(validator, call); recognized {
 			return err
 		}

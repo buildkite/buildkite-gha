@@ -1170,6 +1170,7 @@ func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
 	}{
 		{reference: "secrets.GITHUB_TOKEN", want: "references secrets.GITHUB_TOKEN"},
 		{reference: "github.token", want: "references github.token"},
+		{reference: "toJSON(github)", want: "references github.token"},
 	} {
 		for _, permissions := range []string{"permissions: {}\n", "permissions:\n  contents: none\n"} {
 			source := []byte("on: push\n" + permissions + "jobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ " + test.reference + " }}'\n")
@@ -1324,7 +1325,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: ${{ secrets.NAME_SECRET }}
-        run: echo '${{ github.token }}'
+        run: echo '${{ ToJson(GitHub) }}'
 `)
 	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err != nil {
@@ -1335,10 +1336,10 @@ jobs:
 		t.Fatalf("retained field secrets = %#v", job.RequiredSecrets)
 	}
 	if job.GitHubToken == nil || !job.HasCapability("provider-token-write") {
-		t.Fatalf("github.token authority = %#v, capabilities %#v", job.GitHubToken, job.RequiredCapabilities)
+		t.Fatalf("toJSON(github) authority = %#v, capabilities %#v", job.GitHubToken, job.RequiredCapabilities)
 	}
 	if bundle.Plans[0].Authorization.GitHubTokenSecretReference {
-		t.Fatal("github.token was reported as a secrets.GITHUB_TOKEN reference")
+		t.Fatal("toJSON(github) was reported as a secrets.GITHUB_TOKEN reference")
 	}
 }
 

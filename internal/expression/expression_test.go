@@ -484,7 +484,10 @@ func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
 		{name: "dot", template: "${{ github.token }}", want: true},
 		{name: "bracket", template: "prefix-${{ github['TOKEN'] }}", want: true},
 		{name: "compound", template: "${{ github.token || '' }}", want: true},
+		{name: "serialized context", template: "${{ toJSON(github) }}", want: true},
+		{name: "serialized context case insensitive", template: "${{ ToJson(GitHub) }}", want: true},
 		{name: "other GitHub value", template: "${{ github.actor }}"},
+		{name: "serialized GitHub value", template: "${{ toJSON(github.actor) }}"},
 		{name: "plain", template: "github.token"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -500,10 +503,19 @@ func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
 	if _, err := ReferencesGitHubToken("${{ github.token.extra }}"); err == nil || !strings.Contains(err.Error(), "must name exactly github.token") {
 		t.Fatalf("ReferencesGitHubToken() token dereference error = %v", err)
 	}
-	for _, template := range []string{"${{ github }}", "${{ github.* }}", "${{ github.event.*.token }}"} {
+	for _, template := range []string{
+		"${{ github }}",
+		"${{ github.* }}",
+		"${{ github.event.*.token }}",
+		"${{ toJSON(github.*) }}",
+		"${{ format('{0}', github) }}",
+	} {
 		if _, err := ReferencesGitHubToken(template); err == nil || !strings.Contains(err.Error(), "must name one static property") {
 			t.Fatalf("ReferencesGitHubToken(%q) error = %v, want static-property rejection", template, err)
 		}
+	}
+	if _, err := ReferencesGitHubToken("${{ toJSON(github[env.NAME]) }}"); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
+		t.Fatalf("ReferencesGitHubToken() serialized dynamic index error = %v", err)
 	}
 }
 
@@ -712,6 +724,7 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 		"ref_name":         "feature",
 		"ref_type":         "branch",
 		"repository_owner": "buildkite",
+		"token":            "ghs_scoped_token",
 		"workflow":         "CI",
 	}}
 	for template, want := range map[string]string{
@@ -727,11 +740,48 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 			t.Errorf("EvaluateStep(%q) = %q, %v; want %q", template, got, err, want)
 		}
 	}
+	wantJSON := "{\n" +
+		"  \"action_path\": \"/workspace/actions/composite\",\n" +
+		"  \"base_ref\": \"main\",\n" +
+		"  \"job\": \"build\",\n" +
+		"  \"ref_name\": \"feature\",\n" +
+		"  \"ref_type\": \"branch\",\n" +
+		"  \"repository_owner\": \"buildkite\",\n" +
+		"  \"token\": \"ghs_scoped_token\",\n" +
+		"  \"workflow\": \"CI\"\n" +
+		"}"
+	for _, template := range []string{"${{ toJSON(github) }}", "${{ ToJson(GitHub) }}"} {
+		if got, err := EvaluateStep(template, context); err != nil || got != wantJSON {
+			t.Errorf("EvaluateStep(%q) = %q, %v; want %q", template, got, err, wantJSON)
+		}
+	}
+	if _, err := EvaluateStep("${{ toJSON(github) }}", Context{GitHub: map[string]any{"actor": "octocat"}}); err == nil || !strings.Contains(err.Error(), `unavailable github value "token"`) {
+		t.Fatalf("EvaluateStep() tokenless toJSON(github) error = %v", err)
+	}
 	if got, err := EvaluateStep("${{ github.action_path }}", Context{GitHub: map[string]any{}}); err != nil || got != "" {
 		t.Fatalf("EvaluateStep() action_path outside composite scope = %q, %v; want empty", got, err)
 	}
 	if _, err := EvaluateStep("${{ github.run_id }}", context); err == nil {
 		t.Fatal("EvaluateStep() accepted github.run_id")
+	}
+	for _, template := range []string{
+		"${{ github }}",
+		"${{ github[env.KEY] }}",
+		"${{ github.* }}",
+		"${{ toJSON(github.event) }}",
+		"${{ toJSON(github.*) }}",
+		"${{ toJSON(secrets) }}",
+		"${{ format('{0}', github) }}",
+	} {
+		if _, err := EvaluateStep(template, context); err == nil {
+			t.Errorf("EvaluateStep(%q) allowed unsupported whole or dynamic context access", template)
+		}
+	}
+	if _, err := EvaluateJobEnvironment("${{ toJSON(github) }}", context); err == nil || !strings.Contains(err.Error(), "github.token is unavailable in this field") {
+		t.Fatalf("EvaluateJobEnvironment() toJSON(github) error = %v", err)
+	}
+	if err := ValidateActionInputDefault("${{ toJSON(github) }}"); err == nil {
+		t.Fatal("ValidateActionInputDefault() accepted toJSON(github)")
 	}
 }
 

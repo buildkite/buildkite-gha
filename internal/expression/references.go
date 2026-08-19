@@ -258,6 +258,10 @@ func nodeReferencesGitHubToken(expression actionlint.ExprNode) (bool, error) {
 			if referenceReceiver(node, parent) {
 				return
 			}
+			if call, ok := parent.(*actionlint.FuncCallNode); ok && isToJSONGitHubCall(call) {
+				found = true
+				return
+			}
 			referenceErr = fmt.Errorf("github reference must name one static property")
 			return
 		}
@@ -281,6 +285,14 @@ func nodeReferencesGitHubToken(expression actionlint.ExprNode) (bool, error) {
 		found = true
 	})
 	return found, referenceErr
+}
+
+func isToJSONGitHubCall(call *actionlint.FuncCallNode) bool {
+	if !strings.EqualFold(call.Callee, "toJSON") || len(call.Args) != 1 {
+		return false
+	}
+	root, ok := call.Args[0].(*actionlint.VariableNode)
+	return ok && strings.EqualFold(root.Name, "github")
 }
 
 func referenceRoot(node actionlint.ExprNode) string {

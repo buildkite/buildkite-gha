@@ -2715,6 +2715,71 @@ func TestRunJobMintsAndRedactsScopedGitHubWorkflowToken(t *testing.T) {
 	}
 }
 
+func TestRunJobScrubsTokenSerializedByToJSONGitHub(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: serialized context\n")
+	writeFixtureFile(t, workspace, ".github/actions/serialized/action.yml", `name: serialized context
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        GITHUB_CONTEXT: ${{ ToJson(GitHub) }}
+      run: |
+        compact=$(printf '%s' "$GITHUB_CONTEXT" | tr -d '\n')
+        printf 'composite context: %s\n' "$compact"
+        printf '::warning::composite context: %s\n' "$compact"
+`)
+	const token = "ghs_serialized_context_token"
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{
+			ID: "serialize", Kind: "run", Shell: "sh",
+			Env: map[string]string{"GITHUB_CONTEXT": "${{ toJSON(github) }}"},
+			Command: `
+compact=$(printf '%s' "$GITHUB_CONTEXT" | tr -d '\n')
+printf 'context: %s\n' "$compact"
+printf 'context error: %s\n' "$compact" >&2
+printf '::warning::context: %s\n' "$compact"
+printf '::error::context: %s\n' "$compact"
+printf '%s\n' "$GITHUB_CONTEXT" >> "$GITHUB_STEP_SUMMARY"
+printf 'SERIALIZED_CONTEXT<<EOF\n%s\nEOF\n' "$GITHUB_CONTEXT" >> "$GITHUB_ENV"
+printf 'context<<EOF\n%s\nEOF\n' "$GITHUB_CONTEXT" >> "$GITHUB_OUTPUT"
+`,
+		},
+		{ID: "composite", Kind: "uses", Uses: "./.github/actions/serialized"},
+	})
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"provider-token-write"}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": "read"}}
+	job.Outputs = map[string]string{"serialized": "${{ steps.serialize.outputs.context }}"}
+	provider := &testWorkflowTokenProvider{token: token}
+	redactor := &testRedactor{}
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), `job output "serialized" contains a registered secret`) {
+		t.Fatalf("RunJob() error = %v, want serialized token output rejection", err)
+	}
+	if provider.calls != 1 || !reflect.DeepEqual(redactor.values, []string{token}) {
+		t.Fatalf("token handling = provider calls %d, redactions %#v", provider.calls, redactor.values)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("error leaked serialized token: %v", err)
+	}
+	for name, value := range map[string]string{
+		"logs":        logs.String(),
+		"result":      fmt.Sprintf("%#v", result),
+		"environment": result.Env["SERIALIZED_CONTEXT"],
+		"summary":     result.Summary,
+		"warnings":    result.WarningAnnotations,
+		"annotations": result.ErrorAnnotations,
+	} {
+		if strings.Contains(value, token) || !strings.Contains(value, "***") {
+			t.Errorf("%s was not scrubbed: %q", name, value)
+		}
+	}
+}
+
 func TestRunJobRejectsInvalidWorkflowTokenPolicyBeforeMinting(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/nested/test.yml"
