@@ -50,6 +50,7 @@ func (w Workflow) ReusableOnly() bool {
 // empty list), which is significant for GitHub's defaults.
 type Trigger struct {
 	Event          string           `json:"event"`
+	Position       Position         `json:"position"`
 	Types          []string         `json:"types,omitempty"`
 	Branches       []string         `json:"branches,omitempty"`
 	BranchesIgnore []string         `json:"branches_ignore,omitempty"`

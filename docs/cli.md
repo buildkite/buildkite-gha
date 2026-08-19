@@ -26,7 +26,7 @@ Validate syntax, the static graph, and every declared trigger without an event:
 buildkite-gha validate .github/workflows/ci.yml
 ```
 
-This event-independent check accepts syntactically valid push and pull-request path filters because linked-webhook admission can evaluate them with a verified local git diff. It rejects malformed path filters, unsupported events, unsupported branch and tag filter combinations, and unsupported pull-request activity types. It does not resolve actions, evaluate event payload expressions, or claim hosted admission.
+This event-independent check accepts syntactically valid push and pull-request path filters because linked-webhook admission can evaluate them with a verified local git diff. It rejects malformed path filters, unsupported branch and tag filter combinations, unsupported pull-request activity types, and workflows whose only triggers are unsupported events. An unsupported event beside a supported trigger produces a `W_TRIGGER_EVENT_UNSUPPORTED` warning; see [Names and triggers](compatibility.md#names-and-triggers). It does not resolve actions, evaluate event payload expressions, or claim hosted admission.
 
 Resolve actions and apply production policy:
 
@@ -136,7 +136,7 @@ Reports cover workflow parsing, event validation, graph construction, matrix exp
 
 Report warnings and errors become job-scoped Buildkite annotations. `validate`, `compile`, and upload failures that abort the transaction attach them to the current job. Generated failure steps attach their diagnostics to themselves. CLI-side annotation failures produce a warning but do not change the command result.
 
-Profile validation applies the upload trigger policy before compilation. A `not-applicable` result means the workflow does not declare the selected event and would become a top-level skipped step during upload. Unsupported triggers and malformed data are incompatible.
+Profile validation applies the upload trigger policy before compilation. A `not-applicable` result means the workflow does not declare the selected event and would become a top-level skipped step during upload. Malformed event data is incompatible. An unsupported trigger beside a supported event is ignored with a warning.
 
 Validation may use the public network to resolve actions. Apart from annotation publication when it runs in a Buildkite job, it does not call Buildkite, install Node, or execute workflow code.
 

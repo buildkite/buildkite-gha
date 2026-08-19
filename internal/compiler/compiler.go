@@ -356,6 +356,17 @@ func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string
 
 func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warning {
 	var warnings []Warning
+	for _, trigger := range parsed.Triggers {
+		if buildkitepipeline.SupportedTriggerEvent(trigger.Event) {
+			continue
+		}
+		warnings = append(warnings, Warning{
+			Code:    "W_TRIGGER_EVENT_UNSUPPORTED",
+			Line:    trigger.Position.Line,
+			Column:  trigger.Position.Column,
+			Message: fmt.Sprintf("on.%s has no Buildkite build source; this trigger is ignored and never starts a build", trigger.Event),
+		})
+	}
 	if parsed.Concurrency != nil && cancelInProgress {
 		position := parsed.Concurrency.CancelInProgressPosition
 		warnings = append(warnings, Warning{

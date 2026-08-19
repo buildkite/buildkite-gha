@@ -76,7 +76,13 @@ func TestRunValidateAndCompile(t *testing.T) {
 				for _, stage := range report.Stages {
 					pipelineFailed = pipelineFailed || stage.ID == string(compiler.StagePipeline) && stage.Result == compatibility.Failed
 				}
-				if report.Result != "incompatible" || !pipelineFailed || len(report.Diagnostics) != 1 || report.Diagnostics[0].Stage != string(compiler.StagePipeline) || !strings.Contains(report.Diagnostics[0].Message+report.Diagnostics[0].Detail, test.want) {
+				var failures []compatibility.Diagnostic
+				for _, diagnostic := range report.Diagnostics {
+					if diagnostic.Level == "error" {
+						failures = append(failures, diagnostic)
+					}
+				}
+				if report.Result != "incompatible" || !pipelineFailed || len(failures) != 1 || failures[0].Stage != string(compiler.StagePipeline) || !strings.Contains(failures[0].Message+failures[0].Detail, test.want) {
 					t.Fatalf("report = %#v, want trigger failure containing %q", report, test.want)
 				}
 			})
@@ -366,22 +372,77 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
-	t.Run("validate hosted profile applies upload trigger policy", func(t *testing.T) {
+	t.Run("validate hosted profile skips a workflow with only unsupported trigger events", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "issues.yml")
 		if err := os.WriteFile(workflow, []byte("on: issues\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
 		args := []string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflow}
-		if code := Run(args, &stdout, &stderr, "dev"); code != 1 {
-			t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+		if code := Run(args, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
 		var report compatibility.ProcessingReport
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodePipelineGeneration || !strings.Contains(report.Diagnostics[0].Message, `unsupported GitHub trigger event "issues"`) {
+		if report.Result != "not-applicable" || report.Compile.Result != compatibility.NotEvaluated || report.Admission.Result != compatibility.NotEvaluated {
 			t.Fatalf("profile trigger report = %#v", report)
+		}
+	})
+
+	t.Run("validate hosted profile ignores unsupported trigger events beside a supported one", func(t *testing.T) {
+		workflow := filepath.Join(t.TempDir(), "mixed.yml")
+		if err := os.WriteFile(workflow, []byte("on: [push, issues, pull_request_target]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		args := []string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflow}
+		if code := Run(args, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		var report compatibility.ProcessingReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Result != "admitted" {
+			t.Fatalf("mixed trigger report = %#v", report)
+		}
+		warned := false
+		for _, diagnostic := range report.Diagnostics {
+			if diagnostic.Level == "error" {
+				t.Fatalf("unexpected error diagnostic %#v", diagnostic)
+			}
+			warned = warned || diagnostic.Code == "W_TRIGGER_EVENT_UNSUPPORTED"
+		}
+		if !warned {
+			t.Fatalf("mixed trigger report missing unsupported-trigger warning: %#v", report)
+		}
+	})
+
+	t.Run("validate hosted profile keeps unsupported-trigger warnings in a not-applicable report", func(t *testing.T) {
+		workflow := filepath.Join(t.TempDir(), "cross-event.yml")
+		if err := os.WriteFile(workflow, []byte("on: [pull_request, issues]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		args := []string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflow}
+		if code := Run(args, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		var report compatibility.ProcessingReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Result != "not-applicable" {
+			t.Fatalf("cross-event report = %#v", report)
+		}
+		warned := false
+		for _, diagnostic := range report.Diagnostics {
+			warned = warned || diagnostic.Code == "W_TRIGGER_EVENT_UNSUPPORTED"
+		}
+		if !warned {
+			t.Fatalf("not-applicable report missing unsupported-trigger warning: %#v", report)
 		}
 	})
 
