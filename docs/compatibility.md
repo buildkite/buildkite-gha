@@ -33,7 +33,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64 with `ubuntu-latest`, `ubuntu-24.04`, or `ubuntu-22.04`. Its Agent API resolves single macOS labels to native macOS arm64 hosted queues before local runner mappings. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
-| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash` and `sh`. |
+| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, and `python`. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local workflows with static inputs and direct job-output mappings. Secret forwarding is unsupported. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile actions on Linux only. |
@@ -255,7 +255,7 @@ Jobs expanded from local reusable workflows use the top-level requesting workflo
 | Key | Status | Behavior |
 | --- | --- | --- |
 | `env` | 🟡 Supported subset | Workflow, job, and step maps use normal precedence; the most specific value wins. Individual values may use supported interpolation. An entire map cannot be expression-valued. |
-| `defaults.run.shell` | 🟡 Supported subset | Supported at workflow and job level. Only `bash` and `sh` are supported. Host jobs default to `bash`; job containers default to `sh`. |
+| `defaults.run.shell` | 🟡 Supported subset | Supported at workflow and job level. Only `bash`, `sh`, and `python` are supported. Host jobs default to `bash`; job containers default to `sh`. |
 | `defaults.run.working-directory` | 🟡 Supported subset | Supported at workflow and job level for workspace-relative paths. |
 
 A job-level value overrides the same workflow-level environment variable:
@@ -469,7 +469,7 @@ A step can continue after failure and expose its outcome to a later condition:
 
 ### Commands and actions
 
-**🟡 Supported subset.** Commands run in `bash` or `sh` within the Linux or macOS workspace. PowerShell, Python as a shell, Windows shells, and custom shell templates are unsupported. Working directories cannot escape the workspace.
+**🟡 Supported subset.** Commands run in `bash`, `sh`, or `python` within the Linux or macOS workspace. PowerShell, Windows shells, and custom shell templates are unsupported. Working directories cannot escape the workspace. The runner or job container must provide the selected shell on `PATH`.
 
 A shell step can specify its shell and workspace-relative working directory:
 
@@ -625,7 +625,7 @@ Matrices, runner labels, names, concurrency groups, and event-backed conditions 
 | Public `owner/repo[/path]@ref` action | 🟡 Supported subset | Resolved to an exact commit and digest. |
 | Private action | ❌ Unsupported | No private action source access. |
 | JavaScript action | ✅ Supported | Declares `node16`, `node20`, or `node24`. |
-| Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; `bash` or `sh` for `run`; literal `continue-on-error`. |
+| Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; `bash`, `sh`, or `python` for `run`; literal `continue-on-error`. |
 | Dockerfile action | 🟡 Supported subset | Verified local or public Dockerfile action on Linux. Rejected on macOS, including through a composite action. |
 | `docker://` action | ❌ Unsupported | Rejected during validation. |
 | Top-level action metadata `env` | ➖ Accepted, no effect | Any valid YAML value is discarded. It is not evaluated, injected, retained in plans, or used to request secrets or tokens. |

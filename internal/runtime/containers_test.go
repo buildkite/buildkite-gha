@@ -687,6 +687,42 @@ func TestRunJobContainerDefaultsRunStepsToSh(t *testing.T) {
 	t.Fatal("default-shell container exec call not found")
 }
 
+func TestRunJobContainerPythonShellUsesMountedScript(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	j := jobContainerPlan(t, workspace, []plan.Step{{
+		ID:    "python",
+		Kind:  "run",
+		Shell: "python",
+		Command: `import os
+with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+    output.write(f"script={__file__}\n")
+`,
+	}})
+	j.Outputs = map[string]string{"script": "${{ steps.python.outputs.script }}"}
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), j, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if script := result.Outputs["script"]; !strings.HasSuffix(script, ".py") {
+		t.Fatalf("container Python script path = %q, want .py suffix", script)
+	} else if _, err := os.Stat(script); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary Python script remains at %q: %v", script, err)
+	}
+	for _, call := range f.calls(t) {
+		i := slices.Index(call.Args, ContainerProcessHelperCommand)
+		if i < 0 || len(call.Args) < i+5 || call.Args[i+3] != "python" {
+			continue
+		}
+		script := call.Args[i+4]
+		if !strings.HasPrefix(script, jobContainerTemp+"/buildkite-gha-shell-") || !strings.HasSuffix(script, ".py") {
+			t.Fatalf("container Python argv = %#v", call.Args[i+3:])
+		}
+		return
+	}
+	t.Fatal("Python container exec call not found")
+}
+
 func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 	t.Parallel()
 

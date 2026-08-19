@@ -5019,6 +5019,66 @@ runs:
 	}
 }
 
+func TestRunJobPythonShellUsesTemporaryScript(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:    "python",
+		Kind:  "run",
+		Shell: "python",
+		Command: `import os
+from pathlib import Path
+
+assert Path.cwd() == Path(os.environ["GITHUB_WORKSPACE"])
+assert Path(__file__).suffix == ".py"
+with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+    output.write(f"script={__file__}\n")
+`,
+	}})
+	job.Outputs = map[string]string{"script": "${{ steps.python.outputs.script }}"}
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	script := result.Outputs["script"]
+	if !strings.HasSuffix(script, ".py") {
+		t.Fatalf("Python script path = %q, want .py suffix", script)
+	}
+	if _, err := os.Stat(script); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary Python script remains at %q: %v", script, err)
+	}
+}
+
+func TestCompositePythonShell(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", `name: Python composite
+outputs:
+  value:
+    value: ${{ steps.python.outputs.value }}
+runs:
+  using: composite
+  steps:
+    - id: python
+      shell: python
+      run: |
+        import os
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write("value=python-composite\n")
+`)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
+	job.Outputs = map[string]string{"value": "${{ steps.composite.outputs.value }}"}
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	if result.Outputs["value"] != "python-composite" {
+		t.Fatalf("RunJob() output = %q, want python-composite", result.Outputs["value"])
+	}
+}
+
 func TestCompositeStepWorkingDirectoryEvaluatesExpressions(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
