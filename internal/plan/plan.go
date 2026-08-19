@@ -83,14 +83,15 @@ type ActionSelector struct {
 }
 
 type ActionLock struct {
-	ID           string                    `json:"id"`
-	Source       string                    `json:"source"`
-	Repository   string                    `json:"repository,omitempty"`
-	RequestedRef string                    `json:"requested_ref,omitempty"`
-	Commit       string                    `json:"commit,omitempty"`
-	Path         string                    `json:"path,omitempty"`
-	SourceDigest string                    `json:"source_digest"`
-	Children     map[string]ActionSelector `json:"children,omitempty"`
+	ID             string                    `json:"id"`
+	Source         string                    `json:"source"`
+	Repository     string                    `json:"repository,omitempty"`
+	RequestedRef   string                    `json:"requested_ref,omitempty"`
+	Commit         string                    `json:"commit,omitempty"`
+	Path           string                    `json:"path,omitempty"`
+	WorkspaceAlias string                    `json:"workspace_alias,omitempty"`
+	SourceDigest   string                    `json:"source_digest"`
+	Children       map[string]ActionSelector `json:"children,omitempty"`
 }
 
 type Compiler struct {
@@ -1211,6 +1212,12 @@ func validateActionLocks(job Job) error {
 		if err := validateLockIdentity(lock); err != nil {
 			return fmt.Errorf("action lock %q: %w", lock.ID, err)
 		}
+		if lock.WorkspaceAlias != "" {
+			remote := job.Workflow.Remote
+			if remote == nil || lock.Repository != remote.Repository || lock.RequestedRef != remote.RequestedRef || lock.Commit != remote.Commit || lock.SourceDigest != remote.SourceDigest {
+				return fmt.Errorf("action lock %q workspace alias does not match remote workflow provenance", lock.ID)
+			}
+		}
 		for uses, child := range lock.Children {
 			if len(uses) == 0 || len(uses) > 2048 || !utf8.ValidString(uses) || hasControl(uses) || !actionLockIDPattern.MatchString(child.Lock) {
 				return fmt.Errorf("action lock %q has invalid child selector", lock.ID)
@@ -1296,11 +1303,11 @@ func validateActionLocks(job Job) error {
 func validateLockIdentity(lock ActionLock) error {
 	switch lock.Source {
 	case "workspace":
-		if lock.Repository != "" || lock.RequestedRef != "" || lock.Commit != "" || lock.Path != "" && !cleanActionPath(lock.Path) {
+		if lock.Repository != "" || lock.RequestedRef != "" || lock.Commit != "" || lock.WorkspaceAlias != "" || lock.Path != "" && !cleanActionPath(lock.Path) {
 			return fmt.Errorf("invalid workspace identity")
 		}
 	case "github":
-		if lock.Repository == "" || len(lock.Repository) > 140 || lock.Repository != strings.ToLower(lock.Repository) || lock.RequestedRef == "" || len(lock.RequestedRef) > 1024 || !utf8.ValidString(lock.RequestedRef) || hasControl(lock.RequestedRef) || !commitPattern.MatchString(lock.Commit) || lock.Path != "" && !cleanActionPath(lock.Path) {
+		if lock.Repository == "" || len(lock.Repository) > 140 || lock.Repository != strings.ToLower(lock.Repository) || lock.RequestedRef == "" || len(lock.RequestedRef) > 1024 || !utf8.ValidString(lock.RequestedRef) || hasControl(lock.RequestedRef) || !commitPattern.MatchString(lock.Commit) || lock.Path != "" && !cleanActionPath(lock.Path) || lock.WorkspaceAlias != "" && (lock.Path == "" || !cleanActionPath(lock.WorkspaceAlias)) {
 			return fmt.Errorf("invalid GitHub identity")
 		}
 		r, err := source.Parse(lock.Repository + "@x")
@@ -1316,7 +1323,16 @@ func validateLockIdentity(lock ActionLock) error {
 func validateTopLevelIdentity(uses string, lock ActionLock) error {
 	if strings.HasPrefix(uses, "./") {
 		path := strings.TrimPrefix(uses, "./")
-		if lock.Source != "workspace" || path != "" && !cleanActionPath(path) || lock.Path != path {
+		if path != "" && !cleanActionPath(path) {
+			return fmt.Errorf("local action reference does not match lock identity")
+		}
+		if lock.WorkspaceAlias != "" {
+			if lock.Source != "github" || path != lock.WorkspaceAlias+"/"+lock.Path {
+				return fmt.Errorf("local action reference does not match source-backed workspace identity")
+			}
+			return nil
+		}
+		if lock.Source != "workspace" || lock.Path != path {
 			return fmt.Errorf("local action reference does not match lock identity")
 		}
 		return nil
@@ -1331,7 +1347,16 @@ func validateTopLevelIdentity(uses string, lock ActionLock) error {
 func validateChildIdentity(parent ActionLock, uses string, child ActionLock) error {
 	if strings.HasPrefix(uses, "./") {
 		path := strings.TrimPrefix(uses, "./")
-		if path != "" && !cleanActionPath(path) || child.Source != "workspace" || child.Path != path {
+		if path != "" && !cleanActionPath(path) {
+			return fmt.Errorf("local child does not match workspace action identity")
+		}
+		if child.WorkspaceAlias != "" {
+			if parent.Source != "github" || child.Source != "github" || parent.Repository != child.Repository || parent.Commit != child.Commit || parent.SourceDigest != child.SourceDigest || path != child.WorkspaceAlias+"/"+child.Path {
+				return fmt.Errorf("local child does not match source-backed workspace identity")
+			}
+			return nil
+		}
+		if child.Source != "workspace" || child.Path != path {
 			return fmt.Errorf("local child does not match workspace action identity")
 		}
 		return nil

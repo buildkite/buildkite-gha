@@ -203,6 +203,62 @@ func TestRepositoryProviderCheckoutCredentialArgsUseProviderHost(t *testing.T) {
 	}
 }
 
+func TestRemoteWorkflowCheckoutInputsBindImmutableSource(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	job := plan.Job{
+		Workflow: plan.Workflow{Remote: &plan.RemoteWorkflowSource{
+			Repository: "slsa-framework/slsa-github-generator", RequestedRef: "v2.1.0", Commit: commit,
+		}},
+		Event: plan.Event{Repository: "owner/caller"},
+		Actions: []plan.ActionLock{{
+			Source: "github", Repository: "slsa-framework/slsa-github-generator", RequestedRef: "v2.1.0", Commit: commit,
+			Path: ".github/actions/privacy-check", WorkspaceAlias: "__BUILDER_CHECKOUT_DIR__",
+		}},
+	}
+	inputs := map[string]string{
+		"repository":          "slsa-framework/slsa-github-generator",
+		"ref":                 "refs/tags/v2.1.0",
+		"path":                "__BUILDER_CHECKOUT_DIR__",
+		"token":               "discarded-secret",
+		"persist-credentials": "false",
+		"fetch-depth":         "1",
+	}
+	normalized, pinnedRef, remote, err := remoteWorkflowCheckoutInputs(job, actionintegration.CheckoutV4Commit, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !remote || pinnedRef != "refs/tags/v2.1.0" || checkoutInput(normalized, "repository") != job.Workflow.Remote.Repository || checkoutInput(normalized, "ref") != commit || checkoutInput(normalized, "path") != "__BUILDER_CHECKOUT_DIR__" {
+		t.Fatalf("remote checkout binding = %#v, %q, %t", normalized, pinnedRef, remote)
+	}
+	if checkoutInput(normalized, "token") != "" || inputs["token"] != "discarded-secret" {
+		t.Fatalf("remote checkout token handling mutated source or retained token: normalized=%#v source=%#v", normalized, inputs)
+	}
+	sameRepositoryJob := job
+	sameRepositoryJob.Event.Repository = job.Workflow.Remote.Repository
+	_, _, sameRepositoryRemote, err := remoteWorkflowCheckoutInputs(sameRepositoryJob, actionintegration.CheckoutV4Commit, inputs)
+	if err != nil || !sameRepositoryRemote {
+		t.Fatalf("same-repository remote checkout binding = %t, %v", sameRepositoryRemote, err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		inputs map[string]string
+		remote bool
+		want   string
+	}{
+		{name: "other repository remains unsupported", inputs: map[string]string{"repository": "other/repository"}},
+		{name: "different ref", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "refs/tags/v2.2.0", "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "does not match immutable workflow provenance"},
+		{name: "unbound path", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "v2.1.0", "path": "other"}, remote: true, want: "does not match a source-backed local action"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, gotRemote, err := remoteWorkflowCheckoutInputs(job, actionintegration.CheckoutV4Commit, test.inputs)
+			if gotRemote != test.remote || test.want == "" && err != nil || test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("remoteWorkflowCheckoutInputs() remote/error = %t, %v, want %t / %q", gotRemote, err, test.remote, test.want)
+			}
+		})
+	}
+}
+
 func TestOriginCheckoutUsesExactRemoteAndCredentialHost(t *testing.T) {
 	workspace := t.TempDir()
 	sha := strings.Repeat("a", 40)

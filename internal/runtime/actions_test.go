@@ -405,3 +405,109 @@ runs:
 		t.Fatalf("materializer calls/resolved = %d / %#v", materializer.calls, materializer.resolved)
 	}
 }
+
+func TestRunJobRemoteCompositeUsesSourceBackedWorkspaceActionAfterPopulation(t *testing.T) {
+	workspace := t.TempDir()
+	remote := t.TempDir()
+	generateBuilder := filepath.Join(remote, ".github", "actions", "generate-builder")
+	privacyCheck := filepath.Join(remote, ".github", "actions", "privacy-check")
+	if err := os.MkdirAll(generateBuilder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(privacyCheck, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(generateBuilder, "action.yml"), []byte(`name: Generate builder
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: |
+        mkdir -p "$GITHUB_WORKSPACE/__BUILDER_CHECKOUT_DIR__/.github/actions/privacy-check"
+        cp -R "$GITHUB_ACTION_PATH/../privacy-check/." "$GITHUB_WORKSPACE/__BUILDER_CHECKOUT_DIR__/.github/actions/privacy-check/"
+    - uses: ./__BUILDER_CHECKOUT_DIR__/.github/actions/privacy-check
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(privacyCheck, "action.yml"), []byte(`name: Privacy check
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: |
+        echo SOURCE_BACKED_LOCAL_ACTION=seen >> "$GITHUB_ENV"
+        echo SOURCE_BACKED_ACTION_PATH="$GITHUB_ACTION_PATH" >> "$GITHUB_ENV"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	remoteDigest := digestTree(t, remote)
+	commit := strings.Repeat("a", 40)
+	workflowDigest := "sha256:" + strings.Repeat("b", 64)
+	rootID, childID := "a-0000000000000001", "a-0000000000000002"
+	requiresMise := false
+	job := plan.Job{
+		Schema: plan.Schema,
+		Compiler: plan.Compiler{
+			Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64),
+		},
+		Runtime: &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
+		Workflow: plan.Workflow{
+			Path: "slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0", Digest: workflowDigest, LogicalJobID: "call-remote.generator",
+			Remote: &plan.RemoteWorkflowSource{Repository: "slsa-framework/slsa-github-generator", RequestedRef: "v2.1.0", Commit: commit, SourceDigest: remoteDigest},
+		},
+		Event: plan.Event{
+			Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64), Repository: "owner/project", SHA: strings.Repeat("c", 40),
+		},
+		Target:               plan.Target{StepKey: "gha-call-remote-generator", Queue: "trusted"},
+		RequiredCapabilities: []string{"network"},
+		Steps: []plan.Step{{
+			ID: "generate-builder", Kind: "uses", Uses: "slsa-framework/slsa-github-generator/.github/actions/generate-builder@v2.1.0", Action: &plan.ActionSelector{Lock: rootID},
+		}},
+		Actions: []plan.ActionLock{
+			{
+				ID: rootID, Source: "github", Repository: "slsa-framework/slsa-github-generator", RequestedRef: "v2.1.0", Commit: commit,
+				Path: ".github/actions/generate-builder", SourceDigest: remoteDigest,
+				Children: map[string]plan.ActionSelector{"./__BUILDER_CHECKOUT_DIR__/.github/actions/privacy-check": {Lock: childID}},
+			},
+			{
+				ID: childID, Source: "github", Repository: "slsa-framework/slsa-github-generator", RequestedRef: "v2.1.0", Commit: commit,
+				Path: ".github/actions/privacy-check", WorkspaceAlias: "__BUILDER_CHECKOUT_DIR__", SourceDigest: remoteDigest,
+			},
+		},
+		RequiresMise: &requiresMise,
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: remoteDigest}}
+	result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	if result.Conclusion != "success" || result.Env["SOURCE_BACKED_LOCAL_ACTION"] != "seen" || result.Env["SOURCE_BACKED_ACTION_PATH"] != privacyCheck {
+		t.Fatalf("RunJob() result = %#v", result)
+	}
+}
+
+func TestSourceBackedWorkspaceActionRequiresPopulatedPath(t *testing.T) {
+	lock := plan.ActionLock{WorkspaceAlias: "checked-out", Path: ".github/actions/privacy-check"}
+	if err := verifySourceBackedWorkspaceAction(t.TempDir(), lock, t.TempDir()); err == nil || !strings.Contains(err.Error(), "is unavailable in the workspace") {
+		t.Fatalf("verifySourceBackedWorkspaceAction() error = %v", err)
+	}
+}
+
+func TestSourceBackedWorkspaceActionRejectsTamperedPath(t *testing.T) {
+	workspace := t.TempDir()
+	sourcePath := t.TempDir()
+	localPath := filepath.Join(workspace, "checked-out", ".github", "actions", "privacy-check")
+	if err := os.MkdirAll(localPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourcePath, "action.yml"), []byte("name: immutable\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localPath, "action.yml"), []byte("name: tampered\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lock := plan.ActionLock{WorkspaceAlias: "checked-out", Path: ".github/actions/privacy-check"}
+	if err := verifySourceBackedWorkspaceAction(workspace, lock, sourcePath); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("verifySourceBackedWorkspaceAction() error = %v", err)
+	}
+}

@@ -1622,6 +1622,11 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandProc
 	if err != nil {
 		return result, err
 	}
+	if lock.WorkspaceAlias != "" {
+		// Source-backed local actions stay lazy until an earlier composite step
+		// has populated their caller-workspace path.
+		return result, nil
+	}
 	// The native adapters replace the verified action's lifecycle as one
 	// indivisible operation, so upstream metadata never classifies and no
 	// upstream cleanup is registered for phases this runtime never executes.
@@ -1866,6 +1871,11 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 			return result, err
 		}
 		action, actionLock = resolvedAction, &lock
+		if lock.WorkspaceAlias != "" {
+			if err := verifySourceBackedWorkspaceAction(workspace, lock, action.Path); err != nil {
+				return result, err
+			}
+		}
 		if usesCheckoutAdapter(lock) {
 			inputs := evaluatedWith
 			if inputs == nil {
@@ -2066,6 +2076,30 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 		return result, err
 	}
 	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
+}
+
+func verifySourceBackedWorkspaceAction(workspace string, lock plan.ActionLock, sourcePath string) error {
+	localPath := lock.WorkspaceAlias + "/" + lock.Path
+	resolved, err := workspacePath(workspace, localPath)
+	if err != nil {
+		return fmt.Errorf("source-backed local action %q: %w", localPath, err)
+	}
+	info, err := os.Lstat(resolved)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("source-backed local action %q is unavailable in the workspace", localPath)
+	}
+	want, err := actionsource.DigestTree(sourcePath)
+	if err != nil {
+		return fmt.Errorf("digest immutable source-backed local action %q: %w", localPath, err)
+	}
+	got, err := actionsource.DigestTree(resolved)
+	if err != nil {
+		return fmt.Errorf("digest workspace source-backed local action %q: %w", localPath, err)
+	}
+	if got != want {
+		return fmt.Errorf("source-backed local action %q digest mismatch: immutable source has %s, workspace has %s", localPath, want, got)
+	}
+	return nil
 }
 
 func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionLock *plan.ActionLock, actionStack []string) (Result, error) {

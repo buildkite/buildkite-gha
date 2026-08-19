@@ -207,6 +207,158 @@ jobs:
 	}
 }
 
+func TestCompileSLSARemoteWorkflowLocksSourceCheckedLocalActions(t *testing.T) {
+	callerRoot := t.TempDir()
+	callerPath := writeWorkflow(t, callerRoot, "caller.yml", `on: push
+jobs:
+  hash:
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - id: hash
+        run: echo hashes=c2hhMjU2ICBzdWJqZWN0Cg== >> "$GITHUB_OUTPUT"
+  call-remote:
+    needs: hash
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.hash.outputs.hashes }}
+`)
+	remoteRoot := t.TempDir()
+	writeWorkflow(t, remoteRoot, "generator_generic_slsa3.yml", `on:
+  workflow_call:
+    inputs:
+      base64-subjects:
+        required: false
+        type: string
+jobs:
+  detect-env:
+    runs-on: ubuntu-latest
+    outputs:
+      repository: ${{ steps.detect.outputs.repository }}
+      ref: ${{ steps.detect.outputs.ref }}
+    steps:
+      - id: detect
+        run: |
+          echo repository=slsa-framework/slsa-github-generator >> "$GITHUB_OUTPUT"
+          echo ref=refs/tags/v2.1.0 >> "$GITHUB_OUTPUT"
+  generator:
+    needs: detect-env
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate builder
+        uses: slsa-framework/slsa-github-generator/.github/actions/generate-builder@v2.1.0
+        with:
+          repository: ${{ needs.detect-env.outputs.repository }}
+          ref: ${{ needs.detect-env.outputs.ref }}
+      - name: Run source-checked local action
+        uses: ./__BUILDER_CHECKOUT_DIR__/.github/actions/compute-sha256
+      - env:
+          UNTRUSTED_SUBJECTS: ${{ inputs.base64-subjects }}
+        run: test -n "$UNTRUSTED_SUBJECTS"
+`)
+	writeAction(t, remoteRoot, ".github/actions/generate-builder", `name: Generate builder
+inputs:
+  repository:
+    required: true
+  ref:
+    required: true
+  token:
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - uses: slsa-framework/slsa-github-generator/.github/actions/secure-builder-checkout@v2.1.0
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.ref }}
+        path: __BUILDER_CHECKOUT_DIR__
+    - uses: ./__BUILDER_CHECKOUT_DIR__/.github/actions/privacy-check
+      with:
+        token: ${{ inputs.token }}
+    - uses: ./__BUILDER_CHECKOUT_DIR__/.github/actions/compute-sha256
+`)
+	writeAction(t, remoteRoot, ".github/actions/secure-builder-checkout", `name: Secure builder checkout
+inputs:
+  repository:
+    required: true
+  ref:
+    required: true
+  path:
+    required: true
+  token:
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.ref }}
+        token: ${{ inputs.token }}
+        path: ${{ inputs.path }}
+        persist-credentials: false
+        fetch-depth: 1
+`)
+	writeAction(t, remoteRoot, ".github/actions/privacy-check", "name: Privacy check\ninputs:\n  token: {}\nruns:\n  using: node20\n  main: index.js\n")
+	writeAction(t, remoteRoot, ".github/actions/compute-sha256", "name: Compute SHA256\nruns:\n  using: node20\n  main: index.js\n")
+	for _, actionPath := range []string{"privacy-check", "compute-sha256"} {
+		if err := os.WriteFile(filepath.Join(remoteRoot, ".github", "actions", actionPath, "index.js"), []byte("console.log('ok')\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkoutRoot := t.TempDir()
+	writeAction(t, checkoutRoot, "", "name: Checkout\nruns:\n  using: node20\n  main: index.js\n")
+	fake := newFakeReusableRepositorySource(t, map[string]string{
+		"slsa-framework/slsa-github-generator": remoteRoot,
+		"actions/checkout":                     checkoutRoot,
+	})
+	fake.commits["actions/checkout"] = "11bd71901bbe5b1630ceea73d27597364c9af683"
+	shared := MemoizeRepositorySource(fake)
+	options := defaultOptions()
+	options.RepositorySource = shared
+	options.ResolveActions = true
+	options.ActionSource = shared
+
+	plans, err := compilePlansForTest(t.Context(), callerPath, readFile(t, callerPath), pushEvent(t), "0.0.0-test", testDistributionDigest, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 3 {
+		t.Fatalf("plans = %d, want producer, detector, and generator", len(plans))
+	}
+	var generator plan.Job
+	for _, job := range plans {
+		if job.Workflow.LogicalJobID == "call-remote.generator" {
+			generator = job
+		}
+	}
+	if generator.Workflow.Remote == nil || generator.Workflow.Remote.Repository != "slsa-framework/slsa-github-generator" {
+		t.Fatalf("generator remote provenance = %#v", generator.Workflow.Remote)
+	}
+	deferred, ok := generator.DeferredInputs["base64-subjects"]
+	if !ok || len(deferred.Sources) != 1 || len(deferred.Outputs) != 1 || deferred.Outputs[0].Output != "hashes" {
+		t.Fatalf("generator deferred input = %#v", generator.DeferredInputs)
+	}
+	aliases := map[string]string{}
+	for _, lock := range generator.Actions {
+		if lock.WorkspaceAlias == "" {
+			continue
+		}
+		if lock.Source != "github" || lock.Repository != generator.Workflow.Remote.Repository || lock.RequestedRef != generator.Workflow.Remote.RequestedRef || lock.Commit != generator.Workflow.Remote.Commit || lock.SourceDigest != generator.Workflow.Remote.SourceDigest {
+			t.Fatalf("source-backed local action lost provenance: %#v", lock)
+		}
+		aliases[lock.Path] = lock.WorkspaceAlias
+	}
+	wantAlias := "__BUILDER_CHECKOUT_DIR__"
+	if aliases[".github/actions/privacy-check"] != wantAlias || aliases[".github/actions/compute-sha256"] != wantAlias {
+		t.Fatalf("source-backed local action aliases = %#v", aliases)
+	}
+	if _, err := os.Lstat(filepath.Join(callerRoot, wantAlias)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("caller workspace unexpectedly contains builder checkout: %v", err)
+	}
+}
+
 func TestCompilePinsRemoteWorkflowAndActionToOneCommit(t *testing.T) {
 	callerRoot := t.TempDir()
 	callerPath := writeWorkflow(t, callerRoot, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: owner/repository/.github/workflows/ci.yml@v1\n")

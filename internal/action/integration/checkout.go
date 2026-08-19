@@ -137,7 +137,7 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 				continue
 			}
 		case "ref":
-			if value == "" || ValidCheckoutSHA(value) || validCheckoutBranch(value) {
+			if value == "" || ValidCheckoutSHA(value) || ValidCheckoutBranch(value) {
 				continue
 			}
 		case "persist-credentials":
@@ -170,7 +170,7 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 				continue
 			}
 		case "path":
-			if value == "" || validCheckoutPath(value) {
+			if value == "" || ValidCheckoutPath(value) {
 				continue
 			}
 		case "ssh-key", "ssh-known-hosts", "sparse-checkout":
@@ -199,7 +199,8 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 	return nil
 }
 
-func validCheckoutBranch(value string) bool {
+// ValidCheckoutBranch reports whether value is a bounded branch-like Git ref.
+func ValidCheckoutBranch(value string) bool {
 	if strings.HasPrefix(value, "refs/heads/") {
 		value = strings.TrimPrefix(value, "refs/heads/")
 	} else if strings.HasPrefix(value, "refs/") {
@@ -243,6 +244,7 @@ func ValidCheckoutSHA(value string) bool {
 	return true
 }
 
-func validCheckoutPath(value string) bool {
+// ValidCheckoutPath reports whether value is one safe top-level checkout directory.
+func ValidCheckoutPath(value string) bool {
 	return len(value) <= 255 && value != "." && value != ".." && !strings.EqualFold(value, ".git") && !strings.Contains(value, "/") && !strings.Contains(value, "\\") && !strings.ContainsAny(value, "\r\n\x00") && filepath.IsLocal(value)
 }

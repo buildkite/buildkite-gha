@@ -73,6 +73,58 @@ func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 	}
 }
 
+func TestSourceBackedWorkspaceActionRequiresRemoteWorkflowProvenance(t *testing.T) {
+	job := validJob()
+	commit := strings.Repeat("a", 40)
+	digest := "sha256:" + strings.Repeat("b", 64)
+	job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v1"
+	job.Workflow.Remote = &RemoteWorkflowSource{Repository: "owner/repository", RequestedRef: "v1", Commit: commit, SourceDigest: digest}
+	job.Steps = []Step{{ID: "remote", Kind: "uses", Uses: "owner/repository/root@v1", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Actions = []ActionLock{
+		{
+			ID: "a-0000000000000001", Source: "github", Repository: "owner/repository", RequestedRef: "v1", Commit: commit, Path: "root", SourceDigest: digest,
+			Children: map[string]ActionSelector{"./checked-out/.github/actions/privacy": {Lock: "a-0000000000000002"}},
+		},
+		{
+			ID: "a-0000000000000002", Source: "github", Repository: "owner/repository", RequestedRef: "v1", Commit: commit,
+			Path: ".github/actions/privacy", WorkspaceAlias: "checked-out", SourceDigest: digest,
+		},
+	}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJobPlanSchema(t, encoded)
+
+	tests := []struct {
+		name string
+		edit func(*Job)
+		want string
+	}{
+		{name: "missing remote workflow", edit: func(j *Job) { j.Workflow.Remote = nil }, want: "does not match remote workflow provenance"},
+		{name: "different commit", edit: func(j *Job) { j.Actions[1].Commit = strings.Repeat("c", 40) }, want: "does not match remote workflow provenance"},
+		{name: "workspace source", edit: func(j *Job) { j.Actions[1].Source = "workspace" }, want: "invalid workspace identity"},
+		{name: "different alias", edit: func(j *Job) { j.Actions[1].WorkspaceAlias = "other" }, want: "does not match source-backed workspace identity"},
+		{name: "different parent source", edit: func(j *Job) { j.Actions[0].SourceDigest = "sha256:" + strings.Repeat("d", 64) }, want: "does not match source-backed workspace identity"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := job
+			invalid.Actions = append([]ActionLock(nil), job.Actions...)
+			test.edit(&invalid)
+			if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	topLevel := job
+	topLevel.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./checked-out/.github/actions/privacy", Action: &ActionSelector{Lock: "a-0000000000000002"}}}
+	topLevel.Actions = []ActionLock{job.Actions[1]}
+	if err := topLevel.Validate(); err != nil {
+		t.Fatalf("Validate() top-level source-backed local action error = %v", err)
+	}
+}
+
 func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 	job := validJob()
 	digest := "sha256:" + strings.Repeat("1", 64)

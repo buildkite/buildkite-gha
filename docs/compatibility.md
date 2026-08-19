@@ -172,6 +172,8 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 **🟡 Supported subset.** Calls may use a local path or a literal public GitHub reference such as `owner/repository/.github/workflows/ci.yml@v1`. A public reference resolves once per operation to an immutable commit. Nested `./.github/workflows/...` calls resolve in that pinned repository.
 
+Like GitHub, a `./...` action inside a remote reusable workflow resolves in the caller job's workspace, not relative to the called workflow file. A remote workflow may check out its own pinned repository into a workspace subdirectory and then invoke a local action there. Buildkite binds that action to the called workflow's immutable repository source, rewrites the matching checkout to the exact commit, verifies the workspace copy against the source, and executes the verified source copy.
+
 **✅ Supported:**
 
 - Local `./.github/workflows/...` paths.
