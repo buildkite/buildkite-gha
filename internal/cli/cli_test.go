@@ -745,7 +745,7 @@ jobs:
 			t.Fatal(err)
 		}
 	}
-	t.Run("depth-limited reusable discovery fails closed before event metadata", func(t *testing.T) {
+	t.Run("depth-limited reusable discovery stops before event metadata", func(t *testing.T) {
 		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}
@@ -789,7 +789,7 @@ jobs:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Run("incomplete reusable discovery fails closed before event metadata", func(t *testing.T) {
+	t.Run("incomplete reusable discovery stops before event metadata", func(t *testing.T) {
 		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}

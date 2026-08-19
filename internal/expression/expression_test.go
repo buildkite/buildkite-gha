@@ -265,7 +265,7 @@ func TestActionInputDefaultRequiresGitHubTokenUsesProviderServerURL(t *testing.T
 		{name: "Origin skips GitHub.com token", template: "${{ github.server_url == 'https://github.com' && github.token || '' }}", serverURL: "https://origin.cursor.com"},
 		{name: "Origin reaches reverse guard", template: "${{ github.server_url != 'https://github.com' && github.token || '' }}", serverURL: "https://origin.cursor.com", want: true},
 		{name: "literal false skips token", template: "${{ false && github.token || '' }}", serverURL: "https://origin.cursor.com"},
-		{name: "unknown guard fails closed", template: "${{ inputs.use_token && github.token || '' }}", serverURL: "https://origin.cursor.com", want: true},
+		{name: "unknown guard requires token", template: "${{ inputs.use_token && github.token || '' }}", serverURL: "https://origin.cursor.com", want: true},
 		{name: "no token reference", template: "${{ github.server_url }}", serverURL: "https://origin.cursor.com"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -502,7 +502,7 @@ func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
 	}
 	for _, template := range []string{"${{ github }}", "${{ github.* }}", "${{ github.event.*.token }}"} {
 		if _, err := ReferencesGitHubToken(template); err == nil || !strings.Contains(err.Error(), "must name one static property") {
-			t.Fatalf("ReferencesGitHubToken(%q) error = %v, want fail-closed static-property rejection", template, err)
+			t.Fatalf("ReferencesGitHubToken(%q) error = %v, want static-property rejection", template, err)
 		}
 	}
 }
@@ -774,7 +774,7 @@ func TestEvaluateJobSurfacesSupportAuthorizedCompoundExpressions(t *testing.T) {
 	}
 }
 
-func TestEvaluateJobSurfacesFailClosed(t *testing.T) {
+func TestEvaluateJobSurfacesErrors(t *testing.T) {
 	context := Context{
 		GitHub: map[string]any{"token": "secret"},
 		Env:    map[string]string{"KEY": "TOKEN"},
@@ -1018,13 +1018,13 @@ func TestEvaluateActionLifecycleCondition(t *testing.T) {
 		{name: "rust-cache skips after failure when disabled", condition: "success() || env.CACHE_ON_FAILURE == 'true'", unsuccessful: true, env: map[string]string{"CACHE_ON_FAILURE": "false"}},
 		{name: "rust-cache runs after opted-in failure", condition: "success() || env.CACHE_ON_FAILURE == 'true'", unsuccessful: true, env: map[string]string{"CACHE_ON_FAILURE": "true"}, want: true},
 		{name: "rust-cache skips after cancellation", condition: "success() || env.CACHE_ON_FAILURE == 'true'", cancelled: true},
-		{name: "references fail closed", condition: "github.event_name == 'push'", wantErr: true},
+		{name: "unavailable references return errors", condition: "github.event_name == 'push'", wantErr: true},
 		{name: "compound status expression", condition: "success() || failure()", unsuccessful: true, want: true},
-		{name: "arguments fail closed", condition: "success('build')", wantErr: true},
-		{name: "unknown functions fail closed", condition: "finished()", wantErr: true},
-		{name: "unsupported lazy branch fails closed", condition: "success() || secrets.TOKEN != ''", wantErr: true},
-		{name: "unopened delimiter fails closed", condition: "failure() }}", wantErr: true},
-		{name: "unclosed delimiter fails closed", condition: "${{ failure()", wantErr: true},
+		{name: "arguments return errors", condition: "success('build')", wantErr: true},
+		{name: "unknown functions return errors", condition: "finished()", wantErr: true},
+		{name: "unsupported lazy branch returns error", condition: "success() || secrets.TOKEN != ''", wantErr: true},
+		{name: "unopened delimiter returns error", condition: "failure() }}", wantErr: true},
+		{name: "unclosed delimiter returns error", condition: "${{ failure()", wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1290,11 +1290,11 @@ func TestEvaluateConditionSupportsBracketFormGitHubReferences(t *testing.T) {
 	if _, err := EvaluateCondition("github['event_name'] == 'push'", ConditionContext{}); err == nil || !strings.Contains(err.Error(), "condition references unavailable value github.event_name") {
 		t.Fatalf("EvaluateCondition() without github context error = %v", err)
 	}
-	// Whole and dynamic github access fails closed at evaluation even
+	// Whole and dynamic github access returns an error at evaluation even
 	// without prior validation, such as composite-action if conditions.
 	for _, condition := range []string{"github", "github[vars.KEY]", "github.*"} {
 		if _, err := EvaluateCondition(condition, ConditionContext{GitHub: map[string]any{"event_name": "push"}, Vars: map[string]string{"KEY": "event_name"}}); err == nil {
-			t.Errorf("EvaluateCondition(%q) error = nil, want fail-closed error", condition)
+			t.Errorf("EvaluateCondition(%q) error = nil, want unsupported access error", condition)
 		}
 	}
 }
@@ -1671,7 +1671,7 @@ func TestCompileInputLiteralRepresentations(t *testing.T) {
 		{name: "float64 uses shortest form", value: 2.5, want: "2.5"},
 		{name: "aggregate values cannot be literals", value: []any{"x"}, wantErr: "cannot be represented"},
 		{name: "maps cannot be literals", value: map[string]any{"x": "y"}, wantErr: "cannot be represented"},
-		{name: "typed numerics outside the YAML model fail closed", value: int32(7), wantErr: "cannot be represented"},
+		{name: "typed numerics outside the YAML model are rejected", value: int32(7), wantErr: "cannot be represented"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

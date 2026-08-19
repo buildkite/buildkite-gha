@@ -1,6 +1,6 @@
 // Static reference introspection over templates, complete expressions, and
 // conditions. Each predicate deliberately answers one narrow question with
-// its own fail-closed behavior.
+// an error for unsupported input.
 package expression
 
 import (
@@ -19,7 +19,7 @@ type NeedOutputReference struct {
 
 // ReferencePath extracts one complete static variable reference. Dot and
 // literal string index access are accepted; functions, operators, literals,
-// compound templates, and dynamic indexes fail closed.
+// compound templates, and dynamic indexes return an error.
 func ReferencePath(text string) (string, []string, error) {
 	body, err := expressionBody(text)
 	if err != nil {
@@ -75,7 +75,7 @@ func runtimeMatrixIdentifier(value string) bool {
 }
 
 // SecretReferences returns the statically named secrets referenced by a
-// template. Dynamic indexes fail closed because the runtime cannot determine
+// template. Dynamic indexes return an error because the runtime cannot determine
 // which values to resolve and register with the log redactor before execution.
 func SecretReferences(template string) ([]string, error) {
 	found := map[string]struct{}{}
@@ -208,7 +208,7 @@ func sortedReferenceNames(found map[string]struct{}) []string {
 }
 
 // ReferencesGitHubToken reports whether a template statically references
-// github.token. Dynamic GitHub indexes fail closed so compiler-owned token
+// github.token. Dynamic GitHub indexes return an error so compiler-owned token
 // authority cannot depend on a runtime-selected property.
 func ReferencesGitHubToken(template string) (bool, error) {
 	found := false

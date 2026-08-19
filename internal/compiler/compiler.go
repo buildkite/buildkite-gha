@@ -888,7 +888,7 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 		Warnings: compilerWarnings(parsed, cancelInProgress),
 		Execution: ExecutionBoundary{
 			Supported: true,
-			Reason:    "run-job supports the fail-closed supported shell and local-action subset",
+			Reason:    "run-job rejects unsupported shells and local actions",
 		},
 		Jobs: expanded.instances,
 	}

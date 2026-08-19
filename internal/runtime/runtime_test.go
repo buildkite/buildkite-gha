@@ -1744,7 +1744,7 @@ func TestSkippedBackgroundAndRepeatedWaitAreCommittedAtMostOnce(t *testing.T) {
 	}
 }
 
-func TestBackgroundOutputsFailClosedBeforeBarrier(t *testing.T) {
+func TestBackgroundOutputsReturnErrorBeforeBarrier(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
@@ -2990,7 +2990,7 @@ func TestRunJobRequiresHydratedStaticDependencyResults(t *testing.T) {
 	job.Dependencies = []string{"gha-producer"}
 	job.NeedSources = map[string][]plan.NeedSource{"producer": {{StepKey: "gha-producer", PlanDigest: "sha256:" + strings.Repeat("1", 64)}}}
 	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "no hydrated prerequisite results") {
-		t.Fatalf("RunJob() error = %v, want fail-closed hydration boundary", err)
+		t.Fatalf("RunJob() error = %v, want missing hydration rejection", err)
 	}
 	job.Needs = map[string]plan.Need{"producer": {Result: "success"}}
 	if result, err := (Runner{}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
@@ -6699,7 +6699,7 @@ func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
 			writeFixtureFile(t, workspace, ".github/actions/unsupported/action.yml", "runs:\n  using: "+using+"\n")
 			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "unsupported", Kind: "uses", Uses: "./.github/actions/unsupported"}})
 			if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), `unsupported runtime "`+using+`"`) {
-				t.Fatalf("RunJob() error = %v, want %s fail-closed boundary", err, using)
+				t.Fatalf("RunJob() error = %v, want %s runtime rejection", err, using)
 			}
 		})
 	}

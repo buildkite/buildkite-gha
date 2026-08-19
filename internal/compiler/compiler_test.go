@@ -2044,7 +2044,7 @@ jobs:
 `)
 	ir, err := compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), defaultOptions())
 	if err == nil || !strings.Contains(err.Error(), "flattened job id") || !strings.Contains(err.Error(), "collides with another job") {
-		t.Fatalf("Compile() error = %v, want fail-closed flattened ID collision", err)
+		t.Fatalf("Compile() error = %v, want flattened ID collision rejection", err)
 	}
 	collisionID := fmt.Sprintf("call-%s.test", suffix)
 	var collision *JobInstance

@@ -708,7 +708,7 @@ func TestStoreCanonicalizesAliasedAncestorAndRejectsSymlinkRoot(t *testing.T) {
 	}
 }
 
-func TestStoreExpectedDigestAndManifestTamperFailClosed(t *testing.T) {
+func TestStoreExpectedDigestAndManifestRejectTampering(t *testing.T) {
 	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) }))
 	defer ts.Close()

@@ -44,8 +44,8 @@ type Bundle struct {
 	Processing        ProcessingEvidence
 }
 
-// CompileBundle compiles an unattested event snapshot with the fail-closed
-// default runner policy.
+// CompileBundle compiles an unattested event snapshot with the default runner
+// policy, which rejects unsupported runner labels.
 func CompileBundle(path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest, compilerStep string) (Bundle, error) {
 	return CompileBundleWithOptions(path, source, eventSource, compilerVersion, compilerDistributionDigest, compilerStep, defaultOptions())
 }

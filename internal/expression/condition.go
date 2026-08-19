@@ -1,5 +1,5 @@
 // Condition validation and strict runtime condition evaluation. The
-// condition* value helpers fail closed on mixed-type comparisons.
+// condition* value helpers reject mixed-type comparisons.
 package expression
 
 import (
@@ -405,7 +405,7 @@ func EvaluateActionLifecycleCondition(source string, context ConditionContext) (
 }
 
 // EvaluateCondition evaluates a job or step condition. Unsupported syntax and
-// unavailable values fail closed with an error.
+// unavailable values return an error.
 func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil {
