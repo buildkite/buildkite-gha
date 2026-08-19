@@ -1358,6 +1358,8 @@ jobs:
     steps:
       - name: Head ${{ github.event.pull_request.head.sha }}
         run: echo '${{ github.event.pull_request.head.sha }}' '${{ github.event.missing }}' '${{ github.event.action }}' '${{ github.event.pull_request.head.sha == steps.previous.outputs.sha }}'
+        continue-on-error: ${{ github.event.allow_failure }}
+        timeout-minutes: ${{ github.event.timeout }}
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         shell: ${{ github.event.shell }}
@@ -1381,7 +1383,7 @@ runs:
   "ref": "refs/pull/42/merge",
   "sha": "1111111111111111111111111111111111111111",
   "actor": "octocat",
-  "payload": {"action": "opened", "shell": "bash", "directory": ".", "pull_request": {"head": {"sha": "2222222222222222222222222222222222222222"}}}
+  "payload": {"action": "opened", "allow_failure": true, "timeout": 7, "shell": "bash", "directory": ".", "pull_request": {"head": {"sha": "2222222222222222222222222222222222222222"}}}
 }`)
 	bundle, err := CompileBundle(path, readFile(t, path), event, "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err != nil {
@@ -1394,6 +1396,9 @@ runs:
 	step := job.Steps[0]
 	if step.Name != "Head 2222222222222222222222222222222222222222" || step.Env["HEAD_SHA"] != "2222222222222222222222222222222222222222" || step.Shell != "bash" || step.WorkingDirectory != "." {
 		t.Fatalf("step templates were not reduced: %#v", step)
+	}
+	if step.ContinueOnErrorExpression != "${{ true }}" || step.TimeoutMinutesExpression != "${{ 7 }}" {
+		t.Fatalf("typed step expressions were not reduced: %#v", step)
 	}
 	if want := "echo '2222222222222222222222222222222222222222' '' 'opened' '${{ ('2222222222222222222222222222222222222222' == steps.previous.outputs.sha) }}'"; step.Command != want {
 		t.Fatalf("command = %q, want %q", step.Command, want)

@@ -210,6 +210,17 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		}
 		return reduced, nil
 	}
+	reduceTypedExpression := func(value string) (string, error) {
+		referencesEvent, err := expression.ReferencesGitHubEvent(value)
+		if err != nil || !referencesEvent {
+			return value, err
+		}
+		reduced, err := reduceCondition(value)
+		if err != nil {
+			return "", err
+		}
+		return "${{ " + reduced + " }}", nil
+	}
 	reduceMap := func(values map[string]string) (map[string]string, error) {
 		if values == nil {
 			return nil, nil
@@ -268,8 +279,13 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		if step.If, err = reduceCondition(step.If); err != nil {
 			return JobInstance{}, err
 		}
-		for _, field := range []*string{&step.Name, &step.Run, &step.Shell, &step.WorkingDirectory, &step.ContinueOnErrorExpression, &step.TimeoutMinutesExpression} {
+		for _, field := range []*string{&step.Name, &step.Run, &step.Shell, &step.WorkingDirectory} {
 			if *field, err = reduceTemplate(*field); err != nil {
+				return JobInstance{}, err
+			}
+		}
+		for _, field := range []*string{&step.ContinueOnErrorExpression, &step.TimeoutMinutesExpression} {
+			if *field, err = reduceTypedExpression(*field); err != nil {
 				return JobInstance{}, err
 			}
 		}
