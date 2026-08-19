@@ -200,13 +200,12 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 // ValidateCheckoutInputNames rejects names whose case-insensitive lookup would be ambiguous.
 func ValidateCheckoutInputNames(inputs map[string]string) error {
 	names := sortedNames(inputs)
-	seen := make(map[string]bool, len(names))
-	for _, name := range names {
-		normalized := strings.ToLower(name)
-		if seen[normalized] {
-			return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
+	for index, name := range names {
+		for _, previous := range names[:index] {
+			if strings.EqualFold(name, previous) {
+				return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
+			}
 		}
-		seen[normalized] = true
 	}
 	return nil
 }

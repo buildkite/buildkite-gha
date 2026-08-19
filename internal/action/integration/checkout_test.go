@@ -77,6 +77,13 @@ func TestValidateCheckoutInputs(t *testing.T) {
 	}
 }
 
+func TestValidateCheckoutInputNamesRejectsEqualFoldCollision(t *testing.T) {
+	inputs := map[string]string{"repository": "one", "repo\u017Fitory": "two"}
+	if err := ValidateCheckoutInputNames(inputs); err == nil || !strings.Contains(err.Error(), "duplicate case-insensitive input") {
+		t.Fatalf("ValidateCheckoutInputNames(%#v) = %v, want duplicate-name rejection", inputs, err)
+	}
+}
+
 func TestValidateCheckoutV3InputsRejectsLaterContract(t *testing.T) {
 	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
 	for _, input := range []map[string]string{
