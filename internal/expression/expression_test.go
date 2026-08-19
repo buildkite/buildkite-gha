@@ -1784,6 +1784,8 @@ func TestReduceAvailableCompileTemplateRejectsDeterministicEventErrors(t *testin
 	for _, template := range []string{
 		"${{ fromJSON(github.event.value) }}",
 		"${{ needs.build.outputs.ready || fromJSON(github.event.value) }}",
+		"${{ (fromJSON(needs.build.outputs.config) || fromJSON(github.event.value)).foo }}",
+		"${{ (fromJSON(needs.build.outputs.config) || fromJSON(github.event.value)).*.foo }}",
 	} {
 		_, err := ReduceAvailableCompileTemplate(template, context)
 		if err == nil || !strings.Contains(err.Error(), "invalid JSON") {

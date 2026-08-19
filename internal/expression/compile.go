@@ -313,6 +313,14 @@ func evaluateCompileNodeAvailable(node actionlint.ExprNode, context CompileConte
 		return available, nil
 	}
 	switch node := node.(type) {
+	case *actionlint.ObjectDerefNode:
+		if available, err := children(node.Receiver); err != nil || !available {
+			return nil, available, err
+		}
+	case *actionlint.ArrayDerefNode:
+		if available, err := children(node.Receiver); err != nil || !available {
+			return nil, available, err
+		}
 	case *actionlint.NotOpNode:
 		if available, err := children(node.Operand); err != nil || !available {
 			return nil, available, err
