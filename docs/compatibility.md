@@ -29,16 +29,16 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | Area | Status | Initial release boundary |
 | --- | --- | --- |
 | [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name` and job names are retained. `run-name` has no effect. |
-| [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. Local `workflow_call` is supported for composition. |
+| [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. `workflow_call` is supported for composition. |
 | [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64 with `ubuntu-latest`, `ubuntu-24.04`, or `ubuntu-22.04`. Its Agent API resolves single macOS labels to native macOS arm64 hosted queues before local runner mappings. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, and `python`. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
-| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local workflows with static inputs and direct job-output mappings. Secret forwarding is unsupported. |
+| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local and literal public GitHub workflows with static inputs and direct job-output mappings. Secret forwarding is unsupported. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
-| [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Local reusable-workflow jobs use the top-level workflow permissions. |
+| [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Reusable-workflow jobs use the top-level workflow permissions. |
 | [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs resolve through the destination job's Buildkite secret authority. |
 | [Job and service containers](#containers-and-services) | 🟡 Supported subset | Linux job containers and broadly compatible service definitions, including explicit registry credentials. |
 | [Environments and snapshots](#job-configuration) | 🟡 Supported subset | Environments are rejected. Snapshots are accepted with no effect. |
@@ -126,7 +126,7 @@ An explicit event snapshot never consults contradictory live Buildkite event fie
 | `release` | Native Buildkite release builds only. In the pipeline's GitHub settings, enable **Additional Webhooks** > **Releases** and use **Code** trigger mode. `types` is required and may contain only `published`, `created`, and `released`; bare `release`, all other activity types, and branch, tag, path, and workflow filters are rejected. Draft `created` deliveries are rejected. The ref is `refs/tags/<tag_name>` and the SHA is the checked-out peeled tag commit. |
 | `workflow_dispatch` | Selected for Buildkite UI and API builds. Webhook-style branch, tag, type, and workflow filters are unsupported. |
 | `schedule` | Selected for Buildkite scheduled builds. Buildkite owns cron configuration and does not expose which schedule started a build, so every `on.schedule` workflow is eligible for every Buildkite scheduled build. |
-| `workflow_call` | Defines a local reusable-workflow interface. A reusable-only file is available to callers but does not become a top-level group. |
+| `workflow_call` | Defines a reusable-workflow interface. A reusable-only local file is available to callers but does not become a top-level group. |
 
 Supported `pull_request` activity types are `assigned`, `unassigned`, `labeled`, `unlabeled`, `opened`, `edited`, `closed`, `reopened`, `synchronize`, `converted_to_draft`, `locked`, `unlocked`, `enqueued`, `dequeued`, `milestoned`, `demilestoned`, `ready_for_review`, `review_requested`, `review_request_removed`, `auto_merge_enabled`, and `auto_merge_disabled`.
 
@@ -169,11 +169,12 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 ### Reusable workflows
 
-**🟡 Supported subset.** The caller and called workflow must be in the same repository and commit.
+**🟡 Supported subset.** Calls may use a local path or a literal public GitHub reference such as `owner/repository/.github/workflows/ci.yml@v1`. A public reference resolves once per operation to an immutable commit. Nested `./.github/workflows/...` calls resolve in that pinned repository.
 
 **✅ Supported:**
 
 - Local `./.github/workflows/...` paths.
+- Literal public references to a `.yml` or `.yaml` file directly under `owner/repository/.github/workflows/`.
 - `boolean`, `number`, and `string` inputs.
 - Static input values. Caller values may use graph-time `github`, `vars`, matrix, and parent reusable-workflow inputs with the supported operators and pure functions.
 - Literal defaults and expression defaults over graph-time `github` and `vars` values.
@@ -184,7 +185,7 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 **❌ Unsupported:**
 
-- Remote or dynamic workflow paths.
+- Dynamic workflow paths and private repositories.
 - `secrets: inherit`, explicit secret mappings, or required called-workflow secrets.
 - `needs`-dependent inputs or dynamic matrices.
 - Input defaults that reference `inputs`.
@@ -246,7 +247,7 @@ An omitted map defaults to exactly `contents: read` when a token is needed. This
 
 The top-level scalar `permissions: read-all` expands during compilation to an explicit read-only map containing the 13 supported repository permissions listed above. Plans and workflow-token requests contain that map, not the alias. The expansion excludes `id-token`, `models`, `repository-projects`, `code-quality`, `metadata`, and `vulnerability-alerts`.
 
-Jobs expanded from local reusable workflows use the top-level requesting workflow's repository permissions for `GITHUB_TOKEN`. Only this immutable top-level map is enforced server-side; permission maps in called workflows do not narrow `GITHUB_TOKEN`. The separate `id-token` permission retains called-workflow narrowing. Warnings identify job-level repository maps that differ from the applied top-level permissions and called-workflow maps that would have narrowed the token scope.
+Jobs expanded from reusable workflows use the top-level requesting workflow's repository permissions for `GITHUB_TOKEN`. Only this immutable top-level map is enforced server-side; permission maps in called workflows do not narrow `GITHUB_TOKEN`. The separate `id-token` permission retains called-workflow narrowing. Warnings identify job-level repository maps that differ from the applied top-level permissions and called-workflow maps that would have narrowed the token scope.
 
 `write-all`, job-level aliases, and noncanonical permission names are unsupported. An empty top-level map, or a top-level map containing only `none`, creates no token.
 
@@ -808,7 +809,7 @@ JavaScript and Docker actions with compatible bundled cache clients also receive
 
 Buildkite reads the top-level requesting workflow's policy from the pipeline repository at the build's immutable commit. The workflow must be directly under `.github/workflows/` and use a simple `.yml` or `.yaml` filename. Job-level repository permission maps do not change the token scope. Compilation emits `W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS` when the applied top-level permissions differ. The workflow-token endpoint interprets omitted top-level permissions as exactly `contents: read`, without consulting GitHub repository or organization defaults. It accepts top-level `read-all` only after server support for that source policy is deployed; the client still sends an explicit 13-scope map. Deploy the server support before a client version that compiles `read-all`. Write access requires an explicit, non-empty top-level map. An explicit empty map or scopes resolving only to `none` produce no token.
 
-Eligible direct and expanded jobs can receive a token when the selected workflow contains local reusable-workflow jobs. Every expanded job receives the top-level requesting workflow's repository permissions for `GITHUB_TOKEN`. Only this immutable top-level map is enforced server-side. Buildkite does not inspect permission maps in called workflows for `GITHUB_TOKEN`, so those maps do not narrow it. The separate `id-token` permission retains called-workflow narrowing. Compilation emits `W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS` when an expanded job receives a token that a called-workflow repository policy would have narrowed. Remote and private reusable workflows remain unsupported.
+Eligible direct and expanded jobs can receive a token when the selected workflow contains reusable-workflow jobs. Every expanded job receives the top-level requesting workflow's repository permissions for `GITHUB_TOKEN`. Only this immutable top-level map is enforced server-side. Buildkite does not inspect permission maps in called workflows for `GITHUB_TOKEN`, so those maps do not narrow it. The separate `id-token` permission retains called-workflow narrowing. Compilation emits `W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS` when an expanded job receives a token that a called-workflow repository policy would have narrowed. Private reusable workflows remain unsupported.
 
 Pull-request builds and their triggered or rebuilt descendants may request only `contents: read`. Merge-queue builds and their descendants cannot request a token. The endpoint does not support GitHub Enterprise Server. The backend verifies this provenance and remains authoritative.
 
@@ -894,6 +895,7 @@ hosted-toolchains images provide. macOS images are unsupported.
 | --- | --- |
 | Matrix instances per job | 256 |
 | Reusable workflow nesting | 4 levels |
+| Workflow file | 1 MiB |
 | Jobs after reusable workflow expansion | 1,024 |
 | Nested local action depth | 10 levels |
 | Background steps active at once | 10 |

@@ -74,8 +74,30 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 	if !ok {
 		return 1
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	repositorySource := compiler.RepositorySource(nil)
+	if runtime != nil {
+		repositorySource = runtime.actionSource
+	}
+	cleanupSource := func() {}
+	if repositorySource == nil {
+		var sourceErr error
+		repositorySource, cleanupSource, sourceErr = newHostedActionSource(actionCacheDir, nil, nil)
+		if sourceErr != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: configure public repository source: %v\n", sourceErr)
+			return 1
+		}
+	}
+	defer cleanupSource()
 	if profile != "" {
-		parsed, parseErr := workflow.Parse(workflowPath, source)
+		var parsed *workflow.Workflow
+		var parseErr error
+		if len(source) <= compiler.MaxReusableWorkflowBytes {
+			parsed, parseErr = workflow.Parse(workflowPath, source)
+		} else {
+			parseErr = fmt.Errorf("workflow exceeds %d-byte limit", compiler.MaxReusableWorkflowBytes)
+		}
 		effectiveEvent, eventErr := newEffectiveEvent(event, effectiveEventFromPath, os.Getenv)
 		if parseErr == nil && eventErr == nil && !parsed.ReusableOnly() {
 			selection, triggerErr := selectWorkflowTrigger(parsed.Triggers, effectiveEvent)
@@ -102,12 +124,12 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 	}
 	// Profile validation applies the hosted runner policy so validate and
 	// upload agree on supported labels, including the default macOS queue.
-	var validationOptions *compiler.Options
+	validationOptions := compiler.DefaultOptions()
 	if profile != "" {
-		hosted := hostedOptions("", nil, nil)
-		validationOptions = &hosted
+		validationOptions = hostedOptions("", nil, nil)
 	}
-	processingReport, ok := validatedProcessingReportWithOptions(out, workflowPath, profile, source, event, loadEvent != nil, validationOptions)
+	validationOptions.RepositorySource = repositorySource
+	processingReport, ok := validatedProcessingReportWithOptionsContext(ctx, out, workflowPath, profile, source, event, loadEvent != nil, &validationOptions)
 	if !ok {
 		return 1
 	}
@@ -125,19 +147,13 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 			_ = out.write(processingReport)
 			return 1
 		}
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
 		// Profile validation never executes generated plans, so the importer
 		// digest stands in for every platform's runtime distribution.
 		runtimeDistributions := map[compiler.Platform]string{
 			compiler.PlatformLinuxAMD64:  distributionDigest,
 			compiler.PlatformDarwinARM64: distributionDigest,
 		}
-		var actionSource compiler.ActionSource
-		if runtime != nil {
-			actionSource = runtime.actionSource
-		}
-		preflight, profileErr := compileHostedWithActionCache(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, actionCacheDir, actionSource, nil)
+		preflight, profileErr := compileHostedWithActionCache(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, actionCacheDir, repositorySource, nil)
 		applyHostedPreflight(&processingReport, preflight)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
@@ -201,7 +217,31 @@ func validateAllEvents(out processingOutput, workflowPath, version, actionCacheD
 }
 
 func validateAllEventsSource(out processingOutput, workflowPath string, source []byte, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
-	validation, validationErr := compiler.ValidateWithOptions(workflowPath, source, hostedOptions("", nil, nil))
+	cleanup := func() {}
+	if runtime == nil || runtime.actionSource == nil {
+		actionSource, sourceCleanup, sourceErr := newHostedActionSource(actionCacheDir, nil, nil)
+		cleanup = sourceCleanup
+		if sourceErr != nil {
+			validationReport := compatibility.EnvironmentProcessingReport(workflowPath, hostedProfile, "public repository source could not be configured")
+			report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
+			_ = out.writeV3(report)
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", sourceErr)
+			cleanup()
+			return 1
+		}
+		if runtime == nil {
+			_, _, distributionDigest, executableErr := executable()
+			runtime = &profileValidationRuntime{actionSource: actionSource, distributionDigest: distributionDigest, executableErr: executableErr}
+		} else {
+			runtime = &profileValidationRuntime{
+				actionSource: actionSource, distributionDigest: runtime.distributionDigest, executableErr: runtime.executableErr,
+			}
+		}
+	}
+	defer cleanup()
+	validationOptions := hostedOptions("", nil, nil)
+	validationOptions.RepositorySource = runtime.actionSource
+	validation, validationErr := compiler.ValidateWithOptionsContext(context.Background(), workflowPath, source, validationOptions)
 	validationReport := compatibility.InitialProcessingReport(workflowPath, "", false, validation, validationErr)
 	if validationErr != nil {
 		validationReport.Result = "incompatible"
@@ -221,23 +261,6 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 	for _, trigger := range parsed.Triggers {
 		declared[trigger.Event] = true
 	}
-	cleanup := func() {}
-	if runtime == nil {
-		actionSource, sourceCleanup, sourceErr := newHostedActionSource(actionCacheDir, nil, nil)
-		cleanup = sourceCleanup
-		if sourceErr != nil {
-			validationReport.AddEnvironmentFailure("public action source could not be configured")
-			validationReport.Result = "indeterminate"
-			report.Validation = validationReport
-			_ = out.writeV3(report)
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", sourceErr)
-			cleanup()
-			return 1
-		}
-		_, _, distributionDigest, executableErr := executable()
-		runtime = &profileValidationRuntime{actionSource: actionSource, distributionDigest: distributionDigest, executableErr: executableErr}
-	}
-	defer cleanup()
 	failed := false
 	for _, event := range []string{"push", "pull_request", "merge_group", "release", "workflow_dispatch", "schedule"} {
 		if !declared[event] {

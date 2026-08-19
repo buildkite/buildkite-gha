@@ -385,6 +385,10 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q is unavailable in the event merge commit", input.CanonicalPath)
 			continue
 		}
+		if len(mergeSource) > compiler.MaxReusableWorkflowBytes {
+			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q cannot be parsed from the event merge commit", input.CanonicalPath)
+			continue
+		}
 		mergeWorkflow, err := workflow.Parse(input.Path, mergeSource)
 		if err != nil {
 			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q cannot be parsed from the event merge commit", input.CanonicalPath)

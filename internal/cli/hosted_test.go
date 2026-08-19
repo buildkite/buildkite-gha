@@ -79,6 +79,47 @@ func TestHostedRunnerTargetsContainOnlyHostedGuarantees(t *testing.T) {
 	}
 }
 
+func TestHostedPreflightCompilesPublicReusableWorkflowWithSharedSource(t *testing.T) {
+	callerRoot := t.TempDir()
+	callerPath := filepath.Join(callerRoot, ".github", "workflows", "caller.yml")
+	if err := os.MkdirAll(filepath.Dir(callerPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	caller := []byte("on: push\njobs:\n  delegated:\n    uses: owner/repository/.github/workflows/ci.yml@v1\n")
+	if err := os.WriteFile(callerPath, caller, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remoteRoot := t.TempDir()
+	remotePath := filepath.Join(remoteRoot, ".github", "workflows", "ci.yml")
+	if err := os.MkdirAll(filepath.Dir(remotePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(remotePath, []byte("on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := actionsource.DigestTree(remoteRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &batchCountingActionSource{root: remoteRoot, digest: digest}
+	shared := compiler.MemoizeRepositorySource(source)
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	distributionDigest := "sha256:" + strings.Repeat("d", 64)
+	compiled, err := compileHostedWithActionCache(t.Context(), callerPath, caller, event, "0.0.0-test", distributionDigest, "importer", "", nil, map[compiler.Platform]string{compiler.PlatformLinuxAMD64: distributionDigest}, "", shared, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.HasActions || len(compiled.Bundle.Plans) != 1 || compiled.Bundle.Plans[0].Job.Workflow.Remote == nil || compiled.Bundle.Plans[0].Job.Workflow.Remote.Commit != strings.Repeat("a", 40) {
+		t.Fatalf("hosted remote workflow result = %#v", compiled)
+	}
+	if source.calls != 1 {
+		t.Fatalf("repository source calls = %d, want one across hosted preflight and plans", source.calls)
+	}
+}
+
 func TestHostedReportRetainsIndependentActionInvocationResultsThroughWrapper(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "actions.yml")

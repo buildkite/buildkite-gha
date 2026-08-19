@@ -289,6 +289,9 @@ func captureBatchValidationRecord(record batchValidationRecord) (batchValidation
 // compiler can read in addition to the captured root workflow. A false result
 // disables resumption rather than caching an incomplete dependency closure.
 func localCompilationDependencyDigest(workflowPath string, contents []byte) (string, bool) {
+	if len(contents) > compiler.MaxReusableWorkflowBytes {
+		return "", false
+	}
 	absPath, err := filepath.Abs(filepath.Clean(workflowPath))
 	if err != nil {
 		return "", false
@@ -328,6 +331,9 @@ func localCompilationDependencyDigest(workflowPath string, contents []byte) (str
 	actions := map[string]bool{}
 	var visit func(string, []byte, int) bool
 	visit = func(path string, source []byte, depth int) bool {
+		if len(source) > compiler.MaxReusableWorkflowBytes {
+			return false
+		}
 		relative, err := filepath.Rel(root, path)
 		if err != nil || !withinRoot(path) {
 			return false

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -29,14 +31,24 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 	if !ok {
 		return 1
 	}
-	processingReport, ok := validatedProcessingReport(out, workflowPath, "", source, event, true)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	repositorySource, cleanup, sourceErr := newHostedActionSource("", nil, nil)
+	if sourceErr != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: configure public repository source: %v\n", sourceErr)
+		return 1
+	}
+	defer cleanup()
+	options := compiler.DefaultOptions()
+	options.RepositorySource = repositorySource
+	processingReport, ok := validatedProcessingReportWithOptionsContext(ctx, out, workflowPath, "", source, event, true, &options)
 	if !ok {
 		return 1
 	}
 	var result []byte
 	var warnings []compiler.Warning
 	if format == "ir-json" {
-		result, err = compiler.Compile(workflowPath, source, event)
+		result, err = compiler.CompileWithOptionsContext(ctx, workflowPath, source, event, options)
 		if err == nil {
 			var ir compiler.IR
 			if decodeErr := json.Unmarshal(result, &ir); decodeErr != nil {
@@ -53,7 +65,7 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 			_ = out.write(processingReport)
 			return 1
 		}
-		bundle, compileErr := compiler.CompileBundle(workflowPath, source, event, version, digest, "gha-importer")
+		bundle, compileErr := compiler.CompileBundleContext(ctx, workflowPath, source, event, version, digest, "gha-importer", options)
 		processingReport.ApplyEvidence(bundle.Processing)
 		err = compileErr
 		result = bundle.Pipeline
