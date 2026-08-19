@@ -35,6 +35,7 @@ type sourcedJob struct {
 	root                  string
 	remote                *RemoteWorkflowSource
 	inputs                map[string]any
+	deferredInputs        map[string]needBinding
 	secretAuthority       bool
 	needBindings          map[string]needBinding
 	tokenPolicyNarrowed   bool
@@ -44,9 +45,10 @@ type sourcedJob struct {
 }
 
 type sourcedCallGuard struct {
-	condition    string
-	inputs       map[string]any
-	needBindings map[string]needBinding
+	condition      string
+	inputs         map[string]any
+	deferredInputs map[string]needBinding
+	needBindings   map[string]needBinding
 }
 
 type needBinding struct {
@@ -137,7 +139,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 		}
 	}()
 	resolver.discoverRuntimeMatrixBoundaries(ctx, rootSource, parsed, 0, map[string]int{rootSource.identity.key(): 0})
-	resolution, err := resolver.resolve(ctx, rootSource, digest, parsed, "", "", context.Inputs, nil, nil, true, false, workflow.Position{}, nil, 0)
+	resolution, err := resolver.resolve(ctx, rootSource, digest, parsed, "", "", context.Inputs, nil, nil, nil, true, false, workflow.Position{}, nil, 0)
 	return resolution.jobs, resolver.runtimeMatrixBoundary, err
 }
 
@@ -187,7 +189,7 @@ func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(ctx context.Co
 	}
 }
 
-func (resolver *reusableResolver) resolve(ctx context.Context, current reusableWorkflowSource, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secretAuthority, tokenPolicyNarrowed bool, reusableCallPosition workflow.Position, callGuards []sourcedCallGuard, depth int) (reusableResolution, error) {
+func (resolver *reusableResolver) resolve(ctx context.Context, current reusableWorkflowSource, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, deferredInputs, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secretAuthority, tokenPolicyNarrowed bool, reusableCallPosition workflow.Position, callGuards []sourcedCallGuard, depth int) (reusableResolution, error) {
 	path := current.displayPath
 	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
@@ -221,7 +223,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			return reusableResolution{}, err
 		}
 		if parsed.Callable {
-			if err := rejectUnresolvedInputExpressions(path, job); err != nil {
+			if err := rejectUnresolvedInputExpressions(path, job, deferredInputs); err != nil {
 				return reusableResolution{}, err
 			}
 		}
@@ -257,7 +259,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			}
 			resolved = append(resolved, sourcedJob{
 				Job: job, path: path, digest: digest, root: resolver.workspaceRoot, remote: cloneRemoteWorkflowSource(current.remote), inputs: cloneAnyMap(inputs),
-				secretAuthority: secretAuthority, needBindings: needBindings,
+				deferredInputs: cloneNeedBindings(deferredInputs), secretAuthority: secretAuthority, needBindings: needBindings,
 				tokenPolicyNarrowed: jobTokenPolicyNarrowed, jobPermissionsIgnored: jobPermissionsIgnored, reusableCall: reusableCallPosition,
 				callGuards: cloneSourcedCallGuards(callGuards),
 			})
@@ -283,7 +285,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow call condition: %v", err))
 			}
 			calleeGuards = append(cloneSourcedCallGuards(callGuards), sourcedCallGuard{
-				condition: condition, inputs: cloneAnyMap(inputs), needBindings: cloneNeedBindings(callNeedBindings),
+				condition: condition, inputs: cloneAnyMap(inputs), deferredInputs: cloneNeedBindings(deferredInputs), needBindings: cloneNeedBindings(callNeedBindings),
 			})
 		}
 		if call.InheritSecrets {
@@ -326,7 +328,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		var callOutputs []needOutputBinding
 		callNamespaces := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
-			callInputs, err := resolveCallInputs(path, job, call, callee, inputs, matrix, resolver.context)
+			callInputs, callDeferredInputs, err := resolveCallInputs(path, job, call, callee, inputs, deferredInputs, callNeedBindings, matrix, resolver.context)
 			if err != nil {
 				return reusableResolution{}, err
 			}
@@ -363,7 +365,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				calleeCallPosition = call.Span.Start
 			}
 			resolver.stack = append(resolver.stack, calleeSource.identity)
-			calleeResolution, err := resolver.resolve(ctx, calleeSource, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, secretAuthority && call.InheritSecrets, jobTokenPolicyNarrowed, calleeCallPosition, calleeGuards, depth+1)
+			calleeResolution, err := resolver.resolve(ctx, calleeSource, calleeDigest, callee, callNamespace, callLabel, callInputs, callDeferredInputs, needBindings, calleePermissionCeiling, secretAuthority && call.InheritSecrets, jobTokenPolicyNarrowed, calleeCallPosition, calleeGuards, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {
 				message := "reusable workflow could not be resolved"
@@ -597,7 +599,8 @@ func cloneSourcedCallGuards(guards []sourcedCallGuard) []sourcedCallGuard {
 	cloned := make([]sourcedCallGuard, len(guards))
 	for i, guard := range guards {
 		cloned[i] = sourcedCallGuard{
-			condition: guard.condition, inputs: cloneAnyMap(guard.inputs), needBindings: cloneNeedBindings(guard.needBindings),
+			condition: guard.condition, inputs: cloneAnyMap(guard.inputs),
+			deferredInputs: cloneNeedBindings(guard.deferredInputs), needBindings: cloneNeedBindings(guard.needBindings),
 		}
 	}
 	return cloned
@@ -610,24 +613,33 @@ func namespacedJobID(namespace, id string) string {
 	return namespace + "." + id
 }
 
-func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWorkflowCall, callee *workflow.Workflow, parentInputs, matrix map[string]any, context expression.CompileContext) (map[string]any, error) {
+func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWorkflowCall, callee *workflow.Workflow, parentInputs map[string]any, parentDeferredInputs, callNeeds map[string]needBinding, matrix map[string]any, context expression.CompileContext) (map[string]any, map[string]needBinding, error) {
 	values := make(map[string]any, len(call.Inputs))
+	deferredValues := make(map[string]needBinding)
 	for _, name := range sortedValueKeys(call.Inputs) {
 		value := call.Inputs[name]
 		if _, ok := callee.CallInputs[name]; !ok {
-			return nil, locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, fmt.Sprintf("input %q is not declared by reusable workflow %q", name, call.Uses))
+			return nil, nil, locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, fmt.Sprintf("input %q is not declared by reusable workflow %q", name, call.Uses))
 		}
 		resolved := value.Data
 		if text, ok := resolved.(string); ok && strings.Contains(text, "${{") {
+			if deferred, ok := forwardedDeferredInput(text, parentDeferredInputs); ok {
+				deferredValues[name] = deferred
+				continue
+			}
+			if deferred, ok := deferredNeedInput(text, callNeeds); ok {
+				deferredValues[name] = deferred
+				continue
+			}
 			var err error
 			resolved, err = evaluateStaticCallValue(text, parentInputs, matrix, context)
 			if err != nil {
 				detail := fmt.Sprintf("Reusable-workflow input %q is not statically resolvable: %v", name, err)
 				message := fmt.Sprintf("Reusable workflow input %q uses a value that is unavailable before jobs run. Replace it with a literal or an expression that does not depend on job results.", name)
 				if strings.Contains(err.Error(), `unsupported compile-time context "needs"`) {
-					message = fmt.Sprintf("Reusable workflow input %q uses the needs context, which is unavailable before jobs run. Replace it with a literal or an expression that does not depend on job results.", name)
+					message = fmt.Sprintf("Reusable workflow input %q uses an unsupported needs expression. Use exactly needs.<job>.outputs.<name> for a string input.", name)
 				}
-				return nil, &ProcessingFinding{
+				return nil, nil, &ProcessingFinding{
 					Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
 					Path: path, Line: value.Span.Start.Line, Column: value.Span.Start.Column, Job: job.ID,
 					Message: message, Detail: detail,
@@ -639,23 +651,33 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 	}
 
 	resolved := make(map[string]any, len(callee.CallInputs))
+	deferred := make(map[string]needBinding, len(deferredValues))
 	for _, name := range sortedValueKeys(callee.CallInputs) {
 		declaration := callee.CallInputs[name]
 		value, supplied := values[name]
-		ok := supplied
+		deferredValue, deferredSupplied := deferredValues[name]
+		ok := supplied || deferredSupplied
+		if deferredSupplied {
+			if declaration.Type != "string" {
+				span := call.Inputs[name].Span
+				return nil, nil, locatedJobError(path, job, span.Start.Line, span.Start.Column, fmt.Sprintf("deferred reusable-workflow input %q must be string", name))
+			}
+			deferred[name] = cloneNeedBinding(deferredValue)
+			continue
+		}
 		if !ok && declaration.Default != nil {
 			value, ok = declaration.Default.Data, true
 			if text, isString := value.(string); isString && strings.Contains(text, "${{") {
 				var err error
 				value, err = expression.EvaluateReusableInputDefault(text, context)
 				if err != nil {
-					return nil, locatedJobError(call.Uses, job, declaration.Default.Span.Start.Line, declaration.Default.Span.Start.Column, fmt.Sprintf("evaluate default for reusable-workflow input %q: %v", name, err))
+					return nil, nil, locatedJobError(call.Uses, job, declaration.Default.Span.Start.Line, declaration.Default.Span.Start.Column, fmt.Sprintf("evaluate default for reusable-workflow input %q: %v", name, err))
 				}
 			}
 		}
 		if !ok {
 			if declaration.Required {
-				return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("required reusable-workflow input %q is missing", name))
+				return nil, nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("required reusable-workflow input %q is missing", name))
 			}
 			value = zeroInputValue(declaration.Type)
 		}
@@ -668,14 +690,55 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 				locationPath = call.Uses
 				span = declaration.Default.Span
 			}
-			return nil, locatedJobError(locationPath, job, span.Start.Line, span.Start.Column, fmt.Sprintf("reusable-workflow input %q must be %s", name, declaration.Type))
+			return nil, nil, locatedJobError(locationPath, job, span.Start.Line, span.Start.Column, fmt.Sprintf("reusable-workflow input %q must be %s", name, declaration.Type))
 		}
 		if containsExpression(value) {
-			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow input %q is not statically resolvable", name))
+			return nil, nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow input %q is not statically resolvable", name))
 		}
 		resolved[name] = value
 	}
-	return resolved, nil
+	return resolved, deferred, nil
+}
+
+func forwardedDeferredInput(value string, deferred map[string]needBinding) (needBinding, bool) {
+	root, path, err := expression.ReferencePath(value)
+	if err != nil || !strings.EqualFold(root, "inputs") || len(path) != 1 {
+		return needBinding{}, false
+	}
+	for name, binding := range deferred {
+		if strings.EqualFold(name, path[0]) {
+			return cloneNeedBinding(binding), true
+		}
+	}
+	return needBinding{}, false
+}
+
+func deferredNeedInput(value string, needs map[string]needBinding) (needBinding, bool) {
+	root, path, err := expression.ReferencePath(value)
+	if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") {
+		return needBinding{}, false
+	}
+	for name, binding := range needs {
+		if !strings.EqualFold(name, path[0]) {
+			continue
+		}
+		deferred := needBinding{members: append([]string(nil), binding.members...), projectOutputs: true}
+		if !binding.projectOutputs {
+			for _, member := range binding.members {
+				deferred.outputs = append(deferred.outputs, needOutputBinding{name: "value", member: member, output: path[2]})
+			}
+			return deferred, true
+		}
+		for _, output := range binding.outputs {
+			if !strings.EqualFold(output.name, path[2]) {
+				continue
+			}
+			output.name = "value"
+			deferred.outputs = append(deferred.outputs, output)
+		}
+		return deferred, true
+	}
+	return needBinding{}, false
 }
 
 func evaluateStaticCallValue(value string, inputs, matrix map[string]any, context expression.CompileContext) (any, error) {
@@ -914,7 +977,7 @@ func replaceSliceInputs(values []string, inputs map[string]any) []string {
 	return result
 }
 
-func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
+func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInputs map[string]needBinding) error {
 	jobValues := []string{job.Name}
 	jobRuntimeValues := []string{job.DefaultShell, job.DefaultWorkingDirectory}
 	jobRuntimeValues = appendMapValues(jobRuntimeValues, job.Env)
@@ -965,11 +1028,11 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 			return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
 		}
 	}
-	if hasStaticInputCondition(job.If) {
+	if hasUnresolvedConditionInput(job.If, deferredInputs) {
 		return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
 	}
 	for _, value := range jobRuntimeValues {
-		if hasStaticInputExpression(value) {
+		if hasUnresolvedTemplateInput(value, deferredInputs) {
 			return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
 		}
 	}
@@ -977,14 +1040,14 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 		if hasInputExpression(step.Uses) {
 			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow action reference input expression is not statically resolvable")
 		}
-		if hasStaticInputCondition(step.If) {
+		if hasUnresolvedConditionInput(step.If, deferredInputs) {
 			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
 		}
 		stepValues := []string{step.Name, step.Run, step.Shell, step.WorkingDirectory, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression}
 		stepValues = appendMapValues(stepValues, step.Env)
 		stepValues = appendMapValues(stepValues, step.With)
 		for _, value := range stepValues {
-			if hasStaticInputExpression(value) {
+			if hasUnresolvedTemplateInput(value, deferredInputs) {
 				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
 			}
 		}
@@ -1053,14 +1116,32 @@ func hasInputExpression(value string) bool {
 	return err != nil || usesInputs
 }
 
-func hasStaticInputExpression(value string) bool {
-	usesInputs, err := expression.TemplateUsesStaticContextReference(value, "inputs")
+func hasUnresolvedTemplateInput(value string, deferredInputs map[string]needBinding) bool {
+	resolved, err := expression.SubstituteCompileInputs(value, deferredInputPlaceholders(deferredInputs))
+	if err != nil {
+		return true
+	}
+	usesInputs, err := expression.TemplateUsesStaticContextReference(resolved, "inputs")
 	return err != nil || usesInputs
 }
 
-func hasStaticInputCondition(value string) bool {
-	usesInputs, err := expression.ConditionUsesStaticContextReference(value, "inputs")
-	return err != nil || usesInputs
+func hasUnresolvedConditionInput(value string, deferredInputs map[string]needBinding) bool {
+	if strings.TrimSpace(value) == "" {
+		return false
+	}
+	template := value
+	if !strings.Contains(value, "${{") {
+		template = "${{ " + value + " }}"
+	}
+	return hasUnresolvedTemplateInput(template, deferredInputs)
+}
+
+func deferredInputPlaceholders(inputs map[string]needBinding) map[string]any {
+	placeholders := make(map[string]any, len(inputs))
+	for name := range inputs {
+		placeholders[name] = "deferred"
+	}
+	return placeholders
 }
 
 func cloneMatrixWithInputs(matrix *workflow.Matrix, inputs map[string]any) *workflow.Matrix {

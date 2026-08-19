@@ -287,6 +287,12 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 	}
 	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}, Artifacts: []transport.ResultArtifact{}}
+	if len(job.DeferredInputs) != 0 {
+		if !deferredInputsHydrated(job.DeferredInputs, job.DeferredInputValues) {
+			return jobResult, fmt.Errorf("deferred reusable-workflow inputs were not hydrated")
+		}
+		job.Inputs = mergeWorkflowInputs(job.Inputs, job.DeferredInputValues)
+	}
 	guardsPass, err := evaluateCallGuards(job)
 	if err != nil {
 		return jobResult, err
@@ -923,10 +929,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 func evaluateCallGuards(job plan.Job) (bool, error) {
 	github := githubContext(job)
 	for i, guard := range job.CallGuards {
+		if len(guard.DeferredInputs) != 0 && !deferredInputsHydrated(guard.DeferredInputs, guard.DeferredInputValues) {
+			return false, fmt.Errorf("evaluate reusable-workflow call guard %d: deferred inputs were not hydrated", i+1)
+		}
 		if len(guard.NeedSources) != 0 && len(guard.Needs) == 0 {
 			return false, fmt.Errorf("evaluate reusable-workflow call guard %d: prerequisite results are missing", i+1)
 		}
-		condition := expression.ConditionContext{Inputs: guard.Inputs, Needs: needStatuses(guard.Needs), Vars: job.Vars, GitHub: github}
+		condition := expression.ConditionContext{Inputs: mergeWorkflowInputs(guard.Inputs, guard.DeferredInputValues), Needs: needStatuses(guard.Needs), Vars: job.Vars, GitHub: github}
 		for name, need := range guard.Needs {
 			if need.Result == "" {
 				return false, fmt.Errorf("evaluate reusable-workflow call guard %d: prerequisite result %q is missing", i+1, name)
@@ -949,6 +958,29 @@ func evaluateCallGuards(job plan.Job) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+func deferredInputsHydrated(deferred map[string]plan.DeferredInput, values map[string]any) bool {
+	if len(deferred) != len(values) {
+		return false
+	}
+	for name := range deferred {
+		if _, ok := values[name]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func mergeWorkflowInputs(inputs, deferred map[string]any) map[string]any {
+	merged := maps.Clone(inputs)
+	if merged == nil && len(deferred) != 0 {
+		merged = make(map[string]any, len(deferred))
+	}
+	for name, value := range deferred {
+		merged[name] = value
+	}
+	return merged
 }
 
 func evaluateServices(services map[string]plan.ServiceContainer, eval expression.Context) (map[string]plan.ServiceContainer, error) {

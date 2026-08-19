@@ -1438,6 +1438,124 @@ jobs:
 	}
 }
 
+func TestCompileForwardsDeferredInputToNestedReusableWorkflow(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  hash:
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - id: hash
+        run: echo hashes=value >> "$GITHUB_OUTPUT"
+  call:
+    needs: hash
+    uses: ./.github/workflows/middle.yml
+    with:
+      subjects: ${{ needs.hash.outputs.hashes }}
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      subjects: {type: string, required: true}
+jobs:
+  call:
+    if: inputs.subjects != ''
+    uses: ./.github/workflows/leaf.yml
+    with:
+      subjects: ${{ inputs.subjects }}
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      subjects: {type: string, required: true}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ inputs.subjects }}
+`)
+
+	result, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 2 || len(ir.Jobs[1].DeferredInputs) != 1 || len(ir.Jobs[1].CallGuards) != 1 || ir.Jobs[1].Steps[0].Run != "echo ${{ inputs.subjects }}" {
+		t.Fatalf("forwarded deferred input = %#v", ir.Jobs)
+	}
+	deferred := ir.Jobs[1].DeferredInputs["subjects"]
+	if !reflect.DeepEqual(deferred.Sources, []string{ir.Jobs[0].Key}) || !reflect.DeepEqual(deferred.Outputs, []NeedOutput{{Name: "value", StepKey: ir.Jobs[0].Key, Output: "hashes"}}) {
+		t.Fatalf("forwarded deferred binding = %#v", deferred)
+	}
+	if !reflect.DeepEqual(ir.Jobs[1].CallGuards[0].DeferredInputs["subjects"], deferred) {
+		t.Fatalf("forwarded deferred call guard = %#v", ir.Jobs[1].CallGuards)
+	}
+}
+
+func TestCompileDeferredInputWaitsForEveryReusableWorkflowJob(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  produce:
+    uses: ./.github/workflows/producer.yml
+  consume:
+    needs: produce
+    uses: ./.github/workflows/consumer.yml
+    with:
+      subject: ${{ needs.produce.outputs.subject }}
+`)
+	writeWorkflow(t, repository, "producer.yml", `on:
+  workflow_call:
+    outputs:
+      subject:
+        value: ${{ jobs.outputter.outputs.subject }}
+jobs:
+  outputter:
+    runs-on: ubuntu-latest
+    outputs:
+      subject: ${{ steps.value.outputs.subject }}
+    steps:
+      - id: value
+        run: echo subject=value >> "$GITHUB_OUTPUT"
+  sibling:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo sibling
+`)
+	writeWorkflow(t, repository, "consumer.yml", `on:
+  workflow_call:
+    inputs:
+      subject: {type: string, required: true}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ inputs.subject }}
+`)
+
+	result, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 3 {
+		t.Fatalf("jobs = %#v", ir.Jobs)
+	}
+	consumer := ir.Jobs[2]
+	deferred := consumer.DeferredInputs["subject"]
+	if len(consumer.Needs) != 2 || len(deferred.Sources) != 2 || len(deferred.Outputs) != 1 || !slices.Equal(consumer.Needs, deferred.Sources) {
+		t.Fatalf("consumer dependencies = %#v, deferred input = %#v", consumer.Needs, deferred)
+	}
+}
+
 func TestCompilePreservesComputedReusableInputIndexesForRuntime(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
@@ -1584,7 +1702,7 @@ func TestRejectUnresolvedIndexedInputsInCompileTimeFields(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			test.job.ID = "test"
 			test.job.Span = span
-			if err := rejectUnresolvedInputExpressions("workflow.yml", test.job); err == nil || !strings.Contains(err.Error(), "not statically resolvable") {
+			if err := rejectUnresolvedInputExpressions("workflow.yml", test.job, nil); err == nil || !strings.Contains(err.Error(), "not statically resolvable") {
 				t.Fatalf("rejectUnresolvedInputExpressions() error = %v", err)
 			}
 		})
@@ -1644,7 +1762,7 @@ func TestCompileRejectsUnsafeOrDynamicReusableWorkflowCalls(t *testing.T) {
 		}
 	})
 
-	t.Run("runtime input", func(t *testing.T) {
+	t.Run("unavailable runtime input need", func(t *testing.T) {
 		repository := t.TempDir()
 		path := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -1659,7 +1777,7 @@ jobs:
 			t.Fatalf("Compile() error = %v, want source-located runtime input rejection", err)
 		}
 		var finding *ProcessingFinding
-		if !errors.As(err, &finding) || finding.Message != `Reusable workflow input "target" uses the needs context, which is unavailable before jobs run. Replace it with a literal or an expression that does not depend on job results.` || !strings.Contains(finding.Detail, `Reusable-workflow input "target" is not statically resolvable`) || !strings.Contains(finding.Detail, `unsupported compile-time context "needs"`) {
+		if !errors.As(err, &finding) || finding.Message != `Reusable workflow input "target" uses an unsupported needs expression. Use exactly needs.<job>.outputs.<name> for a string input.` || !strings.Contains(finding.Detail, `Reusable-workflow input "target" is not statically resolvable`) || !strings.Contains(finding.Detail, `unsupported compile-time context "needs"`) {
 			t.Fatalf("Compile() finding = %#v", finding)
 		}
 	})
@@ -2275,6 +2393,38 @@ jobs:
 	}
 	if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo push-release:true:3" {
 		t.Fatalf("reusable defaults = %#v", ir.Jobs)
+	}
+}
+
+func TestCompileRejectsDeferredNonStringReusableWorkflowInput(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.value.outputs.enabled }}
+    steps:
+      - id: value
+        run: echo enabled=true >> "$GITHUB_OUTPUT"
+  call:
+    needs: prepare
+    uses: ./.github/workflows/reusable.yml
+    with:
+      enabled: ${{ needs.prepare.outputs.enabled }}
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      enabled: {type: boolean}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+	if err == nil || !strings.Contains(err.Error(), `deferred reusable-workflow input "enabled" must be string`) {
+		t.Fatalf("Compile() error = %v", err)
 	}
 }
 

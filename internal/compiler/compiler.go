@@ -91,39 +91,40 @@ type WorkflowSource struct {
 
 // JobInstance is one statically expanded job in the owned IR.
 type JobInstance struct {
-	Key                     string                  `json:"key"`
-	LogicalJobID            string                  `json:"logical_job_id"`
-	Label                   string                  `json:"label"`
-	Needs                   []string                `json:"needs,omitempty"`
-	NeedGroups              map[string][]string     `json:"need_groups,omitempty"`
-	NeedOutputs             map[string][]NeedOutput `json:"need_outputs,omitempty"`
-	CallGuards              []CallGuard             `json:"call_guards,omitempty"`
-	RunsOn                  []string                `json:"runs_on"`
-	Queue                   string                  `json:"queue"`
-	Platform                Platform                `json:"-"`
-	RuntimeImage            string                  `json:"runtime_image,omitempty"`
-	Matrix                  map[string]any          `json:"matrix,omitempty"`
-	Inputs                  map[string]any          `json:"inputs,omitempty"`
-	FailFast                *bool                   `json:"fail_fast,omitempty"`
-	MaxParallel             *int                    `json:"max_parallel,omitempty"`
-	ConcurrencyGroup        string                  `json:"concurrency_group,omitempty"`
-	Steps                   []workflow.Step         `json:"steps"`
-	Env                     map[string]string       `json:"env,omitempty"`
-	Permissions             map[string]string       `json:"permissions,omitempty"`
-	If                      string                  `json:"if,omitempty"`
-	ContinueOnError         bool                    `json:"continue_on_error,omitempty"`
-	TimeoutMinutes          float64                 `json:"timeout_minutes,omitempty"`
-	DefaultShell            string                  `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string                  `json:"default_working_directory,omitempty"`
-	Outputs                 map[string]string       `json:"outputs,omitempty"`
-	Container               *workflow.Container     `json:"container,omitempty"`
-	Services                []workflow.Service      `json:"services,omitempty"`
-	ServicesExpression      string                  `json:"services_expression,omitempty"`
-	SourcePath              string                  `json:"source_path"`
-	SourceDigest            string                  `json:"source_digest"`
-	RemoteWorkflow          *RemoteWorkflowSource   `json:"remote_workflow,omitempty"`
-	RepositoryRoot          string                  `json:"-"`
-	Source                  workflow.Span           `json:"source"`
+	Key                     string                   `json:"key"`
+	LogicalJobID            string                   `json:"logical_job_id"`
+	Label                   string                   `json:"label"`
+	Needs                   []string                 `json:"needs,omitempty"`
+	NeedGroups              map[string][]string      `json:"need_groups,omitempty"`
+	NeedOutputs             map[string][]NeedOutput  `json:"need_outputs,omitempty"`
+	CallGuards              []CallGuard              `json:"call_guards,omitempty"`
+	RunsOn                  []string                 `json:"runs_on"`
+	Queue                   string                   `json:"queue"`
+	Platform                Platform                 `json:"-"`
+	RuntimeImage            string                   `json:"runtime_image,omitempty"`
+	Matrix                  map[string]any           `json:"matrix,omitempty"`
+	Inputs                  map[string]any           `json:"inputs,omitempty"`
+	DeferredInputs          map[string]DeferredInput `json:"deferred_inputs,omitempty"`
+	FailFast                *bool                    `json:"fail_fast,omitempty"`
+	MaxParallel             *int                     `json:"max_parallel,omitempty"`
+	ConcurrencyGroup        string                   `json:"concurrency_group,omitempty"`
+	Steps                   []workflow.Step          `json:"steps"`
+	Env                     map[string]string        `json:"env,omitempty"`
+	Permissions             map[string]string        `json:"permissions,omitempty"`
+	If                      string                   `json:"if,omitempty"`
+	ContinueOnError         bool                     `json:"continue_on_error,omitempty"`
+	TimeoutMinutes          float64                  `json:"timeout_minutes,omitempty"`
+	DefaultShell            string                   `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory string                   `json:"default_working_directory,omitempty"`
+	Outputs                 map[string]string        `json:"outputs,omitempty"`
+	Container               *workflow.Container      `json:"container,omitempty"`
+	Services                []workflow.Service       `json:"services,omitempty"`
+	ServicesExpression      string                   `json:"services_expression,omitempty"`
+	SourcePath              string                   `json:"source_path"`
+	SourceDigest            string                   `json:"source_digest"`
+	RemoteWorkflow          *RemoteWorkflowSource    `json:"remote_workflow,omitempty"`
+	RepositoryRoot          string                   `json:"-"`
+	Source                  workflow.Span            `json:"source"`
 	secretAuthority         bool
 	tokenPolicyNarrowed     bool
 	jobPermissionsIgnored   bool
@@ -133,10 +134,18 @@ type JobInstance struct {
 // CallGuard is one immutable caller-scoped condition inherited by a flattened
 // reusable-workflow job.
 type CallGuard struct {
-	Condition   string                  `json:"condition"`
-	Inputs      map[string]any          `json:"inputs,omitempty"`
-	NeedGroups  map[string][]string     `json:"need_groups,omitempty"`
-	NeedOutputs map[string][]NeedOutput `json:"need_outputs,omitempty"`
+	Condition      string                   `json:"condition"`
+	Inputs         map[string]any           `json:"inputs,omitempty"`
+	DeferredInputs map[string]DeferredInput `json:"deferred_inputs,omitempty"`
+	NeedGroups     map[string][]string      `json:"need_groups,omitempty"`
+	NeedOutputs    map[string][]NeedOutput  `json:"need_outputs,omitempty"`
+}
+
+// DeferredInput binds one string workflow_call input to exact prerequisite
+// outputs without exposing the caller's needs context to the callee.
+type DeferredInput struct {
+	Sources []string     `json:"sources"`
+	Outputs []NeedOutput `json:"outputs,omitempty"`
 }
 
 // NeedOutput selects one caller-visible output from a concrete prerequisite.
@@ -557,9 +566,17 @@ instances:
 					}
 				}
 			}
+			deferredInputs, err := planDeferredInputs(instance.DeferredInputs, planDigests)
+			if err != nil {
+				return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+			}
 			callGuards := make([]plan.CallGuard, len(instance.CallGuards))
 			for guardIndex, guard := range instance.CallGuards {
-				planGuard := plan.CallGuard{Condition: guard.Condition, Inputs: cloneAnyMap(guard.Inputs)}
+				guardDeferredInputs, err := planDeferredInputs(guard.DeferredInputs, planDigests)
+				if err != nil {
+					return fmt.Errorf("build plan for job %q call guard %d: %w", instance.LogicalJobID, guardIndex+1, err)
+				}
+				planGuard := plan.CallGuard{Condition: guard.Condition, Inputs: cloneAnyMap(guard.Inputs), DeferredInputs: guardDeferredInputs}
 				if len(guard.NeedGroups) != 0 {
 					planGuard.NeedSources = make(map[string][]plan.NeedSource, len(guard.NeedGroups))
 					for _, logicalNeed := range sortedKeys(guard.NeedGroups) {
@@ -645,6 +662,7 @@ instances:
 				OIDC:                    cloneOIDCConfiguration(options.OIDC),
 				Matrix:                  instance.Matrix,
 				Inputs:                  cloneAnyMap(instance.Inputs),
+				DeferredInputs:          deferredInputs,
 				Vars:                    cloneMap(ir.Vars),
 				Dependencies:            append([]string(nil), instance.Needs...),
 				NeedSources:             needSources,
@@ -706,6 +724,29 @@ instances:
 		evaluations = append(evaluations, JobEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Evaluated: true, Passed: true})
 	}
 	return plans, authorizations, evaluations, errors.Join(diagnostics...)
+}
+
+func planDeferredInputs(inputs map[string]DeferredInput, planDigests map[string]string) (map[string]plan.DeferredInput, error) {
+	if len(inputs) == 0 {
+		return nil, nil
+	}
+	resolved := make(map[string]plan.DeferredInput, len(inputs))
+	for _, name := range sortedKeys(inputs) {
+		input := inputs[name]
+		deferred := plan.DeferredInput{Outputs: make([]plan.NeedOutput, len(input.Outputs))}
+		for _, source := range input.Sources {
+			digest, ok := planDigests[source]
+			if !ok {
+				return nil, fmt.Errorf("deferred input %q source %q has no earlier plan digest", name, source)
+			}
+			deferred.Sources = append(deferred.Sources, plan.NeedSource{StepKey: source, PlanDigest: digest})
+		}
+		for i, output := range input.Outputs {
+			deferred.Outputs[i] = plan.NeedOutput{Name: output.Name, StepKey: output.StepKey, Output: output.Output}
+		}
+		resolved[name] = deferred
+	}
+	return resolved, nil
 }
 
 func cloneOIDCConfiguration(configuration *plan.OIDCConfiguration) *plan.OIDCConfiguration {
@@ -1252,6 +1293,12 @@ func expand(ctx context.Context, path string, source []byte, parsed *workflow.Wo
 		job := sourced.Job
 		for _, guard := range sourced.callGuards {
 			job.Needs = append(job.Needs, bindingMembers(guard.needBindings)...)
+			for _, binding := range guard.deferredInputs {
+				job.Needs = append(job.Needs, binding.members...)
+			}
+		}
+		for _, binding := range sourced.deferredInputs {
+			job.Needs = append(job.Needs, binding.members...)
 		}
 		sort.Strings(job.Needs)
 		job.Needs = slices.Compact(job.Needs)
@@ -1325,8 +1372,22 @@ func expand(ctx context.Context, path string, source []byte, parsed *workflow.Wo
 				}
 			}
 		}
+		for _, binding := range sourced.deferredInputs {
+			for _, member := range binding.members {
+				if failedJobs[member] {
+					jobBlocked = true
+				}
+			}
+		}
 		for _, guard := range sourced.callGuards {
 			for _, binding := range guard.needBindings {
+				for _, member := range binding.members {
+					if failedJobs[member] {
+						jobBlocked = true
+					}
+				}
+			}
+			for _, binding := range guard.deferredInputs {
 				for _, member := range binding.members {
 					if failedJobs[member] {
 						jobBlocked = true
@@ -1337,6 +1398,8 @@ func expand(ctx context.Context, path string, source []byte, parsed *workflow.Wo
 		jobFailed := failedJobs[id]
 		matrices := matricesByJob[id]
 		concurrencyGroups := make(map[string]struct{}, len(matrices))
+		jobContext := context
+		jobContext.Inputs = sourced.inputs
 		for matrixIndex, matrix := range matrices {
 			strategy := map[string]any{"job-index": matrixIndex, "job-total": len(matrices), "fail-fast": true, "max-parallel": len(matrices)}
 			if job.FailFast != nil {
@@ -1345,13 +1408,13 @@ func expand(ctx context.Context, path string, source []byte, parsed *workflow.Wo
 			if job.MaxParallel != nil {
 				strategy["max-parallel"] = *job.MaxParallel
 			}
-			instanceContext := context
+			instanceContext := jobContext
 			instanceContext.Matrix = matrix
 			instanceContext.Strategy = strategy
-			compileConditionErr := supportedCompileTimeConditions(jobPath, job, context, matrix)
-			instanceJob := resolveCompileTimeConditions(job, context, matrix)
+			compileConditionErr := supportedCompileTimeConditions(jobPath, job, jobContext, matrix)
+			instanceJob := resolveCompileTimeConditions(job, jobContext, matrix)
 			conditionValidationJob := instanceJob
-			conditionContext := context
+			conditionContext := jobContext
 			conditionContext.Matrix = matrix
 			if resolved, err := expression.EvaluateCompileCondition(instanceJob.If, conditionContext); err == nil && !resolved {
 				instanceJob.If = "false"
@@ -1416,7 +1479,7 @@ func expand(ctx context.Context, path string, source []byte, parsed *workflow.Wo
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, err))
 				valid = false
 			}
-			labels, runsOnErr := resolveRunsOn(job, context, matrix)
+			labels, runsOnErr := resolveRunsOn(job, jobContext, matrix)
 			if runsOnErr != nil {
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, key, "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, runsOnErr.Error())))
 				valid = false
@@ -1438,7 +1501,7 @@ func expand(ctx context.Context, path string, source []byte, parsed *workflow.Wo
 					valid = false
 				}
 			}
-			concurrencyGroup, concurrencyErr := resolveConcurrency(jobPath, job.ID, job.Concurrency, context, matrix)
+			concurrencyGroup, concurrencyErr := resolveConcurrency(jobPath, job.ID, job.Concurrency, jobContext, matrix)
 			if concurrencyErr != nil {
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, concurrencyErr))
 				valid = false
@@ -1517,6 +1580,23 @@ func expand(ctx context.Context, path string, source []byte, parsed *workflow.Wo
 					instance.NeedOutputs[need] = projected
 				}
 			}
+			for _, name := range sortedKeys(sourced.deferredInputs) {
+				deferred, dependencies, deferredErr := resolveDeferredInputBinding(sourced.deferredInputs[name], byLogicalID)
+				if deferredErr != nil {
+					diagnostics = append(diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve deferred reusable-workflow input %q: %v", name, deferredErr))))
+					dependencyFailed = true
+					break
+				}
+				if instance.DeferredInputs == nil {
+					instance.DeferredInputs = make(map[string]DeferredInput, len(sourced.deferredInputs))
+				}
+				instance.DeferredInputs[name] = deferred
+				instance.Needs = append(instance.Needs, dependencies...)
+			}
+			if dependencyFailed {
+				jobFailed = true
+				continue
+			}
 			for guardIndex, guard := range sourced.callGuards {
 				groups, outputs, dependencies, guardErr := resolveCallGuardBindings(guard.needBindings, byLogicalID)
 				if guardErr != nil {
@@ -1527,6 +1607,22 @@ func expand(ctx context.Context, path string, source []byte, parsed *workflow.Wo
 				instance.CallGuards[guardIndex].NeedGroups = groups
 				instance.CallGuards[guardIndex].NeedOutputs = outputs
 				instance.Needs = append(instance.Needs, dependencies...)
+				for _, name := range sortedKeys(guard.deferredInputs) {
+					deferred, inputDependencies, inputErr := resolveDeferredInputBinding(guard.deferredInputs[name], byLogicalID)
+					if inputErr != nil {
+						diagnostics = append(diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve reusable-workflow call guard input %q: %v", name, inputErr))))
+						dependencyFailed = true
+						break
+					}
+					if instance.CallGuards[guardIndex].DeferredInputs == nil {
+						instance.CallGuards[guardIndex].DeferredInputs = make(map[string]DeferredInput, len(guard.deferredInputs))
+					}
+					instance.CallGuards[guardIndex].DeferredInputs[name] = deferred
+					instance.Needs = append(instance.Needs, inputDependencies...)
+				}
+				if dependencyFailed {
+					break
+				}
 			}
 			if dependencyFailed {
 				jobFailed = true
@@ -1550,6 +1646,43 @@ func expand(ctx context.Context, path string, source []byte, parsed *workflow.Wo
 	}
 	result.instances = instances
 	return result, errors.Join(diagnostics...)
+}
+
+func resolveDeferredInputBinding(binding needBinding, byLogicalID map[string][]JobInstance) (DeferredInput, []string, error) {
+	var deferred DeferredInput
+	for _, member := range binding.members {
+		producers := byLogicalID[member]
+		if len(producers) == 0 {
+			return DeferredInput{}, nil, fmt.Errorf("source job %q has no expanded instances", member)
+		}
+		for _, producer := range producers {
+			deferred.Sources = append(deferred.Sources, producer.Key)
+		}
+	}
+	sort.Strings(deferred.Sources)
+	deferred.Sources = slices.Compact(deferred.Sources)
+	if len(deferred.Sources) > plan.MaxNeedProducers {
+		return DeferredInput{}, nil, fmt.Errorf("has %d producers, maximum is %d", len(deferred.Sources), plan.MaxNeedProducers)
+	}
+	for _, output := range binding.outputs {
+		producers := byLogicalID[output.member]
+		if len(deferred.Outputs)+len(producers) > plan.MaxNeedOutputs {
+			return DeferredInput{}, nil, fmt.Errorf("output %q expands beyond the maximum of %d projections", output.output, plan.MaxNeedOutputs)
+		}
+		for _, producer := range producers {
+			deferred.Outputs = append(deferred.Outputs, NeedOutput{Name: output.name, StepKey: producer.Key, Output: output.output})
+		}
+	}
+	sort.Slice(deferred.Outputs, func(i, j int) bool {
+		if deferred.Outputs[i].Name != deferred.Outputs[j].Name {
+			return deferred.Outputs[i].Name < deferred.Outputs[j].Name
+		}
+		if deferred.Outputs[i].StepKey != deferred.Outputs[j].StepKey {
+			return deferred.Outputs[i].StepKey < deferred.Outputs[j].StepKey
+		}
+		return deferred.Outputs[i].Output < deferred.Outputs[j].Output
+	})
+	return deferred, append([]string(nil), deferred.Sources...), nil
 }
 
 func resolveCallGuardBindings(bindings map[string]needBinding, byLogicalID map[string][]JobInstance) (map[string][]string, map[string][]NeedOutput, []string, error) {

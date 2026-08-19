@@ -77,6 +77,12 @@ func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 	job := validJob()
 	digest := "sha256:" + strings.Repeat("1", 64)
 	job.Dependencies = []string{"gha-prepare"}
+	job.DeferredInputs = map[string]DeferredInput{
+		"subject": {
+			Sources: []NeedSource{{StepKey: "gha-prepare", PlanDigest: digest}},
+			Outputs: []NeedOutput{{Name: "value", StepKey: "gha-prepare", Output: "subject"}},
+		},
+	}
 	job.CallGuards = []CallGuard{{
 		Condition: "always() && needs.prepare.result == 'failure' && needs.prepare.outputs.ready && inputs.enabled",
 		Inputs:    map[string]any{"enabled": true},
@@ -86,6 +92,12 @@ func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 		NeedOutputs: map[string][]NeedOutput{
 			"prepare": {{Name: "ready", StepKey: "gha-prepare", Output: "ready"}},
 		},
+		DeferredInputs: map[string]DeferredInput{
+			"subject": {
+				Sources: []NeedSource{{StepKey: "gha-prepare", PlanDigest: digest}},
+				Outputs: []NeedOutput{{Name: "value", StepKey: "gha-prepare", Output: "subject"}},
+			},
+		},
 	}}
 	encoded, err := Encode(job)
 	if err != nil {
@@ -93,8 +105,8 @@ func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 	}
 	validateJobPlanSchema(t, encoded)
 	decoded, err := Decode(encoded)
-	if err != nil || !reflect.DeepEqual(decoded.CallGuards, job.CallGuards) {
-		t.Fatalf("Decode() call guards = %#v, %v", decoded.CallGuards, err)
+	if err != nil || !reflect.DeepEqual(decoded.CallGuards, job.CallGuards) || !reflect.DeepEqual(decoded.DeferredInputs, job.DeferredInputs) {
+		t.Fatalf("Decode() deferred inputs/call guards = %#v / %#v, %v", decoded.DeferredInputs, decoded.CallGuards, err)
 	}
 
 	job.CallGuards[0].Condition = "matrix.os"
