@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1342,17 +1343,132 @@ jobs:
 	}
 }
 
-func TestCompileBundleRejectsRetainedGitHubEventPayload(t *testing.T) {
+func TestCompileBundleReducesRetainedGitHubEventPayload(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "event.yml", `on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      JOB_SHA: ${{ github.event.pull_request.head.sha }}
+    defaults:
+      run:
+        shell: ${{ github.event.shell }}
+        working-directory: ${{ github.event.directory }}
+    steps:
+      - name: Head ${{ github.event.pull_request.head.sha }}
+        run: echo '${{ github.event.pull_request.head.sha }}' '${{ github.event.missing }}' '${{ github.event.action }}' '${{ github.event.pull_request.head.sha == steps.previous.outputs.sha }}'
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: ${{ github.event.shell }}
+        working-directory: ${{ github.event.directory }}
+      - uses: ./event-action
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+`)
+	writeAction(t, repository, "event-action", `name: event action
+inputs:
+  ref:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	event := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "octocat",
+  "payload": {"action": "opened", "shell": "bash", "directory": ".", "pull_request": {"head": {"sha": "2222222222222222222222222222222222222222"}}}
+}`)
+	bundle, err := CompileBundle(path, readFile(t, path), event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := bundle.Plans[0].Job
+	if job.Env["JOB_SHA"] != "2222222222222222222222222222222222222222" || job.DefaultShell != "bash" || job.DefaultWorkingDirectory != "." {
+		t.Fatalf("job templates were not reduced: env = %#v, shell = %q, working-directory = %q", job.Env, job.DefaultShell, job.DefaultWorkingDirectory)
+	}
+	step := job.Steps[0]
+	if step.Name != "Head 2222222222222222222222222222222222222222" || step.Env["HEAD_SHA"] != "2222222222222222222222222222222222222222" || step.Shell != "bash" || step.WorkingDirectory != "." {
+		t.Fatalf("step templates were not reduced: %#v", step)
+	}
+	if want := "echo '2222222222222222222222222222222222222222' '' 'opened' '${{ ('2222222222222222222222222222222222222222' == steps.previous.outputs.sha) }}'"; step.Command != want {
+		t.Fatalf("command = %q, want %q", step.Command, want)
+	}
+	if got := job.Steps[1].With["ref"]; got != "2222222222222222222222222222222222222222" {
+		t.Fatalf("action input = %q", got)
+	}
+}
+
+func TestCompileBundleRejectsEventValueExpressionInjection(t *testing.T) {
 	source := []byte(`on: push
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - run: echo '${{ github.event.action }}'
+      - run: echo '${{ github.event.value }}'
 `)
-	_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained in a job plan") {
-		t.Fatalf("CompileBundle() error = %v, want retained event rejection", err)
+	event := []byte(`{
+  "provider": "github", "event": "push",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"value": "${{ secrets.ADMIN }}"}
+}`)
+	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "result contains expression syntax") {
+		t.Fatalf("CompileBundle() error = %v, want expression injection rejection", err)
+	}
+}
+
+func TestCompileBundleReducesEventExpressionsAfterMatrixExpansion(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        part: [one, two]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ format('{0}-{1}', github.event.ref, matrix.part) }}
+`)
+	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d, want 2", len(bundle.Plans))
+	}
+	for _, artifact := range bundle.Plans {
+		part := artifact.Job.Matrix["part"]
+		if want := fmt.Sprintf("echo refs/heads/main-%s", part); artifact.Job.Steps[0].Command != want {
+			t.Errorf("matrix %v command = %q, want %q", part, artifact.Job.Steps[0].Command, want)
+		}
+	}
+}
+
+func TestCompileBundleReducesEventExpressionsInReusableWorkflowJobs(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ github.event.ref }}
+`)
+	bundle, err := CompileBundle(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Steps[0].Command != "echo refs/heads/main" {
+		t.Fatalf("reusable-workflow plan = %#v", bundle.Plans)
 	}
 }
 

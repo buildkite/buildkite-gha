@@ -589,6 +589,8 @@ Reusable-workflow call conditions use the same operators and status functions bu
 
 Workflow step `run`, `env`, `with`, `name`, explicit `shell`, explicit `working-directory`, `continue-on-error`, and `timeout-minutes` fields support the operators and pure functions listed above. They also support computed indexes and projections over available `matrix`, `vars`, `inputs`, `env`, and `runner` values. Computed, whole, and projected `steps` and `needs` access remains unsupported, so attempting to access an unavailable background output returns an error.
 
+In these fields and the job-level fields below, the compiler resolves scalar `github.event.*` values from the immutable event snapshot before creating a job plan. It also resolves event-dependent subtrees inside expressions that retain supported runtime values. Missing event members render as null, and template interpolation renders null as an empty string. Event values cannot introduce new `${{ ... }}` regions. Whole-event access and any residual event reference are unsupported because job plans retain only event identity and a payload digest.
+
 Job-level expressions support the same operators and pure functions with these field-specific contexts:
 
 | Field | Contexts |
@@ -627,7 +629,7 @@ Patterns cannot be absolute, contain a `..` path segment, or contain ASCII contr
 
 ### Compile-time expressions
 
-Matrices, runner labels, names, concurrency groups, and event-backed conditions may use statically known `github`, `event`, `vars`, and matrix values. Compile-time `github` values include `github.actor`, `github.base_ref`, `github.event_name`, `github.head_ref`, `github.ref`, `github.ref_name`, `github.ref_type`, `github.repository`, `github.repository_owner`, `github.sha`, and `github.workflow`. They support the compile-time syntax listed above, computed indexes, numeric array indexes, and `.*` projections where the complete expression resolves during compilation. Whole or dynamic `github` access and whole-event serialization remain unsupported. Event-backed conditions may also combine reducible event subtrees with supported runtime condition values such as `needs` and status functions.
+Matrices, runner labels, names, concurrency groups, plan-retained runtime templates, and event-backed conditions may use statically known `github`, `event`, `vars`, and matrix values. Compile-time `github` values include `github.actor`, `github.base_ref`, `github.event_name`, `github.head_ref`, `github.ref`, `github.ref_name`, `github.ref_type`, `github.repository`, `github.repository_owner`, `github.sha`, and `github.workflow`. They support the compile-time syntax listed above, computed indexes, numeric array indexes, and `.*` projections where the complete expression resolves during compilation. Whole or dynamic `github` access and whole-event serialization remain unsupported. Event-backed conditions and runtime templates may also combine reducible event subtrees with values supported by their runtime surface.
 
 ## Actions
 
