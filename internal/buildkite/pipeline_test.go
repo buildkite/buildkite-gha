@@ -246,11 +246,11 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 		EventProvider:      "github",
 		Workflows: []Workflow{
 			{
-				GroupLabel: "CI", GroupKey: "gha-workflow-1111111111111111", Event: "push", Condition: `build.source_event == "push"`,
+				GroupLabel: "CI", GroupKey: "gha-workflow-1111111111111111", Event: "push", Condition: `build.env("BUILDKITE_GITHUB_EVENT") == "push"`,
 				Jobs: []Job{{Key: "gha-1111111111111111-test", Label: "Test", PlanDigest: testDigest("first plan")}},
 			},
 			{
-				GroupLabel: ".github/workflows/release.yml", GroupKey: "gha-workflow-2222222222222222", Event: "workflow_dispatch", Condition: `build.source == "ui"`,
+				GroupLabel: ".github/workflows/release.yml", GroupKey: "gha-workflow-2222222222222222", Event: "workflow_dispatch", Condition: `build.env("BUILDKITE_GITHUB_EVENT") == "workflow_dispatch"`,
 				Jobs: []Job{{Key: "gha-2222222222222222-test", Label: "Test \"quoted\"\nnext", PlanDigest: testDigest("second plan")}},
 			},
 		},
@@ -280,7 +280,7 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 	if err := yaml.Unmarshal(output, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document.Steps) != 2 || document.Steps[0].Group != ":github: workflow · CI" || document.Steps[0].Key != "gha-workflow-1111111111111111" || document.Steps[0].Condition != `build.source_event == "push"` || document.Steps[0].DependsOn != "importer" || document.Steps[0].Notify != nil || len(document.Steps[0].Steps) != 1 || document.Steps[0].Steps[0].Key != "gha-1111111111111111-test" || len(document.Steps[0].Steps[0].Notify) != 1 || document.Steps[0].Steps[0].Notify[0].GitHubCheck.Name != "CI / Test (push)" {
+	if len(document.Steps) != 2 || document.Steps[0].Group != ":github: workflow · CI" || document.Steps[0].Key != "gha-workflow-1111111111111111" || document.Steps[0].Condition != `build.env("BUILDKITE_GITHUB_EVENT") == "push"` || document.Steps[0].DependsOn != "importer" || document.Steps[0].Notify != nil || len(document.Steps[0].Steps) != 1 || document.Steps[0].Steps[0].Key != "gha-1111111111111111-test" || len(document.Steps[0].Steps[0].Notify) != 1 || document.Steps[0].Steps[0].Notify[0].GitHubCheck.Name != "CI / Test (push)" {
 		t.Fatalf("first aggregate group = %#v\n%s", document.Steps, output)
 	}
 	if document.Steps[1].Group != ":github: workflow · .github/workflows/release.yml" || document.Steps[1].Key != "gha-workflow-2222222222222222" || document.Steps[1].DependsOn != "importer" || document.Steps[1].Notify != nil || len(document.Steps[1].Steps) != 1 || document.Steps[1].Steps[0].Key != "gha-2222222222222222-test" || len(document.Steps[1].Steps[0].Notify) != 1 || document.Steps[1].Steps[0].Notify[0].GitHubCheck.Name != ".github/workflows/release.yml / Test \"quoted\"\nnext (workflow_dispatch)" {

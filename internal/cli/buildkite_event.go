@@ -100,6 +100,23 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		ref = "refs/heads/" + branch
 		payload["ref"] = ref
 	}
+	if githubEvent := strings.TrimSpace(getenv("BUILDKITE_GITHUB_EVENT")); githubEventNamePattern.MatchString(githubEvent) {
+		switch githubEvent {
+		case "push", "pull_request", "workflow_dispatch", "schedule":
+			event = githubEvent
+			// Rebuilds retain the original GitHub event even though Buildkite reports
+			// their source as UI. A push may also be associated with an open pull
+			// request, so restore its authoritative branch or tag ref.
+			if event == "push" {
+				if strings.TrimSpace(tag) != "" {
+					ref = "refs/tags/" + tag
+				} else if strings.TrimSpace(branch) != "" {
+					ref = "refs/heads/" + branch
+				}
+				payload = map[string]any{"ref": ref}
+			}
+		}
+	}
 
 	repository := map[string]any{"owner": owner, "name": name, "clone_url": cloneURL}
 	if defaultBranch := strings.TrimSpace(getenv("BUILDKITE_PIPELINE_DEFAULT_BRANCH")); defaultBranch != "" {
