@@ -394,16 +394,17 @@ func TestBuildkiteEventSourceDoesNotInventReleaseFromEnvironment(t *testing.T) {
 	}
 }
 
-func TestBuildkiteWebhookPushUsesBranchRefForPullRequestAssociatedBuild(t *testing.T) {
+func TestBuildkiteWebhookPushUsesPullRequestCompatibilitySnapshot(t *testing.T) {
 	env := map[string]string{
 		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step",
-		"BUILDKITE_REPO":         "https://github.com/buildkite/buildkite-gha",
-		"BUILDKITE_COMMIT":       strings.Repeat("a", 40),
-		"BUILDKITE_BRANCH":       "feature",
-		"BUILDKITE_PULL_REQUEST": "42",
-		"BUILDKITE_GITHUB_EVENT": "push",
+		"BUILDKITE_REPO":                     "https://github.com/buildkite/buildkite-gha",
+		"BUILDKITE_COMMIT":                   strings.Repeat("a", 40),
+		"BUILDKITE_BRANCH":                   "feature",
+		"BUILDKITE_PULL_REQUEST":             "42",
+		"BUILDKITE_PULL_REQUEST_BASE_BRANCH": "main",
+		"BUILDKITE_GITHUB_EVENT":             "push",
 	}
-	source, err := buildkiteWebhookEventSource(func(key string) string { return env[key] }, []byte(`{"ref":"refs/heads/feature"}`))
+	source, err := buildkiteWebhookEventSource(func(key string) string { return env[key] }, []byte(`{"ref":"refs/heads/feature","push_marker":"discarded"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,20 +412,25 @@ func TestBuildkiteWebhookPushUsesBranchRefForPullRequestAssociatedBuild(t *testi
 	if err := json.Unmarshal(source, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot["event"] != "push" || snapshot["ref"] != "refs/heads/feature" {
-		t.Fatalf("snapshot event/ref = %q / %q", snapshot["event"], snapshot["ref"])
+	payload := snapshot["payload"].(map[string]any)
+	pullRequest := payload["pull_request"].(map[string]any)
+	if snapshot["event"] != "pull_request" || snapshot["ref"] != "refs/pull/42/head" ||
+		payload["action"] != "synchronize" || payload["number"] != float64(42) || payload["push_marker"] != nil ||
+		pullRequest["head"].(map[string]any)["ref"] != "feature" || pullRequest["base"].(map[string]any)["ref"] != "main" {
+		t.Fatalf("pull request synchronization snapshot = %#v", snapshot)
 	}
 }
 
-func TestBuildkiteEventSourceRebuiltPushResetsPullRequestPayload(t *testing.T) {
+func TestBuildkiteEventSourceRebuiltPushPreservesPullRequestCompatibilitySnapshot(t *testing.T) {
 	env := map[string]string{
 		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step",
-		"BUILDKITE_REPO":         "https://github.com/buildkite/buildkite-gha",
-		"BUILDKITE_COMMIT":       strings.Repeat("a", 40),
-		"BUILDKITE_BRANCH":       "feature",
-		"BUILDKITE_PULL_REQUEST": "42",
-		"BUILDKITE_GITHUB_EVENT": "push",
-		"BUILDKITE_SOURCE":       "ui",
+		"BUILDKITE_REPO":                     "https://github.com/buildkite/buildkite-gha",
+		"BUILDKITE_COMMIT":                   strings.Repeat("a", 40),
+		"BUILDKITE_BRANCH":                   "feature",
+		"BUILDKITE_PULL_REQUEST":             "42",
+		"BUILDKITE_PULL_REQUEST_BASE_BRANCH": "main",
+		"BUILDKITE_GITHUB_EVENT":             "push",
+		"BUILDKITE_SOURCE":                   "ui",
 	}
 	source, err := buildkiteEventSource(func(key string) string { return env[key] })
 	if err != nil {
@@ -435,7 +441,9 @@ func TestBuildkiteEventSourceRebuiltPushResetsPullRequestPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := snapshot["payload"].(map[string]any)
-	if snapshot["event"] != "push" || snapshot["ref"] != "refs/heads/feature" || payload["ref"] != "refs/heads/feature" || len(payload) != 1 {
+	pullRequest := payload["pull_request"].(map[string]any)
+	if snapshot["event"] != "pull_request" || snapshot["ref"] != "refs/pull/42/head" ||
+		payload["action"] != "synchronize" || pullRequest["base"].(map[string]any)["ref"] != "main" {
 		t.Fatalf("rebuilt push snapshot = %#v", snapshot)
 	}
 }

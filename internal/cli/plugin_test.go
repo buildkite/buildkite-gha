@@ -314,6 +314,94 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 	}
 }
 
+func TestPluginModelsFirstPartyPullRequestSynchronizationFromPush(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"ci.yml": "name: CI\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	configuration, err := json.Marshal(map[string]any{"workflow": ".github/workflows/ci.yml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	setCLIPluginBuildkiteEnvironment(t, "pull-request-push-importer")
+	sha := strings.Repeat("a", 40)
+	t.Setenv("BUILDKITE_COMMIT", sha)
+	t.Setenv("BUILDKITE_BRANCH", "amp/buildkite-gha")
+	t.Setenv("BUILDKITE_PULL_REQUEST", "583")
+	t.Setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "push")
+	runner := &cliCaptureRunner{webhook: []byte(`{
+  "ref":"refs/heads/amp/buildkite-gha",
+  "before":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "after":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "repository":{"full_name":"buildkite/buildkite-gha"},
+  "sender":{"login":"octocat"}
+}`)}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group     string `yaml:"group"`
+			Condition string `yaml:"if"`
+			Skip      string `yaml:"skip"`
+			Steps     []struct {
+				Notify []struct {
+					GitHubCheck struct {
+						Name string `yaml:"name"`
+					} `yaml:"github_check"`
+				} `yaml:"notify"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · CI" || pipeline.Steps[0].Skip != "" || len(pipeline.Steps[0].Steps) != 1 {
+		t.Fatalf("pull request synchronization pipeline = %#v", pipeline.Steps)
+	}
+	condition := pipeline.Steps[0].Condition
+	for _, want := range []string{
+		`build.env("BUILDKITE_GITHUB_EVENT") == "push"`,
+		`build.pull_request.id != null`,
+		`"main" =~ /^main$/`,
+		`"synchronize" == "synchronize"`,
+	} {
+		if !strings.Contains(condition, want) {
+			t.Errorf("pull request synchronization condition missing %q: %s", want, condition)
+		}
+	}
+	if strings.Contains(condition, "amp/buildkite-gha") {
+		t.Errorf("pull request condition retained the false push branch: %s", condition)
+	}
+	check := pipeline.Steps[0].Steps[0].Notify
+	if len(check) != 1 || check[0].GitHubCheck.Name != "CI / test (pull_request)" {
+		t.Fatalf("pull request synchronization check = %#v", check)
+	}
+	planCount := 0
+	for path, contents := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatal(err)
+		}
+		planCount++
+		if job.Event.Name != "pull_request" || job.Event.Ref != "refs/pull/583/head" ||
+			job.Event.HeadRef != "amp/buildkite-gha" || job.Event.BaseRef != "main" ||
+			job.Event.SHA != sha || job.Event.Actor != "octocat" {
+			t.Fatalf("pull request synchronization plan event = %#v", job.Event)
+		}
+	}
+	if planCount != 1 {
+		t.Fatalf("plan count = %d, want 1", planCount)
+	}
+}
+
 func TestPluginIgnoresJobPermissionsForHostedGitHubToken(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{

@@ -346,7 +346,7 @@ func LiveEventPredicate(event string) string {
 	fallbackEvent += " || (" + unsupportedEvent + "))"
 	switch event {
 	case "push":
-		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source != "ui" && build.source != "api" && build.source != "schedule"))`
+		return "((" + predicate + ` && build.pull_request.id == null) || (` + fallbackEvent + ` && build.pull_request.id == null && build.source != "ui" && build.source != "api" && build.source != "schedule"))`
 	case "pull_request":
 		return "(" + predicate + " || (" + fallbackEvent + " && build.pull_request.id != null))"
 	case "workflow_dispatch":
@@ -358,6 +358,13 @@ func LiveEventPredicate(event string) string {
 	default:
 		return ""
 	}
+}
+
+// LivePullRequestPushPredicate matches the push delivery that Buildkite's
+// GitHub integration uses for a first-party pull request synchronization.
+func LivePullRequestPushPredicate() string {
+	githubEvent := "build.env(" + yamlScalar("BUILDKITE_GITHUB_EVENT") + ")"
+	return "(" + githubEvent + ` == "push" && build.pull_request.id != null)`
 }
 
 func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpressions, snapshot TriggerEventSnapshot, selected bool) (string, bool, error) {

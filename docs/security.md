@@ -28,6 +28,8 @@ Public reusable workflows use the same bounded repository source and cache as pu
 
 Push and pull request path-filter admission uses Buildkite's reserved linked-webhook metadata only after binding it to the Buildkite repository and commit and matching local Git history. Missing, shallow, ambiguous, oversized, or mismatched evidence prevents admission. Explicit and generated snapshots cannot grant this admission. This check controls workflow selection; it does not make the selected workflow trusted.
 
+A first-party pull request synchronization may be linked to a push payload. The importer models its trigger from Buildkite pull request metadata but does not treat the push payload as pull request path-filter evidence.
+
 Release ingestion also requires reserved linked-webhook metadata. It binds the webhook activity to `BUILDKITE_GITHUB_ACTION`, the release tag to both `BUILDKITE_TAG` and `BUILDKITE_BRANCH`, and the event SHA to the checked-out commit after the plugin resolves Buildkite's symbolic `HEAD`. Environment fallback cannot invent a release event. Enable **Additional Webhooks** > **Releases** only with **Code** trigger mode.
 
 Reusable-workflow call conditions are immutable plan guards evaluated in caller scope. Direct `needs` values come only from producer-attributed, digest-bound result manifests; a missing or changed manifest stops the job with an error. A false guard skips the flattened job before secret retrieval, workflow-token minting, OIDC startup, action materialization, containers, or steps.

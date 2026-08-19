@@ -116,7 +116,9 @@ Upload selects one authoritative effective event, in this order:
 1. The GitHub event name accompanying Buildkite's reserved linked-webhook metadata.
 1. A Buildkite environment fallback: `BUILDKITE_GITHUB_EVENT` preserves `push`, `pull_request`, `workflow_dispatch`, and `schedule` across rebuilds. Without one of those values, pull request builds use `pull_request`; `ui` and `api` use `workflow_dispatch`; `schedule` uses `schedule`; and every other source, including `trigger_job`, uses `push`.
 
-An explicit event snapshot never consults contradictory live Buildkite event fields. Linked `merge_group` webhooks must match the Buildkite merge queue head and base refs and commits. Linked `release` webhooks must match the Buildkite event, action, branch, and tag; the plugin normalizes Buildkite's symbolic `HEAD` commit to the checked-out peeled tag commit first. The fallback cannot infer a merge group or release without linked webhook data. The selected snapshot is then used consistently for applicability, event-dependent validation and compilation, the `BUILDKITE_GITHUB_EVENT` group condition with its non-webhook fallback, and the event suffix in its provider check.
+Buildkite's GitHub integration coalesces a first-party pull request synchronization into the branch's linked push build. When a GitHub `push` build has a Buildkite pull request number, upload selects one `pull_request` event with `synchronize` activity, the pull request base branch, and `refs/pull/<number>/head`. It does not also select `push`. A push without pull request metadata remains a `push`, so push branch and tag filters retain their normal semantics.
+
+An explicit event snapshot never consults contradictory live Buildkite event fields. Linked `merge_group` webhooks must match the Buildkite merge queue head and base refs and commits. Linked `release` webhooks must match the Buildkite event, action, branch, and tag; the plugin normalizes Buildkite's symbolic `HEAD` commit to the checked-out peeled tag commit first. The fallback cannot infer a merge group or release without linked webhook data. The selected snapshot is then used consistently for applicability, event-dependent validation and compilation, its exact Buildkite group condition, and the event suffix in its provider check.
 
 | Event | Supported trigger behavior |
 | --- | --- |
@@ -156,6 +158,8 @@ on:
 ```
 
 Before upload, the importer compares the pull request merge base with its head using the local checkout. It admits a workflow only when a changed path matches and the linked webhook, commits, synthetic merge, base branch, and workflow file all agree. It uses the checkout's existing Git access for public, private, and fork pull requests. It does not call GitHub or use Buildkite `if_changed`.
+
+A coalesced first-party synchronization has a linked push payload, not a pull request payload. The push payload cannot admit pull request path filters because it covers only that push, not the complete pull request comparison.
 
 | Admitted | Rejected |
 | --- | --- |
