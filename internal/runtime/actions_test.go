@@ -481,7 +481,11 @@ runs:
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
-	if result.Conclusion != "success" || result.Env["SOURCE_BACKED_LOCAL_ACTION"] != "seen" || result.Env["SOURCE_BACKED_ACTION_PATH"] != privacyCheck {
+	canonicalPrivacyCheck, err := filepath.EvalSymlinks(privacyCheck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Conclusion != "success" || result.Env["SOURCE_BACKED_LOCAL_ACTION"] != "seen" || result.Env["SOURCE_BACKED_ACTION_PATH"] != canonicalPrivacyCheck {
 		t.Fatalf("RunJob() result = %#v", result)
 	}
 }
