@@ -306,6 +306,18 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	b.active[key] = true
 	defer delete(b.active, key)
 
+	if actionintegration.UsesNativeAdapter(actionintegration.Identity{Source: n.lock.Source, Repository: n.lock.Repository, Path: n.lock.Path}) {
+		// The native adapter replaces the admitted release's execution
+		// entirely, and admitted legacy releases predate the supported
+		// metadata and runtime set, so upstream metadata must not gate
+		// admission. It still informs input declarations when it loads.
+		n.native = true
+		if m, err := metadata.Load(root, loadPath); err == nil {
+			m.SourceRoot = root
+			n.metadata = m
+		}
+		return n, nil
+	}
 	m, err := metadata.Load(root, loadPath)
 	if err != nil {
 		return nil, err
@@ -323,10 +335,6 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	n.runtime = runtime
 	if err := m.ValidateEntrypoints(runtime); err != nil {
 		return nil, err
-	}
-	if actionintegration.UsesNativeAdapter(actionintegration.Identity{Source: n.lock.Source, Repository: n.lock.Repository, Path: n.lock.Path}) {
-		n.native = true
-		return n, nil
 	}
 	if runtime == metadata.RuntimeNode16 || runtime == metadata.RuntimeNode20 || runtime == metadata.RuntimeNode24 {
 		if err := expression.ValidateActionLifecycleCondition(m.Runs.PreIf); err != nil {

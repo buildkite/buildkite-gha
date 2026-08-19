@@ -551,7 +551,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		// lazy. Materialize every remote lock now because bind mounts cannot be
 		// added after the persistent container is created.
 		for _, lock := range job.Actions {
-			if lock.Source != "github" {
+			if lock.Source != "github" || usesNativeAdapter(lock) {
 				continue
 			}
 			action, _, resolveErr := actions.resolve(runCtx, plan.ActionSelector{Lock: lock.ID})
@@ -1587,15 +1587,15 @@ func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockR
 			return fmt.Errorf("action recursion detected at lock %q", lock.ID)
 		}
 	}
+	if usesNativeAdapter(lock) {
+		return nil
+	}
 	runtime, err := action.Runtime()
 	if err != nil {
 		return err
 	}
 	if err := action.ValidateEntrypoints(runtime); err != nil {
 		return err
-	}
-	if usesNativeAdapter(lock) {
-		return nil
 	}
 	if runtime != metadata.RuntimeComposite {
 		return nil
@@ -1621,6 +1621,11 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 	requiredNode := map[int]bool{}
 	unknownWorkspaceRuntime := false
 	for _, lock := range actions.job.Actions {
+		// A native adapter replaces the admitted action's execution entirely,
+		// so its source tree is never mounted or classified for the container.
+		if usesNativeAdapter(lock) {
+			continue
+		}
 		entry := actions.locks[lock.ID]
 		entry.mu.Lock()
 		material := entry.material
@@ -1660,9 +1665,6 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 				return nil, fmt.Errorf("conflicting verified action roots for %q", target)
 			}
 			byTarget[target] = m
-		}
-		if usesNativeAdapter(lock) {
-			continue
 		}
 		if major, ok := actionNodeMajor(actionRuntime); ok {
 			requiredNode[major] = true
@@ -1734,6 +1736,12 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 	if err != nil {
 		return result, err
 	}
+	// The native adapters replace the verified action's lifecycle as one
+	// indivisible operation, so upstream metadata never classifies and no
+	// upstream cleanup is registered for phases this runtime never executes.
+	if usesCheckoutAdapter(lock) || usesUploadArtifactAdapter(lock) || usesDownloadArtifactAdapter(lock) {
+		return result, nil
+	}
 	runtime, err := action.Runtime()
 	if err != nil {
 		return result, fmt.Errorf("action %q uses %w", step.Uses, err)
@@ -1744,12 +1752,6 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 
 	switch runtime {
 	case metadata.RuntimeNode16, metadata.RuntimeNode20, metadata.RuntimeNode24:
-		// The checkout adapter replaces the verified action's JavaScript
-		// lifecycle as one indivisible operation. Do not register upstream
-		// checkout cleanup for a main phase that this runtime never executes.
-		if usesCheckoutAdapter(lock) || usesUploadArtifactAdapter(lock) || usesDownloadArtifactAdapter(lock) {
-			return result, nil
-		}
 		if err := expression.ValidateActionLifecycleCondition(action.Runs.PreIf); err != nil {
 			return result, fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err)
 		}

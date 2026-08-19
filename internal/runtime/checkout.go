@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,6 +80,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	if err := actionintegration.ValidateCheckoutInputs(commit, inputs, job.Event.Repository, job.Event.SHA); err != nil {
 		return result, fmt.Errorf("%s: %w", adapter, err)
 	}
+	inputs = checkoutInputsWithReleaseDefaults(commit, inputs)
 	checkoutDirectory, err := prepareCheckoutDirectory(workspace, inputs)
 	if err != nil {
 		return result, fmt.Errorf("%s: %w", adapter, err)
@@ -144,12 +146,26 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 }
 
 func setCheckoutOutputs(outputs map[string]string, commit, ref, headSHA string) {
-	// Checkout outputs were added in v4.2.0 and aren't part of the v3 contract.
-	if actionintegration.IsCheckoutV3(commit) {
+	// Checkout outputs were added in v4.2.0 and aren't part of earlier contracts.
+	if !actionintegration.CheckoutSupportsOutputs(commit) {
 		return
 	}
 	outputs["ref"] = ref
 	outputs["commit"] = headSHA
+}
+
+// checkoutInputsWithReleaseDefaults applies v1's full-history fetch default,
+// which lived in the historical runner plugin rather than an action manifest.
+func checkoutInputsWithReleaseDefaults(commit string, inputs map[string]string) map[string]string {
+	if !actionintegration.CheckoutDefaultsToFullHistory(commit) || checkoutInput(inputs, "fetch-depth") != "" {
+		return inputs
+	}
+	defaulted := maps.Clone(inputs)
+	if defaulted == nil {
+		defaulted = map[string]string{}
+	}
+	defaulted["fetch-depth"] = "0"
+	return defaulted
 }
 
 func checkoutRepositoryURL(provider, repository string) (url, credentialHost string, ok bool) {

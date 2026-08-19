@@ -249,6 +249,12 @@ func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLock
 	}
 	m, err := metadata.Load(repositoryRoot, lock.Path)
 	if err != nil {
+		// Admitted legacy releases predate the supported metadata set, and a
+		// native adapter replaces their execution entirely, so the verified
+		// tree digest is the admission boundary rather than the manifest.
+		if usesNativeAdapter(lock) {
+			return metadata.Metadata{SourceRoot: repositoryRoot}, nil
+		}
 		return metadata.Metadata{}, fmt.Errorf("load materialized action: %w", err)
 	}
 	digest, err = source.DigestTree(repositoryRoot)
