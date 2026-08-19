@@ -23,8 +23,8 @@ import (
 const (
 	hostedProfile                = "hosted"
 	legacyHostedTokenlessProfile = "hosted-tokenless"
-	defaultNobleRunnerImage      = "buildkite.namespace-images.com/agent-base@sha256:d8fa20ce298d9ee8673dc6e9ecddabb23ebbff3bcaf828d2011714a960cc5853"
-	defaultJammyRunnerImage      = "buildkite.namespace-images.com/agent-base@sha256:3489d7d999869a11a243bdd9f91f318784cb74f0b57646c57424d10008b1e21d"
+	defaultNobleRunnerImage      = "buildkite.namespace-images.com/agent-base@sha256:243c4015ea220c526b7976df88b037aff1930c1278d8d716b2f5f90247c72a08"
+	defaultJammyRunnerImage      = "buildkite.namespace-images.com/agent-base@sha256:21c6794d225832c5e104c2ed97c8602da5925caf225e31018f32408074fa40fc"
 	defaultMacOSRunnerQueue      = "macos-medium"
 )
 
