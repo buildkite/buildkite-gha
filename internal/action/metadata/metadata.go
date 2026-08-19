@@ -91,14 +91,13 @@ type CompositeStep struct {
 // Runtime identifies one supported action execution model.
 type Runtime string
 
+const runtimeNode20Declaration = "node20"
+
 const (
 	// MaxNestedActionDepth bounds local action expansion in both compilation and execution.
 	MaxNestedActionDepth = 10
 	// RuntimeNode16 executes a JavaScript action with managed Node 16.
 	RuntimeNode16 Runtime = "node16"
-	// RuntimeNode20 identifies the accepted node20 action declaration. Matching
-	// GitHub-hosted runners, Runtime maps it to the managed Node 24 runtime.
-	RuntimeNode20 Runtime = "node20"
 	// RuntimeNode24 executes a JavaScript action with managed Node 24.
 	RuntimeNode24 Runtime = "node24"
 	// RuntimeComposite executes a composite action.
@@ -344,7 +343,7 @@ func (metadata Metadata) Runtime() (Runtime, error) {
 	switch metadata.Runs.Using {
 	case string(RuntimeNode16):
 		return RuntimeNode16, nil
-	case string(RuntimeNode20):
+	case runtimeNode20Declaration:
 		return RuntimeNode24, nil
 	case string(RuntimeNode24):
 		return RuntimeNode24, nil
@@ -382,7 +381,7 @@ func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
 		}
 		return nil
 	}
-	if runtime != RuntimeNode16 && runtime != RuntimeNode20 && runtime != RuntimeNode24 {
+	if runtime != RuntimeNode16 && runtime != RuntimeNode24 {
 		return nil
 	}
 	if metadata.Runs.Main == "" {

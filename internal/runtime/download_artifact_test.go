@@ -209,7 +209,7 @@ func TestNativeArtifactRoundTripTrimsNameAndAcceptsHighCompression(t *testing.T)
 		t.Fatal(err)
 	}
 	uploader := &captureArtifactUploader{}
-	uploadRunner := Runner{Artifacts: uploader, artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
+	uploadRunner := newJobRun(Runner{Artifacts: uploader})
 	upload, err := uploadRunner.runUploadArtifact(t.Context(), newCommandProcessor(io.Discard, io.Discard), uploadWorkspace, map[string]string{"name": " payload ", "path": "zeros.bin"})
 	if err != nil {
 		t.Fatal(err)

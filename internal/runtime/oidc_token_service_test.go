@@ -139,7 +139,7 @@ func TestIDTokenServiceWireContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = service.Close() }()
+	defer func() { _ = service.Close(t.Context()) }()
 	env, revoke, err := service.actionEnvironment(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -185,7 +185,7 @@ func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer func() { _ = service.Close() }()
+			defer func() { _ = service.Close(t.Context()) }()
 			env, revoke, err := service.actionEnvironment(t.Context(), nil)
 			if err != nil {
 				t.Fatal(err)

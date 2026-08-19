@@ -1349,24 +1349,24 @@ func TestBackgroundSummariesAreBoundedInCommitOrder(t *testing.T) {
 	summaryBytes := maxJobSummaryBytes * 3 / 4
 
 	supervisor.start(t.Context(), first.ID,
-		func(context.Context) stepExecution {
+		func(ctx context.Context) stepExecution {
 			<-releaseFirst
 			completionOrder <- first.ID
 			result := newResult()
 			result.Summary = strings.Repeat("a", summaryBytes)
-			return classifyStepExecution(t.Context(), t.Context(), first, result, nil)
+			return classifyStepExecution(ctx, ctx, first, result, nil)
 		},
 		func(ctx context.Context) stepExecution {
 			return cancelledStepExecution(t.Context(), ctx, first)
 		},
 	)
 	supervisor.start(t.Context(), second.ID,
-		func(context.Context) stepExecution {
+		func(ctx context.Context) stepExecution {
 			completionOrder <- second.ID
 			close(releaseFirst)
 			result := newResult()
 			result.Summary = strings.Repeat("b", summaryBytes)
-			return classifyStepExecution(t.Context(), t.Context(), second, result, nil)
+			return classifyStepExecution(ctx, ctx, second, result, nil)
 		},
 		func(ctx context.Context) stepExecution {
 			return cancelledStepExecution(t.Context(), ctx, second)
@@ -4139,7 +4139,7 @@ func TestRunDockerRejectsInvalidEnvironmentNamesBeforeDocker(t *testing.T) {
 			action := fakeDockerAction(t)
 			action.runnerTemp = t.TempDir()
 			action.Env = map[string]string{name: "value"}
-			_, err := (Runner{Docker: docker}).runDocker(t.Context(), newCommandProcessor(io.Discard, io.Discard), action)
+			_, err := newJobRun(Runner{Docker: docker}).runDocker(t.Context(), newCommandProcessor(io.Discard, io.Discard), action)
 			if err == nil || !strings.Contains(err.Error(), "invalid environment variable name") {
 				t.Fatalf("runDocker() error = %v, want invalid environment name", err)
 			}
@@ -4662,7 +4662,7 @@ func TestMiseNodeSelectionIsExactAndConfigFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(nodeBytes)
-	r := Runner{Mise: mise, MiseDataDir: dataDir, nodeDigests: map[int]string{20: hex.EncodeToString(digest[:])}}
+	r := newJobRun(Runner{Mise: mise, MiseDataDir: dataDir, nodeDigests: map[int]string{20: hex.EncodeToString(digest[:])}})
 	got, err := r.discoverNode(t.Context(), 20, "")
 	if err != nil || got != node {
 		t.Fatalf("discoverNode() = %q, %v", got, err)
@@ -4695,7 +4695,7 @@ func TestMiseNode16SelectionIsExactAndConfigFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(nodeBytes)
-	got, err := (Runner{Mise: mise, MiseDataDir: dataDir, nodeDigests: map[int]string{16: hex.EncodeToString(digest[:])}}).discoverNode(t.Context(), 16, "")
+	got, err := newJobRun(Runner{Mise: mise, MiseDataDir: dataDir, nodeDigests: map[int]string{16: hex.EncodeToString(digest[:])}}).discoverNode(t.Context(), 16, "")
 	if err != nil || got != node {
 		t.Fatalf("discoverNode() = %q, %v", got, err)
 	}
@@ -4772,7 +4772,7 @@ func TestMiseNodePathIgnoresProgressOnStderr(t *testing.T) {
 		t.Fatal(err)
 	}
 	wrongDigest := sha256.Sum256(wrongBytes)
-	if _, err := (Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(wrongDigest[:])}}).resolveMiseNodePath(t.Context(), 24); err == nil || !strings.Contains(err.Error(), `reported "v24.99.0", want "v24.18.0"`) {
+	if _, err := newJobRun(Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(wrongDigest[:])}}).resolveMiseNodePath(t.Context(), 24); err == nil || !strings.Contains(err.Error(), `reported "v24.99.0", want "v24.18.0"`) {
 		t.Fatalf("resolveMiseNodePath() error = %v, want exact executable version rejection", err)
 	}
 	correctBytes := []byte("#!/bin/sh\nprintf 'v24.18.0\\n'\n")
@@ -4780,7 +4780,7 @@ func TestMiseNodePathIgnoresProgressOnStderr(t *testing.T) {
 		t.Fatal(err)
 	}
 	correctDigest := sha256.Sum256(correctBytes)
-	got, err := (Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(correctDigest[:])}}).resolveMiseNodePath(t.Context(), 24)
+	got, err := newJobRun(Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(correctDigest[:])}}).resolveMiseNodePath(t.Context(), 24)
 	if err != nil || got != filepath.Join(nodeRoot, "bin", "node") {
 		t.Fatalf("resolveMiseNodePath() = %q, %v", got, err)
 	}
@@ -4821,12 +4821,12 @@ esac
 		t.Fatal(err)
 	}
 	verification := &managedNodeVerification{paths: make(map[int]string)}
-	runner := Runner{
-		Mise:             mise,
-		MiseDataDir:      dataDir,
-		nodeDigests:      map[int]string{24: hex.EncodeToString(digest[:])},
-		nodeVerification: verification,
-	}
+	runner := newJobRun(Runner{
+		Mise:        mise,
+		MiseDataDir: dataDir,
+		nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])},
+	})
+	runner.nodeVerification = verification
 	if got, err := runner.discoverNode(t.Context(), 24, ""); err != nil || got != node {
 		t.Fatalf("discoverNode() = %q, %v", got, err)
 	}
@@ -4876,7 +4876,7 @@ func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testin
 	node20 := filepath.Join(root, "node20")
 	writeNodeExecutable(t, node20, 20)
 	digest := sha256.Sum256(nodeBytes)
-	runner := Runner{Mise: mise, MiseDataDir: dataDir, Node20: node20, nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])}}
+	runner := newJobRun(Runner{Mise: mise, MiseDataDir: dataDir, Node20: node20, nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])}})
 	resolvedNode, err := runner.discoverNode(t.Context(), 24, "")
 	if err != nil {
 		t.Fatal(err)
@@ -4898,7 +4898,7 @@ func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testin
 
 func TestMiseMissingIsClear(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	_, err := (Runner{}).discoverNode(t.Context(), 24, "")
+	_, err := newJobRun(Runner{}).discoverNode(t.Context(), 24, "")
 	if err == nil || !strings.Contains(err.Error(), "mise is required") {
 		t.Fatalf("discoverNode() error = %v", err)
 	}
@@ -4921,7 +4921,7 @@ func TestMiseNodeSelectionRejectsWrongExactVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(nodeBytes)
-	_, err := (Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])}}).discoverNode(t.Context(), 24, "")
+	_, err := newJobRun(Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])}}).discoverNode(t.Context(), 24, "")
 	if err == nil || !strings.Contains(err.Error(), `reported "v24.18.1", want "v24.18.0"`) {
 		t.Fatalf("discoverNode() error = %v", err)
 	}

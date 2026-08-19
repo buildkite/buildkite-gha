@@ -75,16 +75,7 @@ type Runner struct {
 	RepositoryCredentials *AgentRepositoryCredentials
 	WorkflowToken         WorkflowTokenProvider
 	OIDCToken             OIDCTokenProvider
-	runnerTemp            string
-	implicitJobPATH       string
-	explicitJobPATH       bool
-	jobContainer          *jobContainerBackend
-	jobDocker             *jobContainerBackend
-	nodeVerification      *managedNodeVerification
 	nodeDigests           map[int]string
-	artifactRegistry      *artifactRegistry
-	node16Warnings        *node16DeprecationWarnings
-	idTokenService        *idTokenService
 }
 
 func resolveHostExecutableBeforeWorkflow(configured, fallback, label string) (string, error) {
@@ -281,10 +272,10 @@ func (r Runner) runDockerAction(ctx context.Context, action dockerAction) (resul
 		return newResult(), fmt.Errorf("make Docker runner temp writable: %w", e)
 	}
 	action.runnerTemp = temp
-	return r.runDocker(ctx, newCommandProcessor(r.stdout(), r.stderr()), action)
+	return newJobRun(r).runDocker(ctx, newCommandProcessor(r.stdout(), r.stderr()), action)
 }
 
-func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, action dockerAction) (result Result, err error) {
+func (r *jobRun) runDocker(ctx context.Context, processor *commandProcessor, action dockerAction) (result Result, err error) {
 	result = newResult()
 	if err := validateEnvironmentNames(action.Env); err != nil {
 		return result, err
@@ -355,7 +346,7 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 	image, container := "buildkite-gha-image-"+id, "buildkite-gha-container-"+id
 	built, ran := false, false
 	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), r.cleanupTimeout())
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.cleanupTimeout())
 		defer cancel()
 		var cleanupErr error
 		if ran {
@@ -634,7 +625,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	return w.writer.Write(p)
 }
 
-func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, workspace, node string, action javaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
+func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, workspace, node string, action javaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
 	env := mergeStringMaps(result.Env, action.Env, actionInputEnv(action.Inputs))
 	if path, ok := result.Env["PATH"]; ok {
 		env["PATH"] = path
@@ -759,7 +750,7 @@ func resultContains(result Result, value string) bool {
 	return false
 }
 
-func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, result *Result, state map[string]string, name string, args ...string) error {
+func (r *jobRun) runProcess(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, result *Result, state map[string]string, name string, args ...string) error {
 	var files commandFiles
 	var err error
 	if r.jobContainer != nil {
@@ -783,7 +774,7 @@ func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir
 	env = mergeStringMaps(env, commandPaths)
 	var runErr error
 	if r.jobContainer != nil {
-		runErr = r.jobContainer.exec(ctx, r, processor, dir, env, name, args...)
+		runErr = r.jobContainer.exec(ctx, r.Runner, processor, dir, env, name, args...)
 	} else {
 		runErr = r.runStreaming(ctx, processor, dir, env, name, args...)
 	}
@@ -989,7 +980,7 @@ func nodeTool(major int) string {
 	}
 }
 
-func (r Runner) discoverNode(ctx context.Context, major int, explicit string) (string, error) {
+func (r *jobRun) discoverNode(ctx context.Context, major int, explicit string) (string, error) {
 	if explicit != "" || r.ManagedNodeRoot != "" {
 		return discoverNodeContext(ctx, major, explicit, r.ManagedNodeRoot)
 	}
@@ -1003,7 +994,7 @@ func (r Runner) discoverNode(ctx context.Context, major int, explicit string) (s
 	return r.installAndVerifyMiseNode(ctx, major, r.Mise)
 }
 
-func (r Runner) resolveMiseNodePath(ctx context.Context, major int) (string, error) {
+func (r *jobRun) resolveMiseNodePath(ctx context.Context, major int) (string, error) {
 	return r.discoverNode(ctx, major, "")
 }
 
@@ -1014,7 +1005,7 @@ func (r Runner) miseEnv() map[string]string {
 	return map[string]string{"MISE_DATA_DIR": r.MiseDataDir}
 }
 
-func (r Runner) installAndVerifyMiseNode(ctx context.Context, major int, mise string) (string, error) {
+func (r *jobRun) installAndVerifyMiseNode(ctx context.Context, major int, mise string) (string, error) {
 	if r.nodeVerification != nil {
 		r.nodeVerification.mu.Lock()
 		defer r.nodeVerification.mu.Unlock()

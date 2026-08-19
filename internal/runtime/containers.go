@@ -134,7 +134,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 	workflowFailure := false
 	defer func() {
 		if !ok {
-			if cleanupErr := b.cleanup(); cleanupErr != nil {
+			if cleanupErr := b.cleanup(ctx); cleanupErr != nil {
 				err = errors.Join(err, markHardJobFailure(cleanupErr))
 			}
 		}
@@ -284,7 +284,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 	for _, service := range b.services {
 		ports, portErr := b.readServicePorts(ctx, service.id, service.name, services[service.id].Ports)
 		if portErr != nil {
-			b.serviceDiagnostics(processor, service.name)
+			b.serviceDiagnostics(ctx, processor, service.name)
 			return nil, markHardJobFailure(portErr)
 		}
 		b.servicePorts[service.id] = expression.ServiceContext{ID: service.name, Network: b.network, Ports: ports}
@@ -555,7 +555,7 @@ func (b *jobContainerBackend) waitForService(ctx context.Context, processor *com
 			if ctx.Err() != nil {
 				return fmt.Errorf("wait for service %q readiness: %w", serviceID, ctx.Err())
 			}
-			b.serviceDiagnostics(processor, name)
+			b.serviceDiagnostics(ctx, processor, name)
 			return fmt.Errorf("inspect service %q readiness: %w", serviceID, err)
 		}
 		switch strings.TrimSpace(status) {
@@ -563,14 +563,14 @@ func (b *jobContainerBackend) waitForService(ctx context.Context, processor *com
 			return nil
 		case "starting":
 		default:
-			b.serviceDiagnostics(processor, name)
+			b.serviceDiagnostics(ctx, processor, name)
 			return fmt.Errorf("service %q failed readiness with status %q", serviceID, strings.TrimSpace(status))
 		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			b.serviceDiagnostics(processor, name)
+			b.serviceDiagnostics(ctx, processor, name)
 			return fmt.Errorf("wait for service %q readiness: %w", serviceID, ctx.Err())
 		case <-timer.C:
 		}
@@ -583,8 +583,8 @@ func (b *jobContainerBackend) waitForService(ctx context.Context, processor *com
 	}
 }
 
-func (b *jobContainerBackend) serviceDiagnostics(processor *commandProcessor, name string) {
-	ctx, cancel := context.WithTimeout(context.Background(), serviceDiagnosticTimeout)
+func (b *jobContainerBackend) serviceDiagnostics(parent context.Context, processor *commandProcessor, name string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), serviceDiagnosticTimeout)
 	defer cancel()
 	b.emitServiceLogOutput(processor, b.serviceLogOutput(ctx, name))
 }
@@ -659,7 +659,7 @@ func (b *jobContainerBackend) exec(ctx context.Context, r Runner, processor *com
 	}
 	args = append(args, b.container, jobContainerRuntime, ContainerProcessHelperCommand, "run", containerPID, name)
 	args = append(args, argv...)
-	dockerCtx, stopDocker := context.WithCancel(context.Background())
+	dockerCtx, stopDocker := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopDocker()
 	done := make(chan error, 1)
 	dockerRunner := r
@@ -675,7 +675,7 @@ func (b *jobContainerBackend) exec(ctx context.Context, r Runner, processor *com
 		return err
 	case <-ctx.Done():
 		terminationBound := containerPIDPublicationWait + r.interruptGrace() + r.terminateGrace() + 250*time.Millisecond
-		cleanup, cancel := context.WithTimeout(context.Background(), terminationBound)
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), terminationBound)
 		_, terminateErr := boundedDockerOutput(cleanup, b.env, b.docker, "exec", b.container, jobContainerRuntime, ContainerProcessHelperCommand, "terminate", containerPID, r.interruptGrace().String(), r.terminateGrace().String())
 		cancel()
 		stopDocker()
@@ -782,10 +782,10 @@ func randomHex() (string, error) {
 	return hex.EncodeToString(n[:]), err
 }
 
-func (b *jobContainerBackend) cleanup() error {
+func (b *jobContainerBackend) cleanup(parent context.Context) error {
 	// Each service gets enough budget for its graceful stop in addition to the
 	// base budget, which remains reserved for the job, network, and verification.
-	ctx, cancel := context.WithTimeout(context.Background(), jobContainerCleanupTimeout(b.runner.cleanupTimeout(), len(b.services)))
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), jobContainerCleanupTimeout(b.runner.cleanupTimeout(), len(b.services)))
 	defer cancel()
 	var err error
 	var out string

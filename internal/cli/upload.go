@@ -105,15 +105,15 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		workflows[i].Source, err = os.ReadFile(workflows[i].Path)
 		if err != nil {
 			report := compatibility.EnvironmentProcessingReport(workflows[i].Path, hostedProfile, "workflow input could not be read")
-			return out.fail(report, fmt.Errorf("read workflow %s: %w", workflows[i].CanonicalPath, err))
+			return out.fail(ctx, report, fmt.Errorf("read workflow %s: %w", workflows[i].CanonicalPath, err))
 		}
 		if len(workflows[i].Source) > compiler.MaxReusableWorkflowBytes {
-			_, _ = validatedProcessingReport(out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false)
+			_, _ = validatedProcessingReport(ctx, out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false)
 			return 1
 		}
 		parsed, parseErr := workflow.Parse(workflows[i].Path, workflows[i].Source)
 		if parseErr != nil {
-			_, _ = validatedProcessingReport(out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false)
+			_, _ = validatedProcessingReport(ctx, out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false)
 			return 1
 		}
 		workflows[i].ReusableOnly = parsed.ReusableOnly()
@@ -127,11 +127,11 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: workflow paths matched only reusable workflow_call workflows; there is nothing to upload")
 		return 1
 	}
-	anonymousSource, cleanupAnonymousSource, sourceErr := newHostedActionSource("", nil, nil)
+	anonymousSource, cleanupAnonymousSource, sourceErr := newHostedActionSource(ctx, "", nil, nil)
 	if sourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "public repository source could not be configured"), sourceErr)
+				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "public repository source could not be configured"), sourceErr)
 			}
 		}
 		return 1
@@ -149,7 +149,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if validation.RuntimeMatrixBoundary {
 			report := compatibility.InitialProcessingReport(input.Path, hostedProfile, false, validation, validationErr)
 			report.Result = "incompatible"
-			_ = out.write(report)
+			_ = out.write(ctx, report)
 			return 1
 		}
 	}
@@ -159,7 +159,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	if eventLoadErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(compatibility.EventInputProcessingReport(input.Path, hostedProfile, input.Source, "event input could not be acquired"), eventLoadErr)
+				return out.fail(ctx, compatibility.EventInputProcessingReport(input.Path, hostedProfile, input.Source, "event input could not be acquired"), eventLoadErr)
 			}
 		}
 		return 1
@@ -168,7 +168,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	if eventParseErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				_, _ = validatedProcessingReport(out, input.Path, hostedProfile, input.Source, eventSource, true)
+				_, _ = validatedProcessingReport(ctx, out, input.Path, hostedProfile, input.Source, eventSource, true)
 				return 1
 			}
 		}
@@ -181,11 +181,11 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			sourceOptions = append(sourceOptions, authenticationOption)
 		}
 	}
-	authenticatedSource, cleanupSource, sourceErr := newHostedActionSource("", sourceOptions, nil)
+	authenticatedSource, cleanupSource, sourceErr := newHostedActionSource(ctx, "", sourceOptions, nil)
 	if sourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "public repository source could not be configured"), sourceErr)
+				return out.fail(ctx, compatibility.EnvironmentProcessingReport(input.Path, hostedProfile, "public repository source could not be configured"), sourceErr)
 			}
 		}
 		return 1
@@ -272,7 +272,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			}
 			processingReports[i].AddEnvironmentFailure("compiler executable could not be inspected")
 			processingReports[i].Result = "indeterminate"
-			_ = out.write(processingReports[i])
+			_ = out.write(ctx, processingReports[i])
 		}
 		return 1
 	}
@@ -375,7 +375,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 				failureArtifacts = append(failureArtifacts, artifacts...)
 				continue
 			}
-			_ = out.write(processingReports[i])
+			_ = out.write(ctx, processingReports[i])
 			return 1
 		}
 		bundle := preflight.Bundle
@@ -426,7 +426,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 				_ = compatibility.WriteProcessing(stdout, "text", processingReports[i])
 			}
 			if !processingReportHasErrors(processingReports[i]) {
-				out.annotate(processingReports[i])
+				out.annotate(ctx, processingReports[i])
 			}
 		}
 	}
@@ -471,7 +471,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: upload pipeline: %v\n", err)
 			return 1
 		}
-		out.annotateSkippedWorkflows(effectiveEvent.Event.Event, skippedWorkflows)
+		out.annotateSkippedWorkflows(ctx, effectiveEvent.Event.Event, skippedWorkflows)
 		_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %d workflows using %s with importer %s.\n", jobCount, len(generatedWorkflows), executablePath, importerStep)
 		return 0
 	}
@@ -493,7 +493,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	out.annotateSkippedWorkflows(effectiveEvent.Event.Event, skippedWorkflows)
+	out.annotateSkippedWorkflows(ctx, effectiveEvent.Event.Event, skippedWorkflows)
 	_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %d workflows using %s with importer %s.\n", jobCount, len(generatedWorkflows), executablePath, importerStep)
 	return 0
 }
