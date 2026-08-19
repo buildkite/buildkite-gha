@@ -41,6 +41,7 @@ func TestEqualSourceWorkspaceAlias(t *testing.T) {
 		{alias: "source-dir", value: "SOURCE-DIR", want: true},
 		{alias: "sourceKdir", value: "source\u212adir", want: true},
 		{alias: "source;dir", value: "source\u037edir", want: true},
+		{alias: "source-ff-dir", value: "source-\ufb00-dir", want: true},
 		{alias: "", value: "", want: false},
 		{alias: "source-dir", value: "other-dir", want: false},
 	} {

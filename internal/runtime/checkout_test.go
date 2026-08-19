@@ -219,6 +219,10 @@ func TestRemoteWorkflowCheckoutInputsBindImmutableSource(t *testing.T) {
 				Source: "github", Repository: "slsa-framework/slsa-github-generator", RequestedRef: "v2.1.0", Commit: commit,
 				Path: ".github/actions/other", WorkspaceAlias: "source;dir",
 			},
+			{
+				Source: "github", Repository: "slsa-framework/slsa-github-generator", RequestedRef: "v2.1.0", Commit: commit,
+				Path: ".github/actions/folded", WorkspaceAlias: "source-ff-dir",
+			},
 		},
 	}
 	inputs := map[string]string{
@@ -276,6 +280,7 @@ func TestRemoteWorkflowCheckoutInputsBindImmutableSource(t *testing.T) {
 		{name: "case-folded bound alias from event repository", inputs: map[string]string{"repository": job.Event.Repository, "ref": strings.Repeat("b", 40), "path": "__builder_checkout_dir__"}, remote: true, want: "repository does not match immutable workflow provenance"},
 		{name: "unicode-folded bound alias from event repository", inputs: map[string]string{"repository": job.Event.Repository, "ref": strings.Repeat("b", 40), "path": "__BUILDER_CHEC\u212aOUT_DIR__"}, remote: true, want: "repository does not match immutable workflow provenance"},
 		{name: "canonically normalized bound alias from event repository", inputs: map[string]string{"repository": job.Event.Repository, "ref": strings.Repeat("b", 40), "path": "source\u037edir"}, remote: true, want: "repository does not match immutable workflow provenance"},
+		{name: "multi-rune folded bound alias from event repository", inputs: map[string]string{"repository": job.Event.Repository, "ref": strings.Repeat("b", 40), "path": "source-\ufb00-dir"}, remote: true, want: "repository does not match immutable workflow provenance"},
 		{name: "different ref", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "refs/tags/v2.2.0", "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "does not match immutable workflow provenance"},
 		{name: "ambiguous bare tag", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "v2.1.0", "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "does not match immutable workflow provenance"},
 		{name: "different namespace", inputs: map[string]string{"repository": job.Workflow.Remote.Repository, "ref": "refs/heads/v2.1.0", "path": "__BUILDER_CHECKOUT_DIR__"}, remote: true, want: "does not match immutable workflow provenance"},

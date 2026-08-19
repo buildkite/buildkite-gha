@@ -15,6 +15,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
+	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -38,6 +39,7 @@ var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}
 var serviceNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,254}$`)
 var githubRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 var githubWorkflowFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$`)
+var sourceWorkspaceAliasCaseFold = cases.Fold()
 
 // ValidContainerImageReference reports whether image is a supported literal
 // Docker image reference.
@@ -1397,10 +1399,16 @@ func ValidSourceWorkspaceAlias(value string) bool {
 }
 
 // EqualSourceWorkspaceAlias compares an immutable portable alias with a
-// checkout spelling using the canonical normalization and case folding that
+// checkout spelling using the canonical normalization and full case folding that
 // can make distinct strings name the same directory on macOS.
 func EqualSourceWorkspaceAlias(alias, value string) bool {
-	return alias != "" && len(value) <= 255 && strings.EqualFold(norm.NFD.String(alias), norm.NFD.String(value))
+	if alias == "" || len(value) > 255 {
+		return false
+	}
+	canonical := func(value string) string {
+		return norm.NFD.String(sourceWorkspaceAliasCaseFold.String(norm.NFD.String(value)))
+	}
+	return canonical(alias) == canonical(value)
 }
 
 func hasControl(value string) bool {
