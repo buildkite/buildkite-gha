@@ -5280,18 +5280,21 @@ func TestRunJobCustomShellTemplatesUseTemporaryScripts(t *testing.T) {
 		{name: "Julia", command: "julia", shell: `julia --color=yes {0} --project "two words"`, wantArgs: []string{"--color=yes"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			installCustomShellTestCommand(t, test.command)
+			bin := installCustomShellTestCommand(t, test.command)
 			workspace := t.TempDir()
 			arguments := filepath.Join(workspace, "arguments")
 			workflowPath := ".github/workflows/test.yml"
 			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
-			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
-				ID:      "custom",
-				Kind:    "run",
-				Shell:   test.shell,
-				Env:     map[string]string{"CUSTOM_SHELL_ARGS": arguments},
-				Command: `printf 'script=%s\n' "$0" >> "$GITHUB_OUTPUT"`,
-			}})
+			job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+				{ID: "path", Kind: "run", Shell: "sh", Command: `printf '%s\n' "$CUSTOM_SHELL_BIN" >> "$GITHUB_PATH"`, Env: map[string]string{"CUSTOM_SHELL_BIN": bin}},
+				{
+					ID:      "custom",
+					Kind:    "run",
+					Shell:   test.shell,
+					Env:     map[string]string{"CUSTOM_SHELL_ARGS": arguments},
+					Command: `printf 'script=%s\n' "$0" >> "$GITHUB_OUTPUT"`,
+				},
+			})
 			job.Outputs = map[string]string{"script": "${{ steps.custom.outputs.script }}"}
 			result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 			if err != nil {
@@ -5358,7 +5361,7 @@ runs:
 	}
 }
 
-func installCustomShellTestCommand(t *testing.T, name string) {
+func installCustomShellTestCommand(t *testing.T, name string) string {
 	t.Helper()
 	dir := t.TempDir()
 	wrapper := `#!/bin/sh
@@ -5376,7 +5379,7 @@ exec /bin/sh "$script"
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(wrapper), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return dir
 }
 
 func installPythonShellTestCommand(t *testing.T) {

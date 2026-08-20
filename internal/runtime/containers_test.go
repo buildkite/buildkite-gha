@@ -728,7 +728,8 @@ with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
 }
 
 func TestRunJobContainerCustomShellUsesMountedScript(t *testing.T) {
-	installCustomShellTestCommand(t, "julia")
+	bin := installCustomShellTestCommand(t, "julia")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()
 	arguments := filepath.Join(workspace, "arguments")

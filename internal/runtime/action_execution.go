@@ -2409,6 +2409,13 @@ func (r *jobRun) runShellProcess(ctx context.Context, processor *commandProcesso
 	for i := 1; i < len(args); i++ {
 		args[i] = strings.ReplaceAll(args[i], "{0}", path)
 	}
+	if r.jobContainer == nil {
+		command, err := resolveExecutableInPath(args[0], env["PATH"])
+		if err != nil {
+			return err
+		}
+		args[0] = command
+	}
 	return r.runProcess(ctx, processor, dir, env, result, nil, args[0], args[1:]...)
 }
 
