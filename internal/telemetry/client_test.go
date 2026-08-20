@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const testJobID = "22222222-2222-4222-8222-222222222222"
@@ -200,9 +201,9 @@ func TestPropertiesAreBounded(t *testing.T) {
 }
 
 func TestErrorMessageIsNormalizedAndUTF8Bounded(t *testing.T) {
-	message := "failure\n\t" + strings.Repeat("界", maxErrorMessageBytes)
+	message := "earlier output\n\t" + strings.Repeat("界", maxErrorMessageBytes) + "\n immediate failure"
 	bounded, truncated := boundedErrorMessage(message)
-	if !truncated || len(bounded) > maxErrorMessageBytes || !strings.HasPrefix(bounded, "failure ") || !strings.Contains(bounded, "界") {
+	if !truncated || len(bounded) > maxErrorMessageBytes || !utf8.ValidString(bounded) || strings.HasPrefix(bounded, "earlier output") || !strings.HasSuffix(bounded, "immediate failure") {
 		t.Fatalf("boundedErrorMessage() = %q (%d bytes), %t", bounded, len(bounded), truncated)
 	}
 	if got, truncated := boundedErrorMessage("\n failure\t details\x00 \r\n"); got != "failure details" || truncated {

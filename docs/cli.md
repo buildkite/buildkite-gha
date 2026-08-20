@@ -316,7 +316,7 @@ The plugin value must be a YAML boolean, not a quoted string.
 
 ## Disable telemetry
 
-In Buildkite jobs, the plugin importer and `run-job` send best-effort completion telemetry through the job-authenticated Buildkite Agent API. Events contain the command, outcome, client version, duration, bounded diagnostic codes and severities, and, for unsuccessful commands, up to 1,024 bytes of normalized user-visible error output. An `error_message_truncated` property indicates that earlier output or the end of the normalized message was omitted.
+In Buildkite jobs, the plugin importer and `run-job` send best-effort completion telemetry through the job-authenticated Buildkite Agent API. Events contain the command, outcome, client version, duration, bounded diagnostic codes and severities, and, for unsuccessful commands, the final 1,024 bytes of normalized user-visible error output. An `error_message_truncated` property indicates that earlier output was omitted.
 
 Buildkite adds the organization, pipeline, build, and job identifiers on the server. The client does not send workflow or event content, environment variables, command text, or secrets as separate properties. Error output can include details already printed in the job log, such as workflow paths, action references, expressions, or values supplied in invalid configuration. Avoid writing secrets to error messages, and disable telemetry when this diagnostic context must not leave the job.
 

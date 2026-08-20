@@ -327,11 +327,11 @@ func boundedErrorMessage(message string) (string, bool) {
 	if len(message) <= maxErrorMessageBytes {
 		return message, false
 	}
-	end := maxErrorMessageBytes
-	for !utf8.ValidString(message[:end]) {
-		end--
+	start := len(message) - maxErrorMessageBytes
+	for !utf8.RuneStart(message[start]) {
+		start++
 	}
-	return strings.TrimSpace(message[:end]), true
+	return strings.TrimSpace(message[start:]), true
 }
 
 func validAgentURL(u *url.URL) bool {
