@@ -557,13 +557,13 @@ func TestTemplateUsesContextSupportsIndexedAccess(t *testing.T) {
 	}
 }
 
-func TestTemplateContextReferences(t *testing.T) {
-	names, dynamic, err := TemplateContextReferences("${{ inputs.beta }}-${{ inputs['alpha'] }}-${{ inputs[env.KEY] }}", "inputs")
+func TestGitHubTokenInputReferences(t *testing.T) {
+	names, dynamic, err := GitHubTokenInputReferences("${{ inputs.unrelated }}-${{ inputs.beta && github.token }}-${{ inputs['alpha'] }}-${{ inputs[env.KEY] && github.token }}")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(names, []string{"alpha", "beta"}) || !dynamic {
-		t.Fatalf("TemplateContextReferences() = %#v, %t, want alpha/beta and dynamic access", names, dynamic)
+	if !reflect.DeepEqual(names, []string{"beta"}) || !dynamic {
+		t.Fatalf("GitHubTokenInputReferences() = %#v, %t, want beta and dynamic access", names, dynamic)
 	}
 }
 

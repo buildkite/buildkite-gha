@@ -495,12 +495,17 @@ func TemplateUsesContext(source, contextName string) (bool, error) {
 	return found, err
 }
 
-// TemplateContextReferences returns statically named first-level members of a
-// context and reports whether the template also uses computed access.
-func TemplateContextReferences(source, contextName string) ([]string, bool, error) {
+// GitHubTokenInputReferences returns inputs referenced in the same template
+// expressions as github.token and reports whether those expressions also use
+// computed input access.
+func GitHubTokenInputReferences(source string) ([]string, bool, error) {
 	found := map[string]struct{}{}
 	dynamic := false
 	err := visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
+		referencesToken, err := nodeReferencesGitHubToken(expression)
+		if err != nil || !referencesToken {
+			return err
+		}
 		actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
 			if !entering {
 				return
@@ -510,7 +515,7 @@ func TemplateContextReferences(source, contextName string) ([]string, bool, erro
 			default:
 				return
 			}
-			if !strings.EqualFold(referenceRoot(node), contextName) {
+			if !strings.EqualFold(referenceRoot(node), "inputs") {
 				return
 			}
 			root, path, err := referencePath(node)
@@ -518,7 +523,7 @@ func TemplateContextReferences(source, contextName string) ([]string, bool, erro
 				dynamic = true
 				return
 			}
-			if strings.EqualFold(root, contextName) && len(path) != 0 {
+			if strings.EqualFold(root, "inputs") && len(path) != 0 {
 				found[strings.ToLower(path[0])] = struct{}{}
 			}
 		})

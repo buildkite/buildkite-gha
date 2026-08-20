@@ -544,7 +544,7 @@ func inspectCompositeTemplate(field, template string, inputs map[string]string, 
 	if !referencesToken {
 		return false, nil
 	}
-	inputNames, dynamicInputs, err := expression.TemplateContextReferences(template, "inputs")
+	inputNames, dynamicInputs, err := expression.GitHubTokenInputReferences(template)
 	if err != nil {
 		return false, fmt.Errorf("composite action %s: %w", field, err)
 	}

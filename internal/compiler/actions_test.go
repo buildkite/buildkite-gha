@@ -457,7 +457,7 @@ runs:
   steps:
     - shell: bash
       env:
-        DEFAULT_GITHUB_TOKEN: ${{ inputs.fallback == 'cargo-binstall' && github.token || '' }}
+        DEFAULT_GITHUB_TOKEN: ${{ inputs.unrelated }}-${{ inputs.fallback == 'cargo-binstall' && github.token || '' }}
       run: echo "$DEFAULT_GITHUB_TOKEN"
 `)
 
