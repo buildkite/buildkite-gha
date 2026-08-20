@@ -329,8 +329,9 @@ workflows, every path must be tracked inside the repository. Upload
 canonicalizes, deduplicates, and sorts aliases, so argument order does not
 change the pipeline.
 
-Directories, globs, missing files, other extensions, symlinks, untracked paths,
-and outside paths fail before parsing or Buildkite commands run.
+Directories, globs, missing files, other extensions, and symlinks fail before
+parsing or Buildkite commands run. Multiple-workflow uploads also reject
+untracked and outside paths.
 
 `--` ends option parsing. Use it before any externally supplied paths, and
 always when a path begins with `-`. Pass each path as its own argument; the CLI
