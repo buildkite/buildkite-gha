@@ -23,7 +23,8 @@ Prepare and publish a release from the complete change set, with explicit approv
    if test "$(git rev-parse --is-shallow-repository)" = true; then
      git fetch --unshallow origin
    fi
-   git fetch origin main:refs/remotes/origin/main --tags --prune
+   git fetch origin \
+     +refs/heads/main:refs/remotes/origin/main --tags --prune
    ```
 
 3. Confirm `origin/main` is the intended release commit. Record its full SHA. Do not release unpushed local work or a commit other than current `origin/main`.
@@ -146,7 +147,7 @@ Do not report success until all checks below pass.
 
 1. **Tag and target:** fetch tags, then confirm the local tag, remote tag, `origin/main`, and approved SHA resolve to the same commit. Confirm the GitHub release is stable, published, and targets that commit.
 2. **Body:** fetch the release body with `gh release view --json body` and compare it byte-for-byte with the approved notes file. Confirm the Highlights heading and full comparison link remain present.
-3. **CI and release build:** verify all required GitHub checks and the Buildkite tag build passed, including the `publish-release` job. Use `bk build list --pipeline buildkite/buildkite-gha --commit "$commit" --summary --json` and `bk build view <number> --pipeline buildkite/buildkite-gha --json` when Buildkite CLI authentication is available. Soft-fail reporting jobs do not block the release, but identify them accurately.
+3. **CI and release build:** verify all required GitHub checks and the Buildkite tag build passed, including the `publish-release` job. Use `bk build list --pipeline buildkite/buildkite-gha --commit "$commit" --json` and `bk build view <number> --pipeline buildkite/buildkite-gha --json` when Buildkite CLI authentication is available. Soft-fail reporting jobs do not block the release, but identify them accurately.
 4. **Assets:** download the release into a new temporary directory and require exactly these published assets:
    - `buildkite-gha_Linux_x86_64.tar.gz`
    - `buildkite-gha_Darwin_arm64.tar.gz`
@@ -156,7 +157,7 @@ Do not report success until all checks below pass.
 Useful commands:
 
 ```sh
-git fetch origin main:refs/remotes/origin/main --tags
+git fetch origin +refs/heads/main:refs/remotes/origin/main --tags
 commit=$(git rev-parse "$next^{commit}")
 test "$commit" = "$(git rev-parse origin/main)"
 test "$commit" = "$(git ls-remote origin "refs/tags/$next" | awk '{print $1}')"
