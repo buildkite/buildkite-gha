@@ -1736,6 +1736,82 @@ func TestEvaluateAvailableCompileTemplatePreservesRuntimeExpressions(t *testing.
 	}
 }
 
+func TestReduceAvailableCompileTemplateReducesEventSubtrees(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{
+		"action":       "opened",
+		"pull_request": map[string]any{"head": map[string]any{"sha": "abc123"}},
+	}}, Event: map[string]any{"action": "opened"}}
+	tests := []struct {
+		name     string
+		template string
+		want     string
+	}{
+		{name: "direct", template: "${{ github.event.pull_request.head.sha }}", want: "abc123"},
+		{name: "missing member", template: "before-${{ github.event.push.missing }}-after", want: "before--after"},
+		{name: "mixed runtime", template: "${{ github.event.pull_request.head.sha == steps.checkout.outputs.sha }}", want: "${{ ('abc123' == steps.checkout.outputs.sha) }}"},
+		{name: "multiple", template: "${{ github.event.pull_request.head.sha }}-${{ event.action }}-${{ needs.build.outputs.suffix }}", want: "abc123-opened-${{ needs.build.outputs.suffix }}"},
+		{name: "runtime short circuit branch", template: "${{ github.event.action == 'opened' || needs.build.outputs.ready }}", want: "${{ (true || needs.build.outputs.ready) }}"},
+		{name: "unrelated compile value", template: "${{ github.sha }}", want: "${{ github.sha }}"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ReduceAvailableCompileTemplate(test.template, context)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("ReduceAvailableCompileTemplate() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestReduceAvailableCompileTemplateRejectsIntroducedExpressionSyntax(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"value": "${{ secrets.ADMIN }}"}}}
+	_, err := ReduceAvailableCompileTemplate("${{ github.event.value }}", context)
+	if err == nil || !strings.Contains(err.Error(), "result contains expression syntax") {
+		t.Fatalf("ReduceAvailableCompileTemplate() error = %v", err)
+	}
+}
+
+func TestReduceAvailableCompileTemplateRejectsWholeEventAccess(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"action": "opened"}}}
+	context.Event = context.GitHub["event"].(map[string]any)
+	for _, template := range []string{
+		"${{ toJSON(github.event) }}",
+		"${{ toJSON(github.event.*) }}",
+		"${{ toJSON(event.*) }}",
+	} {
+		_, err := ReduceAvailableCompileTemplate(template, context)
+		if err == nil || !strings.Contains(err.Error(), "whole github.event access is unsupported") {
+			t.Errorf("ReduceAvailableCompileTemplate(%q) error = %v", template, err)
+		}
+	}
+}
+
+func TestReduceAvailableCompileTemplateRejectsDeterministicEventErrors(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"value": "["}}}
+	for _, template := range []string{
+		"${{ fromJSON(github.event.value) }}",
+		"${{ needs.build.outputs.ready || fromJSON(github.event.value) }}",
+		"${{ (fromJSON(needs.build.outputs.config) || fromJSON(github.event.value)).foo }}",
+		"${{ (fromJSON(needs.build.outputs.config) || fromJSON(github.event.value)).*.foo }}",
+	} {
+		_, err := ReduceAvailableCompileTemplate(template, context)
+		if err == nil || !strings.Contains(err.Error(), "invalid JSON") {
+			t.Errorf("ReduceAvailableCompileTemplate(%q) error = %v", template, err)
+		}
+	}
+}
+
+func TestReduceCompileConditionRejectsDeterministicEventErrors(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"value": "["}}}
+	_, err := ReduceCompileCondition("needs.build.outputs.ready || fromJSON(github.event.value)", context)
+	if err == nil || !strings.Contains(err.Error(), "invalid JSON") {
+		t.Fatalf("ReduceCompileCondition() error = %v", err)
+	}
+}
+
 func TestEvaluateCompileTemplateUsesGitHubNumberRendering(t *testing.T) {
 	got, err := EvaluateCompileTemplate("prefix-${{ fromJSON('1e20') }}", CompileContext{})
 	if err != nil {
