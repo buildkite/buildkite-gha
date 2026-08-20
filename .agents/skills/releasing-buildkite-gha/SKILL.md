@@ -195,4 +195,4 @@ Report the release URL, tag and commit, Buildkite build and decisive job states,
 
 ## Edit published notes
 
-For an explicitly requested historical release-note edit, first record the release ID, tag, target, name, draft/prerelease state, timestamps, and every asset's ID, name, size, digest, content type, and timestamps. Draft the replacement body and obtain approval before editing. Change only the body, then verify it exactly and confirm all recorded tag, release, and asset metadata remains unchanged. Never alter the tag, commit, binaries, checksums, or assets as part of a notes edit.
+For an explicitly requested historical release-note edit, first record the release ID, tag, target, name, draft/prerelease state, timestamps, and every asset's ID, name, size, digest, content type, and timestamps. Draft the replacement body and obtain approval before editing. Change only the body, then verify it exactly. Require the release's `updated_at` to advance while every other recorded release field and all asset metadata remain unchanged. Never alter the tag, commit, binaries, checksums, or assets as part of a notes edit.
