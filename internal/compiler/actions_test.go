@@ -1247,9 +1247,14 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	for version, commit := range map[string]string{
+		"v1.0.0":     "af513c7a016048ae468971c52ed77d9562c7c819",
 		"v1.2.0":     actionintegration.CheckoutV1Commit,
+		"v2.0.0":     "722adc63f1aa60a57ec37892e133b1d319cae598",
 		"v2.8.0":     actionintegration.CheckoutV2Commit,
+		"v3.0.0":     "a12a3943b4bdde767164f792f33f40b04645d846",
+		"v3.6.0":     "f43a0e5ff2bd294095638e18286ca9a3d1956744",
 		"v3.7.0":     actionintegration.CheckoutV3Commit,
+		"v4.0.0":     "1e31de5234b9f8995739874a8ce0492dc87873e2",
 		"v4":         actionintegration.CheckoutV4Commit,
 		"v5":         actionintegration.CheckoutV5Commit,
 		"v6":         actionintegration.CheckoutV6Commit,
