@@ -84,16 +84,17 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		}
 		for _, want := range []string{
 			`<h2 class="h4 mb2">Workflow could not be run</h2>`,
-			`<p><strong>Runner label &#34;windows-latest&#34; requires Windows, which is unsupported.`,
-			`<summary>Diagnostic detail</summary>`,
-			`Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest.`,
+			`<p><strong>Windows runners aren&#39;t currently supported.</strong></p>`,
+			`Imported jobs run on Linux or macOS Buildkite hosted agents.`,
+			`If this job can run on Linux, change <code>windows-latest</code> to <code>ubuntu-latest</code>.`,
+			`If it requires Windows, open an issue in <a href="https://github.com/buildkite/buildkite-gha" target="_blank">buildkite/buildkite-gha</a> to help us prioritize Windows support.`,
 			"Job <code>test</code>",
 		} {
 			if !strings.Contains(string(annotation.stdin), want) {
 				t.Fatalf("annotation = %q, want %q", annotation.stdin, want)
 			}
 		}
-		for _, unwanted := range []string{"E_EXPRESSION_INVALID", "stage:", "instance:", "gha-test"} {
+		for _, unwanted := range []string{"E_EXPRESSION_INVALID", "stage:", "instance:", "gha-test", "Diagnostic detail", "Supported runner labels:"} {
 			if strings.Contains(string(annotation.stdin), unwanted) {
 				t.Fatalf("annotation = %q, does not want %q", annotation.stdin, unwanted)
 			}

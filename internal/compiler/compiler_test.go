@@ -2265,26 +2265,101 @@ jobs:
 	}
 }
 
-func TestCompileRejectsInheritedReusableWorkflowSecrets(t *testing.T) {
+func TestCompileScopesInheritedReusableWorkflowSecretsPerExpandedJob(t *testing.T) {
 	repository := t.TempDir()
+	writeAction(t, repository, ".github/actions/secret", `name: secret input
+inputs:
+  token:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
 	path := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  direct:
+    runs-on: ubuntu-latest
+    env:
+      DIRECT: ${{ secrets.DIRECT }}
+    steps:
+      - run: true
   call:
+    needs: prepare
     uses: ./.github/workflows/reusable.yml
+    if: needs.prepare.result == 'success'
     secrets: inherit
 `)
 	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
 jobs:
-  test:
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/secret
+        with:
+          token: ${{ secrets.ACTION_TOKEN }}-${{ secrets.ALPHA }}-${{ secrets.ALPHA }}
+  matrix:
+    strategy:
+      matrix:
+        enabled: [true, false]
+    if: matrix.enabled
+    runs-on: ubuntu-latest
+    env:
+      BETA: ${{ secrets.BETA }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - run: true
+  unprivileged:
     runs-on: ubuntu-latest
     steps:
       - run: true
-        env:
-          OPTIONAL_TOKEN: ${{ secrets.OPTIONAL_TOKEN }}
 `)
-	_, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
-	if err == nil || !strings.Contains(err.Error(), "secrets: inherit is unsupported") {
-		t.Fatalf("Compile() error = %v", err)
+	options := defaultOptions()
+	options.ResolveActions = true
+	plans, err := compilePlansForTest(t.Context(), path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 6 {
+		t.Fatalf("plans = %d, want two direct jobs and four expanded callee jobs", len(plans))
+	}
+	byID := map[string][]plan.Job{}
+	for _, job := range plans {
+		byID[job.Workflow.LogicalJobID] = append(byID[job.Workflow.LogicalJobID], job)
+	}
+	direct := byID["direct"][0]
+	if !slices.Equal(direct.RequiredSecrets, []string{"DIRECT"}) || !direct.HasCapability("secrets") {
+		t.Fatalf("direct caller secret boundary = %#v / %#v", direct.RequiredSecrets, direct.RequiredCapabilities)
+	}
+	action := byID["call.action"][0]
+	if !slices.Equal(action.RequiredSecrets, []string{"ACTION_TOKEN", "ALPHA"}) || !action.HasCapability("secrets") {
+		t.Fatalf("action callee secret boundary = %#v / %#v", action.RequiredSecrets, action.RequiredCapabilities)
+	}
+	if len(action.CallGuards) != 1 || action.CallGuards[0].Condition != "(needs.prepare.result == 'success')" {
+		t.Fatalf("action callee call guards = %#v", action.CallGuards)
+	}
+	matrix := byID["call.matrix"]
+	if len(matrix) != 2 {
+		t.Fatalf("matrix plans = %d, want 2", len(matrix))
+	}
+	conditions := map[string]bool{}
+	for _, job := range matrix {
+		if !slices.Equal(job.RequiredSecrets, []string{"BETA"}) || !job.HasCapability("secrets") || job.GitHubToken == nil || !job.HasCapability("provider-token-write") {
+			t.Fatalf("matrix callee authority = secrets %#v, token %#v, capabilities %#v", job.RequiredSecrets, job.GitHubToken, job.RequiredCapabilities)
+		}
+		conditions[job.Condition] = true
+	}
+	if !conditions["matrix.enabled"] || !conditions["false"] {
+		t.Fatalf("matrix callee conditions = %#v, want enabled and statically skipped jobs", conditions)
+	}
+	unprivileged := byID["call.unprivileged"][0]
+	if len(unprivileged.RequiredSecrets) != 0 || unprivileged.HasCapability("secrets") || unprivileged.GitHubToken != nil {
+		t.Fatalf("unprivileged callee authority = %#v", unprivileged)
 	}
 }
 
@@ -2310,6 +2385,98 @@ jobs:
 	}
 	if len(plans) != 1 || len(plans[0].RequiredSecrets) != 0 || plans[0].HasCapability("secrets") {
 		t.Fatalf("uninherited reusable secrets = plans %#v", plans)
+	}
+}
+
+func TestCompileRequiresSecretInheritanceOnEveryReusableWorkflowEdge(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		nestedInherit bool
+		wantSecrets   []string
+	}{
+		{name: "nested edge omits inherit"},
+		{name: "every edge inherits", nestedInherit: true, wantSecrets: []string{"NESTED_TOKEN"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/middle.yml
+    secrets: inherit
+`)
+			nestedSecrets := ""
+			if test.nestedInherit {
+				nestedSecrets = "    secrets: inherit\n"
+			}
+			writeWorkflow(t, repository, "middle.yml", "on: workflow_call\njobs:\n  nested:\n    uses: ./.github/workflows/leaf.yml\n"+nestedSecrets)
+			writeWorkflow(t, repository, "leaf.yml", `on: workflow_call
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      TOKEN: ${{ secrets.NESTED_TOKEN }}
+    steps:
+      - run: true
+`)
+			plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 1 || !slices.Equal(plans[0].RequiredSecrets, test.wantSecrets) || plans[0].HasCapability("secrets") != (len(test.wantSecrets) != 0) {
+				t.Fatalf("nested secret boundary = %#v / %#v", plans[0].RequiredSecrets, plans[0].RequiredCapabilities)
+			}
+		})
+	}
+}
+
+func TestCompileRejectsNonStaticInheritedReusableWorkflowSecrets(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		expression string
+	}{
+		{name: "dynamic", expression: "secrets[env.NAME]"},
+		{name: "whole context", expression: "toJSON(secrets)"},
+		{name: "filtered", expression: "secrets.*"},
+		{name: "projected", expression: "secrets.*.name"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    secrets: inherit\n")
+			writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      VALUE: ${{ "+test.expression+" }}\n    steps: [{run: true}]\n")
+			_, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+			if err == nil {
+				t.Fatalf("compile accepted inherited %s secrets access", test.name)
+			}
+		})
+	}
+}
+
+func TestCompileRejectsInheritedSecretAuthorityFromCompositeMetadata(t *testing.T) {
+	repository := t.TempDir()
+	writeAction(t, repository, ".github/actions/child", `name: child
+inputs:
+  token:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, repository, ".github/actions/parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/child
+      with:
+        token: ${{ secrets.METADATA_TOKEN }}
+`)
+	path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    secrets: inherit\n")
+	writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/parent\n")
+	options := defaultOptions()
+	options.ResolveActions = true
+	_, err := compilePlansForTest(t.Context(), path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), options)
+	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant secret authority") {
+		t.Fatalf("compile metadata secret error = %v", err)
 	}
 }
 

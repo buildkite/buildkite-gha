@@ -327,16 +327,37 @@ func skipReason(reason, fallback string) string {
 }
 
 func liveTriggerExpressions(event string) TriggerConditionExpressions {
-	predicate := ""
-	switch event {
-	case "workflow_dispatch":
-		predicate = `(build.source == "ui" || build.source == "api")`
-	case "schedule":
-		predicate = `build.source == "schedule"`
-	case "push", "pull_request", "merge_group", "release":
-		predicate = `build.source_event == ` + yamlScalar(event)
+	return LiveTriggerConditionExpressions(LiveEventPredicate(event))
+}
+
+// LiveEventPredicate matches the original GitHub event when available and
+// preserves Buildkite's compatibility mapping for non-webhook builds.
+func LiveEventPredicate(event string) string {
+	githubEvent := "build.env(" + yamlScalar("BUILDKITE_GITHUB_EVENT") + ")"
+	predicate := githubEvent + " == " + yamlScalar(event)
+	fallbackEvent := "(" + githubEvent + " == null"
+	unsupportedEvent := ""
+	for _, supported := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
+		if unsupportedEvent != "" {
+			unsupportedEvent += " && "
+		}
+		unsupportedEvent += githubEvent + " != " + yamlScalar(supported)
 	}
-	return LiveTriggerConditionExpressions(predicate)
+	fallbackEvent += " || (" + unsupportedEvent + "))"
+	switch event {
+	case "push":
+		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source != "ui" && build.source != "api" && build.source != "schedule"))`
+	case "pull_request":
+		return "(" + predicate + " || (" + fallbackEvent + " && build.pull_request.id != null))"
+	case "workflow_dispatch":
+		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && (build.source == "ui" || build.source == "api")))`
+	case "schedule":
+		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source == "schedule"))`
+	case "merge_group", "release":
+		return predicate
+	default:
+		return ""
+	}
 }
 
 func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpressions, snapshot TriggerEventSnapshot, selected bool) (string, bool, error) {

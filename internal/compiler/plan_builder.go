@@ -91,6 +91,28 @@ instances:
 	return plans, authorizations, evaluations, errors.Join(diagnostics...)
 }
 
+// reducePlanEventExpressions is the phase boundary for compile-time-only event
+// data. It runs before action inspection, authority inventory, and plan
+// serialization, so every downstream consumer sees the same reduced values.
+func reducePlanEventExpressions(ir IR) (IR, error) {
+	workflowName := ir.Workflow.Name
+	if workflowName == "" {
+		workflowName = canonicalWorkflowName(ir.Workflow.Path)
+	}
+	builder := planBuilder{ir: ir, workflowName: workflowName}
+	ir.Jobs = append([]JobInstance(nil), ir.Jobs...)
+	var diagnostics []error
+	for i, instance := range ir.Jobs {
+		reduced, err := builder.reducePlanInstanceEventExpressions(instance)
+		if err != nil {
+			diagnostics = append(diagnostics, planConstructionFinding(instance, err))
+			continue
+		}
+		ir.Jobs[i] = reduced
+	}
+	return ir, errors.Join(diagnostics...)
+}
+
 func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest string) (plan.Job, PlanAuthorization, []byte, error) {
 	if runtimeDistributionDigest == "" {
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
@@ -136,6 +158,189 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("encode plan for job %q: %w", instance.LogicalJobID, err)
 	}
 	return job, actions.authorization, encoded, nil
+}
+
+func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (JobInstance, error) {
+	context := compileContext(b.ir.Event, b.ir.Vars, instance.SourcePath, b.workflowName)
+	context.Inputs = instance.Inputs
+	context.Matrix = instance.Matrix
+
+	reduceTemplate := func(value string) (string, error) {
+		if value == "" {
+			return value, nil
+		}
+		reduced, err := expression.ReduceAvailableCompileTemplate(value, context)
+		if err != nil {
+			return "", err
+		}
+		referencesEvent, err := expression.TemplateReferencesGitHubEvent(reduced)
+		if err != nil {
+			return "", err
+		}
+		referencesEventAlias, err := expression.TemplateUsesContext(reduced, "event")
+		if err != nil {
+			return "", err
+		}
+		if referencesEvent || referencesEventAlias {
+			return "", fmt.Errorf("github.event cannot be retained in a job plan")
+		}
+		return reduced, nil
+	}
+	reduceCondition := func(value string) (string, error) {
+		if value == "" {
+			return value, nil
+		}
+		referencesEvent, err := expression.ReferencesGitHubEvent(value)
+		if err != nil {
+			return "", err
+		}
+		if !referencesEvent {
+			return value, nil
+		}
+		reduced, err := expression.ReduceCompileCondition(value, context)
+		if err != nil {
+			return "", err
+		}
+		referencesEvent, err = expression.ReferencesGitHubEvent(reduced)
+		if err != nil {
+			return "", err
+		}
+		if referencesEvent {
+			return "", fmt.Errorf("github.event cannot be retained in a job plan")
+		}
+		return reduced, nil
+	}
+	reduceTypedExpression := func(value string) (string, error) {
+		referencesEvent, err := expression.ReferencesGitHubEvent(value)
+		if err != nil || !referencesEvent {
+			return value, err
+		}
+		reduced, err := reduceCondition(value)
+		if err != nil {
+			return "", err
+		}
+		return "${{ " + reduced + " }}", nil
+	}
+	reduceMap := func(values map[string]string) (map[string]string, error) {
+		if values == nil {
+			return nil, nil
+		}
+		result := cloneMap(values)
+		for _, name := range sortedValueKeys(result) {
+			value, err := reduceTemplate(result[name])
+			if err != nil {
+				return nil, err
+			}
+			result[name] = value
+		}
+		return result, nil
+	}
+	reduceSlice := func(values []string) ([]string, error) {
+		if values == nil {
+			return nil, nil
+		}
+		result := append([]string(nil), values...)
+		for i := range result {
+			value, err := reduceTemplate(result[i])
+			if err != nil {
+				return nil, err
+			}
+			result[i] = value
+		}
+		return result, nil
+	}
+
+	var err error
+	if instance.If, err = reduceCondition(instance.If); err != nil {
+		return JobInstance{}, err
+	}
+	for _, field := range []*string{&instance.DefaultShell, &instance.DefaultWorkingDirectory, &instance.ServicesExpression} {
+		if *field, err = reduceTemplate(*field); err != nil {
+			return JobInstance{}, err
+		}
+	}
+	if instance.Env, err = reduceMap(instance.Env); err != nil {
+		return JobInstance{}, err
+	}
+	if instance.Outputs, err = reduceMap(instance.Outputs); err != nil {
+		return JobInstance{}, err
+	}
+
+	instance.CallGuards = append([]CallGuard(nil), instance.CallGuards...)
+	for i := range instance.CallGuards {
+		if instance.CallGuards[i].Condition, err = reduceCondition(instance.CallGuards[i].Condition); err != nil {
+			return JobInstance{}, err
+		}
+	}
+
+	instance.Steps = append([]workflow.Step(nil), instance.Steps...)
+	for i := range instance.Steps {
+		step := &instance.Steps[i]
+		if step.If, err = reduceCondition(step.If); err != nil {
+			return JobInstance{}, err
+		}
+		for _, field := range []*string{&step.Name, &step.Run, &step.Shell, &step.WorkingDirectory} {
+			if *field, err = reduceTemplate(*field); err != nil {
+				return JobInstance{}, err
+			}
+		}
+		for _, field := range []*string{&step.ContinueOnErrorExpression, &step.TimeoutMinutesExpression} {
+			if *field, err = reduceTypedExpression(*field); err != nil {
+				return JobInstance{}, err
+			}
+		}
+		if step.Env, err = reduceMap(step.Env); err != nil {
+			return JobInstance{}, err
+		}
+		if step.With, err = reduceMap(step.With); err != nil {
+			return JobInstance{}, err
+		}
+	}
+
+	if instance.Container != nil {
+		container := *instance.Container
+		if container.Image, err = reduceTemplate(container.Image); err != nil {
+			return JobInstance{}, err
+		}
+		if container.Env, err = reduceMap(container.Env); err != nil {
+			return JobInstance{}, err
+		}
+		if container.Ports, err = reduceSlice(container.Ports); err != nil {
+			return JobInstance{}, err
+		}
+		instance.Container = &container
+	}
+
+	instance.Services = append([]workflow.Service(nil), instance.Services...)
+	for i := range instance.Services {
+		container := instance.Services[i].Container
+		for _, field := range []*string{&container.Image, &container.Options, &container.Command, &container.Entrypoint} {
+			if *field, err = reduceTemplate(*field); err != nil {
+				return JobInstance{}, err
+			}
+		}
+		if container.Env, err = reduceMap(container.Env); err != nil {
+			return JobInstance{}, err
+		}
+		if container.Ports, err = reduceSlice(container.Ports); err != nil {
+			return JobInstance{}, err
+		}
+		if container.Volumes, err = reduceSlice(container.Volumes); err != nil {
+			return JobInstance{}, err
+		}
+		if container.Credentials != nil {
+			credentials := *container.Credentials
+			if credentials.Username, err = reduceTemplate(credentials.Username); err != nil {
+				return JobInstance{}, err
+			}
+			if credentials.Password, err = reduceTemplate(credentials.Password); err != nil {
+				return JobInstance{}, err
+			}
+			container.Credentials = &credentials
+		}
+		instance.Services[i].Container = container
+	}
+	return instance, nil
 }
 
 func lowerPlanSteps(source []workflow.Step) ([]plan.Step, []int, []string, []map[string]string) {
@@ -502,7 +707,7 @@ func planConstructionFinding(instance JobInstance, err error) error {
 func requiredSecrets(instance JobInstance, actionRequired []string, actionInputsInspected bool) ([]string, bool, error) {
 	found := map[string]string{}
 	referencesGitHubToken := false
-	collect := func(value string) error {
+	collect := func(value string, stepRuntime bool) error {
 		referencesEvent, err := expression.TemplateReferencesGitHubEvent(value)
 		if err != nil {
 			return err
@@ -517,7 +722,12 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		for _, name := range names {
 			found[name] = name
 		}
-		referencesToken, err := expression.ReferencesGitHubToken(value)
+		var referencesToken bool
+		if stepRuntime {
+			referencesToken, err = expression.ReferencesStepGitHubToken(value)
+		} else {
+			referencesToken, err = expression.ReferencesGitHubToken(value)
+		}
 		if err != nil {
 			return err
 		}
@@ -554,13 +764,13 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		return nil, false, err
 	}
 	for _, value := range []string{instance.DefaultShell, instance.DefaultWorkingDirectory} {
-		if err := collect(value); err != nil {
+		if err := collect(value, false); err != nil {
 			return nil, false, err
 		}
 	}
 	for _, values := range []map[string]string{instance.Env, instance.Outputs} {
 		for _, name := range sortedValueKeys(values) {
-			if err := collect(values[name]); err != nil {
+			if err := collect(values[name], false); err != nil {
 				return nil, false, err
 			}
 		}
@@ -569,10 +779,13 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		if err := checkCondition(step.If); err != nil {
 			return nil, false, err
 		}
-		for _, value := range []string{step.Name, step.Run, step.Uses, step.Shell, step.WorkingDirectory, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression} {
-			if err := collect(value); err != nil {
+		for _, value := range []string{step.Name, step.Run, step.Shell, step.WorkingDirectory, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression} {
+			if err := collect(value, true); err != nil {
 				return nil, false, err
 			}
+		}
+		if err := collect(step.Uses, false); err != nil {
+			return nil, false, err
 		}
 		valuesToInspect := []map[string]string{step.Env}
 		if step.Kind != "uses" || !actionInputsInspected {
@@ -580,7 +793,7 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		}
 		for _, values := range valuesToInspect {
 			for _, name := range sortedValueKeys(values) {
-				if err := collect(values[name]); err != nil {
+				if err := collect(values[name], true); err != nil {
 					return nil, false, err
 				}
 			}
@@ -588,32 +801,32 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 	}
 	if instance.Container != nil {
 		for _, value := range append([]string{instance.Container.Image}, instance.Container.Ports...) {
-			if err := collect(value); err != nil {
+			if err := collect(value, false); err != nil {
 				return nil, false, err
 			}
 		}
 		for _, name := range sortedValueKeys(instance.Container.Env) {
-			if err := collect(instance.Container.Env[name]); err != nil {
+			if err := collect(instance.Container.Env[name], false); err != nil {
 				return nil, false, err
 			}
 		}
 	}
 	for _, service := range instance.Services {
 		for _, value := range append([]string{service.Container.Image}, service.Container.Ports...) {
-			if err := collect(value); err != nil {
+			if err := collect(value, false); err != nil {
 				return nil, false, err
 			}
 		}
 		for _, name := range sortedValueKeys(service.Container.Env) {
-			if err := collect(service.Container.Env[name]); err != nil {
+			if err := collect(service.Container.Env[name], false); err != nil {
 				return nil, false, err
 			}
 		}
 		if service.Container.Credentials != nil {
-			if err := collect(service.Container.Credentials.Username); err != nil {
+			if err := collect(service.Container.Credentials.Username, false); err != nil {
 				return nil, false, err
 			}
-			if err := collect(service.Container.Credentials.Password); err != nil {
+			if err := collect(service.Container.Credentials.Password, false); err != nil {
 				return nil, false, err
 			}
 		}

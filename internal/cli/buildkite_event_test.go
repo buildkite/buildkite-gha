@@ -123,6 +123,7 @@ func TestBuildkiteEventSourceMappings(t *testing.T) {
 		{name: "unknown source fallback", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "unknown"}},
 		{name: "webhook source fallback", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "webhook"}},
 		{name: "trigger job source fallback", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "trigger_job"}},
+		{name: "rebuilt push preserves GitHub event", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "ui", "BUILDKITE_GITHUB_EVENT": "push"}},
 		{name: "tag", event: "push", ref: "refs/tags/v1.2.3", env: map[string]string{"BUILDKITE_TAG": "v1.2.3"}},
 		{name: "pull request head compatibility ref", event: "pull_request", ref: "refs/pull/42/head", env: map[string]string{"BUILDKITE_PULL_REQUEST": "42", "BUILDKITE_BRANCH": "contributor:feature", "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "main", "BUILDKITE_PULL_REQUEST_REPO": "https://github.com/contributor/widgets.git"}, check: func(t *testing.T, snapshot map[string]any) {
 			t.Helper()
@@ -412,6 +413,30 @@ func TestBuildkiteWebhookPushUsesBranchRefForPullRequestAssociatedBuild(t *testi
 	}
 	if snapshot["event"] != "push" || snapshot["ref"] != "refs/heads/feature" {
 		t.Fatalf("snapshot event/ref = %q / %q", snapshot["event"], snapshot["ref"])
+	}
+}
+
+func TestBuildkiteEventSourceRebuiltPushResetsPullRequestPayload(t *testing.T) {
+	env := map[string]string{
+		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step",
+		"BUILDKITE_REPO":         "https://github.com/buildkite/buildkite-gha",
+		"BUILDKITE_COMMIT":       strings.Repeat("a", 40),
+		"BUILDKITE_BRANCH":       "feature",
+		"BUILDKITE_PULL_REQUEST": "42",
+		"BUILDKITE_GITHUB_EVENT": "push",
+		"BUILDKITE_SOURCE":       "ui",
+	}
+	source, err := buildkiteEventSource(func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(source, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	payload := snapshot["payload"].(map[string]any)
+	if snapshot["event"] != "push" || snapshot["ref"] != "refs/heads/feature" || payload["ref"] != "refs/heads/feature" || len(payload) != 1 {
+		t.Fatalf("rebuilt push snapshot = %#v", snapshot)
 	}
 }
 

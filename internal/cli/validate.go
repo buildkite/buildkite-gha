@@ -98,7 +98,7 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		} else {
 			parseErr = fmt.Errorf("workflow exceeds %d-byte limit", compiler.MaxReusableWorkflowBytes)
 		}
-		effectiveEvent, eventErr := newEffectiveEvent(event, effectiveEventFromPath, os.Getenv)
+		effectiveEvent, eventErr := newEffectiveEvent(event, effectiveEventFromPath)
 		if parseErr == nil && eventErr == nil && !parsed.ReusableOnly() {
 			selection, triggerErr := selectWorkflowTrigger(parsed.Triggers, effectiveEvent)
 			if triggerErr != nil {

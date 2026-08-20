@@ -2910,8 +2910,13 @@ func TestGitHubContextExposesRuntimeEventIdentity(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			github := githubContext(plan.Job{Event: test.event})
-			if github["repository_owner"] != test.wantOwner || github["ref_name"] != test.wantRefName || github["ref_type"] != test.wantRefType || github["base_ref"] != test.wantBaseRef {
+			if github["repository_owner"] != test.wantOwner || github["ref_name"] != test.wantRefName || github["ref_type"] != test.wantRefType || github["base_ref"] != test.wantBaseRef || github["action_path"] != "" || github["action_ref"] != "" || github["action_repository"] != "" {
 				t.Fatalf("GitHub context = %#v", github)
+			}
+			stepContext := stepExpressionContext(expression.Context{GitHub: github, Secrets: map[string]string{"GITHUB_TOKEN": "ghs_test"}})
+			serialized, err := expression.EvaluateStep("${{ toJSON(github) }}", stepContext)
+			if err != nil || !strings.Contains(serialized, `"action_path": ""`) || !strings.Contains(serialized, `"action_ref": ""`) || !strings.Contains(serialized, `"action_repository": ""`) {
+				t.Fatalf("serialized top-level GitHub context = %q, %v", serialized, err)
 			}
 			condition := "github.repository_owner == '" + test.wantOwner + "' && github.ref_name == '" + test.wantRefName + "' && github.ref_type == '" + test.wantRefType + "' && github.base_ref == '" + test.wantBaseRef + "'"
 			got, err := expression.EvaluateCondition(condition, expression.ConditionContext{GitHub: github})
@@ -5465,6 +5470,92 @@ runs:
 	var logs bytes.Buffer
 	if _, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace); err != nil {
 		t.Fatalf("RunJob() error = %v\nlogs: %s", err, logs.String())
+	}
+}
+
+func TestRemoteCompositeGitHubActionIdentityExpressionsAreInvocationScoped(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: action identity\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "composite/action.yml", `name: Identity
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        ACTION_USER_AGENT: ${{ github.action_repository }}@${{ github.action_ref }}
+      run: test "$ACTION_USER_AGENT" = owner/repo@v1
+`)
+	digest := digestTree(t, remote)
+	lockID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "identity", Kind: "uses", Uses: remoteLifecycleUses("composite"), Action: &plan.ActionSelector{Lock: lockID},
+	}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "composite", digest, nil)}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	if result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestNestedRemoteCompositeInvocationFieldsRetainCallerIdentityForPreAndMain(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: nested action identity\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "root/action.yml", `name: Root
+runs:
+  using: composite
+  steps:
+    - uses: child-owner/child-action/child@child-ref
+      env:
+        CALLER_IDENTITY: ${{ github.action_repository }}@${{ github.action_ref }}
+`)
+	writeFixtureFile(t, remote, "child/action.yml", `name: Child
+runs:
+  using: composite
+  steps:
+    - uses: js-owner/js-action/js@js-ref
+`)
+	writeFixtureFile(t, remote, "js/action.yml", "name: JavaScript\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "js/pre.js", "")
+	writeFixtureFile(t, remote, "js/main.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+test "$CALLER_IDENTITY" = root-owner/root-action@root-ref
+printf '%s\n' "$(basename "$1" .js)" >> "$PHASES"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	rootID, childID, jsID := remoteLifecycleLockID(1), remoteLifecycleLockID(2), remoteLifecycleLockID(3)
+	rootLock := remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{"child-owner/child-action/child@child-ref": {Lock: childID}})
+	rootLock.Repository, rootLock.RequestedRef = "root-owner/root-action", "root-ref"
+	childLock := remoteLifecycleLock(childID, "child", digest, map[string]plan.ActionSelector{"js-owner/js-action/js@js-ref": {Lock: jsID}})
+	childLock.Repository, childLock.RequestedRef = "child-owner/child-action", "child-ref"
+	jsLock := remoteLifecycleLock(jsID, "js", digest, nil)
+	jsLock.Repository, jsLock.RequestedRef = "js-owner/js-action", "js-ref"
+	phases := filepath.Join(workspace, "phases")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "identity", Kind: "uses", Uses: "root-owner/root-action/root@root-ref", Action: &plan.ActionSelector{Lock: rootID},
+	}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"PHASES": phases}
+	job.Actions = []plan.ActionLock{rootLock, childLock, jsLock}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	if result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	got, err := os.ReadFile(phases)
+	if err != nil || string(got) != "pre\nmain\n" {
+		t.Fatalf("phases = %q, %v; want pre and main", got, err)
 	}
 }
 

@@ -79,6 +79,10 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	if err != nil {
 		return Bundle{IR: ir}, err
 	}
+	ir, err = reducePlanEventExpressions(ir)
+	if err != nil {
+		return Bundle{IR: ir}, err
+	}
 	options.ActionSource = newMemoizedActionSource(options.ActionSource)
 	evidence, err := validateActionResolutions(ctx, ir, options)
 	bundle := Bundle{IR: ir, Processing: evidence}

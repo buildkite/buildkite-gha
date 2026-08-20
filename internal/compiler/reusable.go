@@ -291,9 +291,6 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				condition: condition, inputs: cloneReusableInputs(inputs), needBindings: cloneNeedBindings(callNeedBindings),
 			})
 		}
-		if call.InheritSecrets {
-			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "secrets: inherit is unsupported")
-		}
 		if call.Secrets {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow secret forwarding is unsupported")
 		}
@@ -303,6 +300,9 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		calleeSource, source, err := resolver.loadReusableWorkflow(ctx, current, call.Uses)
 		if err != nil {
 			return reusableResolution{}, locatedJobWrappedError(path, job, call.Span.Start.Line, call.Span.Start.Column, "", err)
+		}
+		if call.InheritSecrets && calleeSource.identity.kind != "workspace" {
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "secrets: inherit is supported only for repository-local reusable workflows")
 		}
 		if cycle := resolver.cycle(calleeSource); cycle != "" {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow cycle detected: "+cycle)

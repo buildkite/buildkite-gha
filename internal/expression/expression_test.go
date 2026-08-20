@@ -484,8 +484,6 @@ func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
 		{name: "dot", template: "${{ github.token }}", want: true},
 		{name: "bracket", template: "prefix-${{ github['TOKEN'] }}", want: true},
 		{name: "compound", template: "${{ github.token || '' }}", want: true},
-		{name: "serialized context", template: "${{ toJSON(github) }}", want: true},
-		{name: "serialized context case insensitive", template: "${{ ToJson(GitHub) }}", want: true},
 		{name: "other GitHub value", template: "${{ github.actor }}"},
 		{name: "serialized GitHub value", template: "${{ toJSON(github.actor) }}"},
 		{name: "plain", template: "github.token"},
@@ -496,6 +494,14 @@ func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
 				t.Fatalf("ReferencesGitHubToken(%q) = %v, %v, want %v", test.template, got, err, test.want)
 			}
 		})
+	}
+	for _, template := range []string{"${{ toJSON(github) }}", "${{ ToJson(GitHub) }}"} {
+		if got, err := ReferencesStepGitHubToken(template); err != nil || !got {
+			t.Fatalf("ReferencesStepGitHubToken(%q) = %v, %v, want true", template, got, err)
+		}
+		if _, err := ReferencesGitHubToken(template); err == nil || !strings.Contains(err.Error(), "must name one static property") {
+			t.Fatalf("ReferencesGitHubToken(%q) error = %v, want non-step rejection", template, err)
+		}
 	}
 	if _, err := ReferencesGitHubToken("${{ github[env.NAME] }}"); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
 		t.Fatalf("ReferencesGitHubToken() dynamic index error = %v", err)
@@ -514,8 +520,8 @@ func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
 			t.Fatalf("ReferencesGitHubToken(%q) error = %v, want static-property rejection", template, err)
 		}
 	}
-	if _, err := ReferencesGitHubToken("${{ toJSON(github[env.NAME]) }}"); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
-		t.Fatalf("ReferencesGitHubToken() serialized dynamic index error = %v", err)
+	if _, err := ReferencesStepGitHubToken("${{ toJSON(github[env.NAME]) }}"); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
+		t.Fatalf("ReferencesStepGitHubToken() serialized dynamic index error = %v", err)
 	}
 }
 
@@ -718,23 +724,26 @@ func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
 
 func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 	context := Context{GitHub: map[string]any{
-		"action_path":      "/workspace/actions/composite",
-		"base_ref":         "main",
-		"job":              "build",
-		"ref_name":         "feature",
-		"ref_type":         "branch",
-		"repository_owner": "buildkite",
-		"token":            "ghs_scoped_token",
-		"workflow":         "CI",
+		"action_path":       "/workspace/actions/composite",
+		"action_ref":        "v2",
+		"action_repository": "owner/action",
+		"base_ref":          "main",
+		"job":               "build",
+		"ref_name":          "feature",
+		"ref_type":          "branch",
+		"repository_owner":  "buildkite",
+		"token":             "ghs_scoped_token",
+		"workflow":          "CI",
 	}}
 	for template, want := range map[string]string{
-		"${{ github.action_path }}/script.sh": "/workspace/actions/composite/script.sh",
-		"${{ github.base_ref }}":              "main",
-		"${{ github.job }}":                   "build",
-		"${{ github.ref_name }}":              "feature",
-		"${{ github.ref_type }}":              "branch",
-		"${{ github.repository_owner }}":      "buildkite",
-		"${{ github.workflow }}":              "CI",
+		"${{ github.action_path }}/script.sh":                      "/workspace/actions/composite/script.sh",
+		"${{ github.action_repository }}@${{ github.action_ref }}": "owner/action@v2",
+		"${{ github.base_ref }}":                                   "main",
+		"${{ github.job }}":                                        "build",
+		"${{ github.ref_name }}":                                   "feature",
+		"${{ github.ref_type }}":                                   "branch",
+		"${{ github.repository_owner }}":                           "buildkite",
+		"${{ github.workflow }}":                                   "CI",
 	} {
 		if got, err := EvaluateStep(template, context); err != nil || got != want {
 			t.Errorf("EvaluateStep(%q) = %q, %v; want %q", template, got, err, want)
@@ -742,6 +751,8 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 	}
 	wantJSON := "{\n" +
 		"  \"action_path\": \"/workspace/actions/composite\",\n" +
+		"  \"action_ref\": \"v2\",\n" +
+		"  \"action_repository\": \"owner/action\",\n" +
 		"  \"base_ref\": \"main\",\n" +
 		"  \"job\": \"build\",\n" +
 		"  \"ref_name\": \"feature\",\n" +
@@ -1780,6 +1791,82 @@ func TestEvaluateAvailableCompileTemplatePreservesRuntimeExpressions(t *testing.
 	}
 	if want := "echo target 1E+20 ${{ github.ref }}"; got != want {
 		t.Fatalf("EvaluateAvailableCompileTemplate() = %q, want %q", got, want)
+	}
+}
+
+func TestReduceAvailableCompileTemplateReducesEventSubtrees(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{
+		"action":       "opened",
+		"pull_request": map[string]any{"head": map[string]any{"sha": "abc123"}},
+	}}, Event: map[string]any{"action": "opened"}}
+	tests := []struct {
+		name     string
+		template string
+		want     string
+	}{
+		{name: "direct", template: "${{ github.event.pull_request.head.sha }}", want: "abc123"},
+		{name: "missing member", template: "before-${{ github.event.push.missing }}-after", want: "before--after"},
+		{name: "mixed runtime", template: "${{ github.event.pull_request.head.sha == steps.checkout.outputs.sha }}", want: "${{ ('abc123' == steps.checkout.outputs.sha) }}"},
+		{name: "multiple", template: "${{ github.event.pull_request.head.sha }}-${{ event.action }}-${{ needs.build.outputs.suffix }}", want: "abc123-opened-${{ needs.build.outputs.suffix }}"},
+		{name: "runtime short circuit branch", template: "${{ github.event.action == 'opened' || needs.build.outputs.ready }}", want: "${{ (true || needs.build.outputs.ready) }}"},
+		{name: "unrelated compile value", template: "${{ github.sha }}", want: "${{ github.sha }}"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ReduceAvailableCompileTemplate(test.template, context)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("ReduceAvailableCompileTemplate() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestReduceAvailableCompileTemplateRejectsIntroducedExpressionSyntax(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"value": "${{ secrets.ADMIN }}"}}}
+	_, err := ReduceAvailableCompileTemplate("${{ github.event.value }}", context)
+	if err == nil || !strings.Contains(err.Error(), "result contains expression syntax") {
+		t.Fatalf("ReduceAvailableCompileTemplate() error = %v", err)
+	}
+}
+
+func TestReduceAvailableCompileTemplateRejectsWholeEventAccess(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"action": "opened"}}}
+	context.Event = context.GitHub["event"].(map[string]any)
+	for _, template := range []string{
+		"${{ toJSON(github.event) }}",
+		"${{ toJSON(github.event.*) }}",
+		"${{ toJSON(event.*) }}",
+	} {
+		_, err := ReduceAvailableCompileTemplate(template, context)
+		if err == nil || !strings.Contains(err.Error(), "whole github.event access is unsupported") {
+			t.Errorf("ReduceAvailableCompileTemplate(%q) error = %v", template, err)
+		}
+	}
+}
+
+func TestReduceAvailableCompileTemplateRejectsDeterministicEventErrors(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"value": "["}}}
+	for _, template := range []string{
+		"${{ fromJSON(github.event.value) }}",
+		"${{ needs.build.outputs.ready || fromJSON(github.event.value) }}",
+		"${{ (fromJSON(needs.build.outputs.config) || fromJSON(github.event.value)).foo }}",
+		"${{ (fromJSON(needs.build.outputs.config) || fromJSON(github.event.value)).*.foo }}",
+	} {
+		_, err := ReduceAvailableCompileTemplate(template, context)
+		if err == nil || !strings.Contains(err.Error(), "invalid JSON") {
+			t.Errorf("ReduceAvailableCompileTemplate(%q) error = %v", template, err)
+		}
+	}
+}
+
+func TestReduceCompileConditionRejectsDeterministicEventErrors(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"value": "["}}}
+	_, err := ReduceCompileCondition("needs.build.outputs.ready || fromJSON(github.event.value)", context)
+	if err == nil || !strings.Contains(err.Error(), "invalid JSON") {
+		t.Fatalf("ReduceCompileCondition() error = %v", err)
 	}
 }
 

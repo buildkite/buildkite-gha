@@ -211,9 +211,19 @@ func sortedReferenceNames(found map[string]struct{}) []string {
 // github.token. Dynamic GitHub indexes return an error so compiler-owned token
 // authority cannot depend on a runtime-selected property.
 func ReferencesGitHubToken(template string) (bool, error) {
+	return referencesGitHubToken(template, false)
+}
+
+// ReferencesStepGitHubToken reports whether a step runtime template statically
+// references github.token, including the exact toJSON(github) shape.
+func ReferencesStepGitHubToken(template string) (bool, error) {
+	return referencesGitHubToken(template, true)
+}
+
+func referencesGitHubToken(template string, allowContextSerialization bool) (bool, error) {
 	found := false
 	err := visitTemplateExpressions(template, func(expression actionlint.ExprNode) error {
-		referencesToken, err := nodeReferencesGitHubToken(expression)
+		referencesToken, err := nodeReferencesGitHubToken(expression, allowContextSerialization)
 		found = found || referencesToken
 		return err
 	})
@@ -227,10 +237,10 @@ func ConditionReferencesGitHubToken(source string) (bool, error) {
 	if err != nil || empty {
 		return false, err
 	}
-	return nodeReferencesGitHubToken(node)
+	return nodeReferencesGitHubToken(node, false)
 }
 
-func nodeReferencesGitHubToken(expression actionlint.ExprNode) (bool, error) {
+func nodeReferencesGitHubToken(expression actionlint.ExprNode, allowContextSerialization bool) (bool, error) {
 	found := false
 	var referenceErr error
 	actionlint.VisitExprNode(expression, func(node, parent actionlint.ExprNode, entering bool) {
@@ -258,7 +268,7 @@ func nodeReferencesGitHubToken(expression actionlint.ExprNode) (bool, error) {
 			if referenceReceiver(node, parent) {
 				return
 			}
-			if call, ok := parent.(*actionlint.FuncCallNode); ok && isToJSONGitHubCall(call) {
+			if call, ok := parent.(*actionlint.FuncCallNode); allowContextSerialization && ok && isToJSONGitHubCall(call) {
 				found = true
 				return
 			}

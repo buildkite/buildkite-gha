@@ -363,7 +363,11 @@ func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []s
 	case reasonDuplicateLabel:
 		return "runs-on contains a duplicate runner label. Remove duplicate labels from runs-on.", ""
 	case reasonUnsupportedOS:
-		return fmt.Sprintf("Runner label%s requires Windows, which is unsupported. Use a Linux or macOS runner label.", label), detail
+		linuxGuidance := `If this job can run on Linux, change runs-on to "ubuntu-latest".`
+		if label != "" {
+			linuxGuidance = fmt.Sprintf(`If this job can run on Linux, change%s to "ubuntu-latest".`, label)
+		}
+		return "Windows runners aren't currently supported. Imported jobs run on Linux or macOS Buildkite hosted agents. " + linuxGuidance + " If it requires Windows, open an issue in https://github.com/buildkite/buildkite-gha to help us prioritize Windows support.", ""
 	case reasonUnmappedLabel:
 		return fmt.Sprintf("Runner label%s has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.", label), detail
 	case reasonConflictingQueues, reasonConflictingTarget:

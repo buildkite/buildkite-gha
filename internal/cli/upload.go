@@ -164,7 +164,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		return 1
 	}
-	effectiveEvent, eventParseErr := newEffectiveEvent(eventSource, eventOrigin, os.Getenv)
+	effectiveEvent, eventParseErr := newEffectiveEvent(eventSource, eventOrigin)
 	if eventParseErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {

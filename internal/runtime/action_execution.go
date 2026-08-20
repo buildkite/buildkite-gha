@@ -1267,19 +1267,22 @@ func applyPaths(env map[string]string, paths []string) {
 
 func githubContext(job plan.Job) map[string]any {
 	return map[string]any{
-		"repository":       job.Event.Repository,
-		"repository_owner": plan.EventRepositoryOwner(job.Event.Repository),
-		"ref":              job.Event.Ref,
-		"ref_name":         plan.EventRefName(job.Event.Ref),
-		"ref_type":         plan.EventRefType(job.Event.Ref),
-		"head_ref":         job.Event.HeadRef,
-		"base_ref":         job.Event.BaseRef,
-		"sha":              job.Event.SHA,
-		"actor":            job.Event.Actor,
-		"event_name":       job.Event.Name,
-		"server_url":       plan.EventServerURL(job.Event.Provider),
-		"workflow":         workflowDisplayName(job),
-		"job":              job.Workflow.LogicalJobID,
+		"action_path":       "",
+		"action_ref":        "",
+		"action_repository": "",
+		"repository":        job.Event.Repository,
+		"repository_owner":  plan.EventRepositoryOwner(job.Event.Repository),
+		"ref":               job.Event.Ref,
+		"ref_name":          plan.EventRefName(job.Event.Ref),
+		"ref_type":          plan.EventRefType(job.Event.Ref),
+		"head_ref":          job.Event.HeadRef,
+		"base_ref":          job.Event.BaseRef,
+		"sha":               job.Event.SHA,
+		"actor":             job.Event.Actor,
+		"event_name":        job.Event.Name,
+		"server_url":        plan.EventServerURL(job.Event.Provider),
+		"workflow":          workflowDisplayName(job),
+		"job":               job.Workflow.LogicalJobID,
 	}
 }
 
@@ -1744,6 +1747,7 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandProc
 			preparationTimeout = &remotePreparationTimeout{step: step, eval: eval}
 			defer preparationTimeout.close()
 		}
+		bindActionReferenceContext(&eval, &lock)
 		eval.Inputs = inputs
 		// github.action_path scopes to this composite invocation for child pre
 		// hooks too, mirroring the main-phase overlay in runCompositeMetadata.
@@ -2075,6 +2079,7 @@ func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandPro
 	eval.HashFiles = nil
 	eval.Inputs = inputs
 	eval.Steps = make(map[string]expression.StepStatus)
+	bindActionReferenceContext(&eval, actionLock)
 	compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
 	compositeProcessEnv["GITHUB_ACTION_PATH"] = actionPath
 	// github.action_path is scoped to this composite invocation; nested
@@ -2217,6 +2222,16 @@ func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandPro
 		result.Outputs[name] = value
 	}
 	return result, runErr
+}
+
+func bindActionReferenceContext(eval *expression.Context, lock *plan.ActionLock) {
+	eval.GitHub = cloneAnyMap(eval.GitHub)
+	eval.GitHub["action_repository"] = ""
+	eval.GitHub["action_ref"] = ""
+	if lock != nil && lock.Source == "github" {
+		eval.GitHub["action_repository"] = lock.Repository
+		eval.GitHub["action_ref"] = lock.RequestedRef
+	}
 }
 
 func evaluateMap(values map[string]string, context expression.Context) (map[string]string, error) {

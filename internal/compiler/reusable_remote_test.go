@@ -140,6 +140,39 @@ jobs:
 	}
 }
 
+func TestCompileRejectsSecretInheritanceIntoRemoteReusableWorkflows(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		caller string
+		remote string
+	}{
+		{
+			name:   "direct remote call",
+			caller: "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n    secrets: inherit\n",
+			remote: "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		},
+		{
+			name:   "local path within remote repository",
+			caller: "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n",
+			remote: "on: workflow_call\njobs:\n  nested:\n    uses: ./.github/workflows/nested.yml\n    secrets: inherit\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			callerRoot := t.TempDir()
+			callerPath := writeWorkflow(t, callerRoot, "caller.yml", test.caller)
+			remoteRoot := t.TempDir()
+			writeWorkflow(t, remoteRoot, "ci.yml", test.remote)
+			writeWorkflow(t, remoteRoot, "nested.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+			options := defaultOptions()
+			options.RepositorySource = MemoizeRepositorySource(newFakeReusableRepositorySource(t, map[string]string{"owner/workflows": remoteRoot}))
+			_, err := CompileWithOptions(callerPath, readFile(t, callerPath), pushEvent(t), options)
+			if err == nil || !strings.Contains(err.Error(), "secrets: inherit is supported only for repository-local reusable workflows") {
+				t.Fatalf("CompileWithOptions() error = %v, want remote inheritance rejection", err)
+			}
+		})
+	}
+}
+
 func TestCompilePublicReusableWorkflowDefersCallerNeedOutputInput(t *testing.T) {
 	callerRoot := t.TempDir()
 	callerPath := writeWorkflow(t, callerRoot, "caller.yml", `on: push

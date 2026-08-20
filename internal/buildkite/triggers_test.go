@@ -15,15 +15,51 @@ func TestTranslateTriggerCondition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`build.source_event == "push"`, `build.branch =~ /^main$/`, `releases\/.*`, `build.source_event == "pull_request"`, `build.source_action == "opened"`, `build.source_action == "synchronize"`, `build.source_event == "merge_group"`, `build.merge_queue.base_branch =~ /^main$/`, `build.source_action == "checks_requested"`, `build.source == "ui"`, `build.source == "schedule"`} {
+	for _, want := range []string{`build.env("BUILDKITE_GITHUB_EVENT") == "push"`, `build.branch =~ /^main$/`, `releases\/.*`, `build.env("BUILDKITE_GITHUB_EVENT") == "pull_request"`, `build.source_action == "opened"`, `build.source_action == "synchronize"`, `build.env("BUILDKITE_GITHUB_EVENT") == "merge_group"`, `build.merge_queue.base_branch =~ /^main$/`, `build.source_action == "checks_requested"`, `build.env("BUILDKITE_GITHUB_EVENT") == "workflow_dispatch"`, `build.env("BUILDKITE_GITHUB_EVENT") == "schedule"`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("condition missing %q:\n%s", want, got)
 		}
 	}
-	for _, want := range []string{`build.source_event == "release"`, `build.source_action == "published"`, `build.source_action == "released"`} {
+	for _, want := range []string{`build.env("BUILDKITE_GITHUB_EVENT") == "release"`, `build.source_action == "published"`, `build.source_action == "released"`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("release condition missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestLiveEventPredicatePreservesNonWebhookMappings(t *testing.T) {
+	tests := []struct {
+		event    string
+		wants    []string
+		excludes []string
+	}{
+		{event: "push", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "push"`, `build.env("BUILDKITE_GITHUB_EVENT") == null`, `build.env("BUILDKITE_GITHUB_EVENT") != "push"`, `build.env("BUILDKITE_GITHUB_EVENT") != "pull_request"`, `build.env("BUILDKITE_GITHUB_EVENT") != "workflow_dispatch"`, `build.env("BUILDKITE_GITHUB_EVENT") != "schedule"`, `build.pull_request.id == null`, `build.source != "ui"`, `build.source != "api"`, `build.source != "schedule"`}},
+		{event: "pull_request", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "pull_request"`, `build.env("BUILDKITE_GITHUB_EVENT") == null`, `build.pull_request.id != null`}},
+		{event: "workflow_dispatch", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "workflow_dispatch"`, `build.env("BUILDKITE_GITHUB_EVENT") == null`, `build.pull_request.id == null`, `build.source == "ui"`, `build.source == "api"`}},
+		{event: "schedule", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "schedule"`, `build.env("BUILDKITE_GITHUB_EVENT") == null`, `build.pull_request.id == null`, `build.source == "schedule"`}},
+		{event: "merge_group", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "merge_group"`}, excludes: []string{" == null", "build.source"}},
+		{event: "release", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "release"`}, excludes: []string{" == null", "build.source"}},
+	}
+	for _, test := range tests {
+		t.Run(test.event, func(t *testing.T) {
+			predicate := LiveEventPredicate(test.event)
+			for _, want := range test.wants {
+				if !strings.Contains(predicate, want) {
+					t.Errorf("predicate missing %q: %s", want, predicate)
+				}
+			}
+			for _, excluded := range test.excludes {
+				if strings.Contains(predicate, excluded) {
+					t.Errorf("predicate contains %q: %s", excluded, predicate)
+				}
+			}
+			if len(test.wants) > 1 && (!strings.HasPrefix(predicate, "(") || !strings.HasSuffix(predicate, ")")) {
+				t.Errorf("fallback predicate is not grouped: %s", predicate)
+			}
+		})
+	}
+	if predicate := LiveEventPredicate("issues"); predicate != "" {
+		t.Fatalf("unsupported predicate = %q", predicate)
 	}
 }
 
@@ -127,7 +163,7 @@ func TestTranslateTriggerConditionIgnoresUnsupportedEventsBesideSupportedOnes(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, `build.source_event == "push"`) || strings.Contains(got, "issues") || strings.Contains(got, "pull_request_target") {
+	if !strings.Contains(got, `build.env("BUILDKITE_GITHUB_EVENT") == "push"`) || strings.Contains(got, "issues") || strings.Contains(got, "pull_request_target") {
 		t.Fatalf("condition = %q", got)
 	}
 }
@@ -149,7 +185,7 @@ func TestValidateTriggerConditionsIgnoresUnsupportedEventsBesideSupportedOnes(t 
 
 func TestTranslateEventTriggerConditionIgnoresUnsupportedEvents(t *testing.T) {
 	expressions := TriggerConditionExpressions{
-		EventPredicate: `build.source_event == "push"`,
+		EventPredicate: `build.env("BUILDKITE_GITHUB_EVENT") == "push"`,
 		Branch:         "build.branch",
 		Tag:            "build.tag",
 	}
@@ -159,7 +195,7 @@ func TestTranslateEventTriggerConditionIgnoresUnsupportedEvents(t *testing.T) {
 	if err != nil || !applicable {
 		t.Fatalf("condition/applicable/error = %q / %t / %v", condition, applicable, err)
 	}
-	if !strings.Contains(condition, `build.source_event == "push"`) {
+	if !strings.Contains(condition, `build.env("BUILDKITE_GITHUB_EVENT") == "push"`) {
 		t.Fatalf("condition = %q", condition)
 	}
 	condition, applicable, err = TranslateEventTriggerCondition([]workflow.Trigger{
