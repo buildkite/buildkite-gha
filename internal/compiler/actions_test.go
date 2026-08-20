@@ -444,6 +444,107 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsDetectsReachableCompositeMetadataGitHubToken(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "token", `name: composite token
+inputs:
+  fallback:
+    default: cargo-binstall
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        DEFAULT_GITHUB_TOKEN: ${{ inputs.fallback == 'cargo-binstall' && github.token || '' }}
+      run: echo "$DEFAULT_GITHUB_TOKEN"
+`)
+
+	for _, test := range []struct {
+		name     string
+		supplied map[string]string
+		want     bool
+	}{
+		{name: "default", want: true},
+		{name: "explicit matching value", supplied: map[string]string{"fallback": "cargo-binstall"}, want: true},
+		{name: "unreachable cargo install", supplied: map[string]string{"fallback": "cargo-install"}},
+		{name: "unreachable none", supplied: map[string]string{"fallback": "none"}},
+		{name: "unknown expression", supplied: map[string]string{"fallback": "${{ matrix.fallback }}"}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./token"}, []map[string]string{test.supplied})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if compiled.requiresGitHubToken != test.want {
+				t.Fatalf("requires GitHub token = %t, want %t", compiled.requiresGitHubToken, test.want)
+			}
+		})
+	}
+}
+
+func TestCompileActionInvocationsDetectsGitHubTokenAcrossCompositeMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	for _, test := range []struct {
+		name   string
+		action string
+	}{
+		{name: "environment", action: "name: token\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      env:\n        TOKEN: ${{ github.token }}\n      run: echo token\n"},
+		{name: "run", action: "name: token\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo '${{ github.token }}'\n"},
+		{name: "working-directory", action: "name: token\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      working-directory: ${{ github.token }}\n      run: pwd\n"},
+		{name: "output", action: "name: token\noutputs:\n  token:\n    value: ${{ github.token }}\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo token\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			writeAction(t, workspace, test.name, test.action)
+			compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./" + test.name}, []map[string]string{nil})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !compiled.requiresGitHubToken {
+				t.Fatal("composite metadata did not request a GitHub token")
+			}
+		})
+	}
+}
+
+func TestCompileActionInvocationsDetectsReachableCompositeChildInputGitHubToken(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  token:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, workspace, "parent", `name: parent
+inputs:
+  enabled:
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        token: ${{ inputs.enabled == 'true' && github.token || '' }}
+`)
+
+	for _, test := range []struct {
+		enabled string
+		want    bool
+	}{
+		{enabled: "false"},
+		{enabled: "true", want: true},
+	} {
+		compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{{"enabled": test.enabled}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.want {
+			t.Fatalf("enabled %q requires GitHub token = %t, want %t", test.enabled, compiled.requiresGitHubToken, test.want)
+		}
+	}
+}
+
 func TestCompileActionInvocationsScopesWorkflowAuthoredSecretsByInputContract(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "secrets", `name: secret inputs
@@ -546,6 +647,24 @@ runs:
 	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
 	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant github.token authority") {
 		t.Fatalf("composite metadata token error = %v", err)
+	}
+}
+
+func TestCompileActionInvocationsRejectsSecretAuthorityFromCompositeEnvironment(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "secrets", `name: composite secret
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ secrets.DEPLOY_KEY }}
+      run: echo token
+`)
+
+	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./secrets"}, []map[string]string{nil})
+	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant secret authority") {
+		t.Fatalf("composite environment secret error = %v", err)
 	}
 }
 
@@ -840,6 +959,42 @@ jobs:
 		t.Fatalf("default action token plan = %#v", plans)
 	}
 
+	writeAction(t, w, ".github/actions/composite-token", `name: composite token
+inputs:
+  fallback:
+    default: cargo-binstall
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        DEFAULT_GITHUB_TOKEN: ${{ inputs.fallback == 'cargo-binstall' && github.token || '' }}
+      run: echo token
+`)
+	compositeWorkflow := `on: push
+permissions:
+  contents: read
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/composite-token
+`
+	plans, err = compile(compositeWorkflow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken == nil || !plans[0].HasCapability("provider-token-write") {
+		t.Fatalf("composite metadata token plan = %#v", plans)
+	}
+	bundle, err = CompileBundleWithOptions(workflowPath, []byte(compositeWorkflow), pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || !reflect.DeepEqual(bundle.Plans[0].Authorization.GitHubTokenActions, []string{"./.github/actions/composite-token"}) {
+		t.Fatalf("composite metadata token attribution = %#v", bundle.Plans)
+	}
+
 	_, err = compile(`on: push
 permissions: {}
 jobs:
@@ -848,7 +1003,7 @@ jobs:
     steps:
       - uses: ./.github/actions/token
 `)
-	if err == nil || !strings.Contains(err.Error(), "action input default that references github.token") || !strings.Contains(err.Error(), "no effective permissions") {
+	if err == nil || !strings.Contains(err.Error(), "action metadata that references github.token") || !strings.Contains(err.Error(), "no effective permissions") {
 		t.Fatalf("compilePlansForTest() error = %v, want empty permission rejection", err)
 	}
 }

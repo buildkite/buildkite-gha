@@ -3050,10 +3050,12 @@ runs:
   steps:
     - shell: sh
       env:
+        DEFAULT_GITHUB_TOKEN: ${{ github.token }}
         ENV_GITHUB_ACTION_PATH: ${{ env.GITHUB_ACTION_PATH }}
         ENV_GITHUB_SHA: ${{ env.GITHUB_SHA }}
         ENV_RUNNER_TEMP: ${{ env.RUNNER_TEMP }}
       run: |
+        test "$DEFAULT_GITHUB_TOKEN" = "ghs_scoped_action_default"
         test "$GITHUB_TOKEN" = "ghs_scoped_action_default"
         test "$GITHUB_ACTION_PATH" != "file-action-path"
         test -f "$GITHUB_ACTION_PATH/action.yml"

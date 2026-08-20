@@ -397,10 +397,9 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		if !workflowAuthored && len(names) != 0 {
 			return actionRequirements{}, fmt.Errorf("action input %q: composite action metadata cannot grant secret authority", suppliedName)
 		}
-		if !workflowAuthored && referencesToken {
-			return actionRequirements{}, fmt.Errorf("action input %q: composite action metadata cannot grant github.token authority", suppliedName)
+		if workflowAuthored {
+			requirements.githubToken = requirements.githubToken || referencesToken
 		}
-		requirements.githubToken = requirements.githubToken || referencesToken
 		input, declared := n.metadata.Inputs[strings.ToLower(suppliedName)]
 		for _, name := range names {
 			if declared && !input.Required && name != "GITHUB_TOKEN" {
@@ -429,7 +428,46 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	if n.runtime != metadata.RuntimeComposite {
 		return requirements, nil
 	}
+	effectiveInputs, inputsKnown := n.effectiveInputs(supplied)
+	for _, name := range sortedKeys(n.metadata.Outputs) {
+		requiresToken, err := inspectCompositeTemplate("output "+name, n.metadata.Outputs[name].Value, effectiveInputs, inputsKnown, serverURL)
+		if err != nil {
+			return actionRequirements{}, err
+		}
+		requirements.githubToken = requirements.githubToken || requiresToken
+	}
 	for i, step := range n.metadata.Runs.Steps {
+		for _, field := range []struct {
+			name   string
+			values map[string]string
+		}{
+			{name: "environment", values: step.Env},
+			{name: "input", values: step.With},
+		} {
+			for _, name := range sortedKeys(field.values) {
+				requiresToken, err := inspectCompositeTemplate(fmt.Sprintf("step %d %s %q", i+1, field.name, name), field.values[name], effectiveInputs, inputsKnown, serverURL)
+				if err != nil {
+					return actionRequirements{}, err
+				}
+				requirements.githubToken = requirements.githubToken || requiresToken
+			}
+		}
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{name: "run", value: step.Run},
+			{name: "working-directory", value: step.WorkingDirectory},
+		} {
+			if field.value == "" {
+				continue
+			}
+			requiresToken, err := inspectCompositeTemplate(fmt.Sprintf("step %d %s", i+1, field.name), field.value, effectiveInputs, inputsKnown, serverURL)
+			if err != nil {
+				return actionRequirements{}, err
+			}
+			requirements.githubToken = requirements.githubToken || requiresToken
+		}
 		if step.Uses == "" {
 			continue
 		}
@@ -453,6 +491,81 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		}
 	}
 	return requirements, nil
+}
+
+func (n *actionNode) effectiveInputs(supplied map[string]string) (map[string]string, bool) {
+	inputs := make(map[string]string, len(n.metadata.Inputs)+len(supplied))
+	known := true
+	for _, name := range sortedKeys(n.metadata.Inputs) {
+		definition := n.metadata.Inputs[name]
+		value := ""
+		if definition.Default != nil {
+			value = *definition.Default
+		}
+		if strings.Contains(value, "${{") {
+			known = false
+			continue
+		}
+		inputs[name] = value
+	}
+	for _, name := range sortedKeys(supplied) {
+		value := supplied[name]
+		if strings.Contains(value, "${{") {
+			known = false
+			continue
+		}
+		inputs[strings.ToLower(name)] = value
+	}
+	return inputs, known
+}
+
+func inspectCompositeTemplate(field, template string, inputs map[string]string, inputsKnown bool, serverURL string) (bool, error) {
+	referencesEvent, err := expression.TemplateReferencesGitHubEvent(template)
+	if err != nil {
+		return false, fmt.Errorf("composite action %s: %w", field, err)
+	}
+	if referencesEvent {
+		return false, fmt.Errorf("composite action %s: github.event cannot be retained in a job plan", field)
+	}
+	names, err := expression.SecretReferences(template)
+	if err != nil {
+		return false, fmt.Errorf("composite action %s: %w", field, err)
+	}
+	if len(names) != 0 {
+		return false, fmt.Errorf("composite action %s: composite action metadata cannot grant secret authority", field)
+	}
+	referencesToken, err := expression.ReferencesGitHubToken(template)
+	if err != nil {
+		return false, fmt.Errorf("composite action %s: %w", field, err)
+	}
+	if !referencesToken {
+		return false, nil
+	}
+	usesInputs, err := expression.TemplateUsesContext(template, "inputs")
+	if err != nil {
+		return false, fmt.Errorf("composite action %s: %w", field, err)
+	}
+	if usesInputs && !inputsKnown {
+		return true, nil
+	}
+	usesUnknownGitHubProperty, err := expression.TemplateUsesGitHubPropertyOutside(template, "server_url", "token")
+	if err != nil {
+		return false, fmt.Errorf("composite action %s: %w", field, err)
+	}
+	if usesUnknownGitHubProperty {
+		return true, nil
+	}
+	for _, contextName := range []string{"env", "job", "matrix", "needs", "runner", "services", "steps", "vars"} {
+		usesContext, err := expression.TemplateUsesContext(template, contextName)
+		if err != nil {
+			return false, fmt.Errorf("composite action %s: %w", field, err)
+		}
+		if usesContext {
+			return true, nil
+		}
+	}
+	_, err = expression.EvaluateStep(template, expression.Context{Inputs: inputs, GitHub: map[string]any{"server_url": serverURL}})
+	return err != nil, nil
 }
 
 func hasActionInput(inputs map[string]string, name string) bool {

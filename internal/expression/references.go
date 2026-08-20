@@ -495,6 +495,32 @@ func TemplateUsesContext(source, contextName string) (bool, error) {
 	return found, err
 }
 
+// TemplateUsesGitHubPropertyOutside reports whether a template references a
+// github property other than the allowed static properties.
+func TemplateUsesGitHubPropertyOutside(source string, allowed ...string) (bool, error) {
+	allowedProperties := make(map[string]bool, len(allowed))
+	for _, property := range allowed {
+		allowedProperties[strings.ToLower(property)] = true
+	}
+	found := false
+	err := visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
+		actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
+			if !entering || found {
+				return
+			}
+			switch node.(type) {
+			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+			default:
+				return
+			}
+			root, path, _ := referencePath(node)
+			found = strings.EqualFold(root, "github") && len(path) != 0 && !allowedProperties[strings.ToLower(path[0])]
+		})
+		return nil
+	})
+	return found, err
+}
+
 // ConditionUsesStaticContextReference reports whether a condition contains a
 // direct or literal-index reference to a context. Computed indexes and
 // projections remain runtime expressions.

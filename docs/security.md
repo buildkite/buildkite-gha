@@ -76,7 +76,7 @@ manifests. A missing or changed manifest stops the job.
 | Credential | Boundary |
 | --- | --- |
 | Repository checkout | The native adapter checks the event repository and exact commit. Buildkite authorizes private access. Credentials apply only to Git commands and are not persisted. |
-| `GITHUB_TOKEN` | A short-lived token for the event repository. Buildkite enforces the top-level workflow permission map and build provenance. The token is not ambient. |
+| `GITHUB_TOKEN` | Supported workflow references and reachable immutable action metadata receive a short-lived token for the event repository. Buildkite enforces the top-level workflow permission map and build provenance. The token is not ambient. |
 | Cache token | A fresh job-bound token for each compatible JavaScript or Docker action lifecycle. Shell steps do not receive it. |
 | Workflow secrets | Static names resolve with `buildkite-agent secret get` in the destination job. Buildkite Secret access policy is the authority. |
 | Registry credentials | Explicit credentials resolve in the destination job. Passwords go to Docker through standard input and use a private per-job Docker configuration. Secret-derived values stay out of plans and pipeline YAML; authored literals do not. |

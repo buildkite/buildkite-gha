@@ -557,6 +557,25 @@ func TestTemplateUsesContextSupportsIndexedAccess(t *testing.T) {
 	}
 }
 
+func TestTemplateUsesGitHubPropertyOutside(t *testing.T) {
+	for _, test := range []struct {
+		template string
+		want     bool
+	}{
+		{template: "${{ github.server_url == 'https://github.com' && github.token || '' }}"},
+		{template: "${{ github.actor == 'octocat' && github.token || '' }}", want: true},
+		{template: "${{ inputs.actor }}"},
+	} {
+		got, err := TemplateUsesGitHubPropertyOutside(test.template, "server_url", "token")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != test.want {
+			t.Fatalf("TemplateUsesGitHubPropertyOutside(%q) = %t, want %t", test.template, got, test.want)
+		}
+	}
+}
+
 func TestStaticContextReferencesExcludeRuntimeComputedAccess(t *testing.T) {
 	for _, source := range []string{"${{ inputs.enabled }}", "${{ inputs['enabled'] }}", "inputs.enabled"} {
 		var usesInputs bool

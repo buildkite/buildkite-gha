@@ -348,7 +348,7 @@ jobs:
 
 ### Permissions
 
-**🟡 Supported subset.** Permissions matter only when a job statically references `secrets.GITHUB_TOKEN` or `github.token`, or an effective action input default can reach `github.token` for the event provider.
+**🟡 Supported subset.** Permissions matter only when a job statically references `secrets.GITHUB_TOKEN` or `github.token`, or reachable immutable action metadata can use `github.token` for the event provider.
 
 A workflow-level permissions map can request repository access:
 
@@ -1052,12 +1052,13 @@ JavaScript and Docker actions with compatible bundled cache clients also receive
 event repository when it:
 
 - statically references `secrets.GITHUB_TOKEN` or `github.token`; or
-- uses an action whose effective input default can reach `github.token` for the
-  event provider.
+- uses reachable immutable action metadata that can use `github.token` for the
+  event provider, including effective input defaults and composite step fields.
 
 A `github.server_url == 'https://github.com'` guard skips the token branch for
-an Origin repository. Native adapters ignore upstream input defaults, so
-`actions/checkout` alone does not request a token.
+an Origin repository. Known guards skip unreachable token branches; unknown
+values conservatively request a token. Native adapters ignore upstream input
+defaults, so `actions/checkout` alone does not request a token.
 
 The top-level workflow's `permissions` set the scope. Token issuance needs a
 Buildkite organization feature and a pipeline setting; both are off by default.
@@ -1107,9 +1108,9 @@ jobs:
 The server restricts pull requests, merge queues, and their descendants. For other builds, job binding does not establish that an arbitrary commit is trusted. Restrict who can create builds and enable write tokens only when branch builds run trusted code.
 
 The token is not part of the initial job environment. Workflow-authored
-`github.token` references are step-only and use the same token as
-`secrets.GITHUB_TOKEN`. Effective action input defaults can also use it.
-Automatic ambient `GITHUB_TOKEN` is unsupported.
+`github.token` references and supported immutable action metadata use the same
+token as `secrets.GITHUB_TOKEN`. Automatic ambient `GITHUB_TOKEN` is
+unsupported.
 
 ### Other secrets and OIDC
 
