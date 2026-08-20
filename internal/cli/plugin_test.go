@@ -653,48 +653,72 @@ func TestNormalizePluginCommit(t *testing.T) {
 	})
 }
 
-func TestPluginNormalizesReleaseCommitBeforeEventConstruction(t *testing.T) {
+func TestPluginCarriesReleaseCommitIntoPlans(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"release.yml": "on:\n  release:\n    types: [published]\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		"release.yml": "on:\n  release:\n    types: [published]\npermissions:\n  contents: write\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    env:\n      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n    steps: [{run: true}]\n",
 	})
 	t.Chdir(repository)
 	configuration, err := json.Marshal(map[string]any{"workflow": ".github/workflows/release.yml"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(pluginConfigurationEnvironment, string(configuration))
-	setCLIPluginBuildkiteEnvironment(t, "release-importer")
-	t.Setenv("BUILDKITE_COMMIT", "HEAD")
-	t.Setenv("BUILDKITE_BRANCH", "v1.2.3")
-	t.Setenv("BUILDKITE_TAG", "v1.2.3")
-	t.Setenv("BUILDKITE_GITHUB_EVENT", "release")
-	t.Setenv("BUILDKITE_GITHUB_ACTION", "published")
 	commit := strings.Repeat("a", 40)
-	runner := &cliCaptureRunner{
-		gitOutput: []byte(commit + "\n"),
-		webhook:   []byte(`{"action":"published","release":{"tag_name":"v1.2.3","draft":false,"prerelease":false}}`),
-	}
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
-		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
-	}
-	found := false
-	for path, source := range runner.uploaded {
-		if !strings.HasSuffix(path, ".json") {
-			continue
-		}
-		job, err := plan.Decode(source)
-		if err != nil {
-			t.Fatal(err)
-		}
-		found = true
-		if job.Event.Name != "release" || job.Event.Ref != "refs/tags/v1.2.3" || job.Event.SHA != commit {
-			t.Fatalf("release plan event = %#v", job.Event)
-		}
-	}
-	if !found {
-		t.Fatal("plugin uploaded no release job plan")
+	for _, test := range []struct {
+		name            string
+		buildkiteCommit string
+		gitOutput       []byte
+		wantGitCalls    int
+	}{
+		{name: "server-resolved commit", buildkiteCommit: commit},
+		{name: "checked-out HEAD fallback", buildkiteCommit: "HEAD", gitOutput: []byte(commit + "\n"), wantGitCalls: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(pluginConfigurationEnvironment, string(configuration))
+			setCLIPluginBuildkiteEnvironment(t, "release-importer")
+			t.Setenv("BUILDKITE_COMMIT", test.buildkiteCommit)
+			t.Setenv("BUILDKITE_BRANCH", "v1.2.3")
+			t.Setenv("BUILDKITE_TAG", "v1.2.3")
+			t.Setenv("BUILDKITE_GITHUB_EVENT", "release")
+			t.Setenv("BUILDKITE_GITHUB_ACTION", "published")
+			runner := &cliCaptureRunner{
+				gitOutput: test.gitOutput,
+				webhook:   []byte(`{"action":"published","release":{"tag_name":"v1.2.3","draft":false,"prerelease":false}}`),
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+				t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+			}
+			gitCalls := 0
+			for _, command := range runner.commands {
+				if command.name == "git" && slices.Equal(command.args, []string{"rev-parse", "HEAD"}) {
+					gitCalls++
+				}
+			}
+			if gitCalls != test.wantGitCalls {
+				t.Fatalf("git rev-parse HEAD calls = %d, want %d", gitCalls, test.wantGitCalls)
+			}
+			found := false
+			for path, source := range runner.uploaded {
+				if !strings.HasSuffix(path, ".json") {
+					continue
+				}
+				job, err := plan.Decode(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				found = true
+				if job.Event.Name != "release" || job.Event.Ref != "refs/tags/v1.2.3" || job.Event.SHA != commit {
+					t.Fatalf("release plan event = %#v", job.Event)
+				}
+				if job.GitHubToken == nil || job.GitHubToken.Workflow != "release.yml" || !reflect.DeepEqual(job.GitHubToken.Permissions, map[string]string{"contents": "write"}) {
+					t.Fatalf("release GITHUB_TOKEN policy = %#v", job.GitHubToken)
+				}
+			}
+			if !found {
+				t.Fatal("plugin uploaded no release job plan")
+			}
+		})
 	}
 }
 
