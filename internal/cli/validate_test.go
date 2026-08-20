@@ -84,10 +84,10 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		}
 		for _, want := range []string{
 			`<h2 class="h4 mb2">Workflow could not be run</h2>`,
-			`<p><strong>Windows runners aren&#39;t supported yet.</strong></p>`,
-			`Buildkite hosted agents run Linux and macOS only, so this job can&#39;t be imported to one.`,
-			`If the job can run on Linux, change &#34;windows-latest&#34; to &#34;ubuntu-latest&#34;.`,
-			`If it needs Windows, log an issue on <a href="https://github.com/buildkite/buildkite-gha" target="_blank">github.com/buildkite/buildkite-gha</a> so we can prioritise it.`,
+			`<p><strong>Windows runners in GitHub workflows aren&#39;t currently supported.</strong></p>`,
+			`Imported jobs run on Linux or macOS Buildkite hosted agents.`,
+			`If this job can run on Linux, change &#34;windows-latest&#34; to &#34;ubuntu-latest&#34;.`,
+			`If it requires Windows, open an issue in <a href="https://github.com/buildkite/buildkite-gha" target="_blank">buildkite/buildkite-gha</a> to help us prioritize Windows support.`,
 			"Job <code>test</code>",
 		} {
 			if !strings.Contains(string(annotation.stdin), want) {
