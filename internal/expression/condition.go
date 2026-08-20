@@ -487,31 +487,45 @@ func evaluateKnownInputConditionNode(node actionlint.ExprNode, context Condition
 		return evaluateKnownInputConditionNode(call.Args[len(call.Args)-1], context, unknownInputs)
 	}
 
-	names, dynamic := nodeInputReferences(node)
-	if dynamic && len(unknownInputs) != 0 {
-		return false, false, nil
-	}
-	for _, name := range names {
-		if unknownInputs[name] {
-			return false, false, nil
+	value, known := evaluateKnownConditionValue(node, context, unknownInputs)
+	return githubTruthy(value), known, nil
+}
+
+func evaluateKnownConditionValue(node actionlint.ExprNode, context ConditionContext, unknownInputs map[string]bool) (any, bool) {
+	evaluator := newSemanticEvaluator(conditionSurface)
+	evaluator.resolve = func(root string, path []string) (any, error) {
+		switch {
+		case strings.EqualFold(root, "inputs") && len(path) == 1:
+			if unknownInputs[strings.ToLower(path[0])] {
+				return nil, fmt.Errorf("condition input %q is unknown", path[0])
+			}
+			return resolveConditionReference(root, path, context)
+		case strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "server_url"):
+			return resolveConditionReference(root, path, context)
+		default:
+			return nil, fmt.Errorf("condition runtime value is unknown")
 		}
 	}
-	if containsStatusFunction(node) {
-		return false, false, nil
-	}
-	if nodeUsesGitHubPropertyOutside(node, "server_url") {
-		return false, false, nil
-	}
-	for _, contextName := range []string{"env", "job", "matrix", "needs", "runner", "steps", "vars"} {
-		if nodeUsesContext(node, contextName) {
-			return false, false, nil
+	evaluator.resolveRoot = func(root string) (any, error) {
+		if !strings.EqualFold(root, "inputs") || len(unknownInputs) != 0 {
+			return nil, fmt.Errorf("condition runtime context is unknown")
 		}
+		return context.Inputs, nil
 	}
-	value, err := evaluateConditionNode(node, context)
-	if err != nil {
-		return false, false, nil
+	evaluator.truthy = githubTruthy
+	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
+		return githubCompare(kind, left, right)
 	}
-	return githubTruthy(value), true, nil
+	evaluator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("condition expression is unknown") }
+	evaluator.logicalError = func(actionlint.LogicalOpNodeKind) error { return fmt.Errorf("condition expression is unknown") }
+	evaluator.call = func(evaluator *semanticEvaluator, call *actionlint.FuncCallNode) (any, error) {
+		if value, recognized, err := evaluatePureFunction(evaluator, call); recognized {
+			return value, err
+		}
+		return nil, fmt.Errorf("condition function %q is unknown", call.Callee)
+	}
+	value, err := evaluator.evaluate(node)
+	return value, err == nil
 }
 
 func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (any, error) {

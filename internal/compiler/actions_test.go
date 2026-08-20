@@ -708,7 +708,7 @@ runs:
 		roots:   map[string]string{"owner/parent": parent, "owner/child": child},
 		commits: map[string]string{"owner/parent": strings.Repeat("a", 40), "owner/child": strings.Repeat("b", 40)},
 	}
-	compiled, err := compileActionInvocations(t.Context(), t.TempDir(), source, "https://github.com", []string{"owner/parent@v1"}, []map[string]string{nil})
+	compiled, err := compileActionInvocationsWithConditions(t.Context(), t.TempDir(), source, "https://github.com", []string{"owner/parent@v1"}, []map[string]string{nil}, []string{"${{ false }}"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -858,6 +858,109 @@ runs:
 		}
 		if compiled.requiresGitHubToken != test.want {
 			t.Fatalf("enabled %q requires GitHub token = %t, want %t", test.enabled, compiled.requiresGitHubToken, test.want)
+		}
+	}
+
+	writeAction(t, workspace, "default-guarded", `name: default guarded
+inputs:
+  a_enabled:
+    default: "false"
+  b_token:
+    default: ${{ inputs.a_enabled == 'true' && github.token || '' }}
+runs:
+  using: node24
+  main: index.js
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./default-guarded"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("ordered false input default retained unreachable token authority")
+	}
+}
+
+func TestCompileActionInvocationsKeepsRuntimeDefaultInputsUnknown(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "guarded", `name: guarded
+inputs:
+  gate:
+    default: ${{ github.actor }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ inputs.gate != '' && github.token || '' }}
+      run: echo guarded
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./guarded"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("runtime-dependent default omitted reachable token authority")
+	}
+}
+
+func TestCompileActionInvocationsResolvesTopLevelProviderInputs(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "guarded", `name: guarded
+inputs:
+  enabled:
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ inputs.enabled == 'true' && github.token || '' }}
+      run: echo guarded
+`)
+	supplied := map[string]string{"enabled": "${{ github.server_url == 'https://github.com' && 'true' || 'false' }}"}
+	for _, test := range []struct {
+		serverURL string
+		want      bool
+	}{
+		{serverURL: "https://origin.cursor.com"},
+		{serverURL: "https://github.com", want: true},
+	} {
+		compiled, err := compileActionInvocations(t.Context(), workspace, nil, test.serverURL, []string{"./guarded"}, []map[string]string{supplied})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.want {
+			t.Fatalf("server URL %q requires GitHub token = %t, want %t", test.serverURL, compiled.requiresGitHubToken, test.want)
+		}
+	}
+}
+
+func TestCompileActionInvocationsGatesMainAuthorityByWorkflowCondition(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "token", `name: token
+inputs:
+  token:
+    default: ${{ github.token }}
+runs:
+  using: node24
+  main: index.js
+`)
+	for _, test := range []struct {
+		serverURL string
+		condition string
+		want      bool
+	}{
+		{serverURL: "https://github.com", condition: "${{ false }}"},
+		{serverURL: "https://github.com", condition: "${{ github.server_url == 'https://github.com' }}", want: true},
+		{serverURL: "https://origin.cursor.com", condition: "${{ github.server_url == 'https://github.com' }}"},
+		{serverURL: "https://github.com", condition: "${{ env.RUNTIME == 'yes' }}", want: true},
+	} {
+		compiled, err := compileActionInvocationsWithConditions(t.Context(), workspace, nil, test.serverURL, []string{"./token"}, []map[string]string{nil}, []string{test.condition})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.want {
+			t.Fatalf("server URL %q condition %q requires GitHub token = %t, want %t", test.serverURL, test.condition, compiled.requiresGitHubToken, test.want)
 		}
 	}
 }

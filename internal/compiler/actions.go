@@ -216,11 +216,18 @@ func compileActionLocks(ctx context.Context, workspace string, actionSource Acti
 }
 
 func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
+	return compileActionInvocationsWithConditions(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil)
+}
+
+func compileActionInvocationsWithConditions(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, conditions []string) (actionCompilation, error) {
 	if workspace == "" {
 		return actionCompilation{}, fmt.Errorf("workflow path must identify a repository root")
 	}
 	if suppliedInputs != nil && len(suppliedInputs) != len(refs) {
 		return actionCompilation{}, fmt.Errorf("action references and supplied inputs have different lengths")
+	}
+	if conditions != nil && len(conditions) != len(refs) {
+		return actionCompilation{}, fmt.Errorf("action references and conditions have different lengths")
 	}
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
@@ -261,8 +268,17 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
-			requiresGitHubToken = requiresGitHubToken || requirements.githubToken || requirements.preparationGitHubToken
-			if requirements.githubToken || requirements.preparationGitHubToken {
+			mainReachable := true
+			if conditions != nil {
+				run, known, conditionErr := expression.EvaluateKnownCondition(conditions[i], expression.ConditionContext{GitHub: map[string]any{"server_url": serverURL}}, nil)
+				if conditionErr != nil {
+					return actionCompilation{}, fmt.Errorf("compile action %q condition: %w", refs[i], conditionErr)
+				}
+				mainReachable = !known || run
+			}
+			requiresToken := requirements.preparationGitHubToken || mainReachable && requirements.githubToken
+			requiresGitHubToken = requiresGitHubToken || requiresToken
+			if requiresToken {
 				githubTokenActions = append(githubTokenActions, refs[i])
 			}
 			for name := range requirements.requiredSecrets {
@@ -400,6 +416,11 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		}
 		if workflowAuthored {
 			requirements.githubToken = requirements.githubToken || referencesToken
+			_, preparesInputs, preparationErr := n.preparationFields(serverURL)
+			if preparationErr != nil {
+				return actionRequirements{}, preparationErr
+			}
+			requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparesInputs && referencesToken
 		}
 		input, declared := n.metadata.Inputs[strings.ToLower(suppliedName)]
 		for _, name := range names {
@@ -412,29 +433,19 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	if n.native {
 		return requirements, nil
 	}
-	for _, name := range sortedKeys(n.metadata.Inputs) {
-		input := n.metadata.Inputs[name]
-		if input.Default == nil || hasActionInput(supplied, name) {
-			continue
-		}
-		if err := expression.ValidateActionInputDefault(*input.Default); err != nil {
-			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
-		}
-		referencesToken, err := expression.ActionInputDefaultRequiresGitHubToken(*input.Default, serverURL)
-		if err != nil {
-			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
-		}
-		requirements.githubToken = requirements.githubToken || referencesToken
-		_, preparesInputs, preparationErr := n.preparationFields(serverURL)
-		if preparationErr != nil {
-			return actionRequirements{}, preparationErr
-		}
-		requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparesInputs && referencesToken
+	effectiveInputs, unknownInputs, defaultsRequireToken, err := n.effectiveInputs(supplied, serverURL, workflowAuthored)
+	if err != nil {
+		return actionRequirements{}, err
 	}
+	requirements.githubToken = requirements.githubToken || defaultsRequireToken
+	_, preparesInputs, err := n.preparationFields(serverURL)
+	if err != nil {
+		return actionRequirements{}, err
+	}
+	requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparesInputs && defaultsRequireToken
 	if n.runtime != metadata.RuntimeComposite {
 		return requirements, nil
 	}
-	effectiveInputs, unknownInputs := n.effectiveInputs(supplied, serverURL)
 	for _, name := range sortedKeys(n.metadata.Outputs) {
 		requiresToken, err := inspectCompositeTemplate("output "+name, n.metadata.Outputs[name].Value, effectiveInputs, unknownInputs, serverURL)
 		if err != nil {
@@ -533,11 +544,15 @@ func (n *actionNode) preparationFields(serverURL string) (environment, inputs bo
 	return true, !known || run, nil
 }
 
-func (n *actionNode) effectiveInputs(supplied map[string]string, serverURL string) (map[string]string, map[string]bool) {
+func (n *actionNode) effectiveInputs(supplied map[string]string, serverURL string, workflowAuthored bool) (map[string]string, map[string]bool, bool, error) {
 	inputs := make(map[string]string, len(n.metadata.Inputs)+len(supplied))
 	unknown := map[string]bool{}
-	for _, name := range sortedKeys(supplied) {
-		value := supplied[name]
+	resolvedSupplied := supplied
+	if workflowAuthored {
+		resolvedSupplied = resolveKnownWorkflowValues(supplied, serverURL)
+	}
+	for _, name := range sortedKeys(resolvedSupplied) {
+		value := resolvedSupplied[name]
 		name = strings.ToLower(name)
 		if strings.Contains(value, "${{") {
 			unknown[name] = true
@@ -545,6 +560,7 @@ func (n *actionNode) effectiveInputs(supplied map[string]string, serverURL strin
 		}
 		inputs[name] = value
 	}
+	requiresToken := false
 	for _, name := range sortedKeys(n.metadata.Inputs) {
 		if _, ok := inputs[name]; ok || unknown[name] {
 			continue
@@ -554,26 +570,43 @@ func (n *actionNode) effectiveInputs(supplied map[string]string, serverURL strin
 			continue
 		}
 		value := *definition.Default
+		if err := expression.ValidateActionInputDefault(value); err != nil {
+			return nil, nil, false, fmt.Errorf("action input %q default: %w", name, err)
+		}
+		defaultRequiresToken, err := expression.GitHubTokenRequiresEvaluation(value, expression.Context{Inputs: inputs, GitHub: map[string]any{"server_url": serverURL}}, unknown)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("action input %q default: %w", name, err)
+		}
+		requiresToken = requiresToken || defaultRequiresToken
 		if strings.Contains(value, "${{") {
-			inputNames, dynamic, referenceErr := expression.TemplateInputReferences(value)
-			dependsOnUnknown := dynamic && len(unknown) != 0
-			for _, inputName := range inputNames {
-				dependsOnUnknown = dependsOnUnknown || unknown[inputName]
+			var known bool
+			value, known, err = expression.EvaluateKnownStep(value, expression.Context{Inputs: inputs, GitHub: map[string]any{"server_url": serverURL}}, unknown)
+			if err != nil {
+				return nil, nil, false, fmt.Errorf("action input %q default: %w", name, err)
 			}
-			if referenceErr != nil || dependsOnUnknown {
-				unknown[name] = true
-				continue
-			}
-			var err error
-			value, err = expression.EvaluateActionInputDefault(value, expression.Context{Inputs: inputs, GitHub: map[string]any{"server_url": serverURL}})
-			if err != nil || strings.Contains(value, "${{") {
+			if !known || strings.Contains(value, "${{") {
 				unknown[name] = true
 				continue
 			}
 		}
 		inputs[name] = value
 	}
-	return inputs, unknown
+	return inputs, unknown, requiresToken, nil
+}
+
+func resolveKnownWorkflowValues(values map[string]string, serverURL string) map[string]string {
+	resolved := make(map[string]string, len(values))
+	for name, value := range values {
+		resolved[name] = value
+		if !strings.Contains(value, "${{") {
+			continue
+		}
+		evaluated, known, err := expression.EvaluateKnownStep(value, expression.Context{GitHub: map[string]any{"server_url": serverURL}}, nil)
+		if err == nil && known {
+			resolved[name] = evaluated
+		}
+	}
+	return resolved
 }
 
 func compositeStepCondition(condition string, inputs map[string]string, unknownInputs map[string]bool, serverURL string) (bool, bool, error) {
@@ -651,15 +684,6 @@ func inspectCompositeTemplate(field, template string, inputs map[string]string, 
 		return false, fmt.Errorf("composite action %s: %w", field, err)
 	}
 	return requiresToken, nil
-}
-
-func hasActionInput(inputs map[string]string, name string) bool {
-	for candidate := range inputs {
-		if strings.EqualFold(candidate, name) {
-			return true
-		}
-	}
-	return false
 }
 
 func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, plan.ActionLock, string, string, error) {

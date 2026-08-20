@@ -4,6 +4,7 @@
 package expression
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -578,24 +579,7 @@ func githubTokenReachable(node actionlint.ExprNode, context Context, unknownInpu
 		return githubTokenReachable(node.Left, context, unknownInputs) || githubTokenReachable(node.Right, context, unknownInputs)
 	case *actionlint.FuncCallNode:
 		if strings.EqualFold(node.Callee, "case") && len(node.Args) >= 3 && len(node.Args)%2 == 1 {
-			for i := 0; i < len(node.Args)-1; i += 2 {
-				if githubTokenReachable(node.Args[i], context, unknownInputs) {
-					return true
-				}
-				selected, known := evaluateKnownStepNode(node.Args[i], context, unknownInputs)
-				if !known {
-					for _, argument := range node.Args[i+1:] {
-						if githubTokenReachable(argument, context, unknownInputs) {
-							return true
-						}
-					}
-					return false
-				}
-				if selected {
-					return githubTokenReachable(node.Args[i+1], context, unknownInputs)
-				}
-			}
-			return githubTokenReachable(node.Args[len(node.Args)-1], context, unknownInputs)
+			return githubTokenReachableCase(node.Args, context, unknownInputs)
 		}
 		if reachable, handled := githubTokenReachablePureCall(node, context, unknownInputs); handled {
 			return reachable
@@ -607,6 +591,23 @@ func githubTokenReachable(node actionlint.ExprNode, context Context, unknownInpu
 		}
 	}
 	return false
+}
+
+func githubTokenReachableCase(arguments []actionlint.ExprNode, context Context, unknownInputs map[string]bool) bool {
+	if len(arguments) == 1 {
+		return githubTokenReachable(arguments[0], context, unknownInputs)
+	}
+	if githubTokenReachable(arguments[0], context, unknownInputs) {
+		return true
+	}
+	selected, known := evaluateKnownStepNode(arguments[0], context, unknownInputs)
+	if known && selected {
+		return githubTokenReachable(arguments[1], context, unknownInputs)
+	}
+	if !known && githubTokenReachable(arguments[1], context, unknownInputs) {
+		return true
+	}
+	return githubTokenReachableCase(arguments[2:], context, unknownInputs)
 }
 
 func githubTokenReachablePureCall(node *actionlint.FuncCallNode, context Context, unknownInputs map[string]bool) (bool, bool) {
@@ -726,28 +727,58 @@ func evaluateKnownStepNode(node actionlint.ExprNode, context Context, unknownInp
 }
 
 func evaluateKnownStepValue(node actionlint.ExprNode, context Context, unknownInputs map[string]bool) (any, bool) {
-	names, dynamic := nodeInputReferences(node)
-	if dynamic && len(unknownInputs) != 0 {
-		return nil, false
+	value, err := evaluateKnownStepExpression(node, context, unknownInputs)
+	return value, err == nil
+}
+
+var errKnownStepValueUnavailable = errors.New("step runtime value is unavailable during planning")
+
+// EvaluateKnownStep evaluates a step template using only retained planning
+// values. Runtime-dependent templates are reported as unknown.
+func EvaluateKnownStep(template string, context Context, unknownInputs map[string]bool) (string, bool, error) {
+	value, err := evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
+		return evaluateKnownStepExpression(node, context, unknownInputs)
+	})
+	if errors.Is(err, errKnownStepValueUnavailable) {
+		return "", false, nil
 	}
-	for _, name := range names {
-		if unknownInputs[name] {
-			return nil, false
+	return value, err == nil, err
+}
+
+func evaluateKnownStepExpression(node actionlint.ExprNode, context Context, unknownInputs map[string]bool) (any, error) {
+	evaluator := newSemanticEvaluator(stepRuntimeSurface)
+	evaluator.resolve = func(root string, path []string) (any, error) {
+		switch {
+		case strings.EqualFold(root, "inputs") && len(path) == 1:
+			if context.Inputs == nil || unknownInputs[strings.ToLower(path[0])] {
+				return nil, errKnownStepValueUnavailable
+			}
+			return resolveRuntimeReferenceWithMissingMembers(root, path, context)
+		case strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "server_url"):
+			return resolveRuntimeReferenceWithMissingMembers(root, path, context)
+		default:
+			return nil, errKnownStepValueUnavailable
 		}
 	}
-	if nodeUsesGitHubPropertyOutside(node, "server_url") {
-		return nil, false
-	}
-	for _, contextName := range []string{"env", "job", "matrix", "needs", "runner", "services", "steps", "vars"} {
-		if nodeUsesContext(node, contextName) {
-			return nil, false
+	evaluator.resolveRoot = func(root string) (any, error) {
+		if !strings.EqualFold(root, "inputs") || context.Inputs == nil || len(unknownInputs) != 0 {
+			return nil, errKnownStepValueUnavailable
 		}
+		return context.Inputs, nil
 	}
-	value, err := evaluateStepRuntimeExpression(node, context, true, false, nil)
-	if err != nil {
-		return nil, false
+	evaluator.truthy = githubTruthy
+	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
+		return githubCompare(kind, left, right)
 	}
-	return value, true
+	evaluator.unsupported = func(actionlint.ExprNode) error { return errKnownStepValueUnavailable }
+	evaluator.logicalError = func(actionlint.LogicalOpNodeKind) error { return errKnownStepValueUnavailable }
+	evaluator.call = func(evaluator *semanticEvaluator, call *actionlint.FuncCallNode) (any, error) {
+		if value, recognized, err := evaluatePureFunction(evaluator, call); recognized {
+			return value, err
+		}
+		return nil, errKnownStepValueUnavailable
+	}
+	return evaluator.evaluate(node)
 }
 
 func visitGitHubTokenExpressions(source string, visit func(actionlint.ExprNode) error) error {
