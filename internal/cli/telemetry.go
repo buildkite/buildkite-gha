@@ -12,6 +12,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 const (
@@ -65,6 +66,15 @@ type commandTelemetryDetails struct {
 
 func (d *commandTelemetryDetails) captureErrors(writer io.Writer) io.Writer {
 	return errorCaptureWriter{writer: writer, capture: &d.errorOutput}
+}
+
+func captureCommandRunnerErrors(runner transport.Runner, writer io.Writer) transport.Runner {
+	commandRunner, ok := runner.(transport.CommandRunner)
+	if !ok {
+		return runner
+	}
+	commandRunner.Stderr = writer
+	return commandRunner
 }
 
 func (d *commandTelemetryDetails) setFailurePhase(phase telemetry.FailurePhase) {

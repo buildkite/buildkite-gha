@@ -15,6 +15,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
@@ -238,5 +239,26 @@ func TestCommandTelemetryCapturesBoundedErrorTailWithoutChangingOutput(t *testin
 	}
 	if success := details.forOutcome(telemetry.OutcomeSuccess); success.ErrorMessage != "" || success.ErrorMessageTruncated {
 		t.Fatalf("successful telemetry included error output: %#v", success)
+	}
+}
+
+func TestCommandTelemetryCapturesCommandRunnerErrors(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	var stderr bytes.Buffer
+	writer := details.captureErrors(&stderr)
+	runner := captureCommandRunnerErrors(transport.CommandRunner{}, writer)
+
+	commandRunner, ok := runner.(transport.CommandRunner)
+	if !ok {
+		t.Fatalf("runner = %T", runner)
+	}
+	if _, err := commandRunner.Stderr.Write([]byte("agent-diagnostic")); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "agent-diagnostic" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if got := details.forOutcome(telemetry.OutcomeFailure); got.ErrorMessage != "agent-diagnostic" {
+		t.Fatalf("error message = %q", got.ErrorMessage)
 	}
 }
