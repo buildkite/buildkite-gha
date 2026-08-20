@@ -1357,9 +1357,9 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 		}
 	}
 	firstFailureMessage := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
-	if !strings.Contains(firstFailureMessage, `Runner label "windows-latest" requires Windows, which is unsupported. Use a Linux or macOS runner label.`) ||
+	if !strings.Contains(firstFailureMessage, `Windows runners aren't currently supported. Imported jobs run on Linux or macOS Buildkite hosted agents. If this job can run on Linux, change "windows-latest" to "ubuntu-latest". If it requires Windows, open an issue in https://github.com/buildkite/buildkite-gha to help us prioritize Windows support.`) ||
 		!strings.Contains(firstFailureMessage, `Runner label "macos-15" has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.`) ||
-		strings.Count(firstFailureMessage, "detail: Supported runner labels: macos-latest, ubuntu-22.04, ubuntu-24.04, ubuntu-latest.") != 2 {
+		strings.Count(firstFailureMessage, "detail: Supported runner labels: macos-latest, ubuntu-22.04, ubuntu-24.04, ubuntu-latest.") != 1 {
 		t.Fatalf("multi-diagnostic failure message = %q", firstFailureMessage)
 	}
 	actionFailureAnnotation := string(failureArtifactForStep(pipeline.Steps[1].Plugins, runner.uploaded, "annotations"))
