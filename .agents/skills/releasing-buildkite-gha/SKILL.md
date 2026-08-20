@@ -20,8 +20,10 @@ Prepare and publish a release from the complete change set, with explicit approv
 2. Fetch the source of truth:
 
    ```sh
-   git fetch origin main --tags --prune
-   git fetch --unshallow origin 2>/dev/null || true
+   if test "$(git rev-parse --is-shallow-repository)" = true; then
+     git fetch --unshallow origin
+   fi
+   git fetch origin main:refs/remotes/origin/main --tags --prune
    ```
 
 3. Confirm `origin/main` is the intended release commit. Record its full SHA. Do not release unpushed local work or a commit other than current `origin/main`.
@@ -31,7 +33,17 @@ Prepare and publish a release from the complete change set, with explicit approv
    git tag --merged origin/main --list 'v0.*' --sort=-version:refname
    ```
 
-   Select the first tag matching exactly `v0.<minor>.<patch>`.
+   Select the first tag matching exactly `v0.<minor>.<patch>`, then require that tag to exist on `origin` and resolve to the same commit locally. Stop and reconcile the repository state if either check fails; never derive a version from a local-only or mismatched tag.
+
+   ```sh
+   local_previous=$(git rev-parse "$previous^{commit}")
+   remote_previous=$(git ls-remote --exit-code origin \
+     "refs/tags/$previous" "refs/tags/$previous^{}" |
+     awk '$2 ~ /\^\{\}$/ { peeled=$1 } $2 !~ /\^\{\}$/ { tag=$1 }
+       END { print peeled != "" ? peeled : tag }')
+   test -n "$remote_previous"
+   test "$local_previous" = "$remote_previous"
+   ```
 5. Inspect every commit and the complete aggregate diff from that tag through `origin/main`. Do not rely on merge subjects, conventional-commit prefixes, a generated changelog, or a diff summary alone.
 
    ```sh
@@ -139,12 +151,12 @@ Do not report success until all checks below pass.
    - `buildkite-gha_Linux_x86_64.tar.gz`
    - `buildkite-gha_Darwin_arm64.tar.gz`
    - `checksums.txt`
-5. **Checksums and binaries:** run `sha256sum --check checksums.txt`, inspect both archive listings, extract the Linux archive, and confirm its binary reports the released version. On macOS arm64, also execute the Darwin binary when that environment is available; otherwise report that only its checksum and archive contents were verified.
+5. **Checksums and binaries:** verify `checksums.txt` with `sha256sum` or `shasum`, inspect both archive listings, extract the Linux archive, and confirm its binary reports the released version. On macOS arm64, also execute the Darwin binary when that environment is available; otherwise report that only its checksum and archive contents were verified.
 
 Useful commands:
 
 ```sh
-git fetch origin main --tags
+git fetch origin main:refs/remotes/origin/main --tags
 commit=$(git rev-parse "$next^{commit}")
 test "$commit" = "$(git rev-parse origin/main)"
 test "$commit" = "$(git ls-remote origin "refs/tags/$next" | awk '{print $1}')"
@@ -163,9 +175,13 @@ expected_assets=$(printf '%s\n' \
   buildkite-gha_Darwin_arm64.tar.gz \
   buildkite-gha_Linux_x86_64.tar.gz \
   checksums.txt | sort)
-actual_assets=$(find "$assets_dir" -maxdepth 1 -type f -printf '%f\n' | sort)
+actual_assets=$(for asset in "$assets_dir"/*; do basename "$asset"; done | sort)
 test "$actual_assets" = "$expected_assets"
-(cd "$assets_dir" && sha256sum --check checksums.txt)
+if command -v sha256sum >/dev/null; then
+  (cd "$assets_dir" && sha256sum --check checksums.txt)
+else
+  (cd "$assets_dir" && shasum -a 256 --check checksums.txt)
+fi
 tar -tzf "$assets_dir/buildkite-gha_Linux_x86_64.tar.gz"
 tar -tzf "$assets_dir/buildkite-gha_Darwin_arm64.tar.gz"
 tar -xzf "$assets_dir/buildkite-gha_Linux_x86_64.tar.gz" \
