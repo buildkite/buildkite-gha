@@ -1,8 +1,0 @@
-name: Compatibility gap - bash argument template
-on: push
-jobs:
-  probe:
-    runs-on: ubuntu-latest
-    steps:
-      - shell: bash -l {0}
-        run: echo compatible

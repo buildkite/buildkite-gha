@@ -10,7 +10,7 @@
     {"id":"checkout-commits","title":"actions/checkout outside admitted commits","workflow":"checkout-commits.yml","event":"push","mode":"profile"},
     {"id":"cache-commits","title":"actions/cache outside admitted commits","workflow":"cache-commits.yml","event":"push","mode":"profile"},
     {"id":"download-artifact-versions","title":"actions/download-artifact versions","workflow":"download-artifact-versions.yml","event":"push","mode":"profile"},
-    {"id":"bash-arg-template","title":"bash with a custom arg template","workflow":"bash-arg-template.yml","event":"push","mode":"runtime","test":"TestCompatibilityGapBashArgTemplate"},
+    {"id":"custom-shell-templates","title":"R, Julia, and custom shell templates","workflow":"custom-shell-templates.yml","event":"push","mode":"runtime","test":"TestCompatibilityGapCustomShellTemplates"},
     {"id":"release-types","title":"release without supported types","workflow":"release-types.yml","event":"release","mode":"profile"},
     {"id":"docker-actions","title":"docker:// actions","workflow":"docker-actions.yml","event":"push","mode":"profile"},
     {"id":"permissions-write-all","title":"permissions: write-all","workflow":"permissions-write-all.yml","event":"push","mode":"profile"},
