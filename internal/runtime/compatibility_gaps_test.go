@@ -21,8 +21,16 @@ func TestCompatibilityGapOtherShells(t *testing.T) {
 	runCompatibilityGapWorkflow(t, "other-shells.yml")
 }
 
-func TestCompatibilityGapBashArgTemplate(t *testing.T) {
-	runCompatibilityGapWorkflow(t, "bash-arg-template.yml")
+func TestCompatibilityGapCustomShellTemplates(t *testing.T) {
+	for _, name := range []string{"Rscript", "julia"} {
+		bin := t.TempDir()
+		wrapper := filepath.Join(bin, name)
+		if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nfor arg do case \"$arg\" in */buildkite-gha-shell-*) exec sh \"$arg\";; esac; done\nexit 2\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+	runCompatibilityGapWorkflow(t, "custom-shell-templates.yml")
 }
 
 func runCompatibilityGapWorkflow(t *testing.T, name string) {

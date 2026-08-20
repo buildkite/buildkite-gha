@@ -727,6 +727,58 @@ with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
 	t.Fatal("Python container exec call not found")
 }
 
+func TestRunJobContainerCustomShellUsesMountedScript(t *testing.T) {
+	bin := installCustomShellTestCommand(t, "julia")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	arguments := filepath.Join(workspace, "arguments")
+	j := jobContainerPlan(t, workspace, []plan.Step{
+		{
+			ID:      "julia",
+			Kind:    "run",
+			Shell:   `julia --color=yes {0} --project "two words"`,
+			Env:     map[string]string{"CUSTOM_SHELL_ARGS": arguments},
+			Command: `printf 'script=%s\n' "$0" >> "$GITHUB_OUTPUT"`,
+		},
+		{ID: "cleanup", Kind: "run", Shell: "sh", Command: `set -- "$RUNNER_TEMP"/buildkite-gha-shell-*; test ! -e "$1"`},
+	})
+	j.Outputs = map[string]string{"script": "${{ steps.julia.outputs.script }}"}
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(t.Context(), j, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := result.Outputs["script"]
+	if base := filepath.Base(script); !strings.HasPrefix(base, "buildkite-gha-shell-") || filepath.Ext(base) != "" {
+		t.Fatalf("custom shell script path = %q", script)
+	}
+	if _, err := os.Stat(script); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary custom shell script remains at %q: %v", script, err)
+	}
+	data, err := os.ReadFile(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Split(strings.TrimSpace(string(data)), "\n"), []string{"--color=yes", script, "--project", "two words"}; !slices.Equal(got, want) {
+		t.Fatalf("container custom shell arguments = %#v, want %#v", got, want)
+	}
+	for _, call := range f.calls(t) {
+		i := slices.Index(call.Args, ContainerProcessHelperCommand)
+		if i < 0 || len(call.Args) < i+8 || call.Args[i+3] != "julia" {
+			continue
+		}
+		containerScript := call.Args[i+5]
+		if !strings.HasPrefix(containerScript, jobContainerTemp+"/buildkite-gha-shell-") || filepath.Ext(containerScript) != "" {
+			t.Fatalf("container custom shell script path = %q", containerScript)
+		}
+		if got, want := call.Args[i+4:], []string{"--color=yes", containerScript, "--project", "two words"}; !slices.Equal(got, want) {
+			t.Fatalf("container custom shell argv = %#v, want %#v", got, want)
+		}
+		return
+	}
+	t.Fatal("custom shell container exec call not found")
+}
+
 func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 	t.Parallel()
 
