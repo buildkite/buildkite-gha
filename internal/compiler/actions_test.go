@@ -744,7 +744,7 @@ runs:
 	}
 }
 
-func TestCompileActionInvocationsRejectsGitHubTokenAuthorityFromCompositeMetadata(t *testing.T) {
+func TestCompileActionInvocationsAllowsGitHubTokenAuthorityFromCompositeMetadata(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "child", `name: child
 inputs:
@@ -763,9 +763,12 @@ runs:
         token: ${{ github.token }}-${{ toJSON(github) }}
 `)
 
-	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
-	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant github.token authority") {
-		t.Fatalf("composite metadata token error = %v", err)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("composite metadata did not request a GitHub token")
 	}
 }
 

@@ -606,7 +606,7 @@ func inspectCompositeTemplate(field, template string, inputs map[string]string, 
 	if len(names) != 0 {
 		return false, fmt.Errorf("composite action %s: composite action metadata cannot grant secret authority", field)
 	}
-	referencesToken, err := expression.ReferencesGitHubToken(template)
+	referencesToken, err := expression.ReferencesCompositeStepGitHubToken(template)
 	if err != nil {
 		return false, fmt.Errorf("composite action %s: %w", field, err)
 	}

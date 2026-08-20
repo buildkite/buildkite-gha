@@ -502,7 +502,7 @@ func GitHubTokenInputReferences(source string) ([]string, bool, error) {
 	found := map[string]struct{}{}
 	dynamic := false
 	err := visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
-		referencesToken, err := nodeReferencesGitHubToken(expression)
+		referencesToken, err := nodeReferencesGitHubToken(expression, true, false)
 		if err != nil || !referencesToken {
 			return err
 		}
