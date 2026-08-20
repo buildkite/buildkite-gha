@@ -506,30 +506,68 @@ func GitHubTokenInputReferences(source string) ([]string, bool, error) {
 		if err != nil || !referencesToken {
 			return err
 		}
-		actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
-			if !entering {
-				return
-			}
-			switch node.(type) {
-			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.ArrayDerefNode, *actionlint.IndexAccessNode:
-			default:
-				return
-			}
-			if !strings.EqualFold(referenceRoot(node), "inputs") {
-				return
-			}
-			root, path, err := referencePath(node)
-			if err != nil {
-				dynamic = true
-				return
-			}
-			if strings.EqualFold(root, "inputs") && len(path) != 0 {
-				found[strings.ToLower(path[0])] = struct{}{}
-			}
-		})
+		inputNames, dynamicInputs := nodeInputReferences(expression)
+		for _, name := range inputNames {
+			found[name] = struct{}{}
+		}
+		dynamic = dynamic || dynamicInputs
 		return nil
 	})
 	return sortedReferenceNames(found), dynamic, err
+}
+
+// ConditionInputReferences returns statically named inputs from a condition
+// and reports whether it also reads the whole context or uses computed access.
+func ConditionInputReferences(source string) ([]string, bool, error) {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return nil, false, err
+	}
+	names, dynamic := nodeInputReferences(node)
+	return names, dynamic, nil
+}
+
+// TemplateInputReferences returns statically named inputs from a template and
+// reports whether it also reads the whole context or uses computed access.
+func TemplateInputReferences(source string) ([]string, bool, error) {
+	found := map[string]struct{}{}
+	dynamic := false
+	err := visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
+		names, expressionDynamic := nodeInputReferences(expression)
+		for _, name := range names {
+			found[name] = struct{}{}
+		}
+		dynamic = dynamic || expressionDynamic
+		return nil
+	})
+	return sortedReferenceNames(found), dynamic, err
+}
+
+func nodeInputReferences(expression actionlint.ExprNode) ([]string, bool) {
+	found := map[string]struct{}{}
+	dynamic := false
+	actionlint.VisitExprNode(expression, func(node, parent actionlint.ExprNode, entering bool) {
+		if !entering || referenceReceiver(node, parent) {
+			return
+		}
+		switch node.(type) {
+		case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.ArrayDerefNode, *actionlint.IndexAccessNode:
+		default:
+			return
+		}
+		if !strings.EqualFold(referenceRoot(node), "inputs") {
+			return
+		}
+		root, path, err := referencePath(node)
+		if err != nil || len(path) == 0 {
+			dynamic = true
+			return
+		}
+		if strings.EqualFold(root, "inputs") {
+			found[strings.ToLower(path[0])] = struct{}{}
+		}
+	})
+	return sortedReferenceNames(found), dynamic
 }
 
 // TemplateUsesGitHubPropertyOutside reports whether a template references a

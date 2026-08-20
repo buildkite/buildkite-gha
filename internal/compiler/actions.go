@@ -437,6 +437,11 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		requirements.githubToken = requirements.githubToken || requiresToken
 	}
 	for i, step := range n.metadata.Runs.Steps {
+		run, known, err := compositeStepCondition(step.If, effectiveInputs, unknownInputs)
+		if err != nil {
+			return actionRequirements{}, fmt.Errorf("composite action step %d condition: %w", i+1, err)
+		}
+		stepReachable := !known || run
 		for _, field := range []struct {
 			name   string
 			values map[string]string
@@ -449,7 +454,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 				if err != nil {
 					return actionRequirements{}, err
 				}
-				requirements.githubToken = requirements.githubToken || requiresToken
+				requirements.githubToken = requirements.githubToken || stepReachable && requiresToken
 			}
 		}
 		for _, field := range []struct {
@@ -466,7 +471,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			if err != nil {
 				return actionRequirements{}, err
 			}
-			requirements.githubToken = requirements.githubToken || requiresToken
+			requirements.githubToken = requirements.githubToken || stepReachable && requiresToken
 		}
 		if step.Uses == "" {
 			continue
@@ -481,11 +486,12 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
 			}
 		}
-		childRequirements, err := child.inspectInvocation(step.With, false, serverURL)
+		childInputs := resolveKnownCompositeValues(step.With, effectiveInputs, unknownInputs, serverURL)
+		childRequirements, err := child.inspectInvocation(childInputs, false, serverURL)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 		}
-		requirements.githubToken = requirements.githubToken || childRequirements.githubToken
+		requirements.githubToken = requirements.githubToken || stepReachable && childRequirements.githubToken
 		for name := range childRequirements.requiredSecrets {
 			requirements.requiredSecrets[name] = true
 		}
@@ -520,6 +526,69 @@ func (n *actionNode) effectiveInputs(supplied map[string]string) (map[string]str
 		inputs[name] = value
 	}
 	return inputs, unknown
+}
+
+func compositeStepCondition(condition string, inputs map[string]string, unknownInputs map[string]bool) (bool, bool, error) {
+	names, dynamic, err := expression.ConditionInputReferences(condition)
+	if err != nil {
+		return false, false, err
+	}
+	if dynamic && len(unknownInputs) != 0 {
+		return false, false, nil
+	}
+	for _, name := range names {
+		if unknownInputs[name] {
+			return false, false, nil
+		}
+	}
+	status, err := expression.ReferencesStatusFunction(condition)
+	if err != nil {
+		return false, false, err
+	}
+	if status {
+		return false, false, nil
+	}
+	for _, contextName := range []string{"env", "github", "job", "matrix", "needs", "runner", "steps", "vars"} {
+		usesContext, err := expression.ConditionUsesContext(condition, contextName)
+		if err != nil {
+			return false, false, err
+		}
+		if usesContext {
+			return false, false, nil
+		}
+	}
+	conditionInputs := make(map[string]any, len(inputs))
+	for name, value := range inputs {
+		conditionInputs[name] = value
+	}
+	run, err := expression.EvaluateCondition(condition, expression.ConditionContext{Inputs: conditionInputs})
+	if err != nil {
+		return false, false, nil
+	}
+	return run, true, nil
+}
+
+func resolveKnownCompositeValues(values, inputs map[string]string, unknownInputs map[string]bool, serverURL string) map[string]string {
+	resolved := make(map[string]string, len(values))
+	context := expression.Context{Inputs: inputs, GitHub: map[string]any{"server_url": serverURL}}
+	for _, name := range sortedKeys(values) {
+		original := values[name]
+		inputNames, dynamic, err := expression.TemplateInputReferences(original)
+		unknown := dynamic && len(unknownInputs) != 0
+		for _, inputName := range inputNames {
+			unknown = unknown || unknownInputs[inputName]
+		}
+		if unknown || err != nil {
+			resolved[name] = original
+			continue
+		}
+		value, err := expression.EvaluateStep(original, context)
+		if err != nil {
+			value = original
+		}
+		resolved[name] = value
+	}
+	return resolved
 }
 
 func inspectCompositeTemplate(field, template string, inputs map[string]string, unknownInputs map[string]bool, serverURL string) (bool, error) {

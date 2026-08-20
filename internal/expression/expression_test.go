@@ -558,12 +558,32 @@ func TestTemplateUsesContextSupportsIndexedAccess(t *testing.T) {
 }
 
 func TestGitHubTokenInputReferences(t *testing.T) {
-	names, dynamic, err := GitHubTokenInputReferences("${{ inputs.unrelated }}-${{ inputs.beta && github.token }}-${{ inputs['alpha'] }}-${{ inputs[env.KEY] && github.token }}")
+	names, dynamic, err := GitHubTokenInputReferences("${{ inputs.unrelated }}-${{ inputs.beta && github.token }}-${{ inputs['alpha'] }}-${{ inputs[env.KEY] && github.token }}-${{ toJSON(inputs) != '{}' && github.token || '' }}")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(names, []string{"beta"}) || !dynamic {
-		t.Fatalf("GitHubTokenInputReferences() = %#v, %t, want beta and dynamic access", names, dynamic)
+		t.Fatalf("GitHubTokenInputReferences() = %#v, %t, want beta and dynamic or whole-context access", names, dynamic)
+	}
+}
+
+func TestConditionInputReferences(t *testing.T) {
+	names, dynamic, err := ConditionInputReferences("inputs.enabled && inputs['other'] && inputs[env.KEY] && toJSON(inputs) != '{}'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(names, []string{"enabled", "other"}) || !dynamic {
+		t.Fatalf("ConditionInputReferences() = %#v, %t, want enabled, other, and dynamic access", names, dynamic)
+	}
+}
+
+func TestTemplateInputReferences(t *testing.T) {
+	names, dynamic, err := TemplateInputReferences("${{ inputs.enabled }}-${{ inputs['other'] }}-${{ toJSON(inputs) }}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(names, []string{"enabled", "other"}) || !dynamic {
+		t.Fatalf("TemplateInputReferences() = %#v, %t, want enabled, other, and whole-context access", names, dynamic)
 	}
 }
 

@@ -502,6 +502,25 @@ runs:
 	if compiled.requiresGitHubToken {
 		t.Fatal("overridden expression default required a GitHub token")
 	}
+	writeAction(t, workspace, "whole-inputs", `name: whole input context
+inputs:
+  unknown:
+    default: ${{ github.actor }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ toJSON(inputs) != '{}' && github.token || '' }}
+      run: echo "$TOKEN"
+`)
+	compiled, err = compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./whole-inputs"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("whole input context with an unknown input did not request a GitHub token")
+	}
 }
 
 func TestCompileActionInvocationsDetectsGitHubTokenAcrossCompositeMetadata(t *testing.T) {
@@ -558,6 +577,84 @@ runs:
 		{enabled: "true", want: true},
 	} {
 		compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{{"enabled": test.enabled}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.want {
+			t.Fatalf("enabled %q requires GitHub token = %t, want %t", test.enabled, compiled.requiresGitHubToken, test.want)
+		}
+	}
+}
+
+func TestCompileActionInvocationsPreservesKnownInputsAcrossCompositeChildren(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  enabled:
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ inputs.enabled == 'true' && github.token || '' }}
+      run: echo "$TOKEN"
+`)
+	writeAction(t, workspace, "parent", `name: parent
+inputs:
+  enabled:
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        enabled: ${{ inputs.enabled }}
+`)
+
+	for _, test := range []struct {
+		enabled string
+		want    bool
+	}{
+		{enabled: "false"},
+		{enabled: "true", want: true},
+		{enabled: "${{ matrix.enabled }}", want: true},
+	} {
+		compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{{"enabled": test.enabled}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.want {
+			t.Fatalf("enabled %q requires GitHub token = %t, want %t", test.enabled, compiled.requiresGitHubToken, test.want)
+		}
+	}
+}
+
+func TestCompileActionInvocationsSkipsStaticallyDisabledCompositeSteps(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "conditional", `name: conditional
+inputs:
+  enabled:
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - if: inputs.enabled == 'true'
+      shell: bash
+      env:
+        TOKEN: ${{ github.token }}
+      run: echo "$TOKEN"
+`)
+
+	for _, test := range []struct {
+		enabled string
+		want    bool
+	}{
+		{enabled: "false"},
+		{enabled: "true", want: true},
+		{enabled: "${{ matrix.enabled }}", want: true},
+	} {
+		compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./conditional"}, []map[string]string{{"enabled": test.enabled}})
 		if err != nil {
 			t.Fatal(err)
 		}
