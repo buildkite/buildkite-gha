@@ -35,11 +35,11 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, and `python`. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
-| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local and literal public GitHub workflows with static inputs, deferred string inputs from direct needs outputs, and direct job-output mappings. Secret forwarding is unsupported. |
+| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local and literal public GitHub workflows with static inputs, deferred string inputs from direct needs outputs, and direct job-output mappings. Local calls can inherit Buildkite secret authority. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Reusable-workflow jobs use the top-level workflow permissions. |
-| [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs resolve through the destination job's Buildkite secret authority. |
+| [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs and locally inherited reusable jobs resolve through the destination job's Buildkite secret authority. |
 | [Job and service containers](#containers-and-services) | 🟡 Supported subset | Linux job containers and broadly compatible service definitions, including explicit registry credentials. |
 | [Environments and snapshots](#job-configuration) | 🟡 Supported subset | Environments are rejected. Snapshots are accepted with no effect. |
 | [OIDC](#other-secrets-and-oidc) | 🟡 Supported subset | Host JavaScript and composite actions can request Buildkite OIDC tokens in jobs with `id-token: write`. |
@@ -181,6 +181,7 @@ A top-level workflow that does not declare the effective event is excluded befor
 - String inputs passed as exactly `${{ needs.<job>.outputs.<name> }}`. The call must list the job in `needs`. Buildkite resolves the verified output before each flattened callee job runs.
 - Literal defaults and expression defaults over graph-time `github` and `vars` values.
 - Nested calls up to four levels.
+- `secrets: inherit` for repository-local calls. Each nested edge must repeat it.
 - Caller-visible aggregate results.
 - Outputs mapped directly from `jobs.<job>.outputs.<name>`.
 - Call-level `if` over caller `github`, `vars`, `inputs`, direct `needs`, and status functions.
@@ -188,13 +189,15 @@ A top-level workflow that does not declare the effective event is excluded befor
 **❌ Unsupported:**
 
 - Dynamic workflow paths and private repositories.
-- `secrets: inherit`, explicit secret mappings, or required called-workflow secrets.
+- `secrets: inherit` for public remote calls, explicit secret mappings, or required called-workflow secrets.
 - Compound `needs`-dependent inputs or dynamic matrices.
 - Input defaults that reference `inputs`.
 - Literal or compound output expressions.
 - Top-level concurrency in the called workflow.
 
 Job-level `uses`, `with`, and `secrets` follow these boundaries.
+
+For a local call with `secrets: inherit`, each flattened callee job requests only the static ordinary secret names referenced by that job or its workflow-authored action inputs. Inheritance is one hop: an omitted nested `secrets: inherit` removes ordinary secret authority from every job below that edge. It does not affect direct caller jobs or `GITHUB_TOKEN`.
 
 A call condition runs in caller scope before static call-matrix expansion. It keeps the implicit `success()` guard. A false condition skips every flattened descendant, including jobs with `if: always()`, and exposes `skipped` with empty outputs to downstream `needs`. Nested calls evaluate ordered outer-to-inner guards. Callee job results do not change an outer guard. Call conditions cannot use `matrix`, `strategy`, callee inputs or needs, `steps`, `env`, `runner`, or `secrets`.
 
@@ -847,11 +850,11 @@ The token is not added to the initial job environment. Direct workflow-authored 
 
 ### Other secrets and OIDC
 
-**🟡 Supported subset.** Direct jobs can use statically named `${{ secrets.NAME }}` references. The compiler records names only in job plans. At runtime, the destination job runs `buildkite-agent secret get NAME` with its existing authenticated Agent session and registers each value with both the Buildkite Agent redactor and the local workflow-command redactor before use. Missing or denied secrets fail the job without printing the value or Agent error output. The failed job includes an annotation with steps to create or migrate the secret and check its access policy. Secret values do not appear in plans or generated pipeline YAML.
+**🟡 Supported subset.** Direct jobs and locally called reusable-workflow jobs with `secrets: inherit` can use statically named `${{ secrets.NAME }}` references. The compiler records names only in each destination job's plan. At runtime, that job runs `buildkite-agent secret get NAME` with its existing authenticated Agent session and registers each value with both the Buildkite Agent redactor and the local workflow-command redactor before use. Missing or denied secrets fail the job without printing the value or Agent error output. The failed job includes an annotation with steps to create or migrate the secret and check its access policy. Secret values do not appear in plans or generated pipeline YAML.
 
 These are Buildkite secrets available to the destination job, not GitHub repository, environment, event, or fork-scoped secrets. Buildkite Secret access policies are the authorization boundary. A workflow can access any named secret that its destination job's Buildkite identity and secret policy permit, just as arbitrary code in that job can run `buildkite-agent secret get`.
 
-`GITHUB_TOKEN` always uses the separate scoped workflow-token contract described above and cannot be replaced by an ordinary Buildkite secret. Dynamic names, secret use in conditions or other compile-time expressions, GitHub environments and environment secrets, `secrets: inherit`, and reusable-workflow secret forwarding are unsupported. Action metadata defaults cannot add a secret to the plan; such defaults fail compilation rather than becoming an authority source. A secret referenced only by a declared optional action input does not add a job secret requirement and resolves to an empty value unless the same secret is required elsewhere.
+`GITHUB_TOKEN` always uses the separate scoped workflow-token contract described above and cannot be replaced by an ordinary Buildkite secret. Dynamic, whole-context, filtered, and projected `secrets` access; secret use in conditions or other compile-time expressions; GitHub environments and environment secrets; remote inheritance; explicit reusable-workflow secret mappings; and required `on.workflow_call.secrets` declarations are unsupported. Action metadata defaults and composite action metadata cannot add a secret to the plan; they fail compilation rather than becoming authority sources. A secret referenced only by a declared optional action input does not add a job secret requirement and resolves to an empty value unless the same secret is required elsewhere.
 
 Jobs with `id-token: write` expose the GitHub Actions `getIDToken()` wire contract to host JavaScript actions, including JavaScript actions called by composite actions. The endpoint mints a Buildkite OIDC token for the requested audience. Cloud identity providers must trust Buildkite's issuer and claims, not GitHub's. `id-token: read`, `id-token: none`, and omitted permission maps do not expose the endpoint. Repository tests verify the wire contract with a shim that mirrors `actions/toolkit`'s `oidc-utils.ts`; the hosted runtime proof remains pending.
 
