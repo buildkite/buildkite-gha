@@ -735,6 +735,7 @@ func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
 	r.node16Warnings.emit(processor)
 	jobResult.WarningAnnotations, jobResult.warningsTruncated, jobResult.ErrorAnnotations, jobResult.errorsTruncated = processor.workflowCommandAnnotations()
 	sensitiveValues := processor.maskValues()
+	runErr = processor.scrubError(runErr)
 	for _, artifact := range jobResult.Artifacts {
 		for _, sensitive := range sensitiveValues {
 			if sensitive != "" && strings.Contains(artifact.Name, sensitive) {

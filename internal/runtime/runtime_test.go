@@ -2780,6 +2780,32 @@ printf 'context<<EOF\n%s\nEOF\n' "$GITHUB_CONTEXT" >> "$GITHUB_OUTPUT"
 	}
 }
 
+func TestRunJobScrubsTokenSerializedIntoRuntimeError(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: serialized context error\n")
+	const token = "ghs_serialized_error_token"
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "serialize", Kind: "run", Shell: "${{ toJSON(github) }}", Command: "true",
+	}})
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"provider-token-write"}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": "read"}}
+	job.ContinueOnError = true
+	provider := &testWorkflowTokenProvider{token: token}
+	redactor := &testRedactor{}
+	result, err := (Runner{WorkflowToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
+	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") || !strings.Contains(err.Error(), "is unsupported") {
+		t.Fatalf("RunJob() error = %v, want scrubbed unsupported-shell error", err)
+	}
+	if result.Conclusion != "success" || !IsToleratedJobFailure(err) {
+		t.Fatalf("RunJob() result/error = %#v / %v, want preserved tolerated-failure classification", result, err)
+	}
+	if provider.calls != 1 || !reflect.DeepEqual(redactor.values, []string{token}) {
+		t.Fatalf("token handling = provider calls %d, redactions %#v", provider.calls, redactor.values)
+	}
+}
+
 func TestRunJobRejectsInvalidWorkflowTokenPolicyBeforeMinting(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/nested/test.yml"
