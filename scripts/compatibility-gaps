@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Run the tracked compatibility-gap manifest through the exact CLI source under test.
+# Input comes from testdata/compatibility-gaps; the script accepts no arguments.
+# Output is a console tally and, in Buildkite, one aggregated build annotation.
+# A remaining gap makes this command exit 1; CI deliberately soft-fails that step.
+# Keep this harness tracked so local and CI assessments change atomically with the fixtures.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
