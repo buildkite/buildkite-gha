@@ -66,8 +66,9 @@ Expression parity must preserve these invariants:
 - Dynamic, filtered, or whole-context `secrets` access remains unsupported.
 - Direct `github.token` references use the same scoped workflow-token contract
   as `secrets.GITHUB_TOKEN`. They are unavailable outside step execution.
-- Whole-context or dynamic `github` access remains unsupported until token
-  authority and redaction are provably safe.
+- The exact step-runtime call `toJSON(github)` is statically treated as a
+  `github.token` reference and serializes only the retained context. Other
+  whole-context or dynamic `github` access remains unsupported.
 - `github.event` remains compile-time only because generated plans do not retain
   the event payload.
 - Missing Buildkite equivalents remain unsupported instead of receiving

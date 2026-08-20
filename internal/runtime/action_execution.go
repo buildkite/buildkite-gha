@@ -735,6 +735,7 @@ func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
 	r.node16Warnings.emit(processor)
 	jobResult.WarningAnnotations, jobResult.warningsTruncated, jobResult.ErrorAnnotations, jobResult.errorsTruncated = processor.workflowCommandAnnotations()
 	sensitiveValues := processor.maskValues()
+	runErr = processor.scrubError(runErr)
 	for _, artifact := range jobResult.Artifacts {
 		for _, sensitive := range sensitiveValues {
 			if sensitive != "" && strings.Contains(artifact.Name, sensitive) {
@@ -1267,19 +1268,22 @@ func applyPaths(env map[string]string, paths []string) {
 
 func githubContext(job plan.Job) map[string]any {
 	return map[string]any{
-		"repository":       job.Event.Repository,
-		"repository_owner": plan.EventRepositoryOwner(job.Event.Repository),
-		"ref":              job.Event.Ref,
-		"ref_name":         plan.EventRefName(job.Event.Ref),
-		"ref_type":         plan.EventRefType(job.Event.Ref),
-		"head_ref":         job.Event.HeadRef,
-		"base_ref":         job.Event.BaseRef,
-		"sha":              job.Event.SHA,
-		"actor":            job.Event.Actor,
-		"event_name":       job.Event.Name,
-		"server_url":       plan.EventServerURL(job.Event.Provider),
-		"workflow":         workflowDisplayName(job),
-		"job":              job.Workflow.LogicalJobID,
+		"action_path":       "",
+		"action_ref":        "",
+		"action_repository": "",
+		"repository":        job.Event.Repository,
+		"repository_owner":  plan.EventRepositoryOwner(job.Event.Repository),
+		"ref":               job.Event.Ref,
+		"ref_name":          plan.EventRefName(job.Event.Ref),
+		"ref_type":          plan.EventRefType(job.Event.Ref),
+		"head_ref":          job.Event.HeadRef,
+		"base_ref":          job.Event.BaseRef,
+		"sha":               job.Event.SHA,
+		"actor":             job.Event.Actor,
+		"event_name":        job.Event.Name,
+		"server_url":        plan.EventServerURL(job.Event.Provider),
+		"workflow":          workflowDisplayName(job),
+		"job":               job.Workflow.LogicalJobID,
 	}
 }
 

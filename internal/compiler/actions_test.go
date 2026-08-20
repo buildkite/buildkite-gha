@@ -452,6 +452,59 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsAllowsSerializedGitHubContextInCompositeChildInputWithoutGrantingAuthority(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  context:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        context: ${{ ToJson(GitHub) }}
+`)
+
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("composite-authored toJSON(github) granted token authority")
+	}
+}
+
+func TestCompileActionInvocationsRejectsGitHubTokenAuthorityFromCompositeMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  token:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        token: ${{ github.token }}-${{ toJSON(github) }}
+`)
+
+	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
+	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant github.token authority") {
+		t.Fatalf("composite metadata token error = %v", err)
+	}
+}
+
 func TestCompileActionInvocationsRejectsRetainedEventPayload(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "event", `name: event input

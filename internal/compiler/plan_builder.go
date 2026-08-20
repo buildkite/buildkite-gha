@@ -707,7 +707,7 @@ func planConstructionFinding(instance JobInstance, err error) error {
 func requiredSecrets(instance JobInstance, actionRequired []string, actionInputsInspected bool) ([]string, bool, error) {
 	found := map[string]string{}
 	referencesGitHubToken := false
-	collect := func(value string) error {
+	collect := func(value string, stepRuntime bool) error {
 		referencesEvent, err := expression.TemplateReferencesGitHubEvent(value)
 		if err != nil {
 			return err
@@ -722,7 +722,12 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		for _, name := range names {
 			found[name] = name
 		}
-		referencesToken, err := expression.ReferencesGitHubToken(value)
+		var referencesToken bool
+		if stepRuntime {
+			referencesToken, err = expression.ReferencesStepGitHubToken(value)
+		} else {
+			referencesToken, err = expression.ReferencesGitHubToken(value)
+		}
 		if err != nil {
 			return err
 		}
@@ -759,13 +764,13 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		return nil, false, err
 	}
 	for _, value := range []string{instance.DefaultShell, instance.DefaultWorkingDirectory} {
-		if err := collect(value); err != nil {
+		if err := collect(value, false); err != nil {
 			return nil, false, err
 		}
 	}
 	for _, values := range []map[string]string{instance.Env, instance.Outputs} {
 		for _, name := range sortedValueKeys(values) {
-			if err := collect(values[name]); err != nil {
+			if err := collect(values[name], false); err != nil {
 				return nil, false, err
 			}
 		}
@@ -774,10 +779,13 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		if err := checkCondition(step.If); err != nil {
 			return nil, false, err
 		}
-		for _, value := range []string{step.Name, step.Run, step.Uses, step.Shell, step.WorkingDirectory, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression} {
-			if err := collect(value); err != nil {
+		for _, value := range []string{step.Name, step.Run, step.Shell, step.WorkingDirectory, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression} {
+			if err := collect(value, true); err != nil {
 				return nil, false, err
 			}
+		}
+		if err := collect(step.Uses, false); err != nil {
+			return nil, false, err
 		}
 		valuesToInspect := []map[string]string{step.Env}
 		if step.Kind != "uses" || !actionInputsInspected {
@@ -785,7 +793,7 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		}
 		for _, values := range valuesToInspect {
 			for _, name := range sortedValueKeys(values) {
-				if err := collect(values[name]); err != nil {
+				if err := collect(values[name], true); err != nil {
 					return nil, false, err
 				}
 			}
@@ -793,32 +801,32 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 	}
 	if instance.Container != nil {
 		for _, value := range append([]string{instance.Container.Image}, instance.Container.Ports...) {
-			if err := collect(value); err != nil {
+			if err := collect(value, false); err != nil {
 				return nil, false, err
 			}
 		}
 		for _, name := range sortedValueKeys(instance.Container.Env) {
-			if err := collect(instance.Container.Env[name]); err != nil {
+			if err := collect(instance.Container.Env[name], false); err != nil {
 				return nil, false, err
 			}
 		}
 	}
 	for _, service := range instance.Services {
 		for _, value := range append([]string{service.Container.Image}, service.Container.Ports...) {
-			if err := collect(value); err != nil {
+			if err := collect(value, false); err != nil {
 				return nil, false, err
 			}
 		}
 		for _, name := range sortedValueKeys(service.Container.Env) {
-			if err := collect(service.Container.Env[name]); err != nil {
+			if err := collect(service.Container.Env[name], false); err != nil {
 				return nil, false, err
 			}
 		}
 		if service.Container.Credentials != nil {
-			if err := collect(service.Container.Credentials.Username); err != nil {
+			if err := collect(service.Container.Credentials.Username, false); err != nil {
 				return nil, false, err
 			}
-			if err := collect(service.Container.Credentials.Password); err != nil {
+			if err := collect(service.Container.Credentials.Password, false); err != nil {
 				return nil, false, err
 			}
 		}
