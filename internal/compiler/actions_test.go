@@ -828,6 +828,40 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsResolvesOrderedInputDefaults(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "guarded", `name: guarded
+inputs:
+  enabled:
+    default: "false"
+  gate:
+    default: ${{ inputs.enabled }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ inputs.gate == 'true' && github.token || '' }}
+      run: echo guarded
+`)
+	for _, test := range []struct {
+		enabled string
+		want    bool
+	}{
+		{enabled: "false"},
+		{enabled: "true", want: true},
+		{enabled: "${{ matrix.enabled }}", want: true},
+	} {
+		compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./guarded"}, []map[string]string{{"enabled": test.enabled}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.want {
+			t.Fatalf("enabled %q requires GitHub token = %t, want %t", test.enabled, compiled.requiresGitHubToken, test.want)
+		}
+	}
+}
+
 func TestCompileActionInvocationsResolvesForwardedServerURL(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "child", `name: child

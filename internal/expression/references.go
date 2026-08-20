@@ -597,10 +597,88 @@ func githubTokenReachable(node actionlint.ExprNode, context Context, unknownInpu
 			}
 			return githubTokenReachable(node.Args[len(node.Args)-1], context, unknownInputs)
 		}
+		if reachable, handled := githubTokenReachablePureCall(node, context, unknownInputs); handled {
+			return reachable
+		}
 		for _, argument := range node.Args {
 			if githubTokenReachable(argument, context, unknownInputs) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func githubTokenReachablePureCall(node *actionlint.FuncCallNode, context Context, unknownInputs map[string]bool) (bool, bool) {
+	if len(node.Args) == 0 {
+		return false, false
+	}
+	firstReachable := githubTokenReachable(node.Args[0], context, unknownInputs)
+	first, firstKnown := evaluateKnownStepValue(node.Args[0], context, unknownInputs)
+	switch strings.ToLower(node.Callee) {
+	case "format":
+		if firstReachable {
+			return true, true
+		}
+		format, convertible := expressionAggregateString(first)
+		if !firstKnown || !convertible {
+			return !firstKnown && anyGitHubTokenReachable(node.Args[1:], context, unknownInputs), true
+		}
+		reachable := false
+		_, _ = expressionFormat(format, len(node.Args)-1, func(index int) (any, error) {
+			reachable = reachable || githubTokenReachable(node.Args[index+1], context, unknownInputs)
+			return "", nil
+		})
+		return reachable, true
+	case "contains":
+		if firstReachable {
+			return true, true
+		}
+		if !firstKnown {
+			return anyGitHubTokenReachable(node.Args[1:], context, unknownInputs), true
+		}
+		if items, ok := expressionCollection(first); ok && len(items) == 0 {
+			return false, true
+		}
+		if _, ok := expressionString(first); !ok {
+			if _, collection := expressionCollection(first); !collection {
+				return false, true
+			}
+		}
+		return anyGitHubTokenReachable(node.Args[1:], context, unknownInputs), true
+	case "startswith", "endswith":
+		if firstReachable {
+			return true, true
+		}
+		if firstKnown {
+			if _, convertible := expressionString(first); !convertible {
+				return false, true
+			}
+		}
+		return anyGitHubTokenReachable(node.Args[1:], context, unknownInputs), true
+	case "join":
+		if firstReachable {
+			return true, true
+		}
+		if !firstKnown {
+			return anyGitHubTokenReachable(node.Args[1:], context, unknownInputs), true
+		}
+		items, collection := expressionCollection(first)
+		if !collection || len(items) <= 1 {
+			return false, true
+		}
+		return anyGitHubTokenReachable(node.Args[1:], context, unknownInputs), true
+	case "tojson", "fromjson":
+		return firstReachable, true
+	default:
+		return false, false
+	}
+}
+
+func anyGitHubTokenReachable(nodes []actionlint.ExprNode, context Context, unknownInputs map[string]bool) bool {
+	for _, node := range nodes {
+		if githubTokenReachable(node, context, unknownInputs) {
+			return true
 		}
 	}
 	return false
@@ -643,28 +721,33 @@ func evaluateKnownStepNode(node actionlint.ExprNode, context Context, unknownInp
 		}
 		return evaluateKnownStepNode(call.Args[len(call.Args)-1], context, unknownInputs)
 	}
+	value, known := evaluateKnownStepValue(node, context, unknownInputs)
+	return githubTruthy(value), known
+}
+
+func evaluateKnownStepValue(node actionlint.ExprNode, context Context, unknownInputs map[string]bool) (any, bool) {
 	names, dynamic := nodeInputReferences(node)
 	if dynamic && len(unknownInputs) != 0 {
-		return false, false
+		return nil, false
 	}
 	for _, name := range names {
 		if unknownInputs[name] {
-			return false, false
+			return nil, false
 		}
 	}
 	if nodeUsesGitHubPropertyOutside(node, "server_url") {
-		return false, false
+		return nil, false
 	}
 	for _, contextName := range []string{"env", "job", "matrix", "needs", "runner", "services", "steps", "vars"} {
 		if nodeUsesContext(node, contextName) {
-			return false, false
+			return nil, false
 		}
 	}
 	value, err := evaluateStepRuntimeExpression(node, context, true, false, nil)
 	if err != nil {
-		return false, false
+		return nil, false
 	}
-	return githubTruthy(value), true
+	return value, true
 }
 
 func visitGitHubTokenExpressions(source string, visit func(actionlint.ExprNode) error) error {

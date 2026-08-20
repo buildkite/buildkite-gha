@@ -1294,6 +1294,10 @@ func TestGitHubTokenRequiresEvaluationShortCircuitsKnownInputs(t *testing.T) {
 	}{
 		{template: "${{ inputs.enabled == 'true' && env.RUNTIME == 'yes' && github.token || '' }}"},
 		{template: "${{ case(inputs.enabled == 'true', github.token, '') }}"},
+		{template: "${{ format('constant', github.token) }}"},
+		{template: "${{ contains(fromJSON('[]'), github.token) }}"},
+		{template: "${{ join(fromJSON('[\"one\"]'), github.token) }}"},
+		{template: "${{ format('{0}', github.token) }}", want: true},
 		{template: "${{ env.RUNTIME == 'yes' && github.token || '' }}", want: true},
 	} {
 		got, err := GitHubTokenRequiresEvaluation(test.template, context, nil)

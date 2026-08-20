@@ -536,30 +536,40 @@ func (n *actionNode) preparationFields(serverURL string) (environment, inputs bo
 func (n *actionNode) effectiveInputs(supplied map[string]string, serverURL string) (map[string]string, map[string]bool) {
 	inputs := make(map[string]string, len(n.metadata.Inputs)+len(supplied))
 	unknown := map[string]bool{}
-	for _, name := range sortedKeys(n.metadata.Inputs) {
-		definition := n.metadata.Inputs[name]
-		value := ""
-		if definition.Default != nil {
-			value = *definition.Default
-		}
+	for _, name := range sortedKeys(supplied) {
+		value := supplied[name]
+		name = strings.ToLower(name)
 		if strings.Contains(value, "${{") {
+			unknown[name] = true
+			continue
+		}
+		inputs[name] = value
+	}
+	for _, name := range sortedKeys(n.metadata.Inputs) {
+		if _, ok := inputs[name]; ok || unknown[name] {
+			continue
+		}
+		definition := n.metadata.Inputs[name]
+		if definition.Default == nil {
+			continue
+		}
+		value := *definition.Default
+		if strings.Contains(value, "${{") {
+			inputNames, dynamic, referenceErr := expression.TemplateInputReferences(value)
+			dependsOnUnknown := dynamic && len(unknown) != 0
+			for _, inputName := range inputNames {
+				dependsOnUnknown = dependsOnUnknown || unknown[inputName]
+			}
+			if referenceErr != nil || dependsOnUnknown {
+				unknown[name] = true
+				continue
+			}
 			var err error
-			value, err = expression.EvaluateActionInputDefault(value, expression.Context{GitHub: map[string]any{"server_url": serverURL}})
+			value, err = expression.EvaluateActionInputDefault(value, expression.Context{Inputs: inputs, GitHub: map[string]any{"server_url": serverURL}})
 			if err != nil || strings.Contains(value, "${{") {
 				unknown[name] = true
 				continue
 			}
-		}
-		inputs[name] = value
-	}
-	for _, name := range sortedKeys(supplied) {
-		value := supplied[name]
-		name = strings.ToLower(name)
-		delete(inputs, name)
-		delete(unknown, name)
-		if strings.Contains(value, "${{") {
-			unknown[name] = true
-			continue
 		}
 		inputs[name] = value
 	}
