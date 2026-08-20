@@ -388,6 +388,15 @@ func legacyCheckoutWarning(position workflow.Position, release string) Warning {
 	}
 }
 
+func legacyUploadArtifactWarning(position workflow.Position, release string) Warning {
+	return Warning{
+		Code:    "W_UPLOAD_ARTIFACT_LEGACY_RELEASE",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: fmt.Sprintf("actions/upload-artifact %s is emulated by the native adapter with its release contract; upgrade to v4 or later", release),
+	}
+}
+
 func reusableWorkflowTokenWarning(position workflow.Position) Warning {
 	return Warning{
 		Code:    "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS",
