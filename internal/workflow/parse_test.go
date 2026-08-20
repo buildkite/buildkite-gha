@@ -121,23 +121,27 @@ jobs:
 	}
 }
 
-func TestParseExpandsTopLevelReadAllPermissions(t *testing.T) {
-	parsed, err := Parse("permissions.yml", []byte("on: push\npermissions: read-all\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]string{
-		"actions": "read", "artifact-metadata": "read", "attestations": "read", "checks": "read", "contents": "read",
-		"deployments": "read", "discussions": "read", "issues": "read", "packages": "read", "pages": "read",
-		"pull-requests": "read", "security-events": "read", "statuses": "read",
-	}
-	if parsed.Permissions == nil || !reflect.DeepEqual(parsed.Permissions.Scopes, want) {
-		t.Fatalf("workflow permissions = %#v, want %#v", parsed.Permissions, want)
-	}
-	for _, excluded := range []string{"id-token", "models", "repository-projects", "code-quality", "metadata", "vulnerability-alerts"} {
-		if _, ok := parsed.Permissions.Scopes[excluded]; ok {
-			t.Errorf("read-all included excluded scope %q", excluded)
-		}
+func TestParseExpandsTopLevelAllPermissions(t *testing.T) {
+	for _, access := range []string{"read", "write"} {
+		t.Run(access, func(t *testing.T) {
+			parsed, err := Parse("permissions.yml", []byte("on: push\npermissions: "+access+"-all\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{
+				"actions": access, "artifact-metadata": access, "attestations": access, "checks": access, "contents": access,
+				"deployments": access, "discussions": access, "issues": access, "packages": access, "pages": access,
+				"pull-requests": access, "security-events": access, "statuses": access,
+			}
+			if parsed.Permissions == nil || !reflect.DeepEqual(parsed.Permissions.Scopes, want) {
+				t.Fatalf("workflow permissions = %#v, want %#v", parsed.Permissions, want)
+			}
+			for _, excluded := range []string{"id-token", "models", "repository-projects", "code-quality", "metadata", "vulnerability-alerts"} {
+				if _, ok := parsed.Permissions.Scopes[excluded]; ok {
+					t.Errorf("%s-all included excluded scope %q", access, excluded)
+				}
+			}
+		})
 	}
 }
 
@@ -165,7 +169,6 @@ func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
 	for _, test := range []struct {
 		name, declaration, want string
 	}{
-		{name: "write all", declaration: "permissions: write-all\n", want: "permissions.yml:2:14: job \"permissions\": permission aliases are unsupported"},
 		{name: "non-canonical name", declaration: "permissions:\n  pull_requests: write\n", want: "permissions.yml:3:3: job \"permissions\": unsupported permission \"pull_requests\""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
