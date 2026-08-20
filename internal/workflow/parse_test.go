@@ -638,7 +638,8 @@ func TestParseConcurrentControlsRejectInvalidInput(t *testing.T) {
 		{name: "parallel member execution", steps: "      - parallel:\n          - run: true\n            uses: ./action\n", want: "parallel member must declare exactly one"},
 		{name: "parallel outer field", steps: "      - name: group\n        parallel:\n          - run: true\n", want: `parallel control does not support "name"`},
 		{name: "parallel outer fields deterministic", steps: "      - name: group\n        id: group\n        parallel:\n          - run: true\n", want: `parallel control does not support "id"`},
-		{name: "parallel docker overrides", steps: "      - parallel:\n          - uses: docker://example/image\n            with:\n              Entrypoint: /bin/sh\n", want: "unsupported entrypoint or args overrides"},
+		{name: "docker overrides", steps: "      - uses: docker://example/image\n        with:\n          args: echo test\n", want: "docker:// container actions are unsupported; use a Dockerfile action or replace the action with a run step"},
+		{name: "parallel docker overrides", steps: "      - parallel:\n          - uses: docker://example/image\n            with:\n              Entrypoint: /bin/sh\n", want: "docker:// container actions are unsupported; use a Dockerfile action or replace the action with a run step"},
 		{name: "unmatched actionlint error", steps: "      - run: true\n        background: true\n        unexpected: true\n", want: `unexpected key "unexpected"`},
 	}
 	for _, test := range tests {

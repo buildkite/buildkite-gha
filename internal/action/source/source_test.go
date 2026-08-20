@@ -31,9 +31,17 @@ func TestParse(t *testing.T) {
 			t.Errorf("Parse(%q) = %#v, %v", good, r, err)
 		}
 	}
-	for _, bad := range []string{"", "./local@v1", "docker://image@v1", "owner@v1", "owner/repo", "owner/repo@", "owner//repo@v1", "owner/repo/../x@v1", `owner/repo\x@v1`, "owner/repo@a?b", "owner/repo@${{ x }}", "-owner/repo@v1", "owner/repo.git@v1", "owner/repo@a//b"} {
+	for _, bad := range []string{"", "./local@v1", "owner@v1", "owner/repo", "owner/repo@", "owner//repo@v1", "owner/repo/../x@v1", `owner/repo\x@v1`, "owner/repo@a?b", "owner/repo@${{ x }}", "-owner/repo@v1", "owner/repo.git@v1", "owner/repo@a//b"} {
 		if _, err := Parse(bad); err == nil {
 			t.Errorf("Parse(%q) succeeded", bad)
+		}
+	}
+}
+
+func TestParseExplainsUnsupportedContainerActions(t *testing.T) {
+	for _, reference := range []string{"docker://alpine:3.20", "docker://image@sha256:abc", "DOCKER://alpine:latest"} {
+		if _, err := Parse(reference); err == nil || err.Error() != UnsupportedContainerActionReason {
+			t.Errorf("Parse(%q) error = %v, want %q", reference, err, UnsupportedContainerActionReason)
 		}
 	}
 }

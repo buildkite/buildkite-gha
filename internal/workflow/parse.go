@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/rhysd/actionlint"
@@ -753,7 +754,11 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 			owned.Span = spanFrom(step.Pos, exec.Run.Value)
 		case *actionlint.ExecAction:
 			if exec.Entrypoint != nil || exec.Args != nil {
-				return Job{}, locatedError(path, step.Pos, in.ID.Value, "action entrypoint and args overrides are unsupported in the supported runtime subset")
+				reason := "action entrypoint and args overrides are unsupported in the supported runtime subset"
+				if strings.HasPrefix(strings.ToLower(exec.Uses.Value), "docker://") {
+					reason = actionsource.UnsupportedContainerActionReason
+				}
+				return Job{}, locatedError(path, step.Pos, in.ID.Value, reason)
 			}
 			owned.Kind = "uses"
 			owned.Uses = exec.Uses.Value
@@ -1352,7 +1357,7 @@ func parseParallelStep(path string, node *yaml.Node) (Step, error) {
 	_, hasEntrypoint := step.With["entrypoint"]
 	_, hasArgs := step.With["args"]
 	if strings.HasPrefix(strings.ToLower(step.Uses), "docker://") && (hasEntrypoint || hasArgs) {
-		return Step{}, yamlNodeError(path, entries["with"], "parallel docker action member uses unsupported entrypoint or args overrides")
+		return Step{}, yamlNodeError(path, entries["with"], actionsource.UnsupportedContainerActionReason)
 	}
 	return step, nil
 }
