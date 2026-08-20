@@ -3007,7 +3007,8 @@ jobs:
           test "$ENV_RUNNER_TEMP" = "/action-temp"
           printf 'exported token: %s\n' "$GITHUB_TOKEN"
 
-      - uses: ./.github/actions/observer
+      - id: observer
+        uses: ./.github/actions/observer
 
       - env:
           GITHUB_ACTION_PATH: step-action-path
@@ -3017,6 +3018,7 @@ jobs:
           ENV_GITHUB_ACTION_PATH: ${{ env.GITHUB_ACTION_PATH }}
           ENV_GITHUB_SHA: ${{ env.GITHUB_SHA }}
           ENV_RUNNER_TEMP: ${{ env.RUNNER_TEMP }}
+          OBSERVED_GITHUB_TOKEN: ${{ steps.observer.outputs.token }}
         run: |
           test "$GITHUB_ACTION_PATH" = "step-action-path"
           test "$GITHUB_TOKEN" = "step-token"
@@ -3025,6 +3027,7 @@ jobs:
           test "$ENV_GITHUB_ACTION_PATH" = "file-action-path"
           test "$ENV_GITHUB_SHA" = "action-sha"
           test "$ENV_RUNNER_TEMP" = "/action-temp"
+          test "$OBSERVED_GITHUB_TOKEN" = "ghs_scoped_action_default"
 `)
 	writeFixtureFile(t, workspace, ".github/actions/token/action.yml", `name: token default
 inputs:
@@ -3045,6 +3048,12 @@ fs.appendFileSync(process.env.GITHUB_ENV,
   "EXPECTED_RUNNER_TEMP=" + process.env.RUNNER_TEMP + "\n");
 `)
 	writeFixtureFile(t, workspace, ".github/actions/observer/action.yml", `name: context observer
+inputs:
+  enabled:
+    default: "true"
+outputs:
+  token:
+    value: ${{ inputs.enabled == 'true' && github.token || '' }}
 runs:
   using: composite
   steps:

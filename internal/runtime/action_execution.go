@@ -2215,7 +2215,7 @@ func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandPro
 	}
 	for _, name := range sortedKeys(action.Outputs) {
 		output := action.Outputs[name]
-		value, err := expression.Evaluate(output.Value, eval)
+		value, err := expression.EvaluateStep(output.Value, eval)
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("composite output %q: %w", name, err))
 			continue
