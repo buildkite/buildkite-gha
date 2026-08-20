@@ -5,14 +5,14 @@ description: Releases buildkite-gha and writes its release notes. Use for any bu
 
 # Release buildkite-gha
 
-Prepare and publish a release from the complete change set, with explicit approval and end-to-end verification.
+Prepare and publish an authorized release from the complete change set with end-to-end verification.
 
 ## Preserve release history
 
 - Treat every existing release tag as immutable. Never delete, move, force-push, recreate, or reuse one.
 - Do not replace an existing release or its assets. Diagnose a failed publication and resume it only if the same tag still points to the intended commit and the repository's release process supports resuming safely.
-- Stop before making changes if the intended tag or release already exists unexpectedly. Fetch current state, choose the next legal version from the latest stable tag when later work warrants another release, and obtain fresh approval.
-- Do not publish, push a tag, create or edit a GitHub release, rerun a release build, or make another external write until the user explicitly approves that action.
+- Stop before making changes if the intended tag or release already exists unexpectedly. Fetch current state and choose the next legal version from the latest stable tag when later work warrants another release.
+- A direct request to make, publish, or release a version authorizes the required tag push, GitHub release, and release build. Do not ask for redundant approval. A request only to inspect, propose, or draft notes does not authorize publication.
 
 ## Inspect the release delta
 
@@ -103,7 +103,7 @@ grep -Fq "https://github.com/buildkite/buildkite-gha/compare/$previous...$next" 
 test "$(git rev-list --count "$previous..origin/main")" -gt 0
 ```
 
-## Obtain approval
+## Confirm authorization
 
 Present together:
 
@@ -112,15 +112,15 @@ Present together:
 3. the highest-impact reason for the bump; and
 4. the complete draft notes.
 
-Ask for explicit approval to publish that version with those notes. Stop and wait. Approval of a draft, investigation, or earlier release does not authorize publication. Incorporate requested edits and show the complete revised proposal before asking again when the version or substance changes.
+If the user requested that a release be made or published, present the proposal as a progress update and continue without asking for confirmation. The release request authorizes the version selected by this workflow and the draft notes derived from the complete delta. Ask only when the correct bump remains ambiguous.
 
 For a release-note-only task, return the draft and stop unless the user explicitly asks to edit a published release.
 
-## Publish the approved release
+## Publish the release
 
-After approval, start again from a clean, up-to-date local `main`. Re-fetch `origin/main` and tags, confirm the approved SHA and version are unchanged, and recheck that the tag and release do not exist. If anything changed, stop and obtain approval for a new proposal.
+Start again from a clean, up-to-date local `main`. Re-fetch `origin/main` and tags, confirm the selected SHA and version are unchanged, and recheck that the tag and release do not exist. If the source changed, rebuild and present the proposal again; continue under the existing release authorization unless the correct version is ambiguous.
 
-Run the repository task and type the exact approved tag at its confirmation prompt:
+Run the repository task and type the exact selected tag at its confirmation prompt:
 
 ```sh
 mise run release -- "$next"
@@ -128,7 +128,7 @@ mise run release -- "$next"
 
 The task runs the repository check gate, validates clean and current `main`, creates the tag, and pushes it. Do not reproduce these steps manually or bypass its safeguards.
 
-Immediately create the approved GitHub draft for the newly pushed tag so GoReleaser's `use_existing_draft` setting publishes that body after the tag build passes:
+Immediately create the GitHub draft with the presented notes for the newly pushed tag so GoReleaser's `use_existing_draft` setting publishes that body after the tag build passes:
 
 ```sh
 gh release create "$next" \
@@ -139,14 +139,14 @@ gh release create "$next" \
   --notes-file "$notes_file"
 ```
 
-Confirm it is a draft with the exact approved body. If a release already exists, inspect it and stop rather than overwriting it. The tag build reruns checks before its publish job; monitor it through completion. Do not manually accelerate, rebuild, or retry shared CI without separate approval.
+Confirm it is a draft with the exact presented body. If a release already exists, inspect it and stop rather than overwriting it. The tag build reruns checks before its publish job; monitor it through completion. Do not manually accelerate, rebuild, or retry shared CI without separate approval.
 
 ## Verify publication
 
 Do not report success until all checks below pass.
 
-1. **Tag and target:** fetch tags, then confirm the local tag, remote tag, `origin/main`, and approved SHA resolve to the same commit. Confirm the GitHub release is stable, published, and targets that commit.
-2. **Body:** fetch the release body with `gh release view --json body` and compare it byte-for-byte with the approved notes file. Confirm the Highlights heading and full comparison link remain present.
+1. **Tag and target:** fetch tags, then confirm the local tag, remote tag, `origin/main`, and selected SHA resolve to the same commit. Confirm the GitHub release is stable, published, and targets that commit.
+2. **Body:** fetch the release body with `gh release view --json body` and compare it byte-for-byte with the presented notes file. Confirm the Highlights heading and full comparison link remain present.
 3. **CI and release build:** verify all required GitHub checks and the Buildkite tag build passed, including the `publish-release` job. Use `bk build list --pipeline buildkite/buildkite-gha --commit "$commit" --json` and `bk build view <number> --pipeline buildkite/buildkite-gha --json` when Buildkite CLI authentication is available. Soft-fail reporting jobs do not block the release, but identify them accurately.
 4. **Assets:** download the release into a new temporary directory and require exactly these published assets:
    - `buildkite-gha_Linux_x86_64.tar.gz`
@@ -195,4 +195,4 @@ Report the release URL, tag and commit, Buildkite build and decisive job states,
 
 ## Edit published notes
 
-For an explicitly requested historical release-note edit, first record the release ID, tag, target, name, draft/prerelease state, timestamps, and every asset's ID, name, size, digest, content type, and timestamps. Draft the replacement body and obtain approval before editing. Change only the body, then verify it exactly. Require the release's `updated_at` to advance while every other recorded release field and all asset metadata remain unchanged. Never alter the tag, commit, binaries, checksums, or assets as part of a notes edit.
+For an explicitly requested historical release-note edit, first record the release ID, tag, target, name, draft/prerelease state, timestamps, and every asset's ID, name, size, digest, content type, and timestamps. Present the replacement body, then make the requested edit without asking for redundant approval. Change only the body, then verify it exactly. Require the release's `updated_at` to advance while every other recorded release field and all asset metadata remain unchanged. Never alter the tag, commit, binaries, checksums, or assets as part of a notes edit.
