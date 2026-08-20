@@ -86,7 +86,7 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 			`<h2 class="h4 mb2">Workflow could not be run</h2>`,
 			`<p><strong>Windows runners in GitHub workflows aren&#39;t currently supported.</strong></p>`,
 			`Imported jobs run on Linux or macOS Buildkite hosted agents.`,
-			`If this job can run on Linux, change &#34;windows-latest&#34; to &#34;ubuntu-latest&#34;.`,
+			`If this job can run on Linux, change <code>windows-latest</code> to <code>ubuntu-latest</code>.`,
 			`If it requires Windows, open an issue in <a href="https://github.com/buildkite/buildkite-gha" target="_blank">buildkite/buildkite-gha</a> to help us prioritize Windows support.`,
 			"Job <code>test</code>",
 		} {

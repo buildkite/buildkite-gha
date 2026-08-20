@@ -400,6 +400,8 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 		for _, sentence := range details {
 			out.WriteString("<p>")
 			detail := annotationHTML(sentence)
+			detail = strings.ReplaceAll(detail, "&#34;windows-latest&#34;", annotationCode("windows-latest"))
+			detail = strings.ReplaceAll(detail, "&#34;ubuntu-latest&#34;", annotationCode("ubuntu-latest"))
 			const issueURL = "https://github.com/buildkite/buildkite-gha"
 			detail = strings.ReplaceAll(detail, issueURL+" ", `<a href="`+issueURL+`" target="_blank">buildkite/buildkite-gha</a> `)
 			out.WriteString(detail)
