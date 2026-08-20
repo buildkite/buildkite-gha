@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
@@ -239,6 +240,33 @@ func TestCommandTelemetryCapturesBoundedErrorTailWithoutChangingOutput(t *testin
 	}
 	if success := details.forOutcome(telemetry.OutcomeSuccess); success.ErrorMessage != "" || success.ErrorMessageTruncated {
 		t.Fatalf("successful telemetry included error output: %#v", success)
+	}
+}
+
+func TestCommandTelemetrySerializesConcurrentErrorWrites(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	var stderr bytes.Buffer
+	writer := details.captureErrors(&stderr)
+
+	const writes = 100
+	var wait sync.WaitGroup
+	wait.Add(writes)
+	for range writes {
+		go func() {
+			defer wait.Done()
+			if _, err := writer.Write([]byte("failure\n")); err != nil {
+				t.Errorf("Write() error = %v", err)
+			}
+		}()
+	}
+	wait.Wait()
+
+	want := strings.Repeat("failure\n", writes)
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+	if got := details.forOutcome(telemetry.OutcomeFailure).ErrorMessage; got != want {
+		t.Fatalf("captured error = %q, want %q", got, want)
 	}
 }
 

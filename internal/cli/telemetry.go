@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"sync"
 	"time"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
@@ -65,7 +66,7 @@ type commandTelemetryDetails struct {
 }
 
 func (d *commandTelemetryDetails) captureErrors(writer io.Writer) io.Writer {
-	return errorCaptureWriter{writer: writer, capture: &d.errorOutput}
+	return &errorCaptureWriter{writer: writer, capture: &d.errorOutput}
 }
 
 func captureCommandRunnerErrors(runner transport.Runner, writer io.Writer) transport.Runner {
@@ -207,11 +208,14 @@ func telemetryPhase(stage string) telemetry.FailurePhase {
 }
 
 type errorCaptureWriter struct {
+	mu      sync.Mutex
 	writer  io.Writer
 	capture *boundedTailBuffer
 }
 
-func (w errorCaptureWriter) Write(p []byte) (int, error) {
+func (w *errorCaptureWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	n, err := w.writer.Write(p)
 	w.capture.Write(p[:n])
 	return n, err
