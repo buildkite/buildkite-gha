@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -550,7 +551,14 @@ func supported(path string, job workflow.Job) error {
 		return attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, 0, 0, job.ID, "", "", 0, jobError(path, job, "runs-on must resolve statically"))
 	}
 	ids := make(map[string]struct{}, len(job.Steps))
-	for _, step := range job.Steps {
+	for i, step := range job.Steps {
+		if step.Kind == "uses" && strings.HasPrefix(strings.ToLower(step.Uses), "docker://") {
+			return attributedProcessingFinding(
+				StageGraph, CodeGraphInvalid, "compatibility", path, step.Span.Start.Line, step.Span.Start.Column,
+				job.ID, "", step.Uses, i+1,
+				locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, actionsource.UnsupportedContainerActionReason),
+			)
+		}
 		if step.ID != "" {
 			id := strings.ToLower(step.ID)
 			if _, exists := ids[id]; exists {

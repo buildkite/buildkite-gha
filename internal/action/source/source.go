@@ -34,6 +34,8 @@ const (
 	defaultCodeload = "https://codeload.github.com"
 	manifestName    = "manifest-v1.json"
 	mutableRefTTL   = time.Hour
+	// UnsupportedContainerActionReason explains the supported alternative to docker:// actions.
+	UnsupportedContainerActionReason = "docker:// container actions are unsupported; use a Dockerfile action or replace the action with a run step"
 )
 
 var (
@@ -78,7 +80,13 @@ func (m Materialized) Retain(ctx context.Context) (Materialized, error) {
 
 // Parse parses owner/repository[/path]@ref.
 func Parse(raw string) (Reference, error) {
-	if len(raw) == 0 || len(raw) > 2048 || !utf8.ValidString(raw) || strings.ContainsAny(raw, "\\?#") || strings.Contains(raw, "${{") || hasControl(raw) {
+	if len(raw) == 0 || len(raw) > 2048 || !utf8.ValidString(raw) || hasControl(raw) {
+		return Reference{}, fmt.Errorf("invalid action reference")
+	}
+	if strings.HasPrefix(strings.ToLower(raw), "docker://") {
+		return Reference{}, errors.New(UnsupportedContainerActionReason)
+	}
+	if strings.ContainsAny(raw, "\\?#") || strings.Contains(raw, "${{") {
 		return Reference{}, fmt.Errorf("invalid action reference")
 	}
 	at := strings.LastIndexByte(raw, '@')
@@ -86,7 +94,7 @@ func Parse(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("action reference must contain owner/repository@ref")
 	}
 	left, ref := raw[:at], raw[at+1:]
-	if len(ref) > 1024 || strings.HasPrefix(left, "./") || strings.HasPrefix(left, "/") || strings.HasPrefix(strings.ToLower(left), "docker://") {
+	if len(ref) > 1024 || strings.HasPrefix(left, "./") || strings.HasPrefix(left, "/") {
 		return Reference{}, fmt.Errorf("invalid action reference")
 	}
 	parts := strings.Split(left, "/")

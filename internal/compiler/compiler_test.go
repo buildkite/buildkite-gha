@@ -44,6 +44,20 @@ func TestEffectiveReusablePermissionsOnlyNarrowCallerAuthority(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsDockerContainerActions(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker://alpine:3.20
+`)
+	_, err := Validate("workflow.yml", source)
+	if err == nil || !strings.Contains(err.Error(), "docker:// container actions are unsupported; use a Dockerfile action or replace the action with a run step") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestWorkflowTokenPolicyEvidence(t *testing.T) {
 	for _, test := range []struct {
 		name       string
