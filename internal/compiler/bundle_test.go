@@ -990,19 +990,23 @@ func TestCompileBundleGitHubTokenUsesRestrictedDefaultPermissions(t *testing.T) 
 	}
 }
 
-func TestCompileBundleGitHubTokenExpandsTopLevelReadAllPermissions(t *testing.T) {
-	source := []byte("on: push\npermissions: read-all\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
-	bundle, err := CompileBundle(".github/workflows/workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]string{
-		"actions": "read", "artifact_metadata": "read", "attestations": "read", "checks": "read", "contents": "read",
-		"deployments": "read", "discussions": "read", "issues": "read", "packages": "read", "pages": "read",
-		"pull_requests": "read", "security_events": "read", "statuses": "read",
-	}
-	if token := bundle.Plans[0].Job.GitHubToken; token == nil || !reflect.DeepEqual(token.Permissions, want) {
-		t.Fatalf("read-all GitHub workflow token = %#v, want %#v", token, want)
+func TestCompileBundleGitHubTokenExpandsTopLevelAllPermissions(t *testing.T) {
+	for _, access := range []string{"read", "write"} {
+		t.Run(access, func(t *testing.T) {
+			source := []byte("on: push\npermissions: " + access + "-all\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
+			bundle, err := CompileBundle(".github/workflows/workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{
+				"actions": access, "artifact_metadata": access, "attestations": access, "checks": access, "contents": access,
+				"deployments": access, "discussions": access, "issues": access, "packages": access, "pages": access,
+				"pull_requests": access, "security_events": access, "statuses": access,
+			}
+			if token := bundle.Plans[0].Job.GitHubToken; token == nil || !reflect.DeepEqual(token.Permissions, want) {
+				t.Fatalf("%s-all GitHub workflow token = %#v, want %#v", access, token, want)
+			}
+		})
 	}
 }
 

@@ -819,15 +819,16 @@ func adaptConcurrency(path, jobID string, in *actionlint.Concurrency) (*Concurre
 	}, nil
 }
 
-func adaptPermissions(path string, in *actionlint.Permissions, allowReadAll bool) (*Permissions, error) {
+func adaptPermissions(path string, in *actionlint.Permissions, allowAll bool) (*Permissions, error) {
 	if in == nil {
 		return nil, nil
 	}
 	if in.All != nil {
-		if allowReadAll && in.All.Value == "read-all" {
-			scopes := make(map[string]string, len(topLevelReadAllPermissionNames))
-			for _, name := range topLevelReadAllPermissionNames {
-				scopes[name] = "read"
+		if allowAll && (in.All.Value == "read-all" || in.All.Value == "write-all") {
+			access := strings.TrimSuffix(in.All.Value, "-all")
+			scopes := make(map[string]string, len(topLevelAllPermissionNames))
+			for _, name := range topLevelAllPermissionNames {
+				scopes[name] = access
 			}
 			return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
 		}
@@ -858,7 +859,7 @@ func adaptPermissions(path string, in *actionlint.Permissions, allowReadAll bool
 	return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
 }
 
-var topLevelReadAllPermissionNames = []string{
+var topLevelAllPermissionNames = []string{
 	"actions", "artifact-metadata", "attestations", "checks", "contents", "deployments", "discussions",
 	"issues", "packages", "pages", "pull-requests", "security-events", "statuses",
 }
