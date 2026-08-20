@@ -216,6 +216,10 @@ func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 		t.Fatalf("workflow errors = %#v", workflowErrors)
 	}
 	pullRequest := event.Payload["pull_request"].(map[string]any)
+	delete(pullRequest, "mergeable")
+	if paths, _, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{input}); err != nil || !reflect.DeepEqual(paths, []string{"src/main.go"}) {
+		t.Fatalf("unknown mergeability result = %#v, %v", paths, err)
+	}
 	pullRequest["mergeable"] = false
 	if _, _, err := pullRequestChangedPaths(event, 42, "main", nil); err == nil || !strings.Contains(err.Error(), "mergeable synthetic merge") {
 		t.Fatalf("conflicted pull request error = %v", err)

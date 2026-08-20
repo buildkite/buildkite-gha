@@ -343,8 +343,10 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 	if nestedInt(event.Payload, "number") != pullRequestNumber {
 		return nil, nil, fmt.Errorf("webhook pull request number does not match the Buildkite build")
 	}
+	// GitHub may report null while it computes mergeability. The merge commit
+	// and its exact base and head parents are verified below.
 	mergeable, mergeabilityKnown := pullRequest["mergeable"].(bool)
-	if !mergeabilityKnown || !mergeable {
+	if mergeabilityKnown && !mergeable {
 		return nil, nil, fmt.Errorf("webhook pull request must report a mergeable synthetic merge")
 	}
 	if !validBuildkiteCommit(baseSHA) || !validBuildkiteCommit(headSHA) || !validBuildkiteCommit(mergeSHA) {
