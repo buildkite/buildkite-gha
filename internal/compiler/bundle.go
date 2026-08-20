@@ -94,6 +94,7 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("compiler produced %d plans and %d authorizations for %d job instances", len(plans), len(authorizations), len(ir.Jobs)))
 	}
 	warnedLegacyCheckout := map[string]bool{}
+	warnedLegacyUploadArtifact := map[string]bool{}
 	for i, job := range plans {
 		locks := make(map[string]plan.ActionLock, len(job.Actions))
 		for _, lock := range job.Actions {
@@ -105,15 +106,22 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 			}
 			lock := locks[step.Action.Lock]
 			descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-			if descriptor.Adapter != actionintegration.AdapterCheckoutExactEventSHA {
-				continue
+			switch descriptor.Adapter {
+			case actionintegration.AdapterCheckoutExactEventSHA:
+				release, legacy := actionintegration.LegacyCheckoutRelease(lock.Commit)
+				if !legacy || warnedLegacyCheckout[release] {
+					continue
+				}
+				warnedLegacyCheckout[release] = true
+				bundle.IR.Warnings = append(bundle.IR.Warnings, legacyCheckoutWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release))
+			case actionintegration.AdapterUploadArtifactBuildkite:
+				release, legacy := actionintegration.LegacyUploadArtifactRelease(lock.Commit)
+				if !legacy || warnedLegacyUploadArtifact[release] {
+					continue
+				}
+				warnedLegacyUploadArtifact[release] = true
+				bundle.IR.Warnings = append(bundle.IR.Warnings, legacyUploadArtifactWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release))
 			}
-			release, legacy := actionintegration.LegacyCheckoutRelease(lock.Commit)
-			if !legacy || warnedLegacyCheckout[release] {
-				continue
-			}
-			warnedLegacyCheckout[release] = true
-			bundle.IR.Warnings = append(bundle.IR.Warnings, legacyCheckoutWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release))
 		}
 	}
 	warnedReusablePermissions := false

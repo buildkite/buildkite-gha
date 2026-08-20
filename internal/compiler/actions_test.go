@@ -128,6 +128,41 @@ func checkoutTestManifest(commit string) string {
 	}
 }
 
+// These manifests mirror the admitted legacy upload-artifact releases. v1's
+// runner plugin and v2's retired node12 runtime don't pass generic metadata
+// admission, but their execution is replaced entirely by the native adapter.
+const uploadArtifactV1LegacyManifest = `name: 'Upload a Build Artifact'
+inputs:
+  name:
+    required: true
+  path:
+    required: true
+runs:
+  plugin: publish
+`
+
+const uploadArtifactV2LegacyManifest = `name: 'Upload a Build Artifact'
+inputs:
+  name:
+    default: artifact
+  path:
+    required: true
+runs:
+  using: node12
+  main: dist/index.js
+`
+
+func uploadArtifactTestManifest(commit string) string {
+	switch commit {
+	case actionintegration.UploadArtifactV1Commit:
+		return uploadArtifactV1LegacyManifest
+	case actionintegration.UploadArtifactV2Commit:
+		return uploadArtifactV2LegacyManifest
+	default:
+		return "name: upload artifact\nruns:\n  using: node24\n  main: index.js\n"
+	}
+}
+
 type commitActionSource struct{ roots map[string]string }
 
 func (s commitActionSource) Fetch(_ context.Context, r source.Reference) (source.Resolved, source.Materialized, error) {
@@ -1274,6 +1309,66 @@ func TestCompileBundleLegacyCheckoutWarning(t *testing.T) {
 	}
 }
 
+func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roots := map[string]string{}
+	for _, commit := range []string{
+		actionintegration.UploadArtifactV1Commit,
+		actionintegration.UploadArtifactV2Commit,
+		actionintegration.UploadArtifactV3Commit,
+		actionintegration.UploadArtifactCommit,
+	} {
+		root := t.TempDir()
+		writeAction(t, root, "", uploadArtifactTestManifest(commit))
+		roots[commit] = root
+	}
+	compile := func(steps string) Bundle {
+		t.Helper()
+		workflow := []byte("on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps:\n" + steps)
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions: true,
+			ActionSource:   commitActionSource{roots: roots},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bundle
+	}
+
+	bundle := compile("      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV1Commit + "\n" +
+		"        with:\n          name: v1\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV1Commit + "\n" +
+		"        with:\n          name: v1-again\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV2Commit + "\n" +
+		"        with:\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV3Commit + "\n" +
+		"        with:\n          path: payload\n")
+	if len(bundle.IR.Warnings) != 3 ||
+		bundle.IR.Warnings[0].Code != "W_UPLOAD_ARTIFACT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[0].Message, "v1.0.0") || bundle.IR.Warnings[0].Line == 0 ||
+		bundle.IR.Warnings[1].Code != "W_UPLOAD_ARTIFACT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[1].Message, "v2.3.1") ||
+		bundle.IR.Warnings[2].Code != "W_UPLOAD_ARTIFACT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[2].Message, "v3.2.1") {
+		t.Fatalf("legacy upload-artifact warnings = %#v", bundle.IR.Warnings)
+	}
+
+	bundle = compile("      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactCommit + "\n" +
+		"        with:\n          path: payload\n")
+	if len(bundle.IR.Warnings) != 0 {
+		t.Fatalf("warnings = %#v, want none", bundle.IR.Warnings)
+	}
+}
+
 func TestNativeCheckoutIgnoresUpstreamTokenDefaultForOrigin(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
@@ -1346,14 +1441,8 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeAction(t, remote, "", "name: upload artifact\nruns:\n  using: node24\n  main: dist/index.js\n")
-	if err := os.MkdirAll(filepath.Join(remote, "dist"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(remote, "dist", "index.js"), []byte("throw new Error('adapter only')\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	compile := func(commit, with string) ([]plan.Job, error) {
+		writeAction(t, remote, "", uploadArtifactTestManifest(commit))
 		workflow := []byte("on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/upload-artifact@" + commit + "\n" + with)
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
@@ -1367,6 +1456,19 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 			ResolveActions: true,
 			ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
 		})
+	}
+
+	for version, test := range map[string]struct {
+		commit string
+		with   string
+	}{
+		"v1.0.0": {commit: actionintegration.UploadArtifactV1Commit, with: "        with:\n          name: payload\n          path: payload/result.txt\n"},
+		"v2.3.1": {commit: actionintegration.UploadArtifactV2Commit, with: "        with:\n          path: payload/result.txt\n          if-no-files-found: error\n"},
+		"v3.2.1": {commit: actionintegration.UploadArtifactV3Commit, with: "        with:\n          path: payload/result.txt\n          include-hidden-files: true\n"},
+	} {
+		if plans, err := compile(test.commit, test.with); err != nil || len(plans) != 1 {
+			t.Fatalf("audited %s upload rejected: plans = %#v, error = %v", version, plans, err)
+		}
 	}
 
 	plans, err := compile(actionintegration.UploadArtifactCommit, "        with:\n          name: payload\n          path: payload/result.txt\n          if-no-files-found: error\n          compression-level: '0'\n")
@@ -1423,7 +1525,7 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		})
 	}
 
-	if _, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.UploadArtifactCommit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV5Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV6Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV7Commit) {
+	if _, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.UploadArtifactV1Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV2Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV3Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactCommit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV5Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV6Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV7Commit) {
 		t.Fatalf("unsupported upload-artifact commit error = %v", err)
 	}
 

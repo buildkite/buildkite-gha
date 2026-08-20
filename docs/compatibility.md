@@ -721,27 +721,32 @@ Alternate repositories, tags, non-event dynamic commits, LFS, sparse checkout, G
 
 | Release | Commit |
 | --- | --- |
+| v1.0.0 | [`3446296876d12d4e3a0f3145a3c87e67bf0a16b5`](https://github.com/actions/upload-artifact/tree/3446296876d12d4e3a0f3145a3c87e67bf0a16b5) |
+| v2.3.1 | [`82c141cc518b40d92cc801eee768e7aafc9c2fa2`](https://github.com/actions/upload-artifact/tree/82c141cc518b40d92cc801eee768e7aafc9c2fa2) |
+| v3.2.1 | [`ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5`](https://github.com/actions/upload-artifact/tree/ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5) |
 | v4.6.2 | [`ea165f8d65b6e75b540449e92b4886f43607fa02`](https://github.com/actions/upload-artifact/tree/ea165f8d65b6e75b540449e92b4886f43607fa02) |
 | v5.0.0 | [`330a01c490aca151604b8cf639adc76d48f6c5d4`](https://github.com/actions/upload-artifact/tree/330a01c490aca151604b8cf639adc76d48f6c5d4) |
 | v6.0.0 | [`b7c566a772e6b6bfb58ed0dc250532a479d7789f`](https://github.com/actions/upload-artifact/tree/b7c566a772e6b6bfb58ed0dc250532a479d7789f) |
 | v7.0.1 | [`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`](https://github.com/actions/upload-artifact/tree/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a) |
 
+The v1.0.0, v2.3.1, and v3.2.1 commits match the floating legacy major tags used on github.com. Other legacy commits are unsupported, including v3.2.2, which upstream publishes only as a GitHub Enterprise Server security backport and deprecates on github.com. Every admitted release accepts only its declared inputs. Compilation emits `W_UPLOAD_ARTIFACT_LEGACY_RELEASE` for v1 through v3 to recommend v4 or later.
+
 | Input | Supported values |
 | --- | --- |
-| `name` | ✅ Supported; defaults to `artifact`. |
-| `path` | Required; literal files or directories, or bounded `*`, `?`, character-class, and `**` file globs. |
-| `if-no-files-found` | `warn`, `error`, or `ignore`. |
-| `retention-days` | Nonnegative integer; advisory only. |
-| `compression-level` | `0` through `9`. |
-| `overwrite` | Omitted or `false`. |
-| `include-hidden-files` | ✅ Supported. |
+| `name` | v1.0.0: required. v2.3.1 and later: defaults to `artifact`. |
+| `path` | Required. v1.0.0 accepts one literal file or directory. v2.3.1 and later accept literal paths or bounded `*`, `?`, character-class, and `**` file globs. |
+| `if-no-files-found` | v2.3.1 and later: `warn`, `error`, or `ignore`. v1.0.0 fails when its literal path is missing and uploads an empty existing directory. |
+| `retention-days` | v2.3.1 and later: nonnegative integer; advisory only. |
+| `compression-level` | v4.6.2 and later: `0` through `9`. |
+| `overwrite` | v4.6.2 and later: omitted or `false`. |
+| `include-hidden-files` | v3.2.1 and later. v1.0.0 and v2.3.1 include hidden paths by default. |
 | `archive` | v7.0.1 only; omitted or `true`. |
 
-Unsupported path forms include exclusions, symlinks, absolute paths, traversal, braces, extglobs, leading glob comments, and special files. At most 32 path roots may be selected. Hidden path segments remain excluded unless explicitly enabled.
+Unsupported path forms include exclusions, symlinks, absolute paths, traversal, braces, extglobs, leading glob comments, and special files. At most 32 path roots may be selected. For v3.2.1 and later, hidden path segments remain excluded unless explicitly enabled.
 
 An artifact may contain at most 10,000 files and 1 GiB of source data. The ZIP must also be no larger than 1 GiB. A job may publish 64 artifacts.
 
-The adapter sets `artifact-id` and `artifact-digest`. The `artifact-url` output is empty because no GitHub run-scoped URL exists. Merge, raw upload, overwrite, and effective retention control are unsupported.
+For v4.6.2 and later, the adapter sets `artifact-id` and `artifact-digest`; `artifact-url` is empty because no GitHub run-scoped URL exists. The v1 through v3 releases expose no outputs. Merge, raw upload, overwrite, and effective retention control are unsupported.
 
 ### Download artifact action
 
