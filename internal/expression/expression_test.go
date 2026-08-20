@@ -587,6 +587,21 @@ func TestTemplateInputReferences(t *testing.T) {
 	}
 }
 
+func TestGitHubTokenReferencesRuntimeValueScopesInterpolations(t *testing.T) {
+	for _, test := range []struct {
+		template string
+		want     bool
+	}{
+		{template: "${{ env.UNRELATED }}-${{ inputs.enabled && github.token || '' }}"},
+		{template: "${{ env.GUARD && github.token || '' }}", want: true},
+	} {
+		got, err := GitHubTokenReferencesRuntimeValue(test.template)
+		if err != nil || got != test.want {
+			t.Errorf("GitHubTokenReferencesRuntimeValue(%q) = %t, %v, want %t", test.template, got, err, test.want)
+		}
+	}
+}
+
 func TestTemplateUsesGitHubPropertyOutside(t *testing.T) {
 	for _, test := range []struct {
 		template string
@@ -1247,6 +1262,24 @@ func TestEvaluateConditionInputsMatchNormalExpressionSemantics(t *testing.T) {
 		got, err := EvaluateCondition(condition, context)
 		if err != nil || got != want {
 			t.Errorf("EvaluateCondition(%q) = %v, %v, want %v", condition, got, err, want)
+		}
+	}
+}
+
+func TestEvaluateKnownInputConditionShortCircuitsRuntimeValues(t *testing.T) {
+	for _, test := range []struct {
+		condition string
+		inputs    map[string]any
+		want      bool
+		known     bool
+	}{
+		{condition: "inputs.enabled == 'true' && env.RUNTIME == 'yes'", inputs: map[string]any{"enabled": "false"}, known: true},
+		{condition: "inputs.enabled == 'true' && env.RUNTIME == 'yes'", inputs: map[string]any{"enabled": "true"}},
+		{condition: "inputs.enabled == 'true'", inputs: map[string]any{"enabled": "true"}, want: true, known: true},
+	} {
+		got, known, err := EvaluateKnownInputCondition(test.condition, test.inputs, nil)
+		if err != nil || got != test.want || known != test.known {
+			t.Errorf("EvaluateKnownInputCondition(%q) = %t, %t, %v; want %t, %t", test.condition, got, known, err, test.want, test.known)
 		}
 	}
 }

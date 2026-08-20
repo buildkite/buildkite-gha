@@ -478,21 +478,27 @@ func ConditionUsesContext(source, contextName string) (bool, error) {
 func TemplateUsesContext(source, contextName string) (bool, error) {
 	found := false
 	err := visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
-		actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
-			if !entering || found {
-				return
-			}
-			switch node.(type) {
-			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-			default:
-				return
-			}
-			root, _, _ := referencePath(node)
-			found = strings.EqualFold(root, contextName)
-		})
+		found = found || nodeUsesContext(expression, contextName)
 		return nil
 	})
 	return found, err
+}
+
+func nodeUsesContext(expression actionlint.ExprNode, contextName string) bool {
+	found := false
+	actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
+		if !entering || found {
+			return
+		}
+		switch node.(type) {
+		case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		default:
+			return
+		}
+		root, _, _ := referencePath(node)
+		found = strings.EqualFold(root, contextName)
+	})
+	return found
 }
 
 // GitHubTokenInputReferences returns inputs referenced in the same template
@@ -501,11 +507,7 @@ func TemplateUsesContext(source, contextName string) (bool, error) {
 func GitHubTokenInputReferences(source string) ([]string, bool, error) {
 	found := map[string]struct{}{}
 	dynamic := false
-	err := visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
-		referencesToken, err := nodeReferencesGitHubToken(expression, true, false)
-		if err != nil || !referencesToken {
-			return err
-		}
+	err := visitGitHubTokenExpressions(source, func(expression actionlint.ExprNode) error {
 		inputNames, dynamicInputs := nodeInputReferences(expression)
 		for _, name := range inputNames {
 			found[name] = struct{}{}
@@ -514,6 +516,37 @@ func GitHubTokenInputReferences(source string) ([]string, bool, error) {
 		return nil
 	})
 	return sortedReferenceNames(found), dynamic, err
+}
+
+// GitHubTokenReferencesRuntimeValue reports whether an interpolation that
+// references github.token also depends on a runtime context other than inputs
+// or the retained server URL.
+func GitHubTokenReferencesRuntimeValue(source string) (bool, error) {
+	found := false
+	err := visitGitHubTokenExpressions(source, func(expression actionlint.ExprNode) error {
+		if nodeUsesGitHubPropertyOutside(expression, "server_url", "token") {
+			found = true
+			return nil
+		}
+		for _, contextName := range []string{"env", "job", "matrix", "needs", "runner", "services", "steps", "vars"} {
+			if nodeUsesContext(expression, contextName) {
+				found = true
+				break
+			}
+		}
+		return nil
+	})
+	return found, err
+}
+
+func visitGitHubTokenExpressions(source string, visit func(actionlint.ExprNode) error) error {
+	return visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
+		referencesToken, err := nodeReferencesGitHubToken(expression, true, false)
+		if err != nil || !referencesToken {
+			return err
+		}
+		return visit(expression)
+	})
 }
 
 // ConditionInputReferences returns statically named inputs from a condition
@@ -573,27 +606,33 @@ func nodeInputReferences(expression actionlint.ExprNode) ([]string, bool) {
 // TemplateUsesGitHubPropertyOutside reports whether a template references a
 // github property other than the allowed static properties.
 func TemplateUsesGitHubPropertyOutside(source string, allowed ...string) (bool, error) {
+	found := false
+	err := visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
+		found = found || nodeUsesGitHubPropertyOutside(expression, allowed...)
+		return nil
+	})
+	return found, err
+}
+
+func nodeUsesGitHubPropertyOutside(expression actionlint.ExprNode, allowed ...string) bool {
 	allowedProperties := make(map[string]bool, len(allowed))
 	for _, property := range allowed {
 		allowedProperties[strings.ToLower(property)] = true
 	}
 	found := false
-	err := visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
-		actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
-			if !entering || found {
-				return
-			}
-			switch node.(type) {
-			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-			default:
-				return
-			}
-			root, path, _ := referencePath(node)
-			found = strings.EqualFold(root, "github") && len(path) != 0 && !allowedProperties[strings.ToLower(path[0])]
-		})
-		return nil
+	actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
+		if !entering || found {
+			return
+		}
+		switch node.(type) {
+		case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		default:
+			return
+		}
+		root, path, _ := referencePath(node)
+		found = strings.EqualFold(root, "github") && len(path) != 0 && !allowedProperties[strings.ToLower(path[0])]
 	})
-	return found, err
+	return found
 }
 
 // ConditionUsesStaticContextReference reports whether a condition contains a

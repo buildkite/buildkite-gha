@@ -521,6 +521,25 @@ runs:
 	if !compiled.requiresGitHubToken {
 		t.Fatal("whole input context with an unknown input did not request a GitHub token")
 	}
+	writeAction(t, workspace, "unrelated-runtime", `name: unrelated runtime interpolation
+inputs:
+  enabled:
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ env.UNRELATED }}-${{ inputs.enabled == 'true' && github.token || '' }}
+      run: echo "$TOKEN"
+`)
+	compiled, err = compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./unrelated-runtime"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("unrelated runtime interpolation required a GitHub token past a false guard")
+	}
 }
 
 func TestCompileActionInvocationsDetectsGitHubTokenAcrossCompositeMetadata(t *testing.T) {
@@ -619,6 +638,7 @@ runs:
 		{enabled: "false"},
 		{enabled: "true", want: true},
 		{enabled: "${{ matrix.enabled }}", want: true},
+		{enabled: "${{ env.ENABLED }}", want: true},
 	} {
 		compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{{"enabled": test.enabled}})
 		if err != nil {
@@ -626,6 +646,34 @@ runs:
 		}
 		if compiled.requiresGitHubToken != test.want {
 			t.Fatalf("enabled %q requires GitHub token = %t, want %t", test.enabled, compiled.requiresGitHubToken, test.want)
+		}
+	}
+	writeAction(t, workspace, "conditional-runtime", `name: conditional runtime
+inputs:
+  enabled:
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - if: inputs.enabled == 'true' && env.RUNTIME == 'yes'
+      shell: bash
+      env:
+        TOKEN: ${{ github.token }}
+      run: echo "$TOKEN"
+`)
+	for _, test := range []struct {
+		enabled string
+		want    bool
+	}{
+		{enabled: "false"},
+		{enabled: "true", want: true},
+	} {
+		compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./conditional-runtime"}, []map[string]string{{"enabled": test.enabled}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.want {
+			t.Fatalf("runtime condition enabled %q requires GitHub token = %t, want %t", test.enabled, compiled.requiresGitHubToken, test.want)
 		}
 	}
 }

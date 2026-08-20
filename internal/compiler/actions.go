@@ -529,43 +529,11 @@ func (n *actionNode) effectiveInputs(supplied map[string]string) (map[string]str
 }
 
 func compositeStepCondition(condition string, inputs map[string]string, unknownInputs map[string]bool) (bool, bool, error) {
-	names, dynamic, err := expression.ConditionInputReferences(condition)
-	if err != nil {
-		return false, false, err
-	}
-	if dynamic && len(unknownInputs) != 0 {
-		return false, false, nil
-	}
-	for _, name := range names {
-		if unknownInputs[name] {
-			return false, false, nil
-		}
-	}
-	status, err := expression.ReferencesStatusFunction(condition)
-	if err != nil {
-		return false, false, err
-	}
-	if status {
-		return false, false, nil
-	}
-	for _, contextName := range []string{"env", "github", "job", "matrix", "needs", "runner", "steps", "vars"} {
-		usesContext, err := expression.ConditionUsesContext(condition, contextName)
-		if err != nil {
-			return false, false, err
-		}
-		if usesContext {
-			return false, false, nil
-		}
-	}
 	conditionInputs := make(map[string]any, len(inputs))
 	for name, value := range inputs {
 		conditionInputs[name] = value
 	}
-	run, err := expression.EvaluateCondition(condition, expression.ConditionContext{Inputs: conditionInputs})
-	if err != nil {
-		return false, false, nil
-	}
-	return run, true, nil
+	return expression.EvaluateKnownInputCondition(condition, conditionInputs, unknownInputs)
 }
 
 func resolveKnownCompositeValues(values, inputs map[string]string, unknownInputs map[string]bool, serverURL string) map[string]string {
@@ -579,6 +547,17 @@ func resolveKnownCompositeValues(values, inputs map[string]string, unknownInputs
 			unknown = unknown || unknownInputs[inputName]
 		}
 		if unknown || err != nil {
+			resolved[name] = original
+			continue
+		}
+		for _, contextName := range []string{"env", "github", "job", "matrix", "needs", "runner", "secrets", "services", "steps", "vars"} {
+			usesContext, contextErr := expression.TemplateUsesContext(original, contextName)
+			if contextErr != nil || usesContext {
+				unknown = true
+				break
+			}
+		}
+		if unknown {
 			resolved[name] = original
 			continue
 		}
@@ -625,21 +604,12 @@ func inspectCompositeTemplate(field, template string, inputs map[string]string, 
 			return true, nil
 		}
 	}
-	usesUnknownGitHubProperty, err := expression.TemplateUsesGitHubPropertyOutside(template, "server_url", "token")
+	usesRuntimeValue, err := expression.GitHubTokenReferencesRuntimeValue(template)
 	if err != nil {
 		return false, fmt.Errorf("composite action %s: %w", field, err)
 	}
-	if usesUnknownGitHubProperty {
+	if usesRuntimeValue {
 		return true, nil
-	}
-	for _, contextName := range []string{"env", "job", "matrix", "needs", "runner", "services", "steps", "vars"} {
-		usesContext, err := expression.TemplateUsesContext(template, contextName)
-		if err != nil {
-			return false, fmt.Errorf("composite action %s: %w", field, err)
-		}
-		if usesContext {
-			return true, nil
-		}
 	}
 	_, err = expression.EvaluateStep(template, expression.Context{Inputs: inputs, GitHub: map[string]any{"server_url": serverURL}})
 	return err != nil, nil

@@ -425,6 +425,63 @@ func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 	return result, nil
 }
 
+// EvaluateKnownInputCondition evaluates a condition when its result is fixed
+// by known action inputs and short-circuiting. Runtime-dependent results are
+// reported as unknown.
+func EvaluateKnownInputCondition(source string, inputs map[string]any, unknownInputs map[string]bool) (bool, bool, error) {
+	node, empty, err := parseCondition(source)
+	if err != nil {
+		return false, false, err
+	}
+	if empty {
+		return true, true, nil
+	}
+	return evaluateKnownInputConditionNode(node, ConditionContext{Inputs: inputs}, unknownInputs)
+}
+
+func evaluateKnownInputConditionNode(node actionlint.ExprNode, context ConditionContext, unknownInputs map[string]bool) (bool, bool, error) {
+	if logical, ok := node.(*actionlint.LogicalOpNode); ok {
+		left, known, err := evaluateKnownInputConditionNode(logical.Left, context, unknownInputs)
+		if err != nil || !known {
+			return false, known, err
+		}
+		switch logical.Kind {
+		case actionlint.LogicalOpNodeKindAnd:
+			if !left {
+				return false, true, nil
+			}
+		case actionlint.LogicalOpNodeKindOr:
+			if left {
+				return true, true, nil
+			}
+		}
+		return evaluateKnownInputConditionNode(logical.Right, context, unknownInputs)
+	}
+
+	names, dynamic := nodeInputReferences(node)
+	if dynamic && len(unknownInputs) != 0 {
+		return false, false, nil
+	}
+	for _, name := range names {
+		if unknownInputs[name] {
+			return false, false, nil
+		}
+	}
+	if containsStatusFunction(node) {
+		return false, false, nil
+	}
+	for _, contextName := range []string{"env", "github", "job", "matrix", "needs", "runner", "steps", "vars"} {
+		if nodeUsesContext(node, contextName) {
+			return false, false, nil
+		}
+	}
+	value, err := evaluateConditionNode(node, context)
+	if err != nil {
+		return false, false, nil
+	}
+	return githubTruthy(value), true, nil
+}
+
 func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (any, error) {
 	evaluator := newSemanticEvaluator(conditionSurface)
 	rootValues := make(map[string]any)
