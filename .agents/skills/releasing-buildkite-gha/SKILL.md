@@ -167,7 +167,7 @@ gh release view "$next" --repo buildkite/buildkite-gha \
 
 published_notes=$(mktemp)
 gh release view "$next" --repo buildkite/buildkite-gha \
-  --json body --jq .body >"$published_notes"
+  --json body --template '{{.body}}' >"$published_notes"
 cmp "$notes_file" "$published_notes"
 
 assets_dir=$(mktemp -d)
