@@ -442,8 +442,18 @@ func EvaluateKnownInputCondition(source string, inputs map[string]any, unknownIn
 func evaluateKnownInputConditionNode(node actionlint.ExprNode, context ConditionContext, unknownInputs map[string]bool) (bool, bool, error) {
 	if logical, ok := node.(*actionlint.LogicalOpNode); ok {
 		left, known, err := evaluateKnownInputConditionNode(logical.Left, context, unknownInputs)
-		if err != nil || !known {
-			return false, known, err
+		if err != nil {
+			return false, false, err
+		}
+		if !known {
+			right, rightKnown, rightErr := evaluateKnownInputConditionNode(logical.Right, context, unknownInputs)
+			if rightErr != nil {
+				return false, false, rightErr
+			}
+			if rightKnown && (logical.Kind == actionlint.LogicalOpNodeKindAnd && !right || logical.Kind == actionlint.LogicalOpNodeKindOr && right) {
+				return right, true, nil
+			}
+			return false, false, nil
 		}
 		switch logical.Kind {
 		case actionlint.LogicalOpNodeKindAnd:

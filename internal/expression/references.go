@@ -539,6 +539,102 @@ func GitHubTokenReferencesRuntimeValue(source string) (bool, error) {
 	return found, err
 }
 
+// GitHubTokenRequiresEvaluation reports whether evaluating a template can
+// reach github.token after reducing known inputs and the retained server URL.
+func GitHubTokenRequiresEvaluation(source string, context Context, unknownInputs map[string]bool) (bool, error) {
+	required := false
+	err := visitGitHubTokenExpressions(source, func(expression actionlint.ExprNode) error {
+		required = required || githubTokenReachable(expression, context, unknownInputs)
+		return nil
+	})
+	return required, err
+}
+
+func githubTokenReachable(node actionlint.ExprNode, context Context, unknownInputs map[string]bool) bool {
+	logical, ok := node.(*actionlint.LogicalOpNode)
+	if ok {
+		if githubTokenReachable(logical.Left, context, unknownInputs) {
+			return true
+		}
+		left, known := evaluateKnownStepNode(logical.Left, context, unknownInputs)
+		if known && (logical.Kind == actionlint.LogicalOpNodeKindAnd && !left || logical.Kind == actionlint.LogicalOpNodeKindOr && left) {
+			return false
+		}
+		return githubTokenReachable(logical.Right, context, unknownInputs)
+	}
+	if directGitHubTokenReference(node) {
+		return true
+	}
+	switch node := node.(type) {
+	case *actionlint.ObjectDerefNode:
+		return githubTokenReachable(node.Receiver, context, unknownInputs)
+	case *actionlint.ArrayDerefNode:
+		return githubTokenReachable(node.Receiver, context, unknownInputs)
+	case *actionlint.IndexAccessNode:
+		return githubTokenReachable(node.Operand, context, unknownInputs) || githubTokenReachable(node.Index, context, unknownInputs)
+	case *actionlint.NotOpNode:
+		return githubTokenReachable(node.Operand, context, unknownInputs)
+	case *actionlint.CompareOpNode:
+		return githubTokenReachable(node.Left, context, unknownInputs) || githubTokenReachable(node.Right, context, unknownInputs)
+	case *actionlint.FuncCallNode:
+		for _, argument := range node.Args {
+			if githubTokenReachable(argument, context, unknownInputs) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func directGitHubTokenReference(node actionlint.ExprNode) bool {
+	switch node.(type) {
+	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+	default:
+		return false
+	}
+	root, path, err := referencePath(node)
+	return err == nil && strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "token")
+}
+
+func evaluateKnownStepNode(node actionlint.ExprNode, context Context, unknownInputs map[string]bool) (bool, bool) {
+	if logical, ok := node.(*actionlint.LogicalOpNode); ok {
+		left, known := evaluateKnownStepNode(logical.Left, context, unknownInputs)
+		if known {
+			if logical.Kind == actionlint.LogicalOpNodeKindAnd && !left || logical.Kind == actionlint.LogicalOpNodeKindOr && left {
+				return left, true
+			}
+			return evaluateKnownStepNode(logical.Right, context, unknownInputs)
+		}
+		right, rightKnown := evaluateKnownStepNode(logical.Right, context, unknownInputs)
+		if rightKnown && (logical.Kind == actionlint.LogicalOpNodeKindAnd && !right || logical.Kind == actionlint.LogicalOpNodeKindOr && right) {
+			return right, true
+		}
+		return false, false
+	}
+	names, dynamic := nodeInputReferences(node)
+	if dynamic && len(unknownInputs) != 0 {
+		return false, false
+	}
+	for _, name := range names {
+		if unknownInputs[name] {
+			return false, false
+		}
+	}
+	if nodeUsesGitHubPropertyOutside(node, "server_url") {
+		return false, false
+	}
+	for _, contextName := range []string{"env", "job", "matrix", "needs", "runner", "services", "steps", "vars"} {
+		if nodeUsesContext(node, contextName) {
+			return false, false
+		}
+	}
+	value, err := evaluateStepRuntimeExpression(node, context, true, false, nil)
+	if err != nil {
+		return false, false
+	}
+	return githubTruthy(value), true
+}
+
 func visitGitHubTokenExpressions(source string, visit func(actionlint.ExprNode) error) error {
 	return visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
 		referencesToken, err := nodeReferencesGitHubToken(expression, true, false)

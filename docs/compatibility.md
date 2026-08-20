@@ -773,9 +773,10 @@ context listed below, including `token`, with sorted keys and two-space
 indentation.
 
 The compiler treats that call as a token reference, so normal permissions,
-admission, and redaction apply. Composite steps can consume an already
-authorized context, but composite metadata cannot grant token authority. A
-tokenless context is an error.
+admission, and redaction apply. Reachable immutable composite step fields can
+grant token authority through direct `github.token` references and consume the
+authorized context. `toJSON(github)` does not grant authority from composite
+metadata. A tokenless context is an error.
 
 Job-level fields and action input defaults cannot call `toJSON(github)`. Bare,
 projected, or dynamically indexed `github`, and passing the whole context to

@@ -89,8 +89,9 @@ type actionCompilation struct {
 }
 
 type actionRequirements struct {
-	githubToken     bool
-	requiredSecrets map[string]bool
+	githubToken            bool
+	preparationGitHubToken bool
+	requiredSecrets        map[string]bool
 }
 
 // validateActionResolutions resolves each independent root invocation before
@@ -260,8 +261,8 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
-			requiresGitHubToken = requiresGitHubToken || requirements.githubToken
-			if requirements.githubToken {
+			requiresGitHubToken = requiresGitHubToken || requirements.githubToken || requirements.preparationGitHubToken
+			if requirements.githubToken || requirements.preparationGitHubToken {
 				githubTokenActions = append(githubTokenActions, refs[i])
 			}
 			for name := range requirements.requiredSecrets {
@@ -424,6 +425,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
 		}
 		requirements.githubToken = requirements.githubToken || referencesToken
+		requirements.preparationGitHubToken = requirements.preparationGitHubToken || n.preparationEvaluatesInvocation() && referencesToken
 	}
 	if n.runtime != metadata.RuntimeComposite {
 		return requirements, nil
@@ -442,6 +444,15 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			return actionRequirements{}, fmt.Errorf("composite action step %d condition: %w", i+1, err)
 		}
 		stepReachable := !known || run
+		var child *actionNode
+		preparationEvaluatesStep := false
+		if step.Uses != "" {
+			child = n.children[step.Uses]
+			if child == nil {
+				return actionRequirements{}, fmt.Errorf("composite action step %d child %q is missing", i+1, step.Uses)
+			}
+			preparationEvaluatesStep = child.preparationEvaluatesInvocation()
+		}
 		for _, field := range []struct {
 			name   string
 			values map[string]string
@@ -455,6 +466,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 					return actionRequirements{}, err
 				}
 				requirements.githubToken = requirements.githubToken || stepReachable && requiresToken
+				requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparationEvaluatesStep && requiresToken
 			}
 		}
 		for _, field := range []struct {
@@ -472,13 +484,10 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 				return actionRequirements{}, err
 			}
 			requirements.githubToken = requirements.githubToken || stepReachable && requiresToken
+			requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparationEvaluatesStep && requiresToken
 		}
 		if step.Uses == "" {
 			continue
-		}
-		child := n.children[step.Uses]
-		if child == nil {
-			return actionRequirements{}, fmt.Errorf("composite action step %d child %q is missing", i+1, step.Uses)
 		}
 		descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: child.lock.Source, Repository: child.lock.Repository, Path: child.lock.Path})
 		if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
@@ -492,11 +501,16 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 		}
 		requirements.githubToken = requirements.githubToken || stepReachable && childRequirements.githubToken
+		requirements.preparationGitHubToken = requirements.preparationGitHubToken || childRequirements.preparationGitHubToken
 		for name := range childRequirements.requiredSecrets {
 			requirements.requiredSecrets[name] = true
 		}
 	}
 	return requirements, nil
+}
+
+func (n *actionNode) preparationEvaluatesInvocation() bool {
+	return n.runtime == metadata.RuntimeComposite || n.metadata.Runs.Pre != ""
 }
 
 func (n *actionNode) effectiveInputs(supplied map[string]string) (map[string]string, map[string]bool) {
@@ -550,7 +564,7 @@ func resolveKnownCompositeValues(values, inputs map[string]string, unknownInputs
 			resolved[name] = original
 			continue
 		}
-		for _, contextName := range []string{"env", "github", "job", "matrix", "needs", "runner", "secrets", "services", "steps", "vars"} {
+		for _, contextName := range []string{"env", "job", "matrix", "needs", "runner", "secrets", "services", "steps", "vars"} {
 			usesContext, contextErr := expression.TemplateUsesContext(original, contextName)
 			if contextErr != nil || usesContext {
 				unknown = true
@@ -558,6 +572,12 @@ func resolveKnownCompositeValues(values, inputs map[string]string, unknownInputs
 			}
 		}
 		if unknown {
+			resolved[name] = original
+			continue
+		}
+		usesUnknownGitHub, githubErr := expression.TemplateUsesGitHubPropertyOutside(original, "server_url")
+		usesSerializedContext, tokenErr := expression.ReferencesStepGitHubToken(original)
+		if githubErr != nil || tokenErr != nil || usesUnknownGitHub || usesSerializedContext {
 			resolved[name] = original
 			continue
 		}
@@ -592,27 +612,11 @@ func inspectCompositeTemplate(field, template string, inputs map[string]string, 
 	if !referencesToken {
 		return false, nil
 	}
-	inputNames, dynamicInputs, err := expression.GitHubTokenInputReferences(template)
+	requiresToken, err := expression.GitHubTokenRequiresEvaluation(template, expression.Context{Inputs: inputs, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs)
 	if err != nil {
 		return false, fmt.Errorf("composite action %s: %w", field, err)
 	}
-	if dynamicInputs && len(unknownInputs) != 0 {
-		return true, nil
-	}
-	for _, name := range inputNames {
-		if unknownInputs[name] {
-			return true, nil
-		}
-	}
-	usesRuntimeValue, err := expression.GitHubTokenReferencesRuntimeValue(template)
-	if err != nil {
-		return false, fmt.Errorf("composite action %s: %w", field, err)
-	}
-	if usesRuntimeValue {
-		return true, nil
-	}
-	_, err = expression.EvaluateStep(template, expression.Context{Inputs: inputs, GitHub: map[string]any{"server_url": serverURL}})
-	return err != nil, nil
+	return requiresToken, nil
 }
 
 func hasActionInput(inputs map[string]string, name string) bool {

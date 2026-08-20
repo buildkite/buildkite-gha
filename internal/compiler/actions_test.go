@@ -531,6 +531,7 @@ runs:
     - shell: bash
       env:
         TOKEN: ${{ env.UNRELATED }}-${{ inputs.enabled == 'true' && github.token || '' }}
+        GUARDED_TOKEN: ${{ inputs.enabled == 'true' && env.RUNTIME == 'yes' && github.token || '' }}
       run: echo "$TOKEN"
 `)
 	compiled, err = compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./unrelated-runtime"}, []map[string]string{nil})
@@ -660,6 +661,11 @@ runs:
       env:
         TOKEN: ${{ github.token }}
       run: echo "$TOKEN"
+    - if: env.RUNTIME == 'yes' && inputs.enabled == 'true'
+      shell: bash
+      env:
+        TOKEN: ${{ github.token }}
+      run: echo "$TOKEN"
 `)
 	for _, test := range []struct {
 		enabled string
@@ -674,6 +680,74 @@ runs:
 		}
 		if compiled.requiresGitHubToken != test.want {
 			t.Fatalf("runtime condition enabled %q requires GitHub token = %t, want %t", test.enabled, compiled.requiresGitHubToken, test.want)
+		}
+	}
+}
+
+func TestCompileActionInvocationsRetainsTokenForSkippedChildPreHook(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+runs:
+  using: node24
+  pre: pre.js
+  main: index.js
+`)
+	if err := os.WriteFile(filepath.Join(workspace, "child", "pre.js"), []byte("// fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - if: ${{ false }}
+      uses: ./child
+      env:
+        TOKEN: ${{ github.token }}
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("skipped child pre hook did not retain token authority for prepared metadata")
+	}
+}
+
+func TestCompileActionInvocationsResolvesForwardedServerURL(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  enabled:
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ inputs.enabled == 'true' && github.token || '' }}
+      run: echo "$TOKEN"
+`)
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        enabled: ${{ github.server_url == 'https://github.com' && 'true' || 'false' }}
+`)
+	for _, test := range []struct {
+		serverURL string
+		want      bool
+	}{
+		{serverURL: "https://origin.cursor.com"},
+		{serverURL: "https://github.com", want: true},
+	} {
+		compiled, err := compileActionInvocations(t.Context(), workspace, nil, test.serverURL, []string{"./parent"}, []map[string]string{nil})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.want {
+			t.Fatalf("server URL %q requires GitHub token = %t, want %t", test.serverURL, compiled.requiresGitHubToken, test.want)
 		}
 	}
 }
