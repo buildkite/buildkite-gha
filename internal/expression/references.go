@@ -495,6 +495,38 @@ func TemplateUsesContext(source, contextName string) (bool, error) {
 	return found, err
 }
 
+// TemplateContextReferences returns statically named first-level members of a
+// context and reports whether the template also uses computed access.
+func TemplateContextReferences(source, contextName string) ([]string, bool, error) {
+	found := map[string]struct{}{}
+	dynamic := false
+	err := visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
+		actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
+			if !entering {
+				return
+			}
+			switch node.(type) {
+			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.ArrayDerefNode, *actionlint.IndexAccessNode:
+			default:
+				return
+			}
+			if !strings.EqualFold(referenceRoot(node), contextName) {
+				return
+			}
+			root, path, err := referencePath(node)
+			if err != nil {
+				dynamic = true
+				return
+			}
+			if strings.EqualFold(root, contextName) && len(path) != 0 {
+				found[strings.ToLower(path[0])] = struct{}{}
+			}
+		})
+		return nil
+	})
+	return sortedReferenceNames(found), dynamic, err
+}
+
 // TemplateUsesGitHubPropertyOutside reports whether a template references a
 // github property other than the allowed static properties.
 func TemplateUsesGitHubPropertyOutside(source string, allowed ...string) (bool, error) {

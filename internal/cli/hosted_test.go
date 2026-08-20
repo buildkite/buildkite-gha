@@ -974,6 +974,25 @@ func TestBundleUsesActionsDetectsStepsAndLocks(t *testing.T) {
 	}
 }
 
+func TestGitHubTokenAdmissionDiagnosticDescribesActionMetadata(t *testing.T) {
+	for _, test := range []struct {
+		actions []string
+		want    string
+	}{
+		{actions: []string{"owner/action@v1"}, want: `action "owner/action@v1" references github.token in its metadata`},
+		{actions: []string{"owner/one@v1", "owner/two@v2"}, want: `actions "owner/one@v1", "owner/two@v2" reference github.token in their metadata`},
+	} {
+		artifact := compiler.PlanArtifact{
+			Job:           plan.Job{Workflow: plan.Workflow{LogicalJobID: "token"}},
+			Authorization: compiler.PlanAuthorization{GitHubTokenActions: test.actions},
+		}
+		_, detail := githubTokenAdmissionDiagnostic(artifact, "token issuance is unavailable")
+		if !strings.Contains(detail, test.want) {
+			t.Fatalf("githubTokenAdmissionDiagnostic() detail = %q, want %q", detail, test.want)
+		}
+	}
+}
+
 func TestUnprivilegedUploadAllowsCapabilityFreeConcurrentShellSteps(t *testing.T) {
 	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 		Workflow: plan.Workflow{LogicalJobID: "concurrent-job"},

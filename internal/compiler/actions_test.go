@@ -450,6 +450,8 @@ func TestCompileActionInvocationsDetectsReachableCompositeMetadataGitHubToken(t 
 inputs:
   fallback:
     default: cargo-binstall
+  unrelated:
+    default: ${{ github.actor }}
 runs:
   using: composite
   steps:
@@ -468,6 +470,7 @@ runs:
 		{name: "explicit matching value", supplied: map[string]string{"fallback": "cargo-binstall"}, want: true},
 		{name: "unreachable cargo install", supplied: map[string]string{"fallback": "cargo-install"}},
 		{name: "unreachable none", supplied: map[string]string{"fallback": "none"}},
+		{name: "overridden unrelated expression default", supplied: map[string]string{"fallback": "none", "unrelated": "literal"}},
 		{name: "unknown expression", supplied: map[string]string{"fallback": "${{ matrix.fallback }}"}, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -479,6 +482,25 @@ runs:
 				t.Fatalf("requires GitHub token = %t, want %t", compiled.requiresGitHubToken, test.want)
 			}
 		})
+	}
+	writeAction(t, workspace, "overridden-token", `name: overridden composite token
+inputs:
+  fallback:
+    default: ${{ github.actor }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        DEFAULT_GITHUB_TOKEN: ${{ inputs.fallback == 'cargo-binstall' && github.token || '' }}
+      run: echo "$DEFAULT_GITHUB_TOKEN"
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./overridden-token"}, []map[string]string{{"fallback": "none"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("overridden expression default required a GitHub token")
 	}
 }
 

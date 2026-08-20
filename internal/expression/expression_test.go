@@ -557,6 +557,16 @@ func TestTemplateUsesContextSupportsIndexedAccess(t *testing.T) {
 	}
 }
 
+func TestTemplateContextReferences(t *testing.T) {
+	names, dynamic, err := TemplateContextReferences("${{ inputs.beta }}-${{ inputs['alpha'] }}-${{ inputs[env.KEY] }}", "inputs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(names, []string{"alpha", "beta"}) || !dynamic {
+		t.Fatalf("TemplateContextReferences() = %#v, %t, want alpha/beta and dynamic access", names, dynamic)
+	}
+}
+
 func TestTemplateUsesGitHubPropertyOutside(t *testing.T) {
 	for _, test := range []struct {
 		template string

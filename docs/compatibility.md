@@ -1057,8 +1057,9 @@ event repository when it:
 
 A `github.server_url == 'https://github.com'` guard skips the token branch for
 an Origin repository. Known guards skip unreachable token branches; unknown
-values conservatively request a token. Native adapters ignore upstream input
-defaults, so `actions/checkout` alone does not request a token.
+values used by a token guard conservatively request a token. Native adapters
+ignore upstream input defaults, so `actions/checkout` alone does not request a
+token.
 
 The top-level workflow's `permissions` set the scope. Token issuance needs a
 Buildkite organization feature and a pipeline setting; both are off by default.

@@ -428,9 +428,9 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	if n.runtime != metadata.RuntimeComposite {
 		return requirements, nil
 	}
-	effectiveInputs, inputsKnown := n.effectiveInputs(supplied)
+	effectiveInputs, unknownInputs := n.effectiveInputs(supplied)
 	for _, name := range sortedKeys(n.metadata.Outputs) {
-		requiresToken, err := inspectCompositeTemplate("output "+name, n.metadata.Outputs[name].Value, effectiveInputs, inputsKnown, serverURL)
+		requiresToken, err := inspectCompositeTemplate("output "+name, n.metadata.Outputs[name].Value, effectiveInputs, unknownInputs, serverURL)
 		if err != nil {
 			return actionRequirements{}, err
 		}
@@ -445,7 +445,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			{name: "input", values: step.With},
 		} {
 			for _, name := range sortedKeys(field.values) {
-				requiresToken, err := inspectCompositeTemplate(fmt.Sprintf("step %d %s %q", i+1, field.name, name), field.values[name], effectiveInputs, inputsKnown, serverURL)
+				requiresToken, err := inspectCompositeTemplate(fmt.Sprintf("step %d %s %q", i+1, field.name, name), field.values[name], effectiveInputs, unknownInputs, serverURL)
 				if err != nil {
 					return actionRequirements{}, err
 				}
@@ -462,7 +462,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			if field.value == "" {
 				continue
 			}
-			requiresToken, err := inspectCompositeTemplate(fmt.Sprintf("step %d %s", i+1, field.name), field.value, effectiveInputs, inputsKnown, serverURL)
+			requiresToken, err := inspectCompositeTemplate(fmt.Sprintf("step %d %s", i+1, field.name), field.value, effectiveInputs, unknownInputs, serverURL)
 			if err != nil {
 				return actionRequirements{}, err
 			}
@@ -493,9 +493,9 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	return requirements, nil
 }
 
-func (n *actionNode) effectiveInputs(supplied map[string]string) (map[string]string, bool) {
+func (n *actionNode) effectiveInputs(supplied map[string]string) (map[string]string, map[string]bool) {
 	inputs := make(map[string]string, len(n.metadata.Inputs)+len(supplied))
-	known := true
+	unknown := map[string]bool{}
 	for _, name := range sortedKeys(n.metadata.Inputs) {
 		definition := n.metadata.Inputs[name]
 		value := ""
@@ -503,23 +503,26 @@ func (n *actionNode) effectiveInputs(supplied map[string]string) (map[string]str
 			value = *definition.Default
 		}
 		if strings.Contains(value, "${{") {
-			known = false
+			unknown[name] = true
 			continue
 		}
 		inputs[name] = value
 	}
 	for _, name := range sortedKeys(supplied) {
 		value := supplied[name]
+		name = strings.ToLower(name)
+		delete(inputs, name)
+		delete(unknown, name)
 		if strings.Contains(value, "${{") {
-			known = false
+			unknown[name] = true
 			continue
 		}
-		inputs[strings.ToLower(name)] = value
+		inputs[name] = value
 	}
-	return inputs, known
+	return inputs, unknown
 }
 
-func inspectCompositeTemplate(field, template string, inputs map[string]string, inputsKnown bool, serverURL string) (bool, error) {
+func inspectCompositeTemplate(field, template string, inputs map[string]string, unknownInputs map[string]bool, serverURL string) (bool, error) {
 	referencesEvent, err := expression.TemplateReferencesGitHubEvent(template)
 	if err != nil {
 		return false, fmt.Errorf("composite action %s: %w", field, err)
@@ -541,12 +544,17 @@ func inspectCompositeTemplate(field, template string, inputs map[string]string, 
 	if !referencesToken {
 		return false, nil
 	}
-	usesInputs, err := expression.TemplateUsesContext(template, "inputs")
+	inputNames, dynamicInputs, err := expression.TemplateContextReferences(template, "inputs")
 	if err != nil {
 		return false, fmt.Errorf("composite action %s: %w", field, err)
 	}
-	if usesInputs && !inputsKnown {
+	if dynamicInputs && len(unknownInputs) != 0 {
 		return true, nil
+	}
+	for _, name := range inputNames {
+		if unknownInputs[name] {
+			return true, nil
+		}
 	}
 	usesUnknownGitHubProperty, err := expression.TemplateUsesGitHubPropertyOutside(template, "server_url", "token")
 	if err != nil {
