@@ -712,7 +712,7 @@ func TestRunJobFailsWhenAuthoritativePublicationFails(t *testing.T) {
 	if !strings.Contains(stdout.String(), "~~~ :package: Publish GitHub Actions result\n") || !strings.Contains(stdout.String(), "^^^ +++\n") {
 		t.Fatalf("stdout = %q, want failed publication group expanded", stdout.String())
 	}
-	if event := <-events; event.FailurePhase != telemetry.FailurePhaseResultPublication || event.FailureCode != telemetry.FailureCodeUnknown {
+	if event := <-events; event.FailurePhase != telemetry.FailurePhaseResultPublication || event.FailureCode != telemetry.FailureCodeUnknown || !strings.Contains(event.ErrorMessage, "publish terminal result") {
 		t.Fatalf("telemetry = %#v", event)
 	}
 }
@@ -727,7 +727,7 @@ func TestRunJobTelemetryClassifiesExecutionFailure(t *testing.T) {
 	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if event := <-events; event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeUnknown {
+	if event := <-events; event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeUnknown || !strings.Contains(event.ErrorMessage, "exit status 7") {
 		t.Fatalf("telemetry = %#v", event)
 	}
 }

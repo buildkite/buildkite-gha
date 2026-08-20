@@ -43,12 +43,14 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 	}
 	duration := 1234 * time.Millisecond
 	if err := client.Emit(CommandRunJob, OutcomeFailure, duration, Details{
-		FailurePhase: FailurePhaseParsing,
-		FailureCode:  FailureCodeWorkflowSyntax,
+		FailurePhase:          FailurePhaseParsing,
+		FailureCode:           FailureCodeWorkflowSyntax,
+		ErrorMessage:          "  buildkite-gha: run-job:\ninvalid workflow\tvalue  ",
+		ErrorMessageTruncated: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if request.Event != EventCommandCompleted || request.Properties.Command != CommandRunJob || request.Properties.Outcome != OutcomeFailure || request.Properties.ClientVersion != "1.2.3" || request.Properties.DurationMS != 1234 || request.Properties.FailurePhase != FailurePhaseParsing || request.Properties.FailureCode != FailureCodeWorkflowSyntax {
+	if request.Event != EventCommandCompleted || request.Properties.Command != CommandRunJob || request.Properties.Outcome != OutcomeFailure || request.Properties.ClientVersion != "1.2.3" || request.Properties.DurationMS != 1234 || request.Properties.FailurePhase != FailurePhaseParsing || request.Properties.FailureCode != FailureCodeWorkflowSyntax || request.Properties.ErrorMessage != "buildkite-gha: run-job: invalid workflow value" || !request.Properties.ErrorMessageTruncated {
 		t.Fatalf("event = %#v", request)
 	}
 }
@@ -194,6 +196,17 @@ func TestPropertiesAreBounded(t *testing.T) {
 	}
 	if err := client.Emit(CommandRunJob, OutcomeFailure, 0, Details{FailurePhase: FailurePhaseUnknown, FailureCode: FailureCode("arbitrary")}); err == nil {
 		t.Fatal("Emit() accepted an unknown failure code")
+	}
+}
+
+func TestErrorMessageIsNormalizedAndUTF8Bounded(t *testing.T) {
+	message := "failure\n\t" + strings.Repeat("界", maxErrorMessageBytes)
+	bounded, truncated := boundedErrorMessage(message)
+	if !truncated || len(bounded) > maxErrorMessageBytes || !strings.HasPrefix(bounded, "failure ") || !strings.Contains(bounded, "界") {
+		t.Fatalf("boundedErrorMessage() = %q (%d bytes), %t", bounded, len(bounded), truncated)
+	}
+	if got, truncated := boundedErrorMessage("\n failure\t details\x00 \r\n"); got != "failure details" || truncated {
+		t.Fatalf("boundedErrorMessage() = %q, %t", got, truncated)
 	}
 }
 

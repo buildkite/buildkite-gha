@@ -29,6 +29,7 @@ func plugin(args []string, stdout, stderr io.Writer, version, clientVersion stri
 func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer, version, clientVersion string, runner transport.Runner) (code int) {
 	started := time.Now()
 	details := &commandTelemetryDetails{}
+	stderr = details.captureErrors(stderr)
 	defer func() {
 		outcome := telemetryOutcome(code, "", ctx.Err())
 		emitCommandTelemetry(ctx, telemetry.CommandPluginImport, outcome, clientVersion, time.Since(started), details.forOutcome(outcome))

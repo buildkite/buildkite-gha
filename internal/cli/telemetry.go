@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"slices"
 	"time"
@@ -13,7 +14,10 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 )
 
-const maxCommandTelemetryDiagnostics = 20
+const (
+	maxCommandTelemetryDiagnostics = 20
+	maxCommandErrorCaptureBytes    = 64 << 10
+)
 
 func emitCommandTelemetry(ctx context.Context, command telemetry.Command, outcome telemetry.Outcome, version string, duration time.Duration, details telemetry.Details) {
 	client, err := telemetry.New(telemetry.Config{
@@ -56,6 +60,11 @@ type commandTelemetryDetails struct {
 	failureCode  telemetry.FailureCode
 	diagnostics  []telemetry.Diagnostic
 	seen         map[string]int
+	errorOutput  boundedTailBuffer
+}
+
+func (d *commandTelemetryDetails) captureErrors(writer io.Writer) io.Writer {
+	return errorCaptureWriter{writer: writer, capture: &d.errorOutput}
 }
 
 func (d *commandTelemetryDetails) setFailurePhase(phase telemetry.FailurePhase) {
@@ -136,7 +145,10 @@ func (d *commandTelemetryDetails) forOutcome(outcome telemetry.Outcome) telemetr
 	if code == "" {
 		code = telemetry.FailureCodeUnknown
 	}
-	return telemetry.Details{FailurePhase: phase, FailureCode: code, Diagnostics: slices.Clone(d.diagnostics)}
+	return telemetry.Details{
+		FailurePhase: phase, FailureCode: code, Diagnostics: slices.Clone(d.diagnostics),
+		ErrorMessage: string(d.errorOutput.bytes), ErrorMessageTruncated: d.errorOutput.truncated,
+	}
 }
 
 func (d *commandTelemetryDetails) telemetryDetails() telemetry.Details {
@@ -182,4 +194,34 @@ func telemetryPhase(stage string) telemetry.FailurePhase {
 	default:
 		return telemetry.FailurePhaseUnknown
 	}
+}
+
+type errorCaptureWriter struct {
+	writer  io.Writer
+	capture *boundedTailBuffer
+}
+
+func (w errorCaptureWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	w.capture.Write(p[:n])
+	return n, err
+}
+
+type boundedTailBuffer struct {
+	bytes     []byte
+	truncated bool
+}
+
+func (b *boundedTailBuffer) Write(p []byte) {
+	if len(p) >= maxCommandErrorCaptureBytes {
+		b.bytes = append(b.bytes[:0], p[len(p)-maxCommandErrorCaptureBytes:]...)
+		b.truncated = true
+		return
+	}
+	if overflow := len(b.bytes) + len(p) - maxCommandErrorCaptureBytes; overflow > 0 {
+		copy(b.bytes, b.bytes[overflow:])
+		b.bytes = b.bytes[:len(b.bytes)-overflow]
+		b.truncated = true
+	}
+	b.bytes = append(b.bytes, p...)
 }

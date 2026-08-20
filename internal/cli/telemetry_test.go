@@ -27,6 +27,7 @@ func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
 			DurationMS    int64  `json:"duration_ms"`
 			FailurePhase  string `json:"failure_phase"`
 			FailureCode   string `json:"failure_code"`
+			ErrorMessage  string `json:"error_message"`
 		} `json:"properties"`
 	}
 	events := make(chan event, 2)
@@ -60,8 +61,11 @@ func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
 			t.Fatalf("run(%q) code = %d, stderr = %q; want %d", test.args, code, stderr.String(), test.wantCode)
 		}
 		received := <-events
-		if received.Event != "pipelines:buildkite_gha:command_completed" || received.Properties.Command != test.wantCommand || received.Properties.Outcome != "usage_error" || received.Properties.ClientVersion != "test-version" || received.Properties.DurationMS < 0 || received.Properties.FailurePhase != "configuration" || received.Properties.FailureCode != "unknown" {
+		if received.Event != "pipelines:buildkite_gha:command_completed" || received.Properties.Command != test.wantCommand || received.Properties.Outcome != "usage_error" || received.Properties.ClientVersion != "test-version" || received.Properties.DurationMS < 0 || received.Properties.FailurePhase != "configuration" || received.Properties.FailureCode != "unknown" || !strings.Contains(received.Properties.ErrorMessage, "unknown") && !strings.Contains(received.Properties.ErrorMessage, "does not accept arguments") {
 			t.Fatalf("run(%q) event = %#v", test.args, received)
+		}
+		if strings.ContainsAny(received.Properties.ErrorMessage, "\r\n\t") {
+			t.Fatalf("run(%q) error_message is not normalized: %q", test.args, received.Properties.ErrorMessage)
 		}
 	}
 }
@@ -214,5 +218,25 @@ func TestRunJobUntypedFailurePhaseIsUnknown(t *testing.T) {
 	details := (&commandTelemetryDetails{}).forOutcome(telemetry.OutcomeFailure)
 	if details.FailurePhase != telemetry.FailurePhaseUnknown || details.FailureCode != telemetry.FailureCodeUnknown {
 		t.Fatalf("run-job fallback details = %#v", details)
+	}
+}
+
+func TestCommandTelemetryCapturesBoundedErrorTailWithoutChangingOutput(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	var stderr bytes.Buffer
+	writer := details.captureErrors(&stderr)
+	message := "omitted" + strings.Repeat("x", maxCommandErrorCaptureBytes) + " final failure"
+	if _, err := writer.Write([]byte(message)); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != message {
+		t.Fatal("error capture changed stderr output")
+	}
+	got := details.forOutcome(telemetry.OutcomeFailure)
+	if !got.ErrorMessageTruncated || len(got.ErrorMessage) != maxCommandErrorCaptureBytes || !strings.HasSuffix(got.ErrorMessage, " final failure") || strings.Contains(got.ErrorMessage, "omitted") {
+		t.Fatalf("captured error = %q (%d bytes), truncated = %t", got.ErrorMessage, len(got.ErrorMessage), got.ErrorMessageTruncated)
+	}
+	if success := details.forOutcome(telemetry.OutcomeSuccess); success.ErrorMessage != "" || success.ErrorMessageTruncated {
+		t.Fatalf("successful telemetry included error output: %#v", success)
 	}
 }

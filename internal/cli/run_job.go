@@ -44,6 +44,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	started := time.Now()
 	var result gharuntime.JobResult
 	details := &commandTelemetryDetails{}
+	stderr = details.captureErrors(stderr)
 	defer func() {
 		outcome := telemetryOutcome(code, result.Conclusion, ctx.Err())
 		emitCommandTelemetry(ctx, telemetry.CommandRunJob, outcome, clientVersion, time.Since(started), details.forOutcome(outcome))

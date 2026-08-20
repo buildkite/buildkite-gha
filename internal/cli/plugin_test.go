@@ -90,6 +90,9 @@ func TestPluginTelemetryReportsUnprovenActionRuntime(t *testing.T) {
 	if properties.Command != telemetry.CommandPluginImport || properties.Outcome != telemetry.OutcomeSuccess {
 		t.Fatalf("event = %#v", properties)
 	}
+	if properties.ErrorMessage != "" || properties.ErrorMessageTruncated {
+		t.Fatalf("successful event included error output: %#v", properties)
+	}
 	want := []telemetry.Diagnostic{{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: telemetry.SeverityWarning}}
 	if !reflect.DeepEqual(properties.Diagnostics, want) {
 		t.Fatalf("diagnostics = %#v, want %#v", properties.Diagnostics, want)
