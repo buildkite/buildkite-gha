@@ -1,107 +1,110 @@
 # GitHub Actions service container parity
 
-## Outcome
+## Status
 
-`buildkite-gha` supports GitHub-compatible Linux service containers in the
-production hosted profile. The [compatibility reference](../compatibility.md#containers-and-services)
-owns the supported syntax and limits. The [security model](../security.md#isolate-the-whole-job)
-owns the isolation and credential boundaries.
+Linux jobs support GitHub-compatible service containers in the production
+`hosted` profile.
 
-Implicit GHCR authentication remains unsupported because Buildkite does not yet
-provide a policy-scoped workflow token for registry login. Use explicit
-credentials.
+The [compatibility reference](../compatibility.md#containers-and-services) owns
+the supported fields and limits. The [security model](../security.md#isolate-the-whole-job)
+owns isolation and credential guidance.
+
+Implicit GHCR login is not wired into service image pulls. Use explicit
+registry credentials.
 
 ## Compatibility target
 
-The implementation follows the public GitHub Actions contract and
-`actions/runner` at commit
-[`02eb22aaa07eac26f299aa3b46d9e69a478a66d1`](https://github.com/actions/runner/tree/02eb22aaa07eac26f299aa3b46d9e69a478a66d1).
-When documentation and runner internals differ:
+The implementation follows GitHub's public workflow contract and
+[`actions/runner` at commit `02eb22a`](https://github.com/actions/runner/tree/02eb22aaa07eac26f299aa3b46d9e69a478a66d1).
 
-1. Follow documented workflow syntax and documented rejections.
+When the documentation and runner internals differ:
+
+1. Follow the documented workflow syntax and rejections.
 1. Match observable runner behavior for evaluation, Docker arguments,
-   networking, readiness, context, and lifecycle.
+   networking, readiness, contexts, and cleanup.
 1. Keep stricter Buildkite controls when they do not change workflow behavior,
-   including redaction, ownership labels, and cleanup verification.
+   including redaction, ownership labels, and cleanup checks.
 
-Linux native Docker is the only target. Container hooks, Kubernetes
-translation, Windows containers, Docker API emulation, and Docker on macOS are
-separate projects.
+This work targets native Docker on Linux. Windows containers, Docker on macOS,
+Kubernetes translation, container hooks, and Docker API emulation are separate
+projects.
 
 ## Design
 
-### Evaluation and admission
+### Evaluation
 
-The workflow and immutable job plan own every service field: image,
-credentials, environment, ports, volumes, options, command, and entrypoint.
-Static values resolve during matrix expansion. Verified `needs` values and
-secrets resolve during job initialization, before Docker resources are created.
+The workflow and immutable job plan own each service's image, credentials,
+environment, ports, volumes, options, command, and entrypoint.
 
-| Field | Expression contexts |
-| --- | --- |
-| Service fields | `github`, `inputs`, `vars`, `needs`, `strategy`, `matrix` |
-| Credentials | `github`, `vars`, `secrets`, `env` |
-
-Whole-map `fromJSON` expressions preserve declaration order and are structurally
-validated before Docker use. They cannot introduce credentials or unproven
-capabilities. Empty images skip the service.
+Static values resolve during matrix expansion. Verified `needs` outputs and
+secrets resolve when the job starts, before Docker resources are created.
+Whole-map `fromJSON` expressions are validated before Docker receives them and
+cannot add credentials or unproven capabilities.
 
 ### Docker behavior
 
-Service options and commands use a .NET-compatible argument tokenizer. They do
-not invoke a shell or perform environment, command, or backtick expansion. All
+Service options and commands use an argument tokenizer. They do not invoke a
+shell or expand environment variables, commands, or backticks.
+
 Docker options pass through except `--network` and `--net`, matching GitHub's
-documented restriction.
+restriction. Named volumes, anonymous volumes, and absolute bind mounts keep
+their Docker behavior.
 
-Each job receives a private bridge network. Container jobs and Dockerfile
-actions reach services by service ID. Host jobs use published ports. The
-`job.services` context exposes container ID, network, and port mappings.
+Each job gets a private bridge network:
 
-Named, anonymous, and absolute bind volumes retain Docker semantics. The
-runtime snapshots and inspects volumes so cleanup removes only resources created
-by the job.
+- container jobs reach services by service ID
+- host jobs use published ports
+- `job.services` exposes container IDs, the network, and port mappings
 
-### Authentication and isolation
+### Credentials and isolation
 
-Explicit registry credentials resolve inside the destination job. Passwords use
-standard input, values are masked before use, and Docker receives a private
-per-job configuration. Login and pull retries are bounded and cancellation-aware.
-Cleanup removes the configuration and verifies that no credential-bearing state
-remains.
+Explicit registry credentials resolve in the destination job. Passwords pass
+to Docker through standard input. The runtime uses a private, per-job Docker
+configuration and checks that cleanup removes it.
 
-Broad Docker options, bind mounts, and privileged containers do not create a
-security boundary. The hosted queue must provide a disposable machine, no
-ambient protected credentials, host resource limits, and an external firewall.
+Docker options can still grant privileges, mount host paths, and publish ports.
+Containers are packaging, not a security boundary. Use a disposable machine,
+remove ambient protected credentials, and enforce host resource and network
+limits around the whole job.
 
-### Readiness and cleanup
+### Readiness
 
-Services start in declaration order. Services with Docker health checks wait
-with bounded exponential backoff; other services are ready after a successful
-start. Failures include bounded status, health, port, and log diagnostics.
+Services start in declaration order. A service with a Docker health check waits
+until it becomes healthy. A service without one is ready after Docker starts
+it. Failures include bounded status, health, port, and log details.
 
-Teardown removes the job container first, emits masked and bounded service logs,
-then removes services in declaration order, the network, newly created volumes,
-and Docker configuration. Unguessable owner labels identify containers and
-networks. Remaining owned resources fail the job.
+### Cleanup
 
-## Delivered slices
+Teardown removes resources in this order:
 
-| Slice | Result |
+1. the job container
+1. services, after collecting masked and bounded logs
+1. the job network
+1. volumes created by the job
+1. the private Docker configuration
+
+Unguessable owner labels identify job containers and networks. If an owned
+resource remains, the job fails.
+
+## Delivered work
+
+| Area | Result |
 | --- | --- |
-| Static Docker fidelity | Options, command, entrypoint, volumes, argument ordering, health checks, and compile-time expressions. |
-| Explicit credentials | Compiler-owned secret provenance, isolated registry login, retries, masking, and cleanup. |
-| Runtime expressions | `needs` fields, ordered whole-map expressions, empty-image skipping, and complete service context. |
-| Hosted proof | Exact-commit Buildkite execution and a shared GitHub Actions differential fixture covering networking, ports, health, command, entrypoint, volumes, PostgreSQL, and Redis. |
+| Docker behavior | Options, commands, entrypoints, volumes, argument order, health checks, and compile-time expressions. |
+| Registry credentials | Static secret authority, isolated login, bounded retries, masking, and verified cleanup. |
+| Runtime expressions | `needs` values, ordered whole-map expressions, empty-image skipping, and the service context. |
+| Hosted proof | Exact-commit Buildkite execution and a shared GitHub Actions fixture for networking, ports, health, commands, volumes, PostgreSQL, and Redis. |
 
 ## Verification
 
 Coverage includes parser, compiler, schema, Docker argument, lifecycle, cleanup,
-authenticated registry, and live Docker tests. The aggregate local gate is:
+registry authentication, and live Docker tests.
+
+Run the local gate with:
 
 ```sh
 mise run check
 ```
 
-Hosted verification uses the `container-runtime` compatibility proof. The same
-service fixture runs through GitHub Actions and the Buildkite runtime and records
-only externally observable behavior.
+The hosted `container-runtime` proof runs the same service fixture through
+GitHub Actions and Buildkite, then compares observable behavior.

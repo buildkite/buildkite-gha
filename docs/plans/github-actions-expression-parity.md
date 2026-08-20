@@ -1,244 +1,115 @@
 # GitHub Actions expression parity
 
-## Problem
+## Status
 
-`buildkite-gha` has four expression evaluators with different semantics:
+The shared expression evaluator is delivered. Conditions, runtime
+interpolation, compile-time expressions, and action input defaults now use the
+same semantic core.
 
-- compile-time graph expressions in `internal/expression/compile.go`
-- job and step conditions in `internal/expression/condition.go`
-- runtime interpolation in `internal/expression/runtime.go`
-- action input defaults in `internal/expression/action_input_default.go`
+The [compatibility reference](../compatibility.md#expressions-and-contexts)
+lists the expressions and contexts supported today. This plan records the
+design and the remaining limits; it does not duplicate that list.
 
-The parser represents most GitHub Actions expression syntax, but the evaluators
-implement different subsets. Adding each operator or function to each evaluator
-would increase semantic drift and make parity difficult to verify.
+## Original problem
 
-Parity means matching GitHub's expression language where `buildkite-gha` has an
-equivalent value and execution phase. It does not mean inventing values for
-GitHub-specific contexts or allowing every context in every workflow key.
+`buildkite-gha` once evaluated expressions separately in four places:
 
-## Approach
+- compile-time graph expressions
+- job and step conditions
+- runtime interpolation
+- action input defaults
 
-Keep actionlint as the parser. Replace duplicated semantic logic with one
-internal evaluator, fixed workflow-surface policies, and phase-specific value
-resolvers.
+Those paths accepted different subsets of GitHub's expression language. Adding
+an operator or function four times would have increased drift and made results
+harder to verify.
 
-The evaluator owns:
+Parity means matching GitHub where Buildkite has the same value at the same
+stage of execution. It does not mean inventing GitHub-only values or making
+every context available in every workflow key.
+
+## Design
+
+Actionlint remains the parser. One internal evaluator owns:
 
 - values, truthiness, and conversion
 - property and index access
 - operators and short-circuiting
 - pure built-in functions
 
-Each entry point selects a fixed workflow surface and evaluation phase. The
-surface policy defines statically legal contexts and special functions. The
-phase resolver supplies values available at compile time or runtime. Policies
-do not resolve concrete values or perform authority analysis.
+Each call site selects a fixed workflow surface and an evaluation phase. The
+surface decides which contexts and functions are legal. The phase resolver
+supplies values available during compilation or at runtime.
 
-A separate validator traverses every AST branch before evaluation so
-short-circuiting cannot hide unsupported syntax. Invoke validation only at the
-existing validation points until a delivery slice intentionally changes that
-contract.
+A separate validator visits every syntax-tree branch before evaluation. This
+prevents short-circuiting from hiding unsupported syntax.
 
-Before plan serialization, a compile-time reducer replaces every
-`github.event`-dependent subtree that can be resolved from the immutable event
-snapshot. It then validates the residual expression against its runtime
-surface. Plan construction rejects any retained `github.event` reference.
+Before a plan is serialized, the compiler reduces every resolvable
+`github.event` expression from the immutable event snapshot. It then validates
+the remaining expression for runtime use. Plans cannot retain `github.event`.
 
-Condition wrappers continue to own the implicit `success()` guard and status
-function detection. Keep template scanning, rendered-string conversion, and
-typed workflow-key conversion outside the evaluator. Keep status functions and
-`hashFiles()` as runtime callbacks.
+Condition wrappers still own the implicit `success()` guard and status
+functions. Template rendering, typed workflow fields, and `hashFiles()` remain
+outside the pure evaluator.
 
 ## Security boundaries
 
-Expression parity must preserve these invariants:
+Expression support must not create authority. These rules still apply:
 
-- Authority analysis remains independent of policy validation and semantic
-  evaluation.
-- Before any newly accepted AST shape reaches evaluation, `SecretReferences`
-  and `ReferencesGitHubToken` must enumerate its authority statically or reject
-  it.
-- Every expression-bearing field retained in a plan is scanned for both
-  `secrets.<name>` and `github.token`.
-- Each secret reference must name exactly one statically identifiable secret
-  before execution.
-- Dynamic, filtered, or whole-context `secrets` access remains unsupported.
-- Direct `github.token` references use the same scoped workflow-token contract
-  as `secrets.GITHUB_TOKEN`. They are unavailable outside step execution.
-- The exact step-runtime call `toJSON(github)` is statically treated as a
-  `github.token` reference and serializes only the retained context. Other
-  whole-context or dynamic `github` access remains unsupported.
-- `github.event` remains compile-time only because generated plans do not retain
-  the event payload.
-- Missing Buildkite equivalents remain unsupported instead of receiving
-  fabricated GitHub values.
+- Authority analysis is separate from syntax validation and evaluation.
+- Every plan expression is scanned for `secrets.<name>` and `github.token`.
+- A secret reference must name one static secret before execution.
+- Dynamic, filtered, projected, and whole-context secret access is rejected.
+- `github.token` uses the same scoped token as `secrets.GITHUB_TOKEN` and is
+  available only while a step runs.
+- The exact step call `toJSON(github)` counts as a token reference because the
+  retained context includes `token`.
+- `github.event` stays compile-time only because plans do not retain the event
+  payload.
+- Missing Buildkite equivalents remain unsupported.
 
-## Delivery slices
+See the [security model](../security.md) for the current credential boundaries.
 
-### 1. Lock contracts and conformance fixtures
+## Delivered work
 
-Add table-driven tests from GitHub's expression documentation and the open
-source Actions runner. Cover:
+The implementation now provides:
 
-- literal parsing and string escaping
-- truthiness and result conversion
-- numeric coercion, `NaN`, and case-insensitive string comparison
-- operator precedence and short-circuiting
-- legal missing members versus prohibited contexts
-- property access, indexing, filters, and aggregate identity
-- built-in function arguments, laziness, and results
-- workflow-key context and special-function availability
-- compile-time event reduction and the no-event-in-plan invariant
-- secret and token authority for every accepted AST shape
+- one shared evaluator and policy validator
+- GitHub-style truthiness, numeric coercion, comparisons, and
+  operand-returning logical operators
+- core pure functions, including lazy `case()` evaluation
+- computed indexes and `.*` projections
+- whole `matrix`, `needs`, and step-scoped `steps` objects where their phase
+  permits them
+- typed controls for step timeouts and `continue-on-error`
+- compile-time event reduction with a no-event-in-plan invariant
+- static secret and token analysis for every accepted expression shape
+- local conformance fixtures and a manually dispatched GitHub differential
+  oracle
 
-Record parser feasibility explicitly. Pinned actionlint supports `.*` filters
-but not `[*]`; bracket wildcard parity requires a parser upgrade or a narrow
-parser extension before implementation.
+## Deliberate limits
 
-Add a manually dispatched GitHub-hosted differential oracle following the
-repository's existing oracle workflow pattern. Local fixtures are the required
-gate. Run the hosted oracle when semantics change; hosted proofs remain
-optional for local development and the default check gate.
+- The parser accepts `.*` projections but not the equivalent `[*]` spelling.
+- Contexts remain specific to each workflow key and execution phase.
+- Runtime job names remain out of scope because Buildkite labels are fixed
+  during compilation.
+- Reusable-workflow inputs that depend on compound `needs` expressions remain
+  unsupported where no runtime call job exists.
+- Buildkite does not fabricate GitHub-only values.
 
-Include the exact `case()` contract: 3–255 odd-numbered arguments, Boolean
-predicates, and lazy evaluation through the first match and selected value.
-
-### 2. Consolidate evaluation without changing behavior
-
-Add one private recursive evaluator, shared value helpers, a non-evaluating
-policy validator, fixed internal surface identifiers, and phase resolvers.
-
-Route existing evaluators through the shared semantic core, but invoke
-validation only at existing validation call sites. Preserve current strict
-condition equality and Boolean logical results with temporary compatibility
-operations. Preserve direct-reference-only runtime interpolation and restricted
-action-default policies.
-
-Keep exported functions, diagnostics, validation timing, implicit condition
-guards, and authority analyzers unchanged. Remove duplicated recursive
-implementations only after existing behavior and security tests pass unchanged.
-
-### 3. Enforce phase and authority boundaries
-
-Add compile-time partial reduction for event-backed conditions. Reduce every
-resolvable `github.event` subtree, validate the residual expression for its
-runtime surface, and reject any plan that still contains `github.event`.
-
-Scan every expression-bearing plan field for static secrets and
-`github.token`. Extend scanners to reject filters, dynamic indexes, and whole
-objects unless they can prove the exact required authority. Add regressions for
-`ArrayDerefNode` and every new AST shape before later slices enable it.
-
-### 4. Match core values and operators
-
-Implement GitHub's language semantics once:
-
-- falsy `null`, `false`, numeric zero, `NaN`, and empty strings
-- loose equality and numeric coercion
-- `<`, `<=`, `>`, and `>=`
-- case-insensitive string comparison
-- operand-returning `&&` and `||`
-- legal missing members evaluating to null
-
-Enable semantics by surface, not globally. Remove strict mixed-type condition
-rejection after differential fixtures prove the GitHub results. Keep prohibited
-contexts and values unavailable across the immutable phase boundary as errors.
-
-GitHub evaluates job `if` before matrix expansion. Do not expose `matrix` or
-`strategy` there. Step `if` may use both contexts.
-
-### 5. Add pure built-in functions
-
-Implement and test:
-
-- primitive conversion for `startsWith()`, `contains()`, and `endsWith()`
-- array membership for `contains()`
-- `format()`
-- `join()`
-- `toJSON()`
-- `fromJSON()`
-- lazy, ordered `case()` evaluation
-
-Enable each function only where the surface policy and available values permit
-correct evaluation. Keep status functions and `hashFiles()` phase-specific.
-
-### 6. Add indexing, filters, and context shapes
-
-Support:
-
-- computed object indexes
-- numeric array indexes
-- missing and out-of-range indexes
-- `.*` filters
-- chained filter projection
-
-Projection omits missing children and preserves nested arrays. A later wildcard
-may traverse and flatten one collection level. Resolve the parser prerequisite
-before adding `[*]` as equivalent syntax.
-
-Add whole `matrix`, `steps`, and `needs` objects, strategy values, typed inputs,
-and lifecycle-specific GitHub values where their phases support them. Arrays
-and objects compare by instance, matching GitHub.
-
-### 7. Expand expressions by workflow key
-
-Replace direct-reference-only evaluation incrementally:
-
-1. step `run`, `env`, `with`, `name`, shell, and working directory
-2. step timeout and `continue-on-error`
-3. job outputs, defaults, and supported runtime job fields
-4. reusable-workflow values
-
-Use GitHub's context-availability table for each key. Do not add a permissive
-global runtime policy.
-
-Timeout and `continue-on-error` require parser, workflow-model, plan-schema, and
-lifecycle evaluation changes. Treat those as typed-key work rather than string
-interpolation. Runtime job names are out of scope because Buildkite labels are
-currently fixed during compilation; support them only with a separate label
-update design.
-
-Reusable-workflow caller inputs and defaults resolve only while constructing
-the graph. Caller expressions may use graph-time `github`, `vars`, matrix, and
-parent reusable-workflow inputs. Defaults may use graph-time `github` and
-`vars`. `needs`-dependent caller inputs, defaults that require original
-workflow-dispatch input values, and transformed workflow outputs remain
-unsupported because the compiler has no equivalent values or runtime call job.
+The compatibility reference owns the exact, current list.
 
 ## Validation
 
-Every delivery slice must run:
+Changes to expression semantics should run:
 
 - expression conformance and surface-policy tests
-- secret and token authority regression tests
+- secret and token authority tests
 - the starter-workflow corpus
 - `mise run check`
-- a compatibility documentation audit
+- a compatibility documentation review
 
-Run the GitHub-hosted differential oracle manually when semantics change. An
-unavailable hosted proof blocks a parity claim for the affected behavior, but
-does not block local development or the default check gate.
-
-The starter-workflow corpus currently exercises mostly direct context
-interpolation and `hashFiles()`. Use it as a regression gate, not as the measure
-of complete expression parity.
-
-## Completion criteria
-
-Expression parity is complete when:
-
-- complete expressions used by typed keys produce GitHub-equivalent typed
-  values
-- template-valued keys produce GitHub-equivalent rendered strings
-- conditions produce GitHub-equivalent Boolean results
-- each supported workflow key exposes the same contexts and functions where
-  Buildkite has equivalent data and timing
-- legal missing members evaluate as null and render as an empty string
-- prohibited contexts, unprovable authority, and unavailable phase data fail
-  before plan execution
-- the differential oracle has no unexplained differences for claimed behavior
-- `docs/compatibility.md` lists only deliberate, verified limitations
+Run the GitHub-hosted differential oracle when semantics change. It is not part
+of the network-free local gate.
 
 ## References
 
