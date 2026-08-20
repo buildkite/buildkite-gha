@@ -1728,7 +1728,6 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandProc
 	case metadata.RuntimeComposite:
 		inputs := map[string]string{}
 		stepEnv := map[string]string{}
-		bindActionReferenceContext(&eval, &lock)
 		compositeEvalErr := inheritedEvalErr
 		if compositeEvalErr == nil {
 			stepEnv, compositeEvalErr = evaluate(step.Env, eval)
@@ -1745,6 +1744,7 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandProc
 			preparationTimeout = &remotePreparationTimeout{step: step, eval: eval}
 			defer preparationTimeout.close()
 		}
+		bindActionReferenceContext(&eval, &lock)
 		eval.Inputs = inputs
 		// github.action_path scopes to this composite invocation for child pre
 		// hooks too, mirroring the main-phase overlay in runCompositeMetadata.
