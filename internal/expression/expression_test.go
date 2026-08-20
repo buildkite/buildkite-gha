@@ -706,22 +706,25 @@ func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
 
 func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 	context := Context{GitHub: map[string]any{
-		"action_path":      "/workspace/actions/composite",
-		"base_ref":         "main",
-		"job":              "build",
-		"ref_name":         "feature",
-		"ref_type":         "branch",
-		"repository_owner": "buildkite",
-		"workflow":         "CI",
+		"action_path":       "/workspace/actions/composite",
+		"action_ref":        "v2",
+		"action_repository": "owner/action",
+		"base_ref":          "main",
+		"job":               "build",
+		"ref_name":          "feature",
+		"ref_type":          "branch",
+		"repository_owner":  "buildkite",
+		"workflow":          "CI",
 	}}
 	for template, want := range map[string]string{
-		"${{ github.action_path }}/script.sh": "/workspace/actions/composite/script.sh",
-		"${{ github.base_ref }}":              "main",
-		"${{ github.job }}":                   "build",
-		"${{ github.ref_name }}":              "feature",
-		"${{ github.ref_type }}":              "branch",
-		"${{ github.repository_owner }}":      "buildkite",
-		"${{ github.workflow }}":              "CI",
+		"${{ github.action_path }}/script.sh":                      "/workspace/actions/composite/script.sh",
+		"${{ github.action_repository }}@${{ github.action_ref }}": "owner/action@v2",
+		"${{ github.base_ref }}":                                   "main",
+		"${{ github.job }}":                                        "build",
+		"${{ github.ref_name }}":                                   "feature",
+		"${{ github.ref_type }}":                                   "branch",
+		"${{ github.repository_owner }}":                           "buildkite",
+		"${{ github.workflow }}":                                   "CI",
 	} {
 		if got, err := EvaluateStep(template, context); err != nil || got != want {
 			t.Errorf("EvaluateStep(%q) = %q, %v; want %q", template, got, err, want)

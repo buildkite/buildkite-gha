@@ -5403,6 +5403,34 @@ runs:
 	}
 }
 
+func TestRemoteCompositeGitHubActionIdentityExpressionsAreInvocationScoped(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: action identity\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "composite/action.yml", `name: Identity
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        ACTION_USER_AGENT: ${{ github.action_repository }}@${{ github.action_ref }}
+      run: test "$ACTION_USER_AGENT" = owner/repo@v1
+`)
+	digest := digestTree(t, remote)
+	lockID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "identity", Kind: "uses", Uses: remoteLifecycleUses("composite"), Action: &plan.ActionSelector{Lock: lockID},
+	}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "composite", digest, nil)}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	if result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
 func TestExpressionTimeoutBoundsNestedCompositePre(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

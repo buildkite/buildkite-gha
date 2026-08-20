@@ -1728,6 +1728,7 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandProc
 	case metadata.RuntimeComposite:
 		inputs := map[string]string{}
 		stepEnv := map[string]string{}
+		bindActionReferenceContext(&eval, &lock)
 		compositeEvalErr := inheritedEvalErr
 		if compositeEvalErr == nil {
 			stepEnv, compositeEvalErr = evaluate(step.Env, eval)
@@ -2075,6 +2076,7 @@ func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandPro
 	eval.HashFiles = nil
 	eval.Inputs = inputs
 	eval.Steps = make(map[string]expression.StepStatus)
+	bindActionReferenceContext(&eval, actionLock)
 	compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
 	compositeProcessEnv["GITHUB_ACTION_PATH"] = actionPath
 	// github.action_path is scoped to this composite invocation; nested
@@ -2217,6 +2219,16 @@ func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandPro
 		result.Outputs[name] = value
 	}
 	return result, runErr
+}
+
+func bindActionReferenceContext(eval *expression.Context, lock *plan.ActionLock) {
+	eval.GitHub = cloneAnyMap(eval.GitHub)
+	eval.GitHub["action_repository"] = ""
+	eval.GitHub["action_ref"] = ""
+	if lock != nil && lock.Source == "github" {
+		eval.GitHub["action_repository"] = lock.Repository
+		eval.GitHub["action_ref"] = lock.RequestedRef
+	}
 }
 
 func evaluateMap(values map[string]string, context expression.Context) (map[string]string, error) {
