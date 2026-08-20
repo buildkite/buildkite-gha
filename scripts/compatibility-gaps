@@ -46,11 +46,12 @@ while IFS=$'\t' read -r id title workflow event mode test_name; do
   status=0
   report="$work/$id.out"
   if [[ "$mode" == profile ]]; then
+    report_stderr="$work/$id.err"
     (
       cd "$fixture_root"
       "$work/buildkite-gha" validate --profile hosted --format json \
         --event "$event" ".github/workflows/$workflow"
-    ) >"$report" 2>&1 || status=$?
+    ) >"$report" 2>"$report_stderr" || status=$?
     result="$(jq -r '.result // "invalid-report"' "$report" 2>/dev/null || echo invalid-report)"
     if [[ "$status" == 0 && "$result" == admitted ]]; then
       outcome=passing
@@ -80,6 +81,7 @@ while IFS=$'\t' read -r id title workflow event mode test_name; do
     icon='⚠️'
     if [[ "$mode" == profile ]]; then
       jq -r '.diagnostics[]? | "  \(.code): \(.message)"' "$report" >&2 || true
+      sed -n '1,20p' "$report_stderr" >&2
     else
       sed -n '1,20p' "$report" >&2
     fi
