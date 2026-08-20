@@ -403,10 +403,12 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 		return built, nil
 	}
 	actionConditions := make([]string, len(actionIndexes))
+	actionEnvironments := make([]map[string]string, len(actionIndexes))
 	for i, stepIndex := range actionIndexes {
 		actionConditions[i] = steps[stepIndex].Condition
+		actionEnvironments[i] = steps[stepIndex].Env
 	}
-	compiled, err := compileActionInvocationsWithConditions(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs, actionConditions)
+	compiled, err := compileActionInvocationsWithStepContext(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs, actionConditions, actionEnvironments)
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}

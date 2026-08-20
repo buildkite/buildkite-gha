@@ -1259,6 +1259,17 @@ func TestEvaluateKnownInputConditionShortCircuitsRuntimeValues(t *testing.T) {
 	}
 }
 
+func TestEvaluateKnownConditionUsesKnownEnvironment(t *testing.T) {
+	run, known, err := EvaluateKnownCondition("env.RUN_PRE == 'true'", ConditionContext{Env: map[string]string{"RUN_PRE": "false"}}, nil)
+	if err != nil || run || !known {
+		t.Fatalf("EvaluateKnownCondition() = %t, %t, %v, want false, true, nil", run, known, err)
+	}
+	_, known, err = EvaluateKnownCondition("env.RUNTIME == 'true'", ConditionContext{Env: map[string]string{"RUN_PRE": "false"}}, nil)
+	if err != nil || known {
+		t.Fatalf("EvaluateKnownCondition() unavailable env = _, %t, %v, want _, false, nil", known, err)
+	}
+}
+
 func TestGitHubTokenRequiresEvaluationShortCircuitsKnownInputs(t *testing.T) {
 	context := Context{Inputs: map[string]string{"enabled": "false"}, GitHub: map[string]any{"server_url": "https://github.com"}}
 	for _, test := range []struct {

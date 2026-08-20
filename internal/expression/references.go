@@ -754,6 +754,11 @@ func evaluateKnownStepExpression(node actionlint.ExprNode, context Context, unkn
 				return nil, errKnownStepValueUnavailable
 			}
 			return resolveRuntimeReferenceWithMissingMembers(root, path, context)
+		case strings.EqualFold(root, "env") && len(path) == 1:
+			if _, ok := findStringValue(context.Env, path[0]); !ok {
+				return nil, errKnownStepValueUnavailable
+			}
+			return resolveRuntimeReferenceWithMissingMembers(root, path, context)
 		case strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "server_url"):
 			return resolveRuntimeReferenceWithMissingMembers(root, path, context)
 		default:

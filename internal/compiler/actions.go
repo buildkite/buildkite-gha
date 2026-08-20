@@ -216,10 +216,10 @@ func compileActionLocks(ctx context.Context, workspace string, actionSource Acti
 }
 
 func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
-	return compileActionInvocationsWithConditions(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil)
+	return compileActionInvocationsWithStepContext(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil, nil)
 }
 
-func compileActionInvocationsWithConditions(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, conditions []string) (actionCompilation, error) {
+func compileActionInvocationsWithStepContext(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, conditions []string, environments []map[string]string) (actionCompilation, error) {
 	if workspace == "" {
 		return actionCompilation{}, fmt.Errorf("workflow path must identify a repository root")
 	}
@@ -228,6 +228,9 @@ func compileActionInvocationsWithConditions(ctx context.Context, workspace strin
 	}
 	if conditions != nil && len(conditions) != len(refs) {
 		return actionCompilation{}, fmt.Errorf("action references and conditions have different lengths")
+	}
+	if environments != nil && len(environments) != len(refs) {
+		return actionCompilation{}, fmt.Errorf("action references and environments have different lengths")
 	}
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
@@ -264,7 +267,11 @@ func compileActionInvocationsWithConditions(ctx context.Context, workspace strin
 	var githubTokenActions []string
 	if suppliedInputs != nil {
 		for i, root := range roots {
-			requirements, err := root.inspectInvocation(suppliedInputs[i], true, serverURL)
+			var environment map[string]string
+			if environments != nil {
+				environment = knownValues(resolveKnownValues(environments[i], expression.Context{GitHub: map[string]any{"server_url": serverURL}}, nil))
+			}
+			requirements, err := root.inspectInvocation(suppliedInputs[i], true, serverURL, environment)
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
@@ -387,7 +394,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	return n, nil
 }
 
-func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string) (actionRequirements, error) {
+func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string, environment map[string]string) (actionRequirements, error) {
 	requirements := actionRequirements{requiredSecrets: map[string]bool{}}
 	for _, suppliedName := range sortedKeys(supplied) {
 		value := supplied[suppliedName]
@@ -416,7 +423,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		}
 		if workflowAuthored {
 			requirements.githubToken = requirements.githubToken || referencesToken
-			_, preparesInputs, preparationErr := n.preparationFields(serverURL)
+			_, preparesInputs, preparationErr := n.preparationFields(serverURL, environment)
 			if preparationErr != nil {
 				return actionRequirements{}, preparationErr
 			}
@@ -433,12 +440,12 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	if n.native {
 		return requirements, nil
 	}
-	effectiveInputs, unknownInputs, defaultsRequireToken, err := n.effectiveInputs(supplied, serverURL, workflowAuthored)
+	effectiveInputs, unknownInputs, defaultsRequireToken, err := n.effectiveInputs(supplied, serverURL, workflowAuthored, environment)
 	if err != nil {
 		return actionRequirements{}, err
 	}
 	requirements.githubToken = requirements.githubToken || defaultsRequireToken
-	_, preparesInputs, err := n.preparationFields(serverURL)
+	_, preparesInputs, err := n.preparationFields(serverURL, environment)
 	if err != nil {
 		return actionRequirements{}, err
 	}
@@ -454,11 +461,13 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		requirements.githubToken = requirements.githubToken || requiresToken
 	}
 	for i, step := range n.metadata.Runs.Steps {
-		run, known, err := compositeStepCondition(step.If, effectiveInputs, unknownInputs, serverURL)
+		run, known, err := compositeStepCondition(step.If, effectiveInputs, unknownInputs, environment, serverURL)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d condition: %w", i+1, err)
 		}
 		stepReachable := !known || run
+		stepEnvironment := knownValues(resolveKnownValues(step.Env, expression.Context{Inputs: effectiveInputs, Env: environment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs))
+		childEnvironment := mergeKnownValues(environment, stepEnvironment)
 		var child *actionNode
 		preparesEnvironment, preparesInputs := false, false
 		if step.Uses != "" {
@@ -466,7 +475,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			if child == nil {
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q is missing", i+1, step.Uses)
 			}
-			preparesEnvironment, preparesInputs, err = child.preparationFields(serverURL)
+			preparesEnvironment, preparesInputs, err = child.preparationFields(serverURL, childEnvironment)
 			if err != nil {
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 			}
@@ -513,8 +522,8 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
 			}
 		}
-		childInputs := resolveKnownCompositeValues(step.With, effectiveInputs, unknownInputs, serverURL)
-		childRequirements, err := child.inspectInvocation(childInputs, false, serverURL)
+		childInputs := resolveKnownValues(step.With, expression.Context{Inputs: effectiveInputs, Env: childEnvironment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs)
+		childRequirements, err := child.inspectInvocation(childInputs, false, serverURL, childEnvironment)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 		}
@@ -527,7 +536,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	return requirements, nil
 }
 
-func (n *actionNode) preparationFields(serverURL string) (environment, inputs bool, err error) {
+func (n *actionNode) preparationFields(serverURL string, knownEnvironment map[string]string) (environment, inputs bool, err error) {
 	if n.lock.Source != "github" {
 		return false, false, nil
 	}
@@ -537,19 +546,19 @@ func (n *actionNode) preparationFields(serverURL string) (environment, inputs bo
 	if n.metadata.Runs.Pre == "" {
 		return false, false, nil
 	}
-	run, known, err := expression.EvaluateKnownCondition(n.metadata.Runs.PreIf, expression.ConditionContext{GitHub: map[string]any{"server_url": serverURL}}, nil)
+	run, known, err := expression.EvaluateKnownCondition(n.metadata.Runs.PreIf, expression.ConditionContext{Env: knownEnvironment, GitHub: map[string]any{"server_url": serverURL}}, nil)
 	if err != nil {
 		return false, false, err
 	}
 	return true, !known || run, nil
 }
 
-func (n *actionNode) effectiveInputs(supplied map[string]string, serverURL string, workflowAuthored bool) (map[string]string, map[string]bool, bool, error) {
+func (n *actionNode) effectiveInputs(supplied map[string]string, serverURL string, workflowAuthored bool, environment map[string]string) (map[string]string, map[string]bool, bool, error) {
 	inputs := make(map[string]string, len(n.metadata.Inputs)+len(supplied))
 	unknown := map[string]bool{}
 	resolvedSupplied := supplied
 	if workflowAuthored {
-		resolvedSupplied = resolveKnownWorkflowValues(supplied, serverURL)
+		resolvedSupplied = resolveKnownValues(supplied, expression.Context{Env: environment, GitHub: map[string]any{"server_url": serverURL}}, nil)
 	}
 	for _, name := range sortedKeys(resolvedSupplied) {
 		value := resolvedSupplied[name]
@@ -594,67 +603,46 @@ func (n *actionNode) effectiveInputs(supplied map[string]string, serverURL strin
 	return inputs, unknown, requiresToken, nil
 }
 
-func resolveKnownWorkflowValues(values map[string]string, serverURL string) map[string]string {
-	resolved := make(map[string]string, len(values))
-	for name, value := range values {
-		resolved[name] = value
-		if !strings.Contains(value, "${{") {
-			continue
-		}
-		evaluated, known, err := expression.EvaluateKnownStep(value, expression.Context{GitHub: map[string]any{"server_url": serverURL}}, nil)
-		if err == nil && known {
-			resolved[name] = evaluated
-		}
-	}
-	return resolved
-}
-
-func compositeStepCondition(condition string, inputs map[string]string, unknownInputs map[string]bool, serverURL string) (bool, bool, error) {
+func compositeStepCondition(condition string, inputs map[string]string, unknownInputs map[string]bool, environment map[string]string, serverURL string) (bool, bool, error) {
 	conditionInputs := make(map[string]any, len(inputs))
 	for name, value := range inputs {
 		conditionInputs[name] = value
 	}
-	return expression.EvaluateKnownCondition(condition, expression.ConditionContext{Inputs: conditionInputs, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs)
+	return expression.EvaluateKnownCondition(condition, expression.ConditionContext{Inputs: conditionInputs, Env: environment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs)
 }
 
-func resolveKnownCompositeValues(values, inputs map[string]string, unknownInputs map[string]bool, serverURL string) map[string]string {
+func resolveKnownValues(values map[string]string, context expression.Context, unknownInputs map[string]bool) map[string]string {
 	resolved := make(map[string]string, len(values))
-	context := expression.Context{Inputs: inputs, GitHub: map[string]any{"server_url": serverURL}}
 	for _, name := range sortedKeys(values) {
 		original := values[name]
-		inputNames, dynamic, err := expression.TemplateInputReferences(original)
-		unknown := dynamic && len(unknownInputs) != 0
-		for _, inputName := range inputNames {
-			unknown = unknown || unknownInputs[inputName]
-		}
-		if unknown || err != nil {
-			resolved[name] = original
-			continue
-		}
-		for _, contextName := range []string{"env", "job", "matrix", "needs", "runner", "secrets", "services", "steps", "vars"} {
-			usesContext, contextErr := expression.TemplateUsesContext(original, contextName)
-			if contextErr != nil || usesContext {
-				unknown = true
-				break
-			}
-		}
-		if unknown {
-			resolved[name] = original
-			continue
-		}
-		usesUnknownGitHub, githubErr := expression.TemplateUsesGitHubPropertyOutside(original, "server_url")
-		usesSerializedContext, tokenErr := expression.ReferencesStepGitHubToken(original)
-		if githubErr != nil || tokenErr != nil || usesUnknownGitHub || usesSerializedContext {
-			resolved[name] = original
-			continue
-		}
-		value, err := expression.EvaluateStep(original, context)
-		if err != nil {
+		value, known, err := expression.EvaluateKnownStep(original, context, unknownInputs)
+		if err != nil || !known {
 			value = original
 		}
 		resolved[name] = value
 	}
 	return resolved
+}
+
+func knownValues(values map[string]string) map[string]string {
+	known := make(map[string]string, len(values))
+	for name, value := range values {
+		if !strings.Contains(value, "${{") {
+			known[name] = value
+		}
+	}
+	return known
+}
+
+func mergeKnownValues(base, overlay map[string]string) map[string]string {
+	merged := make(map[string]string, len(base)+len(overlay))
+	for name, value := range base {
+		merged[name] = value
+	}
+	for name, value := range overlay {
+		merged[name] = value
+	}
+	return merged
 }
 
 func inspectCompositeTemplate(field, template string, inputs map[string]string, unknownInputs map[string]bool, serverURL string) (bool, error) {

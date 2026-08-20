@@ -708,7 +708,7 @@ runs:
 		roots:   map[string]string{"owner/parent": parent, "owner/child": child},
 		commits: map[string]string{"owner/parent": strings.Repeat("a", 40), "owner/child": strings.Repeat("b", 40)},
 	}
-	compiled, err := compileActionInvocationsWithConditions(t.Context(), t.TempDir(), source, "https://github.com", []string{"owner/parent@v1"}, []map[string]string{nil}, []string{"${{ false }}"})
+	compiled, err := compileActionInvocationsWithStepContext(t.Context(), t.TempDir(), source, "https://github.com", []string{"owner/parent@v1"}, []map[string]string{nil}, []string{"${{ false }}"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -792,6 +792,56 @@ runs:
 	}
 	if !compiled.requiresGitHubToken {
 		t.Fatal("remote pre environment did not retain token authority before a false pre-if")
+	}
+}
+
+func TestCompileActionInvocationsGatesRemotePreInputsWithStepEnvironment(t *testing.T) {
+	parent, child := t.TempDir(), t.TempDir()
+	writeAction(t, child, "", `name: child
+runs:
+  using: node24
+  pre: pre.js
+  pre-if: env.RUN_PRE == 'true'
+  main: index.js
+`)
+	if err := os.WriteFile(filepath.Join(child, "pre.js"), []byte("// fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, parent, "", `name: parent
+runs:
+  using: composite
+  steps:
+    - if: ${{ false }}
+      uses: owner/child@v1
+      env:
+        RUN_PRE: "false"
+      with:
+        token: ${{ github.token }}
+`)
+	source := classifiedActionSource{
+		roots:   map[string]string{"owner/parent": parent, "owner/child": child},
+		commits: map[string]string{"owner/parent": strings.Repeat("a", 40), "owner/child": strings.Repeat("b", 40)},
+	}
+	compiled, err := compileActionInvocations(t.Context(), t.TempDir(), source, "https://github.com", []string{"owner/parent@v1"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("statically skipped child retained token authority behind a false environment-gated pre hook")
+	}
+
+	compiled, err = compileActionInvocationsWithStepContext(
+		t.Context(), t.TempDir(), source, "https://github.com",
+		[]string{"owner/child@v1"},
+		[]map[string]string{{"token": "${{ github.token }}"}},
+		[]string{"${{ false }}"},
+		[]map[string]string{{"RUN_PRE": "false"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("statically skipped workflow action retained token authority behind a false environment-gated pre hook")
 	}
 }
 
@@ -955,7 +1005,7 @@ runs:
 		{serverURL: "https://origin.cursor.com", condition: "${{ github.server_url == 'https://github.com' }}"},
 		{serverURL: "https://github.com", condition: "${{ env.RUNTIME == 'yes' }}", want: true},
 	} {
-		compiled, err := compileActionInvocationsWithConditions(t.Context(), workspace, nil, test.serverURL, []string{"./token"}, []map[string]string{nil}, []string{test.condition})
+		compiled, err := compileActionInvocationsWithStepContext(t.Context(), workspace, nil, test.serverURL, []string{"./token"}, []map[string]string{nil}, []string{test.condition}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1001,6 +1051,37 @@ runs:
 		if compiled.requiresGitHubToken != test.want {
 			t.Fatalf("server URL %q requires GitHub token = %t, want %t", test.serverURL, compiled.requiresGitHubToken, test.want)
 		}
+	}
+}
+
+func TestCompileActionInvocationsLazilyResolvesForwardedInputs(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  enabled:
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ inputs.enabled == 'true' && github.token || '' }}
+      run: echo "$TOKEN"
+`)
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        enabled: ${{ false && env.RUNTIME || 'false' }}
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("unreachable runtime value kept a forwarded input and token branch unknown")
 	}
 }
 

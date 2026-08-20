@@ -500,6 +500,11 @@ func evaluateKnownConditionValue(node actionlint.ExprNode, context ConditionCont
 				return nil, fmt.Errorf("condition input %q is unknown", path[0])
 			}
 			return resolveConditionReference(root, path, context)
+		case strings.EqualFold(root, "env") && len(path) == 1:
+			if _, ok := findStringValue(context.Env, path[0]); !ok {
+				return nil, fmt.Errorf("condition environment value %q is unknown", path[0])
+			}
+			return resolveConditionReference(root, path, context)
 		case strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "server_url"):
 			return resolveConditionReference(root, path, context)
 		default:
