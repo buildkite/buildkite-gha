@@ -499,9 +499,15 @@ func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
 		if got, err := ReferencesStepGitHubToken(template); err != nil || !got {
 			t.Fatalf("ReferencesStepGitHubToken(%q) = %v, %v, want true", template, got, err)
 		}
+		if got, err := ReferencesCompositeStepGitHubToken(template); err != nil || got {
+			t.Fatalf("ReferencesCompositeStepGitHubToken(%q) = %v, %v, want false", template, got, err)
+		}
 		if _, err := ReferencesGitHubToken(template); err == nil || !strings.Contains(err.Error(), "must name one static property") {
 			t.Fatalf("ReferencesGitHubToken(%q) error = %v, want non-step rejection", template, err)
 		}
+	}
+	if got, err := ReferencesCompositeStepGitHubToken("${{ toJSON(github) }}-${{ github.token }}"); err != nil || !got {
+		t.Fatalf("ReferencesCompositeStepGitHubToken() direct token = %v, %v, want true", got, err)
 	}
 	if _, err := ReferencesGitHubToken("${{ github[env.NAME] }}"); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
 		t.Fatalf("ReferencesGitHubToken() dynamic index error = %v", err)

@@ -389,7 +389,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		if workflowAuthored {
 			referencesToken, err = expression.ReferencesStepGitHubToken(value)
 		} else {
-			referencesToken, err = expression.ReferencesGitHubToken(value)
+			referencesToken, err = expression.ReferencesCompositeStepGitHubToken(value)
 		}
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("action input %q: %w", suppliedName, err)
