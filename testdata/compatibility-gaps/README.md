@@ -10,4 +10,4 @@ mise run compatibility:gaps
 
 The command applies the `hosted` profile to compile-time and admission gaps. It compiles and executes the two runtime shell fixtures. A passing case means the representative workflow is currently compatible. A blocked case makes the command fail.
 
-CI soft-fails the aggregate step while gaps remain. After all cases finish, the step publishes one Buildkite annotation per gap. This keeps each result visible without blocking unrelated builds.
+CI soft-fails the aggregate step while gaps remain. After all cases finish, the step publishes one Buildkite annotation containing every result. This keeps the assessment visible without blocking unrelated builds.

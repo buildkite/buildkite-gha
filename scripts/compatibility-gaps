@@ -35,6 +35,8 @@ CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -o "$work/buildkit
 
 blocked=0
 passed=0
+summary="$work/summary.md"
+printf '## Compatibility gap assessment\n\nSource: %s\n\n' "$(jq -r .source "$manifest")" >"$summary"
 while IFS=$'\t' read -r id title workflow event mode test_name; do
   status=0
   report="$work/$id.out"
@@ -67,11 +69,9 @@ while IFS=$'\t' read -r id title workflow event mode test_name; do
   printf '%s: %s\n' "$id" "$outcome"
   if [[ "$outcome" == passing ]]; then
     passed=$((passed + 1))
-    style=success
     icon='✅'
   else
     blocked=$((blocked + 1))
-    style=warning
     icon='⚠️'
     if [[ "$mode" == profile ]]; then
       jq -r '.diagnostics[]? | "  \(.code): \(.message)"' "$report" >&2 || true
@@ -79,16 +79,14 @@ while IFS=$'\t' read -r id title workflow event mode test_name; do
       sed -n '1,20p' "$report" >&2
     fi
   fi
-  printf '## %s %s\n\n%s\n\nSource: %s\n' \
-    "$icon" "$title" "$reason" "$(jq -r .source "$manifest")" >"$work/$id.md"
-  printf '%s\t%s\n' "$id" "$style" >>"$work/annotations.tsv"
+  printf -- '- %s **%s** — %s\n' "$icon" "$title" "$reason" >>"$summary"
 done < <(jq -r '.gaps[] | [.id, .title, .workflow, .event, .mode, (.test // "-")] | @tsv' "$manifest")
 
 if [[ "${BUILDKITE:-}" == true ]] && command -v buildkite-agent >/dev/null; then
-  while IFS=$'\t' read -r id style; do
-    buildkite-agent annotate --context "compatibility-gap-$id" --style "$style" <"$work/$id.md" || \
-      echo "warning: failed to publish Buildkite annotation for $id" >&2
-  done <"$work/annotations.tsv"
+  style=success
+  (( blocked > 0 )) && style=warning
+  buildkite-agent annotate --context compatibility-gaps --style "$style" <"$summary" || \
+    echo "warning: failed to publish Buildkite compatibility gap annotation" >&2
 fi
 
 printf 'Compatibility gaps: %d passing; %d blocked.\n' "$passed" "$blocked"
