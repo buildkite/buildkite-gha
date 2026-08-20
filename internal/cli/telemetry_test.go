@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -240,6 +241,17 @@ func TestCommandTelemetryCapturesBoundedErrorTailWithoutChangingOutput(t *testin
 	}
 	if success := details.forOutcome(telemetry.OutcomeSuccess); success.ErrorMessage != "" || success.ErrorMessageTruncated {
 		t.Fatalf("successful telemetry included error output: %#v", success)
+	}
+}
+
+func TestCommandTelemetryDoesNotMarkExactCaptureAsTruncated(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	writer := details.captureErrors(io.Discard)
+	if _, err := writer.Write([]byte(strings.Repeat("x", maxCommandErrorCaptureBytes))); err != nil {
+		t.Fatal(err)
+	}
+	if got := details.forOutcome(telemetry.OutcomeFailure); got.ErrorMessageTruncated {
+		t.Fatal("exact-capacity error capture was marked truncated")
 	}
 }
 

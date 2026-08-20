@@ -228,8 +228,8 @@ type boundedTailBuffer struct {
 
 func (b *boundedTailBuffer) Write(p []byte) {
 	if len(p) >= maxCommandErrorCaptureBytes {
+		b.truncated = b.truncated || len(b.bytes) > 0 || len(p) > maxCommandErrorCaptureBytes
 		b.bytes = append(b.bytes[:0], p[len(p)-maxCommandErrorCaptureBytes:]...)
-		b.truncated = true
 		return
 	}
 	if overflow := len(b.bytes) + len(p) - maxCommandErrorCaptureBytes; overflow > 0 {
