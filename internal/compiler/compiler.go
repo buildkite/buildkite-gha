@@ -96,10 +96,7 @@ type JobInstance struct {
 	RemoteWorkflow          *RemoteWorkflowSource    `json:"remote_workflow,omitempty"`
 	RepositoryRoot          string                   `json:"-"`
 	Source                  workflow.Span            `json:"source"`
-	secretAuthority         secretAuthority
-	tokenPolicyNarrowed     bool
-	jobPermissionsIgnored   bool
-	reusableCall            workflow.Position
+	reusable                reusableJobAuthority
 }
 
 // CallGuard is one immutable caller-scoped condition inherited by a flattened

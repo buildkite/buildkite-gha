@@ -134,14 +134,14 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		if job.GitHubToken == nil {
 			continue
 		}
-		if ir.Jobs[i].tokenPolicyNarrowed && !warnedReusablePermissions {
-			bundle.IR.Warnings = append(bundle.IR.Warnings, reusableWorkflowTokenWarning(ir.Jobs[i].reusableCall))
+		if ir.Jobs[i].reusable.tokenPolicyNarrowed && !warnedReusablePermissions {
+			bundle.IR.Warnings = append(bundle.IR.Warnings, reusableWorkflowTokenWarning(ir.Jobs[i].reusable.reusableCall))
 			warnedReusablePermissions = true
 		}
-		if (ir.Jobs[i].jobPermissionsIgnored || jobPermissionsIgnored(job.GitHubToken.Permissions, ir.Jobs[i].Permissions)) && !warnedJobPermissions {
+		if (ir.Jobs[i].reusable.jobPermissionsIgnored || jobPermissionsIgnored(job.GitHubToken.Permissions, ir.Jobs[i].Permissions)) && !warnedJobPermissions {
 			position := ir.Jobs[i].Source.Start
-			if ir.Jobs[i].jobPermissionsIgnored && ir.Jobs[i].reusableCall.Line != 0 {
-				position = ir.Jobs[i].reusableCall
+			if ir.Jobs[i].reusable.jobPermissionsIgnored && ir.Jobs[i].reusable.reusableCall.Line != 0 {
+				position = ir.Jobs[i].reusable.reusableCall
 			}
 			bundle.IR.Warnings = append(bundle.IR.Warnings, jobWorkflowTokenWarning(position))
 			warnedJobPermissions = true

@@ -1263,6 +1263,96 @@ jobs:
 	}
 }
 
+func TestCompilePreservesNestedReusableCallContext(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: write
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      subject: ${{ steps.emit.outputs.subject }}
+    steps:
+      - id: emit
+        run: echo subject=value >> "$GITHUB_OUTPUT"
+  delegated:
+    needs: producer
+    if: needs.producer.result == 'success'
+    uses: ./.github/workflows/middle.yml
+    with:
+      subject: ${{ needs.producer.outputs.subject }}
+    secrets: inherit
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      subject: {type: string, required: true}
+permissions:
+  contents: read
+jobs:
+  nested:
+    if: inputs.subject != ''
+    uses: ./.github/workflows/leaf.yml
+    with:
+      subject: ${{ inputs.subject }}
+    secrets: inherit
+`)
+	leafPath := writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      subject: {type: string, required: true}
+jobs:
+  consume:
+    runs-on: ubuntu-latest
+    env:
+      TOKEN: ${{ secrets.LEAF_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - run: echo ${{ inputs.subject }}
+`)
+
+	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %d, want producer and flattened nested consumer", len(plans))
+	}
+	producer, consumer := plans[0], plans[1]
+	if consumer.Workflow.LogicalJobID != "delegated.nested.consume" || consumer.Workflow.Path != "./.github/workflows/leaf.yml" || consumer.Workflow.Digest != "sha256:"+sha256Sum(readFile(t, leafPath)) {
+		t.Fatalf("nested consumer provenance = %#v", consumer.Workflow)
+	}
+	if !slices.Equal(consumer.RequiredSecrets, []string{"LEAF_TOKEN"}) || consumer.GitHubToken == nil || !reflect.DeepEqual(consumer.GitHubToken.Permissions, map[string]string{"contents": "write"}) {
+		t.Fatalf("nested consumer authority = secrets %#v, token %#v", consumer.RequiredSecrets, consumer.GitHubToken)
+	}
+	deferred := consumer.DeferredInputs["subject"]
+	if len(deferred.Sources) != 1 || deferred.Sources[0].StepKey != producer.Target.StepKey || len(deferred.Outputs) != 1 || deferred.Outputs[0] != (plan.NeedOutput{Name: "value", StepKey: producer.Target.StepKey, Output: "subject"}) {
+		t.Fatalf("nested deferred input = %#v", deferred)
+	}
+	if len(consumer.NeedSources["producer"]) != 1 || consumer.NeedSources["producer"][0].StepKey != producer.Target.StepKey || len(consumer.NeedOutputs["producer"]) != 0 {
+		t.Fatalf("nested prerequisite projection = %#v / %#v", consumer.NeedSources, consumer.NeedOutputs)
+	}
+	if len(consumer.CallGuards) != 2 || consumer.CallGuards[0].Condition != "(needs.producer.result == 'success')" || consumer.CallGuards[1].Condition != "(inputs.subject != '')" {
+		t.Fatalf("nested call guards = %#v", consumer.CallGuards)
+	}
+	if !reflect.DeepEqual(consumer.CallGuards[1].DeferredInputs["subject"], deferred) || !slices.Equal(consumer.Dependencies, []string{producer.Target.StepKey}) {
+		t.Fatalf("nested guard/dependencies = %#v / %#v", consumer.CallGuards[1], consumer.Dependencies)
+	}
+	encoded, err := plan.Encode(consumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := plan.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reencoded, err := plan.Encode(decoded)
+	if err != nil || !bytes.Equal(reencoded, encoded) {
+		t.Fatalf("nested reusable context plan round trip changed bytes: %v", err)
+	}
+}
+
 func TestCompileRejectsUnavailableReusableCallConditionContexts(t *testing.T) {
 	for _, contextName := range []string{"matrix.target", "strategy.job-index", "secrets.TOKEN", "env.FLAG", "runner.os", "steps.build.outcome"} {
 		t.Run(contextName, func(t *testing.T) {
