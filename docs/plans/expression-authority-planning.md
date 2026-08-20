@@ -74,13 +74,15 @@ evaluation would skip the branch. It also inventories statically named ordinary
 secrets independently of reachable effects. `Unknown` means a valid runtime
 dependency, not an evaluation or validation failure.
 
-Keep ordinary secret behavior unchanged during this migration. Every statically
-named workflow secret remains part of the authority inventory even when a known
-branch skips its expression, and prohibited composite secret references remain
-errors in unreachable branches. Reachability only narrows effects whose
-existing contract requires it, including `github.token`. Any later change to
-ordinary-secret reachability needs a separate compatibility and security
-decision.
+Keep ordinary secret behavior unchanged during this migration. Validation
+inventories statically named workflow secrets even when a known branch skips
+their expressions; authority policy retains all existing filters, including the
+exception for a secret used only by a declared optional action input, which
+resolves as empty unless required elsewhere. Prohibited composite secret
+references remain errors in unreachable branches. Reachability only narrows
+effects whose existing contract requires it, including `github.token`. Any
+later change to ordinary-secret reachability needs a separate compatibility and
+security decision.
 
 The abstract domain must satisfy both soundness and useful precision:
 
