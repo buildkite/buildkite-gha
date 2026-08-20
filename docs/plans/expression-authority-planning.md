@@ -40,14 +40,17 @@ Extend the existing semantic evaluator with an abstract value domain:
 
 ```go
 type AbstractValue struct {
-	Known   bool
-	Value   any
+	Known bool
+	Value any
+}
+
+type Analysis struct {
+	Value   AbstractValue
 	Effects Effects
 }
 
-type Effects struct {
-	GitHubToken GitHubTokenEffect
-	Secrets     []string
+type Validation struct {
+	SecretReferences []string
 }
 ```
 
@@ -55,25 +58,41 @@ Concrete and abstract evaluation share expression-tree traversal, operator
 semantics, coercion, and function argument selection. Abstract context values
 are either known or unknown. Unknown branches join their possible effects;
 known short-circuits discard effects from branches runtime cannot evaluate.
+Implement these as explicit concrete and abstract domains behind the shared
+traversal, not by passing unknown sentinel values through concrete `any` value
+helpers.
 
-Authority effects retain provenance. At minimum, distinguish:
+Reachable authority effects retain provenance. At minimum, distinguish:
 
 - direct `github.token`
 - workflow-authored `toJSON(github)`
 - composite-authored `toJSON(github)`
-- statically named ordinary secrets
 
 Validation remains an exhaustive pass over every AST branch. Unsupported
 syntax and prohibited authority must fail even when concrete or abstract
-evaluation would skip the branch. `Unknown` means a valid runtime dependency,
-not an evaluation or validation failure.
+evaluation would skip the branch. It also inventories statically named ordinary
+secrets independently of reachable effects. `Unknown` means a valid runtime
+dependency, not an evaluation or validation failure.
 
-For every concrete context represented by an abstract context, the core
-invariant is:
+Keep ordinary secret behavior unchanged during this migration. Every statically
+named workflow secret remains part of the authority inventory even when a known
+branch skips its expression, and prohibited composite secret references remain
+errors in unreachable branches. Reachability only narrows effects whose
+existing contract requires it, including `github.token`. Any later change to
+ordinary-secret reachability needs a separate compatibility and security
+decision.
+
+The abstract domain must satisfy both soundness and useful precision:
 
 ```text
 concrete effects ⊆ abstract effects
+fully known abstract effects = concrete effects
+effects(refined context) ⊆ effects(less-known context)
 ```
+
+The first property prevents missed authority. The other two prevent an
+implementation that always requests every credential from satisfying the
+soundness check while violating known-false and provider guard boundaries.
 
 ### Normalized execution program
 
@@ -109,10 +128,17 @@ The shared program interpreter has two adapters:
 This keeps lifecycle ordering in one module while allowing planning and runtime
 to perform different effects at its seams.
 
+Commands and workflow-command mutations are not predictable during planning.
+The planning adapter treats their outputs, environment changes, and state as
+unknown, then joins later authority conservatively. The operation graph remains
+finite and retains the existing workflow, job, step, and nested-action limits.
+
 Resolved action programs are stored by action lock ID in the job plan. Source
 locks continue to bind repositories, commits, paths, and tree digests. Runtime
 continues to verify source content and executable entrypoints, but does not
-reload metadata to derive a second execution model.
+reload metadata to derive a second execution model. Plan validation requires
+every action program and child invocation to reference an existing lock, and
+the encoded program remains covered by the job-plan digest.
 
 Reusable workflows continue to flatten before plan construction. Their
 expanded jobs then use the same normalization path as direct jobs, eliminating
@@ -190,6 +216,8 @@ metadata contract.
 Test the expression module through its concrete and abstract interfaces:
 
 - property and fuzz tests for `concrete effects ⊆ abstract effects`
+- exact effect equality for fully known contexts
+- monotonic effect narrowing as unknown values become known
 - known, unknown, and unavailable context values
 - `&&`, `||`, `case()`, and pure-function argument laziness
 - direct token and whole-context provenance
