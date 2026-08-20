@@ -1,0 +1,7 @@
+name: Compatibility gap - runner labels
+on: push
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - run: echo compatible
