@@ -1508,6 +1508,18 @@ func TestProcessingAnnotationIsBoundedAndEscapesHTML(t *testing.T) {
 	}
 }
 
+func TestProcessingAnnotationPreservesLongerRepositoryURLs(t *testing.T) {
+	const docsURL = "https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#cache-action"
+	diagnostic := compatibility.Diagnostic{
+		Level: "error", Code: "E_TEST", Message: "Unsupported action. Use a supported version from " + docsURL + ".",
+	}
+
+	body := renderProcessingDiagnostic(diagnostic, sourceLinkContext{})
+	if !strings.Contains(body, docsURL) || strings.Contains(body, `href="https://github.com/buildkite/buildkite-gha"`) {
+		t.Fatalf("annotation = %q, want intact documentation URL", body)
+	}
+}
+
 func TestProcessingAnnotationOmitsUnknownActionRuntime(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{

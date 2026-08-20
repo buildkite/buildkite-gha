@@ -401,7 +401,7 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 			out.WriteString("<p>")
 			detail := annotationHTML(sentence)
 			const issueURL = "https://github.com/buildkite/buildkite-gha"
-			detail = strings.ReplaceAll(detail, issueURL, `<a href="`+issueURL+`" target="_blank">buildkite/buildkite-gha</a>`)
+			detail = strings.ReplaceAll(detail, issueURL+" ", `<a href="`+issueURL+`" target="_blank">buildkite/buildkite-gha</a> `)
 			out.WriteString(detail)
 			out.WriteString("</p>\n")
 		}
