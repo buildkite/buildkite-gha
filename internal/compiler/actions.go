@@ -425,12 +425,16 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
 		}
 		requirements.githubToken = requirements.githubToken || referencesToken
-		requirements.preparationGitHubToken = requirements.preparationGitHubToken || n.preparationEvaluatesInvocation() && referencesToken
+		_, preparesInputs, preparationErr := n.preparationFields(serverURL)
+		if preparationErr != nil {
+			return actionRequirements{}, preparationErr
+		}
+		requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparesInputs && referencesToken
 	}
 	if n.runtime != metadata.RuntimeComposite {
 		return requirements, nil
 	}
-	effectiveInputs, unknownInputs := n.effectiveInputs(supplied)
+	effectiveInputs, unknownInputs := n.effectiveInputs(supplied, serverURL)
 	for _, name := range sortedKeys(n.metadata.Outputs) {
 		requiresToken, err := inspectCompositeTemplate("output "+name, n.metadata.Outputs[name].Value, effectiveInputs, unknownInputs, serverURL)
 		if err != nil {
@@ -439,19 +443,22 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		requirements.githubToken = requirements.githubToken || requiresToken
 	}
 	for i, step := range n.metadata.Runs.Steps {
-		run, known, err := compositeStepCondition(step.If, effectiveInputs, unknownInputs)
+		run, known, err := compositeStepCondition(step.If, effectiveInputs, unknownInputs, serverURL)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d condition: %w", i+1, err)
 		}
 		stepReachable := !known || run
 		var child *actionNode
-		preparationEvaluatesStep := false
+		preparesEnvironment, preparesInputs := false, false
 		if step.Uses != "" {
 			child = n.children[step.Uses]
 			if child == nil {
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q is missing", i+1, step.Uses)
 			}
-			preparationEvaluatesStep = child.preparationEvaluatesInvocation()
+			preparesEnvironment, preparesInputs, err = child.preparationFields(serverURL)
+			if err != nil {
+				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
+			}
 		}
 		for _, field := range []struct {
 			name   string
@@ -466,7 +473,8 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 					return actionRequirements{}, err
 				}
 				requirements.githubToken = requirements.githubToken || stepReachable && requiresToken
-				requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparationEvaluatesStep && requiresToken
+				preparesField := field.name == "environment" && preparesEnvironment || field.name == "input" && preparesInputs
+				requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparesField && requiresToken
 			}
 		}
 		for _, field := range []struct {
@@ -484,7 +492,6 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 				return actionRequirements{}, err
 			}
 			requirements.githubToken = requirements.githubToken || stepReachable && requiresToken
-			requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparationEvaluatesStep && requiresToken
 		}
 		if step.Uses == "" {
 			continue
@@ -501,7 +508,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 		}
 		requirements.githubToken = requirements.githubToken || stepReachable && childRequirements.githubToken
-		requirements.preparationGitHubToken = requirements.preparationGitHubToken || childRequirements.preparationGitHubToken
+		requirements.preparationGitHubToken = requirements.preparationGitHubToken || n.lock.Source == "github" && childRequirements.preparationGitHubToken
 		for name := range childRequirements.requiredSecrets {
 			requirements.requiredSecrets[name] = true
 		}
@@ -509,11 +516,24 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	return requirements, nil
 }
 
-func (n *actionNode) preparationEvaluatesInvocation() bool {
-	return n.runtime == metadata.RuntimeComposite || n.metadata.Runs.Pre != ""
+func (n *actionNode) preparationFields(serverURL string) (environment, inputs bool, err error) {
+	if n.lock.Source != "github" {
+		return false, false, nil
+	}
+	if n.runtime == metadata.RuntimeComposite {
+		return true, true, nil
+	}
+	if n.metadata.Runs.Pre == "" {
+		return false, false, nil
+	}
+	run, known, err := expression.EvaluateKnownCondition(n.metadata.Runs.PreIf, expression.ConditionContext{GitHub: map[string]any{"server_url": serverURL}}, nil)
+	if err != nil {
+		return false, false, err
+	}
+	return true, !known || run, nil
 }
 
-func (n *actionNode) effectiveInputs(supplied map[string]string) (map[string]string, map[string]bool) {
+func (n *actionNode) effectiveInputs(supplied map[string]string, serverURL string) (map[string]string, map[string]bool) {
 	inputs := make(map[string]string, len(n.metadata.Inputs)+len(supplied))
 	unknown := map[string]bool{}
 	for _, name := range sortedKeys(n.metadata.Inputs) {
@@ -523,8 +543,12 @@ func (n *actionNode) effectiveInputs(supplied map[string]string) (map[string]str
 			value = *definition.Default
 		}
 		if strings.Contains(value, "${{") {
-			unknown[name] = true
-			continue
+			var err error
+			value, err = expression.EvaluateActionInputDefault(value, expression.Context{GitHub: map[string]any{"server_url": serverURL}})
+			if err != nil || strings.Contains(value, "${{") {
+				unknown[name] = true
+				continue
+			}
 		}
 		inputs[name] = value
 	}
@@ -542,12 +566,12 @@ func (n *actionNode) effectiveInputs(supplied map[string]string) (map[string]str
 	return inputs, unknown
 }
 
-func compositeStepCondition(condition string, inputs map[string]string, unknownInputs map[string]bool) (bool, bool, error) {
+func compositeStepCondition(condition string, inputs map[string]string, unknownInputs map[string]bool, serverURL string) (bool, bool, error) {
 	conditionInputs := make(map[string]any, len(inputs))
 	for name, value := range inputs {
 		conditionInputs[name] = value
 	}
-	return expression.EvaluateKnownInputCondition(condition, conditionInputs, unknownInputs)
+	return expression.EvaluateKnownCondition(condition, expression.ConditionContext{Inputs: conditionInputs, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs)
 }
 
 func resolveKnownCompositeValues(values, inputs map[string]string, unknownInputs map[string]bool, serverURL string) map[string]string {

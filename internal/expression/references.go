@@ -577,6 +577,26 @@ func githubTokenReachable(node actionlint.ExprNode, context Context, unknownInpu
 	case *actionlint.CompareOpNode:
 		return githubTokenReachable(node.Left, context, unknownInputs) || githubTokenReachable(node.Right, context, unknownInputs)
 	case *actionlint.FuncCallNode:
+		if strings.EqualFold(node.Callee, "case") && len(node.Args) >= 3 && len(node.Args)%2 == 1 {
+			for i := 0; i < len(node.Args)-1; i += 2 {
+				if githubTokenReachable(node.Args[i], context, unknownInputs) {
+					return true
+				}
+				selected, known := evaluateKnownStepNode(node.Args[i], context, unknownInputs)
+				if !known {
+					for _, argument := range node.Args[i+1:] {
+						if githubTokenReachable(argument, context, unknownInputs) {
+							return true
+						}
+					}
+					return false
+				}
+				if selected {
+					return githubTokenReachable(node.Args[i+1], context, unknownInputs)
+				}
+			}
+			return githubTokenReachable(node.Args[len(node.Args)-1], context, unknownInputs)
+		}
 		for _, argument := range node.Args {
 			if githubTokenReachable(argument, context, unknownInputs) {
 				return true
@@ -610,6 +630,18 @@ func evaluateKnownStepNode(node actionlint.ExprNode, context Context, unknownInp
 			return right, true
 		}
 		return false, false
+	}
+	if call, ok := node.(*actionlint.FuncCallNode); ok && strings.EqualFold(call.Callee, "case") && len(call.Args) >= 3 && len(call.Args)%2 == 1 {
+		for i := 0; i < len(call.Args)-1; i += 2 {
+			selected, known := evaluateKnownStepNode(call.Args[i], context, unknownInputs)
+			if !known {
+				return false, false
+			}
+			if selected {
+				return evaluateKnownStepNode(call.Args[i+1], context, unknownInputs)
+			}
+		}
+		return evaluateKnownStepNode(call.Args[len(call.Args)-1], context, unknownInputs)
 	}
 	names, dynamic := nodeInputReferences(node)
 	if dynamic && len(unknownInputs) != 0 {

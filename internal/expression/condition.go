@@ -429,6 +429,13 @@ func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 // by known action inputs and short-circuiting. Runtime-dependent results are
 // reported as unknown.
 func EvaluateKnownInputCondition(source string, inputs map[string]any, unknownInputs map[string]bool) (bool, bool, error) {
+	return EvaluateKnownCondition(source, ConditionContext{Inputs: inputs}, unknownInputs)
+}
+
+// EvaluateKnownCondition evaluates a condition when its result is fixed by
+// retained context values and short-circuiting. Runtime-dependent results are
+// reported as unknown.
+func EvaluateKnownCondition(source string, context ConditionContext, unknownInputs map[string]bool) (bool, bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil {
 		return false, false, err
@@ -436,7 +443,7 @@ func EvaluateKnownInputCondition(source string, inputs map[string]any, unknownIn
 	if empty {
 		return true, true, nil
 	}
-	return evaluateKnownInputConditionNode(node, ConditionContext{Inputs: inputs}, unknownInputs)
+	return evaluateKnownInputConditionNode(node, context, unknownInputs)
 }
 
 func evaluateKnownInputConditionNode(node actionlint.ExprNode, context ConditionContext, unknownInputs map[string]bool) (bool, bool, error) {
@@ -467,6 +474,18 @@ func evaluateKnownInputConditionNode(node actionlint.ExprNode, context Condition
 		}
 		return evaluateKnownInputConditionNode(logical.Right, context, unknownInputs)
 	}
+	if call, ok := node.(*actionlint.FuncCallNode); ok && strings.EqualFold(call.Callee, "case") && len(call.Args) >= 3 && len(call.Args)%2 == 1 {
+		for i := 0; i < len(call.Args)-1; i += 2 {
+			selected, known, err := evaluateKnownInputConditionNode(call.Args[i], context, unknownInputs)
+			if err != nil || !known {
+				return false, known, err
+			}
+			if selected {
+				return evaluateKnownInputConditionNode(call.Args[i+1], context, unknownInputs)
+			}
+		}
+		return evaluateKnownInputConditionNode(call.Args[len(call.Args)-1], context, unknownInputs)
+	}
 
 	names, dynamic := nodeInputReferences(node)
 	if dynamic && len(unknownInputs) != 0 {
@@ -480,7 +499,10 @@ func evaluateKnownInputConditionNode(node actionlint.ExprNode, context Condition
 	if containsStatusFunction(node) {
 		return false, false, nil
 	}
-	for _, contextName := range []string{"env", "github", "job", "matrix", "needs", "runner", "steps", "vars"} {
+	if nodeUsesGitHubPropertyOutside(node, "server_url") {
+		return false, false, nil
+	}
+	for _, contextName := range []string{"env", "job", "matrix", "needs", "runner", "steps", "vars"} {
 		if nodeUsesContext(node, contextName) {
 			return false, false, nil
 		}

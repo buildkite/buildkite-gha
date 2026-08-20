@@ -1275,6 +1275,7 @@ func TestEvaluateKnownInputConditionShortCircuitsRuntimeValues(t *testing.T) {
 	}{
 		{condition: "inputs.enabled == 'true' && env.RUNTIME == 'yes'", inputs: map[string]any{"enabled": "false"}, known: true},
 		{condition: "env.RUNTIME == 'yes' && inputs.enabled == 'true'", inputs: map[string]any{"enabled": "false"}, known: true},
+		{condition: "case(inputs.enabled == 'true', env.RUNTIME == 'yes', false)", inputs: map[string]any{"enabled": "false"}, known: true},
 		{condition: "inputs.enabled == 'true' && env.RUNTIME == 'yes'", inputs: map[string]any{"enabled": "true"}},
 		{condition: "inputs.enabled == 'true'", inputs: map[string]any{"enabled": "true"}, want: true, known: true},
 	} {
@@ -1292,6 +1293,7 @@ func TestGitHubTokenRequiresEvaluationShortCircuitsKnownInputs(t *testing.T) {
 		want     bool
 	}{
 		{template: "${{ inputs.enabled == 'true' && env.RUNTIME == 'yes' && github.token || '' }}"},
+		{template: "${{ case(inputs.enabled == 'true', github.token, '') }}"},
 		{template: "${{ env.RUNTIME == 'yes' && github.token || '' }}", want: true},
 	} {
 		got, err := GitHubTokenRequiresEvaluation(test.template, context, nil)

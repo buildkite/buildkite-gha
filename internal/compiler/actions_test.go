@@ -685,11 +685,45 @@ runs:
 }
 
 func TestCompileActionInvocationsRetainsTokenForSkippedChildPreHook(t *testing.T) {
+	parent, child := t.TempDir(), t.TempDir()
+	writeAction(t, child, "", `name: child
+runs:
+  using: node24
+  pre: pre.js
+  main: index.js
+`)
+	if err := os.WriteFile(filepath.Join(child, "pre.js"), []byte("// fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, parent, "", `name: parent
+runs:
+  using: composite
+  steps:
+    - if: ${{ false }}
+      uses: owner/child@v1
+      env:
+        TOKEN: ${{ github.token }}
+`)
+	source := classifiedActionSource{
+		roots:   map[string]string{"owner/parent": parent, "owner/child": child},
+		commits: map[string]string{"owner/parent": strings.Repeat("a", 40), "owner/child": strings.Repeat("b", 40)},
+	}
+	compiled, err := compileActionInvocations(t.Context(), t.TempDir(), source, "https://github.com", []string{"owner/parent@v1"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("skipped child pre hook did not retain token authority for prepared metadata")
+	}
+}
+
+func TestCompileActionInvocationsDoesNotPrepareWorkspaceOrFalsePreInputs(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "child", `name: child
 runs:
   using: node24
   pre: pre.js
+  pre-if: ${{ false }}
   main: index.js
 `)
 	if err := os.WriteFile(filepath.Join(workspace, "child", "pre.js"), []byte("// fixture\n"), 0o644); err != nil {
@@ -701,15 +735,96 @@ runs:
   steps:
     - if: ${{ false }}
       uses: ./child
-      env:
-        TOKEN: ${{ github.token }}
+      with:
+        token: ${{ github.token }}
 `)
 	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("workspace child or statically skipped pre inputs retained token authority")
+	}
+
+	parent, child := t.TempDir(), t.TempDir()
+	writeAction(t, child, "", `name: child
+runs:
+  using: node24
+  pre: pre.js
+  pre-if: ${{ false }}
+  main: index.js
+`)
+	if err := os.WriteFile(filepath.Join(child, "pre.js"), []byte("// fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, parent, "", `name: parent
+runs:
+  using: composite
+  steps:
+    - if: ${{ false }}
+      uses: owner/child@v1
+      with:
+        token: ${{ github.token }}
+`)
+	source := classifiedActionSource{
+		roots:   map[string]string{"owner/parent": parent, "owner/child": child},
+		commits: map[string]string{"owner/parent": strings.Repeat("a", 40), "owner/child": strings.Repeat("b", 40)},
+	}
+	compiled, err = compileActionInvocations(t.Context(), t.TempDir(), source, "https://github.com", []string{"owner/parent@v1"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("statically skipped remote pre inputs retained token authority")
+	}
+	writeAction(t, parent, "", `name: parent
+runs:
+  using: composite
+  steps:
+    - if: ${{ false }}
+      uses: owner/child@v1
+      env:
+        TOKEN: ${{ github.token }}
+`)
+	compiled, err = compileActionInvocations(t.Context(), t.TempDir(), source, "https://github.com", []string{"owner/parent@v1"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !compiled.requiresGitHubToken {
-		t.Fatal("skipped child pre hook did not retain token authority for prepared metadata")
+		t.Fatal("remote pre environment did not retain token authority before a false pre-if")
+	}
+}
+
+func TestCompileActionInvocationsResolvesProviderGuardsInDefaultsAndConditions(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "guarded", `name: guarded
+inputs:
+  enabled:
+    default: ${{ github.server_url == 'https://github.com' && 'true' || 'false' }}
+runs:
+  using: composite
+  steps:
+    - if: github.server_url == 'https://github.com'
+      shell: bash
+      env:
+        DEFAULT_TOKEN: ${{ inputs.enabled == 'true' && github.token || '' }}
+        CONDITION_TOKEN: ${{ github.token }}
+      run: echo guarded
+`)
+	for _, test := range []struct {
+		serverURL string
+		want      bool
+	}{
+		{serverURL: "https://origin.cursor.com"},
+		{serverURL: "https://github.com", want: true},
+	} {
+		compiled, err := compileActionInvocations(t.Context(), workspace, nil, test.serverURL, []string{"./guarded"}, []map[string]string{nil})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.want {
+			t.Fatalf("server URL %q requires GitHub token = %t, want %t", test.serverURL, compiled.requiresGitHubToken, test.want)
+		}
 	}
 }
 
