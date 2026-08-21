@@ -3585,7 +3585,11 @@ func TestCompiledPlansValidateAgainstSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	validateCompiledPlansAgainstSchema(t, plans)
+}
 
+func validateCompiledPlansAgainstSchema(t *testing.T, plans []plan.Job) {
+	t.Helper()
 	schemaSource := readFile(t, filepath.Join("..", "..", "schemas", "job-plan.schema.json"))
 	var schemaDocument any
 	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {

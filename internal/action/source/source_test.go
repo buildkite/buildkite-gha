@@ -970,7 +970,7 @@ func TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease(t *testing.T) {
 
 func TestStoreMaintenanceUsesLRUAndCleansOnlyUnlockedPartials(t *testing.T) {
 	root := t.TempDir()
-	repository := filepath.Join(root, "owner", "repo")
+	repository := filepath.Join(root, "owner", ".github")
 	if err := os.MkdirAll(repository, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -141,6 +141,7 @@ jobs:
 	if plans[1].Workflow.Remote == nil || *plans[1].Workflow.Remote != wantRemote || plans[1].Workflow.Path != nested.SourcePath || plans[1].Workflow.Digest != wantNestedDigest {
 		t.Fatalf("remote plan provenance = %#v", plans)
 	}
+	validateCompiledPlansAgainstSchema(t, plans)
 	if calls := fake.references(); len(calls) != 1 || calls[0].Raw != "GaloisInc/.github@v2" || calls[0].Path != "" {
 		t.Fatalf("repository source calls = %#v, want one repository-root resolution", calls)
 	}

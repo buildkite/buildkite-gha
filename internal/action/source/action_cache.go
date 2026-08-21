@@ -257,7 +257,7 @@ func (s *Store) cacheEntries() ([]cacheEntry, []string, error) {
 			return nil, nil, readErr
 		}
 		for _, repository := range repositories {
-			if !repository.IsDir() || strings.HasPrefix(repository.Name(), ".") {
+			if !repository.IsDir() || !validRepository(owner.Name()+"/"+repository.Name()) {
 				continue
 			}
 			repositoryPath := filepath.Join(ownerPath, repository.Name())
