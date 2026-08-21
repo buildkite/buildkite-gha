@@ -217,25 +217,26 @@ func Load(root, path string) (Metadata, error) {
 }
 
 func validateDockerArgs(path string, document *yaml.Node) error {
-	node := document
-	if node.Kind == yaml.DocumentNode && len(node.Content) != 0 {
-		node = node.Content[0]
+	var resolved struct {
+		Runs map[string]any `yaml:"runs"`
 	}
-	runs := mappingValue(node, "runs")
-	using := mappingValue(runs, "using")
-	if using == nil || using.Value != string(RuntimeDocker) {
+	if err := document.Decode(&resolved); err != nil {
+		return nil // The strict metadata decoder reports malformed values.
+	}
+	if resolved.Runs["using"] != string(RuntimeDocker) {
 		return nil
 	}
-	args := mappingValue(runs, "args")
-	if args == nil {
+	value, exists := resolved.Runs["args"]
+	if !exists {
 		return nil
 	}
-	if args.Kind != yaml.SequenceNode {
-		return fmt.Errorf("parse action metadata %q:%d:%d: docker runs.args must be a string array", path, args.Line, args.Column)
+	args, ok := value.([]any)
+	if !ok {
+		return fmt.Errorf("parse action metadata %q: docker runs.args must be a string array", path)
 	}
-	for i, argument := range args.Content {
-		if argument.Kind != yaml.ScalarNode || argument.ShortTag() != "!!str" {
-			return fmt.Errorf("parse action metadata %q:%d:%d: docker runs.args item %d must be a string", path, argument.Line, argument.Column, i+1)
+	for i, argument := range args {
+		if _, ok := argument.(string); !ok {
+			return fmt.Errorf("parse action metadata %q: docker runs.args item %d must be a string", path, i+1)
 		}
 	}
 	return nil

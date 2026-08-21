@@ -141,6 +141,43 @@ func TestLoadDockerArgsRequiresStringSequence(t *testing.T) {
 	}
 }
 
+func TestLoadDockerArgsResolvesAliasesBeforeStringValidation(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		metadata string
+		ok       bool
+	}{
+		{name: "aliased runtime strings", ok: true, metadata: `name: &runtime docker
+runs:
+  using: *runtime
+  image: Dockerfile
+  args: [first, ""]
+`},
+		{name: "aliased runtime number", metadata: `name: &runtime docker
+runs:
+  using: *runtime
+  image: Dockerfile
+  args: [1]
+`},
+		{name: "merged runtime boolean", metadata: `runs:
+  <<: &defaults
+    using: docker
+    image: Dockerfile
+  args: [true]
+`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeAction(t, root, "Dockerfile", "FROM scratch\n")
+			writeAction(t, root, "action.yml", test.metadata)
+			_, err := Load(root, ".")
+			if (err == nil) != test.ok {
+				t.Fatalf("Load() error = %v, want success %v", err, test.ok)
+			}
+		})
+	}
+}
+
 func TestLoadIsStrictAndConfined(t *testing.T) {
 	t.Run("softprops top-level env is inert", func(t *testing.T) {
 		root := t.TempDir()
