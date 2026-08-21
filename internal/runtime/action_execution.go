@@ -2049,11 +2049,18 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 		if !job.HasCapability("docker") {
 			return result, fmt.Errorf("docker action %q requires the plan's docker capability", step.Uses)
 		}
-		if action.Runs.PreEntrypoint != "" || action.Runs.PostEntrypoint != "" || action.Runs.Entrypoint != "" || len(action.Runs.Args) != 0 {
-			return result, fmt.Errorf("docker action %q uses unsupported entrypoint, arguments, or pre/post lifecycle", step.Uses)
+		if action.Runs.Main != "" || action.Runs.Pre != "" || action.Runs.PreIf != "" || action.Runs.Post != "" || action.Runs.PostIf != "" || action.Runs.PreEntrypoint != "" || action.Runs.PostEntrypoint != "" || action.Runs.Entrypoint != "" {
+			return result, fmt.Errorf("docker action %q uses unsupported entrypoint or pre/post lifecycle", step.Uses)
 		}
 		if action.Runs.Image != "Dockerfile" {
 			return result, fmt.Errorf("docker action image %q is unsupported; the supported runtime subset requires a local Dockerfile", action.Runs.Image)
+		}
+		dockerArgs := make([]string, len(action.Runs.Args))
+		for i, argument := range action.Runs.Args {
+			dockerArgs[i], err = expression.EvaluateDockerActionArg(argument, inputs)
+			if err != nil {
+				return result, fmt.Errorf("docker action %q argument %d: %w", step.Uses, i+1, err)
+			}
 		}
 		dockerEnv, err := evaluateMap(action.Runs.Env, actionEval)
 		if err != nil {
@@ -2067,7 +2074,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 			sourceDigest = actionLock.SourceDigest
 		}
 		invocationEnv, explicitPATH := environment.docker(dockerEnv, inputs)
-		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})
+		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Args: dockerArgs, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})
 		return result, err
 	}
 	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)

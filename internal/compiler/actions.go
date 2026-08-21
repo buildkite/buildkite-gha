@@ -426,6 +426,13 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		}
 		requirements.githubToken = requirements.githubToken || referencesToken
 	}
+	if n.runtime == metadata.RuntimeDocker {
+		for i, argument := range n.metadata.Runs.Args {
+			if err := expression.ValidateDockerActionArg(argument); err != nil {
+				return actionRequirements{}, fmt.Errorf("docker action argument %d: %w", i+1, err)
+			}
+		}
+	}
 	if n.runtime != metadata.RuntimeComposite {
 		return requirements, nil
 	}

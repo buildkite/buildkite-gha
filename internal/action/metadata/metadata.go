@@ -169,6 +169,9 @@ func Load(root, path string) (Metadata, error) {
 	if err := validateCompositeSteps(metadataPath, &document); err != nil {
 		return Metadata{}, err
 	}
+	if err := validateDockerArgs(metadataPath, &document); err != nil {
+		return Metadata{}, err
+	}
 	if discardTopLevelEnv(&document) {
 		var validated struct {
 			Metadata `yaml:",inline"`
@@ -211,6 +214,31 @@ func Load(root, path string) (Metadata, error) {
 		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
 	}
 	return metadata, nil
+}
+
+func validateDockerArgs(path string, document *yaml.Node) error {
+	node := document
+	if node.Kind == yaml.DocumentNode && len(node.Content) != 0 {
+		node = node.Content[0]
+	}
+	runs := mappingValue(node, "runs")
+	using := mappingValue(runs, "using")
+	if using == nil || using.Value != string(RuntimeDocker) {
+		return nil
+	}
+	args := mappingValue(runs, "args")
+	if args == nil {
+		return nil
+	}
+	if args.Kind != yaml.SequenceNode {
+		return fmt.Errorf("parse action metadata %q:%d:%d: docker runs.args must be a string array", path, args.Line, args.Column)
+	}
+	for i, argument := range args.Content {
+		if argument.Kind != yaml.ScalarNode || argument.ShortTag() != "!!str" {
+			return fmt.Errorf("parse action metadata %q:%d:%d: docker runs.args item %d must be a string", path, argument.Line, argument.Column, i+1)
+		}
+	}
+	return nil
 }
 
 func discardTopLevelEnv(document *yaml.Node) bool {
@@ -366,10 +394,10 @@ func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
 		if metadata.Runs.Image != "Dockerfile" {
 			return fmt.Errorf("docker action requires exact runs.image %q", "Dockerfile")
 		}
-		if metadata.Runs.Main != "" || metadata.Runs.Entrypoint != "" || len(metadata.Runs.Args) != 0 ||
+		if metadata.Runs.Main != "" || metadata.Runs.Entrypoint != "" ||
 			metadata.Runs.Pre != "" || metadata.Runs.PreIf != "" || metadata.Runs.PreEntrypoint != "" ||
 			metadata.Runs.Post != "" || metadata.Runs.PostIf != "" || metadata.Runs.PostEntrypoint != "" {
-			return fmt.Errorf("docker action may not declare entrypoint, arguments, or pre/post lifecycle")
+			return fmt.Errorf("docker action may not declare entrypoint or pre/post lifecycle")
 		}
 		dockerfile := filepath.Join(metadata.Path, "Dockerfile")
 		info, err := os.Lstat(dockerfile)

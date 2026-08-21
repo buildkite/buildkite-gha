@@ -136,6 +136,46 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 	}
 }
 
+func TestDockerActionArgsUseOnlyDirectInputs(t *testing.T) {
+	tests := []struct {
+		name     string
+		template string
+		want     string
+		invalid  bool
+	}{
+		{name: "literal", template: " --flag=$value; ", want: " --flag=$value; "},
+		{name: "property", template: "prefix-${{ inputs.Name }}-suffix", want: "prefix-value-suffix"},
+		{name: "literal index", template: "${{ inputs['name'] }}", want: "value"},
+		{name: "whole inputs", template: "${{ inputs }}", invalid: true},
+		{name: "dynamic input", template: "${{ inputs[env.name] }}", invalid: true},
+		{name: "nested input", template: "${{ inputs.name.value }}", invalid: true},
+		{name: "other context", template: "${{ secrets.token }}", invalid: true},
+		{name: "operator", template: "${{ inputs.name || 'fallback' }}", invalid: true},
+		{name: "function", template: "${{ format('{0}', inputs.name) }}", invalid: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateDockerActionArg(test.template)
+			if test.invalid {
+				if err == nil {
+					t.Fatalf("ValidateDockerActionArg(%q) succeeded", test.template)
+				}
+				if _, evalErr := EvaluateDockerActionArg(test.template, map[string]string{"name": "value"}); evalErr == nil {
+					t.Fatalf("EvaluateDockerActionArg(%q) succeeded", test.template)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := EvaluateDockerActionArg(test.template, map[string]string{"name": "value"})
+			if err != nil || got != test.want {
+				t.Fatalf("EvaluateDockerActionArg(%q) = %q, %v; want %q", test.template, got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestRunnerDirectReferencesWorkAcrossRuntimeEvaluationSurfaces(t *testing.T) {
 	runner := map[string]string{"os": "macOS", "arch": "ARM64", "temp": "/runner/temp"}
 	if got, err := Evaluate("${{ runner.os }}/${{ RUNNER.ARCH }}", Context{Runner: runner}); err != nil || got != "macOS/ARM64" {

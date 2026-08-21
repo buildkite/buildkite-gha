@@ -3,6 +3,7 @@ package compiler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1800,6 +1801,64 @@ func TestCompilePlansDockerfileActionCapabilities(t *testing.T) {
 	}
 	if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"docker", "network"}) || len(plans[0].Actions) != 1 || plans[0].Actions[0].Source != "github" {
 		t.Fatalf("Dockerfile action plans = %#v", plans)
+	}
+}
+
+func TestCompileDockerfileActionArgsAreValidatedButNotPlanned(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "docker", `name: Docker args
+inputs:
+  target:
+    default: default-value
+runs:
+  using: docker
+  image: Dockerfile
+  args:
+    - literal
+    - ${{ inputs.target }}
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./docker"}, []map[string]string{{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(compiled.locks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("literal")) || bytes.Contains(encoded, []byte("inputs.target")) {
+		t.Fatalf("job-plan locks retained Docker args: %s", encoded)
+	}
+
+	invalid := []string{
+		"${{ inputs }}",
+		"${{ inputs[env.name] }}",
+		"${{ secrets.token }}",
+		"${{ inputs.target || 'fallback' }}",
+		"${{ format('{0}', inputs.target) }}",
+	}
+	for _, argument := range invalid {
+		writeAction(t, workspace, "docker", "runs:\n  using: docker\n  image: Dockerfile\n  args:\n    - \""+strings.ReplaceAll(argument, "\"", "\\\"")+"\"\n")
+		_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./docker"}, []map[string]string{{}})
+		if err == nil || !strings.Contains(err.Error(), "docker action argument 1") {
+			t.Errorf("argument %q error = %v, want resolution rejection", argument, err)
+		}
+	}
+}
+
+func TestCompileDockerfileActionValidatesInputDefaultsBeforeArgs(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "docker", `inputs:
+  target:
+    default: ${{ runner.temp }}
+runs:
+  using: docker
+  image: Dockerfile
+  args:
+    - ${{ secrets.token }}
+`)
+	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./docker"}, []map[string]string{{}})
+	if err == nil || !strings.Contains(err.Error(), `action input "target" default`) || strings.Contains(err.Error(), "docker action argument") {
+		t.Fatalf("compileActionInvocations() error = %v, want input-default rejection first", err)
 	}
 }
 
