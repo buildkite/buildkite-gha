@@ -847,6 +847,66 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsKeepsEnvironmentMutableBetweenCompositeSteps(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo FLAG=true >> "$GITHUB_ENV"
+    - if: env.FLAG == 'true'
+      shell: bash
+      env:
+        TOKEN: ${{ github.token }}
+      run: echo guarded
+`)
+	compiled, err := compileActionInvocationsWithStepContext(
+		t.Context(), workspace, nil, "https://github.com",
+		[]string{"./parent"}, []map[string]string{nil},
+		[]actionStepPlanningContext{{actionPlanningContext: actionPlanningContext{environment: map[string]string{"FLAG": "false"}}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("mutable environment made a later token-bearing composite step unreachable")
+	}
+}
+
+func TestCompileActionInvocationsResolvesChildWithBeforeChildEnvironment(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  enabled:
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ inputs.enabled != 'false' && github.token || '' }}
+      run: echo guarded
+`)
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      env:
+        ENABLED: "false"
+      with:
+        enabled: ${{ env.ENABLED }}
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("child with expression incorrectly observed its sibling environment")
+	}
+}
+
 func TestCompileActionInvocationsResolvesProviderGuardsInDefaultsAndConditions(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "guarded", `name: guarded
@@ -1595,6 +1655,59 @@ jobs:
 	}
 	if len(bundle.Plans) != 1 || !reflect.DeepEqual(bundle.Plans[0].Authorization.GitHubTokenActions, []string{"./.github/actions/composite-token"}) {
 		t.Fatalf("composite metadata token attribution = %#v", bundle.Plans)
+	}
+
+	writeAction(t, w, ".github/actions/environment-guarded", `name: environment guarded token
+inputs:
+  enabled:
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ inputs.enabled == 'true' && github.token || '' }}
+      run: echo guarded
+`)
+	plans, err = compile(`on: push
+permissions:
+  contents: read
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    env:
+      ENABLED: "false"
+    steps:
+      - run: echo ENABLED=true >> "$GITHUB_ENV"
+      - uses: ./.github/actions/environment-guarded
+        with:
+          enabled: ${{ env.ENABLED }}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken == nil {
+		t.Fatalf("mutable inherited job environment omitted action token: %#v", plans)
+	}
+
+	plans, err = compile(`on: push
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    env:
+      ENABLED: "true"
+    steps:
+      - uses: ./.github/actions/environment-guarded
+        env:
+          ENABLED: "false"
+        with:
+          enabled: ${{ env.ENABLED }}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken != nil {
+		t.Fatalf("fixed step environment retained unreachable action token: %#v", plans)
 	}
 
 	_, err = compile(`on: push

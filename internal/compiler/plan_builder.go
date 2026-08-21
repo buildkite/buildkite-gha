@@ -408,16 +408,14 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 		unknownWorkflowInputs[name] = true
 	}
 	workflowContext := expression.Context{WorkflowInputs: instance.Inputs, GitHub: map[string]any{"server_url": serverURL}}
-	jobEnvironment := knownValues(resolveKnownValues(instance.Env, workflowContext, unknownWorkflowInputs))
 	actionStepContexts := make([]actionStepPlanningContext, len(actionIndexes))
 	for i, stepIndex := range actionIndexes {
-		workflowContext.Env = jobEnvironment
 		stepEnvironment := knownValues(resolveKnownValues(steps[stepIndex].Env, workflowContext, unknownWorkflowInputs))
 		actionStepContexts[i] = actionStepPlanningContext{
 			actionPlanningContext: actionPlanningContext{
 				workflowInputs:        instance.Inputs,
 				unknownWorkflowInputs: unknownWorkflowInputs,
-				environment:           mergeKnownValues(jobEnvironment, stepEnvironment),
+				environment:           stepEnvironment,
 			},
 			condition: steps[stepIndex].Condition,
 		}

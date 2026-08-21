@@ -469,14 +469,19 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		requirements.githubToken = requirements.githubToken || requiresToken
 	}
 	for i, step := range n.metadata.Runs.Steps {
-		run, known, err := compositeStepCondition(step.If, effectiveInputs, unknownInputs, planning.environment, serverURL)
+		currentPlanning := planning
+		// A preceding composite child can update GITHUB_ENV before this step.
+		// Retain known inherited values only for the first child; declared step
+		// values below remain fixed overrides for that child's preparation.
+		planning.environment = nil
+		run, known, err := compositeStepCondition(step.If, effectiveInputs, unknownInputs, currentPlanning.environment, serverURL)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d condition: %w", i+1, err)
 		}
 		stepReachable := !known || run
-		stepEnvironment := knownValues(resolveKnownValues(step.Env, expression.Context{Inputs: effectiveInputs, Env: planning.environment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs))
-		childPlanning := planning
-		childPlanning.environment = mergeKnownValues(planning.environment, stepEnvironment)
+		stepEnvironment := knownValues(resolveKnownValues(step.Env, expression.Context{Inputs: effectiveInputs, Env: currentPlanning.environment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs))
+		childPlanning := currentPlanning
+		childPlanning.environment = mergeKnownValues(currentPlanning.environment, stepEnvironment)
 		var child *actionNode
 		preparesEnvironment, preparesInputs := false, false
 		if step.Uses != "" {
@@ -531,7 +536,9 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
 			}
 		}
-		childInputs := resolveKnownValues(step.With, expression.Context{Inputs: effectiveInputs, Env: childPlanning.environment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs)
+		// Composite child env and with maps are sibling fields: runtime resolves
+		// both against the parent context before overlaying the child's env.
+		childInputs := resolveKnownValues(step.With, expression.Context{Inputs: effectiveInputs, Env: currentPlanning.environment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs)
 		childRequirements, err := child.inspectInvocation(childInputs, false, serverURL, childPlanning)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
