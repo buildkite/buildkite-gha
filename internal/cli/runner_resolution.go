@@ -11,12 +11,12 @@ import (
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 )
 
-func suggestedRunnerTargets(ctx context.Context, reports []compiler.Report, clientVersion string) (map[string]compiler.RunnerTarget, error) {
+func suggestedRunnerTargets(ctx context.Context, reports []compiler.Report, configuredTargets map[string]compiler.RunnerTarget, clientVersion string) ([]compiler.RunnerSelector, []gharuntime.RunnerWarning, error) {
 	endpoint := os.Getenv("BUILDKITE_AGENT_ENDPOINT")
 	jobID := os.Getenv("BUILDKITE_JOB_ID")
 	jobToken := os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN")
 	if endpoint == "" || jobID == "" || jobToken == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	resolver, err := gharuntime.NewAgentRunnerResolver(gharuntime.AgentRunnerResolverConfig{
 		Endpoint:      endpoint,
@@ -25,43 +25,60 @@ func suggestedRunnerTargets(ctx context.Context, reports []compiler.Report, clie
 		ClientVersion: clientVersion,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	requirements := uniqueRunnerRequirements(reports)
+	requirements := uniqueRunnerRequirements(reports, configuredTargets)
 	suggestions, err := resolver.Resolve(ctx, requirements)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	byID := make(map[string]gharuntime.RunnerRequirement, len(requirements))
 	for _, requirement := range requirements {
 		byID[requirement.ID] = requirement
 	}
-	targets := make(map[string]compiler.RunnerTarget, len(suggestions))
+	selectors := make([]compiler.RunnerSelector, 0, len(suggestions))
+	var warnings []gharuntime.RunnerWarning
 	for _, suggestion := range suggestions {
 		requirement := byID[suggestion.ID]
-		if len(requirement.Labels) != 1 || !runnerQueuePattern.MatchString(suggestion.Queue) {
-			return nil, fmt.Errorf("runner resolution response contains an invalid target")
+		labels := make([]string, len(requirement.Labels))
+		seenLabels := make(map[string]bool, len(requirement.Labels))
+		validLabels := len(requirement.Labels) != 0
+		for i, label := range requirement.Labels {
+			labels[i] = strings.ToLower(strings.TrimSpace(label))
+			if labels[i] == "" || seenLabels[labels[i]] {
+				validLabels = false
+			}
+			seenLabels[labels[i]] = true
+		}
+		if !validLabels {
+			continue
+		}
+		if !runnerQueuePattern.MatchString(suggestion.Queue) {
+			return nil, nil, fmt.Errorf("runner resolution response contains an invalid target")
 		}
 		platform, err := compiler.ParsePlatform(suggestion.Platform)
 		if err != nil {
-			return nil, fmt.Errorf("runner resolution response contains an invalid target: %w", err)
+			return nil, nil, fmt.Errorf("runner resolution response contains an invalid target: %w", err)
 		}
-		label := strings.ToLower(strings.TrimSpace(requirement.Labels[0]))
-		target := compiler.RunnerTarget{Queue: suggestion.Queue, Platform: platform}
-		if existing, ok := targets[label]; ok && existing != target {
-			return nil, fmt.Errorf("runner resolution response contains conflicting targets")
+		if platform == compiler.PlatformLinuxAMD64 && !runnerImagePattern.MatchString(suggestion.Image) {
+			return nil, nil, fmt.Errorf("runner resolution response contains an invalid target image")
 		}
-		targets[label] = target
+		if platform == compiler.PlatformDarwinARM64 && suggestion.Image != "" {
+			return nil, nil, fmt.Errorf("runner resolution response contains an invalid target image")
+		}
+		target := compiler.RunnerTarget{Queue: suggestion.Queue, Platform: platform, Image: suggestion.Image}
+		selectors = append(selectors, compiler.RunnerSelector{Labels: labels, Target: target})
+		warnings = append(warnings, suggestion.Warnings...)
 	}
-	return targets, nil
+	return selectors, warnings, nil
 }
 
-func uniqueRunnerRequirements(reports []compiler.Report) []gharuntime.RunnerRequirement {
+func uniqueRunnerRequirements(reports []compiler.Report, configuredTargets map[string]compiler.RunnerTarget) []gharuntime.RunnerRequirement {
 	seen := make(map[string]bool)
 	var requirements []gharuntime.RunnerRequirement
 	for _, report := range reports {
 		for _, job := range report.Jobs {
-			if len(job.RunsOn) == 0 {
+			if len(job.RunsOn) == 0 || runnerSelectorIsConfigured(job.RunsOn, configuredTargets) {
 				continue
 			}
 			encoded, _ := json.Marshal(job.RunsOn)
@@ -77,4 +94,16 @@ func uniqueRunnerRequirements(reports []compiler.Report) []gharuntime.RunnerRequ
 		}
 	}
 	return requirements
+}
+
+func runnerSelectorIsConfigured(labels []string, configuredTargets map[string]compiler.RunnerTarget) bool {
+	var target compiler.RunnerTarget
+	for i, label := range labels {
+		configured, ok := configuredTargets[strings.ToLower(strings.TrimSpace(label))]
+		if !ok || (i != 0 && configured != target) {
+			return false
+		}
+		target = configured
+	}
+	return len(labels) != 0
 }

@@ -88,17 +88,25 @@ type RunnerTarget struct {
 	Image    string
 }
 
+// RunnerSelector maps one complete runs-on selector to a target without
+// changing how any of its individual labels resolve in other selectors.
+type RunnerSelector struct {
+	Labels []string
+	Target RunnerTarget
+}
+
 // RunnerPolicy maps every accepted runner label to a Buildkite queue and
 // execution platform. An empty Linux queue uses Buildkite's default agent
 // targeting. Darwin always requires an explicit queue. Multi-label targets are
-// accepted only when every label maps to the same complete target. Untrusted
-// events are additionally restricted to UntrustedQueues unless the default is
-// explicitly allowed.
+// resolved by Selectors first, then accepted only when every label maps to the
+// same complete target. Untrusted events are additionally restricted to
+// UntrustedQueues unless the default is explicitly allowed.
 type RunnerPolicy struct {
 	// Labels retains the Linux/amd64 label-to-queue shorthand used by direct
 	// compiler callers. New multi-platform policy should use Targets.
 	Labels                     map[string]string
 	Targets                    map[string]RunnerTarget
+	Selectors                  []RunnerSelector
 	UntrustedQueues            []string
 	AllowUntrustedDefaultQueue bool
 }
@@ -163,7 +171,7 @@ func (options Options) validate() error {
 	if options.StepKeyNamespace != "" && !stepKeyNamespacePattern.MatchString(options.StepKeyNamespace) {
 		return fmt.Errorf("step key namespace %q must be 16 lowercase hexadecimal characters", options.StepKeyNamespace)
 	}
-	if len(options.Runners.Labels) == 0 && len(options.Runners.Targets) == 0 {
+	if len(options.Runners.Labels) == 0 && len(options.Runners.Targets) == 0 && len(options.Runners.Selectors) == 0 {
 		return fmt.Errorf("runner policy requires at least one label mapping")
 	}
 	labels := make(map[string]RunnerTarget, len(options.Runners.Labels)+len(options.Runners.Targets))
@@ -176,6 +184,20 @@ func (options Options) validate() error {
 		if err := validateRunnerTarget(labels, label, target); err != nil {
 			return err
 		}
+	}
+	selectors := make(map[string]RunnerTarget, len(options.Runners.Selectors))
+	for _, selector := range options.Runners.Selectors {
+		key, err := runnerSelectorKey(selector.Labels)
+		if err != nil {
+			return err
+		}
+		if err := validateRunnerTarget(make(map[string]RunnerTarget), strings.Join(selector.Labels, ", "), selector.Target); err != nil {
+			return err
+		}
+		if existing, ok := selectors[key]; ok && existing != selector.Target {
+			return fmt.Errorf("runner selector has conflicting target mappings")
+		}
+		selectors[key] = selector.Target
 	}
 	for _, queue := range options.Runners.UntrustedQueues {
 		if !queuePattern.MatchString(queue) {
@@ -283,19 +305,37 @@ func rejectRunner(reason, format string, args ...any) error {
 	return &runnerPolicyRejection{reason: reason, err: fmt.Errorf(format, args...)}
 }
 
+// Resolve returns the target selected by labels under this policy and trust
+// boundary.
+func (policy RunnerPolicy) Resolve(labels []string, trust EventTrust) (RunnerTarget, error) {
+	return policy.resolve(labels, trust)
+}
+
 func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTarget, error) {
 	if len(labels) == 0 {
 		return RunnerTarget{}, rejectRunner(reasonNoLabels, reasonNoLabels)
 	}
-	var target RunnerTarget
-	resolved := false
+	normalizedLabels := make([]string, len(labels))
 	seen := make(map[string]struct{}, len(labels))
-	for _, label := range labels {
+	for i, label := range labels {
 		normalized := strings.ToLower(strings.TrimSpace(label))
 		if _, duplicate := seen[normalized]; duplicate {
 			return RunnerTarget{}, rejectRunner(reasonDuplicateLabel, "runs-on contains duplicate runner label %q", label)
 		}
 		seen[normalized] = struct{}{}
+		normalizedLabels[i] = normalized
+	}
+	selectorKey, _ := runnerSelectorKey(normalizedLabels)
+	for _, selector := range policy.Selectors {
+		key, err := runnerSelectorKey(selector.Labels)
+		if err == nil && key == selectorKey {
+			return policy.enforceRunnerTrust(selector.Target, trust)
+		}
+	}
+	var target RunnerTarget
+	resolved := false
+	for i, label := range labels {
+		normalized := normalizedLabels[i]
 		if unsupportedOS(normalized) {
 			return RunnerTarget{}, rejectRunner(reasonUnsupportedOS, "unsupported operating system runner label %q", label)
 		}
@@ -332,6 +372,10 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 		target = mapped
 		resolved = true
 	}
+	return policy.enforceRunnerTrust(target, trust)
+}
+
+func (policy RunnerPolicy) enforceRunnerTrust(target RunnerTarget, trust EventTrust) (RunnerTarget, error) {
 	if trust == EventUntrusted && target.Queue == "" && !policy.AllowUntrustedDefaultQueue {
 		return RunnerTarget{}, rejectRunner(reasonUntrustedDefault, reasonUntrustedDefault)
 	}
@@ -341,6 +385,26 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 		return RunnerTarget{}, rejectRunner(reasonUntrustedQueue, "untrusted event cannot target queue %q; allowed queues: %s", target.Queue, strings.Join(allowlist, ", "))
 	}
 	return target, nil
+}
+
+func runnerSelectorKey(labels []string) (string, error) {
+	if len(labels) == 0 {
+		return "", fmt.Errorf("runner selector must contain at least one label")
+	}
+	normalized := make([]string, len(labels))
+	seen := make(map[string]bool, len(labels))
+	for i, label := range labels {
+		normalized[i] = strings.ToLower(strings.TrimSpace(label))
+		if normalized[i] == "" {
+			return "", fmt.Errorf("runner selector labels must be non-empty")
+		}
+		if seen[normalized[i]] {
+			return "", fmt.Errorf("runner selector contains duplicate label %q", label)
+		}
+		seen[normalized[i]] = true
+	}
+	sort.Strings(normalized)
+	return strings.Join(normalized, "\x00"), nil
 }
 
 // runnerRejectionDiagnostic renders a rejected runs-on resolution. Callers

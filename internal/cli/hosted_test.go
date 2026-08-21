@@ -51,6 +51,11 @@ func TestConfiguredLinuxRunnerTargetsDefaultHostedToolchainImages(t *testing.T) 
 	if target.Image != override {
 		t.Fatalf("explicit image = %q, want %q", target.Image, override)
 	}
+
+	canonical, target, err := configuredRunnerTarget("ubuntu-18.04", "legacy-linux", "")
+	if err != nil || canonical != "ubuntu-18.04" || target != (compiler.RunnerTarget{Queue: "legacy-linux", Platform: compiler.PlatformLinuxAMD64}) {
+		t.Fatalf("fallback override = %q, %#v, %v", canonical, target, err)
+	}
 }
 
 func TestHostedRunnerTargetsContainOnlyHostedGuarantees(t *testing.T) {

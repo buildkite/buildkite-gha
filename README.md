@@ -74,9 +74,9 @@ plugins:
 
 Hosted runner labels are case-insensitive. Linux labels use the matching Noble
 or Jammy hosted-toolchains image, with or without a configured queue.
-During upload, the importer asks the job-scoped Agent API to resolve each
-`runs-on` selector before using configured mappings or the local preset. A macOS
-label selects native Darwin/arm64, not a GitHub image or Xcode inventory.
+During upload, the Agent API returns complete targets for selectors without an
+explicit mapping. The importer annotates heuristic fallback warnings. See the
+[compatibility guide](docs/compatibility.md#job-configuration).
 
 The imported workflows are a dynamic part of the Buildkite pipeline. The plugin creates one aggregate group per successfully compiled, explicitly listed workflow in a single transaction. Workflows that do not declare the selected event become top-level skipped steps. Groups and replacement steps depend on the importer. Each runnable job publishes a provider check named `<workflow> / <job> (<event>)`: a GitHub check for GitHub events or an Origin check for Origin events. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
 

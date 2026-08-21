@@ -33,7 +33,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | --- | --- | --- |
 | [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name` and job names are retained. `run-name` has no effect. |
 | [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. `workflow_call` is supported for composition. |
-| [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64 with `ubuntu-latest`, `ubuntu-24.04`, or `ubuntu-22.04`. Its Agent API resolves single macOS labels to native macOS arm64 hosted queues before local runner mappings. Labels do not provide GitHub image, toolchain, or Xcode parity. |
+| [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64. The Agent API can map compatible selectors to hosted Linux or native macOS arm64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `python`, and custom shell templates. |
@@ -427,7 +427,7 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 | --- | --- | --- |
 | `name` | ✅ Supported | Labels may use static `github`, `vars`, reusable-workflow `inputs`, and matrix values. |
 | `needs` | ✅ Supported | Accepts a string or list of static job IDs. Matrix fan-out and fan-in are automatic. |
-| `runs-on` | 🟡 Supported subset | The hosted importer asks the Agent API to resolve each selector before using configured mappings or its local preset. The preset accepts `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04`, and `macos-latest`; configured fallbacks can map `macos-14` and `macos-15`. Labels are case-insensitive. Static expressions may resolve to an accepted label or list whose labels map to the same complete queue, platform, and image target. |
+| `runs-on` | 🟡 Supported subset | Explicit mappings are authoritative. The Agent API returns a complete target for every other selector and can return a fallback warning annotation. The local preset accepts `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04`, and `macos-latest`. Labels are case-insensitive. Static expressions may resolve to an accepted label or label list. |
 | `if` | 🟡 Supported subset | Runs before the job starts. See [Conditions](#conditions). |
 | `outputs` | 🟡 Supported subset | Maps step outputs for consumption through `needs`. A job may publish 64 outputs of up to 1 KiB each. Ambiguous matrix output values stop the job with an error. |
 | `env`, `defaults.run` | 🟡 Supported subset | Uses the [workflow-level behavior](#environment-and-defaults). |
@@ -493,12 +493,18 @@ Runner labels are case-insensitive. Runner aliases such as `macOS-latest` use
 the same target as `macos-latest`. Linux labels default to the corresponding
 Noble or Jammy hosted-toolchains image; an explicit immutable image overrides
 it for a configured profile. Linux labels use default Buildkite agent targeting
-with that image when unmapped. During upload, the job-scoped Agent API resolves
-each `runs-on` selector before configured mappings or the local preset. API
-targets take precedence. `validate --profile hosted` has no job-scoped API and
-admits only the local `macos-latest` preset. macOS labels reject images. They
-select Darwin/arm64, not a GitHub image or Xcode inventory. Linux ARM, macOS
-x86-64, Windows, and other labels are unsupported.
+with that image when unmapped.
+
+An explicit mapping is authoritative and bypasses Agent API resolution. It
+declares that the selector runs on Linux x86-64, except for the known macOS
+labels, which select Darwin arm64 and reject images. For every other selector,
+the job-scoped Agent API owns compatibility and returns the complete queue,
+platform, and immutable Linux image. The importer applies that target verbatim
+and publishes returned fallback warnings as annotations. The server rejects
+selectors that require an incompatible operating system or architecture.
+
+`validate --profile hosted` has no job-scoped API and admits only the local
+`macos-latest` preset.
 
 ### Matrix strategies
 

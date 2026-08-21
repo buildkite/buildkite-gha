@@ -27,6 +27,13 @@ type RunnerSuggestion struct {
 	ID       string
 	Queue    string
 	Platform string
+	Image    string
+	Warnings []RunnerWarning
+}
+
+type RunnerWarning struct {
+	Code    string
+	Message string
 }
 
 type AgentRunnerResolverConfig struct {
@@ -137,15 +144,19 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 			Target *struct {
 				Queue    string `json:"queue"`
 				Platform string `json:"platform"`
+				Image    string `json:"image"`
 			} `json:"target"`
 			Error *struct {
 				Code    string `json:"code"`
 				Message string `json:"message"`
 			} `json:"error"`
+			Warnings []struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"warnings"`
 		} `json:"resolutions"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&decoded); err != nil {
 		return nil, fmt.Errorf("decode runner resolution response: %w", err)
 	}
@@ -165,7 +176,16 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 		}
 		seen[resolution.ID] = true
 		if resolution.Target != nil {
-			suggestions = append(suggestions, RunnerSuggestion{ID: resolution.ID, Queue: resolution.Target.Queue, Platform: resolution.Target.Platform})
+			suggestion := RunnerSuggestion{ID: resolution.ID, Queue: resolution.Target.Queue, Platform: resolution.Target.Platform, Image: resolution.Target.Image}
+			for _, warning := range resolution.Warnings {
+				if strings.TrimSpace(warning.Code) == "" || strings.TrimSpace(warning.Message) == "" {
+					return nil, fmt.Errorf("runner resolution response contains an invalid warning")
+				}
+				suggestion.Warnings = append(suggestion.Warnings, RunnerWarning{Code: warning.Code, Message: warning.Message})
+			}
+			suggestions = append(suggestions, suggestion)
+		} else if len(resolution.Warnings) != 0 {
+			return nil, fmt.Errorf("runner resolution response contains warnings without a target")
 		}
 	}
 	return suggestions, nil

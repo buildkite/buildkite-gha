@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
-func TestAgentRunnerResolverBatchesRequirementsAndReturnsSuggestions(t *testing.T) {
+func TestAgentRunnerResolverBatchesRequirementsIgnoresUnknownFieldsAndReturnsSuggestions(t *testing.T) {
 	const jobID = "11111111-1111-4111-8111-111111111111"
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -29,13 +30,18 @@ func TestAgentRunnerResolverBatchesRequirementsAndReturnsSuggestions(t *testing.
 		}
 		resolutions := make([]map[string]any, len(body.Requirements))
 		for i, requirement := range body.Requirements {
-			if len(requirement.Selector.Labels) == 1 && requirement.Selector.Labels[0] == "macos-26" {
-				resolutions[i] = map[string]any{"id": requirement.ID, "target": map[string]string{"queue": "macos-26-medium", "platform": "darwin/arm64"}}
+			if len(requirement.Selector.Labels) == 1 && requirement.Selector.Labels[0] == "ubuntu-18.04" {
+				resolutions[i] = map[string]any{
+					"id":       requirement.ID,
+					"target":   map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": "registry.example.com/ubuntu@sha256:" + strings.Repeat("0", 64), "future": "ignored"},
+					"warnings": []map[string]string{{"code": "runner_label_fallback", "message": "Runner labels [ubuntu-18.04] are not supported directly; using the linux-medium queue via a heuristic fallback. Configure an explicit runner mapping to use an appropriate Buildkite queue and avoid this fallback.", "future": "ignored"}},
+					"future":   "ignored",
+				}
 			} else {
-				resolutions[i] = map[string]any{"id": requirement.ID, "error": map[string]string{"code": "unmapped_labels", "message": "No compatible runner is configured."}}
+				resolutions[i] = map[string]any{"id": requirement.ID, "error": map[string]string{"code": "unmapped_labels", "message": "No compatible runner is configured.", "future": "ignored"}}
 			}
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"resolutions": resolutions})
+		_ = json.NewEncoder(w).Encode(map[string]any{"resolutions": resolutions, "future": "ignored"})
 	}))
 	defer server.Close()
 
@@ -47,12 +53,12 @@ func TestAgentRunnerResolverBatchesRequirementsAndReturnsSuggestions(t *testing.
 	for i := range requirements {
 		requirements[i] = RunnerRequirement{ID: fmt.Sprintf("r%d", i), Labels: []string{"ubuntu-latest"}}
 	}
-	requirements[100].Labels = []string{"macos-26"}
+	requirements[100].Labels = []string{"ubuntu-18.04"}
 	suggestions, err := resolver.Resolve(t.Context(), requirements)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requests != 2 || len(suggestions) != 1 || suggestions[0] != (RunnerSuggestion{ID: "r100", Queue: "macos-26-medium", Platform: "darwin/arm64"}) {
+	if requests != 2 || len(suggestions) != 1 || suggestions[0].ID != "r100" || suggestions[0].Queue != "linux-medium" || suggestions[0].Platform != "linux/amd64" || suggestions[0].Image != "registry.example.com/ubuntu@sha256:"+strings.Repeat("0", 64) || len(suggestions[0].Warnings) != 1 || suggestions[0].Warnings[0] != (RunnerWarning{Code: "runner_label_fallback", Message: "Runner labels [ubuntu-18.04] are not supported directly; using the linux-medium queue via a heuristic fallback. Configure an explicit runner mapping to use an appropriate Buildkite queue and avoid this fallback."}) {
 		t.Fatalf("requests/suggestions = %d / %#v", requests, suggestions)
 	}
 }
