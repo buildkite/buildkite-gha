@@ -7,6 +7,6 @@
   "workspaces": [],
   "packageManager": "npm@11.16.0",
   "dependencies": {
-    "deepsec": "2.3.4"
+    "deepsec": "2.3.6"
   }
 }
