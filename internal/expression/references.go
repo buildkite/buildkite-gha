@@ -1,6 +1,6 @@
 // Static reference introspection over templates, complete expressions, and
 // conditions. Each predicate deliberately answers one narrow question with
-// its own fail-closed behavior.
+// an error for unsupported input.
 package expression
 
 import (
@@ -19,7 +19,7 @@ type NeedOutputReference struct {
 
 // ReferencePath extracts one complete static variable reference. Dot and
 // literal string index access are accepted; functions, operators, literals,
-// compound templates, and dynamic indexes fail closed.
+// compound templates, and dynamic indexes return an error.
 func ReferencePath(text string) (string, []string, error) {
 	body, err := expressionBody(text)
 	if err != nil {
@@ -75,7 +75,7 @@ func runtimeMatrixIdentifier(value string) bool {
 }
 
 // SecretReferences returns the statically named secrets referenced by a
-// template. Dynamic indexes fail closed because the runtime cannot determine
+// template. Dynamic indexes return an error because the runtime cannot determine
 // which values to resolve and register with the log redactor before execution.
 func SecretReferences(template string) ([]string, error) {
 	found := map[string]struct{}{}
@@ -208,12 +208,29 @@ func sortedReferenceNames(found map[string]struct{}) []string {
 }
 
 // ReferencesGitHubToken reports whether a template statically references
-// github.token. Dynamic GitHub indexes fail closed so compiler-owned token
+// github.token. Dynamic GitHub indexes return an error so compiler-owned token
 // authority cannot depend on a runtime-selected property.
 func ReferencesGitHubToken(template string) (bool, error) {
+	return referencesGitHubToken(template, false, false)
+}
+
+// ReferencesStepGitHubToken reports whether a step runtime template statically
+// references github.token, including the exact toJSON(github) shape.
+func ReferencesStepGitHubToken(template string) (bool, error) {
+	return referencesGitHubToken(template, true, true)
+}
+
+// ReferencesCompositeStepGitHubToken validates the same runtime surface for a
+// composite-authored step input, but does not let toJSON(github) grant token
+// authority. A direct github.token reference still reports true.
+func ReferencesCompositeStepGitHubToken(template string) (bool, error) {
+	return referencesGitHubToken(template, true, false)
+}
+
+func referencesGitHubToken(template string, allowContextSerialization, contextSerializationReferencesToken bool) (bool, error) {
 	found := false
 	err := visitTemplateExpressions(template, func(expression actionlint.ExprNode) error {
-		referencesToken, err := nodeReferencesGitHubToken(expression)
+		referencesToken, err := nodeReferencesGitHubToken(expression, allowContextSerialization, contextSerializationReferencesToken)
 		found = found || referencesToken
 		return err
 	})
@@ -227,10 +244,10 @@ func ConditionReferencesGitHubToken(source string) (bool, error) {
 	if err != nil || empty {
 		return false, err
 	}
-	return nodeReferencesGitHubToken(node)
+	return nodeReferencesGitHubToken(node, false, false)
 }
 
-func nodeReferencesGitHubToken(expression actionlint.ExprNode) (bool, error) {
+func nodeReferencesGitHubToken(expression actionlint.ExprNode, allowContextSerialization, contextSerializationReferencesToken bool) (bool, error) {
 	found := false
 	var referenceErr error
 	actionlint.VisitExprNode(expression, func(node, parent actionlint.ExprNode, entering bool) {
@@ -258,6 +275,10 @@ func nodeReferencesGitHubToken(expression actionlint.ExprNode) (bool, error) {
 			if referenceReceiver(node, parent) {
 				return
 			}
+			if call, ok := parent.(*actionlint.FuncCallNode); allowContextSerialization && ok && isToJSONGitHubCall(call) {
+				found = found || contextSerializationReferencesToken
+				return
+			}
 			referenceErr = fmt.Errorf("github reference must name one static property")
 			return
 		}
@@ -281,6 +302,14 @@ func nodeReferencesGitHubToken(expression actionlint.ExprNode) (bool, error) {
 		found = true
 	})
 	return found, referenceErr
+}
+
+func isToJSONGitHubCall(call *actionlint.FuncCallNode) bool {
+	if !strings.EqualFold(call.Callee, "toJSON") || len(call.Args) != 1 {
+		return false
+	}
+	root, ok := call.Args[0].(*actionlint.VariableNode)
+	return ok && strings.EqualFold(root.Name, "github")
 }
 
 func referenceRoot(node actionlint.ExprNode) string {
@@ -348,15 +377,14 @@ func ReferencesJobStatus(template string) (bool, error) {
 	return found, err
 }
 
-// ReferencesGitHubEvent reports whether a condition reads the event payload
-// through github.event. The compiler can fold those conditions before the
-// immutable runtime boundary, which deliberately omits the payload body.
+// ReferencesGitHubEvent reports whether a condition reads the event payload or
+// an event-derived GitHub ref scalar that the compiler must fold.
 func ReferencesGitHubEvent(source string) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return false, err
 	}
-	return nodeReferencesGitHubEvent(node), nil
+	return nodeReferencesCompileGitHubEvent(node), nil
 }
 
 // TemplateReferencesGitHubEvent reports whether an interpolated template
@@ -364,13 +392,35 @@ func ReferencesGitHubEvent(source string) (bool, error) {
 func TemplateReferencesGitHubEvent(template string) (bool, error) {
 	found := false
 	err := visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
-		found = found || nodeReferencesGitHubEvent(node)
+		found = found || nodeReferencesGitHubEventPayload(node)
 		return nil
 	})
 	return found, err
 }
 
-func nodeReferencesGitHubEvent(node actionlint.ExprNode) bool {
+func nodeReferencesCompileGitHubEvent(node actionlint.ExprNode) bool {
+	return nodeReferencesGitHub(node, func(path []string) bool {
+		if len(path) == 0 {
+			return false
+		}
+		switch strings.ToLower(path[0]) {
+		case "base_ref", "ref_name", "ref_type":
+			return len(path) == 1
+		case "event":
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+func nodeReferencesGitHubEventPayload(node actionlint.ExprNode) bool {
+	return nodeReferencesGitHub(node, func(path []string) bool {
+		return len(path) != 0 && strings.EqualFold(path[0], "event")
+	})
+}
+
+func nodeReferencesGitHub(node actionlint.ExprNode, matches func([]string) bool) bool {
 	found := false
 	actionlint.VisitExprNode(node, func(node, _ actionlint.ExprNode, entering bool) {
 		if !entering || found {
@@ -382,7 +432,7 @@ func nodeReferencesGitHubEvent(node actionlint.ExprNode) bool {
 			return
 		}
 		root, path, pathErr := referencePath(node)
-		found = pathErr == nil && strings.EqualFold(root, "github") && len(path) != 0 && strings.EqualFold(path[0], "event")
+		found = pathErr == nil && strings.EqualFold(root, "github") && matches(path)
 	})
 	return found
 }

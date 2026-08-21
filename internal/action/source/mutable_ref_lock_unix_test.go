@@ -11,11 +11,11 @@ import (
 
 func TestMutableRefLockCancellationWhileHeld(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".lock")
-	unlock, err := lockMutableRefCache(context.Background(), path)
+	unlock, err := lockMutableRefCache(t.Context(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err := lockMutableRefCache(ctx, path); !errors.Is(err, context.Canceled) {
 		unlock()
@@ -23,7 +23,7 @@ func TestMutableRefLockCancellationWhileHeld(t *testing.T) {
 	}
 	unlock()
 	unlock()
-	release, err := lockMutableRefCache(context.Background(), path)
+	release, err := lockMutableRefCache(t.Context(), path)
 	if err != nil {
 		t.Fatalf("reacquire lock: %v", err)
 	}

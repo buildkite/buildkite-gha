@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 type testSecretResolver map[string]string
@@ -45,6 +47,26 @@ type testRedactor struct{ values []string }
 func (r *testRedactor) AddRedaction(_ context.Context, value string) error {
 	r.values = append(r.values, value)
 	return nil
+}
+
+type deferredInputRunner struct {
+	jobID string
+	path  string
+	data  []byte
+}
+
+func (r deferredInputRunner) Run(_ context.Context, _ string, _ string, args []string, _ []byte) ([]byte, error) {
+	if len(args) >= 5 && args[0] == "artifact" && args[1] == "search" && args[2] == r.path {
+		return []byte(r.jobID + "\n"), nil
+	}
+	if len(args) >= 4 && args[0] == "artifact" && args[1] == "download" && args[2] == r.path {
+		path := filepath.Join(args[3], filepath.FromSlash(r.path))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, err
+		}
+		return nil, os.WriteFile(path, r.data, 0o600)
+	}
+	return nil, fmt.Errorf("unexpected agent command: %v", args)
 }
 
 type testWorkflowTokenProvider struct {
@@ -99,7 +121,7 @@ func TestBoundedDockerOutputRejectsOversizedOutput(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\ni=0; while [ $i -lt 5000 ]; do printf x; i=$((i+1)); done\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	out, err := boundedDockerOutput(context.Background(), nil, script, "buildx", "inspect")
+	out, err := boundedDockerOutput(t.Context(), nil, script, "buildx", "inspect")
 	if err == nil || !strings.Contains(err.Error(), "exceeds limit") || len(out) != 4096 {
 		t.Fatalf("boundedDockerOutput() = %d bytes, %v", len(out), err)
 	}
@@ -415,7 +437,7 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 	t.Setenv("BUILDX_BUILDER", "ambient-builder")
 	t.Setenv("BUILDKIT_HOST", "tcp://ambient.invalid:1234")
 	var logs bytes.Buffer
-	result, err := (Runner{Docker: fake.path, Stdout: &logs, Stderr: &logs}).runDockerAction(context.Background(), action)
+	result, err := (Runner{Docker: fake.path, Stdout: &logs, Stderr: &logs}).runDockerAction(t.Context(), action)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +594,7 @@ func TestRunDockerPreservesExplicitPath(t *testing.T) {
 			if test.jobPATH != "" {
 				job.Env = map[string]string{"PATH": test.jobPATH}
 			}
-			if _, err := (Runner{Docker: fake.path}).RunJob(context.Background(), job, workspace); err != nil {
+			if _, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace); err != nil {
 				t.Fatal(err)
 			}
 			calls := fake.calls(t)
@@ -599,7 +621,7 @@ func TestRunDockerPreservesPathWrittenThroughGitHubEnv(t *testing.T) {
 		{ID: "docker", Kind: "uses", Uses: "./.github/actions/docker"},
 	})
 	job.RequiredCapabilities = []string{"docker", "network"}
-	if _, err := (Runner{Docker: fake.path}).RunJob(context.Background(), job, workspace); err != nil {
+	if _, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace); err != nil {
 		t.Fatal(err)
 	}
 	calls := fake.calls(t)
@@ -633,7 +655,7 @@ runs:
 		Env:  map[string]string{"MODE": "caller"},
 	}})
 	job.RequiredCapabilities = []string{"docker", "network"}
-	if _, err := (Runner{Docker: fake.path}).RunJob(context.Background(), job, workspace); err != nil {
+	if _, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace); err != nil {
 		t.Fatal(err)
 	}
 	calls := fake.calls(t)
@@ -652,7 +674,7 @@ func TestRunDockerRejectsUntrustedBuilderBeforeExecution(t *testing.T) {
 	for _, scenario := range []string{"remote", "multiline", "oversized", "inspect-fail"} {
 		t.Run(scenario, func(t *testing.T) {
 			fake := newFakeDocker(t, scenario)
-			if _, err := (Runner{Docker: fake.path}).runDockerAction(context.Background(), fakeDockerAction(t)); err == nil {
+			if _, err := (Runner{Docker: fake.path}).runDockerAction(t.Context(), fakeDockerAction(t)); err == nil {
 				t.Fatal("untrusted builder was accepted")
 			}
 			calls := fake.calls(t)
@@ -669,7 +691,7 @@ func TestRunDockerFakeFailuresCleanOwnedResources(t *testing.T) {
 	for _, scenario := range []string{"build-fail", "run-fail", "leftover", "query-fail"} {
 		t.Run(scenario, func(t *testing.T) {
 			fake := newFakeDocker(t, scenario)
-			if _, err := (Runner{Docker: fake.path, CleanupTimeout: 2 * time.Second}).runDockerAction(context.Background(), fakeDockerAction(t)); err == nil {
+			if _, err := (Runner{Docker: fake.path, CleanupTimeout: 2 * time.Second}).runDockerAction(t.Context(), fakeDockerAction(t)); err == nil {
 				t.Fatal("Docker failure returned success")
 			}
 			calls := fake.calls(t)
@@ -695,7 +717,7 @@ func TestRunDockerFakeFailuresCleanOwnedResources(t *testing.T) {
 
 func TestRunDockerProcessesFileCommandsAfterFailure(t *testing.T) {
 	fake := newFakeDocker(t, "run-fail")
-	result, err := (Runner{Docker: fake.path}).runDockerAction(context.Background(), fakeDockerAction(t))
+	result, err := (Runner{Docker: fake.path}).runDockerAction(t.Context(), fakeDockerAction(t))
 	if err == nil || !strings.Contains(err.Error(), `run Docker action "fake Docker"`) {
 		t.Fatalf("runDockerAction() error = %v", err)
 	}
@@ -706,7 +728,7 @@ func TestRunDockerProcessesFileCommandsAfterFailure(t *testing.T) {
 
 func TestRunDockerJoinsRunAndFileCommandFailures(t *testing.T) {
 	fake := newFakeDocker(t, "run-fail-invalid-files")
-	_, err := (Runner{Docker: fake.path}).runDockerAction(context.Background(), fakeDockerAction(t))
+	_, err := (Runner{Docker: fake.path}).runDockerAction(t.Context(), fakeDockerAction(t))
 	if err == nil || !strings.Contains(err.Error(), `run Docker action "fake Docker"`) || !strings.Contains(err.Error(), `process Docker action "fake Docker" file commands`) || !strings.Contains(err.Error(), "invalid file command") {
 		t.Fatalf("runDockerAction() error = %v", err)
 	}
@@ -716,7 +738,7 @@ func TestRunDockerReadsOnlyOriginalCommandFiles(t *testing.T) {
 	t.Parallel()
 
 	fake := newFakeDocker(t, "replace-files")
-	result, err := (Runner{Docker: fake.path}).runDockerAction(context.Background(), fakeDockerAction(t))
+	result, err := (Runner{Docker: fake.path}).runDockerAction(t.Context(), fakeDockerAction(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -729,7 +751,7 @@ func TestRunDockerCancellationCleansOwnedResources(t *testing.T) {
 	t.Parallel()
 
 	fake := newFakeDocker(t, "cancel")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() {
 		_, err := (Runner{Docker: fake.path, CleanupTimeout: 2 * time.Second, InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}).runDockerAction(ctx, fakeDockerAction(t))
@@ -768,7 +790,7 @@ func TestRunJobUnresolvedDockerActionUsesFakeBackend(t *testing.T) {
 	workspace := fixturePath(t)
 	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "docker", Kind: "uses", Uses: "./actions/docker"}})
 	job.RequiredCapabilities = []string{"docker", "network"}
-	result, err := (Runner{Docker: fake.path}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Env["DOCKER_RUNTIME_SEEN"] != "true" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -785,7 +807,7 @@ func TestRunJobEvaluatesIndexedWorkflowInputs(t *testing.T) {
 	job.Inputs = map[string]any{"label": "dispatched"}
 	job.Env = map[string]string{"KEY": "label"}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -801,7 +823,7 @@ func TestRunJobDoesNotTolerateDockerActionCleanupFailure(t *testing.T) {
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.ContinueOnError = true
 
-	result, err := (Runner{Docker: fake.path}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace)
 	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "owned Docker resources remain after cleanup") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -837,7 +859,7 @@ echo after-soft`},
 	job.Event.Ref = "refs/heads/main"
 	job.Event.SHA = "0123456789abcdef"
 	job.Event.Actor = "octocat"
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: testSecretResolver{"CANARY": "mask-me"}, Redactor: redactor}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: testSecretResolver{"CANARY": "mask-me"}, Redactor: redactor}).RunJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v, logs = %q", err, logs.String())
 	}
@@ -906,7 +928,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, err := compilePlansForTest(context.Background(),
+	plans, err := compilePlansForTest(t.Context(),
 		filepath.Join(workspace, workflowPath),
 		[]byte(source),
 		event,
@@ -932,7 +954,7 @@ jobs:
 		t.Fatalf("plans = %d, want four defaults cases", len(plans))
 	}
 	for _, job := range plans {
-		result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+		result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 		if err != nil || result.Conclusion != "success" {
 			t.Fatalf("RunJob(%s) result = %#v, error = %v", job.Workflow.LogicalJobID, result, err)
 		}
@@ -957,7 +979,7 @@ func TestCompiledBracketSecretResolvesAndMasks(t *testing.T) {
 	}
 	var logs bytes.Buffer
 	redactor := &testRedactor{}
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: testSecretResolver{"TOKEN": "secret-value"}, Redactor: redactor}).RunJob(context.Background(), plans[0], workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: testSecretResolver{"TOKEN": "secret-value"}, Redactor: redactor}).RunJob(t.Context(), plans[0], workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1019,7 +1041,7 @@ printf '%s\n' tap-secret
 	for name := range transportEnvironment {
 		t.Setenv(name, "http://workflow-controlled.example")
 	}
-	value, err := resolved.ResolveSecret(context.Background(), "HOMEBREW_TAP_GITHUB_TOKEN")
+	value, err := resolved.ResolveSecret(t.Context(), "HOMEBREW_TAP_GITHUB_TOKEN")
 	if err != nil || value != "tap-secret" {
 		t.Fatalf("ResolveSecret() = %q, %v", value, err)
 	}
@@ -1031,7 +1053,7 @@ func TestAgentSecretsDoesNotReturnCommandOutputOnFailure(t *testing.T) {
 	if err := os.Chmod(agent, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, err := (AgentSecrets{Executable: agent}).ResolveSecret(context.Background(), "DENIED")
+	_, err := (AgentSecrets{Executable: agent}).ResolveSecret(t.Context(), "DENIED")
 	if err == nil || strings.Contains(err.Error(), "stdout-secret") || strings.Contains(err.Error(), "stderr-secret") || !strings.Contains(err.Error(), "secret request failed") {
 		t.Fatalf("ResolveSecret() error = %v", err)
 	}
@@ -1087,7 +1109,7 @@ test -z "${AMBIENT_SECRET+x}" || exit 15
 	t.Setenv("BUILDKITE_AGENT_ENDPOINT", "https://agent.example/v3")
 	t.Setenv("AMBIENT_SECRET", "must-not-be-inherited")
 
-	if err := (AgentRedactor{Executable: agent}).AddRedaction(context.Background(), "redact-me"); err != nil {
+	if err := (AgentRedactor{Executable: agent}).AddRedaction(t.Context(), "redact-me"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1102,19 +1124,19 @@ func TestFailureConditionsAndCancellation(t *testing.T) {
 		{ID: "default", Kind: "run", Command: "echo must-not-run"},
 		{ID: "recover", Kind: "run", Condition: "failure()", Command: "echo recovered"},
 	})
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" || strings.Contains(logs.String(), "must-not-run") || !strings.Contains(logs.String(), "recovered") {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
 
 	job = runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "timeout", Kind: "run", Command: "sleep 30", TimeoutMinutes: 0.0005}})
 	started := time.Now()
-	result, err = (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err = (Runner{}).RunJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "failure" || time.Since(started) > 3*time.Second {
 		t.Fatalf("timed RunJob() result = %#v, error = %v, elapsed = %s", result, err, time.Since(started))
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	job = runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "cancel", Kind: "run", Condition: "always()", Command: "sleep 30"}})
 	result, err = (Runner{}).RunJob(ctx, job, workspace)
@@ -1132,6 +1154,7 @@ func TestExplicitCancelCommitsEffectsWithoutFailingJob(t *testing.T) {
 }
 
 func testExplicitCancelCommitsEffectsWithoutFailingJob(t *testing.T) {
+	t.Helper()
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
@@ -1150,7 +1173,7 @@ while :; do sleep 1; done`},
 		{ID: "after-cancel", Kind: "run", Condition: "steps.background.outcome == 'cancelled' && steps.cancel.conclusion == 'success' && steps.cancel-again.conclusion == 'success'", Command: `test "$CANCEL_EFFECT" = visible; test -f "$TERMINATED"; echo after-cancel`},
 	})
 	job.Env = map[string]string{"READY": ready, "TERMINATED": terminated}
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Env["CANCEL_EFFECT"] != "visible" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1166,7 +1189,7 @@ func TestCancelQueuedBackgroundNeverStartsIt(t *testing.T) {
 	release := filepath.Join(workspace, "release")
 	queuedMarker := filepath.Join(workspace, "queued-started")
 	steps := make([]plan.Step, 0, maxActiveBackgroundSteps+4)
-	for i := 0; i < maxActiveBackgroundSteps; i++ {
+	for i := range maxActiveBackgroundSteps {
 		steps = append(steps, plan.Step{ID: fmt.Sprintf("blocker-%d", i), Kind: "run", Background: true, Command: `while [ ! -f "$RELEASE" ]; do sleep 0.01; done`})
 	}
 	steps = append(steps,
@@ -1178,7 +1201,7 @@ func TestCancelQueuedBackgroundNeverStartsIt(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, steps)
 	job.Env = map[string]string{"RELEASE": release, "QUEUED_MARKER": queuedMarker}
 
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1194,7 +1217,7 @@ func TestQueuedBackgroundTimeoutStartsAtDispatch(t *testing.T) {
 	release := filepath.Join(workspace, "release")
 	queuedMarker := filepath.Join(workspace, "queued-started")
 	steps := make([]plan.Step, 0, maxActiveBackgroundSteps+3)
-	for i := 0; i < maxActiveBackgroundSteps; i++ {
+	for i := range maxActiveBackgroundSteps {
 		steps = append(steps, plan.Step{ID: fmt.Sprintf("blocker-%d", i), Kind: "run", Background: true, Command: `while [ ! -f "$RELEASE" ]; do sleep 0.01; done`})
 	}
 	steps = append(steps,
@@ -1205,7 +1228,7 @@ func TestQueuedBackgroundTimeoutStartsAtDispatch(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, steps)
 	job.Env = map[string]string{"RELEASE": release, "QUEUED_MARKER": queuedMarker}
 
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1224,7 +1247,7 @@ func TestCancelQueuedBackgroundNeverRegistersPostAction(t *testing.T) {
 	writeFixtureFile(t, workspace, ".github/actions/queued/post.js", "console.log('queued-post-must-not-run')\n")
 	release := filepath.Join(workspace, "release")
 	steps := make([]plan.Step, 0, maxActiveBackgroundSteps+4)
-	for i := 0; i < maxActiveBackgroundSteps; i++ {
+	for i := range maxActiveBackgroundSteps {
 		steps = append(steps, plan.Step{ID: fmt.Sprintf("blocker-%d", i), Kind: "run", Background: true, Command: `while [ ! -f "$RELEASE" ]; do sleep 0.01; done`})
 	}
 	steps = append(steps,
@@ -1237,7 +1260,7 @@ func TestCancelQueuedBackgroundNeverRegistersPostAction(t *testing.T) {
 	job.Env = map[string]string{"RELEASE": release}
 	var logs bytes.Buffer
 
-	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1261,7 +1284,7 @@ func TestFailureBeforeCancelStillFailsJob(t *testing.T) {
 	})
 	job.Env = map[string]string{"FAILED_PID": failedPID}
 
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" || !strings.Contains(logs.String(), "recovered") || strings.Contains(logs.String(), "must-not-run") {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -1305,7 +1328,7 @@ test "${{ steps.two.outputs.value }}" = output-two`},
 	job.Env = map[string]string{"ONE_DONE": oneDone, "TWO_DONE": twoDone, "PATH_ENTRY": pathEntry}
 	job.Outputs = map[string]string{"one": "${{ steps.one.outputs.value }}", "two": "${{ steps.two.outputs.value }}"}
 
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -1325,28 +1348,28 @@ func TestBackgroundSummariesAreBoundedInCommitOrder(t *testing.T) {
 	second := plan.Step{ID: "second"}
 	summaryBytes := maxJobSummaryBytes * 3 / 4
 
-	supervisor.start(context.Background(), first.ID,
-		func(context.Context) stepExecution {
+	supervisor.start(t.Context(), first.ID,
+		func(ctx context.Context) stepExecution {
 			<-releaseFirst
 			completionOrder <- first.ID
 			result := newResult()
 			result.Summary = strings.Repeat("a", summaryBytes)
-			return classifyStepExecution(context.Background(), context.Background(), first, result, nil)
+			return classifyStepExecution(ctx, ctx, first, result, nil)
 		},
 		func(ctx context.Context) stepExecution {
-			return cancelledStepExecution(context.Background(), ctx, first)
+			return cancelledStepExecution(t.Context(), ctx, first)
 		},
 	)
-	supervisor.start(context.Background(), second.ID,
-		func(context.Context) stepExecution {
+	supervisor.start(t.Context(), second.ID,
+		func(ctx context.Context) stepExecution {
 			completionOrder <- second.ID
 			close(releaseFirst)
 			result := newResult()
 			result.Summary = strings.Repeat("b", summaryBytes)
-			return classifyStepExecution(context.Background(), context.Background(), second, result, nil)
+			return classifyStepExecution(ctx, ctx, second, result, nil)
 		},
 		func(ctx context.Context) stepExecution {
-			return cancelledStepExecution(context.Background(), ctx, second)
+			return cancelledStepExecution(t.Context(), ctx, second)
 		},
 	)
 
@@ -1440,7 +1463,7 @@ test "$(printf '%s' "$PATH" | tr ':' '\n' | grep -Fxc "$FOREGROUND_PATH")" -eq 1
 		"ONE_PATH": onePath, "TWO_PATH": twoPath, "FOREGROUND_PATH": foregroundPath,
 	}
 
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -1470,7 +1493,7 @@ runs:
 	})
 	job.Env = map[string]string{"COMPOSITE_PATH": compositePath, "FOREGROUND_PATH": foregroundPath}
 
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -1513,7 +1536,7 @@ esac
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "javascript", Kind: "uses", Uses: "./.github/actions/path"}})
 	job.Env = map[string]string{"PATH_ENTRY": pathEntry}
 
-	result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -1556,7 +1579,7 @@ printf 'NODE16_%s=true\n' "$(basename "$1" .js | tr '[:lower:]' '[:upper:]')" >>
 	}
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "javascript", Kind: "uses", Uses: "./.github/actions/node16"}})
 	var logs bytes.Buffer
-	result, err := (Runner{Node16: fakeNode, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node16: fakeNode, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1593,7 +1616,7 @@ func TestNode16WarningAggregatesInvokedActions(t *testing.T) {
 		{ID: "modern", Kind: "uses", Uses: "./.github/actions/modern"},
 	})
 	var logs bytes.Buffer
-	result, err := (Runner{Node16: node16, Node24: node24, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node16: node16, Node24: node24, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1627,7 +1650,7 @@ printf '\n'
 	}
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "node16", Kind: "uses", Uses: "./.github/actions/sensitive"}})
 	var logs bytes.Buffer
-	result, err := (Runner{Node16: fakeNode, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node16: fakeNode, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "line exceeds 1048576-byte limit") || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v, want oversized-line failure", result, err)
 	}
@@ -1665,7 +1688,7 @@ done
 	}
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "node16", Kind: "uses", Uses: "./.github/actions/node16"}})
 	var logs bytes.Buffer
-	result, err := (Runner{Node16: fakeNode, Stdout: io.Discard, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node16: fakeNode, Stdout: io.Discard, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1693,7 +1716,7 @@ func TestBackgroundFailureSurfacesAtWait(t *testing.T) {
 	})
 	job.Env = map[string]string{"FAILURE_DONE": marker}
 
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1713,7 +1736,7 @@ func TestBackgroundContinueOnError(t *testing.T) {
 		{ID: "after-soft", Kind: "run", Condition: "steps.soft-background.outcome == 'failure' && steps.soft-background.conclusion == 'success'", Command: "echo after-soft"},
 	})
 
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1737,13 +1760,13 @@ func TestSkippedBackgroundAndRepeatedWaitAreCommittedAtMostOnce(t *testing.T) {
 		{ID: "verify", Kind: "run", Condition: "steps.skipped.conclusion == 'skipped' && steps.skipped.outputs.missing == '' && steps.cancel-skipped.conclusion == 'success' && steps.cancel-skipped.outputs.missing == '' && steps.wait-skipped.conclusion == 'success' && steps.wait-skipped.outputs.missing == '' && steps.first-wait.outputs.missing == '' && steps.cancel-completed.conclusion == 'success' && steps.cancel-completed.outputs.missing == '' && steps.second-wait.outputs.missing == ''", Command: "true"},
 	})
 
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Summary != "once\n" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 }
 
-func TestBackgroundOutputsFailClosedBeforeBarrier(t *testing.T) {
+func TestBackgroundOutputsReturnErrorBeforeBarrier(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
@@ -1752,7 +1775,7 @@ func TestBackgroundOutputsFailClosedBeforeBarrier(t *testing.T) {
 		{ID: "premature-reader", Kind: "run", Command: `echo "${{ steps.background.outputs.value }}"`},
 	})
 
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), "unavailable step") {
 		t.Fatalf("RunJob() result = %#v, error = %v, want unavailable background output", result, err)
 	}
@@ -1776,7 +1799,7 @@ func TestExpressionValuedStepControls(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1789,7 +1812,7 @@ func TestSkippedStepDoesNotEvaluateTypedControls(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
 		ID: "skipped", Kind: "run", Condition: "false", Command: "true", TimeoutMinutesExpression: "${{ fromJSON('invalid') }}",
 	}})
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1829,14 +1852,14 @@ func TestExpressionValuedStepControlsRequireTypedBoundedResults(t *testing.T) {
 
 func TestExpressionContinueOnErrorAppliesToPreparedActionFailure(t *testing.T) {
 	step := plan.Step{ID: "action", ContinueOnErrorExpression: "${{ true }}"}
-	execution := classifyStepExecutionWithControls(context.Background(), context.Background(), step, newResult(), errors.New("pre failed"), expression.Context{})
+	execution := classifyStepExecutionWithControls(t.Context(), t.Context(), step, newResult(), errors.New("pre failed"), expression.Context{})
 	if execution.outcome != "failure" || execution.conclusion != "success" {
 		t.Fatalf("prepared action execution = %#v", execution)
 	}
 }
 
 func TestExpressionContinueOnErrorIsNotEvaluatedForCancellation(t *testing.T) {
-	jobCtx, cancel := context.WithCancel(context.Background())
+	jobCtx, cancel := context.WithCancel(t.Context())
 	cancel()
 	step := plan.Step{ID: "cancelled", ContinueOnErrorExpression: "${{ fromJSON('invalid') }}"}
 	execution := classifyStepExecutionWithControls(jobCtx, jobCtx, step, newResult(), context.Canceled, expression.Context{})
@@ -1854,7 +1877,7 @@ func TestStepNameFailsClosedOnUnavailableBackgroundOutput(t *testing.T) {
 		{ID: "premature-reader", Name: `${{ steps.background.outputs.value }}`, Kind: "run", Command: `touch should-not-run`},
 	})
 
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), "name: expression references unavailable step") {
 		t.Fatalf("RunJob() result = %#v, error = %v, want unavailable background output in name", result, err)
 	}
@@ -1950,8 +1973,8 @@ func TestBackgroundSupervisorBoundsActiveWorkAndQueuesFIFO(t *testing.T) {
 	var active atomic.Int32
 	var maximum atomic.Int32
 	var started atomic.Int32
-	for i := 0; i < maxActiveBackgroundSteps+2; i++ {
-		supervisor.start(context.Background(), strconv.Itoa(i), func(context.Context) stepExecution {
+	for i := range maxActiveBackgroundSteps + 2 {
+		supervisor.start(t.Context(), strconv.Itoa(i), func(context.Context) stepExecution {
 			current := active.Add(1)
 			for current > maximum.Load() && !maximum.CompareAndSwap(maximum.Load(), current) {
 			}
@@ -1981,7 +2004,7 @@ func TestBackgroundSupervisorBoundsActiveWorkAndQueuesFIFO(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 	start := func(id string, wait <-chan struct{}) {
-		fifo.start(context.Background(), id, func(context.Context) stepExecution {
+		fifo.start(t.Context(), id, func(context.Context) stepExecution {
 			mu.Lock()
 			order = append(order, id)
 			mu.Unlock()
@@ -2027,7 +2050,7 @@ console.log('post-after-implicit-wait')
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "background", Kind: "uses", Uses: "./.github/actions/background", Background: true}})
 	job.Outputs = map[string]string{"value": "${{ steps.background.outputs.value }}"}
 
-	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Outputs["value"] != "implicit" || result.Env["BACKGROUND_READY"] != "true" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -2049,7 +2072,7 @@ require('node:fs').appendFileSync(process.env.CWD_LOG, %q + process.cwd() + '\t'
 	}
 	cwdLog := filepath.Join(t.TempDir(), "cwd.log")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "cwd", Kind: "uses", Uses: "./.github/actions/cwd", Env: map[string]string{"CWD_LOG": cwdLog}}})
-	result, err := (Runner{Node24: node}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: node}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2101,7 +2124,7 @@ require('node:fs').writeFileSync(process.env.CWD_LOG, process.cwd() + '\t' + pro
 `)
 	cwdLog := filepath.Join(base, "cwd.log")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "cwd", Kind: "uses", Uses: "./.github/actions/cwd", Env: map[string]string{"CWD_LOG": cwdLog}}})
-	result, err := (Runner{Node24: node}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: node}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2137,7 +2160,7 @@ func TestConcurrentStreamsShareMaskRegistration(t *testing.T) {
 		{ID: "wait", Kind: "wait-all"},
 	})
 	job.Env = map[string]string{"MASK_READY": marker}
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2166,12 +2189,12 @@ func TestConcurrentSmokeWorkflowEndToEnd(t *testing.T) {
 	}
 	var logs bytes.Buffer
 	runner := Runner{Stdout: &logs, Stderr: &logs}
-	concurrent, err := runner.RunJob(context.Background(), plans[0], workspace)
+	concurrent, err := runner.RunJob(t.Context(), plans[0], workspace)
 	if err != nil || concurrent.Conclusion != "success" {
 		t.Fatalf("concurrent result = %#v, error = %v, logs = %q", concurrent, err, logs.String())
 	}
 	plans[1].Needs = map[string]plan.Need{"concurrent": {Result: concurrent.Conclusion, Outputs: concurrent.Outputs}}
-	observer, err := runner.RunJob(context.Background(), plans[1], workspace)
+	observer, err := runner.RunJob(t.Context(), plans[1], workspace)
 	if err != nil || observer.Conclusion != "success" {
 		t.Fatalf("observer result = %#v, error = %v, logs = %q", observer, err, logs.String())
 	}
@@ -2191,7 +2214,7 @@ func TestCancellationTerminatesChildProcessGroup(t *testing.T) {
 		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
 	}
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	err := (Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}).runStreaming(ctx, newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"PID_FILE": pidFile}, "sh", "-c", `(trap '' INT TERM; sleep 30) & echo $! > "$PID_FILE"; wait`)
 	if !errors.Is(err, context.DeadlineExceeded) {
@@ -2224,7 +2247,7 @@ func TestCancellationEscalatesFromInterruptToTermination(t *testing.T) {
 	dir := t.TempDir()
 	ready := filepath.Join(dir, "ready")
 	signals := filepath.Join(dir, "signals")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	cancelled := make(chan struct{})
 	go func() {
@@ -2268,7 +2291,7 @@ func TestCancellationPreservesInterruptGraceForDescendants(t *testing.T) {
 	ready := filepath.Join(dir, "ready")
 	childReady := filepath.Join(dir, "child-ready")
 	cleaned := filepath.Join(dir, "cleaned")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	go func() {
 		deadline := time.Now().Add(2 * time.Second)
@@ -2309,7 +2332,7 @@ func TestCancellationWaitsForProcessGroupCleanupAfterOutputCloses(t *testing.T) 
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	ready := filepath.Join(dir, "ready")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	go func() {
 		deadline := time.Now().Add(2 * time.Second)
@@ -2372,7 +2395,7 @@ func TestExplicitCancelTerminatesBackgroundProcessGroup(t *testing.T) {
 	})
 	job.Env = map[string]string{"PID_FILE": pidFile, "READY": ready}
 
-	result, err := (Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2421,6 +2444,73 @@ func TestNeedStatusesCopiesOnlyExpressionVisibleState(t *testing.T) {
 	}
 }
 
+func TestDeferredReusableWorkflowInputFlowsFromVerifiedOutputToCalleeStep(t *testing.T) {
+	const (
+		buildID = "11111111-1111-4111-8111-111111111111"
+		jobID   = "22222222-2222-4222-8222-222222222222"
+		value   = "c2hhMjU2ICBzdWJqZWN0Cg=="
+	)
+	planDigest := transport.Digest([]byte("producer plan"))
+	stepKey := "gha-hash"
+	manifest, err := transport.MarshalResultManifest(transport.ResultManifest{
+		PlanDigest: planDigest,
+		Producer:   transport.Producer{BuildID: buildID, JobID: jobID, StepKey: stepKey},
+		Result:     "success",
+		Outputs:    []transport.Output{{Name: "hashes", Value: value}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactPath := transport.ResultPath(stepKey, planDigest)
+	inputs, err := ResolveDeferredInputs(t.Context(), transport.Agent{Runner: deferredInputRunner{jobID: jobID, path: artifactPath, data: manifest}}, t.TempDir(), buildID, map[string]plan.DeferredInput{
+		"base64-subjects": {
+			Sources: []plan.NeedSource{{StepKey: stepKey, PlanDigest: planDigest}},
+			Outputs: []plan.NeedOutput{{Name: "value", StepKey: stepKey, Output: "hashes"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputs["base64-subjects"] != value {
+		t.Fatalf("resolved inputs = %#v", inputs)
+	}
+
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/generator_generic_slsa3.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:        "create-file",
+		Kind:      "run",
+		Env:       map[string]string{"UNTRUSTED_SUBJECTS": "${{ inputs.base64-subjects }}"},
+		Condition: "inputs.base64-subjects != ''",
+		Command:   `test "$UNTRUSTED_SUBJECTS" = "` + value + `" && echo ran=yes >> "$GITHUB_OUTPUT"`,
+	}})
+	job.Outputs = map[string]string{"ran": "${{ steps.create-file.outputs.ran }}"}
+	job.Dependencies = []string{stepKey}
+	job.DeferredInputs = map[string]plan.DeferredInput{
+		"base64-subjects": {
+			Sources: []plan.NeedSource{{StepKey: stepKey, PlanDigest: planDigest}},
+			Outputs: []plan.NeedOutput{{Name: "value", StepKey: stepKey, Output: "hashes"}},
+		},
+	}
+	job.CallGuards = []plan.CallGuard{{
+		Condition:      "inputs.base64-subjects != ''",
+		DeferredInputs: job.DeferredInputs,
+	}}
+	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "deferred reusable-workflow inputs were not hydrated") {
+		t.Fatalf("RunJob() unhydrated error = %v", err)
+	}
+	job.DeferredInputValues = inputs
+	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "call guard 1: deferred inputs were not hydrated") {
+		t.Fatalf("RunJob() unhydrated guard error = %v", err)
+	}
+	job.CallGuards[0].DeferredInputValues = inputs
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" || result.Outputs["ran"] != "yes" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
 func TestJobConditionConsumesNeedResultAndOutput(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -2428,15 +2518,69 @@ func TestJobConditionConsumesNeedResultAndOutput(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
 	job.Needs = map[string]plan.Need{"producer": {Result: "failure", Outputs: map[string]string{"gate": "yes"}}}
 	job.Condition = "always() && needs.producer.result == 'failure' && needs.producer.outputs.gate"
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 	job.Condition = ""
 	job.Needs["producer"] = plan.Need{Result: "skipped"}
-	result, err = (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err = (Runner{}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "skipped" {
 		t.Fatalf("RunJob() skipped prerequisite result = %#v, error = %v", result, err)
+	}
+}
+
+func TestReusableWorkflowCallGuardsRunBeforeCapabilitiesAndJobConditions(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	marker := filepath.Join(workspace, "ran")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Condition: "always()", Command: "touch " + marker}})
+	job.CallGuards = []plan.CallGuard{{Condition: "false"}, {Condition: "always()"}}
+	job.RequiredCapabilities = []string{"secrets"}
+	job.RequiredSecrets = []string{"TOKEN"}
+	job.Condition = "always()"
+
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "skipped" || len(result.Outputs) != 0 {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outer false guard allowed descendant always() step to run: %v", err)
+	}
+}
+
+func TestReusableWorkflowCallGuardUsesOnlyCallerNeeds(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
+	job.CallGuards = []plan.CallGuard{{
+		Condition: "success() && needs.caller.result == 'success' && needs.caller.outputs.ready",
+		Needs:     map[string]plan.Need{"caller": {Result: "success", Outputs: map[string]string{"ready": "true"}}},
+	}}
+	job.Needs = map[string]plan.Need{"internal": {Result: "failure"}}
+	job.Condition = "always()"
+
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+
+	job.CallGuards[0].Condition = ""
+	job.CallGuards[0].Needs["caller"] = plan.Need{Result: "failure"}
+	if err := job.Validate(); err == nil {
+		t.Fatal("Validate() accepted an empty call guard condition")
+	}
+	job.CallGuards[0].Condition = "needs.caller.outputs.ready"
+	result, err = (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "skipped" {
+		t.Fatalf("implicit success guard result = %#v, error = %v", result, err)
+	}
+	job.CallGuards[0].Condition = "failure()"
+	result, err = (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("failure() guard result = %#v, error = %v", result, err)
 	}
 }
 
@@ -2468,7 +2612,7 @@ func TestJobRuntimeFieldsEvaluateCompoundExpressions(t *testing.T) {
 		"result":      "${{ format('{0}-{1}', steps.run.outputs.value, needs.producer.result) }}",
 	}
 
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Outputs["result"] != "done-success" || result.Outputs["environment"] != "job" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2498,7 +2642,7 @@ func TestDecodedPlanMatrixNumbersDriveRuntimeConditions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := (Runner{}).RunJob(context.Background(), decoded, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), decoded, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2521,7 +2665,7 @@ func TestRunJobRejectsRegisteredSecretInOutput(t *testing.T) {
 	job.RequiredCapabilities = []string{"secrets"}
 	job.RequiredSecrets = []string{"CANARY"}
 	job.Outputs = map[string]string{"leak": "${{ secrets.CANARY }}"}
-	_, err := (Runner{Secrets: testSecretResolver{"CANARY": "do-not-publish"}, Redactor: &testRedactor{}}).RunJob(context.Background(), job, workspace)
+	_, err := (Runner{Secrets: testSecretResolver{"CANARY": "do-not-publish"}, Redactor: &testRedactor{}}).RunJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "contains a registered secret") || strings.Contains(err.Error(), "do-not-publish") {
 		t.Fatalf("RunJob() error = %v, want non-disclosing secret-output rejection", err)
 	}
@@ -2534,7 +2678,7 @@ func TestRunJobScrubsSecretFromRedactorFailure(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
 	job.RequiredCapabilities = []string{"secrets"}
 	job.RequiredSecrets = []string{"CANARY"}
-	_, err := (Runner{Secrets: testSecretResolver{"CANARY": "do-not-leak"}, Redactor: failingTokenRedactor{token: "do-not-leak"}}).RunJob(context.Background(), job, workspace)
+	_, err := (Runner{Secrets: testSecretResolver{"CANARY": "do-not-leak"}, Redactor: failingTokenRedactor{token: "do-not-leak"}}).RunJob(t.Context(), job, workspace)
 	if err == nil || strings.Contains(err.Error(), "do-not-leak") || !strings.Contains(err.Error(), "***") {
 		t.Fatalf("RunJob() error = %v, want scrubbed redactor failure", err)
 	}
@@ -2556,7 +2700,7 @@ func TestRunJobMintsAndRedactsScopedGitHubWorkflowToken(t *testing.T) {
 	provider := &testWorkflowTokenProvider{token: token}
 	redactor := &testRedactor{}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2571,6 +2715,97 @@ func TestRunJobMintsAndRedactsScopedGitHubWorkflowToken(t *testing.T) {
 	}
 }
 
+func TestRunJobScrubsTokenSerializedByToJSONGitHub(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: serialized context\n")
+	writeFixtureFile(t, workspace, ".github/actions/serialized/action.yml", `name: serialized context
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        GITHUB_CONTEXT: ${{ ToJson(GitHub) }}
+      run: |
+        compact=$(printf '%s' "$GITHUB_CONTEXT" | tr -d '\n')
+        printf 'composite context: %s\n' "$compact"
+        printf '::warning::composite context: %s\n' "$compact"
+`)
+	const token = "ghs_serialized_context_token"
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{
+			ID: "serialize", Kind: "run", Shell: "sh",
+			Env: map[string]string{"GITHUB_CONTEXT": "${{ toJSON(github) }}"},
+			Command: `
+compact=$(printf '%s' "$GITHUB_CONTEXT" | tr -d '\n')
+printf 'context: %s\n' "$compact"
+printf 'context error: %s\n' "$compact" >&2
+printf '::warning::context: %s\n' "$compact"
+printf '::error::context: %s\n' "$compact"
+printf '%s\n' "$GITHUB_CONTEXT" >> "$GITHUB_STEP_SUMMARY"
+printf 'SERIALIZED_CONTEXT<<EOF\n%s\nEOF\n' "$GITHUB_CONTEXT" >> "$GITHUB_ENV"
+printf 'context<<EOF\n%s\nEOF\n' "$GITHUB_CONTEXT" >> "$GITHUB_OUTPUT"
+`,
+		},
+		{ID: "composite", Kind: "uses", Uses: "./.github/actions/serialized"},
+	})
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"provider-token-write"}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": "read"}}
+	job.Outputs = map[string]string{"serialized": "${{ steps.serialize.outputs.context }}"}
+	provider := &testWorkflowTokenProvider{token: token}
+	redactor := &testRedactor{}
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), `job output "serialized" contains a registered secret`) {
+		t.Fatalf("RunJob() error = %v, want serialized token output rejection", err)
+	}
+	if provider.calls != 1 || !reflect.DeepEqual(redactor.values, []string{token}) {
+		t.Fatalf("token handling = provider calls %d, redactions %#v", provider.calls, redactor.values)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("error leaked serialized token: %v", err)
+	}
+	for name, value := range map[string]string{
+		"logs":        logs.String(),
+		"result":      fmt.Sprintf("%#v", result),
+		"environment": result.Env["SERIALIZED_CONTEXT"],
+		"summary":     result.Summary,
+		"warnings":    result.WarningAnnotations,
+		"annotations": result.ErrorAnnotations,
+	} {
+		if strings.Contains(value, token) || !strings.Contains(value, "***") {
+			t.Errorf("%s was not scrubbed: %q", name, value)
+		}
+	}
+}
+
+func TestRunJobScrubsTokenSerializedIntoRuntimeError(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: serialized context error\n")
+	const token = "ghs_serialized_error_token"
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "serialize", Kind: "run", Shell: "${{ toJSON(github) }}", Command: "true",
+	}})
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"provider-token-write"}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": "read"}}
+	job.ContinueOnError = true
+	provider := &testWorkflowTokenProvider{token: token}
+	redactor := &testRedactor{}
+	result, err := (Runner{WorkflowToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
+	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") || !strings.Contains(err.Error(), "is unsupported") {
+		t.Fatalf("RunJob() error = %v, want scrubbed unsupported-shell error", err)
+	}
+	if result.Conclusion != "success" || !IsToleratedJobFailure(err) {
+		t.Fatalf("RunJob() result/error = %#v / %v, want preserved tolerated-failure classification", result, err)
+	}
+	if provider.calls != 1 || !reflect.DeepEqual(redactor.values, []string{token}) {
+		t.Fatalf("token handling = provider calls %d, redactions %#v", provider.calls, redactor.values)
+	}
+}
+
 func TestRunJobRejectsInvalidWorkflowTokenPolicyBeforeMinting(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/nested/test.yml"
@@ -2581,7 +2816,7 @@ func TestRunJobRejectsInvalidWorkflowTokenPolicyBeforeMinting(t *testing.T) {
 	job.RequiredCapabilities = []string{"provider-token-write"}
 	job.GitHubToken = &plan.GitHubToken{Workflow: "nested/test.yml", Permissions: map[string]string{"contents": "read"}}
 	provider := &testWorkflowTokenProvider{token: "must-not-be-minted"}
-	_, err := (Runner{WorkflowToken: provider, Redactor: &testRedactor{}}).RunJob(context.Background(), job, workspace)
+	_, err := (Runner{WorkflowToken: provider, Redactor: &testRedactor{}}).RunJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "simple .yml or .yaml filename") || provider.calls != 0 {
 		t.Fatalf("RunJob() error/calls = %v / %d", err, provider.calls)
 	}
@@ -2638,6 +2873,20 @@ func TestResolveActionInputsExposesScopedTokenToMetadataDefaults(t *testing.T) {
 	}
 }
 
+func TestResolveActionInputsUsesRunnerDebugDefaultUnlessExplicitlySupplied(t *testing.T) {
+	debugDefault := "${{ runner.debug }}"
+	action := metadata.Metadata{Inputs: map[string]metadata.Input{"debug": {Default: &debugDefault}}}
+
+	inputs, err := resolveActionInputs(action, nil, expression.Context{})
+	if err != nil || inputs["debug"] != "false" {
+		t.Fatalf("runner.debug default = %#v, %v; want false", inputs, err)
+	}
+	inputs, err = resolveActionInputs(action, map[string]string{"DEBUG": "true"}, expression.Context{})
+	if err != nil || inputs["debug"] != "true" {
+		t.Fatalf("explicit debug input = %#v, %v; want true", inputs, err)
+	}
+}
+
 func TestStepExpressionContextExposesScopedTokenWithoutMutatingJobContext(t *testing.T) {
 	eval := expression.Context{
 		GitHub:  map[string]any{"actor": "octocat"},
@@ -2687,8 +2936,13 @@ func TestGitHubContextExposesRuntimeEventIdentity(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			github := githubContext(plan.Job{Event: test.event})
-			if github["repository_owner"] != test.wantOwner || github["ref_name"] != test.wantRefName || github["ref_type"] != test.wantRefType || github["base_ref"] != test.wantBaseRef {
+			if github["repository_owner"] != test.wantOwner || github["ref_name"] != test.wantRefName || github["ref_type"] != test.wantRefType || github["base_ref"] != test.wantBaseRef || github["action_path"] != "" || github["action_ref"] != "" || github["action_repository"] != "" {
 				t.Fatalf("GitHub context = %#v", github)
+			}
+			stepContext := stepExpressionContext(expression.Context{GitHub: github, Secrets: map[string]string{"GITHUB_TOKEN": "ghs_test"}})
+			serialized, err := expression.EvaluateStep("${{ toJSON(github) }}", stepContext)
+			if err != nil || !strings.Contains(serialized, `"action_path": ""`) || !strings.Contains(serialized, `"action_ref": ""`) || !strings.Contains(serialized, `"action_repository": ""`) {
+				t.Fatalf("serialized top-level GitHub context = %q, %v", serialized, err)
 			}
 			condition := "github.repository_owner == '" + test.wantOwner + "' && github.ref_name == '" + test.wantRefName + "' && github.ref_type == '" + test.wantRefType + "' && github.base_ref == '" + test.wantBaseRef + "'"
 			got, err := expression.EvaluateCondition(condition, expression.ConditionContext{GitHub: github})
@@ -2814,7 +3068,7 @@ runs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, err := compilePlansForTest(context.Background(), workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
+	plans, err := compilePlansForTest(t.Context(), workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
 		EventTrust: compiler.EventUntrusted,
 		Runners: compiler.RunnerPolicy{
 			Labels:                     map[string]string{"ubuntu-latest": ""},
@@ -2830,7 +3084,7 @@ runs:
 	provider := &testWorkflowTokenProvider{token: "ghs_scoped_action_default"}
 	redactor := &testRedactor{}
 	var logs bytes.Buffer
-	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).RunJob(context.Background(), plans[0], workspace)
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).RunJob(t.Context(), plans[0], workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2839,6 +3093,62 @@ runs:
 	}
 	if result.Env["GITHUB_TOKEN"] != "***" || result.Env["GITHUB_SHA"] != "action-sha" || result.Env["RUNNER_TEMP"] != "/action-temp" || strings.Contains(logs.String(), "ghs_scoped_action_default") || !strings.Contains(logs.String(), "exported token: ***") {
 		t.Fatalf("exported workflow token leaked: result = %#v, logs = %q", result, logs.String())
+	}
+}
+
+func TestCompileAndRunJobDiscardsTopLevelActionEnv(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "test.yml")
+	workflow := []byte(`on: push
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/release
+        env:
+          GITHUB_TOKEN: workflow-step-token
+          PRESERVED: workflow-step-env
+`)
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", string(workflow))
+	writeFixtureFile(t, workspace, ".github/actions/release/action.yml", `name: GH Release
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  METADATA_ONLY: ${{ secrets.DEPLOY_TOKEN }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: |
+        test "$GITHUB_TOKEN" = workflow-step-token
+        test "$PRESERVED" = workflow-step-env
+        test -z "${METADATA_ONLY:-}"
+`)
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken != nil || len(plans[0].RequiredSecrets) != 0 || plans[0].HasCapability("provider-token-write") || plans[0].HasCapability("secrets") {
+		t.Fatalf("top-level action env added authority to plan: %#v", plans)
+	}
+	encoded, err := json.Marshal(plans[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "METADATA_ONLY") || strings.Contains(string(encoded), "DEPLOY_TOKEN") {
+		t.Fatalf("top-level action env leaked into plan: %s", encoded)
+	}
+
+	provider := &testWorkflowTokenProvider{token: "must-not-be-minted"}
+	result, err := (Runner{WorkflowToken: provider, Secrets: testSecretResolver{}}).RunJob(t.Context(), plans[0], workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if provider.calls != 0 {
+		t.Fatalf("top-level action env requested %d workflow tokens", provider.calls)
 	}
 }
 
@@ -2852,7 +3162,7 @@ func TestRunJobAbortsAndScrubsWorkflowTokenWhenRedactionFails(t *testing.T) {
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
 	job.GitHubToken = &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"pull_requests": "write"}}
-	_, err := (Runner{WorkflowToken: &testWorkflowTokenProvider{token: token}, Redactor: failingTokenRedactor{token: token}}).RunJob(context.Background(), job, workspace)
+	_, err := (Runner{WorkflowToken: &testWorkflowTokenProvider{token: token}, Redactor: failingTokenRedactor{token: token}}).RunJob(t.Context(), job, workspace)
 	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") {
 		t.Fatalf("RunJob() error = %v, want redaction failure without token disclosure", err)
 	}
@@ -2864,11 +3174,11 @@ func TestRunJobRequiresHydratedStaticDependencyResults(t *testing.T) {
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
 	job.Dependencies = []string{"gha-producer"}
 	job.NeedSources = map[string][]plan.NeedSource{"producer": {{StepKey: "gha-producer", PlanDigest: "sha256:" + strings.Repeat("1", 64)}}}
-	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "no hydrated prerequisite results") {
-		t.Fatalf("RunJob() error = %v, want fail-closed hydration boundary", err)
+	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "no hydrated prerequisite results") {
+		t.Fatalf("RunJob() error = %v, want missing hydration rejection", err)
 	}
 	job.Needs = map[string]plan.Need{"producer": {Result: "success"}}
-	if result, err := (Runner{}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() hydrated result = %#v, error = %v", result, err)
 	}
 }
@@ -2880,7 +3190,7 @@ func TestJavaScriptPreMainPostFilesAndMasking(t *testing.T) {
 	runner := Runner{Stdout: &logs, Stderr: &logs, Node24: node}
 	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "javascript", Kind: "uses", Uses: "./actions/javascript", With: map[string]string{"message": "hello"}}})
 	job.Outputs = map[string]string{"result": "${{ steps.javascript.outputs.result }}"}
-	result, err := runner.RunJob(context.Background(), job, workspace)
+	result, err := runner.RunJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -2945,7 +3255,7 @@ esac
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "summary", Kind: "uses", Uses: "./.github/actions/summary"}})
 	job.Env = map[string]string{"MAIN_SUMMARY_BYTES": strconv.Itoa(maxJobSummaryBytes)}
 
-	result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2969,7 +3279,7 @@ printf 'retained summary\n' >> "$GITHUB_STEP_SUMMARY"`},
 	job.Env = map[string]string{"SUMMARY_BYTES": strconv.Itoa(maxCommandFileBytes + 1)}
 	var logs bytes.Buffer
 
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Env["SUMMARY_EFFECT"] != "preserved" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2989,7 +3299,7 @@ func TestPostActionsRunLIFOAfterMainFailure(t *testing.T) {
 		{ID: "one", Kind: "uses", Uses: "./actions/javascript", With: map[string]string{"message": "one", "order": "one"}},
 		{ID: "two", Kind: "uses", Uses: "./actions/javascript", With: map[string]string{"message": "two", "order": "two", "fail": "true"}},
 	})
-	_, err := runner.RunJob(context.Background(), job, workspace)
+	_, err := runner.RunJob(t.Context(), job, workspace)
 	if err == nil {
 		t.Fatal("RunJob() error = nil, want main failure")
 	}
@@ -3050,7 +3360,7 @@ if [ "${1##*/}" = post.js ]; then printenv INPUT_JOB_STATUS > "$POST_MARKER"; fi
 	post := filepath.Join(workspace, "post")
 	plans[0].Env = map[string]string{"ORDINARY_MARKER": ordinary, "RECOVERY_MARKER": recovery, "POST_MARKER": post}
 
-	result, runErr := (Runner{Node24: fakeNode}).RunJob(context.Background(), plans[0], workspace)
+	result, runErr := (Runner{Node24: fakeNode}).RunJob(t.Context(), plans[0], workspace)
 	if runErr == nil || !IsToleratedJobFailure(runErr) || result.Conclusion != "success" || result.Outputs["diagnostic"] != "failed" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, runErr)
 	}
@@ -3072,7 +3382,7 @@ if [ "${1##*/}" = post.js ]; then printenv INPUT_JOB_STATUS > "$POST_MARKER"; fi
 	timedOut.TimeoutMinutes = 0.001
 	timedOut.Steps = slices.Clone(timedOut.Steps)
 	timedOut.Steps[1].Command = "sleep 1"
-	result, runErr = (Runner{Node24: fakeNode}).RunJob(context.Background(), timedOut, workspace)
+	result, runErr = (Runner{Node24: fakeNode}).RunJob(t.Context(), timedOut, workspace)
 	if !errors.Is(runErr, context.DeadlineExceeded) || IsToleratedJobFailure(runErr) || result.Conclusion != "cancelled" {
 		t.Fatalf("timed out RunJob() result = %#v, error = %v", result, runErr)
 	}
@@ -3092,7 +3402,7 @@ func TestJobTimeoutDuringSetupIsCancelled(t *testing.T) {
 		return "", ctx.Err()
 	}}
 
-	result, err := runner.RunJob(context.Background(), job, workspace)
+	result, err := runner.RunJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -3137,7 +3447,7 @@ if [ "${1##*/}" = main.js ] && [ "${FAIL_MAIN:-false}" = true ]; then exit 9; fi
 			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "conditional", Kind: "uses", Uses: "./.github/actions/conditional"}})
 			job.Env = map[string]string{"POST_MARKER": marker, "FAIL_MAIN": strconv.FormatBool(test.failMain)}
 
-			result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+			result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace)
 			if (err != nil) != test.wantFailure || (result.Conclusion == "failure") != test.wantFailure {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 			}
@@ -3213,7 +3523,7 @@ esac
 			}
 			job := runtimePlan(t, workspace, workflowPath, steps)
 			job.Env = map[string]string{"CACHE_SETTING": test.cacheValue, "POST_MARKER": marker}
-			result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+			result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace)
 			if (err != nil) != test.failJob || (result.Conclusion == "failure") != test.failJob {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 			}
@@ -3273,7 +3583,7 @@ esac
 		{ID: "finalize", Kind: "run", Command: "exit 7"},
 	})
 	job.Env = map[string]string{"POST_MARKER": marker}
-	result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -3309,7 +3619,7 @@ if [ "$(basename "$1")" = post.js ]; then touch "$POST_MARKER"; fi
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "cache", Kind: "uses", Uses: "./.github/actions/cache"}})
 	job.Inputs = map[string]any{"cache": true}
 	job.Env = map[string]string{"POST_MARKER": marker}
-	result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -3328,7 +3638,7 @@ func TestRunnerToolCacheIsPerJobAndReserved(t *testing.T) {
 		Command: `test -d "$RUNNER_TOOL_CACHE"; case "$RUNNER_TOOL_CACHE" in "$RUNNER_TEMP"/*) ;; *) exit 9 ;; esac`,
 	}})
 	job.Env = map[string]string{"RUNNER_TOOL_CACHE": filepath.Join(workspace, "untrusted")}
-	if result, err := (Runner{}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 }
@@ -3347,7 +3657,7 @@ func TestRunnerUsesConfiguredToolCache(t *testing.T) {
 		Command: `test "$RUNNER_TOOL_CACHE" = "$EXPECTED_TOOL_CACHE"`,
 	}})
 	job.Env = map[string]string{"EXPECTED_TOOL_CACHE": toolCache}
-	if result, err := (Runner{ToolCache: toolCache}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{ToolCache: toolCache}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 }
@@ -3465,7 +3775,7 @@ func TestConcurrentPostActionsRunLIFOByRegistration(t *testing.T) {
 	job.Env = map[string]string{"READY": ready}
 	var logs bytes.Buffer
 
-	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -3488,7 +3798,7 @@ func TestPostActionsUseBoundedCleanupContext(t *testing.T) {
 	runner := Runner{Node24: node, CleanupTimeout: 200 * time.Millisecond}
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "slow", Kind: "uses", Uses: "./.github/actions/slow"}})
 	started := time.Now()
-	_, err := runner.RunJob(context.Background(), job, workspace)
+	_, err := runner.RunJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("RunJob() error = %v, want context deadline exceeded", err)
 	}
@@ -3526,7 +3836,7 @@ sleep 30
 		InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond,
 	}
 	started := time.Now()
-	result, err := runner.RunJob(context.Background(), job, workspace)
+	result, err := runner.RunJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -3549,7 +3859,7 @@ func TestCancellationStillRunsRegisteredPostAction(t *testing.T) {
 	writeFixtureFile(t, workspace, ".github/actions/cancel/post.js", "console.log('post-after-cancel')\n")
 	var logs bytes.Buffer
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "cancel", Kind: "uses", Uses: "./.github/actions/cancel"}})
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(ctx, job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" || !strings.Contains(logs.String(), "post-after-cancel") {
@@ -3575,7 +3885,7 @@ func TestExplicitBackgroundCancelStillRunsRegisteredPostAction(t *testing.T) {
 	})
 	job.Env = map[string]string{"READY": ready}
 
-	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || !strings.Contains(logs.String(), "post-after-explicit-cancel") {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -3822,7 +4132,7 @@ func TestRunStreamingDrainsOversizedLineAndPreservesMasking(t *testing.T) {
 	}
 	var logs bytes.Buffer
 	processor := newCommandProcessor(&logs, &logs)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	err = (Runner{}).runStreaming(ctx, processor, "", map[string]string{"GO_WANT_RUNTIME_LONG_LINE": "1"}, executable, "-test.run=^TestLongLineChildProcess$")
 	if err == nil || !strings.Contains(err.Error(), "stdout stream: line exceeds 1048576-byte limit and was discarded") {
@@ -3884,7 +4194,7 @@ test -z "${HTTP_PROXY+x}" && test -z "${HTTPS_PROXY+x}" && test -z "${ALL_PROXY+
 test -z "${http_proxy+x}" && test -z "${https_proxy+x}" && test -z "${all_proxy+x}" && test -z "${no_proxy+x}"
 printf '%s\n' environment-ok
 `
-	if err := (Runner{}).runStreaming(context.Background(), processor, "", map[string]string{"DECLARED": "visible"}, "sh", "-c", command); err != nil {
+	if err := (Runner{}).runStreaming(t.Context(), processor, "", map[string]string{"DECLARED": "visible"}, "sh", "-c", command); err != nil {
 		t.Fatalf("runStreaming() error = %v", err)
 	}
 	if logs.String() != "environment-ok\n" {
@@ -3901,7 +4211,7 @@ func TestRunStreamingRejectsInvalidEnvironmentNamesBeforeExecution(t *testing.T)
 	for _, name := range []string{"", "ALIAS=OTHER", "NUL\x00NAME"} {
 		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "ran")
-			err := (Runner{}).runStreaming(context.Background(), newCommandProcessor(io.Discard, io.Discard), "", map[string]string{name: "value"}, "sh", "-c", `touch "$1"`, "sh", marker)
+			err := (Runner{}).runStreaming(t.Context(), newCommandProcessor(io.Discard, io.Discard), "", map[string]string{name: "value"}, "sh", "-c", `touch "$1"`, "sh", marker)
 			if err == nil || !strings.Contains(err.Error(), "invalid environment variable name") {
 				t.Fatalf("runStreaming() error = %v, want invalid environment name", err)
 			}
@@ -3911,7 +4221,7 @@ func TestRunStreamingRejectsInvalidEnvironmentNamesBeforeExecution(t *testing.T)
 		})
 	}
 
-	if err := (Runner{}).runStreaming(context.Background(), newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"GITHUB-ACTIONS_NAME.1": "valid"}, "true"); err != nil {
+	if err := (Runner{}).runStreaming(t.Context(), newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"GITHUB-ACTIONS_NAME.1": "valid"}, "true"); err != nil {
 		t.Fatalf("valid GitHub Actions environment name was rejected: %v", err)
 	}
 }
@@ -3927,7 +4237,7 @@ func TestRunDockerRejectsInvalidEnvironmentNamesBeforeDocker(t *testing.T) {
 			action := fakeDockerAction(t)
 			action.runnerTemp = t.TempDir()
 			action.Env = map[string]string{name: "value"}
-			_, err := (Runner{Docker: docker}).runDocker(context.Background(), newCommandProcessor(io.Discard, io.Discard), action)
+			_, err := newJobRun(Runner{Docker: docker}).runDocker(t.Context(), newCommandProcessor(io.Discard, io.Discard), action)
 			if err == nil || !strings.Contains(err.Error(), "invalid environment variable name") {
 				t.Fatalf("runDocker() error = %v, want invalid environment name", err)
 			}
@@ -4125,7 +4435,7 @@ func TestRunJobLogsSynchronousStepSectionsAndExpandsFailures(t *testing.T) {
 	job.Matrix = map[string]any{"version": "1.26"}
 	var logs bytes.Buffer
 
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -4165,7 +4475,7 @@ printf '::warning::untrusted warning-shaped output\r\n'
 printf '::crlf-stop-token::\r\n'
 printf '::add-mask::crlf-secret\r\n'
 printf 'masked after resume: crlf-secret\r\n'`
-	if err := (Runner{}).runStreaming(context.Background(), processor, "", nil, "sh", "-c", command); err != nil {
+	if err := (Runner{}).runStreaming(t.Context(), processor, "", nil, "sh", "-c", command); err != nil {
 		t.Fatalf("runStreaming() error = %v", err)
 	}
 	warnings, _, commandErrors, _ := processor.workflowCommandAnnotations()
@@ -4187,7 +4497,7 @@ func TestRunStreamingScopesWorkflowCommandFailuresToInvocation(t *testing.T) {
 	release := filepath.Join(t.TempDir(), "release-clean")
 	cleanDone := make(chan error, 1)
 	go func() {
-		cleanDone <- (Runner{}).runStreaming(context.Background(), processor, "", map[string]string{"READY": ready, "RELEASE": release}, "sh", "-c", `
+		cleanDone <- (Runner{}).runStreaming(t.Context(), processor, "", map[string]string{"READY": ready, "RELEASE": release}, "sh", "-c", `
 : > "$READY"
 while [ ! -e "$RELEASE" ]; do sleep .01; done
 printf '%s\n' 'clean invocation completed'`)
@@ -4202,7 +4512,7 @@ printf '%s\n' 'clean invocation completed'`)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	invalidErr := (Runner{}).runStreaming(context.Background(), processor, "", map[string]string{"RELEASE": release}, "sh", "-c", `
+	invalidErr := (Runner{}).runStreaming(t.Context(), processor, "", map[string]string{"RELEASE": release}, "sh", "-c", `
 printf '%s\n' '::stop-commands::warning'
 : > "$RELEASE"`)
 	cleanErr := <-cleanDone
@@ -4226,7 +4536,7 @@ func TestInvalidWorkflowCommandStopTokenFailsTheStep(t *testing.T) {
 			}})
 			var logs bytes.Buffer
 
-			result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+			result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 			if err == nil || !strings.Contains(err.Error(), "invalid ::stop-commands workflow command") || result.Conclusion != "failure" {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 			}
@@ -4250,7 +4560,7 @@ func TestRunJobCollectsWarningAndErrorCommandsWithoutChangingConclusion(t *testi
 	}})
 	var stdout, stderr bytes.Buffer
 
-	result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -4265,11 +4575,11 @@ func TestRunJobCollectsWarningAndErrorCommandsWithoutChangingConclusion(t *testi
 func TestWorkflowCommandAnnotationsAreConcurrentAndUTF8Bounded(t *testing.T) {
 	processor := newCommandProcessor(io.Discard, io.Discard)
 	var group sync.WaitGroup
-	for worker := 0; worker < 2; worker++ {
+	for worker := range 2 {
 		group.Add(1)
 		go func(worker int) {
 			defer group.Done()
-			for message := 0; message < 50; message++ {
+			for message := range 50 {
 				_ = processor.process(io.Discard, fmt.Sprintf("::warning::worker-%d-message-%d", worker, message))
 			}
 		}(worker)
@@ -4292,7 +4602,7 @@ func TestWorkflowCommandAnnotationsAreConcurrentAndUTF8Bounded(t *testing.T) {
 func TestWorkflowCommandAnnotationsNormalizeInvalidUTF8(t *testing.T) {
 	processor := newCommandProcessor(io.Discard, io.Discard)
 	command := `printf '::warning title=bad\377,file=bad\376.go::bad\375\n'`
-	if err := (Runner{}).runStreaming(context.Background(), processor, "", nil, "sh", "-c", command); err != nil {
+	if err := (Runner{}).runStreaming(t.Context(), processor, "", nil, "sh", "-c", command); err != nil {
 		t.Fatalf("runStreaming() error = %v", err)
 	}
 
@@ -4367,7 +4677,7 @@ runs:
   steps: []
 `)
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "conflict", Kind: "uses", Uses: "./.github/actions/conflict"}})
-	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), `duplicate case-insensitive name "result"`) {
+	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `duplicate case-insensitive name "result"`) {
 		t.Fatalf("RunJob() error = %v, want duplicate output rejection", err)
 	}
 }
@@ -4381,7 +4691,7 @@ func TestDiscoverNodeManagedAndWrongExplicitVersion(t *testing.T) {
 	if err := os.WriteFile(node, []byte("#!/bin/sh\necho v24.99.0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got, err := discoverNodeContext(context.Background(), 24, "", managed)
+	got, err := discoverNodeContext(t.Context(), 24, "", managed)
 	if err != nil || got != node {
 		t.Fatalf("discoverNodeContext(24) = %q, %v, want %q, nil", got, err, node)
 	}
@@ -4390,7 +4700,7 @@ func TestDiscoverNodeManagedAndWrongExplicitVersion(t *testing.T) {
 	if err := os.WriteFile(wrong, []byte("#!/bin/sh\necho v23.1.0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := discoverNodeContext(context.Background(), 24, wrong, ""); err == nil || !strings.Contains(err.Error(), `reported "v23.1.0"`) {
+	if _, err := discoverNodeContext(t.Context(), 24, wrong, ""); err == nil || !strings.Contains(err.Error(), `reported "v23.1.0"`) {
 		t.Fatalf("discoverNodeContext(24) error = %v, want wrong-version detail", err)
 	}
 
@@ -4401,10 +4711,10 @@ func TestDiscoverNodeManagedAndWrongExplicitVersion(t *testing.T) {
 	if err := os.WriteFile(node20, []byte("#!/bin/sh\necho v20.99.0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := discoverNodeContext(context.Background(), 20, "", managed); err != nil || got != node20 {
+	if got, err := discoverNodeContext(t.Context(), 20, "", managed); err != nil || got != node20 {
 		t.Fatalf("discoverNodeContext(20) = %q, %v, want %q, nil", got, err, node20)
 	}
-	if _, err := discoverNodeContext(context.Background(), 24, node20, ""); err == nil || !strings.Contains(err.Error(), `reported "v20.99.0"`) {
+	if _, err := discoverNodeContext(t.Context(), 24, node20, ""); err == nil || !strings.Contains(err.Error(), `reported "v20.99.0"`) {
 		t.Fatalf("discoverNodeContext(24) error = %v, want exact-major rejection", err)
 	}
 }
@@ -4414,7 +4724,7 @@ func TestDiscoverNodePreservesDeadline(t *testing.T) {
 	if err := os.WriteFile(node, []byte("#!/bin/sh\nexec sleep 5\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
 	defer cancel()
 
 	_, err := discoverNodeContext(ctx, 24, node, "")
@@ -4425,7 +4735,7 @@ func TestDiscoverNodePreservesDeadline(t *testing.T) {
 	if err := os.WriteFile(node, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err = discoverNodeContext(context.Background(), 24, node, "")
+	_, err = discoverNodeContext(t.Context(), 24, node, "")
 	if err == nil || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "exit status 7") {
 		t.Fatalf("discoverNodeContext(24) error = %v, want genuine discovery failure", err)
 	}
@@ -4450,8 +4760,8 @@ func TestMiseNodeSelectionIsExactAndConfigFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(nodeBytes)
-	r := Runner{Mise: mise, MiseDataDir: dataDir, nodeDigests: map[int]string{20: hex.EncodeToString(digest[:])}}
-	got, err := r.discoverNode(context.Background(), 20, "")
+	r := newJobRun(Runner{Mise: mise, MiseDataDir: dataDir, nodeDigests: map[int]string{20: hex.EncodeToString(digest[:])}})
+	got, err := r.discoverNode(t.Context(), 20, "")
 	if err != nil || got != node {
 		t.Fatalf("discoverNode() = %q, %v", got, err)
 	}
@@ -4483,7 +4793,7 @@ func TestMiseNode16SelectionIsExactAndConfigFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(nodeBytes)
-	got, err := (Runner{Mise: mise, MiseDataDir: dataDir, nodeDigests: map[int]string{16: hex.EncodeToString(digest[:])}}).discoverNode(context.Background(), 16, "")
+	got, err := newJobRun(Runner{Mise: mise, MiseDataDir: dataDir, nodeDigests: map[int]string{16: hex.EncodeToString(digest[:])}}).discoverNode(t.Context(), 16, "")
 	if err != nil || got != node {
 		t.Fatalf("discoverNode() = %q, %v", got, err)
 	}
@@ -4518,7 +4828,7 @@ func TestMiseNodeInstallationAllowsSymlinkedDataDirAncestor(t *testing.T) {
 	if err := os.Chmod(mise, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	gotInstallation, gotNode, err := (Runner{MiseDataDir: dataDir}).miseNodeInstallation(context.Background(), 24, mise)
+	gotInstallation, gotNode, err := (Runner{MiseDataDir: dataDir}).miseNodeInstallation(t.Context(), 24, mise)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4537,7 +4847,7 @@ func TestMiseNodeInstallationAllowsSymlinkedDataDirAncestor(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(wantInstallation, "bin")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := (Runner{MiseDataDir: dataDir}).miseNodeInstallation(context.Background(), 24, mise); err == nil || !strings.Contains(err.Error(), "symlink") {
+	if _, _, err := (Runner{MiseDataDir: dataDir}).miseNodeInstallation(t.Context(), 24, mise); err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("miseNodeInstallation() accepted symlinked bin directory: %v", err)
 	}
 }
@@ -4560,7 +4870,7 @@ func TestMiseNodePathIgnoresProgressOnStderr(t *testing.T) {
 		t.Fatal(err)
 	}
 	wrongDigest := sha256.Sum256(wrongBytes)
-	if _, err := (Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(wrongDigest[:])}}).resolveMiseNodePath(context.Background(), 24); err == nil || !strings.Contains(err.Error(), `reported "v24.99.0", want "v24.18.0"`) {
+	if _, err := newJobRun(Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(wrongDigest[:])}}).resolveMiseNodePath(t.Context(), 24); err == nil || !strings.Contains(err.Error(), `reported "v24.99.0", want "v24.18.0"`) {
 		t.Fatalf("resolveMiseNodePath() error = %v, want exact executable version rejection", err)
 	}
 	correctBytes := []byte("#!/bin/sh\nprintf 'v24.18.0\\n'\n")
@@ -4568,7 +4878,7 @@ func TestMiseNodePathIgnoresProgressOnStderr(t *testing.T) {
 		t.Fatal(err)
 	}
 	correctDigest := sha256.Sum256(correctBytes)
-	got, err := (Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(correctDigest[:])}}).resolveMiseNodePath(context.Background(), 24)
+	got, err := newJobRun(Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(correctDigest[:])}}).resolveMiseNodePath(t.Context(), 24)
 	if err != nil || got != filepath.Join(nodeRoot, "bin", "node") {
 		t.Fatalf("resolveMiseNodePath() = %q, %v", got, err)
 	}
@@ -4609,13 +4919,13 @@ esac
 		t.Fatal(err)
 	}
 	verification := &managedNodeVerification{paths: make(map[int]string)}
-	runner := Runner{
-		Mise:             mise,
-		MiseDataDir:      dataDir,
-		nodeDigests:      map[int]string{24: hex.EncodeToString(digest[:])},
-		nodeVerification: verification,
-	}
-	if got, err := runner.discoverNode(context.Background(), 24, ""); err != nil || got != node {
+	runner := newJobRun(Runner{
+		Mise:        mise,
+		MiseDataDir: dataDir,
+		nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])},
+	})
+	runner.nodeVerification = verification
+	if got, err := runner.discoverNode(t.Context(), 24, ""); err != nil || got != node {
 		t.Fatalf("discoverNode() = %q, %v", got, err)
 	}
 	got, err := os.ReadFile(node)
@@ -4664,14 +4974,14 @@ func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testin
 	node20 := filepath.Join(root, "node20")
 	writeNodeExecutable(t, node20, 20)
 	digest := sha256.Sum256(nodeBytes)
-	runner := Runner{Mise: mise, MiseDataDir: dataDir, Node20: node20, nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])}}
-	resolvedNode, err := runner.discoverNode(context.Background(), 24, "")
+	runner := newJobRun(Runner{Mise: mise, MiseDataDir: dataDir, Node20: node20, nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])}})
+	resolvedNode, err := runner.discoverNode(t.Context(), 24, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	result := newResult()
 	action := javaScriptAction{Name: "mise", Path: root, Main: "main.js", Env: map[string]string{"MISE_DATA_DIR": "/workflow-controlled"}, nodeMajor: 24}
-	if err := runner.runJavaScriptPhase(context.Background(), newCommandProcessor(io.Discard, io.Discard), root, resolvedNode, action, action.Main, nil, nil, &result); err != nil {
+	if err := runner.runJavaScriptPhase(t.Context(), newCommandProcessor(io.Discard, io.Discard), root, resolvedNode, action, action.Main, nil, nil, &result); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(log)
@@ -4686,7 +4996,7 @@ func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testin
 
 func TestMiseMissingIsClear(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	_, err := (Runner{}).discoverNode(context.Background(), 24, "")
+	_, err := newJobRun(Runner{}).discoverNode(t.Context(), 24, "")
 	if err == nil || !strings.Contains(err.Error(), "mise is required") {
 		t.Fatalf("discoverNode() error = %v", err)
 	}
@@ -4709,7 +5019,7 @@ func TestMiseNodeSelectionRejectsWrongExactVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(nodeBytes)
-	_, err := (Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])}}).discoverNode(context.Background(), 24, "")
+	_, err := newJobRun(Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])}}).discoverNode(t.Context(), 24, "")
 	if err == nil || !strings.Contains(err.Error(), `reported "v24.18.1", want "v24.18.0"`) {
 		t.Fatalf("discoverNode() error = %v", err)
 	}
@@ -4719,7 +5029,7 @@ func TestDockerAction(t *testing.T) {
 	docker := requireDocker(t)
 	var logs bytes.Buffer
 	runner := Runner{Stdout: &logs, Stderr: &logs, Docker: docker}
-	result, err := runner.runDockerAction(context.Background(), dockerAction{
+	result, err := runner.runDockerAction(t.Context(), dockerAction{
 		Name: "local Docker", Path: fixturePath(t, "actions", "docker"), Workspace: fixturePath(t),
 		Env: map[string]string{"INPUT_EXPECTED_FILE": "smoke/.github/workflows/ci.yml"},
 	})
@@ -4785,7 +5095,7 @@ func main() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := (Runner{Docker: docker}).runDockerAction(context.Background(), dockerAction{Name: "non-root Docker", Path: action, Workspace: workspace})
+	result, err := (Runner{Docker: docker}).runDockerAction(t.Context(), dockerAction{Name: "non-root Docker", Path: action, Workspace: workspace})
 	if err != nil {
 		t.Fatalf("runDockerAction() error = %v", err)
 	}
@@ -4812,7 +5122,7 @@ func TestRunJobShellJavaScriptCompositeAndPost(t *testing.T) {
 	})
 	job.Outputs = map[string]string{"result": "${{ steps.composite.outputs.result }}"}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, Node24: node}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Node24: node}).RunJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v\nlogs:\n%s", err, logs.String())
 	}
@@ -4845,7 +5155,7 @@ printf '%s\n' 'derived-mask-value' >> "$GITHUB_STEP_SUMMARY"`,
 	}})
 	job.Outputs = map[string]string{"secret": "${{ steps.derive.outputs.secret }}"}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), `job output "secret" contains a registered secret`) {
 		t.Fatalf("RunJob() error = %v, want dynamically masked output rejection", err)
 	}
@@ -4882,7 +5192,7 @@ runs:
 		"private": "${{ steps.composite.outputs.private }}",
 		"public":  "${{ steps.composite.outputs.public }}",
 	}
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -4891,6 +5201,280 @@ runs:
 	}
 	if result.Env["COMPOSITE_ENV"] != "propagated" || result.Summary != "composite summary\n" {
 		t.Fatalf("RunJob() effects = %#v, summary = %q", result.Env, result.Summary)
+	}
+}
+
+func TestRunJobPythonShellUsesTemporaryScript(t *testing.T) {
+	installPythonShellTestCommand(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:    "python",
+		Kind:  "run",
+		Shell: "python",
+		Command: `import os
+from pathlib import Path
+
+assert Path.cwd() == Path(os.environ["GITHUB_WORKSPACE"])
+assert Path(__file__).suffix == ".py"
+with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+    output.write(f"script={__file__}\n")
+`,
+	}})
+	job.Outputs = map[string]string{"script": "${{ steps.python.outputs.script }}"}
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	script := result.Outputs["script"]
+	if !strings.HasSuffix(script, ".py") {
+		t.Fatalf("Python script path = %q, want .py suffix", script)
+	}
+	if _, err := os.Stat(script); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary Python script remains at %q: %v", script, err)
+	}
+}
+
+func TestParseShellTemplate(t *testing.T) {
+	tests := []struct {
+		name    string
+		shell   string
+		want    []string
+		wantErr string
+	}{
+		{name: "arguments and quotes", shell: `julia --color=yes "two words" {0} --project='quoted value'`, want: []string{"julia", "--color=yes", "two words", "{0}", "--project=quoted value"}},
+		{name: "literal values without expansion", shell: `julia "" '$HOME' semi;colon escaped\ value {0}`, want: []string{"julia", "", "$HOME", "semi;colon", "escaped value", "{0}"}},
+		{name: "embedded and repeated placeholders", shell: `Rscript --file={0} {0}`, want: []string{"Rscript", "--file={0}", "{0}"}},
+		{name: "empty command", shell: `"" {0}`, wantErr: "must contain a command"},
+		{name: "missing placeholder", shell: `Rscript --vanilla`, wantErr: "must contain {0}"},
+		{name: "malformed quote", shell: `julia "unterminated {0}`, wantErr: "parse shell template"},
+		{name: "PowerShell remains unsupported", shell: `/usr/bin/pwsh -File {0}`, wantErr: "unsupported in the supported runtime subset"},
+		{name: "Windows shell remains unsupported", shell: `cmd.exe /C {0}`, wantErr: "unsupported in the supported runtime subset"},
+		{name: "MSYS2 remains unsupported", shell: `msys2 {0}`, wantErr: "unsupported in the supported runtime subset"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseShellTemplate(test.shell)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("parseShellTemplate(%q) error = %v, want %q", test.shell, err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(got, test.want) {
+				t.Fatalf("parseShellTemplate(%q) = %#v, %v, want %#v", test.shell, got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestRunJobCustomShellTemplatesUseTemporaryScripts(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		command  string
+		shell    string
+		wantArgs []string
+	}{
+		{name: "R", command: "Rscript", shell: `Rscript --vanilla "two words" {0} --after='quoted value'`, wantArgs: []string{"--vanilla", "two words"}},
+		{name: "Julia", command: "julia", shell: `julia --color=yes {0} --project "two words"`, wantArgs: []string{"--color=yes"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bin := installCustomShellTestCommand(t, test.command)
+			workspace := t.TempDir()
+			arguments := filepath.Join(workspace, "arguments")
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+			job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+				{ID: "path", Kind: "run", Shell: "sh", Command: `printf '%s\n' "$CUSTOM_SHELL_BIN" >> "$GITHUB_PATH"`, Env: map[string]string{"CUSTOM_SHELL_BIN": bin}},
+				{
+					ID:      "custom",
+					Kind:    "run",
+					Shell:   test.shell,
+					Env:     map[string]string{"CUSTOM_SHELL_ARGS": arguments},
+					Command: `printf 'script=%s\n' "$0" >> "$GITHUB_OUTPUT"`,
+				},
+			})
+			job.Outputs = map[string]string{"script": "${{ steps.custom.outputs.script }}"}
+			result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+			if err != nil {
+				t.Fatalf("RunJob() error = %v", err)
+			}
+			script := result.Outputs["script"]
+			if base := filepath.Base(script); !strings.HasPrefix(base, "buildkite-gha-shell-") || filepath.Ext(base) != "" {
+				t.Fatalf("custom shell script path = %q, want extensionless temporary script", script)
+			}
+			if _, err := os.Stat(script); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("temporary custom shell script remains at %q: %v", script, err)
+			}
+			data, err := os.ReadFile(arguments)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Split(strings.TrimSpace(string(data)), "\n")
+			if len(got) < len(test.wantArgs)+1 || !slices.Equal(got[:len(test.wantArgs)], test.wantArgs) || got[len(test.wantArgs)] != script {
+				t.Fatalf("custom shell arguments = %#v, want prefix %#v followed by %q", got, test.wantArgs, script)
+			}
+		})
+	}
+}
+
+func TestRunJobLoginBashTemplate(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "login", Kind: "run", Shell: "bash -l {0}", Command: `printf 'value=login-bash\n' >> "$GITHUB_OUTPUT"`}})
+	job.Outputs = map[string]string{"value": "${{ steps.login.outputs.value }}"}
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Outputs["value"] != "login-bash" {
+		t.Fatalf("RunJob() output = %q, error = %v, want login-bash", result.Outputs["value"], err)
+	}
+}
+
+func TestCompositePythonShell(t *testing.T) {
+	installPythonShellTestCommand(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", `name: Python composite
+outputs:
+  value:
+    value: ${{ steps.python.outputs.value }}
+runs:
+  using: composite
+  steps:
+    - id: python
+      shell: python
+      run: |
+        import os
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write("value=python-composite\n")
+`)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
+	job.Outputs = map[string]string{"value": "${{ steps.composite.outputs.value }}"}
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	if result.Outputs["value"] != "python-composite" {
+		t.Fatalf("RunJob() output = %q, want python-composite", result.Outputs["value"])
+	}
+}
+
+func installCustomShellTestCommand(t *testing.T, name string) string {
+	t.Helper()
+	dir := t.TempDir()
+	wrapper := `#!/bin/sh
+: > "$CUSTOM_SHELL_ARGS"
+script=
+for arg do
+  printf '%s\n' "$arg" >> "$CUSTOM_SHELL_ARGS"
+  case "$arg" in
+    */buildkite-gha-shell-*) script=$arg ;;
+  esac
+done
+test -n "$script"
+exec /bin/sh "$script"
+`
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func installPythonShellTestCommand(t *testing.T) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	python := filepath.Join(dir, "python")
+	wrapper := "#!/bin/sh\nBUILDKITE_GHA_TEST_PYTHON_HELPER=1 exec " + shellTestQuote(executable) + " -test.run '^TestPythonShellCommandHelper$' -- \"$@\"\n"
+	if err := os.WriteFile(python, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestPythonShellCommandHelper(t *testing.T) {
+	if os.Getenv("BUILDKITE_GHA_TEST_PYTHON_HELPER") == "" {
+		return
+	}
+	separator := slices.Index(os.Args, "--")
+	if separator < 0 || separator+1 >= len(os.Args) {
+		t.Fatalf("Python helper arguments = %#v", os.Args)
+	}
+	script := os.Args[separator+1]
+	source, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Ext(script) != ".py" {
+		t.Fatalf("Python script = %q, want .py suffix", script)
+	}
+	if cwd, err := os.Getwd(); err != nil || cwd != os.Getenv("GITHUB_WORKSPACE") {
+		t.Fatalf("working directory = %q, %v; workspace = %q", cwd, err, os.Getenv("GITHUB_WORKSPACE"))
+	}
+	var output string
+	switch {
+	case bytes.Contains(source, []byte(`script={__file__}`)):
+		output = "script=" + script + "\n"
+	case bytes.Contains(source, []byte(`value=python-composite`)):
+		output = "value=python-composite\n"
+	default:
+		t.Fatalf("unexpected Python source: %s", source)
+	}
+	file, err := os.OpenFile(os.Getenv("GITHUB_OUTPUT"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(output); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompositeStepWorkingDirectoryEvaluatesExpressions(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", `name: Working-directory composite
+inputs:
+  dir:
+    required: false
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      working-directory: ${{ inputs.dir || '.' }}
+      run: test "$(basename "$PWD")" = sub
+    - shell: bash
+      working-directory: literal-dir
+      run: test "$(basename "$PWD")" = literal-dir
+`)
+	for _, directory := range []string{"sub", "literal-dir"} {
+		if err := os.Mkdir(filepath.Join(workspace, directory), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", With: map[string]string{"dir": "sub"}}})
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestRunStepMissingWorkingDirectoryFailsClearly(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Shell: "sh", Command: "true", WorkingDirectory: "missing"}})
+	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `working directory "missing" does not exist`) {
+		t.Fatalf("RunJob() error = %v, want missing working directory diagnostic", err)
 	}
 }
 
@@ -4969,7 +5553,7 @@ printf '%s\n' 'result=nested-ok' >> "$GITHUB_OUTPUT"
 	}
 	job.Outputs = map[string]string{"result": "${{ steps.outer.outputs.result }}"}
 	var logs bytes.Buffer
-	result, err := (Runner{Node24: fakeNode, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v\nlogs: %s", err, logs.String())
 	}
@@ -4978,12 +5562,151 @@ printf '%s\n' 'result=nested-ok' >> "$GITHUB_OUTPUT"
 	}
 }
 
+func TestCompositeGitHubActionPathExpressionIsInvocationScoped(t *testing.T) {
+	workspace := canonicalTempDir(t)
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/inner/action.yml", `name: Inner
+inputs:
+  caller-path:
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        ENV_ACTION_PATH: ${{ github.action_path }}
+        WITH_CALLER_PATH: ${{ inputs.caller-path }}
+      run: |
+        test "${{ github.action_path }}" = "$EXPECTED_INNER_PATH"
+        test "$ENV_ACTION_PATH" = "$EXPECTED_INNER_PATH"
+        test "$WITH_CALLER_PATH" = "$EXPECTED_OUTER_PATH"
+`)
+	writeFixtureFile(t, workspace, ".github/actions/outer/action.yml", `name: Outer
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: |
+        test "${{ github.action_path }}" = "$EXPECTED_OUTER_PATH"
+        test "${{ github.action_path }}" = "$GITHUB_ACTION_PATH"
+        test -f "${{ github.action_path }}/action.yml"
+        test "${{ github.workflow }}" = "$EXPECTED_WORKFLOW"
+        test "${{ github.job }}" = fixture
+    - uses: ./.github/actions/inner
+      with:
+        caller-path: ${{ github.action_path }}
+    - shell: sh
+      run: test "${{ github.action_path }}" = "$EXPECTED_OUTER_PATH"
+`)
+	steps := []plan.Step{
+		{ID: "composite", Kind: "uses", Uses: "./.github/actions/outer"},
+		{ID: "top", Kind: "run", Command: `test -z "${{ github.action_path }}"`},
+	}
+	job := runtimePlan(t, workspace, workflowPath, steps)
+	job.Env = map[string]string{
+		"EXPECTED_OUTER_PATH": filepath.Join(workspace, ".github", "actions", "outer"),
+		"EXPECTED_INNER_PATH": filepath.Join(workspace, ".github", "actions", "inner"),
+		"EXPECTED_WORKFLOW":   workflowPath,
+	}
+	var logs bytes.Buffer
+	if _, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace); err != nil {
+		t.Fatalf("RunJob() error = %v\nlogs: %s", err, logs.String())
+	}
+}
+
+func TestRemoteCompositeGitHubActionIdentityExpressionsAreInvocationScoped(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: action identity\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "composite/action.yml", `name: Identity
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        ACTION_USER_AGENT: ${{ github.action_repository }}@${{ github.action_ref }}
+      run: test "$ACTION_USER_AGENT" = owner/repo@v1
+`)
+	digest := digestTree(t, remote)
+	lockID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "identity", Kind: "uses", Uses: remoteLifecycleUses("composite"), Action: &plan.ActionSelector{Lock: lockID},
+	}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "composite", digest, nil)}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	if result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestNestedRemoteCompositeInvocationFieldsRetainCallerIdentityForPreAndMain(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: nested action identity\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "root/action.yml", `name: Root
+runs:
+  using: composite
+  steps:
+    - uses: child-owner/child-action/child@child-ref
+      env:
+        CALLER_IDENTITY: ${{ github.action_repository }}@${{ github.action_ref }}
+`)
+	writeFixtureFile(t, remote, "child/action.yml", `name: Child
+runs:
+  using: composite
+  steps:
+    - uses: js-owner/js-action/js@js-ref
+`)
+	writeFixtureFile(t, remote, "js/action.yml", "name: JavaScript\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "js/pre.js", "")
+	writeFixtureFile(t, remote, "js/main.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+test "$CALLER_IDENTITY" = root-owner/root-action@root-ref
+printf '%s\n' "$(basename "$1" .js)" >> "$PHASES"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	rootID, childID, jsID := remoteLifecycleLockID(1), remoteLifecycleLockID(2), remoteLifecycleLockID(3)
+	rootLock := remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{"child-owner/child-action/child@child-ref": {Lock: childID}})
+	rootLock.Repository, rootLock.RequestedRef = "root-owner/root-action", "root-ref"
+	childLock := remoteLifecycleLock(childID, "child", digest, map[string]plan.ActionSelector{"js-owner/js-action/js@js-ref": {Lock: jsID}})
+	childLock.Repository, childLock.RequestedRef = "child-owner/child-action", "child-ref"
+	jsLock := remoteLifecycleLock(jsID, "js", digest, nil)
+	jsLock.Repository, jsLock.RequestedRef = "js-owner/js-action", "js-ref"
+	phases := filepath.Join(workspace, "phases")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "identity", Kind: "uses", Uses: "root-owner/root-action/root@root-ref", Action: &plan.ActionSelector{Lock: rootID},
+	}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"PHASES": phases}
+	job.Actions = []plan.ActionLock{rootLock, childLock, jsLock}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	if result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	got, err := os.ReadFile(phases)
+	if err != nil || string(got) != "pre\nmain\n" {
+		t.Fatalf("phases = %q, %v; want pre and main", got, err)
+	}
+}
+
 func TestExpressionTimeoutBoundsNestedCompositePre(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: nested pre timeout\n")
 	remote := t.TempDir()
-	writeFixtureFile(t, remote, "root/action.yml", "name: root\nruns:\n  using: composite\n  steps:\n    - uses: "+remoteLifecycleUses("child")+"\n")
+	writeFixtureFile(t, remote, "root/action.yml", "name: root\nruns:\n  using: composite\n  steps:\n    - uses: "+remoteLifecycleUses("child")+"\n      continue-on-error: true\n")
 	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
 	writeFixtureFile(t, remote, "child/pre.js", "")
 	writeFixtureFile(t, remote, "child/main.js", "")
@@ -5010,12 +5733,107 @@ if [ "$(basename "$(dirname "$1")")/$(basename "$1")" = child/pre.js ]; then sle
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	started := time.Now()
-	_, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	_, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("RunJob() nested pre timeout error = %v", err)
 	}
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("RunJob() nested pre took %s after expression timeout", elapsed)
+	}
+}
+
+func TestNestedRemoteCompositePreSupportsCompoundStepFields(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: nested pre expressions\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "root/action.yml", `name: root
+inputs:
+  targets:
+    required: false
+  target:
+    required: false
+runs:
+  using: composite
+  steps:
+    - uses: owner/repo/child@v1
+      with:
+        message: ${{ inputs.targets || inputs.target || '' }}
+      env:
+        TARGETS: ${{ inputs.targets || inputs.target || '' }}
+`)
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\ninputs:\n  message:\n    required: false\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "child/pre.js", "")
+	writeFixtureFile(t, remote, "child/main.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+test -z "$INPUT_MESSAGE"
+test -z "$TARGETS"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	rootID, childID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestRemoteCompositePreExposesActionPathToChild(t *testing.T) {
+	workspace := canonicalTempDir(t)
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: pre action path\n")
+	remote := canonicalTempDir(t)
+	writeFixtureFile(t, remote, "root/action.yml", `name: root
+runs:
+  using: composite
+  steps:
+    - uses: owner/repo/child@v1
+      with:
+        caller_path: ${{ github.action_path }}
+      env:
+        CALLER_PATH_ENV: ${{ github.action_path }}
+`)
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\ninputs:\n  caller_path:\n    required: false\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "child/pre.js", "")
+	writeFixtureFile(t, remote, "child/main.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+test "$INPUT_CALLER_PATH" = "$EXPECTED_ROOT_PATH"
+test "$CALLER_PATH_ENV" = "$EXPECTED_ROOT_PATH"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	rootID, childID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"EXPECTED_ROOT_PATH": filepath.Join(remote, "root")}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	var logs bytes.Buffer
+	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v\nlogs: %s", result, err, logs.String())
 	}
 }
 
@@ -5034,7 +5852,7 @@ func TestSkippedRemoteCompositeWithoutPreDoesNotEvaluateTimeout(t *testing.T) {
 	job.RequiredCapabilities = []string{"network"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(rootID, "root", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	if result, err := (Runner{Actions: materializer}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() skipped composite result = %#v, error = %v", result, err)
 	}
 }
@@ -5068,7 +5886,7 @@ runs:
 	})
 	job.Env = map[string]string{"STATUS_MARKER": marker}
 
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v; want original step failure", result, err)
 	}
@@ -5111,7 +5929,7 @@ printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
 		{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"},
 	})
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
-	if result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 	events, err := os.ReadFile(lifecycle)
@@ -5137,7 +5955,7 @@ printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
 		},
 		{ID: nestedID, Source: "workspace", Path: ".github/actions/nested", SourceDigest: digestTree(t, filepath.Join(workspace, ".github", "actions", "nested"))},
 	}
-	if result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("v3 RunJob() result = %#v, error = %v", result, err)
 	}
 	events, err = os.ReadFile(lifecycle)
@@ -5267,7 +6085,7 @@ printf '%s\n' 'job:main' >> "$LIFECYCLE_LOG"`},
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	var logs bytes.Buffer
-	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -5348,7 +6166,7 @@ if [ "$action:$phase" = main-fails:main ]; then exit 7; fi
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	provider := &testWorkflowTokenProvider{token: "ghs_scoped_pre"}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer, WorkflowToken: provider, Redactor: &testRedactor{}}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer, WorkflowToken: provider, Redactor: &testRedactor{}}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -5413,7 +6231,7 @@ printf 'child:%s:%s\n' "$(basename "$1" .js)" "$INPUT_MESSAGE" >> "$LIFECYCLE_LO
 		remoteLifecycleLock(childID, "child", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -5481,7 +6299,7 @@ if [ "$action:$phase" = fails:pre ]; then exit 7; fi
 		remoteLifecycleLock(onSuccessID, "on-success", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), `action "owner/repo/fails@v1" pre`) {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -5537,7 +6355,7 @@ fi
 		remoteLifecycleLock(afterID, "after", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -5551,14 +6369,18 @@ func TestRemoteCompositeSoftPreFailurePreservesSuccessForLaterPre(t *testing.T) 
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: softened composite pre failure\n")
 	remote := t.TempDir()
-	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: owner/repo/child@v1\n")
-	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\noutputs:\n  status:\n    value: ${{ steps.child.outcome }}-${{ steps.child.conclusion }}\nruns:\n  using: composite\n  steps:\n    - id: child\n      if: false\n      uses: owner/repo/child@v1\n      continue-on-error: true\n    - id: finalize\n      shell: sh\n      run: touch \"$COMPOSITE_MARKER\"\n")
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n  post-if: steps.finalize.conclusion == 'success'\n")
 	writeFixtureFile(t, remote, "child/pre.js", "")
 	writeFixtureFile(t, remote, "child/main.js", "")
+	writeFixtureFile(t, remote, "child/post.js", "")
 	writeFixtureFile(t, remote, "after/action.yml", "name: after\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: success()\n  main: main.js\n")
 	writeFixtureFile(t, remote, "after/pre.js", "")
 	writeFixtureFile(t, remote, "after/main.js", "")
 	marker := filepath.Join(workspace, "observed")
+	compositeMarker := filepath.Join(workspace, "composite-observed")
+	childMainMarker := filepath.Join(workspace, "child-main-observed")
+	childPostMarker := filepath.Join(workspace, "child-post-observed")
 	fakeNode := filepath.Join(workspace, "node24")
 	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
 set -eu
@@ -5566,6 +6388,8 @@ if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
 action=$(basename "$(dirname "$1")")
 phase=$(basename "$1" .js)
 if [ "$action:$phase" = child:pre ]; then exit 7; fi
+if [ "$action:$phase" = child:main ]; then touch "$CHILD_MAIN_MARKER"; fi
+if [ "$action:$phase" = child:post ]; then touch "$CHILD_POST_MARKER"; fi
 if [ "$action:$phase" = after:pre ]; then touch "$MARKER"; fi
 `)
 	if err := os.Chmod(fakeNode, 0o700); err != nil {
@@ -5579,19 +6403,174 @@ if [ "$action:$phase" = after:pre ]; then touch "$MARKER"; fi
 	})
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
-	job.Env = map[string]string{"MARKER": marker}
+	job.Env = map[string]string{"MARKER": marker, "COMPOSITE_MARKER": compositeMarker, "CHILD_MAIN_MARKER": childMainMarker, "CHILD_POST_MARKER": childPostMarker}
+	job.Outputs = map[string]string{"status": "${{ steps.parent.outputs.status }}"}
 	job.Actions = []plan.ActionLock{
 		remoteLifecycleLock(parentID, "parent", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
 		remoteLifecycleLock(childID, "child", digest, nil),
 		remoteLifecycleLock(afterID, "after", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("later success pre did not run: %v", err)
+	}
+	if result.Outputs["status"] != "failure-success" {
+		t.Fatalf("RunJob() outputs = %#v, want retained child pre-failure status", result.Outputs)
+	}
+	if _, err := os.Stat(compositeMarker); err != nil {
+		t.Fatalf("later composite step did not run: %v", err)
+	}
+	if _, err := os.Stat(childMainMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("child main ran after its pre failed: %v", err)
+	}
+	if _, err := os.Stat(childPostMarker); err != nil {
+		t.Fatalf("child post did not see the final composite step status: %v", err)
+	}
+}
+
+func TestRemoteCompositeSoftPreIfFailureSkipsMain(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: softened composite pre-if failure\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: owner/repo/child@v1\n      continue-on-error: true\n    - shell: sh\n      run: touch \"$LATER_STEP_MARKER\"\n")
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: runner.debug == 'true'\n  main: main.js\n")
+	writeFixtureFile(t, remote, "child/pre.js", "")
+	writeFixtureFile(t, remote, "child/main.js", "")
+	laterStepMarker := filepath.Join(workspace, "later-step-observed")
+	childMainMarker := filepath.Join(workspace, "child-main-observed")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+if [ "$action:$phase" = child:main ]; then touch "$CHILD_MAIN_MARKER"; fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	parentID, childID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "parent", Kind: "uses", Uses: remoteLifecycleUses("parent"), Action: &plan.ActionSelector{Lock: parentID}}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"LATER_STEP_MARKER": laterStepMarker, "CHILD_MAIN_MARKER": childMainMarker}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(parentID, "parent", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(laterStepMarker); err != nil {
+		t.Fatalf("later composite step did not run: %v", err)
+	}
+	if _, err := os.Stat(childMainMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("child main ran after its pre-if failed: %v", err)
+	}
+}
+
+func TestRemoteCompositeSoftConditionFailureBindsPostToFinalStepState(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: softened composite condition failure post scope\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\nruns:\n  using: composite\n  steps:\n    - id: child\n      if: runner.debug == 'true'\n      uses: owner/repo/child@v1\n      continue-on-error: true\n    - id: finalize\n      shell: sh\n      run: touch \"$FINALIZE_MARKER\"\n")
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n  post-if: steps.finalize.conclusion == 'success'\n")
+	for _, path := range []string{"child/pre.js", "child/main.js", "child/post.js"} {
+		writeFixtureFile(t, remote, path, "")
+	}
+	finalizeMarker := filepath.Join(workspace, "finalize-observed")
+	postMarker := filepath.Join(workspace, "post-observed")
+	mainMarker := filepath.Join(workspace, "main-observed")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+if [ "$action:$phase" = child:main ]; then touch "$MAIN_MARKER"; fi
+if [ "$action:$phase" = child:post ]; then touch "$POST_MARKER"; fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	parentID, childID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "parent", Kind: "uses", Uses: remoteLifecycleUses("parent"), Action: &plan.ActionSelector{Lock: parentID}}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"FINALIZE_MARKER": finalizeMarker, "MAIN_MARKER": mainMarker, "POST_MARKER": postMarker}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(parentID, "parent", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	for _, path := range []string{finalizeMarker, postMarker} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected marker %q: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(mainMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("condition-failed child main ran: %v", err)
+	}
+}
+
+func TestRemoteCompositeSoftNestedPreparationFailurePreservesSuccessForLaterPre(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: softened nested composite preparation failure\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: owner/repo/nested@v1\n      continue-on-error: true\n    - uses: owner/repo/after@v1\n")
+	writeFixtureFile(t, remote, "nested/action.yml", "name: nested\nruns:\n  using: composite\n  steps:\n    - uses: owner/repo/child@v1\n")
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "after/action.yml", "name: after\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: success()\n  main: main.js\n")
+	for _, path := range []string{"child/pre.js", "child/main.js", "after/pre.js", "after/main.js"} {
+		writeFixtureFile(t, remote, path, "")
+	}
+	marker := filepath.Join(workspace, "later-pre-observed")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+if [ "$action:$phase" = child:pre ]; then exit 7; fi
+if [ "$action:$phase" = after:pre ]; then touch "$MARKER"; fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	parentID, nestedID, childID, afterID := remoteLifecycleLockID(1), remoteLifecycleLockID(2), remoteLifecycleLockID(3), remoteLifecycleLockID(4)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "parent", Kind: "uses", Uses: remoteLifecycleUses("parent"), Action: &plan.ActionSelector{Lock: parentID}}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"MARKER": marker}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(parentID, "parent", digest, map[string]plan.ActionSelector{remoteLifecycleUses("nested"): {Lock: nestedID}, remoteLifecycleUses("after"): {Lock: afterID}}),
+		remoteLifecycleLock(nestedID, "nested", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+		remoteLifecycleLock(afterID, "after", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("later pre-if: success() did not run: %v", err)
 	}
 }
 
@@ -5631,7 +6610,7 @@ printf '%s:%s\n' "$(basename "$(dirname "$1")")" "$(basename "$1" .js)" >> "$LIF
 	}
 	job.ContinueOnError = true
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "materialized source digest mismatch") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -5659,7 +6638,7 @@ func TestJobContinueOnErrorDoesNotTolerateLazyWorkspaceActionIntegrityFailure(t 
 	job.Actions = []plan.ActionLock{lock}
 	job.ContinueOnError = true
 
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "workspace action digest mismatch") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -5702,7 +6681,7 @@ printf '%s:%s\n' "$(basename "$(dirname "$1")")" "$(basename "$1" .js)" >> "$LIF
 		remoteLifecycleLock(directID, "direct", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -5744,7 +6723,7 @@ runs:
 	shouldNotRun := filepath.Join(workspace, "should-not-run")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/conditions"}})
 	job.Env = map[string]string{"STATUS_RAN": statusRan, "ALWAYS_RAN": alwaysRan, "SHOULD_NOT_RUN": shouldNotRun}
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v, want preserved composite failure", result, err)
 	}
@@ -5755,6 +6734,79 @@ runs:
 	}
 	if _, statErr := os.Stat(shouldNotRun); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("default child ran after failure: %v", statErr)
+	}
+}
+
+func TestCompositeContinueOnErrorPreservesOutcomeAndRunsLaterSteps(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/soft-failure/action.yml", `name: Soft failure composite
+outputs:
+  status:
+    value: ${{ steps.failed.outcome }}-${{ steps.failed.conclusion }}
+runs:
+  using: composite
+  steps:
+    - id: failed
+      shell: sh
+      run: exit 7
+      continue-on-error: true
+    - shell: sh
+      run: touch "$LATER_STEP_RAN"
+`)
+	laterStep := filepath.Join(workspace, "later-step-ran")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/soft-failure"}})
+	job.Env = map[string]string{"LATER_STEP_RAN": laterStep}
+	job.Outputs = map[string]string{"status": "${{ steps.composite.outputs.status }}"}
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v, want soft composite failure", result, err)
+	}
+	if result.Outputs["status"] != "failure-success" {
+		t.Fatalf("RunJob() outputs = %#v, want retained soft-failure status", result.Outputs)
+	}
+	if _, statErr := os.Stat(laterStep); statErr != nil {
+		t.Fatalf("later composite step did not run: %v", statErr)
+	}
+}
+
+func TestCompositeContinueOnErrorToleratesConditionFailure(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/soft-condition/action.yml", `name: Soft condition failure composite
+outputs:
+  status:
+    value: ${{ steps.failed.outcome }}-${{ steps.failed.conclusion }}
+runs:
+  using: composite
+  steps:
+    - id: failed
+      if: runner.debug == 'true'
+      shell: sh
+      run: touch "$SHOULD_NOT_RUN"
+      continue-on-error: true
+    - shell: sh
+      run: touch "$LATER_STEP_RAN"
+`)
+	laterStep := filepath.Join(workspace, "later-step-ran")
+	shouldNotRun := filepath.Join(workspace, "should-not-run")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/soft-condition"}})
+	job.Env = map[string]string{"LATER_STEP_RAN": laterStep, "SHOULD_NOT_RUN": shouldNotRun}
+	job.Outputs = map[string]string{"status": "${{ steps.composite.outputs.status }}"}
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v, want soft condition failure", result, err)
+	}
+	if result.Outputs["status"] != "failure-success" {
+		t.Fatalf("RunJob() outputs = %#v, want retained soft-failure status", result.Outputs)
+	}
+	if _, statErr := os.Stat(laterStep); statErr != nil {
+		t.Fatalf("later composite step did not run: %v", statErr)
+	}
+	if _, statErr := os.Stat(shouldNotRun); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("condition-failed child ran: %v", statErr)
 	}
 }
 
@@ -5778,7 +6830,7 @@ runs:
 			marker := filepath.Join(workspace, "conditional-ran")
 			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/conditional", With: map[string]string{"enabled": enabled}}})
 			job.Env = map[string]string{"CONDITIONAL_RAN": marker}
-			result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+			result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 			if err != nil || result.Conclusion != "success" {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 			}
@@ -5793,13 +6845,63 @@ runs:
 	}
 }
 
+func TestCompositeStepSupportsCompoundInputExpression(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/rust/action.yml", `name: Rust setup expression
+inputs:
+  toolchain:
+    required: false
+  components:
+    required: false
+  targets:
+    required: false
+  target:
+    required: false
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        targets: ${{ inputs.targets || inputs.target || '' }}
+        owner: ${{ github.repository_owner }}
+      run: |
+        test "${{ runner.temp }}" = "$RUNNER_TEMP"
+        echo "downgrade=${{contains(inputs.toolchain, 'nightly') && inputs.components && ' --allow-downgrade' || ''}}" > "$RESULT"
+        echo "targets=$targets" >> "$RESULT"
+        echo "owner=$owner" >> "$RESULT"
+`)
+	output := filepath.Join(workspace, "result")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:   "rust",
+		Kind: "uses",
+		Uses: "./.github/actions/rust",
+		With: map[string]string{"toolchain": "nightly", "components": "rustfmt"},
+	}})
+	job.Env = map[string]string{"RESULT": output}
+	job.Event.Repository = "buildkite/buildkite-gha"
+
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	contents, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(contents), "downgrade= --allow-downgrade\ntargets=\nowner=buildkite\n"; got != want {
+		t.Fatalf("compound composite step expressions = %q, want %q", got, want)
+	}
+}
+
 func TestRuntimeRejectsRecursiveAndOverDepthCompositeActions(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 	writeFixtureFile(t, workspace, ".github/actions/recursive/action.yml", "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/recursive\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "recursive", Kind: "uses", Uses: "./.github/actions/recursive"}})
-	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "recursion detected") {
+	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "recursion detected") {
 		t.Fatalf("RunJob() recursion error = %v", err)
 	}
 
@@ -5811,7 +6913,7 @@ func TestRuntimeRejectsRecursiveAndOverDepthCompositeActions(t *testing.T) {
 		writeFixtureFile(t, workspace, fmt.Sprintf(".github/actions/depth-%d/action.yml", i), "runs:\n  using: composite\n"+next)
 	}
 	job = runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "deep", Kind: "uses", Uses: "./.github/actions/depth-0"}})
-	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds maximum depth %d", metadata.MaxNestedActionDepth)) {
+	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds maximum depth %d", metadata.MaxNestedActionDepth)) {
 		t.Fatalf("RunJob() depth error = %v", err)
 	}
 }
@@ -5828,13 +6930,13 @@ func TestRuntimeMapDiagnosticsAreSorted(t *testing.T) {
 	workspace := fixturePath(t, "smoke")
 	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "shell", Kind: "run", Shell: "sh", Command: "true"}})
 	job.Needs = map[string]plan.Need{"z-last": {}, "a-first": {}}
-	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), `prerequisite result "a-first"`) {
+	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `prerequisite result "a-first"`) {
 		t.Fatalf("RunJob() prerequisite error = %v, want alphabetically first key", err)
 	}
 
 	job.Needs = nil
 	job.Outputs = map[string]string{"z-valid": "partial", "a-invalid": "${{ unsupported.a }}"}
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), `job output "a-invalid"`) {
 		t.Fatalf("RunJob() output error = %v, want alphabetically first key", err)
 	}
@@ -5886,7 +6988,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
 	defer cancel()
 	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
 	if err != nil {
@@ -5943,7 +7045,7 @@ jobs:
 	if err != nil || len(plans) != 1 {
 		t.Fatalf("compile hashFiles workflow = %#v, %v", plans, err)
 	}
-	result, err := (Runner{}).RunJob(context.Background(), plans[0], workspace)
+	result, err := (Runner{}).RunJob(t.Context(), plans[0], workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -5955,7 +7057,7 @@ func TestRunJobDockerUsesSharedMasking(t *testing.T) {
 	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "docker", Kind: "uses", Uses: "./actions/docker"}})
 	job.RequiredCapabilities = []string{"docker", "network"}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, Docker: docker}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Docker: docker}).RunJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -5968,11 +7070,11 @@ func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
 	workspace := fixturePath(t, "smoke")
 	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "local", Kind: "uses", Uses: "./actions/javascript"}})
 	job.Workflow.Digest = "sha256:" + strings.Repeat("0", 64)
-	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "workflow digest mismatch") {
+	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "workflow digest mismatch") {
 		t.Fatalf("RunJob() error = %v, want workflow digest mismatch", err)
 	}
 	job = runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "remote", Kind: "uses", Uses: "actions/checkout@v4"}})
-	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "remote action") {
+	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "remote action") {
 		t.Fatalf("RunJob() error = %v, want explicit remote action error", err)
 	}
 
@@ -5983,8 +7085,8 @@ func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
 			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 			writeFixtureFile(t, workspace, ".github/actions/unsupported/action.yml", "runs:\n  using: "+using+"\n")
 			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "unsupported", Kind: "uses", Uses: "./.github/actions/unsupported"}})
-			if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), `unsupported runtime "`+using+`"`) {
-				t.Fatalf("RunJob() error = %v, want %s fail-closed boundary", err, using)
+			if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `unsupported runtime "`+using+`"`) {
+				t.Fatalf("RunJob() error = %v, want %s runtime rejection", err, using)
 			}
 		})
 	}
@@ -6084,7 +7186,7 @@ func requireLinuxAMD64(t *testing.T) {
 func requireNode24(t *testing.T) string {
 	t.Helper()
 	if node := os.Getenv("BUILDKITE_GHA_TEST_NODE24"); node != "" {
-		if _, err := discoverNodeContext(context.Background(), 24, node, ""); err != nil {
+		if _, err := discoverNodeContext(t.Context(), 24, node, ""); err != nil {
 			t.Fatalf("BUILDKITE_GHA_TEST_NODE24 is not Node 24: %v", err)
 		}
 		return node
@@ -6093,7 +7195,7 @@ func requireNode24(t *testing.T) string {
 		output, err := exec.Command(mise, "where", "node@24").CombinedOutput()
 		if err == nil {
 			node := filepath.Join(strings.TrimSpace(string(output)), "bin", "node")
-			if _, err := discoverNodeContext(context.Background(), 24, node, ""); err == nil {
+			if _, err := discoverNodeContext(t.Context(), 24, node, ""); err == nil {
 				return node
 			}
 		}
@@ -6108,7 +7210,7 @@ func requireDocker(t *testing.T) string {
 	if err != nil {
 		livePrerequisiteUnavailable(t, "Docker unavailable: docker executable not found")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	dockerConfig := t.TempDir()
 	if err := os.Chmod(dockerConfig, 0o700); err != nil {

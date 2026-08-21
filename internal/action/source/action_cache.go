@@ -28,7 +28,7 @@ type materializedLease struct {
 	once    sync.Once
 }
 
-func (s *Store) materializedLease(lock *actionCacheLock, resolved Resolved, tree, actionPath, digest string) (Materialized, error) {
+func (s *Store) materializedLease(ctx context.Context, lock *actionCacheLock, resolved Resolved, tree, actionPath, digest string) (Materialized, error) {
 	m, err := materialized(tree, actionPath, digest)
 	if err != nil {
 		lock.unlock()
@@ -43,7 +43,7 @@ func (s *Store) materializedLease(lock *actionCacheLock, resolved Resolved, tree
 			}
 			total, _ := s.readCacheSize()
 			if s.pressure.Load() || total > s.cfg.cacheMaxBytes {
-				_ = s.maintain(context.Background())
+				_ = s.maintain(context.WithoutCancel(ctx))
 			}
 		})
 	}
@@ -59,7 +59,7 @@ func (s *Store) materializedLease(lock *actionCacheLock, resolved Resolved, tree
 			return s.Materialize(ctx, resolved)
 		}
 		s.touch(base)
-		return s.materializedLease(retained, resolved, tree, actionPath, cached.Digest)
+		return s.materializedLease(ctx, retained, resolved, tree, actionPath, cached.Digest)
 	}
 	m.lease = lease
 	return m, nil

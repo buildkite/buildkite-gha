@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -20,6 +21,7 @@ const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json
 
 const MaxNeedProducers = 1024
 const MaxNeedOutputs = 64
+const MaxCallGuards = 4
 const maxStepTargets = 256
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -154,10 +156,20 @@ func EventServerURL(provider string) string {
 }
 
 type Workflow struct {
-	Path         string `json:"path"`
-	Name         string `json:"name,omitempty"`
-	Digest       string `json:"digest"`
-	LogicalJobID string `json:"logical_job_id"`
+	Path         string                `json:"path"`
+	Name         string                `json:"name,omitempty"`
+	Digest       string                `json:"digest"`
+	LogicalJobID string                `json:"logical_job_id"`
+	Remote       *RemoteWorkflowSource `json:"remote,omitempty"`
+}
+
+// RemoteWorkflowSource binds a workflow file to one immutable public
+// repository tree. Workflow.Digest binds the selected file bytes.
+type RemoteWorkflowSource struct {
+	Repository   string `json:"repository"`
+	RequestedRef string `json:"requested_ref"`
+	Commit       string `json:"commit"`
+	SourceDigest string `json:"source_digest"`
 }
 
 type Target struct {
@@ -197,6 +209,18 @@ type NeedOutput struct {
 	Output  string `json:"output"`
 }
 
+// CallGuard is one immutable caller-scoped reusable-workflow condition. Needs
+// is hydrated only from its independently verified producer manifests.
+type CallGuard struct {
+	Condition           string                   `json:"condition"`
+	Inputs              map[string]any           `json:"inputs,omitempty"`
+	DeferredInputs      map[string]DeferredInput `json:"deferred_inputs,omitempty"`
+	DeferredInputValues map[string]any           `json:"-"`
+	NeedSources         map[string][]NeedSource  `json:"need_sources,omitempty"`
+	NeedOutputs         map[string][]NeedOutput  `json:"need_outputs,omitempty"`
+	Needs               map[string]Need          `json:"-"`
+}
+
 type Position struct {
 	Line   int `json:"line"`
 	Column int `json:"column"`
@@ -229,6 +253,17 @@ type Step struct {
 }
 
 type Container struct {
+	Image string            `json:"image"`
+	Env   map[string]string `json:"env,omitempty"`
+	Ports []string          `json:"ports,omitempty"`
+}
+
+type ContainerCredentials struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type ServiceContainer struct {
 	Image       string                `json:"image"`
 	Credentials *ContainerCredentials `json:"credentials,omitempty"`
 	Env         map[string]string     `json:"env,omitempty"`
@@ -239,12 +274,12 @@ type Container struct {
 	Entrypoint  string                `json:"entrypoint,omitempty"`
 }
 
-type ContainerCredentials struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+// DeferredInput binds one string workflow_call input to exact, verified
+// prerequisite outputs. The runtime resolves it before evaluating callee fields.
+type DeferredInput struct {
+	Sources []NeedSource `json:"sources"`
+	Outputs []NeedOutput `json:"outputs,omitempty"`
 }
-
-type ServiceContainer = Container
 
 // GitHubToken describes one synthetic secrets.GITHUB_TOKEN value. Workflow is
 // the top-level policy filename. Permissions are API-normalized and
@@ -264,23 +299,26 @@ type OIDCConfiguration struct {
 
 // Job is one immutable, compiler-selected workflow job instance.
 type Job struct {
-	Schema               string                  `json:"schema"`
-	Compiler             Compiler                `json:"compiler"`
-	Runtime              *Runtime                `json:"runtime,omitempty"`
-	Workflow             Workflow                `json:"workflow"`
-	Event                Event                   `json:"event"`
-	Target               Target                  `json:"target"`
-	RequiredCapabilities []string                `json:"required_capabilities"`
-	RequiredSecrets      []string                `json:"required_secrets,omitempty"`
-	GitHubToken          *GitHubToken            `json:"github_token,omitempty"`
-	IDTokenPermission    string                  `json:"id_token_permission,omitempty"`
-	OIDC                 *OIDCConfiguration      `json:"oidc,omitempty"`
-	Matrix               map[string]any          `json:"matrix,omitempty"`
-	Inputs               map[string]any          `json:"inputs,omitempty"`
-	Vars                 map[string]string       `json:"vars,omitempty"`
-	Dependencies         []string                `json:"dependencies,omitempty"`
-	NeedSources          map[string][]NeedSource `json:"need_sources,omitempty"`
-	NeedOutputs          map[string][]NeedOutput `json:"need_outputs,omitempty"`
+	Schema               string                   `json:"schema"`
+	Compiler             Compiler                 `json:"compiler"`
+	Runtime              *Runtime                 `json:"runtime,omitempty"`
+	Workflow             Workflow                 `json:"workflow"`
+	Event                Event                    `json:"event"`
+	Target               Target                   `json:"target"`
+	RequiredCapabilities []string                 `json:"required_capabilities"`
+	RequiredSecrets      []string                 `json:"required_secrets,omitempty"`
+	GitHubToken          *GitHubToken             `json:"github_token,omitempty"`
+	IDTokenPermission    string                   `json:"id_token_permission,omitempty"`
+	OIDC                 *OIDCConfiguration       `json:"oidc,omitempty"`
+	Matrix               map[string]any           `json:"matrix,omitempty"`
+	Inputs               map[string]any           `json:"inputs,omitempty"`
+	DeferredInputs       map[string]DeferredInput `json:"deferred_inputs,omitempty"`
+	DeferredInputValues  map[string]any           `json:"-"`
+	Vars                 map[string]string        `json:"vars,omitempty"`
+	Dependencies         []string                 `json:"dependencies,omitempty"`
+	NeedSources          map[string][]NeedSource  `json:"need_sources,omitempty"`
+	NeedOutputs          map[string][]NeedOutput  `json:"need_outputs,omitempty"`
+	CallGuards           []CallGuard              `json:"call_guards,omitempty"`
 	// Needs is populated only from verified producer-attributed manifests at
 	// runtime. It is never accepted from or encoded into an immutable plan.
 	Needs                   map[string]Need   `json:"-"`
@@ -294,11 +332,11 @@ type Job struct {
 	Steps                   []Step            `json:"steps"`
 	Actions                 []ActionLock      `json:"actions,omitempty"`
 	// RequiresMise is the compiler's explicit action-runtime decision.
-	RequiresMise       *bool                `json:"requires_mise,omitempty"`
-	Container          *Container           `json:"container,omitempty"`
-	Services           map[string]Container `json:"services,omitempty"`
-	ServiceOrder       []string             `json:"service_order,omitempty"`
-	ServicesExpression string               `json:"services_expression,omitempty"`
+	RequiresMise       *bool                       `json:"requires_mise,omitempty"`
+	Container          *Container                  `json:"container,omitempty"`
+	Services           map[string]ServiceContainer `json:"services,omitempty"`
+	ServiceOrder       []string                    `json:"service_order,omitempty"`
+	ServicesExpression string                      `json:"services_expression,omitempty"`
 }
 
 // NeedsMise reports whether a generated job needs the managed action runtime.
@@ -321,7 +359,7 @@ func (job Job) RuntimeDistributionDigest() string {
 	return ""
 }
 
-// Decode rejects unknown fields and trailing JSON so schema drift fails closed.
+// Decode rejects unknown fields and trailing JSON to stop on schema drift.
 func Decode(source []byte) (Job, error) {
 	if err := rejectDuplicateKeys(source); err != nil {
 		return Job{}, fmt.Errorf("decode job plan: %w", err)
@@ -476,8 +514,11 @@ func (job Job) Validate() error {
 	if len(job.Event.Repository) > 512 || len(job.Event.Ref) > 1024 || len(job.Event.HeadRef) > 1024 || len(job.Event.BaseRef) > 1024 || len(job.Event.SHA) > 128 || len(job.Event.Actor) > 256 {
 		return fmt.Errorf("job plan event identity exceeds its size limit")
 	}
-	if job.Workflow.Path == "" || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {
+	if job.Workflow.Path == "" || len(job.Workflow.Path) > 1024 || !utf8.ValidString(job.Workflow.Path) || hasControl(job.Workflow.Path) || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {
 		return fmt.Errorf("job plan requires a workflow path, sha256 digest, and logical job id")
+	}
+	if err := validateRemoteWorkflowSource(job.Workflow); err != nil {
+		return err
 	}
 	if len(job.Workflow.Name) > 1024 {
 		return fmt.Errorf("job plan workflow name exceeds its size limit")
@@ -494,22 +535,8 @@ func (job Job) Validate() error {
 	if len(job.Condition) > 65536 || len(job.RequiredSecrets) > 128 {
 		return fmt.Errorf("job plan condition or required secrets exceed their size limit")
 	}
-	if len(job.Inputs) > 25 {
-		return fmt.Errorf("job plan inputs exceed their size limit")
-	}
-	for name, value := range job.Inputs {
-		if name == "" || len(name) > 255 {
-			return fmt.Errorf("job plan has invalid input name")
-		}
-		switch value := value.(type) {
-		case string:
-			if len(value) > 65536 {
-				return fmt.Errorf("job plan input %q exceeds its size limit", name)
-			}
-		case bool, json.Number, int, int64, uint64, float64:
-		default:
-			return fmt.Errorf("job plan input %q has unsupported type %T", name, value)
-		}
+	if err := validateInputs(job.Inputs); err != nil {
+		return err
 	}
 	capabilities := make(map[string]struct{}, len(job.RequiredCapabilities))
 	if !sort.StringsAreSorted(job.RequiredCapabilities) {
@@ -537,9 +564,6 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job containers and services require network capability")
 		}
 		if job.Container != nil {
-			if job.Container.Credentials != nil || len(job.Container.Volumes) != 0 || job.Container.Options != "" || job.Container.Command != "" || job.Container.Entrypoint != "" {
-				return fmt.Errorf("job container contains service-only fields")
-			}
 			if err := validateContainer(job.Container.Image, job.Container.Env, job.Container.Ports); err != nil {
 				return fmt.Errorf("job container: %w", err)
 			}
@@ -665,9 +689,6 @@ func (job Job) Validate() error {
 			sourcedDependencies[key] = struct{}{}
 		}
 	}
-	if len(sourcedDependencies) != len(dependencies) {
-		return fmt.Errorf("job plan dependencies and prerequisite producers differ")
-	}
 	needSourcesByName := make(map[string]map[string]struct{}, len(job.NeedSources))
 	for name, sources := range job.NeedSources {
 		steps := make(map[string]struct{}, len(sources))
@@ -707,6 +728,44 @@ func (job Job) Validate() error {
 			}
 			seen[key] = struct{}{}
 		}
+	}
+	deferredDependencies, err := validateDeferredInputs(job.Inputs, job.DeferredInputs, dependencies)
+	if err != nil {
+		return fmt.Errorf("job plan deferred inputs: %w", err)
+	}
+	for dependency := range deferredDependencies {
+		sourcedDependencies[dependency] = struct{}{}
+	}
+	if len(job.CallGuards) > MaxCallGuards {
+		return fmt.Errorf("job plan has more than %d reusable-workflow call guards", MaxCallGuards)
+	}
+	for i, guard := range job.CallGuards {
+		if strings.TrimSpace(guard.Condition) == "" || len(guard.Condition) > 65536 {
+			return fmt.Errorf("job plan call guard %d has an invalid condition", i+1)
+		}
+		if err := expression.ValidateCallCondition(guard.Condition); err != nil {
+			return fmt.Errorf("job plan call guard %d condition: %w", i+1, err)
+		}
+		if err := validateInputs(guard.Inputs); err != nil {
+			return fmt.Errorf("job plan call guard %d: %w", i+1, err)
+		}
+		guardDependencies, err := validateCallGuardNeeds(guard, dependencies)
+		if err != nil {
+			return fmt.Errorf("job plan call guard %d: %w", i+1, err)
+		}
+		for dependency := range guardDependencies {
+			sourcedDependencies[dependency] = struct{}{}
+		}
+		guardInputDependencies, err := validateDeferredInputs(guard.Inputs, guard.DeferredInputs, dependencies)
+		if err != nil {
+			return fmt.Errorf("job plan call guard %d deferred inputs: %w", i+1, err)
+		}
+		for dependency := range guardInputDependencies {
+			sourcedDependencies[dependency] = struct{}{}
+		}
+	}
+	if len(sourcedDependencies) != len(dependencies) {
+		return fmt.Errorf("job plan dependencies and prerequisite producers differ")
 	}
 	if len(job.Steps) == 0 {
 		return fmt.Errorf("job plan contains no steps")
@@ -787,6 +846,151 @@ func (job Job) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validateRemoteWorkflowSource(workflow Workflow) error {
+	if workflow.Remote == nil {
+		return nil
+	}
+	remote := workflow.Remote
+	if remote.Repository == "" || remote.Repository != strings.ToLower(remote.Repository) || len(remote.Repository) > 140 || remote.RequestedRef == "" || len(remote.RequestedRef) > 1024 || !utf8.ValidString(remote.RequestedRef) || hasControl(remote.RequestedRef) || !commitPattern.MatchString(remote.Commit) || !digestPattern.MatchString(remote.SourceDigest) {
+		return fmt.Errorf("job plan remote workflow has invalid immutable source provenance")
+	}
+	ref, err := source.Parse(workflow.Path)
+	if err != nil || ref.Owner+"/"+ref.Repository != remote.Repository || ref.Ref != remote.RequestedRef || path.Dir(ref.Path) != ".github/workflows" || path.Ext(ref.Path) != ".yml" && path.Ext(ref.Path) != ".yaml" {
+		return fmt.Errorf("job plan remote workflow path does not match source provenance")
+	}
+	repositoryRef, err := source.Parse(remote.Repository + "@x")
+	if err != nil || strings.ToLower(repositoryRef.Owner+"/"+repositoryRef.Repository) != remote.Repository {
+		return fmt.Errorf("job plan remote workflow has invalid canonical repository")
+	}
+	return nil
+}
+
+func validateInputs(inputs map[string]any) error {
+	if len(inputs) > 25 {
+		return fmt.Errorf("job plan inputs exceed their size limit")
+	}
+	for name, value := range inputs {
+		if name == "" || len(name) > 255 {
+			return fmt.Errorf("job plan has invalid input name")
+		}
+		switch value := value.(type) {
+		case string:
+			if len(value) > 65536 {
+				return fmt.Errorf("job plan input %q exceeds its size limit", name)
+			}
+		case bool, json.Number, int, int64, uint64, float64:
+		default:
+			return fmt.Errorf("job plan input %q has unsupported type %T", name, value)
+		}
+	}
+	return nil
+}
+
+func validateDeferredInputs(inputs map[string]any, deferred map[string]DeferredInput, dependencies map[string]struct{}) (map[string]struct{}, error) {
+	if len(inputs)+len(deferred) > 25 {
+		return nil, fmt.Errorf("inputs exceed their size limit")
+	}
+	names := make(map[string]struct{}, len(inputs)+len(deferred))
+	for name := range inputs {
+		names[strings.ToLower(name)] = struct{}{}
+	}
+	sourced := make(map[string]struct{})
+	for name, input := range deferred {
+		lowerName := strings.ToLower(name)
+		if name == "" || len(name) > 255 {
+			return nil, fmt.Errorf("has invalid input name")
+		}
+		if _, exists := names[lowerName]; exists {
+			return nil, fmt.Errorf("repeats input %q", name)
+		}
+		names[lowerName] = struct{}{}
+		if len(input.Sources) == 0 || len(input.Sources) > MaxNeedProducers {
+			return nil, fmt.Errorf("input %q has no valid producers", name)
+		}
+		producers := make(map[string]struct{}, len(input.Sources))
+		for i, source := range input.Sources {
+			if !targetPattern.MatchString(source.StepKey) || !digestPattern.MatchString(source.PlanDigest) || i > 0 && input.Sources[i-1].StepKey >= source.StepKey {
+				return nil, fmt.Errorf("input %q has invalid, repeated, or unsorted producer identity", name)
+			}
+			key := strings.ToLower(source.StepKey)
+			if _, exists := dependencies[key]; !exists {
+				return nil, fmt.Errorf("input %q producer %q is not a dependency", name, source.StepKey)
+			}
+			producers[key] = struct{}{}
+			sourced[key] = struct{}{}
+		}
+		if len(input.Outputs) > MaxNeedOutputs {
+			return nil, fmt.Errorf("input %q has too many output projections", name)
+		}
+		for i, output := range input.Outputs {
+			if output.Name != "value" || !targetPattern.MatchString(output.StepKey) || !targetPattern.MatchString(output.Output) {
+				return nil, fmt.Errorf("input %q has invalid output projection", name)
+			}
+			if _, exists := producers[strings.ToLower(output.StepKey)]; !exists {
+				return nil, fmt.Errorf("input %q output selects unknown producer %q", name, output.StepKey)
+			}
+			if i > 0 && compareNeedOutput(input.Outputs[i-1], output) >= 0 {
+				return nil, fmt.Errorf("input %q output projections must be unique and sorted", name)
+			}
+		}
+	}
+	return sourced, nil
+}
+
+func validateCallGuardNeeds(guard CallGuard, dependencies map[string]struct{}) (map[string]struct{}, error) {
+	sourced := make(map[string]struct{})
+	names := make(map[string]map[string]struct{}, len(guard.NeedSources))
+	for name, sources := range guard.NeedSources {
+		if len(name) > 255 || !logicalJobIDPattern.MatchString(name) || len(sources) == 0 || len(sources) > MaxNeedProducers {
+			return nil, fmt.Errorf("contains invalid prerequisite %q", name)
+		}
+		lowerName := strings.ToLower(name)
+		if _, exists := names[lowerName]; exists {
+			return nil, fmt.Errorf("contains duplicate prerequisite %q", name)
+		}
+		steps := make(map[string]struct{}, len(sources))
+		for i, source := range sources {
+			if !targetPattern.MatchString(source.StepKey) || !digestPattern.MatchString(source.PlanDigest) || i > 0 && sources[i-1].StepKey >= source.StepKey {
+				return nil, fmt.Errorf("prerequisite %q has invalid, repeated, or unsorted producer identity", name)
+			}
+			key := strings.ToLower(source.StepKey)
+			if _, exists := dependencies[key]; !exists {
+				return nil, fmt.Errorf("prerequisite %q producer %q is not a dependency", name, source.StepKey)
+			}
+			if _, exists := sourced[key]; exists {
+				return nil, fmt.Errorf("dependency %q has multiple logical owners", source.StepKey)
+			}
+			steps[key] = struct{}{}
+			sourced[key] = struct{}{}
+		}
+		names[lowerName] = steps
+	}
+	seenOutputNeeds := make(map[string]struct{}, len(guard.NeedOutputs))
+	for name, outputs := range guard.NeedOutputs {
+		lowerName := strings.ToLower(name)
+		producers, exists := names[lowerName]
+		if !exists {
+			return nil, fmt.Errorf("prerequisite output projection %q has no matching prerequisite", name)
+		}
+		if _, exists := seenOutputNeeds[lowerName]; exists || len(outputs) > MaxNeedOutputs {
+			return nil, fmt.Errorf("prerequisite %q has duplicate or excessive output projections", name)
+		}
+		seenOutputNeeds[lowerName] = struct{}{}
+		for i, output := range outputs {
+			if !targetPattern.MatchString(output.Name) || !targetPattern.MatchString(output.StepKey) || !targetPattern.MatchString(output.Output) {
+				return nil, fmt.Errorf("prerequisite %q has invalid output projection", name)
+			}
+			if _, exists := producers[strings.ToLower(output.StepKey)]; !exists {
+				return nil, fmt.Errorf("prerequisite %q output %q selects unknown producer %q", name, output.Name, output.StepKey)
+			}
+			if i > 0 && compareNeedOutput(outputs[i-1], output) >= 0 {
+				return nil, fmt.Errorf("prerequisite %q output projections must be unique and sorted", name)
+			}
+		}
+	}
+	return sourced, nil
 }
 
 func validateServiceContainer(service ServiceContainer, templates bool) error {

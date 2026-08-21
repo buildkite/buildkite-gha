@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/rhysd/actionlint"
@@ -62,7 +64,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, err
 	}
 	parsed, errs := actionlint.Parse(source)
-	expectedDiagnostics := append(concurrency.Diagnostics, containerDiagnostics...)
+	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics)
 	if err := filterActionlintDiagnostics(path, errs, expectedDiagnostics); err != nil {
 		return nil, err
 	}
@@ -91,7 +93,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		owned.Concurrency.CancelInProgress = true
 		owned.Concurrency.CancelInProgressPosition = *workflowCancellation
 	}
-	owned.Permissions, err = adaptPermissions(path, parsed.Permissions)
+	owned.Permissions, err = adaptPermissions(path, parsed.Permissions, true)
 	if err != nil {
 		return nil, err
 	}
@@ -218,6 +220,24 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	return owned, nil
 }
 
+func triggerPosition(event actionlint.Event) Position {
+	switch e := event.(type) {
+	case *actionlint.WebhookEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.ScheduledEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.WorkflowDispatchEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.RepositoryDispatchEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.WorkflowCallEvent:
+		return pointSpan(e.Pos).Start
+	case *actionlint.ImageVersionEvent:
+		return pointSpan(e.Pos).Start
+	}
+	return Position{}
+}
+
 func adaptTriggers(events []actionlint.Event) []Trigger {
 	out := make([]Trigger, 0, len(events))
 	values := func(f *actionlint.WebhookEventFilter) []string {
@@ -241,7 +261,7 @@ func adaptTriggers(events []actionlint.Event) []Trigger {
 		return out
 	}
 	for _, event := range events {
-		t := Trigger{Event: event.EventName()}
+		t := Trigger{Event: event.EventName(), Position: triggerPosition(event)}
 		switch e := event.(type) {
 		case *actionlint.WebhookEvent:
 			t.Types, t.Branches, t.BranchesIgnore = stringsOf(e.Types), values(e.Branches), values(e.BranchesIgnore)
@@ -524,7 +544,7 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		return Job{}, err
 	}
 	out.Concurrency = ownedConcurrency
-	permissions, err := adaptPermissions(path, in.Permissions)
+	permissions, err := adaptPermissions(path, in.Permissions, false)
 	if err != nil {
 		return Job{}, err
 	}
@@ -738,7 +758,11 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 			owned.Span = spanFrom(step.Pos, exec.Run.Value)
 		case *actionlint.ExecAction:
 			if exec.Entrypoint != nil || exec.Args != nil {
-				return Job{}, locatedError(path, step.Pos, in.ID.Value, "action entrypoint and args overrides are unsupported in the supported runtime subset")
+				reason := "action entrypoint and args overrides are unsupported in the supported runtime subset"
+				if strings.HasPrefix(strings.ToLower(exec.Uses.Value), "docker://") {
+					reason = actionsource.UnsupportedContainerActionReason
+				}
+				return Job{}, locatedError(path, step.Pos, in.ID.Value, reason)
 			}
 			owned.Kind = "uses"
 			owned.Uses = exec.Uses.Value
@@ -804,11 +828,19 @@ func adaptConcurrency(path, jobID string, in *actionlint.Concurrency) (*Concurre
 	}, nil
 }
 
-func adaptPermissions(path string, in *actionlint.Permissions) (*Permissions, error) {
+func adaptPermissions(path string, in *actionlint.Permissions, allowAll bool) (*Permissions, error) {
 	if in == nil {
 		return nil, nil
 	}
 	if in.All != nil {
+		if allowAll && (in.All.Value == "read-all" || in.All.Value == "write-all") {
+			access := strings.TrimSuffix(in.All.Value, "-all")
+			scopes := make(map[string]string, len(topLevelAllPermissionNames))
+			for _, name := range topLevelAllPermissionNames {
+				scopes[name] = access
+			}
+			return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
+		}
 		return nil, locatedError(path, in.All.Pos, "permissions", "permission aliases are unsupported; declare each required permission explicitly")
 	}
 	scopes := make(map[string]string, len(in.Scopes))
@@ -834,6 +866,11 @@ func adaptPermissions(path string, in *actionlint.Permissions) (*Permissions, er
 		}
 	}
 	return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
+}
+
+var topLevelAllPermissionNames = []string{
+	"actions", "artifact-metadata", "attestations", "checks", "contents", "deployments", "discussions",
+	"issues", "packages", "pages", "pull-requests", "security-events", "statuses",
 }
 
 func supportedGitHubTokenPermission(name string) bool {
@@ -1325,7 +1362,7 @@ func parseParallelStep(path string, node *yaml.Node) (Step, error) {
 	_, hasEntrypoint := step.With["entrypoint"]
 	_, hasArgs := step.With["args"]
 	if strings.HasPrefix(strings.ToLower(step.Uses), "docker://") && (hasEntrypoint || hasArgs) {
-		return Step{}, yamlNodeError(path, entries["with"], "parallel docker action member uses unsupported entrypoint or args overrides")
+		return Step{}, yamlNodeError(path, entries["with"], actionsource.UnsupportedContainerActionReason)
 	}
 	return step, nil
 }

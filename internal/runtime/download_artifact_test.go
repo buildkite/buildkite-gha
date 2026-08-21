@@ -80,6 +80,7 @@ func (s *downloadStore) DownloadArtifact(ctx context.Context, path, destination,
 }
 
 func testDownloadZIP(t *testing.T, names ...string) (string, int64, string) {
+	t.Helper()
 	return testDownloadZIPPayload(t, "payload", names...)
 }
 
@@ -143,7 +144,7 @@ func TestDownloadArtifactExactNeedAndDirectExtraction(t *testing.T) {
 	workspace := t.TempDir()
 	processor := newCommandProcessor(io.Discard, io.Discard)
 	need := plan.NeedArtifact{Name: "payload", ID: "42", Path: "buildkite-gha/v1/artifacts/" + strings.Repeat("a", 64) + ".zip", Digest: digest, Size: size, FileCount: 1, Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"}}
-	result, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), processor, workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{need}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload", "path": "out"})
+	result, err := (Runner{Artifacts: store}).runDownloadArtifact(t.Context(), processor, workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{need}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload", "path": "out"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,16 +158,16 @@ func TestDownloadArtifactExactNeedAndDirectExtraction(t *testing.T) {
 	if result.Outputs["download-path"] != want {
 		t.Fatalf("download-path = %q", result.Outputs["download-path"])
 	}
-	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), processor, workspace, map[string]plan.Need{}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload"}); err == nil || strings.Contains(err.Error(), "payload") {
+	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(t.Context(), processor, workspace, map[string]plan.Need{}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload"}); err == nil || strings.Contains(err.Error(), "payload") {
 		t.Fatal("missing artifact accepted")
 	}
-	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), processor, workspace, map[string]plan.Need{"a": {Artifacts: []plan.NeedArtifact{need}}, "b": {Artifacts: []plan.NeedArtifact{need}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload"}); err == nil || strings.Contains(err.Error(), "payload") {
+	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(t.Context(), processor, workspace, map[string]plan.Need{"a": {Artifacts: []plan.NeedArtifact{need}}, "b": {Artifacts: []plan.NeedArtifact{need}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload"}); err == nil || strings.Contains(err.Error(), "payload") {
 		t.Fatal("ambiguous artifact accepted")
 	}
-	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), processor, workspace, map[string]plan.Need{"matrix": {Artifacts: []plan.NeedArtifact{need, need}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload"}); err == nil {
+	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(t.Context(), processor, workspace, map[string]plan.Need{"matrix": {Artifacts: []plan.NeedArtifact{need, need}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload"}); err == nil {
 		t.Fatal("duplicate matrix artifact name accepted")
 	}
-	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), processor, workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{need}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "Payload"}); err == nil || strings.Contains(err.Error(), "Payload") {
+	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(t.Context(), processor, workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{need}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "Payload"}); err == nil || strings.Contains(err.Error(), "Payload") {
 		t.Fatal("non-exact artifact name accepted")
 	}
 }
@@ -186,7 +187,7 @@ func TestDownloadArtifactSupportsAuditedCommitsAndNonASCIIExactName(t *testing.T
 				inputs["skip-decompress"] = "False"
 				inputs["digest-mismatch"] = "error"
 			}
-			result, err := (Runner{Artifacts: &downloadStore{archive: archive}}).runDownloadArtifact(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, commit, inputs)
+			result, err := (Runner{Artifacts: &downloadStore{archive: archive}}).runDownloadArtifact(t.Context(), newCommandProcessor(io.Discard, io.Discard), workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, commit, inputs)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -208,8 +209,8 @@ func TestNativeArtifactRoundTripTrimsNameAndAcceptsHighCompression(t *testing.T)
 		t.Fatal(err)
 	}
 	uploader := &captureArtifactUploader{}
-	uploadRunner := Runner{Artifacts: uploader, artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
-	upload, err := uploadRunner.runUploadArtifact(context.Background(), newCommandProcessor(io.Discard, io.Discard), uploadWorkspace, map[string]string{"name": " payload ", "path": "zeros.bin"})
+	uploadRunner := newJobRun(Runner{Artifacts: uploader})
+	upload, err := uploadRunner.runUploadArtifact(t.Context(), newCommandProcessor(io.Discard, io.Discard), uploadWorkspace, map[string]string{"name": " payload ", "path": "zeros.bin"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +228,7 @@ func TestNativeArtifactRoundTripTrimsNameAndAcceptsHighCompression(t *testing.T)
 		Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"},
 	}
 	downloadWorkspace := t.TempDir()
-	_, err = (Runner{Artifacts: &downloadStore{archive: archive}}).runDownloadArtifact(context.Background(), newCommandProcessor(io.Discard, io.Discard), downloadWorkspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, actionintegration.DownloadArtifactV801Commit, map[string]string{"name": " payload "})
+	_, err = (Runner{Artifacts: &downloadStore{archive: archive}}).runDownloadArtifact(t.Context(), newCommandProcessor(io.Discard, io.Discard), downloadWorkspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, actionintegration.DownloadArtifactV801Commit, map[string]string{"name": " payload "})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +251,7 @@ func TestDownloadArtifactPatternMergesVerifiedDirectNeeds(t *testing.T) {
 	store := &downloadStore{archives: map[string]string{firstPath: firstArchive, secondPath: secondArchive}}
 	workspace := t.TempDir()
 	result, err := (Runner{Artifacts: store}).runDownloadArtifact(
-		context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace,
+		t.Context(), newCommandProcessor(io.Discard, io.Discard), workspace,
 		map[string]plan.Need{"test": {Artifacts: []plan.NeedArtifact{second, ignored, first}}},
 		actionintegration.DownloadArtifactV5Commit,
 		map[string]string{"pattern": "junit-xml-25-*", "path": "junit-xml", "merge-multiple": "true"},
@@ -283,7 +284,7 @@ func TestDownloadArtifactMultiPrefixDeduplicatesAndOrdersVerifiedProducers(t *te
 	workspace := t.TempDir()
 
 	_, err := (Runner{Artifacts: store}).runDownloadArtifact(
-		context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace,
+		t.Context(), newCommandProcessor(io.Discard, io.Discard), workspace,
 		map[string]plan.Need{"backend": {Artifacts: []plan.NeedArtifact{product}}, "products": {Artifacts: []plan.NeedArtifact{backend}}},
 		actionintegration.DownloadArtifactV5Commit,
 		map[string]string{"pattern": "{junit-results,junit-results-backend,product-junit-results}-*", "path": "junit", "merge-multiple": "true"},
@@ -308,7 +309,7 @@ func TestDownloadArtifactPatternRejectsTooManyMatchesBeforeDownload(t *testing.T
 	}
 	store := &downloadStore{}
 	_, err := (Runner{Artifacts: store}).runDownloadArtifact(
-		context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(),
+		t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(),
 		map[string]plan.Need{"producer": {Artifacts: artifacts}}, actionintegration.DownloadArtifactV5Commit,
 		map[string]string{"pattern": "{backend,product}-*", "merge-multiple": "true"},
 	)
@@ -333,7 +334,7 @@ func TestDownloadArtifactPatternStagesCompleteMergeBeforeDestinationMutation(t *
 	t.Run("later artifact name wins overlapping member", func(t *testing.T) {
 		workspace := t.TempDir()
 		store := &downloadStore{archives: map[string]string{firstPath: firstArchive, secondPath: secondArchive}}
-		if _, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, needs, actionintegration.DownloadArtifactV5Commit, inputs); err != nil {
+		if _, err := (Runner{Artifacts: store}).runDownloadArtifact(t.Context(), newCommandProcessor(io.Discard, io.Discard), workspace, needs, actionintegration.DownloadArtifactV5Commit, inputs); err != nil {
 			t.Fatal(err)
 		}
 		if got, err := os.ReadFile(filepath.Join(workspace, "merged", "result.xml")); err != nil || string(got) != "second" {
@@ -347,7 +348,7 @@ func TestDownloadArtifactPatternStagesCompleteMergeBeforeDestinationMutation(t *
 		invalid.Digest = "sha256:" + strings.Repeat("0", 64)
 		store := &downloadStore{archives: map[string]string{firstPath: firstArchive, secondPath: secondArchive}}
 		_, err := (Runner{Artifacts: store}).runDownloadArtifact(
-			context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace,
+			t.Context(), newCommandProcessor(io.Discard, io.Discard), workspace,
 			map[string]plan.Need{"test": {Artifacts: []plan.NeedArtifact{invalid, first}}},
 			actionintegration.DownloadArtifactV5Commit, inputs,
 		)
@@ -372,7 +373,7 @@ func TestDownloadArtifactPatternRejectsDuplicateNamesAcrossNeeds(t *testing.T) {
 	store := &downloadStore{archives: map[string]string{firstPath: archive, secondPath: archive}}
 
 	_, err := (Runner{Artifacts: store}).runDownloadArtifact(
-		context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(),
+		t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(),
 		map[string]plan.Need{"first": {Artifacts: []plan.NeedArtifact{first}}, "second": {Artifacts: []plan.NeedArtifact{second}}},
 		actionintegration.DownloadArtifactV5Commit,
 		map[string]string{"pattern": "*", "merge-multiple": "true"},
@@ -389,7 +390,7 @@ func TestDownloadArtifactRejectsMaskedNameWithoutDisclosure(t *testing.T) {
 	const maskedName = "runtime-secret-artifact"
 	processor := newCommandProcessor(io.Discard, io.Discard)
 	processor.addMask(maskedName)
-	_, err := (Runner{}).runDownloadArtifact(context.Background(), processor, t.TempDir(), nil, actionintegration.DownloadArtifactCommit, map[string]string{"name": maskedName})
+	_, err := (Runner{}).runDownloadArtifact(t.Context(), processor, t.TempDir(), nil, actionintegration.DownloadArtifactCommit, map[string]string{"name": maskedName})
 	if err == nil || strings.Contains(err.Error(), maskedName) || !strings.Contains(err.Error(), "registered mask") {
 		t.Fatalf("masked artifact lookup error = %v", err)
 	}
@@ -409,7 +410,7 @@ func TestDownloadArtifactScrubsMaskedMemberFromDestinationErrors(t *testing.T) {
 		Digest: digest, Size: size, FileCount: 1,
 		Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"},
 	}
-	_, err := (Runner{Artifacts: &downloadStore{archive: archive}}).runDownloadArtifact(context.Background(), processor, workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload"})
+	_, err := (Runner{Artifacts: &downloadStore{archive: archive}}).runDownloadArtifact(t.Context(), processor, workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload"})
 	if err == nil || strings.Contains(err.Error(), maskedMember) || !strings.Contains(err.Error(), "***") {
 		t.Fatalf("masked destination error = %v", err)
 	}
@@ -429,7 +430,7 @@ func TestDownloadArtifactScrubsQuotedMaskedDestinationFromErrors(t *testing.T) {
 		Digest: digest, Size: size, FileCount: 1,
 		Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"},
 	}
-	_, err := (Runner{Artifacts: &downloadStore{archive: archive}}).runDownloadArtifact(context.Background(), processor, workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload", "path": maskedDestination})
+	_, err := (Runner{Artifacts: &downloadStore{archive: archive}}).runDownloadArtifact(t.Context(), processor, workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload", "path": maskedDestination})
 	if err == nil || strings.Contains(err.Error(), maskedDestination) || strings.Contains(err.Error(), `runtime\"secret`) || !strings.Contains(err.Error(), "***") {
 		t.Fatalf("quoted masked destination error = %v", err)
 	}
@@ -439,20 +440,20 @@ func TestDownloadArtifactRejectsUnsafeZIPAndDigest(t *testing.T) {
 	for _, name := range []string{"../escape", "/absolute", "dir/../escape", "a\\b", "C:/drive", `\\server\share`} {
 		t.Run(name, func(t *testing.T) {
 			archive, _, _ := testDownloadZIP(t, name)
-			if err := extractDownloadZIP(context.Background(), archive, t.TempDir(), ".", 1); err == nil {
+			if err := extractDownloadZIP(t.Context(), archive, t.TempDir(), ".", 1); err == nil {
 				t.Fatal("unsafe member accepted")
 			}
 		})
 	}
 	archive, _, _ := testDownloadZIP(t, "A.txt", "a.txt")
-	if err := extractDownloadZIP(context.Background(), archive, t.TempDir(), ".", 2); err == nil || !strings.Contains(err.Error(), "duplicate") {
+	if err := extractDownloadZIP(t.Context(), archive, t.TempDir(), ".", 2); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("case-folding collision error = %v", err)
 	}
 	archive, size, _ := testDownloadZIP(t, "ok")
-	if err := verifyDownloadDigest(context.Background(), archive, "sha256:"+strings.Repeat("0", 64), size); err == nil {
+	if err := verifyDownloadDigest(t.Context(), archive, "sha256:"+strings.Repeat("0", 64), size); err == nil {
 		t.Fatal("bad digest accepted")
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if err := verifyDownloadDigest(ctx, archive, "", size); err == nil {
 		t.Fatal("cancellation ignored")
@@ -470,6 +471,7 @@ func TestDownloadArtifactRejectsRawCorruptAndDuplicateArchivesWithoutDestination
 		fileCount int
 	}{
 		{name: "raw", archive: func(t *testing.T) string {
+			t.Helper()
 			name := filepath.Join(t.TempDir(), "raw")
 			if err := os.WriteFile(name, []byte("not a ZIP"), 0o644); err != nil {
 				t.Fatal(err)
@@ -477,22 +479,27 @@ func TestDownloadArtifactRejectsRawCorruptAndDuplicateArchivesWithoutDestination
 			return name
 		}, fileCount: 1},
 		{name: "duplicate", archive: func(t *testing.T) string {
+			t.Helper()
 			name, _, _ := testDownloadZIP(t, "same", "same")
 			return name
 		}, fileCount: 2},
 		{name: "file before child", archive: func(t *testing.T) string {
+			t.Helper()
 			name, _, _ := testDownloadZIP(t, "same", "same/child")
 			return name
 		}, fileCount: 2},
 		{name: "child before file", archive: func(t *testing.T) string {
+			t.Helper()
 			name, _, _ := testDownloadZIP(t, "same/child", "same")
 			return name
 		}, fileCount: 2},
 		{name: "lexically separated file and child", archive: func(t *testing.T) string {
+			t.Helper()
 			name, _, _ := testDownloadZIP(t, "same", "same.", "same/child")
 			return name
 		}, fileCount: 3},
 		{name: "corrupt member", archive: func(t *testing.T) string {
+			t.Helper()
 			name, _, _ := testDownloadZIP(t, "first", "second")
 			zr, err := zip.OpenReader(name)
 			if err != nil {
@@ -521,7 +528,7 @@ func TestDownloadArtifactRejectsRawCorruptAndDuplicateArchivesWithoutDestination
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			destination := filepath.Join(workspace, strings.ReplaceAll(test.name, " ", "-"))
-			if err := extractDownloadZIP(context.Background(), test.archive(t), workspace, filepath.Base(destination), test.fileCount); err == nil {
+			if err := extractDownloadZIP(t.Context(), test.archive(t), workspace, filepath.Base(destination), test.fileCount); err == nil {
 				t.Fatal("unsafe archive accepted")
 			}
 			if _, err := os.Lstat(destination); !os.IsNotExist(err) {
@@ -951,7 +958,7 @@ func TestDownloadArtifactExtractionUsesVerifiedArchiveDescriptor(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	if err := verifyDownloadDigestFile(context.Background(), f, digest, size); err != nil {
+	if err := verifyDownloadDigestFile(t.Context(), f, digest, size); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(name, name+".verified"); err != nil {
@@ -965,7 +972,7 @@ func TestDownloadArtifactExtractionUsesVerifiedArchiveDescriptor(t *testing.T) {
 		t.Fatalf("descriptor-pinned expanded size = %d, %v", expanded, err)
 	}
 	workspace := t.TempDir()
-	if err := extractDownloadZIPFile(context.Background(), f, size, workspace, ".", 1); err != nil {
+	if err := extractDownloadZIPFile(t.Context(), f, size, workspace, ".", 1); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(filepath.Join(workspace, "result.txt")); err != nil || string(got) != "payload" {
@@ -1028,7 +1035,7 @@ func TestDownloadArtifactInstallUsesPinnedDestinationDescriptor(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(staging, "result.txt"), []byte("poison!"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := installDownloadMembersAt(context.Background(), stagingRoot, destinationRoot, []downloadMember{{info: stagedInfo, name: "result.txt", staged: "result.txt", size: 7}}); err != nil {
+	if err := installDownloadMembersAt(t.Context(), stagingRoot, destinationRoot, []downloadMember{{info: stagedInfo, name: "result.txt", staged: "result.txt", size: 7}}); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(filepath.Join(moved, "result.txt")); err != nil || string(got) != "payload" {
@@ -1064,7 +1071,7 @@ func TestDownloadArtifactInstallRejectsFIFOStagingReplacementWithoutBlocking(t *
 	defer func() { _ = destinationRoot.Close() }()
 	done := make(chan error, 1)
 	go func() {
-		done <- installDownloadMembersAt(context.Background(), stagingRoot, destinationRoot, []downloadMember{{name: "payload", staged: "payload", size: 7}})
+		done <- installDownloadMembersAt(t.Context(), stagingRoot, destinationRoot, []downloadMember{{name: "payload", staged: "payload", size: 7}})
 	}()
 	select {
 	case err := <-done:
@@ -1102,7 +1109,7 @@ func TestDownloadArtifactCancellationCleansPartialAgentDownload(t *testing.T) {
 		Digest: digest, Size: size, FileCount: 1,
 		Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"},
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	store := &downloadStore{archive: archive, download: func(ctx context.Context, destination string) error {
 		if err := os.WriteFile(filepath.Join(destination, "partial"), []byte("partial"), 0o644); err != nil {
 			return err
@@ -1134,7 +1141,7 @@ func TestDownloadArtifactRejectsManifestAndDownloadMismatch(t *testing.T) {
 			artifact := base
 			store := &downloadStore{archive: archive}
 			test.alter(&artifact, store)
-			_, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload"})
+			_, err := (Runner{Artifacts: store}).runDownloadArtifact(t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, actionintegration.DownloadArtifactCommit, map[string]string{"name": "payload"})
 			if err == nil {
 				t.Fatal("mismatched download accepted")
 			}
@@ -1152,7 +1159,7 @@ func TestDownloadArtifactDestinationCollisions(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(regular, "nested", "result.txt"), []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractDownloadZIP(context.Background(), archive, workspace, "regular", 1); err != nil {
+	if err := extractDownloadZIP(t.Context(), archive, workspace, "regular", 1); err != nil {
 		t.Fatalf("replace regular file: %v", err)
 	}
 	if got, err := os.ReadFile(filepath.Join(regular, "nested", "result.txt")); err != nil || string(got) != "payload" {
@@ -1177,7 +1184,7 @@ func TestDownloadArtifactDestinationCollisions(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
-			if err := extractDownloadZIP(context.Background(), archive, workspace, test.name, 1); err == nil {
+			if err := extractDownloadZIP(t.Context(), archive, workspace, test.name, 1); err == nil {
 				t.Fatal("non-regular destination accepted")
 			}
 		})
@@ -1190,7 +1197,7 @@ func TestDownloadArtifactRejectsDestinationSymlinkEscape(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(workspace, "linked")); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractDownloadZIP(context.Background(), archive, workspace, "linked/out", 1); err == nil {
+	if err := extractDownloadZIP(t.Context(), archive, workspace, "linked/out", 1); err == nil {
 		t.Fatal("symlinked destination accepted")
 	}
 	if _, err := os.Stat(filepath.Join(outside, "out", "result.txt")); !os.IsNotExist(err) {
@@ -1225,7 +1232,7 @@ func TestDownloadArtifactRejectsUnsupportedMemberAndExpandedSize(t *testing.T) {
 			if err := errors.Join(zw.Close(), out.Close()); err != nil {
 				t.Fatal(err)
 			}
-			if err := extractDownloadZIP(context.Background(), filename, t.TempDir(), ".", 1); err == nil {
+			if err := extractDownloadZIP(t.Context(), filename, t.TempDir(), ".", 1); err == nil {
 				t.Fatal("unsupported ZIP member accepted")
 			}
 		})
@@ -1267,7 +1274,7 @@ func TestDownloadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) 
 	job.Needs = map[string]plan.Need{"producer": {Result: "success", Artifacts: []plan.NeedArtifact{artifact}}}
 	store := &downloadStore{archive: archive}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: sourceDigest}}
-	result, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Outputs["download_path"] != filepath.Join(workspace, "downloaded") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1279,7 +1286,7 @@ func TestDownloadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) 
 	}
 
 	job.Actions[0].Commit = strings.Repeat("b", 40)
-	if _, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), actionintegration.DownloadArtifactCommit) {
+	if _, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), actionintegration.DownloadArtifactCommit) {
 		t.Fatalf("unsupported runtime commit error = %v", err)
 	}
 }
@@ -1322,7 +1329,7 @@ func TestDownloadArtifactMatrixConsumersEvaluateNameAndNormalizeRootPath(t *test
 			}}
 			job.Needs = map[string]plan.Need{"producer": {Result: "success", Artifacts: []plan.NeedArtifact{artifact}}}
 
-			result, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(context.Background(), job, workspace)
+			result, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(t.Context(), job, workspace)
 			wantPath, absErr := filepath.Abs(workspace)
 			if absErr != nil {
 				t.Fatal(absErr)

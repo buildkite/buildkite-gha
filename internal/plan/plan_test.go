@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -29,6 +30,94 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 		t.Fatalf("decoded fixture lost trust bindings: %#v", job)
 	}
 	validateJobPlanSchema(t, source)
+}
+
+func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
+	job := validJob()
+	job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v1"
+	job.Workflow.Remote = &RemoteWorkflowSource{
+		Repository: "owner/repository", RequestedRef: "v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
+	}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJobPlanSchema(t, encoded)
+	decoded, err := Decode(encoded)
+	if err != nil || !reflect.DeepEqual(decoded.Workflow, job.Workflow) {
+		t.Fatalf("Decode() remote workflow = %#v, %v", decoded.Workflow, err)
+	}
+
+	tests := []struct {
+		name string
+		edit func(*Job)
+		want string
+	}{
+		{name: "repository case", edit: func(job *Job) { job.Workflow.Remote.Repository = "Owner/repository" }, want: "invalid immutable source provenance"},
+		{name: "path repository", edit: func(job *Job) { job.Workflow.Path = "other/repository/.github/workflows/ci.yml@v1" }, want: "path does not match"},
+		{name: "path ref", edit: func(job *Job) { job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v2" }, want: "path does not match"},
+		{name: "nested path", edit: func(job *Job) { job.Workflow.Path = "owner/repository/.github/workflows/nested/ci.yml@v1" }, want: "path does not match"},
+		{name: "commit", edit: func(job *Job) { job.Workflow.Remote.Commit = strings.Repeat("A", 40) }, want: "invalid immutable source provenance"},
+		{name: "tree digest", edit: func(job *Job) { job.Workflow.Remote.SourceDigest = "sha256:invalid" }, want: "invalid immutable source provenance"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := job
+			remote := *job.Workflow.Remote
+			invalid.Workflow.Remote = &remote
+			test.edit(&invalid)
+			if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
+	job := validJob()
+	digest := "sha256:" + strings.Repeat("1", 64)
+	job.Dependencies = []string{"gha-prepare"}
+	job.DeferredInputs = map[string]DeferredInput{
+		"subject": {
+			Sources: []NeedSource{{StepKey: "gha-prepare", PlanDigest: digest}},
+			Outputs: []NeedOutput{{Name: "value", StepKey: "gha-prepare", Output: "subject"}},
+		},
+	}
+	job.CallGuards = []CallGuard{{
+		Condition: "always() && needs.prepare.result == 'failure' && needs.prepare.outputs.ready && inputs.enabled",
+		Inputs:    map[string]any{"enabled": true},
+		NeedSources: map[string][]NeedSource{
+			"prepare": {{StepKey: "gha-prepare", PlanDigest: digest}},
+		},
+		NeedOutputs: map[string][]NeedOutput{
+			"prepare": {{Name: "ready", StepKey: "gha-prepare", Output: "ready"}},
+		},
+		DeferredInputs: map[string]DeferredInput{
+			"subject": {
+				Sources: []NeedSource{{StepKey: "gha-prepare", PlanDigest: digest}},
+				Outputs: []NeedOutput{{Name: "value", StepKey: "gha-prepare", Output: "subject"}},
+			},
+		},
+	}}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJobPlanSchema(t, encoded)
+	decoded, err := Decode(encoded)
+	if err != nil || !reflect.DeepEqual(decoded.CallGuards, job.CallGuards) || !reflect.DeepEqual(decoded.DeferredInputs, job.DeferredInputs) {
+		t.Fatalf("Decode() deferred inputs/call guards = %#v / %#v, %v", decoded.DeferredInputs, decoded.CallGuards, err)
+	}
+
+	job.CallGuards[0].Condition = "matrix.os"
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), `call condition context "matrix" is unsupported`) {
+		t.Fatalf("Validate() unavailable call context error = %v", err)
+	}
+	job.CallGuards[0].Condition = "true"
+	job.CallGuards[0].NeedSources["prepare"][0].PlanDigest = "sha256:tampered"
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "producer identity") {
+		t.Fatalf("Validate() tampered call producer error = %v", err)
+	}
 }
 
 func TestEventHeadRefSizeLimit(t *testing.T) {
@@ -584,7 +673,7 @@ func TestRemoteCompositeLocalChildUsesWorkspaceIdentity(t *testing.T) {
 	}
 }
 
-func TestActionSelectorsAndPathsFailClosed(t *testing.T) {
+func TestActionSelectorsAndPathsRejectInvalidValues(t *testing.T) {
 	local := func() Job {
 		job := validJob()
 		requiresMise := true
@@ -633,7 +722,7 @@ func TestWorkspaceRootActionAndSharedChildDAG(t *testing.T) {
 	base := "manyletters/repository@v1"
 	for i := range 256 {
 		variant := []byte(base)
-		for bit := 0; bit < 8; bit++ {
+		for bit := range 8 {
 			if i&(1<<bit) != 0 {
 				variant[bit] -= 'a' - 'A'
 			}
@@ -742,26 +831,63 @@ func TestContainerContract(t *testing.T) {
 	job := validJob()
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Container = &Container{Image: "node:24", Env: map[string]string{"NODE_ENV": "test"}, Ports: []string{"8080"}}
-	job.Services = map[string]Container{"redis": {Image: "redis:7", Ports: []string{"6379:6379"}}}
-	job.ServiceOrder = []string{"redis"}
+	job.Services = map[string]ServiceContainer{"database": {
+		Image:       "postgres:16",
+		Credentials: &ContainerCredentials{Username: "user", Password: "password"},
+		Env:         map[string]string{"POSTGRES_DB": "app"},
+		Ports:       []string{"5432:5432"},
+		Volumes:     []string{"database:/data"},
+		Options:     "--health-retries 5",
+		Command:     "postgres -c fsync=off",
+		Entrypoint:  "docker-entrypoint.sh",
+	}}
+	job.ServiceOrder = []string{"database"}
 	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "workspace", Path: "actions/build", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Decode(encoded); err != nil {
+	decoded, err := Decode(encoded)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if !reflect.DeepEqual(decoded.Container, job.Container) || !reflect.DeepEqual(decoded.Services, job.Services) {
+		t.Fatalf("decoded containers = %#v, %#v", decoded.Container, decoded.Services)
+	}
 	validateJobPlanSchema(t, encoded)
+	wire, err := json.Marshal(struct {
+		Container *Container                  `json:"container"`
+		Services  map[string]ServiceContainer `json:"services"`
+	}{Container: job.Container, Services: job.Services})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"container":{"image":"node:24","env":{"NODE_ENV":"test"},"ports":["8080"]},"services":{"database":{"image":"postgres:16","credentials":{"username":"user","password":"password"},"env":{"POSTGRES_DB":"app"},"ports":["5432:5432"],"volumes":["database:/data"],"options":"--health-retries 5","command":"postgres -c fsync=off","entrypoint":"docker-entrypoint.sh"}}}`
+	if string(wire) != want {
+		t.Fatalf("encoded containers = %s, want %s", wire, want)
+	}
 }
 
-func TestJobContainerRejectsServiceCredentials(t *testing.T) {
-	job := validJob()
-	job.RequiredCapabilities = []string{"docker", "network"}
-	job.Container = &Container{Image: "node:24", Credentials: &ContainerCredentials{Username: "user", Password: "password"}}
-	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "service-only fields") {
-		t.Fatalf("Validate() error = %v, want service-only fields", err)
+func TestContainerModelFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		typeOf reflect.Type
+		fields []string
+	}{
+		{name: "job", typeOf: reflect.TypeFor[Container](), fields: []string{"Image:image", "Env:env,omitempty", "Ports:ports,omitempty"}},
+		{name: "service", typeOf: reflect.TypeFor[ServiceContainer](), fields: []string{"Image:image", "Credentials:credentials,omitempty", "Env:env,omitempty", "Ports:ports,omitempty", "Volumes:volumes,omitempty", "Options:options,omitempty", "Command:command,omitempty", "Entrypoint:entrypoint,omitempty"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var got []string
+			for field := range test.typeOf.Fields() {
+				got = append(got, field.Name+":"+string(field.Tag.Get("json")))
+			}
+			if !slices.Equal(got, test.fields) {
+				t.Fatalf("fields = %#v, want %#v", got, test.fields)
+			}
+		})
 	}
 }
 
@@ -831,10 +957,22 @@ func TestValidateGitHubWorkflowAccessTokenPermissions(t *testing.T) {
 	if err := ValidateGitHubWorkflowAccessTokenPermissions(map[string]string{"contents": "read", "pull_requests": "write"}); err != nil {
 		t.Fatal(err)
 	}
+	readAll := map[string]string{
+		"actions": "read", "artifact_metadata": "read", "attestations": "read", "checks": "read", "contents": "read",
+		"deployments": "read", "discussions": "read", "issues": "read", "packages": "read", "pages": "read",
+		"pull_requests": "read", "security_events": "read", "statuses": "read",
+	}
+	if err := ValidateGitHubWorkflowAccessTokenPermissions(readAll); err != nil {
+		t.Fatalf("ValidateGitHubWorkflowAccessTokenPermissions(read-all) = %v", err)
+	}
 	for _, permissions := range []map[string]string{
 		nil,
 		{"models": "read"},
 		{"repository_projects": "read"},
+		{"id_token": "read"},
+		{"code_quality": "read"},
+		{"metadata": "read"},
+		{"vulnerability_alerts": "read"},
 		{"contents": "admin"},
 	} {
 		if err := ValidateGitHubWorkflowAccessTokenPermissions(permissions); err == nil {

@@ -2,10 +2,10 @@ package compiler
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -318,6 +318,20 @@ func TestRunsOnPolicyFailsClosedWithLocatedDiagnostics(t *testing.T) {
 	}
 }
 
+func TestValidateEventRetainsResolvedRunsOnWhenRunnerPolicyRejectsIt(t *testing.T) {
+	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: macos-26\n    steps:\n      - run: true\n")
+	report, err := ValidateEventWithOptions("policy.yml", workflow, pushEvent(t), Options{
+		EventTrust: EventTrusted,
+		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
+	})
+	if err == nil {
+		t.Fatal("ValidateEventWithOptions() error = nil, want runner policy rejection")
+	}
+	if len(report.Jobs) != 1 || !slices.Equal(report.Jobs[0].RunsOn, []string{"macos-26"}) {
+		t.Fatalf("resolved runs-on = %#v", report.Jobs)
+	}
+}
+
 func TestRunnerRejectionDiagnosticIsActionableWithoutResolvedLabel(t *testing.T) {
 	policy := RunnerPolicy{
 		Labels:          map[string]string{"ubuntu-24.04": "linux", "self-hosted": "one", "linux": "two", "default": ""},
@@ -332,7 +346,7 @@ func TestRunnerRejectionDiagnosticIsActionableWithoutResolvedLabel(t *testing.T)
 	}{
 		{name: "no labels", trust: EventTrusted, want: "Set runs-on"},
 		{name: "duplicate label", labels: []string{"ubuntu-24.04", "ubuntu-24.04"}, trust: EventTrusted, want: "Remove duplicate labels"},
-		{name: "unsupported operating system", labels: []string{"windows-latest"}, trust: EventTrusted, want: "Use a Linux or macOS runner label"},
+		{name: "unsupported operating system", labels: []string{"windows-latest"}, trust: EventTrusted, want: `change runs-on to "ubuntu-latest"`},
 		{name: "unmapped label", labels: []string{"macos-15"}, trust: EventTrusted, want: "Configure a mapping"},
 		{name: "conflicting queues", labels: []string{"self-hosted", "linux"}, trust: EventTrusted, want: "Use labels that map to one runner target"},
 		{name: "conflicting targets", labels: []string{"ubuntu-24.04", "macos"}, trust: EventTrusted, want: "Use labels that map to one runner target"},
@@ -365,6 +379,27 @@ func TestRunnerRejectionDiagnosticOmitsIrrelevantAllowlistForDuplicateLabel(t *t
 	}
 }
 
+func TestRunnerPolicySelectorTargetDoesNotChangeOverlappingLabelTarget(t *testing.T) {
+	jammy := RunnerTarget{Platform: PlatformLinuxAMD64, Image: "example.com/toolchains/jammy@sha256:" + strings.Repeat("0", 64)}
+	fallback := RunnerTarget{Queue: "linux-medium", Platform: PlatformLinuxAMD64}
+	policy := RunnerPolicy{
+		Targets: map[string]RunnerTarget{"ubuntu-22.04": jammy},
+		Selectors: []RunnerSelector{{
+			Labels: []string{"self-hosted", "ubuntu-22.04"},
+			Target: fallback,
+		}},
+	}
+	if got, err := policy.resolve([]string{"ubuntu-22.04"}, EventTrusted); err != nil || got != jammy {
+		t.Fatalf("standalone preset = %#v, %v", got, err)
+	}
+	if got, err := policy.resolve([]string{"ubuntu-22.04", "self-hosted"}, EventTrusted); err != nil || got != fallback {
+		t.Fatalf("multi-label selector = %#v, %v", got, err)
+	}
+	if got, err := (RunnerPolicy{Selectors: []RunnerSelector{{Labels: []string{"windows-latest"}, Target: fallback}}}).resolve([]string{"windows-latest"}, EventTrusted); err != nil || got != fallback {
+		t.Fatalf("server target = %#v, %v", got, err)
+	}
+}
+
 func TestRunnerRejectionDiagnosticFallsBackWhenUnclassified(t *testing.T) {
 	message, detail := runnerRejectionDiagnostic(errors.New("boom"), nil, nil, nil)
 	if message != "Runner target is unsupported. Use a configured Linux or macOS runner target." || detail != "" {
@@ -377,14 +412,16 @@ func TestRunnerRejectionDiagnosticSeparatesStaticLabelFromAllowlist(t *testing.T
 	tests := []struct {
 		label       string
 		wantMessage string
+		wantDetail  string
 	}{
 		{
 			label:       "windows-latest",
-			wantMessage: `Runner label "windows-latest" requires Windows, which is unsupported. Use a Linux or macOS runner label.`,
+			wantMessage: `Windows runners aren't currently supported. Imported jobs run on Linux or macOS Buildkite hosted agents. If this job can run on Linux, change "windows-latest" to "ubuntu-latest". If it requires Windows, open an issue in https://github.com/buildkite/buildkite-gha to help us prioritize Windows support.`,
 		},
 		{
 			label:       "macos-latest",
 			wantMessage: `Runner label "macos-latest" has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.`,
+			wantDetail:  "Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest.",
 		},
 	}
 	policy := RunnerPolicy{Targets: map[string]RunnerTarget{
@@ -398,7 +435,7 @@ func TestRunnerRejectionDiagnosticSeparatesStaticLabelFromAllowlist(t *testing.T
 			t.Fatalf("resolve(%q) error = nil", test.label)
 		}
 		message, detail := runnerRejectionDiagnostic(err, []string{test.label}, supported, nil)
-		if message != test.wantMessage || detail != "Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest." {
+		if message != test.wantMessage || detail != test.wantDetail {
 			t.Fatalf("runnerRejectionDiagnostic(%q) = %q, %q", test.label, message, detail)
 		}
 		if strings.Contains(message, "ubuntu-22.04") {
@@ -460,7 +497,7 @@ func TestCompilePlansUsePolicyQueueAndContainOnlyNonSecretVars(t *testing.T) {
 		Vars:       VariableSources{Bridge: map[string]string{"PUBLIC": "snapshotted"}},
 		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-24.04": "linux"}},
 	}
-	plans, err := compilePlansForTest(context.Background(), "plan.yml", workflow, pushEvent(t), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), options)
+	plans, err := compilePlansForTest(t.Context(), "plan.yml", workflow, pushEvent(t), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), options)
 	if err != nil {
 		t.Fatal(err)
 	}

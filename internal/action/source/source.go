@@ -27,6 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const (
@@ -34,6 +36,8 @@ const (
 	defaultCodeload = "https://codeload.github.com"
 	manifestName    = "manifest-v1.json"
 	mutableRefTTL   = time.Hour
+	// UnsupportedContainerActionReason explains the supported alternative to docker:// actions.
+	UnsupportedContainerActionReason = "docker:// container actions are unsupported; use a Dockerfile action or replace the action with a run step"
 )
 
 var (
@@ -78,7 +82,13 @@ func (m Materialized) Retain(ctx context.Context) (Materialized, error) {
 
 // Parse parses owner/repository[/path]@ref.
 func Parse(raw string) (Reference, error) {
-	if len(raw) == 0 || len(raw) > 2048 || !utf8.ValidString(raw) || strings.ContainsAny(raw, "\\?#") || strings.Contains(raw, "${{") || hasControl(raw) {
+	if len(raw) == 0 || len(raw) > 2048 || !utf8.ValidString(raw) || hasControl(raw) {
+		return Reference{}, fmt.Errorf("invalid action reference")
+	}
+	if strings.HasPrefix(strings.ToLower(raw), "docker://") {
+		return Reference{}, errors.New(UnsupportedContainerActionReason)
+	}
+	if strings.ContainsAny(raw, "\\?#") || strings.Contains(raw, "${{") {
 		return Reference{}, fmt.Errorf("invalid action reference")
 	}
 	at := strings.LastIndexByte(raw, '@')
@@ -86,7 +96,7 @@ func Parse(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("action reference must contain owner/repository@ref")
 	}
 	left, ref := raw[:at], raw[at+1:]
-	if len(ref) > 1024 || strings.HasPrefix(left, "./") || strings.HasPrefix(left, "/") || strings.HasPrefix(strings.ToLower(left), "docker://") {
+	if len(ref) > 1024 || strings.HasPrefix(left, "./") || strings.HasPrefix(left, "/") {
 		return Reference{}, fmt.Errorf("invalid action reference")
 	}
 	parts := strings.Split(left, "/")
@@ -133,6 +143,7 @@ type config struct {
 	mutableRefs                         *mutableRefCache
 	resolutionSnapshot                  *actionResolutionSnapshot
 	cacheMaxBytes                       int64
+	userAgent                           string
 	maxCompressed, maxExpanded, maxFile int64
 	maxEntries                          int
 	maxPath, maxSegment                 int
@@ -141,12 +152,20 @@ type config struct {
 func defaults() config {
 	api, _ := url.Parse(defaultAPI)
 	codeload, _ := url.Parse(defaultCodeload)
-	return config{api: api, codeload: codeload, finalHosts: map[string]bool{"codeload.github.com": true}, maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
+	return config{api: api, codeload: codeload, finalHosts: map[string]bool{"codeload.github.com": true}, userAgent: useragent.FromVersion(""), maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
 }
 
 // Option configures trusted process-level limits or test endpoints. Options must
 // never be populated from workflow input.
 type Option func(*config) error
+
+// WithUserAgentVersion identifies the buildkite-gha client making requests.
+func WithUserAgentVersion(version string) Option {
+	return func(c *config) error {
+		c.userAgent = useragent.FromVersion(version)
+		return nil
+	}
+}
 
 // WithGitHubActionSourceTokenProvider authenticates mutable-ref API requests using a
 // credential provisioned at the first such request and cached for this client.
@@ -346,7 +365,7 @@ func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, 
 	return Resolved{Reference: ref, Commit: v.SHA}, nil
 }
 func (r *Resolver) peel(ctx context.Context, ref Reference, typ, sha string) (string, error) {
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if !shaRE.MatchString(sha) {
 			return "", fmt.Errorf("GitHub returned malformed object SHA")
 		}
@@ -392,7 +411,7 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	if err != nil {
 		return err
 	}
-	setAPIHeaders(req, actionSourceToken(cfg, parts))
+	setAPIHeaders(req, actionSourceToken(cfg, parts), cfg.userAgent)
 	c := *client
 	c.Jar = nil
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -409,7 +428,7 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	if len(body) > 1<<20 {
 		return fmt.Errorf("GitHub API response too large")
 	}
-	if resp.StatusCode == 404 {
+	if resp.StatusCode == http.StatusNotFound {
 		return &NotPublicError{}
 	}
 	if rate := rateLimitError(resp, body); rate != nil {
@@ -449,7 +468,7 @@ func actionSourceToken(cfg config, parts []string) string {
 	return cfg.credential.token
 }
 func rateLimitError(resp *http.Response, body []byte) error {
-	if resp.StatusCode != 429 && (resp.StatusCode != 403 || (resp.Header.Get("X-RateLimit-Remaining") != "0" && !strings.Contains(strings.ToLower(string(body)), "rate limit"))) {
+	if resp.StatusCode != http.StatusTooManyRequests && (resp.StatusCode != http.StatusForbidden || (resp.Header.Get("X-RateLimit-Remaining") != "0" && !strings.Contains(strings.ToLower(string(body)), "rate limit"))) {
 		return nil
 	}
 	var reset time.Time
@@ -462,13 +481,13 @@ func rateLimitError(resp *http.Response, body []byte) error {
 	}
 	return &RateLimitError{reset}
 }
-func setAPIHeaders(r *http.Request, token string) {
+func setAPIHeaders(r *http.Request, token, userAgent string) {
 	r.Header.Del("Authorization")
 	r.Header.Del("Cookie")
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
-	r.Header.Set("User-Agent", "buildkite-gha-action-source/1")
+	r.Header.Set("User-Agent", userAgent)
 	r.Header.Set("Accept", "application/vnd.github+json")
 	r.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 }
@@ -484,6 +503,10 @@ type Store struct {
 }
 
 func NewStore(root string, client *http.Client, opts ...Option) (*Store, error) {
+	return NewStoreContext(context.Background(), root, client, opts...)
+}
+
+func NewStoreContext(ctx context.Context, root string, client *http.Client, opts ...Option) (*Store, error) {
 	c, e := makeConfig(opts)
 	if e != nil {
 		return nil, e
@@ -512,7 +535,7 @@ func NewStore(root string, client *http.Client, opts ...Option) (*Store, error) 
 	}
 	store := &Store{root: root, client: client, cfg: c}
 	if c.cacheMaxBytes > 0 {
-		if err := store.maintain(context.Background()); err != nil {
+		if err := store.maintain(ctx); err != nil {
 			return nil, fmt.Errorf("maintain action source cache: %w", err)
 		}
 	}
@@ -542,7 +565,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	m, verifyErr := s.verify(base, resolved)
 	if verifyErr == nil {
 		s.touch(base)
-		return s.materializedLease(entryLock, resolved, tree, parsed.Path, m.Digest)
+		return s.materializedLease(ctx, entryLock, resolved, tree, parsed.Path, m.Digest)
 	}
 	if _, statErr := os.Stat(base); statErr == nil {
 		// The initial verification may have raced a publisher between its
@@ -550,7 +573,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 		// publication again before treating it as corrupt.
 		if m, retryErr := s.verify(base, resolved); retryErr == nil {
 			s.touch(base)
-			return s.materializedLease(entryLock, resolved, tree, parsed.Path, m.Digest)
+			return s.materializedLease(ctx, entryLock, resolved, tree, parsed.Path, m.Digest)
 		}
 		entryLock.unlock()
 		return Materialized{}, fmt.Errorf("verify action source cache: %w", verifyErr)
@@ -627,7 +650,7 @@ func (s *Store) lockMissingEntry(ctx context.Context, base, tree, actionPath str
 			m, verifyErr := s.verify(base, resolved)
 			if verifyErr == nil {
 				s.touch(base)
-				materialized, leaseErr := s.materializedLease(shared, resolved, tree, actionPath, m.Digest)
+				materialized, leaseErr := s.materializedLease(ctx, shared, resolved, tree, actionPath, m.Digest)
 				return nil, &materialized, leaseErr
 			}
 			shared.unlock()
@@ -652,7 +675,7 @@ func (s *Store) reacquireMaterializedLease(ctx context.Context, exclusive *actio
 		return s.Materialize(ctx, resolved)
 	}
 	s.touch(base)
-	return s.materializedLease(shared, resolved, tree, actionPath, m.Digest)
+	return s.materializedLease(ctx, shared, resolved, tree, actionPath, m.Digest)
 }
 
 func materialized(tree, p, digest string) (Materialized, error) {
@@ -689,7 +712,7 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) err
 	}
 	req.Header.Del("Authorization")
 	req.Header.Del("Cookie")
-	req.Header.Set("User-Agent", "buildkite-gha-action-source/1")
+	req.Header.Set("User-Agent", s.cfg.userAgent)
 	c := *s.client
 	c.Jar = nil
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -701,6 +724,7 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) err
 		}
 		req.Header.Del("Authorization")
 		req.Header.Del("Cookie")
+		req.Header.Set("User-Agent", s.cfg.userAgent)
 		return nil
 	}
 	resp, e := c.Do(req)
@@ -711,10 +735,10 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) err
 	if !validArchiveURL(resp.Request.URL, s.cfg.finalHosts) {
 		return fmt.Errorf("archive final URL denied")
 	}
-	if resp.StatusCode == 404 {
+	if resp.StatusCode == http.StatusNotFound {
 		return &NotPublicError{}
 	}
-	if resp.StatusCode == 403 || resp.StatusCode == 429 {
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if readErr != nil {
 			return fmt.Errorf("read archive error response: %w", readErr)
@@ -772,7 +796,7 @@ type manifestFile struct {
 
 // DigestTree returns the canonical source digest for a local action directory.
 // It uses the same bounded manifest and file-mode model as immutable remote
-// action source. Symlinks and other special files fail closed.
+// action source. It rejects symlinks and other special files.
 func DigestTree(root string) (string, error) {
 	info, err := os.Stat(root)
 	if err != nil {
@@ -967,11 +991,12 @@ func extractTar(r io.Reader, dst string, c config) error {
 				if e == nil {
 					n, ce := io.CopyN(f, tr, h.Size)
 					cl := f.Close()
-					if ce != nil || n != h.Size {
+					switch {
+					case ce != nil || n != h.Size:
 						e = fmt.Errorf("short archive file")
-					} else if cl != nil {
+					case cl != nil:
 						e = cl
-					} else {
+					default:
 						mode := os.FileMode(0o644)
 						if h.Mode&0o100 != 0 {
 							mode = 0o755

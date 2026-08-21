@@ -85,19 +85,19 @@ type CompositeStep struct {
 	Env              map[string]string `yaml:"env"`
 	If               string            `yaml:"if"`
 	With             map[string]string `yaml:"with"`
+	ContinueOnError  bool              `yaml:"continue-on-error"`
 }
 
 // Runtime identifies one supported action execution model.
 type Runtime string
+
+const runtimeNode20Declaration = "node20"
 
 const (
 	// MaxNestedActionDepth bounds local action expansion in both compilation and execution.
 	MaxNestedActionDepth = 10
 	// RuntimeNode16 executes a JavaScript action with managed Node 16.
 	RuntimeNode16 Runtime = "node16"
-	// RuntimeNode20 identifies the accepted node20 action declaration. Matching
-	// GitHub-hosted runners, Runtime maps it to the managed Node 24 runtime.
-	RuntimeNode20 Runtime = "node20"
 	// RuntimeNode24 executes a JavaScript action with managed Node 24.
 	RuntimeNode24 Runtime = "node24"
 	// RuntimeComposite executes a composite action.
@@ -152,7 +152,15 @@ func Load(root, path string) (Metadata, error) {
 
 	metadata := Metadata{Path: actionPath}
 	var document yaml.Node
-	if err := yaml.Unmarshal(source, &document); err != nil {
+	documentDecoder := yaml.NewDecoder(bytes.NewReader(source))
+	if err := documentDecoder.Decode(&document); err != nil {
+		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
+	}
+	var trailing any
+	if err := documentDecoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return Metadata{}, fmt.Errorf("parse action metadata %q: multiple YAML documents", metadataPath)
+		}
 		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
 	}
 	if err := rejectCompositeControls(metadataPath, &document); err != nil {
@@ -161,16 +169,24 @@ func Load(root, path string) (Metadata, error) {
 	if err := validateCompositeSteps(metadataPath, &document); err != nil {
 		return Metadata{}, err
 	}
+	if discardTopLevelEnv(&document) {
+		var validated struct {
+			Metadata `yaml:",inline"`
+			Env      yaml.Node `yaml:"env"`
+		}
+		validator := yaml.NewDecoder(bytes.NewReader(source))
+		validator.KnownFields(true)
+		if err := validator.Decode(&validated); err != nil {
+			return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
+		}
+		source, err = yaml.Marshal(&document)
+		if err != nil {
+			return Metadata{}, fmt.Errorf("parse action metadata %q: discard top-level env: %w", metadataPath, err)
+		}
+	}
 	decoder := yaml.NewDecoder(bytes.NewReader(source))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&metadata); err != nil {
-		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return Metadata{}, fmt.Errorf("parse action metadata %q: multiple YAML documents", metadataPath)
-		}
 		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
 	}
 	if metadata.Runs.Using == "" {
@@ -195,6 +211,24 @@ func Load(root, path string) (Metadata, error) {
 		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
 	}
 	return metadata, nil
+}
+
+func discardTopLevelEnv(document *yaml.Node) bool {
+	root := document
+	if root.Kind == yaml.DocumentNode && len(root.Content) != 0 {
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != "env" {
+			continue
+		}
+		root.Content = append(root.Content[:i], root.Content[i+2:]...)
+		return true
+	}
+	return false
 }
 
 func rejectCompositeControls(path string, document *yaml.Node) error {
@@ -309,7 +343,7 @@ func (metadata Metadata) Runtime() (Runtime, error) {
 	switch metadata.Runs.Using {
 	case string(RuntimeNode16):
 		return RuntimeNode16, nil
-	case string(RuntimeNode20):
+	case runtimeNode20Declaration:
 		return RuntimeNode24, nil
 	case string(RuntimeNode24):
 		return RuntimeNode24, nil
@@ -347,7 +381,7 @@ func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
 		}
 		return nil
 	}
-	if runtime != RuntimeNode16 && runtime != RuntimeNode20 && runtime != RuntimeNode24 {
+	if runtime != RuntimeNode16 && runtime != RuntimeNode24 {
 		return nil
 	}
 	if metadata.Runs.Main == "" {

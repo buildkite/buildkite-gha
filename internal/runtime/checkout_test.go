@@ -113,7 +113,7 @@ esac
 		RequiresMise: &requiresMise,
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
-	result, err := (Runner{Git: git, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Env["CHECKOUT_CHAIN"] != "ok" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -147,7 +147,7 @@ esac
 	if err := os.Remove(gitLog); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(context.Background(), job, t.TempDir()); err == nil || !strings.Contains(err.Error(), "dynamic ref must resolve to the exact event SHA") {
+	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, t.TempDir()); err == nil || !strings.Contains(err.Error(), "dynamic ref must resolve to the exact event SHA") {
 		t.Fatalf("dynamic checkout ref error = %v", err)
 	}
 	if _, err := os.Stat(gitLog); !os.IsNotExist(err) {
@@ -158,7 +158,7 @@ esac
 
 	job.Actions[0].Commit = strings.Repeat("0", 40)
 	unknownWorkspace := t.TempDir()
-	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(context.Background(), job, unknownWorkspace); err == nil || !strings.Contains(err.Error(), "does not admit") {
+	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, unknownWorkspace); err == nil || !strings.Contains(err.Error(), "does not admit") {
 		t.Fatalf("unknown checkout commit error = %v", err)
 	}
 	if _, err := os.Stat(gitLog); !os.IsNotExist(err) {
@@ -168,7 +168,7 @@ esac
 	job.Actions[0].Commit = actionintegration.CheckoutV7Commit
 	job.Actions[0].SourceDigest = "sha256:" + strings.Repeat("0", 64)
 	secondWorkspace := t.TempDir()
-	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(context.Background(), job, secondWorkspace); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, secondWorkspace); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
 		t.Fatalf("tampered checkout lock error = %v", err)
 	}
 	if _, err := os.Stat(gitLog); !os.IsNotExist(err) {
@@ -262,7 +262,7 @@ printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
 	}
 	var logs bytes.Buffer
 	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(
-		context.Background(), newCommandProcessor(&logs, &logs), workspace, job, actionintegration.CheckoutV7Commit, nil,
+		t.Context(), newCommandProcessor(&logs, &logs), workspace, job, actionintegration.CheckoutV7Commit, nil,
 	)
 	if err != nil {
 		t.Fatalf("runCheckout() error = %v, logs = %q", err, logs.String())
@@ -292,18 +292,18 @@ func TestCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) {
 	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
 	processor := newCommandProcessor(io.Discard, io.Discard)
 	job := plan.Job{Event: plan.Event{Provider: "github", Repository: repository, SHA: sha}}
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, actionintegration.CheckoutV7Commit, map[string]string{"token": ""}); err == nil || !strings.Contains(err.Error(), "unsupported") {
+	if _, err := (Runner{}).runCheckout(t.Context(), processor, t.TempDir(), job, actionintegration.CheckoutV7Commit, map[string]string{"token": ""}); err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("runCheckout() unsupported input error = %v", err)
 	}
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "occupied"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, actionintegration.CheckoutV7Commit, nil); err == nil || !strings.Contains(err.Error(), "empty workspace") {
+	if _, err := (Runner{}).runCheckout(t.Context(), processor, workspace, job, actionintegration.CheckoutV7Commit, nil); err == nil || !strings.Contains(err.Error(), "empty workspace") {
 		t.Fatalf("nonempty workspace error = %v", err)
 	}
 	job.Event.Provider = "other"
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, actionintegration.CheckoutV7Commit, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Origin event") {
+	if _, err := (Runner{}).runCheckout(t.Context(), processor, t.TempDir(), job, actionintegration.CheckoutV7Commit, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Origin event") {
 		t.Fatalf("invalid event error = %v", err)
 	}
 }
@@ -373,6 +373,8 @@ func TestCheckoutOutputsMatchReleaseContract(t *testing.T) {
 		commit string
 		want   map[string]string
 	}{
+		{name: "v1.2.0", commit: actionintegration.CheckoutV1Commit, want: map[string]string{}},
+		{name: "v2.8.0", commit: actionintegration.CheckoutV2Commit, want: map[string]string{}},
 		{name: "v3.7.0", commit: actionintegration.CheckoutV3Commit, want: map[string]string{}},
 		{name: "v4 and later", commit: actionintegration.CheckoutV4Commit, want: map[string]string{"ref": "refs/heads/main", "commit": strings.Repeat("a", 40)}},
 	} {
@@ -381,6 +383,26 @@ func TestCheckoutOutputsMatchReleaseContract(t *testing.T) {
 			setCheckoutOutputs(outputs, test.commit, "refs/heads/main", strings.Repeat("a", 40))
 			if !maps.Equal(outputs, test.want) {
 				t.Fatalf("checkout outputs = %#v, want %#v", outputs, test.want)
+			}
+		})
+	}
+}
+
+func TestCheckoutInputsWithReleaseDefaults(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		commit string
+		inputs map[string]string
+		want   map[string]string
+	}{
+		{name: "v1 defaults to full history", commit: actionintegration.CheckoutV1Commit, inputs: nil, want: map[string]string{"fetch-depth": "0"}},
+		{name: "v1 keeps explicit depth", commit: actionintegration.CheckoutV1Commit, inputs: map[string]string{"Fetch-Depth": "5"}, want: map[string]string{"Fetch-Depth": "5"}},
+		{name: "v2 keeps shallow default", commit: actionintegration.CheckoutV2Commit, inputs: nil, want: nil},
+		{name: "v4 keeps shallow default", commit: actionintegration.CheckoutV4Commit, inputs: map[string]string{"ref": "main"}, want: map[string]string{"ref": "main"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := checkoutInputsWithReleaseDefaults(test.commit, test.inputs); !maps.Equal(got, test.want) {
+				t.Fatalf("checkoutInputsWithReleaseDefaults() = %#v, want %#v", got, test.want)
 			}
 		})
 	}
@@ -400,7 +422,7 @@ func TestCheckoutSubmoduleNativeCommandSequenceAndFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
-	if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), true, true, false, ""); err != nil {
+	if err := runner.runCheckoutSubmodules(t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), true, true, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	contents, err := os.ReadFile(logPath)
@@ -439,7 +461,7 @@ exit 0
 			if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			err := (Runner{Stdout: io.Discard, Stderr: io.Discard}).runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false, "")
+			err := (Runner{Stdout: io.Discard, Stderr: io.Discard}).runCheckoutSubmodules(t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false, "")
 			if err == nil || !strings.Contains(err.Error(), "invalid state") {
 				t.Fatalf("status prefix %q error = %v", prefix, err)
 			}
@@ -467,7 +489,7 @@ func TestCheckoutSubmodulesUsesNativePorcelain(t *testing.T) {
 			runTestGit(t, workspace, "checkout", "--detach", parentOID)
 			base := append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always")
 			runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
-			if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, "git", map[string]string{"HOME": filepath.Join(workspace, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull}, base, test.depthOne, test.recursive, false, ""); err != nil {
+			if err := runner.runCheckoutSubmodules(t.Context(), newCommandProcessor(io.Discard, io.Discard), workspace, "git", map[string]string{"HOME": filepath.Join(workspace, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull}, base, test.depthOne, test.recursive, false, ""); err != nil {
 				t.Fatal(err)
 			}
 			childPath := filepath.Join(workspace, "deps", "child")
@@ -532,7 +554,7 @@ func TestSubmoduleResolvedCredentialsWithoutCapabilityDoNotInvokeHelper(t *testi
 		t.Fatal(err)
 	}
 	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "secret"}, Stdout: io.Discard, Stderr: io.Discard}
-	if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false, ""); err != nil {
+	if err := runner.runCheckoutSubmodules(t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -573,7 +595,7 @@ echo job-secret
 	}
 	var logs bytes.Buffer
 	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "job-secret"}, Stdout: &logs, Stderr: &logs}
-	if err := runner.runRepositoryProviderCheckoutFetch(context.Background(), newCommandProcessor(&logs, &logs), workspace, map[string]string{}, git, checkoutGitBaseArgs(), []string{"submodule", "update"}, "github.com"); err != nil {
+	if err := runner.runRepositoryProviderCheckoutFetch(t.Context(), newCommandProcessor(&logs, &logs), workspace, map[string]string{}, git, checkoutGitBaseArgs(), []string{"submodule", "update"}, "github.com"); err != nil {
 		t.Fatal(err)
 	}
 	input, err := os.ReadFile(inputLog)
@@ -734,7 +756,7 @@ exec ` + shellTestQuote(realGit) + ` "$@"
 	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() {
@@ -782,7 +804,7 @@ exit 0
 	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() {
@@ -817,7 +839,7 @@ func TestCheckoutRejectsInvalidRepositoryBeforeInspectingWorkspace(t *testing.T)
 	}
 	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "owner/..", SHA: strings.Repeat("a", 40)}}
 	processor := newCommandProcessor(io.Discard, io.Discard)
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, actionintegration.CheckoutV7Commit, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Origin event repository") {
+	if _, err := (Runner{}).runCheckout(t.Context(), processor, workspace, job, actionintegration.CheckoutV7Commit, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Origin event repository") {
 		t.Fatalf("checkout repository validation error = %v", err)
 	}
 }
@@ -963,7 +985,7 @@ printf '%s|%s\n' "$PWD" "$*" >> ` + shellTestQuote(gitLog) + `
 	for name := range proxyEnvironment {
 		t.Setenv(name, "http://late-workflow-value.invalid")
 	}
-	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(context.Background(), processor, workspace, job, actionintegration.CheckoutV7Commit, map[string]string{"path": "test-catalog"})
+	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(t.Context(), processor, workspace, job, actionintegration.CheckoutV7Commit, map[string]string{"path": "test-catalog"})
 	if err != nil {
 		t.Fatalf("runCheckout() error = %v, logs = %q", err, logs.String())
 	}
@@ -1111,7 +1133,7 @@ esac
 	credentials := &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "job-secret"}
 	var logs bytes.Buffer
 	processor := newCommandProcessor(&logs, &logs)
-	if _, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(context.Background(), processor, workspace, job, actionintegration.CheckoutV7Commit, nil); err == nil {
+	if _, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(t.Context(), processor, workspace, job, actionintegration.CheckoutV7Commit, nil); err == nil {
 		t.Fatal("runCheckout() succeeded after repository-provider helper denial")
 	}
 	if strings.Contains(logs.String(), "job-secret") || !strings.Contains(logs.String(), "***") {
@@ -1260,7 +1282,7 @@ fi
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: remoteDigest}}
 	var logs bytes.Buffer
 	credentials := &AgentRepositoryCredentials{JobID: testCacheJobID, JobToken: "job-secret"}
-	result, err := (Runner{Node24: node, RepositoryCredentials: credentials, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: node, RepositoryCredentials: credentials, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -1286,13 +1308,154 @@ fi
 	}
 }
 
+// legacyCheckoutManifests mirror the real actions/checkout manifests at the
+// admitted v1.2.0 and v2.8.0 release commits: v1.2.0 declares runs.plugin
+// with no runs.using and v2.8.0 declares the retired node12 runtime, so
+// neither passes generic metadata admission.
+var legacyCheckoutManifests = map[string]string{
+	actionintegration.CheckoutV1Commit: "name: 'Checkout'\ndescription: 'Checkout a Git repository.'\nruns:\n  plugin: 'checkout'\n",
+	actionintegration.CheckoutV2Commit: "name: 'Checkout'\nruns:\n  using: node12\n  main: dist/index.js\n  post: dist/index.js\n",
+}
+
+func writeLegacyCheckoutTree(t *testing.T, commit string) (string, string) {
+	t.Helper()
+	remote := t.TempDir()
+	manifest := legacyCheckoutManifests[commit]
+	if err := os.WriteFile(filepath.Join(remote, "action.yml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(manifest, "dist/index.js") {
+		if err := os.Mkdir(filepath.Join(remote, "dist"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(remote, "dist", "index.js"), []byte("throw new Error('adapter must not execute checkout JavaScript')\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	digest, err := source.DigestTree(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return remote, digest
+}
+
+func TestCheckoutAdapterRunsLegacyReleaseManifests(t *testing.T) {
+	for name, test := range map[string]struct {
+		commit    string
+		fetchWant string
+		fetchSkip string
+	}{
+		"v1.2.0 plugin manifest": {commit: actionintegration.CheckoutV1Commit, fetchWant: "--prune origin", fetchSkip: "--depth="},
+		"v2.8.0 node12 manifest": {commit: actionintegration.CheckoutV2Commit, fetchWant: "--depth=1 origin"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			workspace := t.TempDir()
+			remote, remoteDigest := writeLegacyCheckoutTree(t, test.commit)
+
+			sha := strings.Repeat("a", 40)
+			gitLog := filepath.Join(t.TempDir(), "git.log")
+			git := filepath.Join(t.TempDir(), "git")
+			script := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
+operation=
+for argument in "$@"; do
+  case "$argument" in init|checkout) operation="$argument"; break ;; esac
+done
+case "$operation" in
+  init) mkdir -p .git ;;
+  checkout) printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD ;;
+esac
+`
+			if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			workflowSource := []byte("name: legacy checkout\n")
+			workflowDigest := sha256.Sum256(workflowSource)
+			checkoutID := "a-0000000000000001"
+			requiresMise := false
+			job := plan.Job{
+				Schema: plan.Schema,
+				Compiler: plan.Compiler{
+					Version: "checkout-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64),
+				},
+				Runtime: &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
+				Workflow: plan.Workflow{
+					Path: ".github/workflows/test.yml", Digest: "sha256:" + hex.EncodeToString(workflowDigest[:]), LogicalJobID: "checkout",
+				},
+				Event: plan.Event{
+					Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64), Repository: "buildkite/buildkite-gha", Ref: "refs/heads/main", SHA: sha,
+				},
+				Target:               plan.Target{StepKey: "gha-checkout", Queue: "trusted"},
+				RequiredCapabilities: []string{"network"},
+				Steps: []plan.Step{
+					{ID: "checkout", Kind: "uses", Uses: "actions/checkout@" + test.commit, Action: &plan.ActionSelector{Lock: checkoutID}},
+				},
+				Actions: []plan.ActionLock{
+					{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: test.commit, Commit: test.commit, SourceDigest: remoteDigest},
+				},
+				RequiresMise: &requiresMise,
+			}
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
+			var logs bytes.Buffer
+			result, err := (Runner{Git: git, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+			}
+			logBytes, err := os.ReadFile(gitLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			log := string(logBytes)
+			if !strings.Contains(log, test.fetchWant) {
+				t.Fatalf("Git log lacks %q:\n%s", test.fetchWant, log)
+			}
+			if test.fetchSkip != "" && strings.Contains(log, test.fetchSkip) {
+				t.Fatalf("Git log contains %q:\n%s", test.fetchSkip, log)
+			}
+		})
+	}
+}
+
+func TestContainerPreparationSkipsNativeCheckoutClassification(t *testing.T) {
+	for name, commit := range map[string]string{
+		"v1.2.0 plugin manifest": actionintegration.CheckoutV1Commit,
+		"v2.8.0 node12 manifest": actionintegration.CheckoutV2Commit,
+	} {
+		t.Run(name, func(t *testing.T) {
+			remote, remoteDigest := writeLegacyCheckoutTree(t, commit)
+			checkoutID := "a-0000000000000001"
+			job := plan.Job{
+				RequiredCapabilities: []string{"network"},
+				Steps: []plan.Step{
+					{ID: "checkout", Kind: "uses", Uses: "actions/checkout@" + commit, Action: &plan.ActionSelector{Lock: checkoutID}},
+				},
+				Actions: []plan.ActionLock{
+					{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: commit, Commit: commit, SourceDigest: remoteDigest},
+				},
+			}
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
+			actions := newActionLockResolver(job, t.TempDir(), materializer)
+			runner := newJobRun(Runner{})
+			if err := runner.verifyRemoteActionTree(t.Context(), actions, plan.ActionSelector{Lock: checkoutID}, nil); err != nil {
+				t.Fatalf("verifyRemoteActionTree() error = %v", err)
+			}
+			mounts, err := runner.actionContainerMounts(t.Context(), actions)
+			if err != nil || len(mounts) != 0 {
+				t.Fatalf("actionContainerMounts() = %#v, error = %v", mounts, err)
+			}
+		})
+	}
+}
+
 func TestRepositoryProviderCheckoutRequiresPreResolvedGit(t *testing.T) {
 	job := plan.Job{
 		Event:                plan.Event{Provider: "github", Repository: "buildkite/buildkite-gha", SHA: strings.Repeat("a", 40)},
 		RequiredCapabilities: []string{"provider-token-read"},
 	}
 	credentials := &AgentRepositoryCredentials{Agent: "/usr/bin/buildkite-agent", JobID: testCacheJobID, JobToken: "job-secret"}
-	if _, err := (Runner{Git: "git", RepositoryCredentials: credentials}).runCheckout(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), job, actionintegration.CheckoutV7Commit, nil); err == nil || !strings.Contains(err.Error(), "resolved before workflow execution") {
+	if _, err := (Runner{Git: "git", RepositoryCredentials: credentials}).runCheckout(t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), job, actionintegration.CheckoutV7Commit, nil); err == nil || !strings.Contains(err.Error(), "resolved before workflow execution") {
 		t.Fatalf("runCheckout() unresolved Git error = %v", err)
 	}
 }
@@ -1317,7 +1480,7 @@ func TestProviderTokenReadRuntimeAuthorityIsCheckoutOnly(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: authority\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "ordinary", Kind: "run", Command: "true"}})
 	job.RequiredCapabilities = []string{"provider-token-read"}
-	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "restricted to the verified checkout adapter") {
+	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "restricted to the verified checkout adapter") {
 		t.Fatalf("ordinary provider-token-read error = %v", err)
 	}
 }
@@ -1352,7 +1515,7 @@ func TestCompositeCheckoutPreservesDynamicRefProvenance(t *testing.T) {
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
 
-	if _, err := (Runner{Actions: materializer}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "dynamic ref must resolve to the exact event SHA") {
+	if _, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "dynamic ref must resolve to the exact event SHA") {
 		t.Fatalf("nested dynamic checkout ref error = %v", err)
 	}
 }
@@ -1371,7 +1534,7 @@ func TestProviderTokenReadPreflightRejectsAnyUnknownCheckoutCommit(t *testing.T)
 		},
 	}
 	if found, err := validateJobCheckoutAdapters(job); err == nil || found || !strings.Contains(err.Error(), "does not admit") {
-		t.Fatalf("validateJobCheckoutAdapters() = %t, %v, want fail-closed rejection", found, err)
+		t.Fatalf("validateJobCheckoutAdapters() = %t, %v, want unknown commit rejection", found, err)
 	}
 }
 

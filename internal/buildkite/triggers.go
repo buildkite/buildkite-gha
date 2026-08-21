@@ -50,6 +50,40 @@ type TriggerEventSnapshot struct {
 	ChangedPaths          ChangedPathEvaluation
 }
 
+// supportedTriggerEvents is the single source of truth for GitHub trigger
+// events that map to a Buildkite build source.
+var supportedTriggerEvents = map[string]bool{
+	"workflow_call":     true,
+	"workflow_dispatch": true,
+	"schedule":          true,
+	"push":              true,
+	"pull_request":      true,
+	"merge_group":       true,
+	"release":           true,
+}
+
+// SupportedTriggerEvent reports whether the GitHub trigger event maps to a
+// Buildkite build source.
+func SupportedTriggerEvent(event string) bool {
+	return supportedTriggerEvents[event]
+}
+
+// UnsupportedTriggerEventError reports a trigger event with no Buildkite
+// build source. Such a trigger can never start a build, so it is ignored
+// when the workflow also declares a supported trigger.
+type UnsupportedTriggerEventError struct {
+	Event string
+}
+
+func (e *UnsupportedTriggerEventError) Error() string {
+	return fmt.Sprintf("unsupported GitHub trigger event %q", e.Event)
+}
+
+func unsupportedTriggerEvent(err error) bool {
+	var unsupported *UnsupportedTriggerEventError
+	return errors.As(err, &unsupported)
+}
+
 // UnsupportedPathFiltersError reports a trigger that cannot be translated
 // without changing its path-filter semantics.
 type UnsupportedPathFiltersError struct {
@@ -82,10 +116,17 @@ func LiveTriggerConditionExpressions(eventPredicate string) TriggerConditionExpr
 // TranslateTriggerCondition converts GitHub's trigger selection into a
 // deterministic Buildkite conditional. It deliberately does not approximate
 // path filtering: Buildkite if_changed has materially different semantics.
+// Unsupported trigger events contribute nothing unless no trigger has a
+// Buildkite build source at all.
 func TranslateTriggerCondition(triggers []workflow.Trigger) (string, error) {
 	var terms []string
+	var unsupported []error
 	for _, t := range triggers {
 		term, contributes, err := translateTrigger(t, liveTriggerExpressions(t.Event), TriggerEventSnapshot{}, true)
+		if unsupportedTriggerEvent(err) {
+			unsupported = append(unsupported, err)
+			continue
+		}
 		if err != nil {
 			return "", err
 		}
@@ -94,6 +135,9 @@ func TranslateTriggerCondition(triggers []workflow.Trigger) (string, error) {
 		}
 	}
 	if len(terms) == 0 {
+		if len(unsupported) > 0 {
+			return "", errors.Join(unsupported...)
+		}
 		return "", fmt.Errorf("workflow has no supported build source trigger")
 	}
 	return strings.Join(terms, " || "), nil
@@ -101,16 +145,31 @@ func TranslateTriggerCondition(triggers []workflow.Trigger) (string, error) {
 
 // ValidateTriggerConditions validates every trigger using the same translation
 // rules as pipeline generation without selecting an effective event.
+// Unsupported trigger events are reported only when the workflow declares no
+// supported trigger event at all; otherwise they are ignored because they can
+// never start a Buildkite build.
 func ValidateTriggerConditions(triggers []workflow.Trigger) error {
 	var findings []error
+	var unsupported []error
+	supportedEvent := false
 	for _, trigger := range triggers {
-		if _, _, err := translateTrigger(trigger, liveTriggerExpressions(trigger.Event), TriggerEventSnapshot{}, true); err != nil {
-			var pathFilters *UnsupportedPathFiltersError
-			if errors.As(err, &pathFilters) && (pathFilters.Event == "push" || pathFilters.Event == "pull_request") && pathFilters.Reason == "" {
-				continue
-			}
-			findings = append(findings, err)
+		_, _, err := translateTrigger(trigger, liveTriggerExpressions(trigger.Event), TriggerEventSnapshot{}, true)
+		if unsupportedTriggerEvent(err) {
+			unsupported = append(unsupported, err)
+			continue
 		}
+		supportedEvent = true
+		if err == nil {
+			continue
+		}
+		var pathFilters *UnsupportedPathFiltersError
+		if errors.As(err, &pathFilters) && (pathFilters.Event == "push" || pathFilters.Event == "pull_request") && pathFilters.Reason == "" {
+			continue
+		}
+		findings = append(findings, err)
+	}
+	if !supportedEvent {
+		findings = append(findings, unsupported...)
 	}
 	return errors.Join(findings...)
 }
@@ -129,6 +188,9 @@ func TranslateEventTriggerCondition(triggers []workflow.Trigger, event string, e
 			triggerSnapshot = snapshot
 		}
 		term, contributes, err := translateTrigger(trigger, triggerExpressions, triggerSnapshot, selected)
+		if !selected && unsupportedTriggerEvent(err) {
+			continue
+		}
 		if err != nil {
 			return "", false, err
 		}
@@ -265,19 +327,43 @@ func skipReason(reason, fallback string) string {
 }
 
 func liveTriggerExpressions(event string) TriggerConditionExpressions {
-	predicate := ""
-	switch event {
-	case "workflow_dispatch":
-		predicate = `(build.source == "ui" || build.source == "api")`
-	case "schedule":
-		predicate = `build.source == "schedule"`
-	case "push", "pull_request", "merge_group", "release":
-		predicate = `build.source_event == ` + yamlScalar(event)
+	return LiveTriggerConditionExpressions(LiveEventPredicate(event))
+}
+
+// LiveEventPredicate matches the original GitHub event when available and
+// preserves Buildkite's compatibility mapping for non-webhook builds.
+func LiveEventPredicate(event string) string {
+	githubEvent := "build.env(" + yamlScalar("BUILDKITE_GITHUB_EVENT") + ")"
+	predicate := githubEvent + " == " + yamlScalar(event)
+	fallbackEvent := "(" + githubEvent + " == null"
+	unsupportedEvent := ""
+	for _, supported := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
+		if unsupportedEvent != "" {
+			unsupportedEvent += " && "
+		}
+		unsupportedEvent += githubEvent + " != " + yamlScalar(supported)
 	}
-	return LiveTriggerConditionExpressions(predicate)
+	fallbackEvent += " || (" + unsupportedEvent + "))"
+	switch event {
+	case "push":
+		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source != "ui" && build.source != "api" && build.source != "schedule"))`
+	case "pull_request":
+		return "(" + predicate + " || (" + fallbackEvent + " && build.pull_request.id != null))"
+	case "workflow_dispatch":
+		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && (build.source == "ui" || build.source == "api")))`
+	case "schedule":
+		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source == "schedule"))`
+	case "merge_group", "release":
+		return predicate
+	default:
+		return ""
+	}
 }
 
 func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpressions, snapshot TriggerEventSnapshot, selected bool) (string, bool, error) {
+	if !SupportedTriggerEvent(t.Event) {
+		return "", false, &UnsupportedTriggerEventError{Event: t.Event}
+	}
 	pathFilters := t.Paths != nil || t.PathsIgnore != nil
 	if pathFilters {
 		if t.Event != "push" && t.Event != "pull_request" {
@@ -328,11 +414,12 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		if err != nil {
 			return "", false, fmt.Errorf("push tags: %w", err)
 		}
-		if hasBranchFilter && hasTagFilter {
+		switch {
+		case hasBranchFilter && hasTagFilter:
 			parts = append(parts, "(("+expressions.Tag+" == null && ("+branch+")) || ("+expressions.Tag+" != null && ("+tag+")))")
-		} else if hasBranchFilter {
+		case hasBranchFilter:
 			parts = append(parts, expressions.Tag+" == null", branch)
-		} else if hasTagFilter {
+		case hasTagFilter:
 			parts = append(parts, expressions.Tag+" != null", tag)
 		}
 		if pathFilters && selected && snapshot.Tag == nil {
@@ -482,7 +569,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	default:
-		return "", false, fmt.Errorf("unsupported GitHub trigger event %q", t.Event)
+		return "", false, &UnsupportedTriggerEventError{Event: t.Event}
 	}
 }
 
@@ -577,15 +664,14 @@ func refFilters(field string, include, exclude []string) (string, bool, error) {
 			return err
 		}
 		match := field + " =~ /" + r + "/"
-		if positive {
-			if state == "" {
-				state = match
-			} else {
-				state = "(" + state + " || " + match + ")"
-			}
-		} else if state == "" {
+		switch {
+		case positive && state == "":
+			state = match
+		case positive:
+			state = "(" + state + " || " + match + ")"
+		case state == "":
 			state = "!(" + match + ")"
-		} else {
+		default:
 			state = "(" + state + " && !(" + match + "))"
 		}
 		return nil
@@ -687,12 +773,13 @@ func githubGlob(glob string, pathPattern bool) (string, error) {
 		case '*':
 			if i+1 < len(runes) && runes[i+1] == '*' {
 				i++
-				if pathPattern && (i == 1 || runes[i-2] == '/') && i+1 < len(runes) && runes[i+1] == '/' {
+				switch {
+				case pathPattern && (i == 1 || runes[i-2] == '/') && i+1 < len(runes) && runes[i+1] == '/':
 					i++
 					atoms = append(atoms, atom{value: `((?s:.*)\/)?`})
-				} else if pathPattern {
+				case pathPattern:
 					atoms = append(atoms, atom{value: `(?s:.*)`})
-				} else {
+				default:
 					atoms = append(atoms, atom{value: ".*"})
 				}
 			} else {

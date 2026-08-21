@@ -343,8 +343,10 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 	if nestedInt(event.Payload, "number") != pullRequestNumber {
 		return nil, nil, fmt.Errorf("webhook pull request number does not match the Buildkite build")
 	}
+	// GitHub may report null while it computes mergeability. The merge commit
+	// and its exact base and head parents are verified below.
 	mergeable, mergeabilityKnown := pullRequest["mergeable"].(bool)
-	if !mergeabilityKnown || !mergeable {
+	if mergeabilityKnown && !mergeable {
 		return nil, nil, fmt.Errorf("webhook pull request must report a mergeable synthetic merge")
 	}
 	if !validBuildkiteCommit(baseSHA) || !validBuildkiteCommit(headSHA) || !validBuildkiteCommit(mergeSHA) {
@@ -383,6 +385,10 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 		mergeSource, err := gitCommand(root, "cat-file", "blob", mergeSHA+":"+input.CanonicalPath).Output()
 		if err != nil {
 			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q is unavailable in the event merge commit", input.CanonicalPath)
+			continue
+		}
+		if len(mergeSource) > compiler.MaxReusableWorkflowBytes {
+			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q cannot be parsed from the event merge commit", input.CanonicalPath)
 			continue
 		}
 		mergeWorkflow, err := workflow.Parse(input.Path, mergeSource)

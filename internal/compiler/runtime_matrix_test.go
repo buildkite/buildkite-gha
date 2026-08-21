@@ -170,11 +170,11 @@ func TestExpandRuntimeMatrixOutputEnforcesByteCardinalityAndGraphBounds(t *testi
 	}
 
 	dimensions := make(map[string]any, MaxRuntimeMatrixProperties)
-	for i := 0; i < MaxRuntimeMatrixProperties-1; i++ {
+	for i := range MaxRuntimeMatrixProperties - 1 {
 		dimensions[fmt.Sprintf("d%d", i)] = []any{i}
 	}
 	include := make(map[string]any, MaxRuntimeMatrixProperties)
-	for i := 0; i < MaxRuntimeMatrixProperties; i++ {
+	for i := range MaxRuntimeMatrixProperties {
 		include[fmt.Sprintf("i%d", i)] = i
 	}
 	dimensions["include"] = []any{include}

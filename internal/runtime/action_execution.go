@@ -26,207 +26,15 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
-// JobResult is the bounded logical result returned to the transport layer.
-type JobResult struct {
-	Conclusion         string                     `json:"conclusion"`
-	Outputs            map[string]string          `json:"outputs,omitempty"`
-	Env                map[string]string          `json:"env,omitempty"`
-	State              map[string]string          `json:"state,omitempty"`
-	Summary            string                     `json:"summary,omitempty"`
-	WarningAnnotations string                     `json:"warning_annotations,omitempty"`
-	ErrorAnnotations   string                     `json:"error_annotations,omitempty"`
-	Artifacts          []transport.ResultArtifact `json:"artifacts,omitempty"`
-
-	summaryTruncated  bool
-	warningsTruncated bool
-	errorsTruncated   bool
-	failureVisible    bool
-}
-
-// FailureVisible reports whether the runtime expanded a section containing the failure.
-func (r JobResult) FailureVisible() bool { return r.failureVisible }
-
-const maxJobOutputBytes = 1024
-
-type toleratedJobFailure struct {
-	err error
-}
-
-func (e *toleratedJobFailure) Error() string { return e.err.Error() }
-func (e *toleratedJobFailure) Unwrap() error { return e.err }
-
-type hardJobFailure struct {
-	err error
-}
-
-func (e *hardJobFailure) Error() string { return e.err.Error() }
-func (e *hardJobFailure) Unwrap() error { return e.err }
-
-type workflowJobFailure struct {
-	err error
-}
-
-func (e *workflowJobFailure) Error() string { return e.err.Error() }
-func (e *workflowJobFailure) Unwrap() error { return e.err }
-
-func markHardJobFailure(err error) error {
-	if err == nil || isHardJobFailure(err) {
-		return err
-	}
-	return &hardJobFailure{err: err}
-}
-
-func isHardJobFailure(err error) bool {
-	var target *hardJobFailure
-	return errors.As(err, &target)
-}
-
-func markWorkflowJobFailure(err error) error {
-	if err == nil {
-		return nil
-	}
-	return &workflowJobFailure{err: err}
-}
-
-func isWorkflowJobFailure(err error) bool {
-	var target *workflowJobFailure
-	return errors.As(err, &target)
-}
-
-// IsToleratedJobFailure reports whether err contains only a workflow failure
-// admitted by the job's continue-on-error setting. Joined cleanup, integrity,
-// transport, and publication errors deliberately return false.
-func IsToleratedJobFailure(err error) bool {
-	_, ok := err.(*toleratedJobFailure)
-	return ok
-}
-
-func tolerateJobSetupFailure(runCtx context.Context, job plan.Job, result JobResult, err error) (JobResult, error) {
-	if runCtx.Err() != nil {
-		result.Conclusion = "cancelled"
-		return result, errors.Join(err, runCtx.Err())
-	}
-	if job.ContinueOnError && isWorkflowJobFailure(err) && !isHardJobFailure(err) {
-		result.Conclusion = "success"
-		return result, &toleratedJobFailure{err: err}
-	}
-	return result, err
-}
-
-type registeredPost struct {
-	condition  string
-	invocation *preparedInvocation
-}
-
-type postRegistry struct {
-	mu    sync.Mutex
-	posts []registeredPost
-}
-
-type preparedInvocation struct {
-	action         javaScriptAction
-	state          map[string]string
-	node           string
-	eval           expression.Context
-	envOverlay     map[string]string
-	isolated       bool
-	postRegistered bool
-}
-
-type remotePreparations map[string]*preparedInvocation
-
-type remotePreparationStatus struct {
-	unsuccessful bool
-}
-
-type remotePreparationTimeout struct {
-	ctx      context.Context
-	step     plan.Step
-	eval     expression.Context
-	resolved bool
-	bounded  context.Context
-	cancel   context.CancelFunc
-}
-
-func (t *remotePreparationTimeout) context() (context.Context, error) {
-	if !t.resolved {
-		step, err := evaluateStepTimeout(t.step, t.eval)
-		if err != nil {
-			return nil, fmt.Errorf("controls: %w", err)
-		}
-		t.bounded, t.cancel = stepContext(t.ctx, step.TimeoutMinutes)
-		t.resolved = true
-	}
-	return t.bounded, nil
-}
-
-func (t *remotePreparationTimeout) close() {
-	if t != nil && t.cancel != nil {
-		t.cancel()
-	}
-}
-
-const node16DeprecationMessage = "Node.js 16 actions are deprecated. Please update the following actions to use Node.js 20: %s. For more information see: https://github.blog/changelog/2023-09-22-github-actions-transitioning-from-node-16-to-node-20/."
-
-type node16DeprecationWarnings struct {
-	mu      sync.Mutex
-	actions map[string]struct{}
-}
-
-func (w *node16DeprecationWarnings) record(reference string) {
-	if w == nil || reference == "" {
-		return
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.actions == nil {
-		w.actions = make(map[string]struct{})
-	}
-	w.actions[reference] = struct{}{}
-}
-
-func (w *node16DeprecationWarnings) emit(processor *commandProcessor) {
-	if w == nil || processor == nil {
-		return
-	}
-	w.mu.Lock()
-	actions := sortedKeys(w.actions)
-	w.mu.Unlock()
-	if len(actions) != 0 {
-		processor.trustedWarning(fmt.Sprintf(node16DeprecationMessage, strings.Join(actions, ", ")))
-	}
-}
-
-func actionNodeMajor(runtime metadata.Runtime) (int, bool) {
-	switch runtime {
-	case metadata.RuntimeNode16:
-		return 16, true
-	case metadata.RuntimeNode20:
-		return 20, true
-	case metadata.RuntimeNode24:
-		return 24, true
-	default:
-		return 0, false
-	}
-}
-
-func (r *postRegistry) register(post *registeredPost) {
-	if post == nil {
-		return
-	}
-	r.mu.Lock()
-	r.posts = append(r.posts, *post)
-	r.mu.Unlock()
-}
-
-func (r *postRegistry) snapshot() []registeredPost {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]registeredPost(nil), r.posts...)
-}
-
 // verifyWorkflow binds a plan to the workflow bytes in the supplied workspace.
 func verifyWorkflow(job plan.Job, workspace string) error {
+	if job.Workflow.Remote != nil {
+		// Remote workflow bytes were read from the immutable repository tree
+		// recorded in the content-addressed plan. They are not part of the
+		// caller workspace; Job.Validate binds their path, commit, tree digest,
+		// and file digest instead.
+		return nil
+	}
 	path, err := workspacePath(workspace, job.Workflow.Path)
 	if err != nil {
 		return fmt.Errorf("verify workflow binding: %w", err)
@@ -243,20 +51,10 @@ func verifyWorkflow(job plan.Job, workspace string) error {
 	return nil
 }
 
-// RunJob executes the plan's ordered steps and always drains registered post actions.
-func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (final JobResult, runJobErr error) {
-	defer func() {
-		if final.Conclusion == "success" && runJobErr != nil && !IsToleratedJobFailure(runJobErr) {
-			final.Conclusion = "failure"
-		}
-	}()
-	callerWorkspace := workspace != ""
-	if r.nodeVerification == nil {
-		r.nodeVerification = &managedNodeVerification{paths: make(map[int]string, 2)}
-	}
-	if r.artifactRegistry == nil {
-		r.artifactRegistry = &artifactRegistry{names: make(map[string]bool)}
-	}
+func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error) {
+	job := r.job
+	workspace := r.workspace
+	callerWorkspace := r.callerWorkspace
 	if err := job.Validate(); err != nil {
 		return JobResult{}, err
 	}
@@ -271,6 +69,22 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		if capability != "docker" && capability != "secrets" && capability != "network" && capability != "provider-token-read" && capability != "provider-token-write" {
 			return JobResult{}, fmt.Errorf("capability %q is unsupported in the job runtime", capability)
 		}
+	}
+	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}, Artifacts: []transport.ResultArtifact{}}
+	if len(job.DeferredInputs) != 0 {
+		if !deferredInputsHydrated(job.DeferredInputs, job.DeferredInputValues) {
+			return jobResult, fmt.Errorf("deferred reusable-workflow inputs were not hydrated")
+		}
+		job.Inputs = mergeWorkflowInputs(job.Inputs, job.DeferredInputValues)
+		r.job = job
+	}
+	guardsPass, err := evaluateCallGuards(job)
+	if err != nil {
+		return jobResult, err
+	}
+	if !guardsPass {
+		jobResult.Conclusion = "skipped"
+		return jobResult, nil
 	}
 	if job.HasCapability("provider-token-read") {
 		usesCheckout, err := validateJobCheckoutAdapters(job)
@@ -346,11 +160,10 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}
 		}
 	}
-	if len(job.Dependencies) != 0 && len(job.Needs) == 0 {
-		return JobResult{}, fmt.Errorf("job has %d static dependencies but no hydrated prerequisite results", len(job.Dependencies))
+	if len(job.NeedSources) != 0 && len(job.Needs) == 0 {
+		return jobResult, fmt.Errorf("job has prerequisite sources but no hydrated prerequisite results")
 	}
 	processor := newCommandProcessor(r.stdout(), r.stderr())
-	r.node16Warnings = &node16DeprecationWarnings{}
 	eval := expression.Context{
 		WorkflowInputs: job.Inputs,
 		Matrix:         job.Matrix,
@@ -361,7 +174,6 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		JobStatus:      "success",
 		Runner:         runnerContext,
 	}
-	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}, Artifacts: []transport.ResultArtifact{}}
 	for _, name := range sortedKeys(job.Needs) {
 		need := job.Needs[name]
 		if need.Result == "" {
@@ -402,7 +214,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			cancelService()
 			return jobResult, err
 		}
-		defer func() { runJobErr = errors.Join(runJobErr, r.idTokenService.Close()) }()
+		defer func() { runJobErr = errors.Join(runJobErr, r.idTokenService.Close(runCtx)) }()
 		defer cancelService()
 	}
 	if r.Mise == "" && r.ResolveMise != nil {
@@ -536,7 +348,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		// lazy. Materialize every remote lock now because bind mounts cannot be
 		// added after the persistent container is created.
 		for _, lock := range job.Actions {
-			if lock.Source != "github" {
+			if lock.Source != "github" || usesNativeAdapter(lock) {
 				continue
 			}
 			action, _, resolveErr := actions.resolve(runCtx, plan.ActionSelector{Lock: lock.ID})
@@ -570,7 +382,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				return tolerateJobSetupFailure(runCtx, job, jobResult, mountErr)
 			}
 		}
-		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, *job.Container, services, evaluatedServiceOrder, containerMounts...)
+		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, job.Container, services, evaluatedServiceOrder, containerMounts...)
 		if setupErr != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
@@ -578,22 +390,26 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		r.jobDocker = backend
 		eval.Services = backend.servicePorts
 		defer func() {
-			if err := backend.cleanup(); err != nil {
+			if err := backend.cleanup(runCtx); err != nil {
 				runJobErr = errors.Join(runJobErr, err)
 			}
 		}()
 	} else if len(services) != 0 {
-		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, plan.Container{}, services, evaluatedServiceOrder)
+		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, nil, services, evaluatedServiceOrder)
 		if setupErr != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
 		r.jobDocker = backend
 		eval.Services = backend.servicePorts
 		defer func() {
-			if err := backend.cleanup(); err != nil {
+			if err := backend.cleanup(runCtx); err != nil {
 				runJobErr = errors.Join(runJobErr, err)
 			}
 		}()
+	}
+	runnerContext["temp"] = runnerTemp
+	if r.jobContainer != nil {
+		runnerContext["temp"] = r.jobContainer.containerPath(runnerTemp)
 	}
 	runtimeEnv := standardEnvironment(job, workspace, runnerTemp, toolCache)
 	jobResult.Env = mergeStepEnvironment(runtimeEnv, jobEnv)
@@ -612,14 +428,33 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 	}
 	eval.Env = jobResult.Env
-	var posts postRegistry
-	supervisor := newBackgroundSupervisor(maxActiveBackgroundSteps)
+	r.workspace = workspace
+	r.processor = processor
+	r.eval = eval
+	r.result = jobResult
+	r.runtimeEnv = runtimeEnv
+	r.actions = actions
+	r.posts = &postRegistry{}
+	r.supervisor = newBackgroundSupervisor(maxActiveBackgroundSteps)
+	r.prepared = remotePreparations{}
+	r.preFailures = make(map[int]stepExecution)
+	return r.runPreActions(ctx, runCtx)
+}
 
-	var runErr error
-	hardFailure := false
-	prepared := remotePreparations{}
+func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
+	job := r.job
+	workspace := r.workspace
+	processor := r.processor
+	eval := r.eval
+	jobResult := r.result
+	runtimeEnv := r.runtimeEnv
+	actions := r.actions
+	posts := r.posts
+	prepared := r.prepared
+	runErr := r.runErr
+	hardFailure := r.hardFailure
 	preStatus := remotePreparationStatus{}
-	preFailures := make(map[int]stepExecution)
+	preFailures := r.preFailures
 	if len(job.Actions) != 0 {
 		for stepIndex, step := range job.Steps {
 			eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
@@ -656,7 +491,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes)
 			bindHashFilesContext(preCtx, &preEval)
 			wasUnsuccessful := preStatus.unsuccessful
-			preResult, preErr := r.prepareRemoteAction(preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, &posts, actions, prepared, &preStatus, true, nil, nil, nil)
+			preResult, preErr := r.prepareRemoteAction(preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, posts, actions, prepared, &preStatus, true, nil, nil, nil)
 			commitResultEnvironment(jobResult.Env, preResult)
 			mergeInto(jobResult.State, preResult.State)
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
@@ -679,6 +514,26 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			cancelPre()
 		}
 	}
+	r.eval = eval
+	r.result = jobResult
+	r.runErr = runErr
+	r.hardFailure = hardFailure
+	return r.runSteps(ctx, runCtx)
+}
+
+func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
+	job := r.job
+	workspace := r.workspace
+	processor := r.processor
+	eval := r.eval
+	jobResult := r.result
+	runtimeEnv := r.runtimeEnv
+	actions := r.actions
+	posts := r.posts
+	supervisor := r.supervisor
+	prepared := r.prepared
+	preFailures := r.preFailures
+	runErr := r.runErr
 	for stepIndex, step := range job.Steps {
 		eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
 		if step.Kind == "cancel" {
@@ -781,7 +636,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 					defer cancelExecution()
 					executionEval := cloneExpressionContext(evalSnapshot)
 					bindHashFilesContext(stepCtx, &executionEval)
-					return r.executePlanStep(runCtx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, executionEval, &posts, actions, prepared)
+					return r.executePlanStep(runCtx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, executionEval, posts, actions, prepared)
 				},
 				func(stepCtx context.Context) stepExecution {
 					return cancelledStepExecution(runCtx, stepCtx, step)
@@ -790,7 +645,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			continue
 		}
 		processor.logSection(displayName)
-		execution := r.executePlanStep(runCtx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, evalSnapshot, &posts, actions, prepared)
+		execution := r.executePlanStep(runCtx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, evalSnapshot, posts, actions, prepared)
 		cancelStep()
 		if execution.outcome == "failure" {
 			processor.expandCurrentSection()
@@ -804,10 +659,21 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if runCtx.Err() != nil {
 		runErr = errors.Join(runErr, runCtx.Err())
 	}
+	r.eval = eval
+	r.result = jobResult
+	r.runErr = runErr
+	return r.runPostActions(runCtx)
+}
 
+func (r *jobRun) runPostActions(runCtx context.Context) (JobResult, error) {
+	jobResult := r.result
+	processor := r.processor
+	workspace := r.workspace
+	eval := r.eval
+	runErr := r.runErr
 	postCtx, cancelPosts := postPhaseContext(runCtx, r.postActionTimeout(), r.cleanupTimeout())
 	defer cancelPosts()
-	registeredPosts := posts.snapshot()
+	registeredPosts := r.posts.snapshot()
 	for i := len(registeredPosts) - 1; i >= 0; i-- {
 		post := registeredPosts[i]
 		invocation := post.invocation
@@ -853,10 +719,23 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			runErr = errors.Join(runErr, fmt.Errorf("post action %q: %w", action.Name, postErr))
 		}
 	}
+	r.eval = eval
+	r.result = jobResult
+	r.runErr = runErr
+	return r.finalize(runCtx)
+}
 
+func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
+	job := r.job
+	processor := r.processor
+	eval := r.eval
+	jobResult := r.result
+	runErr := r.runErr
+	hardFailure := r.hardFailure
 	r.node16Warnings.emit(processor)
 	jobResult.WarningAnnotations, jobResult.warningsTruncated, jobResult.ErrorAnnotations, jobResult.errorsTruncated = processor.workflowCommandAnnotations()
 	sensitiveValues := processor.maskValues()
+	runErr = processor.scrubError(runErr)
 	for _, artifact := range jobResult.Artifacts {
 		for _, sensitive := range sensitiveValues {
 			if sensitive != "" && strings.Contains(artifact.Name, sensitive) {
@@ -882,22 +761,80 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 		jobResult.Outputs[name] = value
 	}
-	if runCtx.Err() != nil {
+	switch {
+	case runCtx.Err() != nil:
 		jobResult.Conclusion = "cancelled"
-	} else if runErr == nil {
+	case runErr == nil:
 		jobResult.Conclusion = "success"
-	} else if job.ContinueOnError && !hardFailure && !isHardJobFailure(runErr) {
+	case job.ContinueOnError && !hardFailure && !isHardJobFailure(runErr):
 		jobResult.Conclusion = "success"
 		runErr = &toleratedJobFailure{err: runErr}
 	}
 	return scrubJobResult(jobResult, sensitiveValues), runErr
 }
 
-func evaluateServices(services map[string]plan.Container, eval expression.Context) (map[string]plan.Container, error) {
+func evaluateCallGuards(job plan.Job) (bool, error) {
+	github := githubContext(job)
+	for i, guard := range job.CallGuards {
+		if len(guard.DeferredInputs) != 0 && !deferredInputsHydrated(guard.DeferredInputs, guard.DeferredInputValues) {
+			return false, fmt.Errorf("evaluate reusable-workflow call guard %d: deferred inputs were not hydrated", i+1)
+		}
+		if len(guard.NeedSources) != 0 && len(guard.Needs) == 0 {
+			return false, fmt.Errorf("evaluate reusable-workflow call guard %d: prerequisite results are missing", i+1)
+		}
+		condition := expression.ConditionContext{Inputs: mergeWorkflowInputs(guard.Inputs, guard.DeferredInputValues), Needs: needStatuses(guard.Needs), Vars: job.Vars, GitHub: github}
+		for name, need := range guard.Needs {
+			if need.Result == "" {
+				return false, fmt.Errorf("evaluate reusable-workflow call guard %d: prerequisite result %q is missing", i+1, name)
+			}
+			switch need.Result {
+			case "success", "failure", "cancelled", "skipped":
+			default:
+				return false, fmt.Errorf("evaluate reusable-workflow call guard %d: prerequisite %q has invalid result %q", i+1, name, need.Result)
+			}
+			condition.Failure = condition.Failure || need.Result == "failure"
+			condition.Cancelled = condition.Cancelled || need.Result == "cancelled"
+			condition.Unsuccessful = condition.Unsuccessful || need.Result != "success"
+		}
+		run, err := expression.EvaluateCondition(guard.Condition, condition)
+		if err != nil {
+			return false, fmt.Errorf("evaluate reusable-workflow call guard %d: %w", i+1, err)
+		}
+		if !run {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func deferredInputsHydrated(deferred map[string]plan.DeferredInput, values map[string]any) bool {
+	if len(deferred) != len(values) {
+		return false
+	}
+	for name := range deferred {
+		if _, ok := values[name]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func mergeWorkflowInputs(inputs, deferred map[string]any) map[string]any {
+	merged := maps.Clone(inputs)
+	if merged == nil && len(deferred) != 0 {
+		merged = make(map[string]any, len(deferred))
+	}
+	for name, value := range deferred {
+		merged[name] = value
+	}
+	return merged
+}
+
+func evaluateServices(services map[string]plan.ServiceContainer, eval expression.Context) (map[string]plan.ServiceContainer, error) {
 	if len(services) == 0 {
 		return services, nil
 	}
-	result := make(map[string]plan.Container, len(services))
+	result := make(map[string]plan.ServiceContainer, len(services))
 	for name, service := range services {
 		service.Env = maps.Clone(service.Env)
 		service.Ports = append([]string(nil), service.Ports...)
@@ -949,7 +886,7 @@ func evaluateServices(services map[string]plan.Container, eval expression.Contex
 	return result, nil
 }
 
-func serviceOrder(services map[string]plan.Container, preferred []string) []string {
+func serviceOrder(services map[string]plan.ServiceContainer, preferred []string) []string {
 	result := make([]string, 0, len(services))
 	seen := make(map[string]bool, len(services))
 	for _, name := range preferred {
@@ -966,7 +903,7 @@ func serviceOrder(services map[string]plan.Container, preferred []string) []stri
 	return result
 }
 
-func evaluateServiceMap(static map[string]plan.Container, staticOrder []string, source string, eval expression.Context) (map[string]plan.Container, []string, error) {
+func evaluateServiceMap(static map[string]plan.ServiceContainer, staticOrder []string, source string, eval expression.Context) (map[string]plan.ServiceContainer, []string, error) {
 	if source == "" {
 		services, err := evaluateServices(static, eval)
 		return services, serviceOrder(services, staticOrder), err
@@ -978,14 +915,14 @@ func evaluateServiceMap(static map[string]plan.Container, staticOrder []string, 
 	if len(entries) > 32 {
 		return nil, nil, fmt.Errorf("services expression has more than 32 entries")
 	}
-	services := make(map[string]plan.Container, len(entries))
+	services := make(map[string]plan.ServiceContainer, len(entries))
 	order := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		name, raw := entry.Name, entry.Value
 		if !plan.ValidateServiceName(name) {
 			return nil, nil, fmt.Errorf("service name %q must be lowercase and valid", name)
 		}
-		var service plan.Container
+		var service plan.ServiceContainer
 		if image, ok := raw.(string); ok {
 			service.Image = image
 		} else {
@@ -1211,7 +1148,7 @@ func (r Runner) resolveSecrets(ctx context.Context, processor *commandProcessor,
 	for _, name := range names {
 		value, err := r.Secrets.ResolveSecret(ctx, name)
 		if err != nil {
-			return nil, fmt.Errorf("resolve secret %q: %w", name, err)
+			return nil, &SecretResolutionError{Name: name, Err: err}
 		}
 		if value != "" {
 			processor.addMask(value)
@@ -1331,26 +1268,35 @@ func applyPaths(env map[string]string, paths []string) {
 
 func githubContext(job plan.Job) map[string]any {
 	return map[string]any{
-		"repository":       job.Event.Repository,
-		"repository_owner": plan.EventRepositoryOwner(job.Event.Repository),
-		"ref":              job.Event.Ref,
-		"ref_name":         plan.EventRefName(job.Event.Ref),
-		"ref_type":         plan.EventRefType(job.Event.Ref),
-		"head_ref":         job.Event.HeadRef,
-		"base_ref":         job.Event.BaseRef,
-		"sha":              job.Event.SHA,
-		"actor":            job.Event.Actor,
-		"event_name":       job.Event.Name,
-		"server_url":       plan.EventServerURL(job.Event.Provider),
+		"action_path":       "",
+		"action_ref":        "",
+		"action_repository": "",
+		"repository":        job.Event.Repository,
+		"repository_owner":  plan.EventRepositoryOwner(job.Event.Repository),
+		"ref":               job.Event.Ref,
+		"ref_name":          plan.EventRefName(job.Event.Ref),
+		"ref_type":          plan.EventRefType(job.Event.Ref),
+		"head_ref":          job.Event.HeadRef,
+		"base_ref":          job.Event.BaseRef,
+		"sha":               job.Event.SHA,
+		"actor":             job.Event.Actor,
+		"event_name":        job.Event.Name,
+		"server_url":        plan.EventServerURL(job.Event.Provider),
+		"workflow":          workflowDisplayName(job),
+		"job":               job.Workflow.LogicalJobID,
 	}
+}
+
+func workflowDisplayName(job plan.Job) string {
+	if job.Workflow.Name != "" {
+		return job.Workflow.Name
+	}
+	return job.Workflow.Path
 }
 
 func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string) map[string]string {
 	runner, _ := canonicalRunnerContext(goruntime.GOOS, goruntime.GOARCH)
-	workflowName := job.Workflow.Name
-	if workflowName == "" {
-		workflowName = job.Workflow.Path
-	}
+	workflowName := workflowDisplayName(job)
 	env := map[string]string{
 		"CI":                "true",
 		"GITHUB_ACTIONS":    "true",
@@ -1446,7 +1392,7 @@ type invocationEnvironment struct {
 	explicitPATH bool
 }
 
-func (r Runner) invocationEnvironment(jobEnv, stepEnv map[string]string) invocationEnvironment {
+func (r *jobRun) invocationEnvironment(jobEnv, stepEnv map[string]string) invocationEnvironment {
 	_, stepPATH := stepEnv["PATH"]
 	jobPATH := r.explicitJobPATH || jobEnv["PATH"] != r.implicitJobPATH
 	return invocationEnvironment{jobEnv: jobEnv, stepEnv: stepEnv, explicitPATH: jobPATH || stepPATH}
@@ -1507,7 +1453,7 @@ func isRuntimeContextEnvironment(name string) bool {
 	}
 }
 
-func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) (Result, error) {
+func (r *jobRun) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) (Result, error) {
 	return r.runActionStep(ctx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, nil, eval, posts, actions, prepared, nil, nil)
 }
 
@@ -1531,15 +1477,15 @@ func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockR
 			return fmt.Errorf("action recursion detected at lock %q", lock.ID)
 		}
 	}
+	if usesNativeAdapter(lock) {
+		return nil
+	}
 	runtime, err := action.Runtime()
 	if err != nil {
 		return err
 	}
 	if err := action.ValidateEntrypoints(runtime); err != nil {
 		return err
-	}
-	if usesNativeAdapter(lock) {
-		return nil
 	}
 	if runtime != metadata.RuntimeComposite {
 		return nil
@@ -1560,11 +1506,16 @@ func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockR
 	return nil
 }
 
-func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockResolver) ([]containerMount, error) {
+func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockResolver) ([]containerMount, error) {
 	byTarget := map[string]containerMount{}
 	requiredNode := map[int]bool{}
 	unknownWorkspaceRuntime := false
 	for _, lock := range actions.job.Actions {
+		// A native adapter replaces the admitted action's execution entirely,
+		// so its source tree is never mounted or classified for the container.
+		if usesNativeAdapter(lock) {
+			continue
+		}
 		entry := actions.locks[lock.ID]
 		entry.mu.Lock()
 		material := entry.material
@@ -1604,9 +1555,6 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 				return nil, fmt.Errorf("conflicting verified action roots for %q", target)
 			}
 			byTarget[target] = m
-		}
-		if usesNativeAdapter(lock) {
-			continue
 		}
 		if major, ok := actionNodeMajor(actionRuntime); ok {
 			requiredNode[major] = true
@@ -1660,13 +1608,11 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 	return out, nil
 }
 
-func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProcessor, workspace string, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error, inheritedTimeout *remotePreparationTimeout, inheritedEnvOverlay map[string]string) (Result, error) {
+func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandProcessor, workspace string, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error, inheritedTimeout *remotePreparationTimeout, inheritedEnvOverlay map[string]string) (Result, error) {
 	result := newResult()
 	eval.JobStatus = jobStatusValue(status.unsuccessful, ctx.Err() != nil)
-	evaluate := evaluateMap
-	if workflowStep {
-		evaluate = evaluateStepMap
-	} else {
+	evaluate := evaluateStepMap
+	if !workflowStep {
 		eval.HashFiles = nil
 	}
 	source, err := actions.source(*step.Action)
@@ -1680,6 +1626,12 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 	if err != nil {
 		return result, err
 	}
+	// The native adapters replace the verified action's lifecycle as one
+	// indivisible operation, so upstream metadata never classifies and no
+	// upstream cleanup is registered for phases this runtime never executes.
+	if usesCheckoutAdapter(lock) || usesUploadArtifactAdapter(lock) || usesDownloadArtifactAdapter(lock) {
+		return result, nil
+	}
 	runtime, err := action.Runtime()
 	if err != nil {
 		return result, fmt.Errorf("action %q uses %w", step.Uses, err)
@@ -1689,13 +1641,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 	}
 
 	switch runtime {
-	case metadata.RuntimeNode16, metadata.RuntimeNode20, metadata.RuntimeNode24:
-		// The checkout adapter replaces the verified action's JavaScript
-		// lifecycle as one indivisible operation. Do not register upstream
-		// checkout cleanup for a main phase that this runtime never executes.
-		if usesCheckoutAdapter(lock) || usesUploadArtifactAdapter(lock) || usesDownloadArtifactAdapter(lock) {
-			return result, nil
-		}
+	case metadata.RuntimeNode16, metadata.RuntimeNode24:
 		if err := expression.ValidateActionLifecycleCondition(action.Runs.PreIf); err != nil {
 			return result, fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err)
 		}
@@ -1717,48 +1663,54 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}, eval: invocationEval, isolated: !workflowStep}
 		prepared[invocationID] = invocation
 		if javascript.Pre != "" {
+			failPre := func(err error) (Result, error) {
+				invocation.preFailure = err
+				return result, err
+			}
 			stepEnv := map[string]string{}
 			if inheritedEvalErr == nil {
 				stepEnv, err = evaluate(step.Env, eval)
 				if err != nil {
-					return result, err
+					return failPre(err)
 				}
 				invocationEval.Env = mergeStringMaps(invocationEval.Env, stepEnv)
 			}
 			condition := lifecycleConditionContext(invocationEval, status.unsuccessful, ctx.Err() != nil)
 			runPre, err := expression.EvaluateActionLifecycleCondition(action.Runs.PreIf, condition)
 			if err != nil {
-				return result, fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err)
+				return failPre(fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err))
 			}
 			if !runPre {
 				return result, nil
 			}
 			if inheritedEvalErr != nil {
-				return result, inheritedEvalErr
+				return failPre(inheritedEvalErr)
 			}
 			eval.Env = mergeStringMaps(eval.Env, stepEnv)
-			phaseCtx := ctx
-			cancelPhase := func() {}
+			phaseCtx, cancelPhase := context.WithCancel(ctx)
+			defer func() { cancelPhase() }()
 			if workflowStep {
 				resolvedStep, err := evaluateStepTimeout(step, eval)
 				if err != nil {
-					return result, fmt.Errorf("controls: %w", err)
+					return failPre(fmt.Errorf("controls: %w", err))
 				}
+				cancelPhase()
 				phaseCtx, cancelPhase = stepContext(ctx, resolvedStep.TimeoutMinutes)
 			} else if inheritedTimeout != nil {
-				phaseCtx, err = inheritedTimeout.context()
+				cancelPhase()
+				phaseCtx, err = inheritedTimeout.context(ctx)
+				cancelPhase = func() {}
 				if err != nil {
-					return result, err
+					return failPre(err)
 				}
 			}
-			defer cancelPhase()
 			inputs, err := evaluate(step.With, eval)
 			if err != nil {
-				return result, err
+				return failPre(err)
 			}
 			inputs, err = resolveActionInputs(action, inputs, eval)
 			if err != nil {
-				return result, err
+				return failPre(err)
 			}
 			javascript.Inputs = inputs
 			javascript.Env = mergeStepEnvironment(jobEnv, stepEnv)
@@ -1767,13 +1719,13 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			invocation.envOverlay = mergeStringMaps(inheritedEnvOverlay, stepEnv)
 			node, err := r.discoverNode(phaseCtx, major, explicit)
 			if err != nil {
-				return result, err
+				return failPre(err)
 			}
 			invocation.node = node
 			posts.register(postForInvocation(invocation, action.Runs.PostIf))
 			invocation.postRegistered = true
 			if err := r.runJavaScriptPhase(phaseCtx, processor, workspace, node, javascript, javascript.Pre, nil, invocation.state, &result); err != nil {
-				return result, err
+				return failPre(err)
 			}
 		}
 		return result, nil
@@ -1793,10 +1745,19 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		}
 		preparationTimeout := inheritedTimeout
 		if workflowStep && compositeEvalErr == nil {
-			preparationTimeout = &remotePreparationTimeout{ctx: ctx, step: step, eval: eval}
+			preparationTimeout = &remotePreparationTimeout{step: step, eval: eval}
 			defer preparationTimeout.close()
 		}
+		bindActionReferenceContext(&eval, &lock)
 		eval.Inputs = inputs
+		// github.action_path scopes to this composite invocation for child pre
+		// hooks too, mirroring the main-phase overlay in runCompositeMetadata.
+		contextActionPath := action.Path
+		if r.jobContainer != nil {
+			contextActionPath = r.jobContainer.containerPath(action.Path)
+		}
+		eval.GitHub = cloneAnyMap(eval.GitHub)
+		eval.GitHub["action_path"] = contextActionPath
 		compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
 		compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
 		lifecycleEnvOverlay := mergeStringMaps(inheritedEnvOverlay, stepEnv)
@@ -1811,6 +1772,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			child := plan.Step{ID: childStep.ID, Name: childStep.Name, Kind: "uses", Uses: childStep.Uses, With: childStep.With, Env: childStep.Env, Action: &plan.ActionSelector{Lock: selector.Lock}}
 			childProcessEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 			eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
+			wasUnsuccessful := status.unsuccessful
 			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, false, compositeEvalErr, preparationTimeout, lifecycleEnvOverlay)
 			mergeInto(result.Env, childResult.Env)
 			if childResult.pathBaseSet {
@@ -1822,8 +1784,22 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			mergeInto(result.State, childResult.State)
 			appendJobSummary(&result.Summary, &result.summaryTruncated, childResult.Summary, childResult.summaryTruncated)
 			if childErr != nil {
-				status.unsuccessful = true
-				err = errors.Join(err, fmt.Errorf("composite action step %d: %w", i+1, childErr))
+				classificationCtx, cancelClassification := context.WithCancel(ctx)
+				if preparationTimeout != nil && preparationTimeout.bounded != nil {
+					// contextcheck cannot trace the cached timeout context back to ctx.
+					// Classification only needs its cancellation state.
+					if preparationTimeout.bounded.Err() != nil {
+						cancelClassification()
+					}
+				}
+				execution := classifyStepExecution(classificationCtx, classificationCtx, plan.Step{ContinueOnError: childStep.ContinueOnError}, childResult, childErr)
+				cancelClassification()
+				if execution.conclusion != "success" {
+					status.unsuccessful = true
+					err = errors.Join(err, fmt.Errorf("composite action step %d: %w", i+1, childErr))
+				} else {
+					status.unsuccessful = wasUnsuccessful
+				}
 			}
 		}
 		return result, err
@@ -1832,7 +1808,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 	}
 }
 
-func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv, evaluatedWith map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string, inheritedEnvOverlay map[string]string) (Result, error) {
+func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv, evaluatedWith map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string, inheritedEnvOverlay map[string]string) (Result, error) {
 	if stepEnv == nil {
 		var err error
 		stepEnv, err = evaluateStepMap(step.Env, eval)
@@ -1875,16 +1851,12 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if err != nil {
 			return result, err
 		}
-		dir, err := workspacePath(workspace, workingDirectory)
-		if err != nil {
-			return result, err
-		}
-		args, err := shellCommand(shell, script)
+		dir, err := stepWorkingDirectory(workspace, workingDirectory)
 		if err != nil {
 			return result, err
 		}
 		runEnv := environment.process()
-		err = r.runProcess(ctx, processor, dir, runEnv, &result, nil, args[0], args[1:]...)
+		err = r.runShellProcess(ctx, processor, dir, runEnv, &result, shell, script)
 		return result, err
 	}
 
@@ -1984,7 +1956,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 	actionEval := eval
 	actionEval.Inputs = inputs
 	switch actionRuntime {
-	case metadata.RuntimeNode16, metadata.RuntimeNode20, metadata.RuntimeNode24:
+	case metadata.RuntimeNode16, metadata.RuntimeNode24:
 		if action.Runs.Main == "" {
 			return result, fmt.Errorf("JavaScript action %q has no main entry point", step.Uses)
 		}
@@ -2030,6 +2002,12 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			// map. Retain that map so post-if sees its final state without
 			// exposing workflow or sibling-composite steps.
 			lifecycleEval.Steps = eval.Steps
+		}
+		if invocation != nil && invocation.preFailure != nil {
+			invocation.eval = lifecycleEval
+			invocation.envOverlay = lifecycleEnvOverlay
+			bindCompositeInvocationSteps(invocation, eval.Steps)
+			return result, invocation.preFailure
 		}
 		if invocation == nil {
 			invocation = &preparedInvocation{action: javascript, state: state, node: node, eval: lifecycleEval, envOverlay: lifecycleEnvOverlay, isolated: isolated}
@@ -2095,15 +2073,25 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
 }
 
-func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionLock *plan.ActionLock, actionStack []string) (Result, error) {
+func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionLock *plan.ActionLock, actionStack []string) (Result, error) {
 	result := newResult()
 	// Keep hashFiles unavailable to composite step metadata while retaining the
 	// context binder for nested JavaScript lifecycle conditions.
 	eval.HashFiles = nil
 	eval.Inputs = inputs
 	eval.Steps = make(map[string]expression.StepStatus)
+	bindActionReferenceContext(&eval, actionLock)
 	compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
 	compositeProcessEnv["GITHUB_ACTION_PATH"] = actionPath
+	// github.action_path is scoped to this composite invocation; nested
+	// composites overlay their own path on entry. Job-container executions
+	// interpolate the mounted path because the script runs in the container.
+	contextActionPath := actionPath
+	if r.jobContainer != nil {
+		contextActionPath = r.jobContainer.containerPath(actionPath)
+	}
+	eval.GitHub = cloneAnyMap(eval.GitHub)
+	eval.GitHub["action_path"] = contextActionPath
 	compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
 	inheritedFailure := eval.JobStatus == "failure"
 	inheritedCancelled := eval.JobStatus == "cancelled"
@@ -2120,6 +2108,18 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		// rebuilding the map so a child's declared env cannot leak to siblings.
 		eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
 		id := strings.ToLower(step.ID)
+		if invocation := prepared[childInvocationID]; invocation != nil && invocation.preFailure != nil {
+			childErr := invocation.preFailure
+			execution := classifyStepExecution(ctx, ctx, plan.Step{ContinueOnError: step.ContinueOnError}, newResult(), childErr)
+			if id != "" {
+				eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: map[string]string{}}
+			}
+			if execution.conclusion != "success" {
+				runErr = errors.Join(runErr, childErr)
+			}
+			bindCompositeInvocationSteps(invocation, eval.Steps)
+			continue
+		}
 		inputs := make(map[string]any, len(eval.Inputs))
 		for name, value := range eval.Inputs {
 			inputs[name] = value
@@ -2127,17 +2127,25 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, Steps: eval.Steps, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
 		run, err := expression.EvaluateCondition(step.If, condition)
 		if err != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d condition: %w", i+1, err))
+			childErr := fmt.Errorf("composite action step %d condition: %w", i+1, err)
+			execution := classifyStepExecution(ctx, ctx, plan.Step{ContinueOnError: step.ContinueOnError}, newResult(), childErr)
+			if id != "" {
+				eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: map[string]string{}}
+			}
+			if execution.conclusion != "success" {
+				runErr = errors.Join(runErr, childErr)
+			}
+			bindCompositeInvocationSteps(prepared[childInvocationID], eval.Steps)
 			continue
 		}
 		if !run {
 			if id != "" {
 				eval.Steps[id] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
 			}
-			if invocation := prepared[childInvocationID]; invocation != nil && invocation.isolated {
+			if invocation := prepared[childInvocationID]; invocation != nil {
 				// Pre hooks register posts before composite execution. If main is
 				// skipped, retain this composite's live final step scope for post-if.
-				invocation.eval.Steps = eval.Steps
+				bindCompositeInvocationSteps(invocation, eval.Steps)
 			}
 			continue
 		}
@@ -2145,14 +2153,15 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		childErr := error(nil)
 		childJobEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 		childJobEnv["GITHUB_ACTION_PATH"] = actionPath
-		if step.Uses != "" {
-			// Composite metadata remains direct-reference-only. Resolve its child
-			// fields before entering workflow-authored action evaluation.
+		switch {
+		case step.Uses != "":
+			// Resolve composite child fields before entering workflow-authored
+			// action evaluation.
 			var childEnv map[string]string
-			childEnv, childErr = evaluateMap(step.Env, eval)
+			childEnv, childErr = evaluateStepMap(step.Env, eval)
 			var childWith map[string]string
 			if childErr == nil {
-				childWith, childErr = evaluateMap(step.With, eval)
+				childWith, childErr = evaluateStepMap(step.With, eval)
 			}
 			child := plan.Step{ID: step.ID, Name: step.Name, Kind: "uses", Uses: step.Uses, With: step.With, Env: step.Env}
 			if actionLock != nil {
@@ -2166,24 +2175,24 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			if childErr == nil {
 				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, childInvocationID, childJobEnv, childEnv, childWith, eval, posts, actions, prepared, actionStack, lifecycleEnvOverlay)
 			}
-		} else if strings.TrimSpace(step.Run) == "" {
+		case strings.TrimSpace(step.Run) == "":
 			childErr = fmt.Errorf("composite action step %d has no run command", i+1)
-		} else {
+		default:
 			var script, dir string
-			var args []string
 			var env map[string]string
-			env, childErr = evaluateMap(step.Env, eval)
+			env, childErr = evaluateStepMap(step.Env, eval)
 			if childErr == nil {
-				script, childErr = expression.Evaluate(step.Run, eval)
+				script, childErr = expression.EvaluateStep(step.Run, eval)
 			}
 			if childErr == nil {
-				dir, childErr = workspacePath(workspace, step.WorkingDirectory)
+				var workingDirectory string
+				workingDirectory, childErr = expression.EvaluateStep(step.WorkingDirectory, eval)
+				if childErr == nil {
+					dir, childErr = stepWorkingDirectory(workspace, workingDirectory)
+				}
 			}
 			if childErr == nil {
-				args, childErr = shellCommand(step.Shell, script)
-			}
-			if childErr == nil {
-				childErr = r.runProcess(ctx, processor, dir, mergeStepEnvironment(childJobEnv, env), &stepResult, nil, args[0], args[1:]...)
+				childErr = r.runShellProcess(ctx, processor, dir, mergeStepEnvironment(childJobEnv, env), &stepResult, step.Shell, script)
 			}
 		}
 		mergeInto(result.Env, stepResult.Env)
@@ -2196,14 +2205,11 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		result.Artifacts = append(result.Artifacts, stepResult.Artifacts...)
 		mergeInto(result.State, stepResult.State)
 		appendJobSummary(&result.Summary, &result.summaryTruncated, stepResult.Summary, stepResult.summaryTruncated)
+		execution := classifyStepExecution(ctx, ctx, plan.Step{ContinueOnError: step.ContinueOnError}, stepResult, childErr)
 		if id != "" {
-			outcome := "success"
-			if childErr != nil {
-				outcome = "failure"
-			}
-			eval.Steps[id] = expression.StepStatus{Outcome: outcome, Conclusion: outcome, Outputs: stepResult.Outputs}
+			eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: stepResult.Outputs}
 		}
-		if childErr != nil {
+		if execution.conclusion != "success" {
 			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d: %w", i+1, childErr))
 		}
 	}
@@ -2217,6 +2223,16 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		result.Outputs[name] = value
 	}
 	return result, runErr
+}
+
+func bindActionReferenceContext(eval *expression.Context, lock *plan.ActionLock) {
+	eval.GitHub = cloneAnyMap(eval.GitHub)
+	eval.GitHub["action_repository"] = ""
+	eval.GitHub["action_ref"] = ""
+	if lock != nil && lock.Source == "github" {
+		eval.GitHub["action_repository"] = lock.Repository
+		eval.GitHub["action_ref"] = lock.RequestedRef
+	}
 }
 
 func evaluateMap(values map[string]string, context expression.Context) (map[string]string, error) {
@@ -2347,6 +2363,163 @@ func shellCommand(shell, script string) ([]string, error) {
 	}
 }
 
+func (r *jobRun) runShellProcess(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, result *Result, shell, script string) error {
+	shell = strings.TrimSpace(shell)
+	if shell != "python" && !strings.Contains(shell, "{0}") {
+		args, err := shellCommand(shell, script)
+		if err != nil {
+			return err
+		}
+		return r.runProcess(ctx, processor, dir, env, result, nil, args[0], args[1:]...)
+	}
+
+	args := []string{"python", "{0}"}
+	if shell != "python" {
+		var err error
+		args, err = parseShellTemplate(shell)
+		if err != nil {
+			return err
+		}
+	}
+	extension := shellScriptExtension(args[0])
+	parent := ""
+	if r.jobContainer != nil {
+		parent = r.runnerTemp
+	}
+	file, err := os.CreateTemp(parent, "buildkite-gha-shell-*"+extension)
+	if err != nil {
+		return fmt.Errorf("create shell script: %w", err)
+	}
+	path := file.Name()
+	defer func(path string) { _ = os.Remove(path) }(path)
+	if _, err := file.WriteString(script); err != nil {
+		return errors.Join(fmt.Errorf("write shell script: %w", err), file.Close())
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close shell script: %w", err)
+	}
+	if r.jobContainer != nil {
+		// Job containers may declare any USER, so the mounted script must be
+		// readable without assuming a shared host UID or GID.
+		if err := os.Chmod(path, 0o644); err != nil {
+			return fmt.Errorf("make shell script container-readable: %w", err)
+		}
+		path = r.jobContainer.containerPath(path)
+	}
+	for i := 1; i < len(args); i++ {
+		args[i] = strings.ReplaceAll(args[i], "{0}", path)
+	}
+	if r.jobContainer == nil {
+		command, err := resolveExecutableInPath(args[0], env["PATH"])
+		if err != nil {
+			return err
+		}
+		args[0] = command
+	}
+	return r.runProcess(ctx, processor, dir, env, result, nil, args[0], args[1:]...)
+}
+
+func parseShellTemplate(shell string) ([]string, error) {
+	args, err := splitShellTemplate(shell)
+	if err != nil {
+		return nil, fmt.Errorf("parse shell template %q: %w", shell, err)
+	}
+	if len(args) == 0 || args[0] == "" {
+		return nil, fmt.Errorf("shell template %q must contain a command", shell)
+	}
+	command := strings.ToLower(filepath.Base(args[0]))
+	switch command {
+	case "pwsh", "pwsh.exe", "cmd", "cmd.exe", "powershell", "powershell.exe", "msys2", "msys2.cmd", "msys2.exe":
+		return nil, fmt.Errorf("shell %q is unsupported in the supported runtime subset", shell)
+	}
+	hasPlaceholder := false
+	for _, arg := range args[1:] {
+		hasPlaceholder = hasPlaceholder || strings.Contains(arg, "{0}")
+	}
+	if !hasPlaceholder {
+		return nil, fmt.Errorf("shell template %q must contain {0} in its arguments", shell)
+	}
+	return args, nil
+}
+
+func splitShellTemplate(shell string) ([]string, error) {
+	var args []string
+	var arg strings.Builder
+	var quote rune
+	escaped := false
+	inArg := false
+	flush := func() {
+		if inArg {
+			args = append(args, arg.String())
+			arg.Reset()
+			inArg = false
+		}
+	}
+	for _, char := range shell {
+		if escaped {
+			arg.WriteRune(char)
+			escaped = false
+			inArg = true
+			continue
+		}
+		if quote != 0 {
+			switch {
+			case char == quote:
+				quote = 0
+			case char == '\\' && quote == '"':
+				escaped = true
+			default:
+				arg.WriteRune(char)
+			}
+			inArg = true
+			continue
+		}
+		switch char {
+		case '\\':
+			escaped = true
+			inArg = true
+		case '\'', '"':
+			quote = char
+			inArg = true
+		case ' ', '\t', '\r', '\n':
+			flush()
+		default:
+			arg.WriteRune(char)
+			inArg = true
+		}
+	}
+	if escaped || quote != 0 {
+		return nil, errors.New("unclosed quote or escape")
+	}
+	flush()
+	return args, nil
+}
+
+func shellScriptExtension(command string) string {
+	switch strings.ToLower(command) {
+	case "bash", "sh":
+		return ".sh"
+	case "python":
+		return ".py"
+	default:
+		return ""
+	}
+}
+
+// stepWorkingDirectory resolves a run step's working directory and requires it
+// to exist. Failing here names the directory instead of surfacing the child
+// process's chdir failure as a misleading "fork/exec <shell>" error.
+func stepWorkingDirectory(root, path string) (string, error) {
+	resolved, err := workspacePath(root, path)
+	if err != nil {
+		return "", err
+	}
+	if info, statErr := os.Stat(resolved); statErr != nil || !info.IsDir() {
+		return "", fmt.Errorf("working directory %q does not exist in the workspace", path)
+	}
+	return resolved, nil
+}
+
 func workspacePath(root, path string) (string, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -2425,7 +2598,7 @@ func (r Runner) postActionTimeout() time.Duration {
 // Cancellation still permits the existing short cleanup grace before stopping
 // an in-flight post action.
 func postPhaseContext(parent context.Context, timeout, cancelGrace time.Duration) (context.Context, context.CancelFunc) {
-	postCtx, cancelPosts := context.WithTimeout(context.Background(), timeout)
+	postCtx, cancelPosts := context.WithTimeout(context.WithoutCancel(parent), timeout)
 	postDone := make(chan struct{})
 	var once sync.Once
 	go func() {

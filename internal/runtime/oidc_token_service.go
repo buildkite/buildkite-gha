@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const oidcTokenResponseLimit = 64 << 10
@@ -38,17 +40,19 @@ type AgentOIDCTokenConfig struct {
 	Claims         []string
 	AWSSessionTags []string
 	SubjectClaim   string
+	ClientVersion  string
 	Client         *http.Client
 }
 
 // AgentOIDCTokens mints job-bound Buildkite OIDC tokens through the Agent API.
 type AgentOIDCTokens struct {
-	mintURL  string
-	jobToken string
-	claims   []string
-	awsTags  []string
-	subject  string
-	client   *http.Client
+	mintURL   string
+	jobToken  string
+	claims    []string
+	awsTags   []string
+	subject   string
+	userAgent string
+	client    *http.Client
 }
 
 func NewAgentOIDCTokens(config AgentOIDCTokenConfig) (*AgentOIDCTokens, error) {
@@ -70,12 +74,13 @@ func NewAgentOIDCTokens(config AgentOIDCTokenConfig) (*AgentOIDCTokens, error) {
 		bounded.Timeout = 15 * time.Second
 	}
 	return &AgentOIDCTokens{
-		mintURL:  mintURL,
-		jobToken: config.JobToken,
-		claims:   append([]string(nil), config.Claims...),
-		awsTags:  append([]string(nil), config.AWSSessionTags...),
-		subject:  config.SubjectClaim,
-		client:   &bounded,
+		mintURL:   mintURL,
+		jobToken:  config.JobToken,
+		claims:    append([]string(nil), config.Claims...),
+		awsTags:   append([]string(nil), config.AWSSessionTags...),
+		subject:   config.SubjectClaim,
+		userAgent: useragent.FromVersion(config.ClientVersion),
+		client:    &bounded,
 	}, nil
 }
 
@@ -102,6 +107,7 @@ func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (strin
 	request.Header.Set("Authorization", "Token "+c.jobToken)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", c.userAgent)
 	response, err := c.client.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("request OIDC token: %w", err)
@@ -208,8 +214,8 @@ func startIDTokenService(ctx context.Context, provider OIDCTokenProvider, redact
 	return service, nil
 }
 
-func (s *idTokenService) Close() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (s *idTokenService) Close(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 	defer cancel()
 	return s.server.Shutdown(ctx)
 }

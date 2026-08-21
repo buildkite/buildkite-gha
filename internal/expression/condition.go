@@ -1,5 +1,5 @@
 // Condition validation and strict runtime condition evaluation. The
-// condition* value helpers fail closed on mixed-type comparisons.
+// condition* value helpers reject mixed-type comparisons.
 package expression
 
 import (
@@ -36,6 +36,9 @@ const (
 	JobCondition ConditionScope = iota
 	// StepCondition is evaluated while a job is running.
 	StepCondition
+	// CallCondition is evaluated in the caller scope before a local reusable
+	// workflow's flattened jobs are allowed to start.
+	CallCondition
 	// actionLifecycleCondition is evaluated for action pre-if and post-if
 	// metadata. It has its own context policy and no implicit success guard.
 	actionLifecycleCondition
@@ -52,6 +55,22 @@ func ValidateCondition(source string, scope ConditionScope) error {
 // types against one concrete, statically expanded matrix instance.
 func ValidateConditionWithMatrix(source string, scope ConditionScope, matrix map[string]any) error {
 	return validateCondition(source, scope, matrix, true)
+}
+
+// ValidateCallCondition verifies the caller-only runtime surface of a local
+// reusable-workflow call condition.
+func ValidateCallCondition(source string) error {
+	return validateCondition(source, CallCondition, nil, false)
+}
+
+// ValidateCompileCallCondition verifies every branch of a call condition
+// before event-backed values are reduced by the compiler.
+func ValidateCompileCallCondition(source string, context CompileContext) error {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return err
+	}
+	return validateCompileConditionNode(node, CallCondition, context, nil)
 }
 
 // ValidateActionLifecycleCondition verifies an action pre-if or post-if
@@ -211,12 +230,27 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			return fmt.Errorf("lifecycle condition context %q is unsupported", root)
 		}
 	}
+	if scope == CallCondition {
+		switch strings.ToLower(root) {
+		case "github", "vars", "inputs", "needs":
+		default:
+			return fmt.Errorf("reusable-workflow call condition context %q is unsupported", root)
+		}
+	}
 	switch strings.ToLower(root) {
 	case "runner":
-		if len(path) == 1 && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch")) {
-			return nil
+		if len(path) == 1 {
+			if strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") {
+				return nil
+			}
+			if strings.EqualFold(path[0], "temp") && scope != JobCondition && scope != CallCondition {
+				return nil
+			}
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected runner.os or runner.arch", reference)
+		if scope == JobCondition {
+			return fmt.Errorf("condition reference %q is unsupported; expected runner.os or runner.arch", reference)
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, or runner.temp", reference)
 	case "github":
 		if len(path) == 1 {
 			switch strings.ToLower(path[0]) {
@@ -371,7 +405,7 @@ func EvaluateActionLifecycleCondition(source string, context ConditionContext) (
 }
 
 // EvaluateCondition evaluates a job or step condition. Unsupported syntax and
-// unavailable values fail closed with an error.
+// unavailable values return an error.
 func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil {

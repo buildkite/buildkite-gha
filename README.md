@@ -58,8 +58,8 @@ plugins:
 ```
 
 Runtime v0.9.0 adds `runner.os` and `runner.arch`. They resolve to `Linux` and
-`X64` on Linux and `macOS` and `ARM64` on native macOS. Configure macOS runner
-labels with a native Darwin/arm64 queue:
+`X64` on Linux and `macOS` and `ARM64` on native macOS. You can configure a
+fallback queue for a macOS runner label:
 
 ```yaml
 plugins:
@@ -74,10 +74,9 @@ plugins:
 
 Hosted runner labels are case-insensitive. Linux labels use the matching Noble
 or Jammy hosted-toolchains image, with or without a configured queue.
-`macos-latest` targets the hosted `macos-medium` queue. Version-specific
-`macos-14` and `macos-15` labels require an organization-provided queue and are
-not part of the hosted preset. A macOS label selects native Darwin/arm64, not a
-GitHub image or Xcode inventory.
+During upload, the Agent API returns complete targets for selectors without an
+explicit mapping. The importer annotates heuristic fallback warnings. See the
+[compatibility guide](docs/compatibility.md#job-configuration).
 
 The imported workflows are a dynamic part of the Buildkite pipeline. The plugin creates one aggregate group per successfully compiled, explicitly listed workflow in a single transaction. Workflows that do not declare the selected event become top-level skipped steps. Groups and replacement steps depend on the importer. Each runnable job publishes a provider check named `<workflow> / <job> (<event>)`: a GitHub check for GitHub events or an Origin check for Origin events. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
 
@@ -89,9 +88,9 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 
 | Good fit | Not currently supported |
 | --- | --- |
-| Linux x86-64 and native macOS arm64 jobs using `bash` or `sh` | Windows, Linux arm64, or macOS x86-64 |
-| Local and public JavaScript and composite actions; verified Dockerfile actions on Linux | Private actions, Dockerfile actions on macOS, or arbitrary reusable-workflow source |
-| Static matrices, `needs`, outputs, and local reusable workflows | Dynamic matrices and expressions outside the documented subset |
+| Linux x86-64 and native macOS arm64 jobs using `bash`, `sh`, `python`, or an installed custom shell | Windows, Linux arm64, or macOS x86-64 |
+| Local and public JavaScript and composite actions; verified Dockerfile actions on Linux | Private actions or private reusable workflows, and Dockerfile actions on macOS |
+| Static matrices, `needs`, outputs, and local or literal public reusable workflows | Dynamic reusable calls, matrices, and expressions outside the documented subset |
 | Exact-commit checkout, including managed private repository access | GitHub environment secrets, GitHub-issued OIDC claims, or protected queues |
 | Static Buildkite job-accessible secrets | Dynamic or reusable-workflow secret forwarding |
 | Scoped `GITHUB_TOKEN` and step `github.token` use allowed by Buildkite policy | Ambient token injection or dynamic token access |

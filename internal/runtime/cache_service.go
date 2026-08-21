@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const (
@@ -45,11 +47,12 @@ type CacheCredentialProvider interface {
 // service. Endpoint and JobToken are runtime connection and authentication
 // material; this provider does not add them to action subprocess environments.
 type AgentCacheConfig struct {
-	Endpoint   string
-	JobID      string
-	JobToken   string
-	ResultsURL string
-	Client     *http.Client
+	Endpoint      string
+	JobID         string
+	JobToken      string
+	ResultsURL    string
+	ClientVersion string
+	Client        *http.Client
 }
 
 // AgentCacheCredentials mints GHAC tokens through Buildkite's job-bound Agent
@@ -58,6 +61,7 @@ type AgentCacheCredentials struct {
 	mintURL    string
 	jobToken   string
 	resultsURL string
+	userAgent  string
 	client     *http.Client
 }
 
@@ -86,7 +90,10 @@ func NewAgentCacheCredentials(config AgentCacheConfig) (*AgentCacheCredentials, 
 	if bounded.Timeout == 0 {
 		bounded.Timeout = 15 * time.Second
 	}
-	return &AgentCacheCredentials{mintURL: mintURL, jobToken: config.JobToken, resultsURL: resultsURL, client: &bounded}, nil
+	return &AgentCacheCredentials{
+		mintURL: mintURL, jobToken: config.JobToken, resultsURL: resultsURL,
+		userAgent: useragent.FromVersion(config.ClientVersion), client: &bounded,
+	}, nil
 }
 
 func (c *AgentCacheCredentials) Credentials(ctx context.Context) (CacheCredentials, error) {
@@ -99,6 +106,7 @@ func (c *AgentCacheCredentials) Credentials(ctx context.Context) (CacheCredentia
 	}
 	request.Header.Set("Authorization", "Token "+c.jobToken)
 	request.Header.Set("Accept", "application/json")
+	request.Header.Set("User-Agent", c.userAgent)
 	response, err := c.client.Do(request)
 	if err != nil {
 		return CacheCredentials{}, fmt.Errorf("request cache credential: %w", err)
