@@ -76,9 +76,9 @@ func (s *fakeReusableRepositorySource) references() []actionsource.Reference {
 
 func TestCompilePublicReusableWorkflowWithNestedPinnedLocalCall(t *testing.T) {
 	callerRoot := t.TempDir()
-	callerPath := writeWorkflow(t, callerRoot, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: Octo/Workflows/.github/workflows/ci.yml@v1\n")
+	callerPath := writeWorkflow(t, callerRoot, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: GaloisInc/.github/.github/workflows/haskell-ci.yml@v2\n")
 	remoteRoot := t.TempDir()
-	writeWorkflow(t, remoteRoot, "ci.yml", `on: workflow_call
+	writeWorkflow(t, remoteRoot, "haskell-ci.yml", `on: workflow_call
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -95,7 +95,7 @@ jobs:
     steps:
       - run: nested
 `)
-	fake := newFakeReusableRepositorySource(t, map[string]string{"octo/workflows": remoteRoot})
+	fake := newFakeReusableRepositorySource(t, map[string]string{"galoisinc/.github": remoteRoot})
 	shared := MemoizeRepositorySource(fake)
 	options := defaultOptions()
 	options.RepositorySource = shared
@@ -117,10 +117,10 @@ jobs:
 	}
 	direct := byID["delegated.prepare"]
 	nested := byID["delegated.nested.test"]
-	if direct.SourcePath != "octo/workflows/.github/workflows/ci.yml@v1" || nested.SourcePath != "octo/workflows/.github/workflows/nested.yml@v1" {
+	if direct.SourcePath != "galoisinc/.github/.github/workflows/haskell-ci.yml@v2" || nested.SourcePath != "galoisinc/.github/.github/workflows/nested.yml@v2" {
 		t.Fatalf("remote source paths = %q / %q", direct.SourcePath, nested.SourcePath)
 	}
-	if nested.RemoteWorkflow == nil || nested.RemoteWorkflow.Repository != "octo/workflows" || nested.RemoteWorkflow.RequestedRef != "v1" || nested.RemoteWorkflow.Commit != fake.commits["octo/workflows"] || nested.RemoteWorkflow.SourceDigest != fake.digests["octo/workflows"] {
+	if nested.RemoteWorkflow == nil || nested.RemoteWorkflow.Repository != "galoisinc/.github" || nested.RemoteWorkflow.RequestedRef != "v2" || nested.RemoteWorkflow.Commit != fake.commits["galoisinc/.github"] || nested.RemoteWorkflow.SourceDigest != fake.digests["galoisinc/.github"] {
 		t.Fatalf("remote workflow provenance = %#v", nested.RemoteWorkflow)
 	}
 	wantNestedDigest := "sha256:" + sha256Sum(readFile(t, nestedPath))
@@ -132,10 +132,16 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 2 || plans[1].Workflow.Remote == nil || plans[1].Workflow.Path != nested.SourcePath || plans[1].Workflow.Digest != wantNestedDigest || plans[1].Workflow.Remote.SourceDigest != fake.digests["octo/workflows"] {
+	if len(plans) != 2 {
+		t.Fatalf("remote plans = %#v", plans)
+	}
+	wantRemote := plan.RemoteWorkflowSource{
+		Repository: "galoisinc/.github", RequestedRef: "v2", Commit: fake.commits["galoisinc/.github"], SourceDigest: fake.digests["galoisinc/.github"],
+	}
+	if plans[1].Workflow.Remote == nil || *plans[1].Workflow.Remote != wantRemote || plans[1].Workflow.Path != nested.SourcePath || plans[1].Workflow.Digest != wantNestedDigest {
 		t.Fatalf("remote plan provenance = %#v", plans)
 	}
-	if calls := fake.references(); len(calls) != 1 || calls[0].Raw != "Octo/Workflows@v1" || calls[0].Path != "" {
+	if calls := fake.references(); len(calls) != 1 || calls[0].Raw != "GaloisInc/.github@v2" || calls[0].Path != "" {
 		t.Fatalf("repository source calls = %#v, want one repository-root resolution", calls)
 	}
 }
