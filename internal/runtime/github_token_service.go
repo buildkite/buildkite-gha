@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const githubTokenResponseLimit = 64 << 10
@@ -43,6 +44,7 @@ type AgentGitHubTokenConfig struct {
 	JobToken         string
 	OrganizationSlug string
 	PipelineSlug     string
+	ClientVersion    string
 	Client           *http.Client
 }
 
@@ -53,6 +55,7 @@ type AgentGitHubTokens struct {
 	workflowURL        string
 	repositorySettings string
 	jobToken           string
+	userAgent          string
 	client             *http.Client
 }
 
@@ -83,6 +86,7 @@ func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, er
 		workflowURL:        workflowURL,
 		repositorySettings: pipelineRepositorySettingsURL(config.OrganizationSlug, config.PipelineSlug),
 		jobToken:           config.JobToken,
+		userAgent:          useragent.FromVersion(config.ClientVersion),
 		client:             &bounded,
 	}, nil
 }
@@ -133,6 +137,7 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workf
 	request.Header.Set("Authorization", "Token "+c.jobToken)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", c.userAgent)
 	response, err := c.client.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("request GitHub %s token: %w", purpose, err)

@@ -1,0 +1,7 @@
+name: Compatibility gap - checkout commits
+on: push
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2.3.4

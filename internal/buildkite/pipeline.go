@@ -254,7 +254,7 @@ type preparedWorkflow struct {
 
 func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflow) error {
 	if failure := workflow.Failure; failure != nil {
-		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(":github: "+workflow.GroupLabel))
+		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(":github: workflow · "+workflow.GroupLabel))
 		_, _ = fmt.Fprintf(out, "    key: %s\n", yamlScalar(workflow.GroupKey))
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
@@ -281,7 +281,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		return nil
 	}
 	if workflow.SkipReason != "" && workflow.Aggregate {
-		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(":github: "+workflow.GroupLabel))
+		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(":github: workflow · "+workflow.GroupLabel))
 		_, _ = fmt.Fprintf(out, "    key: %s\n", yamlScalar(workflow.GroupKey))
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
@@ -297,7 +297,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 	if workflow.Grouped {
 		groupLabel := workflow.GroupLabel
 		if workflow.Aggregate {
-			groupLabel = ":github: " + groupLabel
+			groupLabel = ":github: workflow · " + groupLabel
 		}
 		_, _ = fmt.Fprintf(out, "  - group: %s\n", yamlScalar(groupLabel))
 		if workflow.GroupKey != "" {
@@ -349,7 +349,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if platform == "darwin/arm64" && runtimeImage != "" {
 			return fmt.Errorf("job %q cannot select a container runtime image on darwin/arm64", job.Key)
 		}
-		_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(job.Label))
+		_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(":github: job · "+job.Label))
 		_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))
 		if runtimeImage != "" {
 			_, _ = fmt.Fprintf(out, "%simage: %s\n", attributeIndent, yamlScalar(runtimeImage))

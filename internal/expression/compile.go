@@ -142,7 +142,7 @@ func validateCompileExpressionNode(node actionlint.ExprNode) error {
 			return nil
 		case strings.EqualFold(root, "github") && len(path) == 1:
 			switch strings.ToLower(path[0]) {
-			case "actor", "event_name", "head_ref", "ref", "repository", "repository_owner", "sha", "workflow":
+			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha", "workflow":
 				return nil
 			}
 		case strings.EqualFold(root, "github") && len(path) >= 2 && strings.EqualFold(path[0], "event"):
@@ -259,11 +259,14 @@ func ReduceCompileCondition(source string, context CompileContext) (string, erro
 	if err != nil || empty {
 		return source, err
 	}
+	if _, _, err := evaluateCompileNodeAvailable(node, context); err != nil {
+		return "", err
+	}
 	return reduceCompileNode(node, context), nil
 }
 
 func reduceCompileNode(node actionlint.ExprNode, context CompileContext) string {
-	if value, err := evaluateCompileNode(node, context); err == nil {
+	if value, available, _ := evaluateCompileNodeAvailable(node, context); available {
 		if literal, ok := compileScalarLiteral(value); ok {
 			return literal
 		}
@@ -292,6 +295,59 @@ func reduceCompileNode(node actionlint.ExprNode, context CompileContext) string 
 	default:
 		return ""
 	}
+}
+
+// evaluateCompileNodeAvailable checks every branch before evaluation. This
+// prevents short-circuit evaluation from hiding runtime dependencies or
+// deterministic errors in an unselected branch.
+func evaluateCompileNodeAvailable(node actionlint.ExprNode, context CompileContext) (any, bool, error) {
+	children := func(nodes ...actionlint.ExprNode) (bool, error) {
+		available := true
+		for _, child := range nodes {
+			_, childAvailable, err := evaluateCompileNodeAvailable(child, context)
+			if err != nil {
+				return false, err
+			}
+			available = available && childAvailable
+		}
+		return available, nil
+	}
+	switch node := node.(type) {
+	case *actionlint.ObjectDerefNode:
+		if available, err := children(node.Receiver); err != nil || !available {
+			return nil, available, err
+		}
+	case *actionlint.ArrayDerefNode:
+		if available, err := children(node.Receiver); err != nil || !available {
+			return nil, available, err
+		}
+	case *actionlint.NotOpNode:
+		if available, err := children(node.Operand); err != nil || !available {
+			return nil, available, err
+		}
+	case *actionlint.CompareOpNode:
+		if available, err := children(node.Left, node.Right); err != nil || !available {
+			return nil, available, err
+		}
+	case *actionlint.LogicalOpNode:
+		if available, err := children(node.Left, node.Right); err != nil || !available {
+			return nil, available, err
+		}
+	case *actionlint.FuncCallNode:
+		if available, err := children(node.Args...); err != nil || !available {
+			return nil, available, err
+		}
+	case *actionlint.IndexAccessNode:
+		if available, err := children(node.Operand, node.Index); err != nil || !available {
+			return nil, available, err
+		}
+	}
+	value, err := evaluateCompileNode(node, context)
+	var dependency compileRuntimeDependencyError
+	if errors.As(err, &dependency) {
+		return nil, false, nil
+	}
+	return value, err == nil, err
 }
 
 func compileScalarLiteral(value any) (string, bool) {
@@ -364,6 +420,107 @@ func EvaluateAvailableCompileTemplate(template string, context CompileContext) (
 		}
 		remaining = source[consumed:]
 	}
+}
+
+// ReduceAvailableCompileTemplate replaces statically available scalar
+// subtrees in each template expression while preserving runtime-dependent
+// subtrees. Values rendered outside an expression retain the same expression
+// injection protection as EvaluateAvailableCompileTemplate.
+func ReduceAvailableCompileTemplate(template string, context CompileContext) (string, error) {
+	const open = "${{"
+	var reduced strings.Builder
+	remaining := template
+	for {
+		start := strings.Index(remaining, open)
+		if start < 0 {
+			reduced.WriteString(remaining)
+			return reduced.String(), nil
+		}
+		reduced.WriteString(remaining[:start])
+		source := remaining[start+len(open):]
+		_, consumed, lexErr := actionlint.LexExpression(source)
+		if lexErr != nil {
+			return "", fmt.Errorf("invalid expression: %w", lexErr)
+		}
+		complete := open + source[:consumed]
+		expr, err := Parse(complete, 1, 1)
+		if err != nil {
+			return "", err
+		}
+		node, err := parseCompileExpression(expr)
+		if err != nil {
+			return "", err
+		}
+		if !nodeReferencesGitHubEventPayload(node) && !nodeReferencesContext(node, "event") {
+			reduced.WriteString(complete)
+			remaining = source[consumed:]
+			continue
+		}
+		if referencesWholeEvent(node) {
+			return "", fmt.Errorf("whole github.event access is unsupported")
+		}
+		value, available, err := evaluateCompileNodeAvailable(node, context)
+		if err != nil {
+			return "", err
+		}
+		if available {
+			replacement, scalar := expressionString(value)
+			if !scalar {
+				return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
+			}
+			if introducesExpressionSyntax(reduced.String(), replacement, source[consumed:]) {
+				return "", fmt.Errorf("compile-time expression result contains expression syntax")
+			}
+			reduced.WriteString(replacement)
+		} else {
+			reduced.WriteString(open)
+			reduced.WriteString(" ")
+			reduced.WriteString(reduceCompileNode(node, context))
+			reduced.WriteString(" }}")
+		}
+		remaining = source[consumed:]
+	}
+}
+
+func referencesWholeEvent(expression actionlint.ExprNode) bool {
+	found := false
+	actionlint.VisitExprNode(expression, func(node, parent actionlint.ExprNode, entering bool) {
+		if !entering || found {
+			return
+		}
+		if projection, ok := node.(*actionlint.ArrayDerefNode); ok {
+			root, path, err := referencePath(projection.Receiver)
+			found = err == nil && (strings.EqualFold(root, "event") && len(path) == 0 ||
+				strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "event"))
+			if found {
+				return
+			}
+		}
+		if referenceReceiver(node, parent) {
+			return
+		}
+		switch node.(type) {
+		case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.ArrayDerefNode, *actionlint.IndexAccessNode:
+		default:
+			return
+		}
+		root, path, err := referencePath(node)
+		if err != nil {
+			return
+		}
+		found = strings.EqualFold(root, "event") && len(path) == 0 ||
+			strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "event")
+	})
+	return found
+}
+
+func nodeReferencesContext(expression actionlint.ExprNode, contextName string) bool {
+	found := false
+	actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
+		variable, ok := node.(*actionlint.VariableNode)
+		found = found || entering && ok && strings.EqualFold(variable.Name, contextName)
+	})
+	return found
 }
 
 func introducesExpressionSyntax(before, replacement, after string) bool {
@@ -563,10 +720,7 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 		if recognized {
 			return value, err
 		}
-		if strings.EqualFold(node.Callee, "hashFiles") {
-			return nil, compileRuntimeDependencyError{fmt.Errorf("unsupported compile-time function %q", node.Callee)}
-		}
-		return nil, fmt.Errorf("unsupported compile-time function %q", node.Callee)
+		return nil, compileRuntimeDependencyError{fmt.Errorf("unsupported compile-time function %q", node.Callee)}
 	}
 	return evaluator.evaluate(node)
 }

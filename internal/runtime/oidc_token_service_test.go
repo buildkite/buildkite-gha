@@ -17,30 +17,38 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
-func TestAgentOIDCTokensMintsRequestedAudience(t *testing.T) {
+func TestAgentOIDCTokensMintsRequestedAudienceAndConfiguredClaims(t *testing.T) {
 	const token = "header.payload.signature"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/jobs/"+testCacheJobID+"/oidc/tokens" {
 			t.Errorf("path = %q", request.URL.Path)
 		}
-		if request.Method != http.MethodPost || request.Header.Get("Authorization") != "Token job-secret" || request.Header.Get("Accept") != "application/json" || request.Header.Get("Content-Type") != "application/json" {
+		if request.Method != http.MethodPost || request.Header.Get("Authorization") != "Token job-secret" || request.Header.Get("Accept") != "application/json" || request.Header.Get("Content-Type") != "application/json" || request.Header.Get("User-Agent") != "buildkite-gha/1.2.3" {
 			t.Errorf("request = %s headers %#v", request.Method, request.Header)
 		}
 		body, err := io.ReadAll(request.Body)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(body) != `{"audience":"sts.amazonaws.com"}` {
+		if string(body) != `{"audience":"sts.amazonaws.com","claims":["organization_id"],"aws_session_tags":["organization_slug","pipeline_id"],"subject_claim":"pipeline_id"}` {
 			t.Errorf("body = %s", body)
 		}
 		_, _ = io.WriteString(w, `{"token":"`+token+`"}`)
 	}))
 	defer server.Close()
-	provider, err := NewAgentOIDCTokens(AgentOIDCTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret"})
+	provider, err := NewAgentOIDCTokens(AgentOIDCTokenConfig{
+		Endpoint:       server.URL,
+		JobID:          testCacheJobID,
+		JobToken:       "job-secret",
+		Claims:         []string{"organization_id"},
+		AWSSessionTags: []string{"organization_slug", "pipeline_id"},
+		SubjectClaim:   "pipeline_id",
+		ClientVersion:  "1.2.3",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := provider.OIDCToken(context.Background(), "sts.amazonaws.com")
+	got, err := provider.OIDCToken(t.Context(), "sts.amazonaws.com")
 	if err != nil || got != token {
 		t.Fatalf("OIDCToken() = %q, %v", got, err)
 	}
@@ -98,7 +106,7 @@ func TestAgentOIDCTokensRejectsAuthFailuresAndMalformedResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = provider.OIDCToken(context.Background(), "audience")
+			_, err = provider.OIDCToken(t.Context(), "audience")
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), secret) {
 				t.Fatalf("OIDCToken() error = %v, want %q without response body", err, test.want)
 			}
@@ -128,12 +136,12 @@ func TestIDTokenServiceWireContract(t *testing.T) {
 	provider := &testOIDCTokenProvider{token: "header.payload.signature", requireLiveContext: true}
 	redactor := &testRedactor{}
 	processor := newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{})
-	service, err := startIDTokenService(context.Background(), provider, redactor, processor)
+	service, err := startIDTokenService(t.Context(), provider, redactor, processor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = service.Close() }()
-	env, revoke, err := service.actionEnvironment(context.Background(), nil)
+	defer func() { _ = service.Close(t.Context()) }()
+	env, revoke, err := service.actionEnvironment(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,12 +182,12 @@ func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			provider := &testOIDCTokenProvider{err: oidcTokenStatusError(status)}
-			service, err := startIDTokenService(context.Background(), provider, &testRedactor{}, newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{}))
+			service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{}))
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer func() { _ = service.Close() }()
-			env, revoke, err := service.actionEnvironment(context.Background(), nil)
+			defer func() { _ = service.Close(t.Context()) }()
+			env, revoke, err := service.actionEnvironment(t.Context(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -269,7 +277,7 @@ if (process.env.no_proxy !== "lower.example,127.0.0.1") throw new Error("no_prox
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
 	provider := &testOIDCTokenProvider{token: "header.payload.signature"}
 	redactor := &testRedactor{}
-	result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: redactor}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() = %#v, %v", result, err)
 	}
@@ -305,7 +313,7 @@ const core = require("@actions/core");
 	job.IDTokenPermission = "write"
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
 	provider := &testOIDCTokenProvider{token: "header.payload.signature", requireLiveContext: true}
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: &testRedactor{}}).RunJob(ctx, job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" {
@@ -349,7 +357,7 @@ const core = require("@actions/core");
 		Action: &plan.ActionSelector{Lock: lockID},
 	}})
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
-	result, err := (Runner{Node24: node}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: node}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() = %#v, %v", result, err)
 	}

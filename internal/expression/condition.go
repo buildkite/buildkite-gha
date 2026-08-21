@@ -1,5 +1,5 @@
 // Condition validation and strict runtime condition evaluation. The
-// condition* value helpers fail closed on mixed-type comparisons.
+// condition* value helpers reject mixed-type comparisons.
 package expression
 
 import (
@@ -36,6 +36,12 @@ const (
 	JobCondition ConditionScope = iota
 	// StepCondition is evaluated while a job is running.
 	StepCondition
+	// CallCondition is evaluated in the caller scope before a local reusable
+	// workflow's flattened jobs are allowed to start.
+	CallCondition
+	// actionLifecycleCondition is evaluated for action pre-if and post-if
+	// metadata. It has its own context policy and no implicit success guard.
+	actionLifecycleCondition
 )
 
 // ValidateCondition verifies that a job or step condition uses only expression
@@ -49,6 +55,39 @@ func ValidateCondition(source string, scope ConditionScope) error {
 // types against one concrete, statically expanded matrix instance.
 func ValidateConditionWithMatrix(source string, scope ConditionScope, matrix map[string]any) error {
 	return validateCondition(source, scope, matrix, true)
+}
+
+// ValidateCallCondition verifies the caller-only runtime surface of a local
+// reusable-workflow call condition.
+func ValidateCallCondition(source string) error {
+	return validateCondition(source, CallCondition, nil, false)
+}
+
+// ValidateCompileCallCondition verifies every branch of a call condition
+// before event-backed values are reduced by the compiler.
+func ValidateCompileCallCondition(source string, context CompileContext) error {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return err
+	}
+	return validateCompileConditionNode(node, CallCondition, context, nil)
+}
+
+// ValidateActionLifecycleCondition verifies an action pre-if or post-if
+// expression without resolving runtime-dependent values.
+func ValidateActionLifecycleCondition(source string) error {
+	if err := validateLifecycleDelimiters(source); err != nil {
+		return err
+	}
+	return validateCondition(source, actionLifecycleCondition, nil, false)
+}
+
+func validateLifecycleDelimiters(source string) error {
+	condition := strings.TrimSpace(source)
+	if strings.HasPrefix(condition, "${{") != strings.HasSuffix(condition, "}}") {
+		return fmt.Errorf("parse condition: mismatched expression delimiters")
+	}
+	return nil
 }
 
 // ValidateCompileConditionWithMatrix verifies every branch of an event-backed
@@ -95,7 +134,7 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 			}
 			return nil
 		case "hashfiles":
-			if scope != StepCondition {
+			if scope != StepCondition && scope != actionLifecycleCondition {
 				return fmt.Errorf("condition function %q is unavailable in job conditions", node.Callee)
 			}
 			if len(node.Args) == 0 || len(node.Args) > 255 {
@@ -184,12 +223,34 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 	if len(path) != 0 {
 		reference += "." + strings.Join(path, ".")
 	}
+	if scope == actionLifecycleCondition {
+		switch strings.ToLower(root) {
+		case "env", "github", "inputs", "job", "matrix", "runner", "steps":
+		default:
+			return fmt.Errorf("lifecycle condition context %q is unsupported", root)
+		}
+	}
+	if scope == CallCondition {
+		switch strings.ToLower(root) {
+		case "github", "vars", "inputs", "needs":
+		default:
+			return fmt.Errorf("reusable-workflow call condition context %q is unsupported", root)
+		}
+	}
 	switch strings.ToLower(root) {
 	case "runner":
-		if len(path) == 1 && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch")) {
-			return nil
+		if len(path) == 1 {
+			if strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch") {
+				return nil
+			}
+			if strings.EqualFold(path[0], "temp") && scope != JobCondition && scope != CallCondition {
+				return nil
+			}
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected runner.os or runner.arch", reference)
+		if scope == JobCondition {
+			return fmt.Errorf("condition reference %q is unsupported; expected runner.os or runner.arch", reference)
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, or runner.temp", reference)
 	case "github":
 		if len(path) == 1 {
 			switch strings.ToLower(path[0]) {
@@ -208,6 +269,11 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			return nil
 		}
 		return fmt.Errorf("condition reference %q is unsupported; expected vars.<name>", reference)
+	case "inputs":
+		if len(path) == 1 {
+			return nil
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected inputs.<name>", reference)
 	case "matrix":
 		// Matrix values may be objects or arrays, so nested references such
 		// as matrix.config.os are valid.
@@ -246,6 +312,21 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 
 func validateConditionAccessNode(validator *semanticValidator, node actionlint.ExprNode, scope ConditionScope) error {
 	root := strings.ToLower(referenceRoot(node))
+	if scope == actionLifecycleCondition {
+		switch root {
+		case "env", "github", "inputs", "job", "matrix", "runner", "steps":
+		default:
+			return fmt.Errorf("lifecycle condition context %q is unsupported", root)
+		}
+		if _, whole := node.(*actionlint.VariableNode); whole {
+			return fmt.Errorf("whole lifecycle condition context %q is unsupported", root)
+		}
+		staticRoot, path, err := referencePath(node)
+		if err != nil {
+			return fmt.Errorf("dynamic lifecycle condition access is unsupported")
+		}
+		return validateConditionReference(staticRoot, path, scope)
+	}
 	switch root {
 	case "":
 		switch node := node.(type) {
@@ -297,36 +378,34 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 	return validationErr
 }
 
-// EvaluateActionLifecycleCondition evaluates an action pre-if or post-if
-// condition against the supplied lifecycle state. The accepted grammar is
-// deliberately narrower than general conditions: exactly one status function,
-// or !cancelled(), with optional ${{ }} delimiters. An empty condition is
-// unconditionally true (unlike general conditions, which apply the implicit
-// success guard), failure() means unsuccessful and not cancelled, and any
-// other expression fails closed with an error.
-func EvaluateActionLifecycleCondition(value string, unsuccessful, cancelled bool) (bool, error) {
-	value = strings.TrimSpace(value)
-	if strings.HasPrefix(value, "${{") && strings.HasSuffix(value, "}}") {
-		value = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "${{"), "}}"))
+// EvaluateActionLifecycleCondition evaluates action pre-if or post-if
+// metadata. Empty conditions are unconditionally true and, unlike workflow
+// step conditions, lifecycle conditions have no implicit success guard.
+func EvaluateActionLifecycleCondition(source string, context ConditionContext) (bool, error) {
+	if err := validateLifecycleDelimiters(source); err != nil {
+		return false, err
 	}
-	switch strings.ToLower(value) {
-	case "", "always()":
+	node, empty, err := parseCondition(source)
+	if err != nil {
+		return false, err
+	}
+	if empty {
 		return true, nil
-	case "success()":
-		return !unsuccessful && !cancelled, nil
-	case "failure()":
-		return unsuccessful && !cancelled, nil
-	case "cancelled()":
-		return cancelled, nil
-	case "!cancelled()":
-		return !cancelled, nil
-	default:
-		return false, fmt.Errorf("condition %q is unsupported", value)
 	}
+	// Validate before evaluation so short-circuiting cannot hide an
+	// unsupported context or function in an unselected branch.
+	if err := validateConditionNode(node, actionLifecycleCondition, nil, false); err != nil {
+		return false, err
+	}
+	value, err := evaluateConditionNode(node, context)
+	if err != nil {
+		return false, err
+	}
+	return githubTruthy(value), nil
 }
 
 // EvaluateCondition evaluates a job or step condition. Unsupported syntax and
-// unavailable values fail closed with an error.
+// unavailable values return an error.
 func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil {

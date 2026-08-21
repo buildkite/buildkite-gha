@@ -71,7 +71,15 @@ func parseUploadOptions(commit string, inputs map[string]string) (uploadOptions,
 	for k, v := range inputs {
 		values[strings.ToLower(k)] = strings.TrimSpace(v)
 	}
-	o := uploadOptions{name: "artifact", noFiles: "warn", level: 6}
+	o := uploadOptions{
+		name:    "artifact",
+		noFiles: "warn",
+		hidden:  actionintegration.UploadArtifactIncludesHiddenByDefault(commit),
+		level:   6,
+	}
+	if commit == actionintegration.UploadArtifactV1Commit {
+		o.noFiles = "error"
+	}
 	if v, ok := values["name"]; ok {
 		o.name = strings.TrimSpace(v)
 	}
@@ -127,7 +135,7 @@ type archiveFile struct {
 	info       os.FileInfo
 }
 
-func (r Runner) runUploadArtifactCommit(ctx context.Context, processor *commandProcessor, workspace, commit string, inputs map[string]string) (result Result, returnErr error) {
+func (r *jobRun) runUploadArtifactCommit(ctx context.Context, processor *commandProcessor, workspace, commit string, inputs map[string]string) (result Result, returnErr error) {
 	result = newResult()
 	defer func() { returnErr = processor.scrubError(returnErr) }()
 	if err := ctx.Err(); err != nil {
@@ -159,7 +167,12 @@ func (r Runner) runUploadArtifactCommit(ctx context.Context, processor *commandP
 	if err != nil {
 		return result, err
 	}
-	if len(files) == 0 {
+	emptyV1Directory := false
+	if commit == actionintegration.UploadArtifactV1Commit {
+		info, statErr := os.Stat(filepath.Join(workspace, filepath.FromSlash(o.paths[0])))
+		emptyV1Directory = statErr == nil && info.IsDir()
+	}
+	if len(files) == 0 && !emptyV1Directory {
 		message := fmt.Sprintf("No files were found with the provided path: %s. No artifacts will be uploaded.", o.searchPath)
 		switch o.noFiles {
 		case "error":
@@ -222,8 +235,10 @@ func (r Runner) runUploadArtifactCommit(ctx context.Context, processor *commandP
 	}
 	// The future download adapter resolves this opaque ID through the result manifest.
 	id := strconv.FormatUint(idNumber, 10)
-	result.Outputs["artifact-id"] = id
-	result.Outputs["artifact-digest"] = digest
+	if actionintegration.UploadArtifactSupportsOutputs(commit) {
+		result.Outputs["artifact-id"] = id
+		result.Outputs["artifact-digest"] = digest
+	}
 	result.Artifacts = []transport.ResultArtifact{{Name: o.name, ID: id, Path: rel, Digest: "sha256:" + digest, Size: size, FileCount: len(files)}}
 	success = true
 	return result, nil

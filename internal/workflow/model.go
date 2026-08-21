@@ -50,6 +50,7 @@ func (w Workflow) ReusableOnly() bool {
 // empty list), which is significant for GitHub's defaults.
 type Trigger struct {
 	Event          string           `json:"event"`
+	Position       Position         `json:"position"`
 	Types          []string         `json:"types,omitempty"`
 	Branches       []string         `json:"branches,omitempty"`
 	BranchesIgnore []string         `json:"branches_ignore,omitempty"`
@@ -97,7 +98,7 @@ type Permissions struct {
 	Span   Span              `json:"span"`
 }
 
-// CallInput declares one statically resolvable workflow_call input.
+// CallInput declares one typed workflow_call input.
 type CallInput struct {
 	Type     string `json:"type"`
 	Required bool   `json:"required,omitempty"`

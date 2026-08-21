@@ -13,10 +13,14 @@ import (
 )
 
 const (
-	// UploadArtifactCommit through UploadArtifactV7Commit are the audited
+	// UploadArtifactV1Commit through UploadArtifactV7Commit are the audited
 	// upstream implementations whose ZIP-mode semantics this adapter implements.
-	// Raw v7 uploads remain explicitly unsupported by
-	// ValidateUploadArtifactInputs.
+	// The v1, v2, and v3 commits are the floating legacy major releases used on
+	// github.com and are admitted exactly. Raw v7 uploads remain explicitly
+	// unsupported by ValidateUploadArtifactInputs.
+	UploadArtifactV1Commit = "3446296876d12d4e3a0f3145a3c87e67bf0a16b5"
+	UploadArtifactV2Commit = "82c141cc518b40d92cc801eee768e7aafc9c2fa2"
+	UploadArtifactV3Commit = "ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5"
 	UploadArtifactCommit   = "ea165f8d65b6e75b540449e92b4886f43607fa02"
 	UploadArtifactV5Commit = "330a01c490aca151604b8cf639adc76d48f6c5d4"
 	UploadArtifactV6Commit = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
@@ -28,10 +32,58 @@ const (
 )
 
 var uploadArtifactCommits = map[string]string{
+	UploadArtifactV1Commit: "v1.0.0",
+	UploadArtifactV2Commit: "v2.3.1",
+	UploadArtifactV3Commit: "v3.2.1",
 	UploadArtifactCommit:   "v4.6.2",
 	UploadArtifactV5Commit: "v5.0.0",
 	UploadArtifactV6Commit: "v6.0.0",
 	UploadArtifactV7Commit: "v7.0.1",
+}
+
+// uploadArtifactInputIntroduced records the first admitted generation that
+// declared each version-gated input. Inputs absent from this map are declared
+// by every admitted release. The v7 archive input retains its more specific
+// validation below.
+var uploadArtifactInputIntroduced = map[string]int{
+	"if-no-files-found":    2,
+	"retention-days":       2,
+	"include-hidden-files": 3,
+	"compression-level":    4,
+	"overwrite":            4,
+}
+
+func uploadArtifactGeneration(commit string) int {
+	switch commit {
+	case UploadArtifactV1Commit:
+		return 1
+	case UploadArtifactV2Commit:
+		return 2
+	case UploadArtifactV3Commit:
+		return 3
+	}
+	return 4
+}
+
+// UploadArtifactSupportsOutputs reports whether the admitted release declares
+// artifact outputs. Upstream legacy v1 through v3 releases declared none.
+func UploadArtifactSupportsOutputs(commit string) bool {
+	return uploadArtifactGeneration(commit) >= 4
+}
+
+// UploadArtifactIncludesHiddenByDefault reports whether omission of
+// include-hidden-files retains hidden paths for the admitted release.
+func UploadArtifactIncludesHiddenByDefault(commit string) bool {
+	return commit == UploadArtifactV1Commit || commit == UploadArtifactV2Commit
+}
+
+// LegacyUploadArtifactRelease reports the release label for admitted v1
+// through v3 commits, which warrant an upgrade warning.
+func LegacyUploadArtifactRelease(commit string) (string, bool) {
+	if uploadArtifactGeneration(commit) <= 3 {
+		return uploadArtifactCommits[commit], true
+	}
+	return "", false
 }
 
 func validateUploadArtifactCommit(commit string) error {
@@ -63,6 +115,7 @@ func validateUploadArtifactInputs(commit string, inputs map[string]string, evalu
 	if err := validateUploadArtifactCommit(commit); err != nil {
 		return err
 	}
+	generation := uploadArtifactGeneration(commit)
 	allowed := map[string]bool{"name": true, "path": true, "if-no-files-found": true, "include-hidden-files": true, "compression-level": true, "overwrite": true, "archive": true, "retention-days": true}
 	seen := map[string]bool{}
 	for _, name := range sortedNames(inputs) {
@@ -77,15 +130,27 @@ func validateUploadArtifactInputs(commit string, inputs map[string]string, evalu
 		if lower == "archive" && commit != UploadArtifactV7Commit {
 			return fmt.Errorf("input %q exists only in actions/upload-artifact v7", name)
 		}
+		if uploadArtifactInputIntroduced[lower] > generation {
+			return fmt.Errorf("explicit input %q is unsupported by this actions/upload-artifact release", name)
+		}
 	}
 	pathValue, ok := inputFold(inputs, "path")
 	if !ok || strings.TrimSpace(pathValue) == "" {
 		return fmt.Errorf("required input %q is missing", "path")
 	}
 	if evaluated || !uploadArtifactExpression(pathValue) {
-		_, err := UploadArtifactPaths(pathValue)
+		paths, err := UploadArtifactPaths(pathValue)
 		if err != nil {
 			return err
+		}
+		if generation == 1 && (len(paths) != 1 || strings.ContainsAny(paths[0], "*?[")) {
+			return fmt.Errorf("input %q in actions/upload-artifact v1 must be one literal file or directory", "path")
+		}
+	}
+	if generation == 1 {
+		name, ok := inputFold(inputs, "name")
+		if !ok || strings.TrimSpace(name) == "" {
+			return fmt.Errorf("required input %q is missing", "name")
 		}
 	}
 	if value, ok := inputFold(inputs, "name"); ok && (evaluated || !uploadArtifactExpression(value)) {

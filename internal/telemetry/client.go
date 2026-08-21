@@ -12,6 +12,10 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const (
@@ -20,6 +24,7 @@ const (
 	defaultTimeout        = 1500 * time.Millisecond
 	responseDrainLimit    = 32 << 10
 	maxClientVersionBytes = 64
+	maxErrorMessageBytes  = 1024
 	maxDurationMS         = int64(1<<31 - 1)
 	maxDiagnostics        = 20
 )
@@ -88,19 +93,23 @@ type Diagnostic struct {
 }
 
 type Details struct {
-	FailurePhase FailurePhase
-	FailureCode  FailureCode
-	Diagnostics  []Diagnostic
+	FailurePhase          FailurePhase
+	FailureCode           FailureCode
+	ErrorMessage          string
+	ErrorMessageTruncated bool
+	Diagnostics           []Diagnostic
 }
 
 type Properties struct {
-	Command       Command      `json:"command"`
-	Outcome       Outcome      `json:"outcome"`
-	ClientVersion string       `json:"client_version"`
-	DurationMS    int64        `json:"duration_ms,omitempty"`
-	FailurePhase  FailurePhase `json:"failure_phase,omitempty"`
-	FailureCode   FailureCode  `json:"failure_code,omitempty"`
-	Diagnostics   []Diagnostic `json:"diagnostics,omitempty"`
+	Command               Command      `json:"command"`
+	Outcome               Outcome      `json:"outcome"`
+	ClientVersion         string       `json:"client_version"`
+	DurationMS            int64        `json:"duration_ms,omitempty"`
+	FailurePhase          FailurePhase `json:"failure_phase,omitempty"`
+	FailureCode           FailureCode  `json:"failure_code,omitempty"`
+	ErrorMessage          string       `json:"error_message,omitempty"`
+	ErrorMessageTruncated bool         `json:"error_message_truncated,omitempty"`
+	Diagnostics           []Diagnostic `json:"diagnostics,omitempty"`
 }
 
 type Config struct {
@@ -117,6 +126,7 @@ type Client struct {
 	eventsURL     string
 	jobToken      string
 	clientVersion string
+	userAgent     string
 	client        *http.Client
 	timeout       time.Duration
 }
@@ -149,16 +159,22 @@ func New(config Config) (*Client, error) {
 	if timeout <= 0 || timeout > defaultTimeout {
 		timeout = defaultTimeout
 	}
+	clientVersion := boundedClientVersion(config.ClientVersion)
 	return &Client{
 		eventsURL:     u.String(),
 		jobToken:      config.JobToken,
-		clientVersion: boundedClientVersion(config.ClientVersion),
+		clientVersion: clientVersion,
+		userAgent:     useragent.FromVersion(config.ClientVersion),
 		client:        &bounded,
 		timeout:       timeout,
 	}, nil
 }
 
 func (c *Client) Emit(command Command, outcome Outcome, duration time.Duration, details Details) error {
+	return c.EmitContext(context.Background(), command, outcome, duration, details)
+}
+
+func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outcome, duration time.Duration, details Details) error {
 	if c == nil {
 		return nil
 	}
@@ -178,6 +194,8 @@ func (c *Client) Emit(command Command, outcome Outcome, duration time.Duration, 
 	if err != nil {
 		return err
 	}
+	errorMessage, errorMessageTruncated := boundedErrorMessage(details.ErrorMessage)
+	errorMessageTruncated = errorMessage != "" && (errorMessageTruncated || details.ErrorMessageTruncated)
 	durationMS := duration.Milliseconds()
 	if durationMS < 0 {
 		durationMS = 0
@@ -191,20 +209,22 @@ func (c *Client) Emit(command Command, outcome Outcome, duration time.Duration, 
 		Event: EventCommandCompleted,
 		Properties: Properties{
 			Command: command, Outcome: outcome, ClientVersion: c.clientVersion, DurationMS: durationMS,
-			FailurePhase: details.FailurePhase, FailureCode: details.FailureCode, Diagnostics: diagnostics,
+			FailurePhase: details.FailurePhase, FailureCode: details.FailureCode,
+			ErrorMessage: errorMessage, ErrorMessageTruncated: errorMessageTruncated, Diagnostics: diagnostics,
 		},
 	})
 	if err != nil {
 		return fmt.Errorf("encode telemetry event: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	requestCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.eventsURL, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.eventsURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create telemetry request: %v", err)
 	}
 	request.Header.Set("Authorization", "Token "+c.jobToken)
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", c.userAgent)
 	response, err := c.client.Do(request)
 	if err != nil {
 		return fmt.Errorf("send telemetry event: %w", err)
@@ -300,6 +320,24 @@ func boundedClientVersion(version string) string {
 		}
 	}
 	return version
+}
+
+func boundedErrorMessage(message string) (string, bool) {
+	message = strings.Map(func(character rune) rune {
+		if unicode.IsControl(character) {
+			return ' '
+		}
+		return character
+	}, strings.ToValidUTF8(message, "�"))
+	message = strings.Join(strings.Fields(message), " ")
+	if len(message) <= maxErrorMessageBytes {
+		return message, false
+	}
+	start := len(message) - maxErrorMessageBytes
+	for !utf8.RuneStart(message[start]) {
+		start++
+	}
+	return strings.TrimSpace(message[start:]), true
 }
 
 func validAgentURL(u *url.URL) bool {

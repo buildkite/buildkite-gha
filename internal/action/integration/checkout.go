@@ -12,12 +12,15 @@ import (
 )
 
 const (
-	// CheckoutV3Commit through CheckoutV7Commit are the current audited release
-	// implementations. CheckoutV3Commit is the final v3 release and is admitted
-	// exactly rather than extending the v4-and-later main-branch snapshot.
+	// CheckoutV1Commit through CheckoutV7Commit are the current audited release
+	// implementations. CheckoutV1Commit, CheckoutV2Commit, and CheckoutV3Commit
+	// are the final v1, v2, and v3 releases and are admitted exactly rather
+	// than extending the v4-and-later main-branch snapshot.
 	// CheckoutV7InitialCommit is retained because it is pinned by the OSS
 	// compatibility corpus; its later v7.0.1 changes do not affect the adapter's
 	// bounded exact-event-SHA operation.
+	CheckoutV1Commit        = "50fbc622fc4ef5163becd7fab6573eac35f8462e"
+	CheckoutV2Commit        = "0717577d45739eb3c851188b29f50ed6c0b2194e"
 	CheckoutV3Commit        = "a37ce9120846195fa4ece8f58b268e6043cb2f26"
 	CheckoutV4Commit        = "11d5960a326750d5838078e36cf38b85af677262"
 	CheckoutV5Commit        = "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
@@ -27,6 +30,8 @@ const (
 )
 
 var checkoutCommits = map[string]string{
+	CheckoutV1Commit:        "v1.2.0",
+	CheckoutV2Commit:        "v2.8.0",
 	CheckoutV3Commit:        "v3.7.0",
 	CheckoutV4Commit:        "v4",
 	CheckoutV5Commit:        "v5",
@@ -35,9 +40,61 @@ var checkoutCommits = map[string]string{
 	CheckoutV7Commit:        "v7.0.1",
 }
 
+// checkoutInputIntroduced records the earliest admitted release generation
+// declaring each version-gated input. Inputs absent from this map are declared
+// by every admitted release.
+var checkoutInputIntroduced = map[string]int{
+	"ssh-key":                   2,
+	"ssh-known-hosts":           2,
+	"ssh-strict":                2,
+	"persist-credentials":       2,
+	"set-safe-directory":        2,
+	"allow-unsafe-pr-checkout":  2,
+	"fetch-tags":                3,
+	"sparse-checkout":           3,
+	"sparse-checkout-cone-mode": 3,
+	"github-server-url":         3,
+	"filter":                    4,
+	"show-progress":             4,
+	"ssh-user":                  4,
+}
+
+func checkoutGeneration(commit string) int {
+	switch commit {
+	case CheckoutV1Commit:
+		return 1
+	case CheckoutV2Commit:
+		return 2
+	case CheckoutV3Commit:
+		return 3
+	}
+	return 4
+}
+
+// CheckoutSupportsOutputs reports whether the admitted release declares the
+// ref and commit outputs, added upstream in v4.2.0.
+func CheckoutSupportsOutputs(commit string) bool {
+	return checkoutGeneration(commit) >= 4
+}
+
+// CheckoutDefaultsToFullHistory reports whether the admitted release fetched
+// full history when fetch-depth was omitted, as v1's runner plugin did.
+func CheckoutDefaultsToFullHistory(commit string) bool {
+	return commit == CheckoutV1Commit
+}
+
+// LegacyCheckoutRelease reports the admitted release label for the v1 and v2
+// commits, which predate the v3.7.0 contract and warrant an upgrade warning.
+func LegacyCheckoutRelease(commit string) (string, bool) {
+	if commit == CheckoutV1Commit || commit == CheckoutV2Commit {
+		return checkoutCommits[commit], true
+	}
+	return "", false
+}
+
 // validateCheckoutCommit admits known releases and a static snapshot of
 // commits reachable from upstream main. Mutable references are resolved before
-// this check, so changes after the snapshot remain fail-closed until regeneration.
+// this check, so changes after the snapshot are rejected until regeneration.
 func validateCheckoutCommit(commit string) error {
 	if _, ok := checkoutCommits[commit]; ok {
 		return nil
@@ -47,11 +104,6 @@ func validateCheckoutCommit(commit string) error {
 		return versionError("actions/checkout", "native adapter", commit, supported)
 	}
 	return nil
-}
-
-// IsCheckoutV3 reports whether commit uses the audited v3.7.0 contract.
-func IsCheckoutV3(commit string) bool {
-	return commit == CheckoutV3Commit
 }
 
 func sortedCheckoutCommits() []string {
@@ -68,7 +120,7 @@ func sortedCheckoutCommits() []string {
 func ValidateCheckoutInputs(commit string, inputs map[string]string, repository, sha string) error {
 	names := sortedNames(inputs)
 	seen := make(map[string]bool, len(names))
-	v3 := IsCheckoutV3(commit)
+	generation := checkoutGeneration(commit)
 	for _, name := range names {
 		value := inputs[name]
 		normalized := strings.ToLower(name)
@@ -76,6 +128,9 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 			return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
 		}
 		seen[normalized] = true
+		if checkoutInputIntroduced[normalized] > generation {
+			return fmt.Errorf("explicit input %q is unsupported by this actions/checkout release", name)
+		}
 		switch normalized {
 		case "repository":
 			if strings.EqualFold(value, repository) {
@@ -111,7 +166,7 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 				continue
 			}
 		case "show-progress":
-			if !v3 && actionBoolean(value) {
+			if actionBoolean(value) {
 				continue
 			}
 		case "path":
@@ -123,7 +178,7 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 				continue
 			}
 		case "filter":
-			if !v3 && value == "" {
+			if value == "" {
 				continue
 			}
 		case "ssh-strict", "sparse-checkout-cone-mode":
@@ -131,7 +186,7 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 				continue
 			}
 		case "ssh-user":
-			if !v3 && value == "git" {
+			if value == "git" {
 				continue
 			}
 		case "github-server-url":

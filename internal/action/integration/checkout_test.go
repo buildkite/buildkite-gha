@@ -6,7 +6,7 @@ import (
 )
 
 func TestCheckoutCommitAdmission(t *testing.T) {
-	for _, commit := range []string{CheckoutV3Commit, CheckoutV4Commit, CheckoutV5Commit, CheckoutV6Commit, CheckoutV7InitialCommit, CheckoutV7Commit} {
+	for _, commit := range []string{CheckoutV1Commit, CheckoutV2Commit, CheckoutV3Commit, CheckoutV4Commit, CheckoutV5Commit, CheckoutV6Commit, CheckoutV7InitialCommit, CheckoutV7Commit} {
 		if err := validateCheckoutCommit(commit); err != nil {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
@@ -94,5 +94,45 @@ func TestValidateCheckoutV3InputsRejectsLaterContract(t *testing.T) {
 		"fetch-tags": "false",
 	}, repository, sha); err != nil {
 		t.Fatalf("ValidateCheckoutInputs() rejected v3 inputs: %v", err)
+	}
+}
+
+func TestValidateCheckoutLegacyInputsRejectLaterContracts(t *testing.T) {
+	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
+	if err := ValidateCheckoutInputs(CheckoutV1Commit, map[string]string{
+		"repository": repository, "ref": sha, "fetch-depth": "0",
+		"clean": "true", "lfs": "false", "submodules": "recursive", "path": "sources",
+	}, repository, sha); err != nil {
+		t.Fatalf("ValidateCheckoutInputs() rejected v1 inputs: %v", err)
+	}
+	if err := ValidateCheckoutInputs(CheckoutV2Commit, map[string]string{
+		"repository": repository, "ref": sha, "fetch-depth": "1",
+		"ssh-key": "", "ssh-known-hosts": "", "ssh-strict": "true", "persist-credentials": "false",
+		"set-safe-directory": "true", "allow-unsafe-pr-checkout": "false",
+	}, repository, sha); err != nil {
+		t.Fatalf("ValidateCheckoutInputs() rejected v2 inputs: %v", err)
+	}
+
+	for name, test := range map[string]struct {
+		commit string
+		inputs map[string]string
+	}{
+		"v1 persist-credentials": {CheckoutV1Commit, map[string]string{"persist-credentials": "false"}},
+		"v1 ssh-key":             {CheckoutV1Commit, map[string]string{"ssh-key": ""}},
+		"v1 set-safe-directory":  {CheckoutV1Commit, map[string]string{"set-safe-directory": "true"}},
+		"v1 fetch-tags":          {CheckoutV1Commit, map[string]string{"fetch-tags": "false"}},
+		"v2 fetch-tags":          {CheckoutV2Commit, map[string]string{"fetch-tags": "true"}},
+		"v2 sparse-checkout":     {CheckoutV2Commit, map[string]string{"sparse-checkout": ""}},
+		"v2 github-server-url":   {CheckoutV2Commit, map[string]string{"github-server-url": ""}},
+		"v2 filter":              {CheckoutV2Commit, map[string]string{"filter": ""}},
+		"v2 show-progress":       {CheckoutV2Commit, map[string]string{"show-progress": "true"}},
+		"v2 ssh-user":            {CheckoutV2Commit, map[string]string{"ssh-user": "git"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateCheckoutInputs(test.commit, test.inputs, repository, sha)
+			if err == nil || !strings.Contains(err.Error(), "unsupported by this actions/checkout release") {
+				t.Fatalf("ValidateCheckoutInputs(%#v) = %v, want release-contract rejection", test.inputs, err)
+			}
+		})
 	}
 }

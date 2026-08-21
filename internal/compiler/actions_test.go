@@ -75,6 +75,106 @@ func (f *fakeActionSource) Fetch(_ context.Context, r source.Reference) (source.
 	return source.Resolved{Reference: r, Commit: commit}, source.Materialized{RepositoryRoot: f.root, ActionRoot: filepath.Join(f.root, r.Path), SourceDigest: d}, err
 }
 
+// checkoutV1LegacyManifest and checkoutV2LegacyManifest mirror the real
+// actions/checkout manifests at the admitted v1.2.0 and v2.8.0 release
+// commits: v1.2.0 declares runs.plugin with no runs.using and v2.8.0 declares
+// the retired node12 runtime, so neither passes generic metadata admission.
+const checkoutV1LegacyManifest = `name: 'Checkout'
+description: 'Checkout a Git repository.'
+inputs:
+  repository:
+    description: 'Repository name'
+  ref:
+    description: 'Ref to checkout (SHA, branch, tag)'
+  token:
+    description: 'Access token for clone repository'
+  fetch-depth:
+    description: 'The depth of commits to ask Git to fetch; defaults to no limit'
+  path:
+    description: 'Optional path to check out source code'
+runs:
+  # Plugins live on the runner and are only available to a certain set of first party actions.
+  plugin: 'checkout'
+`
+
+const checkoutV2LegacyManifest = `name: 'Checkout'
+description: 'Checkout a Git repository at a particular version'
+inputs:
+  repository:
+    description: 'Repository name with owner. For example, actions/checkout'
+    default: ${{ github.repository }}
+  token:
+    description: 'Personal access token (PAT) used to fetch the repository.'
+    default: ${{ github.token }}
+  fetch-depth:
+    description: 'Number of commits to fetch. 0 indicates all history for all branches and tags.'
+    default: 1
+  path:
+    description: 'Relative path under $GITHUB_WORKSPACE to place the repository'
+runs:
+  using: node12
+  main: dist/index.js
+  post: dist/index.js
+`
+
+func checkoutTestManifest(commit string) string {
+	switch commit {
+	case actionintegration.CheckoutV1Commit:
+		return checkoutV1LegacyManifest
+	case actionintegration.CheckoutV2Commit:
+		return checkoutV2LegacyManifest
+	default:
+		return "name: checkout\nruns:\n  using: node24\n  main: index.js\n"
+	}
+}
+
+// These manifests mirror the admitted legacy upload-artifact releases. v1's
+// runner plugin and v2's retired node12 runtime don't pass generic metadata
+// admission, but their execution is replaced entirely by the native adapter.
+const uploadArtifactV1LegacyManifest = `name: 'Upload a Build Artifact'
+inputs:
+  name:
+    required: true
+  path:
+    required: true
+runs:
+  plugin: publish
+`
+
+const uploadArtifactV2LegacyManifest = `name: 'Upload a Build Artifact'
+inputs:
+  name:
+    default: artifact
+  path:
+    required: true
+runs:
+  using: node12
+  main: dist/index.js
+`
+
+func uploadArtifactTestManifest(commit string) string {
+	switch commit {
+	case actionintegration.UploadArtifactV1Commit:
+		return uploadArtifactV1LegacyManifest
+	case actionintegration.UploadArtifactV2Commit:
+		return uploadArtifactV2LegacyManifest
+	default:
+		return "name: upload artifact\nruns:\n  using: node24\n  main: index.js\n"
+	}
+}
+
+type commitActionSource struct{ roots map[string]string }
+
+func (s commitActionSource) Fetch(_ context.Context, r source.Reference) (source.Resolved, source.Materialized, error) {
+	commit := strings.ToLower(r.Ref)
+	root, ok := s.roots[commit]
+	if !ok {
+		return source.Resolved{}, source.Materialized{}, fmt.Errorf("no fixture tree for ref %q", r.Ref)
+	}
+	d, err := source.DigestTree(filepath.Join(root, r.Path))
+	return source.Resolved{Reference: r, Commit: commit}, source.Materialized{RepositoryRoot: root, ActionRoot: filepath.Join(root, r.Path), SourceDigest: d}, err
+}
+
 func writeAction(t *testing.T, root, name, body string) {
 	t.Helper()
 	d := filepath.Join(root, name)
@@ -111,6 +211,15 @@ func TestActionResolutionMessageDistinguishesResolutionFailure(t *testing.T) {
 	want := `Action "owner/action@v1" could not be resolved: tag v1 was not found`
 	if got, detail, action := actionResolutionMessage("owner/action@v1", err); got != want || detail != "" || action != "owner/action@v1" {
 		t.Fatalf("actionResolutionMessage() = %q, %q, %q; want %q, empty detail, %q", got, detail, action, want, "owner/action@v1")
+	}
+}
+
+func TestActionResolutionMessageExplainsUnsupportedContainerAction(t *testing.T) {
+	reference := "docker://alpine:3.20"
+	_, err := source.Parse(reference)
+	want := `Action "docker://alpine:3.20" is unsupported: docker:// container actions are unsupported; use a Dockerfile action or replace the action with a run step`
+	if got, detail, action := actionResolutionMessage(reference, err); got != want || detail != "" || action != reference {
+		t.Fatalf("actionResolutionMessage() = %q, %q, %q; want %q, empty detail, %q", got, detail, action, want, reference)
 	}
 }
 
@@ -214,7 +323,7 @@ func TestCompileActionLocksRequiresMiseOnlyForJavaScriptReachableGraphs(t *testi
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, _, _, got, err := compileActionLocks(context.Background(), workspace, source, test.refs)
+			_, _, _, got, err := compileActionLocks(t.Context(), workspace, source, test.refs)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -234,12 +343,12 @@ func TestCompileActionInvocationsValidatesNestedUploadArtifact(t *testing.T) {
 	}
 
 	writeAction(t, workspace, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: actions/upload-artifact@v4\n      with:\n        path: payload\n        overwrite: true\n")
-	if _, err := compileActionInvocations(context.Background(), workspace, source, "https://github.com", []string{"./parent"}, []map[string]string{{}}); err == nil || !strings.Contains(err.Error(), "bounded upload-artifact adapter") || !strings.Contains(err.Error(), "overwrite") {
+	if _, err := compileActionInvocations(t.Context(), workspace, source, "https://github.com", []string{"./parent"}, []map[string]string{{}}); err == nil || !strings.Contains(err.Error(), "bounded upload-artifact adapter") || !strings.Contains(err.Error(), "overwrite") {
 		t.Fatalf("nested literal validation error = %v", err)
 	}
 
 	writeAction(t, workspace, "parent", "name: parent\ninputs:\n  path:\n    required: true\nruns:\n  using: composite\n  steps:\n    - uses: actions/upload-artifact@v4\n      with:\n        path: ${{ inputs.path }}\n")
-	if _, err := compileActionInvocations(context.Background(), workspace, source, "https://github.com", []string{"./parent"}, []map[string]string{{"path": "payload"}}); err != nil {
+	if _, err := compileActionInvocations(t.Context(), workspace, source, "https://github.com", []string{"./parent"}, []map[string]string{{"path": "payload"}}); err != nil {
 		t.Fatalf("nested expression was not deferred to runtime: %v", err)
 	}
 }
@@ -247,7 +356,7 @@ func TestCompileActionInvocationsValidatesNestedUploadArtifact(t *testing.T) {
 func TestCompileActionLocksLocalAndDedup(t *testing.T) {
 	w := t.TempDir()
 	writeAction(t, w, "js", "name: js\nruns:\n  using: node20\n  main: index.js\n")
-	selectors, locks, caps, _, err := compileActionLocks(context.Background(), w, nil, []string{"./js", "./js"})
+	selectors, locks, caps, _, err := compileActionLocks(t.Context(), w, nil, []string{"./js", "./js"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +427,7 @@ runs:
 		{name: "token before dynamic GitHub index", ref: "./mixed", wantErr: "index must be a string literal"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			compiled, err := compileActionInvocations(context.Background(), w, nil, "https://github.com", []string{test.ref}, []map[string]string{test.supplied})
+			compiled, err := compileActionInvocations(t.Context(), w, nil, "https://github.com", []string{test.ref}, []map[string]string{test.supplied})
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 					t.Fatalf("compileActionInvocations() error = %v, want %q", err, test.wantErr)
@@ -348,7 +457,7 @@ runs:
   main: index.js
 `)
 	compiled, err := compileActionInvocations(
-		context.Background(), workspace, nil, "https://github.com", []string{"./secrets"},
+		t.Context(), workspace, nil, "https://github.com", []string{"./secrets"},
 		[]map[string]string{{"optional": "${{ secrets.OPTIONAL_TOKEN }}", "required": "${{ secrets.REQUIRED_TOKEN }}-${{ secrets.GITHUB_TOKEN }}-${{ github.token }}"}},
 	)
 	if err != nil {
@@ -381,9 +490,62 @@ runs:
         token: ${{ secrets.DEPLOY_KEY }}
 `)
 
-	_, err := compileActionInvocations(context.Background(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
+	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
 	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant secret authority") {
 		t.Fatalf("composite metadata secret error = %v", err)
+	}
+}
+
+func TestCompileActionInvocationsAllowsSerializedGitHubContextInCompositeChildInputWithoutGrantingAuthority(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  context:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        context: ${{ ToJson(GitHub) }}
+`)
+
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("composite-authored toJSON(github) granted token authority")
+	}
+}
+
+func TestCompileActionInvocationsRejectsGitHubTokenAuthorityFromCompositeMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  token:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        token: ${{ github.token }}-${{ toJSON(github) }}
+`)
+
+	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
+	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant github.token authority") {
+		t.Fatalf("composite metadata token error = %v", err)
 	}
 }
 
@@ -398,7 +560,7 @@ runs:
   main: index.js
 `)
 	_, err := compileActionInvocations(
-		context.Background(), workspace, nil, "https://github.com", []string{"./event"},
+		t.Context(), workspace, nil, "https://github.com", []string{"./event"},
 		[]map[string]string{{"action": "${{ github.event.action }}"}},
 	)
 	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained in a job plan") {
@@ -416,7 +578,7 @@ runs:
   using: node24
   main: index.js
 `)
-	_, err := compileActionInvocations(context.Background(), workspace, nil, "https://github.com", []string{"./secrets"}, []map[string]string{nil})
+	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./secrets"}, []map[string]string{nil})
 	if err == nil || !strings.Contains(err.Error(), "action input defaults cannot grant secret authority") {
 		t.Fatalf("metadata secret default error = %v", err)
 	}
@@ -433,14 +595,14 @@ runs:
   main: index.js
 `)
 	actionSource := &fakeActionSource{root: remote, calls: map[string]int{}}
-	compiled, err := compileActionInvocations(context.Background(), workspace, actionSource, "https://github.com", []string{"owner/action@v1"}, []map[string]string{nil})
+	compiled, err := compileActionInvocations(t.Context(), workspace, actionSource, "https://github.com", []string{"owner/action@v1"}, []map[string]string{nil})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !compiled.requiresGitHubToken {
 		t.Fatal("conditional remote action default did not require a GitHub token")
 	}
-	compiled, err = compileActionInvocations(context.Background(), workspace, actionSource, "https://origin.cursor.com", []string{"owner/action@v1"}, []map[string]string{nil})
+	compiled, err = compileActionInvocations(t.Context(), workspace, actionSource, "https://origin.cursor.com", []string{"owner/action@v1"}, []map[string]string{nil})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +624,7 @@ runs:
 	fake := &fakeActionSource{root: remote, calls: map[string]int{}}
 	shared := MemoizeActionSource(fake)
 	for range 2 {
-		if _, err := compileActionInvocations(context.Background(), workspace, shared, "https://github.com", []string{"owner/action@v1"}, []map[string]string{nil}); err != nil {
+		if _, err := compileActionInvocations(t.Context(), workspace, shared, "https://github.com", []string{"owner/action@v1"}, []map[string]string{nil}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -485,7 +647,7 @@ func TestMemoizeActionSourceCoalescesConcurrentResolution(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			_, _, err := shared.Fetch(context.Background(), ref)
+			_, _, err := shared.Fetch(t.Context(), ref)
 			errs <- err
 		}()
 	}
@@ -550,7 +712,7 @@ runs:
 		{ref: "./parent", want: true},
 		{ref: "./overridden"},
 	} {
-		compiled, err := compileActionInvocations(context.Background(), w, nil, "https://github.com", []string{test.ref}, []map[string]string{nil})
+		compiled, err := compileActionInvocations(t.Context(), w, nil, "https://github.com", []string{test.ref}, []map[string]string{nil})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -558,8 +720,30 @@ runs:
 			t.Fatalf("%s requires GitHub token = %t, want %t", test.ref, compiled.requiresGitHubToken, test.want)
 		}
 	}
-	if _, err := compileActionInvocations(context.Background(), w, nil, "https://github.com", []string{"./mixed-parent"}, []map[string]string{nil}); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
+	if _, err := compileActionInvocations(t.Context(), w, nil, "https://github.com", []string{"./mixed-parent"}, []map[string]string{nil}); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
 		t.Fatalf("mixed child traversal error = %v, want dynamic index rejection", err)
+	}
+}
+
+func TestCompileActionInvocationsSupportsNestedRunnerDebugDefault(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "github-script", `name: GitHub Script
+inputs:
+  debug:
+    default: ${{ runner.debug == '1' }}
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, workspace, "parent", `name: Parent
+runs:
+  using: composite
+  steps:
+    - uses: ./github-script
+`)
+
+	if _, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil}); err != nil {
+		t.Fatalf("compile nested github-script action: %v", err)
 	}
 }
 
@@ -581,7 +765,7 @@ runs:
 		if err := os.WriteFile(workflowPath, []byte(workflow), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return compilePlansForTest(context.Background(), workflowPath, []byte(workflow), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+		return compilePlansForTest(t.Context(), workflowPath, []byte(workflow), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
 	}
 
 	effectiveWorkflow := `on: push
@@ -674,7 +858,7 @@ func TestCompileActionLocksRemoteCompositeUsesWorkspaceRoot(t *testing.T) {
 	writeAction(t, w, "child", "name: child\nruns:\n  using: docker\n  image: Dockerfile\n")
 	writeAction(t, remote, "", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./child\n")
 	f := &fakeActionSource{root: remote, calls: map[string]int{}}
-	_, locks, caps, _, err := compileActionLocks(context.Background(), w, f, []string{"Owner/Repo@v1", "Owner/Repo@v1"})
+	_, locks, caps, _, err := compileActionLocks(t.Context(), w, f, []string{"Owner/Repo@v1", "Owner/Repo@v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -695,14 +879,14 @@ func TestCompileActionLocksRemoteCompositeUsesWorkspaceRoot(t *testing.T) {
 func TestCompileActionLocksRecursion(t *testing.T) {
 	w := t.TempDir()
 	writeAction(t, w, "loop", "name: loop\nruns:\n  using: composite\n  steps:\n    - uses: ./loop\n")
-	_, _, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./loop"})
+	_, _, _, _, err := compileActionLocks(t.Context(), w, nil, []string{"./loop"})
 	if err == nil || !strings.Contains(err.Error(), "recursion") {
 		t.Fatalf("got %v", err)
 	}
 }
 
 func TestCompileActionLocksRequiresRepositoryRoot(t *testing.T) {
-	_, _, _, _, err := compileActionLocks(context.Background(), "", nil, []string{"./local"})
+	_, _, _, _, err := compileActionLocks(t.Context(), "", nil, []string{"./local"})
 	if err == nil || !strings.Contains(err.Error(), "workflow path must identify a repository root") {
 		t.Fatalf("compileActionLocks() error = %v, want repository-root rejection", err)
 	}
@@ -717,7 +901,7 @@ func TestCompileActionLocksRejectsExcessiveDepthBeforeResolvingLeaf(t *testing.T
 		}
 		writeAction(t, w, "depth-"+strconv.Itoa(i), "name: depth\nruns:\n  using: composite\n"+steps)
 	}
-	_, _, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./depth-0"})
+	_, _, _, _, err := compileActionLocks(t.Context(), w, nil, []string{"./depth-0"})
 	if err == nil || !strings.Contains(err.Error(), "exceeds maximum depth") {
 		t.Fatalf("compileActionLocks() error = %v, want depth rejection", err)
 	}
@@ -729,7 +913,7 @@ func TestCompileActionLocksRejectsEscapedJavaScriptEntrypoint(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(w, "outside.js"), []byte("// outside\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./js"})
+	_, _, _, _, err := compileActionLocks(t.Context(), w, nil, []string{"./js"})
 	if err == nil || !strings.Contains(err.Error(), "escapes action source") {
 		t.Fatalf("compileActionLocks() error = %v, want entry-point confinement rejection", err)
 	}
@@ -740,7 +924,7 @@ func TestCompileActionLocksExplicitRemoteAndDistinctRefs(t *testing.T) {
 	writeAction(t, remote, "", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: Other/Child/sub@v2\n")
 	writeAction(t, remote, "sub", "name: child\nruns:\n  using: node24\n  main: index.js\n")
 	f := &fakeActionSource{root: remote, calls: map[string]int{}}
-	selectors, locks, _, _, err := compileActionLocks(context.Background(), w, f, []string{"Owner/Repo@v1", "Owner/Repo@main"})
+	selectors, locks, _, _, err := compileActionLocks(t.Context(), w, f, []string{"Owner/Repo@v1", "Owner/Repo@main"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,16 +942,48 @@ func TestCompileActionLocksDeterministic(t *testing.T) {
 	w := t.TempDir()
 	writeAction(t, w, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./child\n")
 	writeAction(t, w, "child", "name: child\nruns:\n  using: node20\n  main: index.js\n")
-	aSelectors, aLocks, aCaps, _, err := compileActionLocks(context.Background(), w, nil, []string{"./parent"})
+	aSelectors, aLocks, aCaps, _, err := compileActionLocks(t.Context(), w, nil, []string{"./parent"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bSelectors, bLocks, bCaps, _, err := compileActionLocks(context.Background(), w, nil, []string{"./parent"})
+	bSelectors, bLocks, bCaps, _, err := compileActionLocks(t.Context(), w, nil, []string{"./parent"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual([]any{aSelectors, aLocks, aCaps}, []any{bSelectors, bLocks, bCaps}) {
 		t.Fatalf("non-deterministic output:\n%#v\n%#v", aLocks, bLocks)
+	}
+}
+
+func TestCompileActionLocksValidatesJavaScriptLifecycleConditions(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "rust-cache", "name: rust-cache\nruns:\n  using: node24\n  main: index.js\n  post: index.js\n  post-if: (success() || env.CACHE_ON_FAILURE == 'true') && inputs.cache == true && hashFiles('Cargo.lock') != ''\n")
+	writeAction(t, workspace, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./rust-cache\n")
+	if _, _, _, _, err := compileActionLocks(t.Context(), workspace, nil, []string{"./parent"}); err != nil {
+		t.Fatalf("compileActionLocks() rejected rust-cache lifecycle condition: %v", err)
+	}
+
+	writeAction(t, workspace, "broken", "name: broken\nruns:\n  using: node24\n  pre: index.js\n  pre-if: success() || secrets.TOKEN != ''\n  main: index.js\n")
+	if _, _, _, _, err := compileActionLocks(t.Context(), workspace, nil, []string{"./broken"}); err == nil || !strings.Contains(err.Error(), "pre-if") || !strings.Contains(err.Error(), `context "secrets"`) {
+		t.Fatalf("direct lifecycle validation error = %v", err)
+	}
+
+	writeAction(t, workspace, "nested-broken", "name: broken\nruns:\n  using: node24\n  main: index.js\n  post: index.js\n  post-if: needs[env.JOB].result == 'success'\n")
+	writeAction(t, workspace, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./nested-broken\n")
+	if _, _, _, _, err := compileActionLocks(t.Context(), workspace, nil, []string{"./parent"}); err == nil || !strings.Contains(err.Error(), `child action "./nested-broken"`) || !strings.Contains(err.Error(), "post-if") || !strings.Contains(err.Error(), `context "needs"`) {
+		t.Fatalf("nested lifecycle validation error = %v", err)
+	}
+}
+
+func TestCompileActionLocksDoesNotValidateUnusedNativeLifecycle(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  pre: index.js\n  pre-if: secrets.UNSUPPORTED\n  main: index.js\n")
+	source := classifiedActionSource{
+		roots:   map[string]string{"actions/checkout": remote},
+		commits: map[string]string{"actions/checkout": actionintegration.CheckoutV4Commit},
+	}
+	if _, _, _, _, err := compileActionLocks(t.Context(), workspace, source, []string{"actions/checkout@v4"}); err != nil {
+		t.Fatalf("compileActionLocks() validated replaced native lifecycle: %v", err)
 	}
 }
 
@@ -788,7 +1004,7 @@ func TestCompileActionLocksAllowsOnlyAuditedCacheCommits(t *testing.T) {
 					uses += "/" + path
 				}
 				uses += "@" + commit
-				_, locks, capabilities, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: commit}, []string{uses})
+				_, locks, capabilities, _, err := compileActionLocks(t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: commit}, []string{uses})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -799,7 +1015,7 @@ func TestCompileActionLocksAllowsOnlyAuditedCacheCommits(t *testing.T) {
 		}
 	}
 
-	_, locks, _, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: actionintegration.CacheCommit}, []string{"actions/cache@v6.1.0"})
+	_, locks, _, _, err := compileActionLocks(t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: actionintegration.CacheCommit}, []string{"actions/cache@v6.1.0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -808,18 +1024,18 @@ func TestCompileActionLocksAllowsOnlyAuditedCacheCommits(t *testing.T) {
 	}
 
 	resolved := strings.Repeat("a", 40)
-	_, _, _, _, err = compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v6"})
+	_, _, _, _, err = compileActionLocks(t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v6"})
 	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), actionintegration.CacheV3Commit) || !strings.Contains(err.Error(), actionintegration.CacheV4Commit) || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
 		t.Fatalf("unsupported actions/cache commit error = %v", err)
 	}
-	_, _, _, _, err = compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v5"})
+	_, _, _, _, err = compileActionLocks(t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v5"})
 	if err == nil || !strings.Contains(err.Error(), "actions/cache@v5 resolved to commit "+resolved) {
 		t.Fatalf("moved actions/cache v5 error = %v", err)
 	}
 }
 
 func TestPublicActionSourceNil(t *testing.T) {
-	_, _, err := (PublicActionSource{}).Fetch(context.Background(), source.Reference{})
+	_, _, err := (PublicActionSource{}).Fetch(t.Context(), source.Reference{})
 	if err == nil {
 		t.Fatal("nil dependencies accepted")
 	}
@@ -861,11 +1077,11 @@ jobs:
 		ResolveActions: true,
 		ActionSource:   fake,
 	}
-	first, err := compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, options)
+	first, err := compilePlansForTest(t.Context(), workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, options)
+	second, err := compilePlansForTest(t.Context(), workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -960,7 +1176,6 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
 	options := Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
@@ -971,11 +1186,12 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
 	}
 	compile := func(commit, with string) ([]plan.Job, error) {
+		writeAction(t, remote, "", checkoutTestManifest(commit))
 		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@" + commit + "\n" + with)
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "checkout-test", testDistributionDigest, options)
+		return compilePlansForTest(t.Context(), workflowPath, workflow, pushEvent(t), "checkout-test", testDistributionDigest, options)
 	}
 
 	accepted := []string{
@@ -1017,15 +1233,22 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		})
 	}
 
-	if _, err := compile(actionintegration.CheckoutV3Commit, "        with:\n          show-progress: false\n"); err == nil || !strings.Contains(err.Error(), "explicit input \"show-progress\" value is unsupported") {
+	if _, err := compile(actionintegration.CheckoutV3Commit, "        with:\n          show-progress: false\n"); err == nil || !strings.Contains(err.Error(), "explicit input \"show-progress\" is unsupported by this actions/checkout release") {
 		t.Fatalf("v3.7.0 later-contract input error = %v", err)
+	}
+	if _, err := compile(actionintegration.CheckoutV2Commit, "        with:\n          fetch-tags: 'true'\n"); err == nil || !strings.Contains(err.Error(), "explicit input \"fetch-tags\" is unsupported by this actions/checkout release") {
+		t.Fatalf("v2.8.0 later-contract input error = %v", err)
+	}
+	if _, err := compile(actionintegration.CheckoutV1Commit, "        with:\n          persist-credentials: false\n"); err == nil || !strings.Contains(err.Error(), "explicit input \"persist-credentials\" is unsupported by this actions/checkout release") {
+		t.Fatalf("v1.2.0 later-contract input error = %v", err)
 	}
 }
 
 func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
-	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
 	for version, commit := range map[string]string{
+		"v1.2.0":     actionintegration.CheckoutV1Commit,
+		"v2.8.0":     actionintegration.CheckoutV2Commit,
 		"v3.7.0":     actionintegration.CheckoutV3Commit,
 		"v4":         actionintegration.CheckoutV4Commit,
 		"v5":         actionintegration.CheckoutV5Commit,
@@ -1035,8 +1258,9 @@ func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 		"v7.0.1":     actionintegration.CheckoutV7Commit,
 	} {
 		t.Run(version, func(t *testing.T) {
+			writeAction(t, remote, "", checkoutTestManifest(commit))
 			actionSource := &fakeActionSource{root: remote, commit: commit, calls: map[string]int{}}
-			_, locks, _, _, err := compileActionLocks(context.Background(), workspace, actionSource, []string{"actions/checkout@" + version})
+			_, locks, _, _, err := compileActionLocks(t.Context(), workspace, actionSource, []string{"actions/checkout@" + version})
 			if err != nil || len(locks) != 1 || locks[0].Commit != commit {
 				t.Fatalf("compileActionLocks() locks = %#v, error = %v", locks, err)
 			}
@@ -1044,8 +1268,9 @@ func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 	}
 
 	unknown := strings.Repeat("0", 40)
+	writeAction(t, remote, "", checkoutTestManifest(unknown))
 	actionSource := &fakeActionSource{root: remote, commit: unknown, calls: map[string]int{}}
-	if _, _, _, _, err := compileActionLocks(context.Background(), workspace, actionSource, []string{"actions/checkout@v7"}); err == nil || !strings.Contains(err.Error(), "does not admit") {
+	if _, _, _, _, err := compileActionLocks(t.Context(), workspace, actionSource, []string{"actions/checkout@v7"}); err == nil || !strings.Contains(err.Error(), "does not admit") {
 		t.Fatalf("unknown checkout commit error = %v", err)
 	}
 }
@@ -1093,6 +1318,116 @@ func TestCheckoutCapabilityRequiresVerifiedRootAdapter(t *testing.T) {
 	_, err = compile("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "        with:\n          token: '${{ github.token }}'\n")
 	if err == nil || !strings.Contains(err.Error(), "checkout adapter") {
 		t.Fatalf("workflow token input error = %v", err)
+	}
+}
+
+func TestCompileBundleLegacyCheckoutWarning(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roots := map[string]string{}
+	for _, commit := range []string{actionintegration.CheckoutV1Commit, actionintegration.CheckoutV2Commit, actionintegration.CheckoutV4Commit} {
+		root := t.TempDir()
+		writeAction(t, root, "", checkoutTestManifest(commit))
+		roots[commit] = root
+	}
+	compile := func(steps string) Bundle {
+		t.Helper()
+		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n" + steps)
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions: true,
+			ActionSource:   commitActionSource{roots: roots},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bundle
+	}
+
+	bundle := compile("      - uses: actions/checkout@" + actionintegration.CheckoutV1Commit + "\n" +
+		"      - uses: actions/checkout@" + actionintegration.CheckoutV1Commit + "\n" +
+		"        with:\n          path: again\n" +
+		"      - uses: actions/checkout@" + actionintegration.CheckoutV2Commit + "\n" +
+		"        with:\n          path: legacy\n")
+	if len(bundle.IR.Warnings) != 2 ||
+		bundle.IR.Warnings[0].Code != "W_CHECKOUT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[0].Message, "v1.2.0") || bundle.IR.Warnings[0].Line == 0 ||
+		bundle.IR.Warnings[1].Code != "W_CHECKOUT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[1].Message, "v2.8.0") {
+		t.Fatalf("legacy checkout warnings = %#v", bundle.IR.Warnings)
+	}
+
+	bundle = compile("      - uses: actions/checkout@" + actionintegration.CheckoutV4Commit + "\n")
+	if len(bundle.IR.Warnings) != 0 {
+		t.Fatalf("warnings = %#v, want none", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roots := map[string]string{}
+	for _, commit := range []string{
+		actionintegration.UploadArtifactV1Commit,
+		actionintegration.UploadArtifactV2Commit,
+		actionintegration.UploadArtifactV3Commit,
+		actionintegration.UploadArtifactCommit,
+	} {
+		root := t.TempDir()
+		writeAction(t, root, "", uploadArtifactTestManifest(commit))
+		roots[commit] = root
+	}
+	compile := func(steps string) Bundle {
+		t.Helper()
+		workflow := []byte("on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps:\n" + steps)
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions: true,
+			ActionSource:   commitActionSource{roots: roots},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bundle
+	}
+
+	bundle := compile("      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV1Commit + "\n" +
+		"        with:\n          name: v1\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV1Commit + "\n" +
+		"        with:\n          name: v1-again\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV2Commit + "\n" +
+		"        with:\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV3Commit + "\n" +
+		"        with:\n          path: payload\n")
+	if len(bundle.IR.Warnings) != 3 ||
+		bundle.IR.Warnings[0].Code != "W_UPLOAD_ARTIFACT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[0].Message, "v1.0.0") || bundle.IR.Warnings[0].Line == 0 ||
+		bundle.IR.Warnings[1].Code != "W_UPLOAD_ARTIFACT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[1].Message, "v2.3.1") ||
+		bundle.IR.Warnings[2].Code != "W_UPLOAD_ARTIFACT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[2].Message, "v3.2.1") {
+		t.Fatalf("legacy upload-artifact warnings = %#v", bundle.IR.Warnings)
+	}
+
+	bundle = compile("      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactCommit + "\n" +
+		"        with:\n          path: payload\n")
+	if len(bundle.IR.Warnings) != 0 {
+		t.Fatalf("warnings = %#v, want none", bundle.IR.Warnings)
 	}
 }
 
@@ -1168,19 +1503,13 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeAction(t, remote, "", "name: upload artifact\nruns:\n  using: node24\n  main: dist/index.js\n")
-	if err := os.MkdirAll(filepath.Join(remote, "dist"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(remote, "dist", "index.js"), []byte("throw new Error('adapter only')\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	compile := func(commit, with string) ([]plan.Job, error) {
+		writeAction(t, remote, "", uploadArtifactTestManifest(commit))
 		workflow := []byte("on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/upload-artifact@" + commit + "\n" + with)
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
+		return compilePlansForTest(t.Context(), workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
 			EventTrust: EventUntrusted,
 			Runners: RunnerPolicy{
 				Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1189,6 +1518,19 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 			ResolveActions: true,
 			ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
 		})
+	}
+
+	for version, test := range map[string]struct {
+		commit string
+		with   string
+	}{
+		"v1.0.0": {commit: actionintegration.UploadArtifactV1Commit, with: "        with:\n          name: payload\n          path: payload/result.txt\n"},
+		"v2.3.1": {commit: actionintegration.UploadArtifactV2Commit, with: "        with:\n          path: payload/result.txt\n          if-no-files-found: error\n"},
+		"v3.2.1": {commit: actionintegration.UploadArtifactV3Commit, with: "        with:\n          path: payload/result.txt\n          include-hidden-files: true\n"},
+	} {
+		if plans, err := compile(test.commit, test.with); err != nil || len(plans) != 1 {
+			t.Fatalf("audited %s upload rejected: plans = %#v, error = %v", version, plans, err)
+		}
 	}
 
 	plans, err := compile(actionintegration.UploadArtifactCommit, "        with:\n          name: payload\n          path: payload/result.txt\n          if-no-files-found: error\n          compression-level: '0'\n")
@@ -1245,7 +1587,7 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		})
 	}
 
-	if _, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.UploadArtifactCommit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV5Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV6Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV7Commit) {
+	if _, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.UploadArtifactV1Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV2Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV3Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactCommit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV5Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV6Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV7Commit) {
 		t.Fatalf("unsupported upload-artifact commit error = %v", err)
 	}
 
@@ -1253,7 +1595,7 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	if err := os.WriteFile(workflowPath, matrixWorkflow, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	plans, err = compilePlansForTest(context.Background(), workflowPath, matrixWorkflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
+	plans, err = compilePlansForTest(t.Context(), workflowPath, matrixWorkflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1287,7 +1629,7 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
+		return compilePlansForTest(t.Context(), workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
 			EventTrust: EventUntrusted,
 			Runners: RunnerPolicy{
 				Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1391,7 +1733,7 @@ jobs:
 	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	plans, err := compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
+	plans, err := compilePlansForTest(t.Context(), workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1425,7 +1767,7 @@ func TestDownloadArtifactMutableTagMustResolveToAuditedExactLock(t *testing.T) {
 	remote := t.TempDir()
 	writeAction(t, remote, "", "name: artifact action\nruns:\n  using: node24\n  main: index.js\n")
 	resolved := &fakeActionSource{root: remote, calls: map[string]int{}, commit: actionintegration.DownloadArtifactV801Commit}
-	_, locks, _, _, err := compileActionLocks(context.Background(), t.TempDir(), resolved, []string{"actions/download-artifact@v8"})
+	_, locks, _, _, err := compileActionLocks(t.Context(), t.TempDir(), resolved, []string{"actions/download-artifact@v8"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1434,7 +1776,7 @@ func TestDownloadArtifactMutableTagMustResolveToAuditedExactLock(t *testing.T) {
 	}
 
 	resolved.commit = strings.Repeat("b", 40)
-	if _, _, _, _, err := compileActionLocks(context.Background(), t.TempDir(), resolved, []string{"actions/download-artifact@v8"}); err == nil {
+	if _, _, _, _, err := compileActionLocks(t.Context(), t.TempDir(), resolved, []string{"actions/download-artifact@v8"}); err == nil {
 		t.Fatal("mutable v8 tag resolving to an unaudited commit was accepted")
 	}
 }
@@ -1444,7 +1786,7 @@ func TestCompilePlansDockerfileActionCapabilities(t *testing.T) {
 	writeAction(t, remote, "", "name: remote Docker\nruns:\n  using: docker\n  image: Dockerfile\n")
 	workflowPath := filepath.Join("..", "..", "testdata", "dockerfile-action", ".github", "workflows", "docker-action.yml")
 	templatePath := workflowPath + ".tmpl"
-	plans, err := compilePlansForTest(context.Background(), workflowPath, readFile(t, templatePath), pushEvent(t), "dockerfile-action-test", testDistributionDigest, Options{
+	plans, err := compilePlansForTest(t.Context(), workflowPath, readFile(t, templatePath), pushEvent(t), "dockerfile-action-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1468,7 +1810,7 @@ func TestCompilePlansRemoteActionRequiresSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	workflow := []byte("on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: owner/repo@v1\n")
-	_, err := compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
+	_, err := compilePlansForTest(t.Context(), workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1488,7 +1830,7 @@ func TestCompilePlansContextCancelsRemoteResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 	workflow := []byte("on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: owner/repo@v1\n")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	_, err := compilePlansForTest(ctx, workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
@@ -1540,7 +1882,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	plans, err := compilePlansForTest(ctx, workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,

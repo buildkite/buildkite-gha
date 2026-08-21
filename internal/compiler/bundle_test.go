@@ -2,9 +2,9 @@ package compiler
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -95,7 +95,7 @@ jobs:
 func TestBundlePlansPermitAdmissionBeforePipelineGeneration(t *testing.T) {
 	path := smokePath(".github", "workflows", "shell.yml")
 	options := defaultOptions()
-	bundle, err := CompileBundlePlansContext(context.Background(), path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, options)
+	bundle, err := CompileBundlePlansContext(t.Context(), path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,6 +526,78 @@ func TestCompileBundleRetainsGitHubHeadRefWithoutPayload(t *testing.T) {
 	}
 }
 
+func TestCompileBundleFoldsGitHubRefScalarsForConcurrencyAndRunnerSelection(t *testing.T) {
+	source := []byte(`on: [push, pull_request]
+concurrency: ${{ github.ref_type }}-${{ github.ref_name }}-${{ github.base_ref }}
+jobs:
+  test:
+    if: github.ref_type == 'branch' && (github.base_ref == '' || github.base_ref == 'trunk') && github.ref_name
+    runs-on: ${{ format('runner-{0}-{1}', github.ref_type, github.base_ref || github.ref_name) }}
+    steps: [{run: true}]
+`)
+	pullRequest := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha-smoke",
+  "payload": {"pull_request": {"base": {"ref": "trunk"}}}
+}`)
+	tests := []struct {
+		name, concurrency, label, queue string
+		event                           []byte
+	}{
+		{name: "push", event: pushEvent(t), concurrency: "branch-main-", label: "runner-branch-main", queue: "push-linux"},
+		{name: "pull request", event: pullRequest, concurrency: "branch-42/merge-trunk", label: "runner-branch-trunk", queue: "pr-linux"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			bundle, err := CompileBundleWithOptions("refs.yml", source, test.event, "0.0.0-test", testDistributionDigest, "gha-importer", Options{
+				EventTrust: EventTrusted,
+				Runners: RunnerPolicy{Labels: map[string]string{
+					"runner-branch-main":  "push-linux",
+					"runner-branch-trunk": "pr-linux",
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bundle.IR.Workflow.ConcurrencyGroup != test.concurrency || len(bundle.IR.Jobs) != 1 || bundle.IR.Jobs[0].Queue != test.queue || bundle.IR.Jobs[0].RunsOn[0] != test.label {
+				t.Fatalf("folded bundle = concurrency %q, jobs %#v", bundle.IR.Workflow.ConcurrencyGroup, bundle.IR.Jobs)
+			}
+			if strings.Contains(bundle.IR.Jobs[0].If, "github.") || bytes.Contains(bundle.Plans[0].Contents, []byte("github.ref_")) || bytes.Contains(bundle.Plans[0].Contents, []byte("github.base_ref")) {
+				t.Fatalf("compile-time GitHub ref scalar reached emitted plan: %s", bundle.Plans[0].Contents)
+			}
+		})
+	}
+}
+
+func TestCompileBundleAppliesRunnerPolicyAfterGitHubRefScalarResolution(t *testing.T) {
+	source := []byte(`on: pull_request
+jobs:
+  test:
+    runs-on: runner-${{ github.ref_type }}-${{ github.base_ref }}
+    steps: [{run: true}]
+`)
+	event := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha-smoke",
+  "payload": {"pull_request": {"base": {"ref": "trunk"}}}
+}`)
+	_, err := CompileBundleWithOptions("refs.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer", Options{
+		EventTrust: EventTrusted,
+		Runners:    RunnerPolicy{Labels: map[string]string{"runner-branch-main": "linux"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), `runner label "runner-branch-trunk" is not mapped by policy`) {
+		t.Fatalf("CompileBundleWithOptions() error = %v, want resolved-label policy rejection", err)
+	}
+}
+
 func TestCompileBundleTranslatesWorkflowAndJobConcurrency(t *testing.T) {
 	source := []byte(`name: Deployment
 on: push
@@ -918,6 +990,184 @@ func TestCompileBundleGitHubTokenUsesRestrictedDefaultPermissions(t *testing.T) 
 	}
 }
 
+func TestCompileBundleGitHubTokenExpandsTopLevelAllPermissions(t *testing.T) {
+	for _, access := range []string{"read", "write"} {
+		t.Run(access, func(t *testing.T) {
+			source := []byte("on: push\npermissions: " + access + "-all\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
+			bundle, err := CompileBundle(".github/workflows/workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{
+				"actions": access, "artifact_metadata": access, "attestations": access, "checks": access, "contents": access,
+				"deployments": access, "discussions": access, "issues": access, "packages": access, "pages": access,
+				"pull_requests": access, "security_events": access, "statuses": access,
+			}
+			if token := bundle.Plans[0].Job.GitHubToken; token == nil || !reflect.DeepEqual(token.Permissions, want) {
+				t.Fatalf("%s-all GitHub workflow token = %#v, want %#v", access, token, want)
+			}
+		})
+	}
+}
+
+func TestCompileBundleReusableWorkflowTokensUseRootPermissions(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: write
+  id-token: write
+  issues: read
+jobs:
+  direct:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps: [{run: true}]
+  delegated:
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+permissions:
+  contents: read
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps: [{run: true}]
+`)
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPermissions := map[string]string{"contents": "write", "issues": "read"}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d, want direct and reusable jobs", len(bundle.Plans))
+	}
+	for _, artifact := range bundle.Plans {
+		if artifact.Job.GitHubToken == nil || artifact.Job.GitHubToken.Workflow != "caller.yml" || !reflect.DeepEqual(artifact.Job.GitHubToken.Permissions, wantPermissions) {
+			t.Fatalf("job %q token = %#v, want caller policy and permissions %#v", artifact.Job.Workflow.LogicalJobID, artifact.Job.GitHubToken, wantPermissions)
+		}
+		wantIDTokenPermission := ""
+		if artifact.Job.Workflow.LogicalJobID == "direct" {
+			wantIDTokenPermission = "write"
+		}
+		if artifact.Job.IDTokenPermission != wantIDTokenPermission {
+			t.Fatalf("job %q id-token permission = %q, want %q", artifact.Job.Workflow.LogicalJobID, artifact.Job.IDTokenPermission, wantIDTokenPermission)
+		}
+	}
+	if len(bundle.IR.Warnings) != 2 || bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS" || bundle.IR.Warnings[1].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" {
+		t.Fatalf("warnings = %#v, want reusable workflow and job permission warnings", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleReusableWorkflowTokensUseRootReadAllPermissions(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", "on: push\npermissions: read-all\njobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n")
+	writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\npermissions:\n  contents: read\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token := bundle.Plans[0].Job.GitHubToken; token == nil || len(token.Permissions) != 13 || token.Permissions["contents"] != "read" || token.Permissions["artifact_metadata"] != "read" {
+		t.Fatalf("reusable read-all GitHub workflow token = %#v", token)
+	}
+	for _, excluded := range []string{"id_token", "models", "repository_projects", "code_quality", "metadata", "vulnerability_alerts"} {
+		if _, ok := bundle.Plans[0].Job.GitHubToken.Permissions[excluded]; ok {
+			t.Errorf("reusable read-all token included excluded scope %q", excluded)
+		}
+	}
+}
+
+func TestCompileBundleReusableWorkflowTokenWarningRequiresNarrowedRepositoryPermissions(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		callerPermissions string
+		calleePermissions string
+		calleeStep        string
+		wantToken         bool
+	}{
+		{
+			name:              "identical repository permissions",
+			callerPermissions: "  contents: read\n",
+			calleePermissions: "  contents: read\n",
+			calleeStep:        "      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n",
+			wantToken:         true,
+		},
+		{
+			name:              "tokenless narrowed permissions",
+			callerPermissions: "  contents: write\n",
+			calleePermissions: "  contents: read\n",
+			calleeStep:        "      - run: echo tokenless\n",
+		},
+		{
+			name:              "id-token-only difference",
+			callerPermissions: "  contents: read\n  id-token: write\n",
+			calleePermissions: "  contents: read\n",
+			calleeStep:        "      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n",
+			wantToken:         true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			caller := writeWorkflow(t, repository, "caller.yml", "on: push\npermissions:\n"+test.callerPermissions+"jobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n")
+			writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\npermissions:\n"+test.calleePermissions+"jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"+test.calleeStep)
+
+			bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bundle.IR.Warnings) != 0 {
+				t.Fatalf("warnings = %#v, want none", bundle.IR.Warnings)
+			}
+			if got := bundle.Plans[0].Job.GitHubToken != nil; got != test.wantToken {
+				t.Fatalf("called job has token = %t, want %t", got, test.wantToken)
+			}
+			if bundle.Plans[0].Job.IDTokenPermission != "" {
+				t.Fatalf("called job id-token permission = %q, want narrowed permission", bundle.Plans[0].Job.IDTokenPermission)
+			}
+		})
+	}
+}
+
+func TestCompileBundleNestedReusableWorkflowTokenWarning(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: write
+jobs:
+  delegated:
+    uses: ./.github/workflows/middle.yml
+`)
+	writeWorkflow(t, repository, "middle.yml", `on: workflow_call
+permissions:
+  contents: read
+jobs:
+  delegated:
+    uses: ./.github/workflows/leaf.yml
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on: workflow_call
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ secrets.GITHUB_TOKEN }}'
+`)
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS" || bundle.IR.Warnings[0].Line != 6 {
+		t.Fatalf("warnings = %#v, want nested reusable workflow token warning at the top-level call", bundle.IR.Warnings)
+	}
+}
+
 func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
 	for _, test := range []struct {
 		reference string
@@ -925,6 +1175,7 @@ func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
 	}{
 		{reference: "secrets.GITHUB_TOKEN", want: "references secrets.GITHUB_TOKEN"},
 		{reference: "github.token", want: "references github.token"},
+		{reference: "toJSON(github)", want: "references github.token"},
 	} {
 		for _, permissions := range []string{"permissions: {}\n", "permissions:\n  contents: none\n"} {
 			source := []byte("on: push\n" + permissions + "jobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ " + test.reference + " }}'\n")
@@ -936,25 +1187,111 @@ func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
 	}
 }
 
-func TestCompileBundleJobPermissionsReplaceWorkflowPermissions(t *testing.T) {
-	source := []byte(`on: push
+func TestCompileBundleGitHubTokenIgnoresJobPermissions(t *testing.T) {
+	for _, test := range []struct {
+		name, jobPermissions, idToken string
+	}{
+		{name: "narrower", jobPermissions: "    permissions:\n      contents: read\n"},
+		{name: "broader", jobPermissions: "    permissions:\n      pull-requests: write\n"},
+		{name: "empty", jobPermissions: "    permissions: {}\n"},
+		{name: "none", jobPermissions: "    permissions:\n      contents: none\n"},
+		{name: "ID token", jobPermissions: "    permissions:\n      contents: read\n      id-token: write\n", idToken: "write"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := []byte(`on: push
 permissions:
-  contents: read
+  contents: write
 jobs:
   token:
     runs-on: ubuntu-latest
+` + test.jobPermissions + `    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps: [{run: true}]
+`)
+			bundle, err := CompileBundle(".github/workflows/workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := bundle.Plans[0].Job
+			if job.GitHubToken == nil || !reflect.DeepEqual(job.GitHubToken.Permissions, map[string]string{"contents": "write"}) {
+				t.Fatalf("GITHUB_TOKEN = %#v, want workflow permissions", job.GitHubToken)
+			}
+			if job.IDTokenPermission != test.idToken {
+				t.Fatalf("ID token permission = %q, want %q", job.IDTokenPermission, test.idToken)
+			}
+			if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" {
+				t.Fatalf("warnings = %#v, want ignored job permissions warning", bundle.IR.Warnings)
+			}
+		})
+	}
+}
+
+func TestCompileBundleGitHubTokenWarnsForIgnoredReusableCallPermissions(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  delegated:
     permissions:
-      pull-requests: write
+      contents: read
+      issues: write
+      id-token: write
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  token:
+    runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps: [{run: true}]
 `)
-	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := bundle.Plans[0].Job.GitHubToken.Permissions; !reflect.DeepEqual(got, map[string]string{"pull_requests": "write"}) {
-		t.Fatalf("effective job permissions = %#v", got)
+	if bundle.Plans[0].Job.IDTokenPermission != "write" {
+		t.Fatalf("called job id-token permission = %q, want job-level permission", bundle.Plans[0].Job.IDTokenPermission)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" || bundle.IR.Warnings[0].Line != 10 {
+		t.Fatalf("warnings = %#v, want ignored reusable call permissions warning", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleGitHubTokenWarnsForIgnoredNestedReusableCallPermissions(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  delegated:
+    uses: ./.github/workflows/middle.yml
+`)
+	writeWorkflow(t, repository, "middle.yml", `on: workflow_call
+jobs:
+  delegated:
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps: [{run: true}]
+`)
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" || bundle.IR.Warnings[0].Line != 6 {
+		t.Fatalf("warnings = %#v, want ignored nested reusable call permissions warning", bundle.IR.Warnings)
 	}
 }
 
@@ -993,7 +1330,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: ${{ secrets.NAME_SECRET }}
-        run: echo '${{ github.token }}'
+        run: echo '${{ ToJson(GitHub) }}'
 `)
 	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err != nil {
@@ -1004,24 +1341,182 @@ jobs:
 		t.Fatalf("retained field secrets = %#v", job.RequiredSecrets)
 	}
 	if job.GitHubToken == nil || !job.HasCapability("provider-token-write") {
-		t.Fatalf("github.token authority = %#v, capabilities %#v", job.GitHubToken, job.RequiredCapabilities)
+		t.Fatalf("toJSON(github) authority = %#v, capabilities %#v", job.GitHubToken, job.RequiredCapabilities)
 	}
 	if bundle.Plans[0].Authorization.GitHubTokenSecretReference {
-		t.Fatal("github.token was reported as a secrets.GITHUB_TOKEN reference")
+		t.Fatal("toJSON(github) was reported as a secrets.GITHUB_TOKEN reference")
 	}
 }
 
-func TestCompileBundleRejectsRetainedGitHubEventPayload(t *testing.T) {
+func TestCompileBundleRejectsToJSONGitHubOutsideStepRuntimeFields(t *testing.T) {
+	source := []byte(`on: push
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_CONTEXT: ${{ toJSON(github) }}
+    steps:
+      - run: true
+`)
+	_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "github reference must name one static property") {
+		t.Fatalf("CompileBundle() error = %v, want job-level toJSON(github) rejection", err)
+	}
+}
+
+func TestCompileBundleReducesRetainedGitHubEventPayload(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "event.yml", `on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      JOB_SHA: ${{ github.event.pull_request.head.sha }}
+    defaults:
+      run:
+        shell: ${{ github.event.shell }}
+        working-directory: ${{ github.event.directory }}
+    steps:
+      - name: Head ${{ github.event.pull_request.head.sha }}
+        run: echo '${{ github.event.pull_request.head.sha }}' '${{ github.event.missing }}' '${{ github.event.action }}' '${{ github.event.pull_request.head.sha == steps.previous.outputs.sha }}'
+        continue-on-error: ${{ github.event.allow_failure }}
+        timeout-minutes: ${{ github.event.timeout }}
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: ${{ github.event.shell }}
+        working-directory: ${{ github.event.directory }}
+      - uses: ./event-action
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+`)
+	writeAction(t, repository, "event-action", `name: event action
+inputs:
+  ref:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	event := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "octocat",
+  "payload": {"action": "opened", "allow_failure": true, "timeout": 7, "shell": "bash", "directory": ".", "pull_request": {"head": {"sha": "2222222222222222222222222222222222222222"}}}
+}`)
+	bundle, err := CompileBundle(path, readFile(t, path), event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := bundle.Plans[0].Job
+	if job.Env["JOB_SHA"] != "2222222222222222222222222222222222222222" || job.DefaultShell != "bash" || job.DefaultWorkingDirectory != "." {
+		t.Fatalf("job templates were not reduced: env = %#v, shell = %q, working-directory = %q", job.Env, job.DefaultShell, job.DefaultWorkingDirectory)
+	}
+	step := job.Steps[0]
+	if step.Name != "Head 2222222222222222222222222222222222222222" || step.Env["HEAD_SHA"] != "2222222222222222222222222222222222222222" || step.Shell != "bash" || step.WorkingDirectory != "." {
+		t.Fatalf("step templates were not reduced: %#v", step)
+	}
+	if step.ContinueOnErrorExpression != "${{ true }}" || step.TimeoutMinutesExpression != "${{ 7 }}" {
+		t.Fatalf("typed step expressions were not reduced: %#v", step)
+	}
+	if want := "echo '2222222222222222222222222222222222222222' '' 'opened' '${{ ('2222222222222222222222222222222222222222' == steps.previous.outputs.sha) }}'"; step.Command != want {
+		t.Fatalf("command = %q, want %q", step.Command, want)
+	}
+	if got := job.Steps[1].With["ref"]; got != "2222222222222222222222222222222222222222" {
+		t.Fatalf("action input = %q", got)
+	}
+}
+
+func TestCompileBundleRejectsEventValueExpressionInjection(t *testing.T) {
 	source := []byte(`on: push
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - run: echo '${{ github.event.action }}'
+      - run: echo '${{ github.event.value }}'
 `)
-	_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained in a job plan") {
-		t.Fatalf("CompileBundle() error = %v, want retained event rejection", err)
+	event := []byte(`{
+  "provider": "github", "event": "push",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"value": "${{ secrets.ADMIN }}"}
+}`)
+	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "result contains expression syntax") {
+		t.Fatalf("CompileBundle() error = %v, want expression injection rejection", err)
+	}
+}
+
+func TestCompileBundleDoesNotReduceEventExpressionsInActionReferences(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ${{ github.event.action_ref }}
+`)
+	event := []byte(`{
+  "provider": "github", "event": "push",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"action_ref": "owner/action@1111111111111111111111111111111111111111"}
+}`)
+	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained") {
+		t.Fatalf("CompileBundle() error = %v, want static action reference rejection", err)
+	}
+}
+
+func TestCompileBundleReducesEventExpressionsAfterMatrixExpansion(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        part: [one, two]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ format('{0}-{1}', github.event.ref, matrix.part) }}
+`)
+	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d, want 2", len(bundle.Plans))
+	}
+	for _, artifact := range bundle.Plans {
+		part := artifact.Job.Matrix["part"]
+		if want := fmt.Sprintf("echo refs/heads/main-%s", part); artifact.Job.Steps[0].Command != want {
+			t.Errorf("matrix %v command = %q, want %q", part, artifact.Job.Steps[0].Command, want)
+		}
+	}
+}
+
+func TestCompileBundleReducesEventExpressionsInReusableWorkflowJobs(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ github.event.ref }}
+`)
+	bundle, err := CompileBundle(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Steps[0].Command != "echo refs/heads/main" {
+		t.Fatalf("reusable-workflow plan = %#v", bundle.Plans)
 	}
 }
 

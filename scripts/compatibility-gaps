@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Run the tracked compatibility-gap manifest through the exact CLI source under test.
+# Input comes from testdata/compatibility-gaps; the script accepts no arguments.
+# Output is a console tally and, in Buildkite, one aggregated build annotation.
+# A remaining gap makes this command exit 1; CI deliberately soft-fails that step.
+# Keep this harness tracked so local and CI assessments change atomically with the fixtures.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly root
+readonly fixture_root="$root/testdata/compatibility-gaps"
+readonly manifest="$fixture_root/manifest.json"
+work="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-compatibility-gaps.XXXXXXXX")"
+trap 'rm -rf -- "$work"' EXIT
+
+cd "$root"
+jq -e '
+  .schema == "buildkite-gha/compatibility-gaps/v1" and
+  (.source | startswith("https://slopcannon.tail952194.ts.net/")) and
+  (.gaps | type == "array" and length == 16) and
+  all(.gaps[];
+    (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
+    (.title | type == "string" and length > 0) and
+    (.workflow | test("^[a-z0-9]+(?:-[a-z0-9]+)*\\.yml$")) and
+    (.event | IN("push", "pull_request", "merge_group", "release")) and
+    (.mode | IN("profile", "runtime")) and
+    (if .mode == "runtime" then (.test | test("^TestCompatibilityGap[A-Za-z]+$")) else (has("test") | not) end)) and
+  ([.gaps[].id] | length == (unique | length)) and
+  ([.gaps[].workflow] | length == (unique | length))
+' "$manifest" >/dev/null
+
+while IFS= read -r workflow; do
+  [[ -f "$fixture_root/.github/workflows/$workflow" ]] || {
+    echo "missing compatibility gap workflow: $workflow" >&2
+    exit 1
+  }
+done < <(jq -r '.gaps[].workflow' "$manifest")
+
+CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -o "$work/buildkite-gha" ./cmd/buildkite-gha
+
+blocked=0
+passed=0
+summary="$work/summary.md"
+printf '## Compatibility gap assessment\n\nSource: %s\n\n' "$(jq -r .source "$manifest")" >"$summary"
+while IFS=$'\t' read -r id title workflow event mode test_name; do
+  status=0
+  report="$work/$id.out"
+  if [[ "$mode" == profile ]]; then
+    report_stderr="$work/$id.err"
+    (
+      cd "$fixture_root"
+      "$work/buildkite-gha" validate --profile hosted --format json \
+        --event "$event" ".github/workflows/$workflow"
+    ) >"$report" 2>"$report_stderr" || status=$?
+    result="$(jq -r '.result // "invalid-report"' "$report" 2>/dev/null || echo invalid-report)"
+    if [[ "$status" == 0 && "$result" == admitted ]]; then
+      outcome=passing
+      reason="Hosted profile admitted the workflow."
+    else
+      outcome=blocked
+      reason="$(jq -r '[.diagnostics[]?.message] | unique | join(" ") | if length == 0 then "Validation did not produce a diagnostic." else . end' "$report" 2>/dev/null || echo 'Validation report could not be read.')"
+    fi
+  else
+    mise exec -- go test -tags compatibility_gaps ./internal/runtime \
+      -run "^${test_name}$" -count=1 >"$report" 2>&1 || status=$?
+    if [[ "$status" == 0 ]]; then
+      outcome=passing
+      reason="The compiled workflow completed in the compatibility runtime."
+    else
+      outcome=blocked
+      reason="The compiled workflow did not complete in the compatibility runtime."
+    fi
+  fi
+
+  printf '%s: %s\n' "$id" "$outcome"
+  if [[ "$outcome" == passing ]]; then
+    passed=$((passed + 1))
+    icon='✅'
+  else
+    blocked=$((blocked + 1))
+    icon='⚠️'
+    if [[ "$mode" == profile ]]; then
+      jq -r '.diagnostics[]? | "  \(.code): \(.message)"' "$report" >&2 || true
+      sed -n '1,20p' "$report_stderr" >&2
+    else
+      sed -n '1,20p' "$report" >&2
+    fi
+  fi
+  printf -- '- %s **%s** — %s\n' "$icon" "$title" "$reason" >>"$summary"
+done < <(jq -r '.gaps[] | [.id, .title, .workflow, .event, .mode, (.test // "-")] | @tsv' "$manifest")
+
+if [[ "${BUILDKITE:-}" == true ]] && command -v buildkite-agent >/dev/null; then
+  style=success
+  (( blocked > 0 )) && style=warning
+  buildkite-agent annotate --context compatibility-gaps --style "$style" <"$summary" || \
+    echo "warning: failed to publish Buildkite compatibility gap annotation" >&2
+fi
+
+printf 'Compatibility gaps: %d passing; %d blocked.\n' "$passed" "$blocked"
+(( blocked == 0 ))

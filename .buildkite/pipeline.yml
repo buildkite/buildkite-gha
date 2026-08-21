@@ -123,6 +123,20 @@ steps:
               version: "2026.5.12"
         command: "mise run corpus:starter-profile"
 
+      - label: ":github: Documented compatibility gaps"
+        key: "compatibility-gaps"
+        soft_fail: true
+        timeout_in_minutes: 20
+        plugins:
+          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+              version: "2026.5.12"
+        command: "mise run compatibility:gaps"
+
+      - label: ":pipeline: Load public actions runtime proof"
+        key: "public-actions-ci-loader"
+        if: build.env("DEMO_SUITE") != "plugin" && build.env("SMOKE_PROBE") != "hosted" && build.env("COMPATIBILITY_PROOF") == null
+        command: "buildkite-agent pipeline upload .buildkite/public-actions-proof.yml"
+
       - label: ":github: Exact-source plugin smoke"
         key: "plugin-source-smoke-importer"
         if: build.env("DEMO_SUITE") != "plugin"

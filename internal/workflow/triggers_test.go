@@ -57,6 +57,21 @@ func TestParseRetainsTriggerConfiguration(t *testing.T) {
 	}
 }
 
+func TestParseRetainsImageVersionTriggerPosition(t *testing.T) {
+	source := []byte("on:\n  push:\n  image_version:\n    names: [ubuntu]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+	w, err := Parse("workflow.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(w.Triggers) != 2 {
+		t.Fatalf("got %d triggers: %#v", len(w.Triggers), w.Triggers)
+	}
+	trigger := w.Triggers[1]
+	if trigger.Event != "image_version" || trigger.Position == (Position{}) {
+		t.Fatalf("image_version trigger position lost: %#v", trigger)
+	}
+}
+
 func TestWorkflowReusableOnly(t *testing.T) {
 	for _, test := range []struct {
 		name     string

@@ -216,6 +216,10 @@ func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 		t.Fatalf("workflow errors = %#v", workflowErrors)
 	}
 	pullRequest := event.Payload["pull_request"].(map[string]any)
+	delete(pullRequest, "mergeable")
+	if paths, _, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{input}); err != nil || !reflect.DeepEqual(paths, []string{"src/main.go"}) {
+		t.Fatalf("unknown mergeability result = %#v, %v", paths, err)
+	}
 	pullRequest["mergeable"] = false
 	if _, _, err := pullRequestChangedPaths(event, 42, "main", nil); err == nil || !strings.Contains(err.Error(), "mergeable synthetic merge") {
 		t.Fatalf("conflicted pull request error = %v", err)
@@ -338,8 +342,8 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 		Path: workflowPath, CanonicalPath: "ci.yml", Source: unfiltered,
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	}}
-	context := buildkitepipeline.TriggerConditionContext{}
-	populateChangedPaths(&context, event, effectiveEventFromWebhook, closedWorkflows)
+	snapshot := buildkitepipeline.TriggerEventSnapshot{}
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, closedWorkflows)
 	if closedWorkflows[0].PathFiltersError != "" {
 		t.Fatalf("unfiltered closed workflow provenance error = %q", closedWorkflows[0].PathFiltersError)
 	}
@@ -348,8 +352,8 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 		Path: workflowPath, CanonicalPath: "ci.yml", Source: unfiltered,
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	})
-	context = buildkitepipeline.TriggerConditionContext{}
-	populateChangedPaths(&context, event, effectiveEventFromWebhook, closedWorkflows)
+	snapshot = buildkitepipeline.TriggerEventSnapshot{}
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, closedWorkflows)
 	if !strings.Contains(closedWorkflows[0].PathFiltersError, "does not bind the event base and head") {
 		t.Fatalf("filtered closed workflow provenance error = %q", closedWorkflows[0].PathFiltersError)
 	}
@@ -363,8 +367,8 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 		Path: customPath, CanonicalPath: customPath,
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	}}
-	context = buildkitepipeline.TriggerConditionContext{}
-	populateChangedPaths(&context, event, effectiveEventFromWebhook, customWorkflows)
+	snapshot = buildkitepipeline.TriggerEventSnapshot{}
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, customWorkflows)
 	if customWorkflows[0].PathFiltersError != "" {
 		t.Fatalf("unfiltered custom workflow provenance error = %q", customWorkflows[0].PathFiltersError)
 	}
@@ -374,8 +378,8 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 		Path: workflowPath, CanonicalPath: "ci.yml", Source: unfiltered,
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	}}
-	context = buildkitepipeline.TriggerConditionContext{}
-	populateChangedPaths(&context, event, effectiveEventFromWebhook, workflows)
+	snapshot = buildkitepipeline.TriggerEventSnapshot{}
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, workflows)
 	if !strings.Contains(workflows[0].PathFiltersError, "merge commit SHAs") {
 		t.Fatalf("missing merge commit workflow error = %q", workflows[0].PathFiltersError)
 	}
@@ -383,8 +387,8 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 	pullRequest["base"].(map[string]any)["sha"] = ""
 	pullRequest["head"].(map[string]any)["sha"] = ""
 	workflows[0].PathFiltersError = ""
-	context = buildkitepipeline.TriggerConditionContext{}
-	populateChangedPaths(&context, event, effectiveEventFromWebhook, workflows)
+	snapshot = buildkitepipeline.TriggerEventSnapshot{}
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, workflows)
 	if !strings.Contains(workflows[0].PathFiltersError, "base, head, and merge commit SHAs") {
 		t.Fatalf("missing base and head workflow error = %q", workflows[0].PathFiltersError)
 	}
@@ -438,12 +442,12 @@ func TestBoundedCommandOutput(t *testing.T) {
 func TestPopulateChangedPathsRequiresLinkedWebhook(t *testing.T) {
 	for _, event := range []string{"push", "pull_request"} {
 		t.Run(event, func(t *testing.T) {
-			context := buildkitepipeline.TriggerConditionContext{}
-			populateChangedPaths(&context, compiler.Event{Event: event}, effectiveEventFromPath, []workflowInput{{
+			snapshot := buildkitepipeline.TriggerEventSnapshot{}
+			populateChangedPaths(&snapshot, compiler.Event{Event: event}, effectiveEventFromPath, []workflowInput{{
 				Triggers: []workflow.Trigger{{Event: event, Paths: []string{"src/**"}}},
 			}})
-			if context.ChangedPathsKnown || !strings.Contains(context.ChangedPathsError, event+" path filters require linked Buildkite webhook") {
-				t.Fatalf("changed-path context = %#v", context)
+			if snapshot.ChangedPaths.Paths != nil || !strings.Contains(snapshot.ChangedPaths.UnavailableReason, event+" path filters require linked Buildkite webhook") {
+				t.Fatalf("changed-path snapshot = %#v", snapshot)
 			}
 		})
 	}

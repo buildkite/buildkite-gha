@@ -38,7 +38,7 @@ func TestAgentCacheCredentialsMintsBoundedJobCredential(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.EscapedPath() != "/v3/jobs/"+testCacheJobID+"/ghac_tokens" || r.URL.RawQuery != "" {
 			t.Errorf("request = %s %s", r.Method, r.URL.String())
 		}
-		if r.Header.Get("Authorization") != "Token job-secret" || r.Header.Get("Accept") != "application/json" || len(body) != 0 {
+		if r.Header.Get("Authorization") != "Token job-secret" || r.Header.Get("Accept") != "application/json" || r.Header.Get("User-Agent") != "buildkite-gha/1.2.3" || len(body) != 0 {
 			t.Errorf("request headers/body = %#v / %q", r.Header, body)
 		}
 		_, _ = io.WriteString(w, `{"token":"header.payload.signature"}`)
@@ -46,14 +46,16 @@ func TestAgentCacheCredentialsMintsBoundedJobCredential(t *testing.T) {
 	defer server.Close()
 
 	provider, err := NewAgentCacheCredentials(AgentCacheConfig{
-		Endpoint: server.URL + "/v3/",
-		JobID:    testCacheJobID, JobToken: "job-secret",
-		ResultsURL: server.URL,
+		Endpoint:      server.URL + "/v3/",
+		JobID:         testCacheJobID,
+		JobToken:      "job-secret",
+		ResultsURL:    server.URL,
+		ClientVersion: "1.2.3",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	credentials, err := provider.Credentials(context.Background())
+	credentials, err := provider.Credentials(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +155,7 @@ func TestAgentCacheCredentialsRejectsRedirectsAndUntrustedResponses(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = provider.Credentials(context.Background())
+			_, err = provider.Credentials(t.Context())
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), secret) {
 				t.Fatalf("Credentials() error = %v, want %q without response body", err, test.want)
 			}
@@ -176,13 +178,13 @@ func TestAgentCacheCredentialsRejectsRedirectsAndUntrustedResponses(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.Credentials(context.Background()); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
+	if _, err := provider.Credentials(t.Context()); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
 		t.Fatalf("redirect Credentials() error/redirected = %v / %v", err, redirected)
 	}
 }
 
 func TestAgentCacheCredentialsHonorsCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	provider, err := NewAgentCacheCredentials(AgentCacheConfig{
 		Endpoint: "https://agent.invalid/v3", JobID: testCacheJobID,
@@ -229,6 +231,7 @@ func TestCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T) {
 }
 
 func testCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T, using, commit string) {
+	t.Helper()
 	node := requireNode24(t)
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/cache.yml"
@@ -328,7 +331,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	result, err := (Runner{
 		Node24: node, Actions: materializer, Cache: provider, Redactor: redactor,
 		Stdout: &logs, Stderr: &logs,
-	}).RunJob(context.Background(), job, workspace)
+	}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -386,7 +389,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	}
 
 	job.Actions[0].Commit = strings.Repeat("b", 40)
-	if _, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: redactor}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
+	if _, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
 		t.Fatalf("unsupported runtime cache commit error = %v", err)
 	}
 }
@@ -500,7 +503,7 @@ fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "\n");
 				Commit: strings.Repeat("a", 40), SourceDigest: digest,
 			}}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-			result, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: &testRedactor{}}).RunJob(context.Background(), job, workspace)
+			result, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: &testRedactor{}}).RunJob(t.Context(), job, workspace)
 			if err != nil || result.Conclusion != "success" {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 			}
@@ -558,7 +561,7 @@ func TestActionCacheRedactorIsPinnedBeforeWorkflowExecution(t *testing.T) {
 		SourceDigest: digestTree(t, filepath.Join(workspace, filepath.FromSlash(actionPath))),
 	}}
 	provider := &sequenceCacheCredentials{tokens: []string{token}}
-	result, err := (Runner{Node24: node, Cache: provider, Redactor: AgentRedactor{}}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: node, Cache: provider, Redactor: AgentRedactor{}}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -592,7 +595,7 @@ func TestGenericActionCacheDisablesWhenRedactorCannotBePinned(t *testing.T) {
 	result, err := (Runner{
 		Node24: node, Cache: provider,
 		Redactor: AgentRedactor{Executable: filepath.Join(t.TempDir(), "missing-agent")},
-	}).RunJob(context.Background(), job, workspace)
+	}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -625,7 +628,7 @@ func TestExplicitCacheRequiresPinnedRedactorBeforeWorkflowExecution(t *testing.T
 	_, err := (Runner{
 		Cache:    provider,
 		Redactor: AgentRedactor{Executable: filepath.Join(t.TempDir(), "missing-agent")},
-	}).RunJob(context.Background(), job, workspace)
+	}).RunJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "resolve Buildkite Agent redactor before workflow execution") {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -653,9 +656,9 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	result.Env["MARKER"] = marker
 	result.Env["ACTIONS_RUNTIME_TOKEN"] = "workflow-token"
 	processor := newCommandProcessor(io.Discard, io.Discard)
-	runner := Runner{Cache: provider, Redactor: &testRedactor{}}
+	runner := newJobRun(Runner{Cache: provider, Redactor: &testRedactor{}})
 	if err := runner.runJavaScriptPhase(
-		context.Background(), processor, actionRoot, node,
+		t.Context(), processor, actionRoot, node,
 		javaScriptAction{Name: "ordinary", Path: actionRoot, Main: "main.js"}, "main.js", nil, nil, &result,
 	); err != nil {
 		t.Fatalf("generic action cache fallback error = %v", err)
@@ -667,7 +670,7 @@ fs.writeFileSync(process.env.MARKER, "executed");
 		t.Fatal(err)
 	}
 	if err := runner.runJavaScriptPhase(
-		context.Background(), processor, actionRoot, node,
+		t.Context(), processor, actionRoot, node,
 		javaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true}, "main.js", nil, nil, &result,
 	); err == nil || !strings.Contains(err.Error(), "configure actions/cache service: cache unavailable") {
 		t.Fatalf("explicit cache action error = %v", err)
@@ -686,7 +689,7 @@ func TestDockerActionReceivesCacheCredentialsWithoutTokenInArguments(t *testing.
 	action.Env["ACTIONS_RUNTIME_TOKEN"] = "workflow-token"
 	action.Env["ACTIONS_RESULTS_URL"] = "https://attacker.invalid"
 	action.Env["ACTIONS_CACHE_SERVICE_V2"] = "false"
-	if _, err := (Runner{Docker: fake.path, Cache: provider, Redactor: redactor}).runDockerAction(context.Background(), action); err != nil {
+	if _, err := (Runner{Docker: fake.path, Cache: provider, Redactor: redactor}).runDockerAction(t.Context(), action); err != nil {
 		t.Fatal(err)
 	}
 	cacheRuntime, err := os.ReadFile(filepath.Join(fake.root, "cache-runtime"))
@@ -730,8 +733,8 @@ func TestCacheRedactorFailureAbortsBeforeExecutionAndScrubsToken(t *testing.T) {
 	processor := newCommandProcessor(&logs, &logs)
 	result := newResult()
 	result.Env["MARKER"] = marker
-	err := (Runner{Cache: provider, Redactor: failingCacheRedactor{token: token}}).runJavaScriptPhase(
-		context.Background(), processor, actionRoot, "node", javaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true}, "main.js", nil, nil, &result,
+	err := newJobRun(Runner{Cache: provider, Redactor: failingCacheRedactor{token: token}}).runJavaScriptPhase(
+		t.Context(), processor, actionRoot, "node", javaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true}, "main.js", nil, nil, &result,
 	)
 	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") {
 		t.Fatalf("runJavaScriptPhase() error = %v", err)
@@ -764,8 +767,8 @@ func TestActionRuntimeCacheTokenCommandFileEffectsAreDiscarded(t *testing.T) {
 			result.Summary = "existing summary\n"
 			result.Paths = []string{"/existing/path"}
 			state := map[string]string{"kept": "action state"}
-			err := (Runner{Cache: provider, Redactor: &testRedactor{}}).runJavaScriptPhase(
-				context.Background(), newCommandProcessor(io.Discard, io.Discard), actionRoot, node,
+			err := newJobRun(Runner{Cache: provider, Redactor: &testRedactor{}}).runJavaScriptPhase(
+				t.Context(), newCommandProcessor(io.Discard, io.Discard), actionRoot, node,
 				javaScriptAction{Name: "ordinary", Path: actionRoot, Main: "main.js"}, "main.js", nil, state, &result,
 			)
 			if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "phase effects were discarded") {

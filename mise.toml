@@ -1,6 +1,6 @@
 [tools]
-go = "1.26.5"
-golangci-lint = "2.12.2"
+go = "1.26.7"
+golangci-lint = "2.13.1"
 jq = "1.8.2"
 node = ["24.18.0", "20.20.2"]
 shellcheck = "0.11.0"
@@ -34,7 +34,7 @@ run = "echo '--- Lint Go'; golangci-lint run"
 
 [tasks."lint:shell"]
 description = "Lint shell scripts"
-run = "echo '--- Lint shell'; shellcheck -x .buildkite/upload-examples.sh scripts/ci-buildkite-release scripts/compare-example scripts/starter-workflows-corpus scripts/update-checkout-main-commits scripts/validate-public-workflow-corpus scripts/verify-source-checkout scripts/hosted-docker-probe scripts/container-runtime-probe scripts/verify-summary-annotation scripts/verify-workflow-annotations scripts/verify-upload-artifact scripts/verify-artifact-roundtrip scripts/release scripts/release-test scripts/smoke-local testdata/actions/docker/entrypoint.sh testdata/container-runtime/.github/actions/docker/entrypoint.sh"
+run = "echo '--- Lint shell'; shellcheck -x .buildkite/upload-examples.sh scripts/ci-buildkite-release scripts/compare-example scripts/compatibility-gaps scripts/starter-workflows-corpus scripts/update-checkout-main-commits scripts/validate-public-workflow-corpus scripts/verify-source-checkout scripts/hosted-docker-probe scripts/container-runtime-probe scripts/verify-summary-annotation scripts/verify-workflow-annotations scripts/verify-upload-artifact scripts/verify-artifact-roundtrip scripts/release scripts/release-test scripts/smoke-local testdata/actions/docker/entrypoint.sh testdata/container-runtime/.github/actions/docker/entrypoint.sh"
 
 [tasks.lint]
 description = "Lint Go code and shell scripts"
@@ -68,6 +68,10 @@ run = "echo '--- Run local smoke tests'; ./scripts/smoke-local"
 [tasks."smoke:profile"]
 description = "Resolve actions and apply the hosted profile to smoke fixtures"
 run = "./scripts/smoke-local --profile hosted"
+
+[tasks."compatibility:gaps"]
+description = "Assess the documented compatibility gaps"
+run = "./scripts/compatibility-gaps"
 
 [tasks."corpus:starter"]
 description = "Report compile compatibility for the pinned GitHub starter workflow corpus"

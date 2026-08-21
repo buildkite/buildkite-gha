@@ -50,7 +50,8 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		event = "workflow_dispatch"
 	}
 	payload := map[string]any{}
-	if pullRequest != "" && pullRequest != "false" {
+	switch {
+	case pullRequest != "" && pullRequest != "false":
 		number, parseErr := strconv.Atoi(pullRequest)
 		if parseErr != nil || number <= 0 {
 			return nil, fmt.Errorf("BUILDKITE_PULL_REQUEST must be false or a positive integer")
@@ -89,15 +90,32 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		// head rather than a distinct GitHub delivery. Use synchronize to give
 		// that compatibility snapshot deterministic head-update semantics.
 		payload["action"], payload["number"], payload["pull_request"] = "synchronize", number, pr
-	} else if strings.TrimSpace(tag) != "" {
+	case strings.TrimSpace(tag) != "":
 		ref = "refs/tags/" + tag
 		payload["ref"] = ref
-	} else {
+	default:
 		if strings.TrimSpace(branch) == "" {
 			return nil, fmt.Errorf("BUILDKITE_BRANCH or BUILDKITE_TAG is required")
 		}
 		ref = "refs/heads/" + branch
 		payload["ref"] = ref
+	}
+	if githubEvent := strings.TrimSpace(getenv("BUILDKITE_GITHUB_EVENT")); githubEventNamePattern.MatchString(githubEvent) {
+		switch githubEvent {
+		case "push", "pull_request", "workflow_dispatch", "schedule":
+			event = githubEvent
+			// Rebuilds retain the original GitHub event even though Buildkite reports
+			// their source as UI. A push may also be associated with an open pull
+			// request, so restore its authoritative branch or tag ref.
+			if event == "push" {
+				if strings.TrimSpace(tag) != "" {
+					ref = "refs/tags/" + tag
+				} else if strings.TrimSpace(branch) != "" {
+					ref = "refs/heads/" + branch
+				}
+				payload = map[string]any{"ref": ref}
+			}
+		}
 	}
 
 	repository := map[string]any{"owner": owner, "name": name, "clone_url": cloneURL}
@@ -166,6 +184,14 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 			return nil, err
 		}
 	}
+	if _, hasRelease := payload["release"]; hasRelease && snapshot["event"] != "release" {
+		return nil, fmt.Errorf("release webhook payload does not match BUILDKITE_GITHUB_EVENT")
+	}
+	if snapshot["event"] == "release" {
+		if err := validateBuildkiteRelease(snapshot, getenv); err != nil {
+			return nil, err
+		}
+	}
 	result, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, fmt.Errorf("encode Buildkite webhook snapshot: %w", err)
@@ -204,6 +230,41 @@ func validateBuildkiteMergeGroup(snapshot map[string]any, getenv func(string) st
 	if baseSHA, _ := mergeGroup["base_sha"].(string); baseSHA != baseCommit {
 		return fmt.Errorf("merge_group webhook base_sha does not match BUILDKITE_MERGE_QUEUE_BASE_COMMIT")
 	}
+	return nil
+}
+
+func validateBuildkiteRelease(snapshot map[string]any, getenv func(string) string) error {
+	if snapshot["provider"] != "github" {
+		return fmt.Errorf("release webhook requires a GitHub repository")
+	}
+	payload := snapshot["payload"].(map[string]any)
+	action, _ := payload["action"].(string)
+	if action == "" || action != strings.TrimSpace(getenv("BUILDKITE_GITHUB_ACTION")) {
+		return fmt.Errorf("release webhook payload.action does not match BUILDKITE_GITHUB_ACTION")
+	}
+	if action != "published" && action != "created" && action != "released" {
+		return fmt.Errorf("release webhook action %q is unsupported", action)
+	}
+	release, ok := payload["release"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("release webhook requires payload.release")
+	}
+	tag, tagOK := release["tag_name"].(string)
+	draft, draftOK := release["draft"].(bool)
+	_, prereleaseOK := release["prerelease"].(bool)
+	if !tagOK || strings.TrimSpace(tag) == "" || !draftOK || !prereleaseOK {
+		return fmt.Errorf("release webhook requires payload.release tag_name, draft, and prerelease")
+	}
+	if draft {
+		if action == "created" {
+			return fmt.Errorf("release webhook draft created activity does not trigger GitHub Actions")
+		}
+		return fmt.Errorf("release webhook %s activity requires a non-draft release", action)
+	}
+	if tag != getenv("BUILDKITE_TAG") || tag != getenv("BUILDKITE_BRANCH") {
+		return fmt.Errorf("release webhook tag_name does not match BUILDKITE_TAG and BUILDKITE_BRANCH")
+	}
+	snapshot["ref"] = "refs/tags/" + tag
 	return nil
 }
 

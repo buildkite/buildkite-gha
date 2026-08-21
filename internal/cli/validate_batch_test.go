@@ -351,12 +351,51 @@ func TestBatchValidationReusesActionResolutionAcrossWorkflows(t *testing.T) {
 			t.Fatal(err)
 		}
 		out := processingOutput{command: "validate-batch", format: "json", reports: io.Discard, stderr: io.Discard}
-		if code := validateAllEvents(out, path, "dev", "", runtime, io.Discard); code != 0 {
+		if code := validateAllEvents(t.Context(), out, path, "dev", "", runtime, io.Discard); code != 0 {
 			t.Fatalf("validateAllEvents(%s) = %d", name, code)
 		}
 	}
 	if source.calls != 1 {
 		t.Fatalf("action source calls = %d, want 1", source.calls)
+	}
+}
+
+func TestBatchValidationPinsPublicReusableWorkflowAcrossPasses(t *testing.T) {
+	root := t.TempDir()
+	remoteRoot := t.TempDir()
+	remotePath := filepath.Join(remoteRoot, ".github", "workflows", "ci.yml")
+	if err := os.MkdirAll(filepath.Dir(remotePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(remotePath, []byte("on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := actionsource.DigestTree(remoteRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &batchCountingActionSource{root: remoteRoot, digest: digest}
+	_, _, distributionDigest, err := executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &profileValidationRuntime{actionSource: compiler.MemoizeRepositorySource(source), distributionDigest: distributionDigest}
+	workflow := []byte("on: push\njobs:\n  delegated:\n    uses: owner/repository/.github/workflows/ci.yml@v1\n")
+	for _, name := range []string{"one", "two"} {
+		workflowPath := filepath.Join(root, name, ".github", "workflows", "caller.yml")
+		if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out := processingOutput{command: "validate-batch", format: "json", reports: io.Discard, stderr: io.Discard}
+		if code := validateAllEvents(t.Context(), out, workflowPath, "dev", "", runtime, io.Discard); code != 0 {
+			t.Fatalf("validateAllEvents(%s) = %d", name, code)
+		}
+	}
+	if source.calls != 1 {
+		t.Fatalf("repository source calls = %d, want one pinned resolution across workflows and passes", source.calls)
 	}
 }
 
@@ -374,7 +413,7 @@ func TestBatchValidationUsesCapturedWorkflowForEveryEvent(t *testing.T) {
 	var reports bytes.Buffer
 	out := processingOutput{command: "validate-batch", format: "json", reports: &reports, stderr: io.Discard}
 	runtime := &profileValidationRuntime{distributionDigest: distributionDigest}
-	if code := validateAllEventsSource(out, path, captured, "dev", "", runtime, io.Discard); code != 0 {
+	if code := validateAllEventsSource(t.Context(), out, path, captured, "dev", "", runtime, io.Discard); code != 0 {
 		t.Fatalf("validateAllEventsSource() = %d", code)
 	}
 	var report compatibility.ProcessingReportV3

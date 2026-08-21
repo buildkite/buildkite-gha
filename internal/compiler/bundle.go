@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"strings"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -42,8 +44,8 @@ type Bundle struct {
 	Processing        ProcessingEvidence
 }
 
-// CompileBundle compiles an unattested event snapshot with the fail-closed
-// default runner policy.
+// CompileBundle compiles an unattested event snapshot with the default runner
+// policy, which rejects unsupported runner labels.
 func CompileBundle(path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest, compilerStep string) (Bundle, error) {
 	return CompileBundleWithOptions(path, source, eventSource, compilerVersion, compilerDistributionDigest, compilerStep, defaultOptions())
 }
@@ -73,7 +75,11 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	if !strings.HasPrefix(compilerDistributionDigest, "sha256:") {
 		return Bundle{}, fmt.Errorf("compiler distribution digest is required")
 	}
-	ir, err := compile(path, source, eventSource, options)
+	ir, err := compile(ctx, path, source, eventSource, options)
+	if err != nil {
+		return Bundle{IR: ir}, err
+	}
+	ir, err = reducePlanEventExpressions(ir)
 	if err != nil {
 		return Bundle{IR: ir}, err
 	}
@@ -90,6 +96,56 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	}
 	if len(plans) != len(ir.Jobs) || len(authorizations) != len(plans) {
 		return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("compiler produced %d plans and %d authorizations for %d job instances", len(plans), len(authorizations), len(ir.Jobs)))
+	}
+	warnedLegacyCheckout := map[string]bool{}
+	warnedLegacyUploadArtifact := map[string]bool{}
+	for i, job := range plans {
+		locks := make(map[string]plan.ActionLock, len(job.Actions))
+		for _, lock := range job.Actions {
+			locks[lock.ID] = lock
+		}
+		for stepIndex, step := range job.Steps {
+			if step.Action == nil || stepIndex >= len(ir.Jobs[i].Steps) {
+				continue
+			}
+			lock := locks[step.Action.Lock]
+			descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+			switch descriptor.Adapter {
+			case actionintegration.AdapterCheckoutExactEventSHA:
+				release, legacy := actionintegration.LegacyCheckoutRelease(lock.Commit)
+				if !legacy || warnedLegacyCheckout[release] {
+					continue
+				}
+				warnedLegacyCheckout[release] = true
+				bundle.IR.Warnings = append(bundle.IR.Warnings, legacyCheckoutWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release))
+			case actionintegration.AdapterUploadArtifactBuildkite:
+				release, legacy := actionintegration.LegacyUploadArtifactRelease(lock.Commit)
+				if !legacy || warnedLegacyUploadArtifact[release] {
+					continue
+				}
+				warnedLegacyUploadArtifact[release] = true
+				bundle.IR.Warnings = append(bundle.IR.Warnings, legacyUploadArtifactWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release))
+			}
+		}
+	}
+	warnedReusablePermissions := false
+	warnedJobPermissions := false
+	for i, job := range plans {
+		if job.GitHubToken == nil {
+			continue
+		}
+		if ir.Jobs[i].tokenPolicyNarrowed && !warnedReusablePermissions {
+			bundle.IR.Warnings = append(bundle.IR.Warnings, reusableWorkflowTokenWarning(ir.Jobs[i].reusableCall))
+			warnedReusablePermissions = true
+		}
+		if (ir.Jobs[i].jobPermissionsIgnored || jobPermissionsIgnored(job.GitHubToken.Permissions, ir.Jobs[i].Permissions)) && !warnedJobPermissions {
+			position := ir.Jobs[i].Source.Start
+			if ir.Jobs[i].jobPermissionsIgnored && ir.Jobs[i].reusableCall.Line != 0 {
+				position = ir.Jobs[i].reusableCall
+			}
+			bundle.IR.Warnings = append(bundle.IR.Warnings, jobWorkflowTokenWarning(position))
+			warnedJobPermissions = true
+		}
 	}
 
 	artifacts := make([]PlanArtifact, len(plans))
@@ -118,6 +174,16 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	bundle.Plans = artifacts
 	bundle.Processing.PlansConstructed = true
 	return bundle, nil
+}
+
+func jobPermissionsIgnored(workflowPermissions, effectivePermissions map[string]string) bool {
+	normalized := make(map[string]string, len(effectivePermissions))
+	for name, access := range effectivePermissions {
+		if name != "id-token" {
+			normalized[strings.ReplaceAll(name, "-", "_")] = access
+		}
+	}
+	return !maps.Equal(workflowPermissions, normalized)
 }
 
 // GenerateBundlePipeline emits pipeline bytes only after plan construction and
