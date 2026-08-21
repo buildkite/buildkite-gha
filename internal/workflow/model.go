@@ -28,7 +28,7 @@ type Workflow struct {
 	DefaultWorkingDirectory string                `json:"default_working_directory,omitempty"`
 	CallInputs              map[string]CallInput  `json:"call_inputs,omitempty"`
 	CallOutputs             map[string]CallOutput `json:"call_outputs,omitempty"`
-	RequiredCallSecrets     []string              `json:"required_call_secrets,omitempty"`
+	CallSecrets             map[string]CallSecret `json:"call_secrets,omitempty"`
 	Callable                bool                  `json:"callable,omitempty"`
 	Jobs                    []Job                 `json:"jobs"`
 }
@@ -114,6 +114,14 @@ type CallOutput struct {
 	Span  Span   `json:"span"`
 }
 
+// CallSecret declares one secret accepted by workflow_call. Map keys are
+// case-normalized aliases; Name and Span retain the callee-owned declaration.
+type CallSecret struct {
+	Name     string `json:"name"`
+	Required bool   `json:"required,omitempty"`
+	Span     Span   `json:"span"`
+}
+
 // Job is one logical GitHub Actions job.
 type Job struct {
 	ID                      string                 `json:"id"`
@@ -177,11 +185,19 @@ type ContainerCredentials struct {
 
 // ReusableWorkflowCall is a job-level invocation of another workflow.
 type ReusableWorkflowCall struct {
-	Uses           string           `json:"uses"`
-	Inputs         map[string]Value `json:"inputs,omitempty"`
-	Secrets        bool             `json:"secrets,omitempty"`
-	InheritSecrets bool             `json:"inherit_secrets,omitempty"`
-	Span           Span             `json:"span"`
+	Uses           string                   `json:"uses"`
+	Inputs         map[string]Value         `json:"inputs,omitempty"`
+	Secrets        map[string]SecretMapping `json:"secrets,omitempty"`
+	InheritSecrets bool                     `json:"inherit_secrets,omitempty"`
+	Span           Span                     `json:"span"`
+}
+
+// SecretMapping binds one callee alias to a direct caller secret reference.
+// Both names are normalized for case-insensitive lookup; Span owns the source.
+type SecretMapping struct {
+	Target string `json:"target"`
+	Source string `json:"source"`
+	Span   Span   `json:"span"`
 }
 
 // Matrix retains either static rows or a deferred expression.

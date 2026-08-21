@@ -228,13 +228,24 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	if err != nil {
 		return tolerateJobSetupFailure(runCtx, job, jobResult, err)
 	}
+	if len(job.SecretMappings) != 0 {
+		projected := make(map[string]string, len(job.SecretMappings))
+		for alias, source := range job.SecretMappings {
+			projected[alias] = secrets[source]
+		}
+		secrets = projected
+	}
 	if job.GitHubToken != nil {
 		if secrets == nil {
 			secrets = map[string]string{}
 		}
-		secrets["GITHUB_TOKEN"], err = r.resolveWorkflowToken(runCtx, processor, job.Event.Repository, job.GitHubToken.Workflow, job.GitHubToken.Permissions)
+		token, err := r.resolveWorkflowToken(runCtx, processor, job.Event.Repository, job.GitHubToken.Workflow, job.GitHubToken.Permissions)
 		if err != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, err)
+		}
+		secrets["GITHUB_TOKEN"] = token
+		for _, alias := range job.GitHubToken.Aliases {
+			secrets[alias] = token
 		}
 	}
 	eval.Secrets = secrets

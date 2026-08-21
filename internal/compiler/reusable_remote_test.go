@@ -152,6 +152,11 @@ func TestCompileRejectsSecretInheritanceIntoRemoteReusableWorkflows(t *testing.T
 			remote: "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		},
 		{
+			name:   "explicit remote call",
+			caller: "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n    secrets:\n      token: ${{ secrets.SOURCE }}\n",
+			remote: "on:\n  workflow_call:\n    secrets:\n      token:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		},
+		{
 			name:   "local path within remote repository",
 			caller: "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n",
 			remote: "on: workflow_call\njobs:\n  nested:\n    uses: ./.github/workflows/nested.yml\n    secrets: inherit\n",
@@ -166,7 +171,7 @@ func TestCompileRejectsSecretInheritanceIntoRemoteReusableWorkflows(t *testing.T
 			options := defaultOptions()
 			options.RepositorySource = MemoizeRepositorySource(newFakeReusableRepositorySource(t, map[string]string{"owner/workflows": remoteRoot}))
 			_, err := CompileWithOptions(callerPath, readFile(t, callerPath), pushEvent(t), options)
-			if err == nil || !strings.Contains(err.Error(), "secrets: inherit is supported only for repository-local reusable workflows") {
+			if err == nil || !strings.Contains(err.Error(), "secret forwarding is supported only for repository-local reusable workflows") {
 				t.Fatalf("CompileWithOptions() error = %v, want remote inheritance rejection", err)
 			}
 		})

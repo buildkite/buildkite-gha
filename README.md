@@ -92,7 +92,7 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 | Local and public JavaScript and composite actions; verified Dockerfile actions on Linux | Private actions or private reusable workflows, and Dockerfile actions on macOS |
 | Static matrices, `needs`, outputs, and local or literal public reusable workflows | Dynamic reusable calls, matrices, and expressions outside the documented subset |
 | Exact-commit checkout, including managed private repository access | GitHub environment secrets, GitHub-issued OIDC claims, or protected queues |
-| Static Buildkite job-accessible secrets | Dynamic or reusable-workflow secret forwarding |
+| Static Buildkite job-accessible secrets, including declared aliases in local reusable workflows | Dynamic secret access or remote reusable-workflow secret forwarding |
 | Scoped `GITHUB_TOKEN` and step `github.token` use allowed by Buildkite policy | Ambient token injection or dynamic token access |
 | Buildkite OIDC tokens through host JavaScript and composite actions | OIDC in Docker actions or job containers |
 | Audited artifact action versions and cache v6 integration | Other artifact and cache modes or general GitHub service emulation |

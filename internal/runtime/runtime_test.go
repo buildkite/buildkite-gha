@@ -42,6 +42,20 @@ func (s testSecretResolver) ResolveSecret(_ context.Context, name string) (strin
 	return value, nil
 }
 
+type countingSecretResolver struct {
+	values map[string]string
+	calls  map[string]int
+}
+
+func (s *countingSecretResolver) ResolveSecret(_ context.Context, name string) (string, error) {
+	s.calls[name]++
+	value, ok := s.values[name]
+	if !ok {
+		return "", fmt.Errorf("denied")
+	}
+	return value, nil
+}
+
 type testRedactor struct{ values []string }
 
 func (r *testRedactor) AddRedaction(_ context.Context, value string) error {
@@ -982,6 +996,34 @@ echo after-soft`},
 		t.Fatalf("RunJob() result = %#v, redactions = %#v", result, redactor.values)
 	}
 	if strings.Contains(logs.String(), "mask-me") || !strings.Contains(logs.String(), "secret=***") || !strings.Contains(logs.String(), "after-soft") {
+		t.Fatalf("RunJob() logs = %q", logs.String())
+	}
+}
+
+func TestRunJobResolvesOriginalSecretOnceAndProjectsAliases(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/aliases.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: aliases\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "aliases", Kind: "run", Command: `test "${{ secrets.FIRST }}" = shared-value
+test "${{ secrets.SECOND }}" = shared-value
+test -z "${{ secrets.OPTIONAL }}"
+echo "first=${{ secrets.FIRST }} second=${{ secrets.SECOND }}"`,
+	}})
+	job.RequiredCapabilities = []string{"secrets"}
+	job.RequiredSecrets = []string{"ORIGINAL"}
+	job.SecretMappings = map[string]string{"FIRST": "ORIGINAL", "SECOND": "ORIGINAL"}
+	resolver := &countingSecretResolver{values: map[string]string{"ORIGINAL": "shared-value"}, calls: map[string]int{}}
+	redactor := &testRedactor{}
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: resolver, Redactor: redactor}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+	if resolver.calls["ORIGINAL"] != 1 || len(resolver.calls) != 1 || !slices.Equal(redactor.values, []string{"shared-value"}) {
+		t.Fatalf("secret resolution calls = %#v, redactions = %#v", resolver.calls, redactor.values)
+	}
+	if strings.Contains(logs.String(), "shared-value") || !strings.Contains(logs.String(), "first=*** second=***") {
 		t.Fatalf("RunJob() logs = %q", logs.String())
 	}
 }
@@ -2805,13 +2847,15 @@ func TestRunJobMintsAndRedactsScopedGitHubWorkflowToken(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: workflow token\n")
 	const token = "ghs_scoped_workflow_token"
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
-		ID: "use-token", Kind: "run", Shell: "sh", Command: `test "$GH_TOKEN" = "ghs_scoped_workflow_token" && printf '%s\n' "$GH_TOKEN"`,
+		ID: "use-token", Kind: "run", Shell: "sh", Command: `test "$GH_TOKEN" = "ghs_scoped_workflow_token"
+test "$ALIAS_TOKEN" = "$GH_TOKEN"
+printf '%s %s\n' "$GH_TOKEN" "$ALIAS_TOKEN"`,
 	}})
 	job.Schema = plan.Schema
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
-	job.GitHubToken = &plan.GitHubToken{Workflow: "caller.yml", Permissions: map[string]string{"contents": "read", "pull_requests": "write"}}
-	job.Env = map[string]string{"GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}"}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "caller.yml", Permissions: map[string]string{"contents": "read", "pull_requests": "write"}, Aliases: []string{"TOKEN_ALIAS"}}
+	job.Env = map[string]string{"GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}", "ALIAS_TOKEN": "${{ secrets.TOKEN_ALIAS }}"}
 	provider := &testWorkflowTokenProvider{token: token}
 	redactor := &testRedactor{}
 	var logs bytes.Buffer

@@ -47,6 +47,52 @@ func TestParseRetainsRunNameAndSourceSpan(t *testing.T) {
 	}
 }
 
+func TestParseOwnsReusableWorkflowSecretDeclarationsAndMappings(t *testing.T) {
+	source := []byte(`on:
+  workflow_call:
+    secrets:
+      Required_Token:
+        required: true
+      optional_token:
+jobs:
+  nested:
+    uses: ./.github/workflows/nested.yml
+    secrets:
+      target_token: ${{ secrets['SOURCE_TOKEN'] }}
+`)
+	parsed, err := Parse("reusable.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.CallSecrets) != 2 || !parsed.CallSecrets["REQUIRED_TOKEN"].Required || parsed.CallSecrets["REQUIRED_TOKEN"].Span.Start.Line != 4 {
+		t.Fatalf("call secret declarations = %#v", parsed.CallSecrets)
+	}
+	mapping := parsed.Jobs[0].Reusable.Secrets["TARGET_TOKEN"]
+	if mapping.Source != "SOURCE_TOKEN" || mapping.Span.Start.Line != 11 {
+		t.Fatalf("call secret mapping = %#v", mapping)
+	}
+}
+
+func TestParseRejectsUnsupportedReusableWorkflowSecretMappings(t *testing.T) {
+	for _, value := range []string{"literal", "${{ vars.SOURCE }}", "${{ secrets[inputs.name] }}", "${{ secrets.A }}-${{ secrets.B }}"} {
+		source := "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    secrets:\n      target: " + value + "\n"
+		if _, err := Parse("caller.yml", []byte(source)); err == nil || !strings.Contains(err.Error(), "secret mapping") {
+			t.Fatalf("Parse(%q) error = %v", value, err)
+		}
+	}
+}
+
+func TestParseRejectsCaseCollidingReusableWorkflowSecretAliases(t *testing.T) {
+	for _, source := range []string{
+		"on:\n  workflow_call:\n    secrets:\n      TOKEN: {}\n      token: {}\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
+		"on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    secrets:\n      TOKEN: ${{ secrets.A }}\n      token: ${{ secrets.B }}\n",
+	} {
+		if _, err := Parse("collision.yml", []byte(source)); err == nil {
+			t.Fatal("Parse() accepted case-colliding secret aliases")
+		}
+	}
+}
+
 func TestParsePreservesEnvironmentVariableCase(t *testing.T) {
 	source := []byte("on: push\nenv:\n  WorkflowValue: workflow\njobs:\n  build:\n    runs-on: ubuntu-latest\n    env:\n      JobValue: job\n    steps:\n      - run: true\n        env:\n          STEP_VALUE: step\n")
 	parsed, err := Parse("env.yml", source)

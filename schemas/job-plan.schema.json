@@ -14,6 +14,7 @@
     "target": {"$ref": "#/$defs/target"},
     "required_capabilities": {"type": "array", "uniqueItems": true, "maxItems": 16, "items": {"$ref": "#/$defs/capability"}},
     "required_secrets": {"type": "array", "uniqueItems": true, "maxItems": 128, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "not": {"const": "GITHUB_TOKEN"}}},
+    "secret_mappings": {"type": "object", "maxProperties": 128, "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "not": {"const": "GITHUB_TOKEN"}}, "additionalProperties": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}},
     "github_token": {"$ref": "#/$defs/githubToken"},
     "id_token_permission": {"enum": ["read", "write"]},
     "oidc": {"$ref": "#/$defs/oidcConfiguration"},
@@ -71,7 +72,7 @@
     "event": {"type": "object", "additionalProperties": false, "required": ["provider", "name", "payload_digest"], "properties": {"provider": {"enum": ["github", "cursor-origin"]}, "name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 128}, "payload_digest": {"$ref": "#/$defs/digest"}, "repository": {"type": "string", "maxLength": 512}, "ref": {"type": "string", "maxLength": 1024}, "head_ref": {"type": "string", "maxLength": 1024}, "base_ref": {"type": "string", "maxLength": 1024}, "sha": {"type": "string", "maxLength": 128}, "actor": {"type": "string", "maxLength": 256}}},
     "target": {"type": "object", "additionalProperties": false, "required": ["step_key"], "properties": {"step_key": {"$ref": "#/$defs/buildkiteName"}, "queue": {"$ref": "#/$defs/buildkiteName"}}},
     "githubEventRepository": {"type": "string", "maxLength": 140, "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", "not": {"pattern": "^(?:\\.\\.?/|[A-Za-z0-9_.-]+/\\.\\.?)$"}},
-    "githubToken": {"type": "object", "additionalProperties": false, "required": ["workflow", "permissions"], "properties": {"workflow": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.ya?ml$", "maxLength": 255}, "permissions": {"$ref": "#/$defs/githubPermissions"}}},
+    "githubToken": {"type": "object", "additionalProperties": false, "required": ["workflow", "permissions"], "properties": {"workflow": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.ya?ml$", "maxLength": 255}, "permissions": {"$ref": "#/$defs/githubPermissions"}, "aliases": {"type": "array", "uniqueItems": true, "maxItems": 128, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "not": {"const": "GITHUB_TOKEN"}}}}},
     "oidcConfiguration": {"type": "object", "additionalProperties": false, "properties": {"claims": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "aws_session_tags": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "subject_claim": {"type": "string", "minLength": 1}}},
     "githubPermissions": {
       "type": "object", "additionalProperties": false, "minProperties": 1, "maxProperties": 15,

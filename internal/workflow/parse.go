@@ -170,11 +170,18 @@ func Parse(path string, source []byte) (*Workflow, error) {
 			if secret.Required != nil && secret.Required.Expression != nil {
 				return nil, locatedError(path, secret.Required.Expression.Pos, "workflow", fmt.Sprintf("expression-valued required flag for workflow_call secret %q is unsupported", name))
 			}
-			if secret.Required != nil && secret.Required.Value {
-				owned.RequiredCallSecrets = append(owned.RequiredCallSecrets, name)
+			if owned.CallSecrets == nil {
+				owned.CallSecrets = make(map[string]CallSecret, len(call.Secrets))
 			}
+			declaration := CallSecret{
+				Name: secret.Name.Value,
+				Span: spanFrom(secret.Name.Pos, secret.Name.Value),
+			}
+			if secret.Required != nil && secret.Required.Value {
+				declaration.Required = true
+			}
+			owned.CallSecrets[strings.ToUpper(name)] = declaration
 		}
-		sort.Strings(owned.RequiredCallSecrets)
 	}
 
 	ids := make([]string, 0, len(parsed.Jobs))
@@ -553,9 +560,23 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		call := in.WorkflowCall
 		out.Reusable = &ReusableWorkflowCall{
 			Uses:           call.Uses.Value,
-			Secrets:        len(call.Secrets) != 0,
 			InheritSecrets: call.InheritSecrets,
 			Span:           spanFrom(call.Uses.Pos, call.Uses.Value),
+		}
+		if len(call.Secrets) != 0 {
+			out.Reusable.Secrets = make(map[string]SecretMapping, len(call.Secrets))
+			for name, secret := range call.Secrets {
+				source, err := expression.DirectSecretReference(secret.Value.Value)
+				if err != nil {
+					return Job{}, locatedError(path, secret.Value.Pos, fmt.Sprintf("job %q", in.ID.Value), fmt.Sprintf("secret mapping %q: %v", secret.Name.Value, err))
+				}
+				target := strings.ToUpper(name)
+				out.Reusable.Secrets[target] = SecretMapping{
+					Target: target,
+					Source: source,
+					Span:   spanFrom(secret.Value.Pos, secret.Value.Value),
+				}
+			}
 		}
 		if len(call.Inputs) != 0 {
 			out.Reusable.Inputs = make(map[string]Value, len(call.Inputs))

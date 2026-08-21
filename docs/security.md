@@ -146,15 +146,23 @@ are not GitHub repository, environment, event, or fork-scoped secrets.
 
 `secrets: inherit` lets a local reusable-workflow call place that callee job's
 statically referenced secret names in its plan. It is one hop, and every nested
-edge must repeat it. It does not support aliases, remote calls, or secret names
-invented by action metadata.
+edge must repeat it. A local call can instead map a declared callee alias from
+one direct caller secret reference. Required declarations must be mapped;
+optional unmapped aliases stay empty.
+
+Nested explicit mappings compose aliases to the original Buildkite secret.
+They can forward only authority received from the parent and never fall back to
+a same-named Buildkite secret. The runtime retrieves each original once and
+projects its value to the authorized aliases. Remote forwarding and secret
+names invented by action metadata remain unsupported.
 
 Plans and pipeline YAML contain secret names, never values. Restrict the
 destination job with Buildkite Secret access policies. Arbitrary code in the
 same job identity can also run `buildkite-agent secret get`.
 
-`GITHUB_TOKEN` stays on its separate workflow-token boundary and is not affected
-by secret inheritance.
+`GITHUB_TOKEN` stays on its separate workflow-token boundary. Forwarding it to
+a declared alias preserves that scoped token boundary; it never requests an
+ordinary Buildkite secret.
 
 ### OIDC
 

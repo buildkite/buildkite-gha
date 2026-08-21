@@ -35,12 +35,22 @@ type sourcedJob struct {
 	root                  string
 	remote                *RemoteWorkflowSource
 	inputs                reusableInputs
-	secretAuthority       bool
+	secretAuthority       secretAuthority
 	needBindings          map[string]needBinding
 	tokenPolicyNarrowed   bool
 	jobPermissionsIgnored bool
 	reusableCall          workflow.Position
 	callGuards            []sourcedCallGuard
+}
+
+type secretAuthority struct {
+	unrestricted bool
+	bindings     map[string]secretBinding
+}
+
+type secretBinding struct {
+	source string
+	token  bool
 }
 
 type sourcedCallGuard struct {
@@ -118,7 +128,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
 			}
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: true, needBindings: bindings}
+			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings}
 			workflowJobs[job.ID] = job
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
@@ -142,7 +152,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 		}
 	}()
 	resolver.discoverRuntimeMatrixBoundaries(ctx, rootSource, parsed, 0, map[string]int{rootSource.identity.key(): 0})
-	resolution, err := resolver.resolve(ctx, rootSource, digest, parsed, "", "", reusableInputs{values: context.Inputs}, nil, nil, true, false, workflow.Position{}, nil, 0)
+	resolution, err := resolver.resolve(ctx, rootSource, digest, parsed, "", "", reusableInputs{values: context.Inputs}, nil, nil, secretAuthority{unrestricted: true}, false, workflow.Position{}, nil, 0)
 	return resolution.jobs, resolver.runtimeMatrixBoundary, err
 }
 
@@ -192,7 +202,7 @@ func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(ctx context.Co
 	}
 }
 
-func (resolver *reusableResolver) resolve(ctx context.Context, current reusableWorkflowSource, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs reusableInputs, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secretAuthority, tokenPolicyNarrowed bool, reusableCallPosition workflow.Position, callGuards []sourcedCallGuard, depth int) (reusableResolution, error) {
+func (resolver *reusableResolver) resolve(ctx context.Context, current reusableWorkflowSource, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs reusableInputs, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secrets secretAuthority, tokenPolicyNarrowed bool, reusableCallPosition workflow.Position, callGuards []sourcedCallGuard, depth int) (reusableResolution, error) {
 	path := current.displayPath
 	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
@@ -262,7 +272,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			}
 			resolved = append(resolved, sourcedJob{
 				Job: job, path: path, digest: digest, root: resolver.workspaceRoot, remote: cloneRemoteWorkflowSource(current.remote), inputs: cloneReusableInputs(inputs),
-				secretAuthority: secretAuthority, needBindings: needBindings,
+				secretAuthority: cloneSecretAuthority(secrets), needBindings: needBindings,
 				tokenPolicyNarrowed: jobTokenPolicyNarrowed, jobPermissionsIgnored: jobPermissionsIgnored, reusableCall: reusableCallPosition,
 				callGuards: cloneSourcedCallGuards(callGuards),
 			})
@@ -291,9 +301,6 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				condition: condition, inputs: cloneReusableInputs(inputs), needBindings: cloneNeedBindings(callNeedBindings),
 			})
 		}
-		if call.Secrets {
-			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow secret forwarding is unsupported")
-		}
 		if depth >= MaxReusableWorkflowDepth {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow nesting exceeds maximum depth %d", MaxReusableWorkflowDepth))
 		}
@@ -301,8 +308,8 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		if err != nil {
 			return reusableResolution{}, locatedJobWrappedError(path, job, call.Span.Start.Line, call.Span.Start.Column, "", err)
 		}
-		if call.InheritSecrets && calleeSource.identity.kind != "workspace" {
-			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "secrets: inherit is supported only for repository-local reusable workflows")
+		if (call.InheritSecrets || len(call.Secrets) != 0) && calleeSource.identity.kind != "workspace" {
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "secret forwarding is supported only for repository-local reusable workflows")
 		}
 		if cycle := resolver.cycle(calleeSource); cycle != "" {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow cycle detected: "+cycle)
@@ -315,8 +322,9 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		if !callee.Callable {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable workflow %q does not declare on.workflow_call", call.Uses))
 		}
-		if len(callee.RequiredCallSecrets) != 0 {
-			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable workflow %q requires unsupported secret %q", call.Uses, callee.RequiredCallSecrets[0]))
+		calleeSecrets, err := resolveCallSecretAuthority(path, job, call, callee, secrets)
+		if err != nil {
+			return reusableResolution{}, err
 		}
 		if callee.Concurrency != nil {
 			return reusableResolution{}, fmt.Errorf("%s:%d:%d: workflow concurrency in a called reusable workflow is unsupported", calleeSource.displayPath, callee.Concurrency.Span.Start.Line, callee.Concurrency.Span.Start.Column)
@@ -368,7 +376,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				calleeCallPosition = call.Span.Start
 			}
 			resolver.stack = append(resolver.stack, calleeSource.identity)
-			calleeResolution, err := resolver.resolve(ctx, calleeSource, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, secretAuthority && call.InheritSecrets, jobTokenPolicyNarrowed, calleeCallPosition, calleeGuards, depth+1)
+			calleeResolution, err := resolver.resolve(ctx, calleeSource, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, calleeSecrets, jobTokenPolicyNarrowed, calleeCallPosition, calleeGuards, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {
 				message := "reusable workflow could not be resolved"
@@ -406,6 +414,69 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		return reusableResolution{}, err
 	}
 	return reusableResolution{jobs: resolved, outputs: outputs}, nil
+}
+
+func resolveCallSecretAuthority(path string, job workflow.Job, call *workflow.ReusableWorkflowCall, callee *workflow.Workflow, parent secretAuthority) (secretAuthority, error) {
+	if call.InheritSecrets {
+		for _, name := range sortedValueKeys(callee.CallSecrets) {
+			declaration := callee.CallSecrets[name]
+			if declaration.Required && !parent.has(name) {
+				return secretAuthority{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable workflow %q requires secret %q", call.Uses, declaration.Name))
+			}
+		}
+		return cloneSecretAuthority(parent), nil
+	}
+
+	forwarded := secretAuthority{bindings: make(map[string]secretBinding, len(call.Secrets))}
+	for _, target := range sortedValueKeys(call.Secrets) {
+		mapping := call.Secrets[target]
+		_, declared := callee.CallSecrets[target]
+		if !declared {
+			return secretAuthority{}, locatedJobError(path, job, mapping.Span.Start.Line, mapping.Span.Start.Column, fmt.Sprintf("secret mapping target %q is not declared by reusable workflow %q", mapping.Target, call.Uses))
+		}
+		if target == "GITHUB_TOKEN" {
+			return secretAuthority{}, locatedJobError(path, job, mapping.Span.Start.Line, mapping.Span.Start.Column, "GITHUB_TOKEN cannot be an explicit secret mapping target")
+		}
+		if mapping.Source == "GITHUB_TOKEN" {
+			forwarded.bindings[target] = secretBinding{source: "GITHUB_TOKEN", token: true}
+			continue
+		}
+		if binding, ok := parent.resolve(mapping.Source); ok {
+			forwarded.bindings[target] = binding
+		}
+	}
+	for _, name := range sortedValueKeys(callee.CallSecrets) {
+		declaration := callee.CallSecrets[name]
+		if declaration.Required && !forwarded.has(name) {
+			return secretAuthority{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable workflow %q requires secret %q", call.Uses, declaration.Name))
+		}
+	}
+	return forwarded, nil
+}
+
+func (authority secretAuthority) resolve(alias string) (secretBinding, bool) {
+	alias = strings.ToUpper(alias)
+	if authority.unrestricted {
+		return secretBinding{source: alias}, true
+	}
+	binding, ok := authority.bindings[alias]
+	return binding, ok
+}
+
+func (authority secretAuthority) has(alias string) bool {
+	_, ok := authority.resolve(alias)
+	return ok
+}
+
+func cloneSecretAuthority(authority secretAuthority) secretAuthority {
+	cloned := secretAuthority{unrestricted: authority.unrestricted}
+	if authority.bindings != nil {
+		cloned.bindings = make(map[string]secretBinding, len(authority.bindings))
+		for alias, binding := range authority.bindings {
+			cloned.bindings[alias] = binding
+		}
+	}
+	return cloned
 }
 
 func effectivePermissions(job, workflowDefault, ceiling *workflow.Permissions, bounded bool) *workflow.Permissions {
