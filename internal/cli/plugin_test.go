@@ -217,6 +217,7 @@ func TestParsePluginConfiguration(t *testing.T) {
 		{name: "unknown runner field", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","extra":true}]}`, want: "unknown field"},
 		{name: "case alias runner field", source: `{"workflow":"ci.yml","runners":[{"Runs-On":"ubuntu-latest","queue":"hosted"}]}`, want: "unknown field"},
 		{name: "duplicate runner field", source: `{"workflow":"ci.yml","runners":[{"runs-on":"windows-latest","runs-on":"ubuntu-latest","queue":"hosted"}]}`, want: "duplicate object key"},
+		{name: "empty runner label", source: `{"workflow":"ci.yml","runners":[{"runs-on":"","queue":"hosted"}]}`, want: "unsupported runner label"},
 		{name: "duplicate runner", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"one"},{"runs-on":"UBUNTU-LATEST","queue":"two"}]}`, want: "only be configured once"},
 		{name: "missing queue", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest"}]}`, want: "queue must be a string"},
 		{name: "empty image", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","image":""}]}`, want: "immutable registry"},
@@ -426,7 +427,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	requireImporterHost(t)
 	const fullCommit = "0123456789abcdef0123456789abcdef01234567"
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"mixed.yml": "on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  macos:\n    needs: linux\n    runs-on: macos-26\n    steps:\n      - run: echo macos\n",
+		"mixed.yml": "on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  configured:\n    needs: linux\n    runs-on: ubuntu-18.04\n    steps:\n      - run: echo configured\n  fallback:\n    needs: linux\n    runs-on: [self-hosted, ubuntu-20.04]\n    steps:\n      - run: echo fallback\n  macos:\n    needs: linux\n    runs-on: macos-26\n    steps:\n      - run: echo macos\n",
 	})
 	t.Chdir(repository)
 	workflowPath := filepath.Join(".github", "workflows", "mixed.yml")
@@ -448,11 +449,10 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	if err := os.WriteFile(darwinPath, darwinContents, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
 	configuration, err := json.Marshal(map[string]any{
 		"workflow": workflowPath,
 		"runners": []map[string]any{
-			{"runs-on": "ubuntu-latest", "queue": "linux", "image": image},
+			{"runs-on": "ubuntu-18.04", "queue": "legacy-linux"},
 		},
 	})
 	if err != nil {
@@ -462,7 +462,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resolutionRequests++
 		if r.URL.Path != "/v3/jobs/"+cliTestJobID+"/github-actions/runners" || r.Header.Get("Authorization") != "Token job-token" {
-			t.Errorf("runner resolution request = %s, authorization %q", r.URL.Path, r.Header.Get("Authorization"))
+			t.Errorf("runner resolution request = %s, headers %#v", r.URL.Path, r.Header)
 		}
 		var body struct {
 			Requirements []struct {
@@ -477,9 +477,24 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 		}
 		resolutions := make([]map[string]any, len(body.Requirements))
 		for i, requirement := range body.Requirements {
-			if slices.Equal(requirement.Selector.Labels, []string{"macos-26"}) {
+			switch {
+			case slices.Equal(requirement.Selector.Labels, []string{"ubuntu-latest"}):
+				resolutions[i] = map[string]any{
+					"id":     requirement.ID,
+					"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage},
+				}
+			case slices.Equal(requirement.Selector.Labels, []string{"self-hosted", "ubuntu-20.04"}):
+				resolutions[i] = map[string]any{
+					"id":     requirement.ID,
+					"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage},
+					"warnings": []map[string]string{{
+						"code":    "runner_label_fallback",
+						"message": "This runner selector is not supported directly; using the linux-medium queue via a heuristic fallback. Configure an explicit runner mapping to use an appropriate Buildkite queue and avoid this fallback: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md",
+					}},
+				}
+			case slices.Equal(requirement.Selector.Labels, []string{"macos-26"}):
 				resolutions[i] = map[string]any{"id": requirement.ID, "target": map[string]string{"queue": "macos-26-medium", "platform": "darwin/arm64"}}
-			} else {
+			default:
 				resolutions[i] = map[string]any{"id": requirement.ID, "error": map[string]string{"code": "unmapped_labels", "message": "No compatible runner is configured."}}
 			}
 		}
@@ -502,6 +517,17 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	}
 	if resolutionRequests != 1 {
 		t.Fatalf("runner resolution requests = %d, want 1", resolutionRequests)
+	}
+	var runnerAnnotation *cliCommand
+	for i := range runner.commands {
+		command := &runner.commands[i]
+		if len(command.args) >= 7 && command.args[0] == "annotate" && command.args[6] == runnerResolutionContext {
+			runnerAnnotation = command
+			break
+		}
+	}
+	if runnerAnnotation == nil || runnerAnnotation.args[8] != "warning" || !strings.Contains(string(runnerAnnotation.stdin), "heuristic fallback") || !strings.Contains(string(runnerAnnotation.stdin), "linux-medium") || !strings.Contains(string(runnerAnnotation.stdin), "docs/compatibility.md") {
+		t.Fatalf("runner resolution annotation = %#v", runnerAnnotation)
 	}
 	darwinDigest := transport.Digest(darwinContents)
 	planRuntimes := map[string]string{}
@@ -556,7 +582,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 			Command string
 		}{Image: step.Image, Queue: step.Agents["queue"], Command: step.Command}
 	}
-	var linux, macos struct {
+	var linux, configured, fallback, macos struct {
 		Image   string
 		Queue   string
 		Command string
@@ -565,12 +591,22 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 		switch {
 		case strings.HasSuffix(key, "-linux"):
 			linux = step
+		case strings.HasSuffix(key, "-configured"):
+			configured = step
+		case strings.HasSuffix(key, "-fallback"):
+			fallback = step
 		case strings.HasSuffix(key, "-macos"):
 			macos = step
 		}
 	}
-	if linux.Queue != "linux" || linux.Image != image || !strings.Contains(linux.Command, "--hosted-tool-cache") || !strings.Contains(linux.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
+	if linux.Queue != "linux-medium" || linux.Image != defaultNobleRunnerImage || !strings.Contains(linux.Command, "--hosted-tool-cache") || !strings.Contains(linux.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
 		t.Fatalf("Linux pipeline step = %#v", linux)
+	}
+	if configured.Queue != "legacy-linux" || configured.Image != "" || strings.Contains(configured.Command, "--hosted-tool-cache") || !strings.Contains(configured.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
+		t.Fatalf("configured Linux pipeline step = %#v", configured)
+	}
+	if fallback.Queue != "linux-medium" || fallback.Image != defaultNobleRunnerImage || !strings.Contains(fallback.Command, "--hosted-tool-cache") || !strings.Contains(fallback.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
+		t.Fatalf("fallback Linux pipeline step = %#v", fallback)
 	}
 	if macos.Queue != "macos-26-medium" || macos.Image != "" || strings.Contains(macos.Command, "--hosted-tool-cache") || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) {
 		t.Fatalf("Darwin pipeline step = %#v", macos)

@@ -18,12 +18,14 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 const (
 	processingAnnotationContext   = "buildkite-gha-processing"
 	skippedWorkflowsContext       = "buildkite-gha-skipped-workflows"
+	runnerResolutionContext       = "buildkite-gha-runner-resolution"
 	processingAnnotationBodyLimit = 1024 * 1024
 	processingAnnotationNotice    = "\n_Additional diagnostics omitted at the Buildkite annotation size limit._\n"
 	processingAnnotationTimeout   = 5 * time.Second
@@ -202,6 +204,22 @@ func (o processingOutput) annotateSkippedWorkflows(parent context.Context, event
 	defer cancel()
 	if err := o.agent.AnnotateJob(ctx, o.annotationJob, skippedWorkflowsContext, "info", body); err != nil {
 		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: warning: skipped workflows annotation: %v\n", o.command, err)
+	}
+}
+
+func (o processingOutput) annotateRunnerResolutionWarnings(parent context.Context, warnings []runtime.RunnerWarning) {
+	if o.annotationJob == "" || len(warnings) == 0 {
+		return
+	}
+	var body strings.Builder
+	body.WriteString("#### Unsupported runner labels were mapped to Ubuntu\n\nBuildkite used heuristic runner mappings:\n\n")
+	for _, warning := range warnings {
+		_, _ = fmt.Fprintf(&body, "* %s — %s\n", annotationCode(warning.Code), annotationHTML(warning.Message))
+	}
+	ctx, cancel := context.WithTimeout(parent, processingAnnotationTimeout)
+	defer cancel()
+	if err := o.agent.AnnotateJob(ctx, o.annotationJob, runnerResolutionContext, "warning", body.String()); err != nil {
+		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: warning: runner resolution annotation: %v\n", o.command, err)
 	}
 }
 

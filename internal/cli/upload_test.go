@@ -2538,6 +2538,7 @@ func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
 		"--experimental-runner-user",
 		"--runner-queue", "ubuntu-latest=hosted",
 		"--runner-image", "ubuntu-latest=" + image,
+		"--runner-queue", "ubuntu-20.04=legacy-linux",
 		"--runner-queue", "macos-14=macos-sonoma-arm64",
 		"--runtime-distribution", "linux/amd64=/tmp/buildkite-gha-linux",
 		"--event-path", "event.json",
@@ -2553,6 +2554,9 @@ func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
 	if got := parsed.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {
 		t.Fatalf("Linux runner target = %#v", got)
 	}
+	if got := parsed.runnerTargets["ubuntu-20.04"]; got != (compiler.RunnerTarget{Queue: "legacy-linux", Platform: compiler.PlatformLinuxAMD64}) {
+		t.Fatalf("explicit fallback runner target = %#v", got)
+	}
 	if got := parsed.runnerTargets["macos-14"]; got != (compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("macOS runner target = %#v", got)
 	}
@@ -2567,8 +2571,6 @@ func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
 		{args: []string{"--runner-queue", "ubuntu-latest=one", "--runner-queue", "UBUNTU-LATEST=two", "workflow.yml"}, want: "may only be specified once"},
 		{args: []string{"--runner-image", "ubuntu-latest=" + image, "workflow.yml"}, want: "requires --runner-queue"},
 		{args: []string{"--runner-queue", "macos-14=macos", "--runner-image", "macos-14=" + image, "workflow.yml"}, want: "unsupported on darwin/arm64"},
-		{args: []string{"--runner-queue", "windows-latest=windows", "workflow.yml"}, want: "unsupported runner label"},
-		{args: []string{"--runner-queue", "ubuntu-20.04=hosted", "workflow.yml"}, want: "unsupported runner label"},
 		{args: []string{"--runner-queue", "ubuntu-latest=not a queue", "workflow.yml"}, want: "runner queue"},
 		{args: []string{"--runner-queue", "ubuntu-latest=hosted", "--runner-image", "ubuntu-latest=ubuntu:latest", "workflow.yml"}, want: "immutable registry sha256 reference"},
 	} {

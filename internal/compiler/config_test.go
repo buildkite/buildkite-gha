@@ -289,6 +289,27 @@ func TestRunnerRejectionDiagnosticOmitsIrrelevantAllowlistForDuplicateLabel(t *t
 	}
 }
 
+func TestRunnerPolicySelectorTargetDoesNotChangeOverlappingLabelTarget(t *testing.T) {
+	jammy := RunnerTarget{Platform: PlatformLinuxAMD64, Image: "example.com/toolchains/jammy@sha256:" + strings.Repeat("0", 64)}
+	fallback := RunnerTarget{Queue: "linux-medium", Platform: PlatformLinuxAMD64}
+	policy := RunnerPolicy{
+		Targets: map[string]RunnerTarget{"ubuntu-22.04": jammy},
+		Selectors: []RunnerSelector{{
+			Labels: []string{"self-hosted", "ubuntu-22.04"},
+			Target: fallback,
+		}},
+	}
+	if got, err := policy.resolve([]string{"ubuntu-22.04"}, EventTrusted); err != nil || got != jammy {
+		t.Fatalf("standalone preset = %#v, %v", got, err)
+	}
+	if got, err := policy.resolve([]string{"ubuntu-22.04", "self-hosted"}, EventTrusted); err != nil || got != fallback {
+		t.Fatalf("multi-label selector = %#v, %v", got, err)
+	}
+	if got, err := (RunnerPolicy{Selectors: []RunnerSelector{{Labels: []string{"windows-latest"}, Target: fallback}}}).resolve([]string{"windows-latest"}, EventTrusted); err != nil || got != fallback {
+		t.Fatalf("server target = %#v, %v", got, err)
+	}
+}
+
 func TestRunnerRejectionDiagnosticFallsBackWhenUnclassified(t *testing.T) {
 	message, detail := runnerRejectionDiagnostic(errors.New("boom"), nil, nil, nil)
 	if message != "Runner target is unsupported. Use a configured Linux or macOS runner target." || detail != "" {

@@ -31,18 +31,6 @@ const (
 var runnerQueuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var runnerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
 
-func configuredRunnerPlatform(labels []string, configuredTargets map[string]compiler.RunnerTarget) (compiler.Platform, error) {
-	if len(labels) == 0 {
-		return compiler.Platform{}, fmt.Errorf("runs-on resolved to no labels")
-	}
-	canonical := strings.ToLower(strings.TrimSpace(labels[0]))
-	if target, ok := configuredTargets[canonical]; ok {
-		return target.Platform, nil
-	}
-	_, platform, err := supportedRunnerTarget(canonical)
-	return platform, err
-}
-
 type hostedCompilation struct {
 	Bundle     compiler.Bundle
 	HasActions bool
@@ -190,6 +178,15 @@ func hostedOptions(groupLabel string, configuredTargets map[string]compiler.Runn
 	return options
 }
 
+func applyRunnerSelectors(options *compiler.Options, selectors []compiler.RunnerSelector) {
+	options.Runners.Selectors = selectors
+	for _, selector := range selectors {
+		if selector.Target.Queue != "" && !slices.Contains(options.Runners.UntrustedQueues, selector.Target.Queue) {
+			options.Runners.UntrustedQueues = append(options.Runners.UntrustedQueues, selector.Target.Queue)
+		}
+	}
+}
+
 // hostedRunnerTargets is the runner preset shared by hosted validation and
 // production upload. RunnerPolicy resolves these labels case-insensitively.
 // Keep API-resolved and organization-provided targets out of this preset.
@@ -207,15 +204,16 @@ func compileHosted(ctx context.Context, workflowPath string, workflowSource, eve
 }
 
 func compileHostedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", nil, actionCacheDir, sharedActionSource, actionAuthentication)
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, nil, runtimeDistributions, "", nil, actionCacheDir, sharedActionSource, actionAuthentication)
 }
 
 func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, stepKeyNamespace, oidc, "", nil, actionAuthentication)
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, nil, runtimeDistributions, stepKeyNamespace, oidc, "", nil, actionAuthentication)
 }
 
-func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerSelectors []compiler.RunnerSelector, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
+	applyRunnerSelectors(&options, runnerSelectors)
 	options.StepKeyNamespace = stepKeyNamespace
 	options.OIDC = oidc
 	repositorySource := sharedActionSource
@@ -519,7 +517,7 @@ func configuredRunnerTarget(label, queue, image string) (string, compiler.Runner
 }
 
 func supportedRunnerTarget(label string) (string, compiler.Platform, error) {
-	if label != strings.TrimSpace(label) || strings.ContainsAny(label, "\r\n") {
+	if label == "" || label != strings.TrimSpace(label) || strings.ContainsAny(label, "\r\n") {
 		return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q", label)
 	}
 	canonical := strings.ToLower(label)
@@ -531,6 +529,9 @@ func supportedRunnerTarget(label string) (string, compiler.Platform, error) {
 		// These remain available as local fallbacks when the Agent API is absent.
 		return canonical, compiler.PlatformDarwinARM64, nil
 	default:
-		return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q", label)
+		// Configuring an otherwise unknown selector explicitly maps it to the
+		// supported Linux/amd64 platform. The Agent API owns compatibility
+		// policy for every selector that is not configured locally.
+		return canonical, compiler.PlatformLinuxAMD64, nil
 	}
 }
