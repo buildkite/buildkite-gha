@@ -40,6 +40,9 @@ func TestPluginAcquiresVerifiedLinuxRuntimeForDarwinHost(t *testing.T) {
 	archive := pluginTestArchive(t, linux, false)
 	archiveDigest := sha256.Sum256(archive)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("User-Agent") != "buildkite-gha/1.2.3" {
+			t.Errorf("User-Agent = %q", request.Header.Get("User-Agent"))
+		}
 		switch filepath.Base(request.URL.Path) {
 		case "checksums.txt":
 			_, _ = fmt.Fprintf(response, "%x  %s\n", archiveDigest, pluginLinuxAsset)

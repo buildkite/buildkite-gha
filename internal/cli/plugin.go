@@ -54,6 +54,7 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	return uploadParsedContext(ctx, parsedUploadArgs{
 		workflowOperands:       configuration.Workflows,
 		explicitWorkflowPaths:  true,
+		clientVersion:          clientVersion,
 		runnerTargets:          configuration.runnerTargets,
 		oidc:                   configuration.OIDC,
 		experimentalRunnerUser: configuration.ExperimentalRunnerUser,

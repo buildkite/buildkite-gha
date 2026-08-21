@@ -32,6 +32,9 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 		if got := r.Header.Get("Content-Type"); got != "application/json" {
 			t.Errorf("Content-Type = %q", got)
 		}
+		if got := r.Header.Get("User-Agent"); got != "buildkite-gha/1.2.3" {
+			t.Errorf("User-Agent = %q", got)
+		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
@@ -194,6 +197,9 @@ func TestPropertiesAreBounded(t *testing.T) {
 	}
 	if len(client.clientVersion) != maxClientVersionBytes {
 		t.Fatalf("client version length = %d", len(client.clientVersion))
+	}
+	if client.userAgent != "buildkite-gha/unknown" {
+		t.Fatalf("User-Agent = %q, want bounded fallback", client.userAgent)
 	}
 	if err := client.Emit(Command("arbitrary"), OutcomeSuccess, 0, Details{}); err == nil {
 		t.Fatal("Emit() accepted an unknown command")

@@ -53,7 +53,7 @@ func TestResolverTagPeelingAndHeaders(t *testing.T) {
 		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
 			t.Error("credentials sent")
 		}
-		if r.Header.Get("User-Agent") == "" || r.Header.Get("Accept") == "" || r.Header.Get("X-GitHub-Api-Version") == "" {
+		if r.Header.Get("User-Agent") != "buildkite-gha/1.2.3" || r.Header.Get("Accept") == "" || r.Header.Get("X-GitHub-Api-Version") == "" {
 			t.Error("required headers missing")
 		}
 		switch {
@@ -66,7 +66,7 @@ func TestResolverTagPeelingAndHeaders(t *testing.T) {
 		}
 	}))
 	defer ts.Close()
-	r, err := NewResolver(&http.Client{}, WithTestEndpoints(ts.URL))
+	r, err := NewResolver(&http.Client{}, WithTestEndpoints(ts.URL), WithUserAgentVersion("1.2.3"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,10 +604,13 @@ func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 		if r.URL.Path != "/Owner/Repo/tar.gz/"+testSHA {
 			t.Errorf("URL = %s", r.URL.Path)
 		}
+		if r.Header.Get("User-Agent") != "buildkite-gha/1.2.3" {
+			t.Errorf("User-Agent = %q", r.Header.Get("User-Agent"))
+		}
 		_, _ = w.Write(archive)
 	}))
 	defer ts.Close()
-	store, err := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, ts.URL))
+	store, err := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, ts.URL), WithUserAgentVersion("1.2.3"))
 	if err != nil {
 		t.Fatal(err)
 	}

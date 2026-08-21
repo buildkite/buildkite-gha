@@ -20,7 +20,7 @@ func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 		if r.URL.Path != "/jobs/"+testCacheJobID+"/github_workflow_access_token" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Token job-secret" || r.Header.Get("Accept") != "application/json" || r.Header.Get("Content-Type") != "application/json" {
+		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Token job-secret" || r.Header.Get("Accept") != "application/json" || r.Header.Get("Content-Type") != "application/json" || r.Header.Get("User-Agent") != "buildkite-gha/1.2.3" {
 			t.Errorf("request = %s headers %#v", r.Method, r.Header)
 		}
 		body, err := io.ReadAll(r.Body)
@@ -33,7 +33,7 @@ func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 		_, _ = io.WriteString(w, `{"token":"`+statelessToken+`"}`)
 	}))
 	defer server.Close()
-	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret"})
+	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret", ClientVersion: "1.2.3"})
 	if err != nil {
 		t.Fatal(err)
 	}

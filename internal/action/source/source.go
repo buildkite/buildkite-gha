@@ -27,6 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const (
@@ -141,6 +143,7 @@ type config struct {
 	mutableRefs                         *mutableRefCache
 	resolutionSnapshot                  *actionResolutionSnapshot
 	cacheMaxBytes                       int64
+	userAgent                           string
 	maxCompressed, maxExpanded, maxFile int64
 	maxEntries                          int
 	maxPath, maxSegment                 int
@@ -149,12 +152,20 @@ type config struct {
 func defaults() config {
 	api, _ := url.Parse(defaultAPI)
 	codeload, _ := url.Parse(defaultCodeload)
-	return config{api: api, codeload: codeload, finalHosts: map[string]bool{"codeload.github.com": true}, maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
+	return config{api: api, codeload: codeload, finalHosts: map[string]bool{"codeload.github.com": true}, userAgent: useragent.FromVersion(""), maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
 }
 
 // Option configures trusted process-level limits or test endpoints. Options must
 // never be populated from workflow input.
 type Option func(*config) error
+
+// WithUserAgentVersion identifies the buildkite-gha client making requests.
+func WithUserAgentVersion(version string) Option {
+	return func(c *config) error {
+		c.userAgent = useragent.FromVersion(version)
+		return nil
+	}
+}
 
 // WithGitHubActionSourceTokenProvider authenticates mutable-ref API requests using a
 // credential provisioned at the first such request and cached for this client.
@@ -400,7 +411,7 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	if err != nil {
 		return err
 	}
-	setAPIHeaders(req, actionSourceToken(cfg, parts))
+	setAPIHeaders(req, actionSourceToken(cfg, parts), cfg.userAgent)
 	c := *client
 	c.Jar = nil
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -470,13 +481,13 @@ func rateLimitError(resp *http.Response, body []byte) error {
 	}
 	return &RateLimitError{reset}
 }
-func setAPIHeaders(r *http.Request, token string) {
+func setAPIHeaders(r *http.Request, token, userAgent string) {
 	r.Header.Del("Authorization")
 	r.Header.Del("Cookie")
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
-	r.Header.Set("User-Agent", "buildkite-gha-action-source/1")
+	r.Header.Set("User-Agent", userAgent)
 	r.Header.Set("Accept", "application/vnd.github+json")
 	r.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 }
@@ -701,7 +712,7 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) err
 	}
 	req.Header.Del("Authorization")
 	req.Header.Del("Cookie")
-	req.Header.Set("User-Agent", "buildkite-gha-action-source/1")
+	req.Header.Set("User-Agent", s.cfg.userAgent)
 	c := *s.client
 	c.Jar = nil
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -713,6 +724,7 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) err
 		}
 		req.Header.Del("Authorization")
 		req.Header.Del("Cookie")
+		req.Header.Set("User-Agent", s.cfg.userAgent)
 		return nil
 	}
 	resp, e := c.Do(req)

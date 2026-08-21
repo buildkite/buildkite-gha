@@ -38,7 +38,7 @@ func TestAgentCacheCredentialsMintsBoundedJobCredential(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.EscapedPath() != "/v3/jobs/"+testCacheJobID+"/ghac_tokens" || r.URL.RawQuery != "" {
 			t.Errorf("request = %s %s", r.Method, r.URL.String())
 		}
-		if r.Header.Get("Authorization") != "Token job-secret" || r.Header.Get("Accept") != "application/json" || len(body) != 0 {
+		if r.Header.Get("Authorization") != "Token job-secret" || r.Header.Get("Accept") != "application/json" || r.Header.Get("User-Agent") != "buildkite-gha/1.2.3" || len(body) != 0 {
 			t.Errorf("request headers/body = %#v / %q", r.Header, body)
 		}
 		_, _ = io.WriteString(w, `{"token":"header.payload.signature"}`)
@@ -46,9 +46,11 @@ func TestAgentCacheCredentialsMintsBoundedJobCredential(t *testing.T) {
 	defer server.Close()
 
 	provider, err := NewAgentCacheCredentials(AgentCacheConfig{
-		Endpoint: server.URL + "/v3/",
-		JobID:    testCacheJobID, JobToken: "job-secret",
-		ResultsURL: server.URL,
+		Endpoint:      server.URL + "/v3/",
+		JobID:         testCacheJobID,
+		JobToken:      "job-secret",
+		ResultsURL:    server.URL,
+		ClientVersion: "1.2.3",
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -96,15 +96,16 @@ func (s *repositorySourceSwitch) set(source compiler.RepositorySource) {
 	s.mu.Unlock()
 }
 
-func importerJobActionSourceAuthentication(warnings io.Writer) *actionSourceAuthentication {
+func importerJobActionSourceAuthentication(warnings io.Writer, clientVersion string) *actionSourceAuthentication {
 	authentication := &actionSourceAuthentication{
 		redactor: gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
 		warnings: warnings,
 	}
 	provider, err := gharuntime.NewAgentGitHubTokens(gharuntime.AgentGitHubTokenConfig{
-		Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
-		JobID:    os.Getenv("BUILDKITE_JOB_ID"),
-		JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+		Endpoint:      os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+		JobID:         os.Getenv("BUILDKITE_JOB_ID"),
+		JobToken:      os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+		ClientVersion: clientVersion,
 	})
 	if err != nil {
 		return authentication
@@ -228,7 +229,7 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 			}
 		}
 		var err error
-		repositorySource, cleanup, err = newHostedActionSource(ctx, actionCacheDir, sourceOptions, nil)
+		repositorySource, cleanup, err = newHostedActionSource(ctx, actionCacheDir, version, sourceOptions, nil)
 		if err != nil {
 			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, err)
 		}
@@ -265,12 +266,14 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 	return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, nil
 }
 
-func newHostedActionSource(ctx context.Context, actionCacheDir string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), error) {
-	actionSource, cleanup, _, err := newHostedActionSourceWithSnapshot(ctx, actionCacheDir, resolverOptions, storeOptions)
+func newHostedActionSource(ctx context.Context, actionCacheDir, clientVersion string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), error) {
+	actionSource, cleanup, _, err := newHostedActionSourceWithSnapshot(ctx, actionCacheDir, clientVersion, resolverOptions, storeOptions)
 	return actionSource, cleanup, err
 }
 
-func newHostedActionSourceWithSnapshot(ctx context.Context, actionCacheDir string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), string, error) {
+func newHostedActionSourceWithSnapshot(ctx context.Context, actionCacheDir, clientVersion string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), string, error) {
+	resolverOptions = append(resolverOptions, actionsource.WithUserAgentVersion(clientVersion))
+	storeOptions = append(storeOptions, actionsource.WithUserAgentVersion(clientVersion))
 	actionRoot := actionCacheDir
 	cleanup := func() {}
 	if actionRoot == "" {

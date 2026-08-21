@@ -13,7 +13,7 @@ func TestAgentRunnerResolverBatchesRequirementsAndReturnsSuggestions(t *testing.
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
-		if r.Method != http.MethodPost || r.URL.Path != "/v3/jobs/"+jobID+"/github-actions/runners" || r.Header.Get("Authorization") != "Token job-token" || r.Header.Get("Accept") != "application/json" || r.Header.Get("Content-Type") != "application/json" {
+		if r.Method != http.MethodPost || r.URL.Path != "/v3/jobs/"+jobID+"/github-actions/runners" || r.Header.Get("Authorization") != "Token job-token" || r.Header.Get("Accept") != "application/json" || r.Header.Get("Content-Type") != "application/json" || r.Header.Get("User-Agent") != "buildkite-gha/1.2.3" {
 			t.Errorf("request = %s %s, headers %#v", r.Method, r.URL.Path, r.Header)
 		}
 		var body struct {
@@ -39,7 +39,7 @@ func TestAgentRunnerResolverBatchesRequirementsAndReturnsSuggestions(t *testing.
 	}))
 	defer server.Close()
 
-	resolver, err := NewAgentRunnerResolver(AgentRunnerResolverConfig{Endpoint: server.URL + "/v3", JobID: jobID, JobToken: "job-token", Client: server.Client()})
+	resolver, err := NewAgentRunnerResolver(AgentRunnerResolverConfig{Endpoint: server.URL + "/v3", JobID: jobID, JobToken: "job-token", ClientVersion: "1.2.3", Client: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}

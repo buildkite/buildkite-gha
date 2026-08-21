@@ -138,7 +138,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			return 1
 		}
 		defer func() { _ = os.RemoveAll(actionCache) }()
-		store, err := actionsource.NewStoreContext(ctx, actionCache, nil)
+		store, err := actionsource.NewStoreContext(ctx, actionCache, nil, actionsource.WithUserAgentVersion(clientVersion))
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure action cache: %v\n", err)
 			return 1
@@ -153,10 +153,11 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	}
 	if cacheRequired || len(job.Actions) > 0 {
 		cacheCredentials, err = gharuntime.NewAgentCacheCredentials(gharuntime.AgentCacheConfig{
-			Endpoint:   os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
-			JobID:      os.Getenv("BUILDKITE_JOB_ID"),
-			JobToken:   os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
-			ResultsURL: os.Getenv("BUILDKITE_GHA_CACHE_URL"),
+			Endpoint:      os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+			JobID:         os.Getenv("BUILDKITE_JOB_ID"),
+			JobToken:      os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+			ResultsURL:    os.Getenv("BUILDKITE_GHA_CACHE_URL"),
+			ClientVersion: clientVersion,
 		})
 		if err != nil && cacheRequired {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure actions/cache service: %v\n", err)
@@ -174,6 +175,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			JobToken:         os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
 			OrganizationSlug: os.Getenv("BUILDKITE_ORGANIZATION_SLUG"),
 			PipelineSlug:     os.Getenv("BUILDKITE_PIPELINE_SLUG"),
+			ClientVersion:    clientVersion,
 		})
 		if tokenErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure GitHub token service: %v\n", tokenErr)
@@ -184,9 +186,10 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	var oidcTokens gharuntime.OIDCTokenProvider
 	if job.IDTokenPermission == "write" {
 		config := gharuntime.AgentOIDCTokenConfig{
-			Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
-			JobID:    os.Getenv("BUILDKITE_JOB_ID"),
-			JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+			Endpoint:      os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+			JobID:         os.Getenv("BUILDKITE_JOB_ID"),
+			JobToken:      os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+			ClientVersion: clientVersion,
 		}
 		if job.OIDC != nil {
 			config.Claims = job.OIDC.Claims
@@ -248,7 +251,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			if err != nil {
 				return "", fmt.Errorf("prepare action runtime: create private action runtime: %w", err)
 			}
-			mise, err := resolveRuntimeMise(ctx, os.Getenv("BUILDKITE_GHA_MISE"), runner.MiseDataDir, privateRuntime, stderr)
+			mise, err := resolveRuntimeMiseVersion(ctx, os.Getenv("BUILDKITE_GHA_MISE"), runner.MiseDataDir, privateRuntime, stderr, clientVersion)
 			if err != nil {
 				return "", fmt.Errorf("prepare action runtime: %w", err)
 			}
