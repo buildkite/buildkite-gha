@@ -102,6 +102,11 @@ type actionPlanningContext struct {
 	preparationEnvironment map[string]string
 }
 
+type actionInvocationInputs struct {
+	main        map[string]string
+	preparation map[string]string
+}
+
 type actionStepPlanningContext struct {
 	actionPlanningContext
 	condition string
@@ -281,7 +286,8 @@ func compileActionInvocationsWithStepContext(ctx context.Context, workspace stri
 			if stepContexts != nil {
 				stepContext = stepContexts[i]
 			}
-			requirements, err := root.inspectInvocation(suppliedInputs[i], true, serverURL, stepContext.actionPlanningContext)
+			invocationInputs := actionInvocationInputs{main: suppliedInputs[i], preparation: suppliedInputs[i]}
+			requirements, err := root.inspectInvocation(invocationInputs, true, serverURL, stepContext.actionPlanningContext)
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
@@ -404,10 +410,10 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	return n, nil
 }
 
-func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string, planning actionPlanningContext) (actionRequirements, error) {
+func (n *actionNode) inspectInvocation(supplied actionInvocationInputs, workflowAuthored bool, serverURL string, planning actionPlanningContext) (actionRequirements, error) {
 	requirements := actionRequirements{requiredSecrets: map[string]bool{}}
-	for _, suppliedName := range sortedKeys(supplied) {
-		value := supplied[suppliedName]
+	for _, suppliedName := range sortedKeys(supplied.main) {
+		value := supplied.main[suppliedName]
 		referencesEvent, err := expression.TemplateReferencesGitHubEvent(value)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("action input %q: %w", suppliedName, err)
@@ -450,7 +456,13 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	if n.native {
 		return requirements, nil
 	}
-	effectiveInputs, unknownInputs, defaultsRequireToken, err := n.effectiveInputs(supplied, serverURL, workflowAuthored, planning)
+	effectiveInputs, unknownInputs, defaultsRequireToken, err := n.effectiveInputs(supplied.main, serverURL, workflowAuthored, planning)
+	if err != nil {
+		return actionRequirements{}, err
+	}
+	preparationPlanning := planning
+	preparationPlanning.environment = planning.preparationEnvironment
+	preparationInputs, unknownPreparationInputs, preparationDefaultsRequireToken, err := n.effectiveInputs(supplied.preparation, serverURL, workflowAuthored, preparationPlanning)
 	if err != nil {
 		return actionRequirements{}, err
 	}
@@ -459,7 +471,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	if err != nil {
 		return actionRequirements{}, err
 	}
-	requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparesInputs && defaultsRequireToken
+	requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparesInputs && preparationDefaultsRequireToken
 	if n.runtime != metadata.RuntimeComposite {
 		requirements.preparationMutatesEnv = preparesInputs
 		return requirements, nil
@@ -483,7 +495,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		}
 		stepReachable := !known || run
 		stepEnvironment := knownValues(resolveKnownValues(step.Env, expression.Context{Inputs: effectiveInputs, Env: currentPlanning.environment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs))
-		preparationStepEnvironment := knownValues(resolveKnownValues(step.Env, expression.Context{Inputs: effectiveInputs, Env: currentPlanning.preparationEnvironment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs))
+		preparationStepEnvironment := knownValues(resolveKnownValues(step.Env, expression.Context{Inputs: preparationInputs, Env: currentPlanning.preparationEnvironment, GitHub: map[string]any{"server_url": serverURL}}, unknownPreparationInputs))
 		childPlanning := currentPlanning
 		childPlanning.environment = mergeKnownValues(currentPlanning.environment, stepEnvironment)
 		childPlanning.preparationEnvironment = mergeKnownValues(currentPlanning.preparationEnvironment, preparationStepEnvironment)
@@ -511,9 +523,15 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 				if err != nil {
 					return actionRequirements{}, err
 				}
-				requirements.githubToken = requirements.githubToken || stepReachable && requiresToken
 				preparesField := field.name == "environment" && preparesEnvironment || field.name == "input" && preparesInputs
-				requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparesField && requiresToken
+				requirements.githubToken = requirements.githubToken || stepReachable && requiresToken
+				if preparesField {
+					preparationRequiresToken, err := inspectCompositeTemplate(fmt.Sprintf("step %d %s %q", i+1, field.name, name), field.values[name], preparationInputs, unknownPreparationInputs, serverURL)
+					if err != nil {
+						return actionRequirements{}, err
+					}
+					requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparationRequiresToken
+				}
 			}
 		}
 		for _, field := range []struct {
@@ -541,9 +559,12 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
 			}
 		}
-		// Composite child env and with maps are sibling fields: runtime resolves
-		// both against the parent context before overlaying the child's env.
-		childInputs := resolveKnownValues(step.With, expression.Context{Inputs: effectiveInputs, Env: currentPlanning.environment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs)
+		// Main execution resolves sibling env and with maps against the parent.
+		// Preparation overlays the child env before resolving its inputs.
+		childInputs := actionInvocationInputs{
+			main:        resolveKnownValues(step.With, expression.Context{Inputs: effectiveInputs, Env: currentPlanning.environment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs),
+			preparation: resolveKnownValues(step.With, expression.Context{Inputs: preparationInputs, Env: childPlanning.preparationEnvironment, GitHub: map[string]any{"server_url": serverURL}}, unknownPreparationInputs),
+		}
 		childRequirements, err := child.inspectInvocation(childInputs, false, serverURL, childPlanning)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)

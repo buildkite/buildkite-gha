@@ -915,6 +915,51 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsResolvesPreparationInputsAfterChildEnvironment(t *testing.T) {
+	parent, child := t.TempDir(), t.TempDir()
+	writeAction(t, child, "", `name: child
+inputs:
+  enabled:
+    default: "false"
+  token:
+    default: ${{ inputs.enabled == 'true' && github.token || '' }}
+runs:
+  using: node24
+  pre: pre.js
+  main: index.js
+`)
+	if err := os.WriteFile(filepath.Join(child, "pre.js"), []byte("// fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, parent, "", `name: parent
+runs:
+  using: composite
+  steps:
+    - if: ${{ false }}
+      uses: owner/child@v1
+      env:
+        ENABLED: "true"
+      with:
+        enabled: ${{ env.ENABLED }}
+`)
+	source := classifiedActionSource{
+		roots:   map[string]string{"owner/parent": parent, "owner/child": child},
+		commits: map[string]string{"owner/parent": strings.Repeat("a", 40), "owner/child": strings.Repeat("b", 40)},
+	}
+	knownEnvironment := map[string]string{"ENABLED": "false"}
+	compiled, err := compileActionInvocationsWithStepContext(
+		t.Context(), t.TempDir(), source, "https://github.com",
+		[]string{"owner/parent@v1"}, []map[string]string{nil},
+		[]actionStepPlanningContext{{actionPlanningContext: actionPlanningContext{environment: knownEnvironment, preparationEnvironment: knownEnvironment}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("preparation input did not observe the child environment overlay")
+	}
+}
+
 func TestCompileActionInvocationsResolvesChildWithBeforeChildEnvironment(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "child", `name: child
