@@ -706,6 +706,19 @@ func planConstructionFinding(instance JobInstance, err error) error {
 func requiredSecrets(instance JobInstance, actionRequired []string, actionInputsInspected bool) ([]string, map[string]string, []string, bool, error) {
 	found := map[string]string{}
 	referencesGitHubToken := false
+	collectTokenSecretAliases := func(value string) error {
+		names, err := expression.SecretReferences(value)
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
+			binding, ok := instance.secretAuthority.resolve(name)
+			if strings.EqualFold(name, "GITHUB_TOKEN") || ok && binding.token {
+				found[name] = name
+			}
+		}
+		return nil
+	}
 	collect := func(value string, stepRuntime bool) error {
 		referencesEvent, err := expression.TemplateReferencesGitHubEvent(value)
 		if err != nil {
@@ -789,6 +802,12 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		valuesToInspect := []map[string]string{step.Env}
 		if step.Kind != "uses" || !actionInputsInspected {
 			valuesToInspect = append(valuesToInspect, step.With)
+		} else {
+			for _, name := range sortedValueKeys(step.With) {
+				if err := collectTokenSecretAliases(step.With[name]); err != nil {
+					return nil, nil, nil, false, err
+				}
+			}
 		}
 		for _, values := range valuesToInspect {
 			for _, name := range sortedValueKeys(values) {

@@ -2336,6 +2336,53 @@ jobs:
 	}
 }
 
+func TestCompilePreservesTokenAliasUsedByOptionalActionInput(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+    secrets:
+      token_alias: ${{ secrets.GITHUB_TOKEN }}
+      optional_alias: ${{ secrets.OPTIONAL }}
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    secrets:
+      token_alias:
+      optional_alias:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/optional-token
+        with:
+          token: ${{ secrets.token_alias }}
+          optional: ${{ secrets.optional_alias }}
+`)
+	writeAction(t, filepath.Join(repository, ".github", "actions"), "optional-token", `name: optional token
+inputs:
+  token:
+  optional:
+runs:
+  using: node24
+  main: index.js
+`)
+
+	plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken == nil || !slices.Equal(plans[0].GitHubToken.Aliases, []string{"TOKEN_ALIAS"}) {
+		t.Fatalf("token alias boundary = %#v", plans)
+	}
+	if len(plans[0].RequiredSecrets) != 0 || plans[0].HasCapability("secrets") {
+		t.Fatalf("optional ordinary action input granted secret authority: %#v", plans[0])
+	}
+}
+
 func TestCompileComposesNestedExplicitSecretAliasesWithoutFallback(t *testing.T) {
 	repository := t.TempDir()
 	path := writeWorkflow(t, repository, "caller.yml", `on: push
