@@ -1,7 +1,25 @@
 # Security model
 
-`buildkite-gha` runs workflow steps and third-party actions as native Buildkite
-jobs. GitHub Actions syntax does not make that code trusted.
+GitHub Actions normally combines workflow execution and GitHub-managed
+credentials behind a runner. `buildkite-gha` keeps the workflow syntax but runs
+each supported job as a native Buildkite job. It does not create a GitHub
+Actions run or a GitHub-hosted runner, so Buildkite's agent, queue, and policies
+provide the security boundary.
+
+Treat workflow steps and third-party actions as you would on a self-hosted
+GitHub Actions runner: code can use anything available to its job. Workflow
+syntax can request permissions, but it does not make code trusted or grant
+access by itself.
+
+## How GitHub Actions security maps to Buildkite
+
+| GitHub Actions concept | `buildkite-gha` and Buildkite boundary |
+| --- | --- |
+| Runner or runner group | The Buildkite queue selects the agent environment. Use a disposable host or equivalent whole-job isolation. |
+| Job | A native Buildkite command job. All workflow steps share its workspace and Buildkite identity. |
+| `permissions` and `GITHUB_TOKEN` | Top-level workflow permissions and Buildkite's workflow-token policy determine whether Buildkite issues a scoped token. GitHub repository and organization defaults are not inherited. |
+| Repository and environment secrets | Static secret names resolve through Buildkite Secrets when the destination job's identity and Secret access policy allow them. GitHub environment, event, and fork scoping are not inherited. |
+| OIDC | Actions use Buildkite-issued tokens and claims. Cloud trust policies must trust Buildkite rather than GitHub. |
 
 The [compatibility reference](compatibility.md) says what works. This page says
 where trust and authorization come from.
