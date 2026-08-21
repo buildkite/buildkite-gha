@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
@@ -15,6 +17,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
@@ -27,6 +30,7 @@ func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
 			DurationMS    int64  `json:"duration_ms"`
 			FailurePhase  string `json:"failure_phase"`
 			FailureCode   string `json:"failure_code"`
+			ErrorMessage  string `json:"error_message"`
 		} `json:"properties"`
 	}
 	events := make(chan event, 2)
@@ -60,8 +64,23 @@ func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
 			t.Fatalf("run(%q) code = %d, stderr = %q; want %d", test.args, code, stderr.String(), test.wantCode)
 		}
 		received := <-events
-		if received.Event != "pipelines:buildkite_gha:command_completed" || received.Properties.Command != test.wantCommand || received.Properties.Outcome != "usage_error" || received.Properties.ClientVersion != "test-version" || received.Properties.DurationMS < 0 || received.Properties.FailurePhase != "configuration" || received.Properties.FailureCode != "unknown" {
-			t.Fatalf("run(%q) event = %#v", test.args, received)
+		if received.Event != telemetry.EventCommandCompleted {
+			t.Fatalf("run(%q) event = %q, want %q", test.args, received.Event, telemetry.EventCommandCompleted)
+		}
+		if received.Properties.Command != test.wantCommand || received.Properties.Outcome != "usage_error" {
+			t.Fatalf("run(%q) command/outcome = %q/%q", test.args, received.Properties.Command, received.Properties.Outcome)
+		}
+		if received.Properties.ClientVersion != "test-version" || received.Properties.DurationMS < 0 {
+			t.Fatalf("run(%q) client version/duration = %q/%d", test.args, received.Properties.ClientVersion, received.Properties.DurationMS)
+		}
+		if received.Properties.FailurePhase != "configuration" || received.Properties.FailureCode != "unknown" {
+			t.Fatalf("run(%q) failure = %q/%q", test.args, received.Properties.FailurePhase, received.Properties.FailureCode)
+		}
+		if !strings.Contains(received.Properties.ErrorMessage, "unknown") && !strings.Contains(received.Properties.ErrorMessage, "does not accept arguments") {
+			t.Fatalf("run(%q) error_message = %q", test.args, received.Properties.ErrorMessage)
+		}
+		if strings.ContainsAny(received.Properties.ErrorMessage, "\r\n\t") {
+			t.Fatalf("run(%q) error_message is not normalized: %q", test.args, received.Properties.ErrorMessage)
 		}
 	}
 }
@@ -214,5 +233,90 @@ func TestRunJobUntypedFailurePhaseIsUnknown(t *testing.T) {
 	details := (&commandTelemetryDetails{}).forOutcome(telemetry.OutcomeFailure)
 	if details.FailurePhase != telemetry.FailurePhaseUnknown || details.FailureCode != telemetry.FailureCodeUnknown {
 		t.Fatalf("run-job fallback details = %#v", details)
+	}
+}
+
+func TestCommandTelemetryCapturesBoundedErrorTailWithoutChangingOutput(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	var stderr bytes.Buffer
+	writer := details.captureErrors(&stderr)
+	message := "omitted" + strings.Repeat("x", maxCommandErrorCaptureBytes) + " final failure"
+	if _, err := writer.Write([]byte(message)); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != message {
+		t.Fatal("error capture changed stderr output")
+	}
+	got := details.forOutcome(telemetry.OutcomeFailure)
+	if !got.ErrorMessageTruncated {
+		t.Fatal("bounded error capture did not report truncation")
+	}
+	if len(got.ErrorMessage) != maxCommandErrorCaptureBytes {
+		t.Fatalf("captured error = %d bytes, want %d", len(got.ErrorMessage), maxCommandErrorCaptureBytes)
+	}
+	if !strings.HasSuffix(got.ErrorMessage, " final failure") || strings.Contains(got.ErrorMessage, "omitted") {
+		t.Fatalf("captured error = %q, want final failure without omitted prefix", got.ErrorMessage)
+	}
+	if success := details.forOutcome(telemetry.OutcomeSuccess); success.ErrorMessage != "" || success.ErrorMessageTruncated {
+		t.Fatalf("successful telemetry included error output: %#v", success)
+	}
+}
+
+func TestCommandTelemetryDoesNotMarkExactCaptureAsTruncated(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	writer := details.captureErrors(io.Discard)
+	if _, err := writer.Write([]byte(strings.Repeat("x", maxCommandErrorCaptureBytes))); err != nil {
+		t.Fatal(err)
+	}
+	if got := details.forOutcome(telemetry.OutcomeFailure); got.ErrorMessageTruncated {
+		t.Fatal("exact-capacity error capture was marked truncated")
+	}
+}
+
+func TestCommandTelemetrySerializesConcurrentErrorWrites(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	var stderr bytes.Buffer
+	writer := details.captureErrors(&stderr)
+
+	const writes = 100
+	var wait sync.WaitGroup
+	wait.Add(writes)
+	for range writes {
+		go func() {
+			defer wait.Done()
+			if _, err := writer.Write([]byte("failure\n")); err != nil {
+				t.Errorf("Write() error = %v", err)
+			}
+		}()
+	}
+	wait.Wait()
+
+	want := strings.Repeat("failure\n", writes)
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+	if got := details.forOutcome(telemetry.OutcomeFailure).ErrorMessage; got != want {
+		t.Fatalf("captured error = %q, want %q", got, want)
+	}
+}
+
+func TestCommandTelemetryCapturesCommandRunnerErrors(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	var stderr bytes.Buffer
+	writer := details.captureErrors(&stderr)
+	runner := captureCommandRunnerErrors(transport.CommandRunner{}, writer)
+
+	commandRunner, ok := runner.(transport.CommandRunner)
+	if !ok {
+		t.Fatalf("runner = %T", runner)
+	}
+	if _, err := commandRunner.Stderr.Write([]byte("agent-diagnostic")); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "agent-diagnostic" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if got := details.forOutcome(telemetry.OutcomeFailure); got.ErrorMessage != "agent-diagnostic" {
+		t.Fatalf("error message = %q", got.ErrorMessage)
 	}
 }

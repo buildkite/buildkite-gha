@@ -808,6 +808,23 @@ func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, d
 	return r.runStreamingCommand(ctx, processor, cmd)
 }
 
+func resolveExecutableInPath(name, path string) (string, error) {
+	if strings.ContainsRune(name, filepath.Separator) {
+		return name, nil
+	}
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			dir = "."
+		}
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+}
+
 func (r Runner) runStreamingCommand(ctx context.Context, processor *commandProcessor, cmd *exec.Cmd) error {
 	configureProcessGroup(cmd)
 	stdout, stdoutWriter, err := os.Pipe()

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/rhysd/actionlint"
@@ -753,7 +754,11 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 			owned.Span = spanFrom(step.Pos, exec.Run.Value)
 		case *actionlint.ExecAction:
 			if exec.Entrypoint != nil || exec.Args != nil {
-				return Job{}, locatedError(path, step.Pos, in.ID.Value, "action entrypoint and args overrides are unsupported in the supported runtime subset")
+				reason := "action entrypoint and args overrides are unsupported in the supported runtime subset"
+				if strings.HasPrefix(strings.ToLower(exec.Uses.Value), "docker://") {
+					reason = actionsource.UnsupportedContainerActionReason
+				}
+				return Job{}, locatedError(path, step.Pos, in.ID.Value, reason)
 			}
 			owned.Kind = "uses"
 			owned.Uses = exec.Uses.Value
@@ -819,15 +824,16 @@ func adaptConcurrency(path, jobID string, in *actionlint.Concurrency) (*Concurre
 	}, nil
 }
 
-func adaptPermissions(path string, in *actionlint.Permissions, allowReadAll bool) (*Permissions, error) {
+func adaptPermissions(path string, in *actionlint.Permissions, allowAll bool) (*Permissions, error) {
 	if in == nil {
 		return nil, nil
 	}
 	if in.All != nil {
-		if allowReadAll && in.All.Value == "read-all" {
-			scopes := make(map[string]string, len(topLevelReadAllPermissionNames))
-			for _, name := range topLevelReadAllPermissionNames {
-				scopes[name] = "read"
+		if allowAll && (in.All.Value == "read-all" || in.All.Value == "write-all") {
+			access := strings.TrimSuffix(in.All.Value, "-all")
+			scopes := make(map[string]string, len(topLevelAllPermissionNames))
+			for _, name := range topLevelAllPermissionNames {
+				scopes[name] = access
 			}
 			return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
 		}
@@ -858,7 +864,7 @@ func adaptPermissions(path string, in *actionlint.Permissions, allowReadAll bool
 	return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
 }
 
-var topLevelReadAllPermissionNames = []string{
+var topLevelAllPermissionNames = []string{
 	"actions", "artifact-metadata", "attestations", "checks", "contents", "deployments", "discussions",
 	"issues", "packages", "pages", "pull-requests", "security-events", "statuses",
 }
@@ -1352,7 +1358,7 @@ func parseParallelStep(path string, node *yaml.Node) (Step, error) {
 	_, hasEntrypoint := step.With["entrypoint"]
 	_, hasArgs := step.With["args"]
 	if strings.HasPrefix(strings.ToLower(step.Uses), "docker://") && (hasEntrypoint || hasArgs) {
-		return Step{}, yamlNodeError(path, entries["with"], "parallel docker action member uses unsupported entrypoint or args overrides")
+		return Step{}, yamlNodeError(path, entries["with"], actionsource.UnsupportedContainerActionReason)
 	}
 	return step, nil
 }

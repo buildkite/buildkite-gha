@@ -1,0 +1,7 @@
+name: Compatibility gap - docker actions
+on: push
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker://alpine:3.20

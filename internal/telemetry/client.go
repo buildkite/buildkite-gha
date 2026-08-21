@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -20,6 +22,7 @@ const (
 	defaultTimeout        = 1500 * time.Millisecond
 	responseDrainLimit    = 32 << 10
 	maxClientVersionBytes = 64
+	maxErrorMessageBytes  = 1024
 	maxDurationMS         = int64(1<<31 - 1)
 	maxDiagnostics        = 20
 )
@@ -88,19 +91,23 @@ type Diagnostic struct {
 }
 
 type Details struct {
-	FailurePhase FailurePhase
-	FailureCode  FailureCode
-	Diagnostics  []Diagnostic
+	FailurePhase          FailurePhase
+	FailureCode           FailureCode
+	ErrorMessage          string
+	ErrorMessageTruncated bool
+	Diagnostics           []Diagnostic
 }
 
 type Properties struct {
-	Command       Command      `json:"command"`
-	Outcome       Outcome      `json:"outcome"`
-	ClientVersion string       `json:"client_version"`
-	DurationMS    int64        `json:"duration_ms,omitempty"`
-	FailurePhase  FailurePhase `json:"failure_phase,omitempty"`
-	FailureCode   FailureCode  `json:"failure_code,omitempty"`
-	Diagnostics   []Diagnostic `json:"diagnostics,omitempty"`
+	Command               Command      `json:"command"`
+	Outcome               Outcome      `json:"outcome"`
+	ClientVersion         string       `json:"client_version"`
+	DurationMS            int64        `json:"duration_ms,omitempty"`
+	FailurePhase          FailurePhase `json:"failure_phase,omitempty"`
+	FailureCode           FailureCode  `json:"failure_code,omitempty"`
+	ErrorMessage          string       `json:"error_message,omitempty"`
+	ErrorMessageTruncated bool         `json:"error_message_truncated,omitempty"`
+	Diagnostics           []Diagnostic `json:"diagnostics,omitempty"`
 }
 
 type Config struct {
@@ -182,6 +189,8 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 	if err != nil {
 		return err
 	}
+	errorMessage, errorMessageTruncated := boundedErrorMessage(details.ErrorMessage)
+	errorMessageTruncated = errorMessage != "" && (errorMessageTruncated || details.ErrorMessageTruncated)
 	durationMS := duration.Milliseconds()
 	if durationMS < 0 {
 		durationMS = 0
@@ -195,7 +204,8 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 		Event: EventCommandCompleted,
 		Properties: Properties{
 			Command: command, Outcome: outcome, ClientVersion: c.clientVersion, DurationMS: durationMS,
-			FailurePhase: details.FailurePhase, FailureCode: details.FailureCode, Diagnostics: diagnostics,
+			FailurePhase: details.FailurePhase, FailureCode: details.FailureCode,
+			ErrorMessage: errorMessage, ErrorMessageTruncated: errorMessageTruncated, Diagnostics: diagnostics,
 		},
 	})
 	if err != nil {
@@ -304,6 +314,24 @@ func boundedClientVersion(version string) string {
 		}
 	}
 	return version
+}
+
+func boundedErrorMessage(message string) (string, bool) {
+	message = strings.Map(func(character rune) rune {
+		if unicode.IsControl(character) {
+			return ' '
+		}
+		return character
+	}, strings.ToValidUTF8(message, "�"))
+	message = strings.Join(strings.Fields(message), " ")
+	if len(message) <= maxErrorMessageBytes {
+		return message, false
+	}
+	start := len(message) - maxErrorMessageBytes
+	for !utf8.RuneStart(message[start]) {
+		start++
+	}
+	return strings.TrimSpace(message[start:]), true
 }
 
 func validAgentURL(u *url.URL) bool {

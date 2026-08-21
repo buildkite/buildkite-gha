@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -388,6 +389,15 @@ func legacyCheckoutWarning(position workflow.Position, release string) Warning {
 	}
 }
 
+func legacyUploadArtifactWarning(position workflow.Position, release string) Warning {
+	return Warning{
+		Code:    "W_UPLOAD_ARTIFACT_LEGACY_RELEASE",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: fmt.Sprintf("actions/upload-artifact %s is emulated by the native adapter with its release contract; upgrade to v4 or later", release),
+	}
+}
+
 func reusableWorkflowTokenWarning(position workflow.Position) Warning {
 	return Warning{
 		Code:    "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS",
@@ -541,7 +551,14 @@ func supported(path string, job workflow.Job) error {
 		return attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, 0, 0, job.ID, "", "", 0, jobError(path, job, "runs-on must resolve statically"))
 	}
 	ids := make(map[string]struct{}, len(job.Steps))
-	for _, step := range job.Steps {
+	for i, step := range job.Steps {
+		if step.Kind == "uses" && strings.HasPrefix(strings.ToLower(step.Uses), "docker://") {
+			return attributedProcessingFinding(
+				StageGraph, CodeGraphInvalid, "compatibility", path, step.Span.Start.Line, step.Span.Start.Column,
+				job.ID, "", step.Uses, i+1,
+				locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, actionsource.UnsupportedContainerActionReason),
+			)
+		}
 		if step.ID != "" {
 			id := strings.ToLower(step.ID)
 			if _, exists := ids[id]; exists {

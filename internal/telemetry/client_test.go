@@ -7,10 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const testJobID = "22222222-2222-4222-8222-222222222222"
@@ -43,13 +45,23 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 	}
 	duration := 1234 * time.Millisecond
 	if err := client.Emit(CommandRunJob, OutcomeFailure, duration, Details{
-		FailurePhase: FailurePhaseParsing,
-		FailureCode:  FailureCodeWorkflowSyntax,
+		FailurePhase:          FailurePhaseParsing,
+		FailureCode:           FailureCodeWorkflowSyntax,
+		ErrorMessage:          "  buildkite-gha: run-job:\ninvalid workflow\tvalue  ",
+		ErrorMessageTruncated: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if request.Event != EventCommandCompleted || request.Properties.Command != CommandRunJob || request.Properties.Outcome != OutcomeFailure || request.Properties.ClientVersion != "1.2.3" || request.Properties.DurationMS != 1234 || request.Properties.FailurePhase != FailurePhaseParsing || request.Properties.FailureCode != FailureCodeWorkflowSyntax {
-		t.Fatalf("event = %#v", request)
+	if request.Event != EventCommandCompleted {
+		t.Fatalf("event = %q, want %q", request.Event, EventCommandCompleted)
+	}
+	want := Properties{
+		Command: CommandRunJob, Outcome: OutcomeFailure, ClientVersion: "1.2.3", DurationMS: 1234,
+		FailurePhase: FailurePhaseParsing, FailureCode: FailureCodeWorkflowSyntax,
+		ErrorMessage: "buildkite-gha: run-job: invalid workflow value", ErrorMessageTruncated: true,
+	}
+	if !reflect.DeepEqual(request.Properties, want) {
+		t.Fatalf("properties = %#v, want %#v", request.Properties, want)
 	}
 }
 
@@ -194,6 +206,26 @@ func TestPropertiesAreBounded(t *testing.T) {
 	}
 	if err := client.Emit(CommandRunJob, OutcomeFailure, 0, Details{FailurePhase: FailurePhaseUnknown, FailureCode: FailureCode("arbitrary")}); err == nil {
 		t.Fatal("Emit() accepted an unknown failure code")
+	}
+}
+
+func TestErrorMessageIsNormalizedAndUTF8Bounded(t *testing.T) {
+	message := "earlier output\n\t" + strings.Repeat("界", maxErrorMessageBytes) + "\n immediate failure"
+	bounded, truncated := boundedErrorMessage(message)
+	if !truncated {
+		t.Fatal("boundedErrorMessage() did not report truncation")
+	}
+	if len(bounded) > maxErrorMessageBytes {
+		t.Fatalf("boundedErrorMessage() returned %d bytes, want at most %d", len(bounded), maxErrorMessageBytes)
+	}
+	if !utf8.ValidString(bounded) {
+		t.Fatalf("boundedErrorMessage() returned invalid UTF-8: %q", bounded)
+	}
+	if strings.HasPrefix(bounded, "earlier output") || !strings.HasSuffix(bounded, "immediate failure") {
+		t.Fatalf("boundedErrorMessage() = %q, want final failure without earlier output", bounded)
+	}
+	if got, truncated := boundedErrorMessage("\n failure\t details\x00 \r\n"); got != "failure details" || truncated {
+		t.Fatalf("boundedErrorMessage() = %q, %t", got, truncated)
 	}
 }
 

@@ -121,23 +121,27 @@ jobs:
 	}
 }
 
-func TestParseExpandsTopLevelReadAllPermissions(t *testing.T) {
-	parsed, err := Parse("permissions.yml", []byte("on: push\npermissions: read-all\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]string{
-		"actions": "read", "artifact-metadata": "read", "attestations": "read", "checks": "read", "contents": "read",
-		"deployments": "read", "discussions": "read", "issues": "read", "packages": "read", "pages": "read",
-		"pull-requests": "read", "security-events": "read", "statuses": "read",
-	}
-	if parsed.Permissions == nil || !reflect.DeepEqual(parsed.Permissions.Scopes, want) {
-		t.Fatalf("workflow permissions = %#v, want %#v", parsed.Permissions, want)
-	}
-	for _, excluded := range []string{"id-token", "models", "repository-projects", "code-quality", "metadata", "vulnerability-alerts"} {
-		if _, ok := parsed.Permissions.Scopes[excluded]; ok {
-			t.Errorf("read-all included excluded scope %q", excluded)
-		}
+func TestParseExpandsTopLevelAllPermissions(t *testing.T) {
+	for _, access := range []string{"read", "write"} {
+		t.Run(access, func(t *testing.T) {
+			parsed, err := Parse("permissions.yml", []byte("on: push\npermissions: "+access+"-all\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{
+				"actions": access, "artifact-metadata": access, "attestations": access, "checks": access, "contents": access,
+				"deployments": access, "discussions": access, "issues": access, "packages": access, "pages": access,
+				"pull-requests": access, "security-events": access, "statuses": access,
+			}
+			if parsed.Permissions == nil || !reflect.DeepEqual(parsed.Permissions.Scopes, want) {
+				t.Fatalf("workflow permissions = %#v, want %#v", parsed.Permissions, want)
+			}
+			for _, excluded := range []string{"id-token", "models", "repository-projects", "code-quality", "metadata", "vulnerability-alerts"} {
+				if _, ok := parsed.Permissions.Scopes[excluded]; ok {
+					t.Errorf("%s-all included excluded scope %q", access, excluded)
+				}
+			}
+		})
 	}
 }
 
@@ -165,7 +169,6 @@ func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
 	for _, test := range []struct {
 		name, declaration, want string
 	}{
-		{name: "write all", declaration: "permissions: write-all\n", want: "permissions.yml:2:14: job \"permissions\": permission aliases are unsupported"},
 		{name: "non-canonical name", declaration: "permissions:\n  pull_requests: write\n", want: "permissions.yml:3:3: job \"permissions\": unsupported permission \"pull_requests\""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -638,7 +641,8 @@ func TestParseConcurrentControlsRejectInvalidInput(t *testing.T) {
 		{name: "parallel member execution", steps: "      - parallel:\n          - run: true\n            uses: ./action\n", want: "parallel member must declare exactly one"},
 		{name: "parallel outer field", steps: "      - name: group\n        parallel:\n          - run: true\n", want: `parallel control does not support "name"`},
 		{name: "parallel outer fields deterministic", steps: "      - name: group\n        id: group\n        parallel:\n          - run: true\n", want: `parallel control does not support "id"`},
-		{name: "parallel docker overrides", steps: "      - parallel:\n          - uses: docker://example/image\n            with:\n              Entrypoint: /bin/sh\n", want: "unsupported entrypoint or args overrides"},
+		{name: "docker overrides", steps: "      - uses: docker://example/image\n        with:\n          args: echo test\n", want: "docker:// container actions are unsupported; use a Dockerfile action or replace the action with a run step"},
+		{name: "parallel docker overrides", steps: "      - parallel:\n          - uses: docker://example/image\n            with:\n              Entrypoint: /bin/sh\n", want: "docker:// container actions are unsupported; use a Dockerfile action or replace the action with a run step"},
 		{name: "unmatched actionlint error", steps: "      - run: true\n        background: true\n        unexpected: true\n", want: `unexpected key "unexpected"`},
 	}
 	for _, test := range tests {

@@ -2715,6 +2715,97 @@ func TestRunJobMintsAndRedactsScopedGitHubWorkflowToken(t *testing.T) {
 	}
 }
 
+func TestRunJobScrubsTokenSerializedByToJSONGitHub(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: serialized context\n")
+	writeFixtureFile(t, workspace, ".github/actions/serialized/action.yml", `name: serialized context
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        GITHUB_CONTEXT: ${{ ToJson(GitHub) }}
+      run: |
+        compact=$(printf '%s' "$GITHUB_CONTEXT" | tr -d '\n')
+        printf 'composite context: %s\n' "$compact"
+        printf '::warning::composite context: %s\n' "$compact"
+`)
+	const token = "ghs_serialized_context_token"
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{
+			ID: "serialize", Kind: "run", Shell: "sh",
+			Env: map[string]string{"GITHUB_CONTEXT": "${{ toJSON(github) }}"},
+			Command: `
+compact=$(printf '%s' "$GITHUB_CONTEXT" | tr -d '\n')
+printf 'context: %s\n' "$compact"
+printf 'context error: %s\n' "$compact" >&2
+printf '::warning::context: %s\n' "$compact"
+printf '::error::context: %s\n' "$compact"
+printf '%s\n' "$GITHUB_CONTEXT" >> "$GITHUB_STEP_SUMMARY"
+printf 'SERIALIZED_CONTEXT<<EOF\n%s\nEOF\n' "$GITHUB_CONTEXT" >> "$GITHUB_ENV"
+printf 'context<<EOF\n%s\nEOF\n' "$GITHUB_CONTEXT" >> "$GITHUB_OUTPUT"
+`,
+		},
+		{ID: "composite", Kind: "uses", Uses: "./.github/actions/serialized"},
+	})
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"provider-token-write"}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": "read"}}
+	job.Outputs = map[string]string{"serialized": "${{ steps.serialize.outputs.context }}"}
+	provider := &testWorkflowTokenProvider{token: token}
+	redactor := &testRedactor{}
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), `job output "serialized" contains a registered secret`) {
+		t.Fatalf("RunJob() error = %v, want serialized token output rejection", err)
+	}
+	if provider.calls != 1 || !reflect.DeepEqual(redactor.values, []string{token}) {
+		t.Fatalf("token handling = provider calls %d, redactions %#v", provider.calls, redactor.values)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("error leaked serialized token: %v", err)
+	}
+	for name, value := range map[string]string{
+		"logs":        logs.String(),
+		"result":      fmt.Sprintf("%#v", result),
+		"environment": result.Env["SERIALIZED_CONTEXT"],
+		"summary":     result.Summary,
+		"warnings":    result.WarningAnnotations,
+		"annotations": result.ErrorAnnotations,
+	} {
+		if strings.Contains(value, token) || !strings.Contains(value, "***") {
+			t.Errorf("%s was not scrubbed: %q", name, value)
+		}
+	}
+}
+
+func TestRunJobScrubsTokenSerializedIntoRuntimeError(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: serialized context error\n")
+	const token = "ghs_serialized_error_token"
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "serialize", Kind: "run", Shell: "${{ toJSON(github) }}", Command: "true",
+	}})
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"provider-token-write"}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": "read"}}
+	job.ContinueOnError = true
+	provider := &testWorkflowTokenProvider{token: token}
+	redactor := &testRedactor{}
+	result, err := (Runner{WorkflowToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
+	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") || !strings.Contains(err.Error(), "is unsupported") {
+		t.Fatalf("RunJob() error = %v, want scrubbed unsupported-shell error", err)
+	}
+	if result.Conclusion != "success" || !IsToleratedJobFailure(err) {
+		t.Fatalf("RunJob() result/error = %#v / %v, want preserved tolerated-failure classification", result, err)
+	}
+	if provider.calls != 1 || !reflect.DeepEqual(redactor.values, []string{token}) {
+		t.Fatalf("token handling = provider calls %d, redactions %#v", provider.calls, redactor.values)
+	}
+}
+
 func TestRunJobRejectsInvalidWorkflowTokenPolicyBeforeMinting(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/nested/test.yml"
@@ -2845,8 +2936,13 @@ func TestGitHubContextExposesRuntimeEventIdentity(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			github := githubContext(plan.Job{Event: test.event})
-			if github["repository_owner"] != test.wantOwner || github["ref_name"] != test.wantRefName || github["ref_type"] != test.wantRefType || github["base_ref"] != test.wantBaseRef {
+			if github["repository_owner"] != test.wantOwner || github["ref_name"] != test.wantRefName || github["ref_type"] != test.wantRefType || github["base_ref"] != test.wantBaseRef || github["action_path"] != "" || github["action_ref"] != "" || github["action_repository"] != "" {
 				t.Fatalf("GitHub context = %#v", github)
+			}
+			stepContext := stepExpressionContext(expression.Context{GitHub: github, Secrets: map[string]string{"GITHUB_TOKEN": "ghs_test"}})
+			serialized, err := expression.EvaluateStep("${{ toJSON(github) }}", stepContext)
+			if err != nil || !strings.Contains(serialized, `"action_path": ""`) || !strings.Contains(serialized, `"action_ref": ""`) || !strings.Contains(serialized, `"action_repository": ""`) {
+				t.Fatalf("serialized top-level GitHub context = %q, %v", serialized, err)
 			}
 			condition := "github.repository_owner == '" + test.wantOwner + "' && github.ref_name == '" + test.wantRefName + "' && github.ref_type == '" + test.wantRefType + "' && github.base_ref == '" + test.wantBaseRef + "'"
 			got, err := expression.EvaluateCondition(condition, expression.ConditionContext{GitHub: github})
@@ -5140,6 +5236,101 @@ with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
 	}
 }
 
+func TestParseShellTemplate(t *testing.T) {
+	tests := []struct {
+		name    string
+		shell   string
+		want    []string
+		wantErr string
+	}{
+		{name: "arguments and quotes", shell: `julia --color=yes "two words" {0} --project='quoted value'`, want: []string{"julia", "--color=yes", "two words", "{0}", "--project=quoted value"}},
+		{name: "literal values without expansion", shell: `julia "" '$HOME' semi;colon escaped\ value {0}`, want: []string{"julia", "", "$HOME", "semi;colon", "escaped value", "{0}"}},
+		{name: "embedded and repeated placeholders", shell: `Rscript --file={0} {0}`, want: []string{"Rscript", "--file={0}", "{0}"}},
+		{name: "empty command", shell: `"" {0}`, wantErr: "must contain a command"},
+		{name: "missing placeholder", shell: `Rscript --vanilla`, wantErr: "must contain {0}"},
+		{name: "malformed quote", shell: `julia "unterminated {0}`, wantErr: "parse shell template"},
+		{name: "PowerShell remains unsupported", shell: `/usr/bin/pwsh -File {0}`, wantErr: "unsupported in the supported runtime subset"},
+		{name: "Windows shell remains unsupported", shell: `cmd.exe /C {0}`, wantErr: "unsupported in the supported runtime subset"},
+		{name: "MSYS2 remains unsupported", shell: `msys2 {0}`, wantErr: "unsupported in the supported runtime subset"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseShellTemplate(test.shell)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("parseShellTemplate(%q) error = %v, want %q", test.shell, err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(got, test.want) {
+				t.Fatalf("parseShellTemplate(%q) = %#v, %v, want %#v", test.shell, got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestRunJobCustomShellTemplatesUseTemporaryScripts(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		command  string
+		shell    string
+		wantArgs []string
+	}{
+		{name: "R", command: "Rscript", shell: `Rscript --vanilla "two words" {0} --after='quoted value'`, wantArgs: []string{"--vanilla", "two words"}},
+		{name: "Julia", command: "julia", shell: `julia --color=yes {0} --project "two words"`, wantArgs: []string{"--color=yes"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bin := installCustomShellTestCommand(t, test.command)
+			workspace := t.TempDir()
+			arguments := filepath.Join(workspace, "arguments")
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+			job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+				{ID: "path", Kind: "run", Shell: "sh", Command: `printf '%s\n' "$CUSTOM_SHELL_BIN" >> "$GITHUB_PATH"`, Env: map[string]string{"CUSTOM_SHELL_BIN": bin}},
+				{
+					ID:      "custom",
+					Kind:    "run",
+					Shell:   test.shell,
+					Env:     map[string]string{"CUSTOM_SHELL_ARGS": arguments},
+					Command: `printf 'script=%s\n' "$0" >> "$GITHUB_OUTPUT"`,
+				},
+			})
+			job.Outputs = map[string]string{"script": "${{ steps.custom.outputs.script }}"}
+			result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+			if err != nil {
+				t.Fatalf("RunJob() error = %v", err)
+			}
+			script := result.Outputs["script"]
+			if base := filepath.Base(script); !strings.HasPrefix(base, "buildkite-gha-shell-") || filepath.Ext(base) != "" {
+				t.Fatalf("custom shell script path = %q, want extensionless temporary script", script)
+			}
+			if _, err := os.Stat(script); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("temporary custom shell script remains at %q: %v", script, err)
+			}
+			data, err := os.ReadFile(arguments)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Split(strings.TrimSpace(string(data)), "\n")
+			if len(got) < len(test.wantArgs)+1 || !slices.Equal(got[:len(test.wantArgs)], test.wantArgs) || got[len(test.wantArgs)] != script {
+				t.Fatalf("custom shell arguments = %#v, want prefix %#v followed by %q", got, test.wantArgs, script)
+			}
+		})
+	}
+}
+
+func TestRunJobLoginBashTemplate(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "login", Kind: "run", Shell: "bash -l {0}", Command: `printf 'value=login-bash\n' >> "$GITHUB_OUTPUT"`}})
+	job.Outputs = map[string]string{"value": "${{ steps.login.outputs.value }}"}
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Outputs["value"] != "login-bash" {
+		t.Fatalf("RunJob() output = %q, error = %v, want login-bash", result.Outputs["value"], err)
+	}
+}
+
 func TestCompositePythonShell(t *testing.T) {
 	installPythonShellTestCommand(t)
 	workspace := t.TempDir()
@@ -5168,6 +5359,27 @@ runs:
 	if result.Outputs["value"] != "python-composite" {
 		t.Fatalf("RunJob() output = %q, want python-composite", result.Outputs["value"])
 	}
+}
+
+func installCustomShellTestCommand(t *testing.T, name string) string {
+	t.Helper()
+	dir := t.TempDir()
+	wrapper := `#!/bin/sh
+: > "$CUSTOM_SHELL_ARGS"
+script=
+for arg do
+  printf '%s\n' "$arg" >> "$CUSTOM_SHELL_ARGS"
+  case "$arg" in
+    */buildkite-gha-shell-*) script=$arg ;;
+  esac
+done
+test -n "$script"
+exec /bin/sh "$script"
+`
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func installPythonShellTestCommand(t *testing.T) {

@@ -6,14 +6,24 @@ import (
 )
 
 func TestUploadArtifactCommitsAreExact(t *testing.T) {
-	for _, commit := range []string{UploadArtifactCommit, UploadArtifactV5Commit, UploadArtifactV6Commit, UploadArtifactV7Commit} {
+	commits := []string{
+		UploadArtifactV1Commit, UploadArtifactV2Commit, UploadArtifactV3Commit,
+		UploadArtifactCommit, UploadArtifactV5Commit, UploadArtifactV6Commit, UploadArtifactV7Commit,
+	}
+	for _, commit := range commits {
 		if err := validateUploadArtifactCommit(commit); err != nil {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
 	}
 	for _, commit := range []string{"bbbca2ddaa5d8feaa63e36b76fdaad77386f024f", strings.Repeat("0", 40)} {
-		if err := validateUploadArtifactCommit(commit); err == nil || !strings.Contains(err.Error(), UploadArtifactCommit) || !strings.Contains(err.Error(), UploadArtifactV5Commit) || !strings.Contains(err.Error(), UploadArtifactV6Commit) || !strings.Contains(err.Error(), UploadArtifactV7Commit) {
-			t.Fatalf("unrecognized commit %s error = %v, want all audited commits", commit, err)
+		err := validateUploadArtifactCommit(commit)
+		if err == nil {
+			t.Fatalf("unrecognized commit %s accepted", commit)
+		}
+		for _, supported := range commits {
+			if !strings.Contains(err.Error(), supported) {
+				t.Fatalf("unrecognized commit %s error = %v, want audited commit %s", commit, err, supported)
+			}
 		}
 	}
 }
@@ -23,6 +33,9 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 		commit string
 		inputs map[string]string
 	}{
+		{UploadArtifactV1Commit, map[string]string{"name": "payload", "path": "payload/result.txt"}},
+		{UploadArtifactV2Commit, map[string]string{"path": "payload/result.txt", "retention-days": "7", "if-no-files-found": "error"}},
+		{UploadArtifactV3Commit, map[string]string{"path": "payload/", "include-hidden-files": "true"}},
 		{UploadArtifactCommit, map[string]string{"path": "payload/result.txt"}},
 		{UploadArtifactCommit, map[string]string{"name": " payload ", "path": "payload/result.txt"}},
 		{UploadArtifactV5Commit, map[string]string{"path": "./payload/result.txt"}},
@@ -70,6 +83,24 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 	}
 	if err := ValidateUploadArtifactInputs(UploadArtifactCommit, map[string]string{"path": "payload", "archive": "true"}); err == nil || !strings.Contains(err.Error(), "only in actions/upload-artifact v7") {
 		t.Fatalf("v4 archive input error = %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		commit string
+		inputs map[string]string
+		want   string
+	}{
+		{name: "v1 requires name", commit: UploadArtifactV1Commit, inputs: map[string]string{"path": "payload"}, want: `required input "name" is missing`},
+		{name: "v1 rejects glob path", commit: UploadArtifactV1Commit, inputs: map[string]string{"name": "payload", "path": "payload/*.txt"}, want: "must be one literal file or directory"},
+		{name: "v1 rejects v2 input", commit: UploadArtifactV1Commit, inputs: map[string]string{"name": "payload", "path": "payload", "if-no-files-found": "warn"}, want: `explicit input "if-no-files-found" is unsupported`},
+		{name: "v2 rejects v3 input", commit: UploadArtifactV2Commit, inputs: map[string]string{"path": "payload", "include-hidden-files": "true"}, want: `explicit input "include-hidden-files" is unsupported`},
+		{name: "v3 rejects v4 input", commit: UploadArtifactV3Commit, inputs: map[string]string{"path": "payload", "compression-level": "0"}, want: `explicit input "compression-level" is unsupported`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := ValidateUploadArtifactInputs(test.commit, test.inputs); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateUploadArtifactInputs(%s, %#v) error = %v, want %q", test.commit, test.inputs, err, test.want)
+			}
+		})
 	}
 	if err := ValidateEvaluatedUploadArtifactInputs(UploadArtifactV7Commit, map[string]string{"path": "${{ still.unresolved }}"}); err == nil {
 		t.Fatal("runtime accepted an unevaluated path expression")
