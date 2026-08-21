@@ -63,6 +63,23 @@ func TestLiveEventPredicatePreservesNonWebhookMappings(t *testing.T) {
 	}
 }
 
+func TestLivePushPredicatesPartitionPullRequestBuilds(t *testing.T) {
+	pullRequestPush := LivePullRequestPushPredicate()
+	for _, want := range []string{
+		`build.env("BUILDKITE_GITHUB_EVENT") == "push"`,
+		`build.pull_request.id != null`,
+	} {
+		if !strings.Contains(pullRequestPush, want) {
+			t.Errorf("pull request push predicate missing %q: %s", want, pullRequestPush)
+		}
+	}
+	push := LiveEventPredicate("push")
+	want := `build.env("BUILDKITE_GITHUB_EVENT") == "push" && build.pull_request.id == null`
+	if !strings.Contains(push, want) {
+		t.Fatalf("push predicate does not exclude pull request builds: %s", push)
+	}
+}
+
 func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 	tests := []struct {
 		name     string

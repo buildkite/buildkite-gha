@@ -368,6 +368,9 @@ The selected snapshot establishes one event for applicability, compilation,
 group conditions, and provider-check names. An explicit event is never replaced
 with live Buildkite fields.
 
+Buildkite's coalesced first-party pull request push maps to the `pull_request`
+synchronization described in [Names and triggers](compatibility.md#names-and-triggers).
+
 Linked webhook data can provide `merge_group` and `release`. Those events need
 matching Buildkite refs, commits, and activity. Release also needs a valid
 payload and a tag matching `BUILDKITE_TAG` and `BUILDKITE_BRANCH`. The GitHub

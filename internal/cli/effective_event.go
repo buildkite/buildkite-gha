@@ -21,9 +21,10 @@ const maxWebhookMetadataBytes = 25 << 20
 type effectiveEventOrigin string
 
 const (
-	effectiveEventFromPath    effectiveEventOrigin = "event-path"
-	effectiveEventFromWebhook effectiveEventOrigin = "buildkite-webhook"
-	effectiveEventFromBuild   effectiveEventOrigin = "buildkite-environment"
+	effectiveEventFromPath            effectiveEventOrigin = "event-path"
+	effectiveEventFromWebhook         effectiveEventOrigin = "buildkite-webhook"
+	effectiveEventFromBuild           effectiveEventOrigin = "buildkite-environment"
+	effectiveEventFromPullRequestPush effectiveEventOrigin = "buildkite-pull-request-push"
 )
 
 type effectiveEventSelection struct {
@@ -47,10 +48,18 @@ func loadEffectiveEventSource(ctx context.Context, eventPath string, agent trans
 			return nil, "", fmt.Errorf("buildkite:webhook exceeds %d bytes", maxWebhookMetadataBytes)
 		}
 		source, err := buildkiteWebhookEventSource(os.Getenv, webhook)
-		return source, effectiveEventFromWebhook, err
+		origin := effectiveEventFromWebhook
+		if buildkitePushRepresentsPullRequest(os.Getenv) {
+			origin = effectiveEventFromPullRequestPush
+		}
+		return source, origin, err
 	case errors.Is(metadataErr, transport.ErrMetadataUnavailable):
 		source, err := buildkiteEventSource(os.Getenv)
-		return source, effectiveEventFromBuild, err
+		origin := effectiveEventFromBuild
+		if buildkitePushRepresentsPullRequest(os.Getenv) {
+			origin = effectiveEventFromPullRequestPush
+		}
+		return source, origin, err
 	default:
 		return nil, "", metadataErr
 	}
@@ -70,7 +79,11 @@ func newEffectiveEvent(source []byte, origin effectiveEventOrigin) (effectiveEve
 	if origin == effectiveEventFromPath {
 		return effective, nil
 	}
-	effective.TriggerExpressions.EventPredicate = buildkitepipeline.LiveEventPredicate(event.Event)
+	if origin == effectiveEventFromPullRequestPush {
+		effective.TriggerExpressions.EventPredicate = buildkitepipeline.LivePullRequestPushPredicate()
+	} else {
+		effective.TriggerExpressions.EventPredicate = buildkitepipeline.LiveEventPredicate(event.Event)
+	}
 	return effective, nil
 }
 

@@ -165,7 +165,16 @@ Upload selects one effective event, in this order:
 1. The GitHub event name accompanying Buildkite's reserved linked-webhook metadata.
 1. A Buildkite environment fallback.
 
-The fallback preserves `push`, `pull_request`, `workflow_dispatch`, and
+Buildkite's GitHub integration coalesces a first-party pull request
+synchronization into the branch's linked push build. When a GitHub `push` build
+has a positive Buildkite pull request number, upload selects one `pull_request`
+event with `synchronize` activity, the pull request base branch, and
+`refs/pull/<number>/head`. It does not also select `push`. A push without pull
+request metadata remains a `push`, so push filters retain their normal
+semantics.
+
+Except for that coalesced mapping, the fallback preserves `push`,
+`pull_request`, `workflow_dispatch`, and
 `schedule` from `BUILDKITE_GITHUB_EVENT` across rebuilds. Otherwise:
 
 | Buildkite source | Effective event |
@@ -251,6 +260,10 @@ commits, synthetic merge, base branch, and workflow file must agree.
 
 The check uses the checkout's existing Git access for public, private, and fork
 pull requests. It does not call GitHub or use Buildkite `if_changed`.
+
+A coalesced first-party synchronization has a linked push payload, not a pull
+request payload. The push payload cannot admit pull request path filters because
+it covers only that push, not the complete pull request comparison.
 
 | Admitted | Rejected |
 | --- | --- |

@@ -440,13 +440,21 @@ func TestBoundedCommandOutput(t *testing.T) {
 }
 
 func TestPopulateChangedPathsRequiresLinkedWebhook(t *testing.T) {
-	for _, event := range []string{"push", "pull_request"} {
-		t.Run(event, func(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		event  string
+		origin effectiveEventOrigin
+	}{
+		{name: "explicit push", event: "push", origin: effectiveEventFromPath},
+		{name: "explicit pull request", event: "pull_request", origin: effectiveEventFromPath},
+		{name: "pull request push", event: "pull_request", origin: effectiveEventFromPullRequestPush},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			snapshot := buildkitepipeline.TriggerEventSnapshot{}
-			populateChangedPaths(&snapshot, compiler.Event{Event: event}, effectiveEventFromPath, []workflowInput{{
-				Triggers: []workflow.Trigger{{Event: event, Paths: []string{"src/**"}}},
+			populateChangedPaths(&snapshot, compiler.Event{Event: test.event}, test.origin, []workflowInput{{
+				Triggers: []workflow.Trigger{{Event: test.event, Paths: []string{"src/**"}}},
 			}})
-			if snapshot.ChangedPaths.Paths != nil || !strings.Contains(snapshot.ChangedPaths.UnavailableReason, event+" path filters require linked Buildkite webhook") {
+			if snapshot.ChangedPaths.Paths != nil || !strings.Contains(snapshot.ChangedPaths.UnavailableReason, test.event+" path filters require linked Buildkite webhook") {
 				t.Fatalf("changed-path snapshot = %#v", snapshot)
 			}
 		})

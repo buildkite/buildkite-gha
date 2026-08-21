@@ -72,6 +72,9 @@ trusted or grant credentials.
   it to the Buildkite repository, commit, workflow, and bounded local Git
   history. Missing, shallow, ambiguous, or mismatched evidence blocks
   admission.
+- A coalesced first-party pull request synchronization can be linked to a push
+  payload. Buildkite pull request metadata models the trigger; the push payload
+  cannot grant pull request path-filter admission.
 - Release ingestion matches the webhook activity and tag to Buildkite's event,
   branch, and tag. The GitHub Code Access App supplies server-resolved commit
   provenance. A local `HEAD` fallback preserves compatibility but cannot grant

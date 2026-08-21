@@ -103,17 +103,21 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	if githubEvent := strings.TrimSpace(getenv("BUILDKITE_GITHUB_EVENT")); githubEventNamePattern.MatchString(githubEvent) {
 		switch githubEvent {
 		case "push", "pull_request", "workflow_dispatch", "schedule":
-			event = githubEvent
-			// Rebuilds retain the original GitHub event even though Buildkite reports
-			// their source as UI. A push may also be associated with an open pull
-			// request, so restore its authoritative branch or tag ref.
-			if event == "push" {
-				if strings.TrimSpace(tag) != "" {
-					ref = "refs/tags/" + tag
-				} else if strings.TrimSpace(branch) != "" {
-					ref = "refs/heads/" + branch
+			// Buildkite's GitHub integration coalesces a first-party pull request
+			// synchronization into its linked push build. Preserve the pull request
+			// compatibility snapshot when the build carries that PR identity.
+			if githubEvent != "push" || !buildkitePushRepresentsPullRequest(getenv) {
+				event = githubEvent
+				// Rebuilds retain the original GitHub event even though Buildkite
+				// reports their source as UI. Restore a push's branch or tag ref.
+				if event == "push" {
+					if strings.TrimSpace(tag) != "" {
+						ref = "refs/tags/" + tag
+					} else if strings.TrimSpace(branch) != "" {
+						ref = "refs/heads/" + branch
+					}
+					payload = map[string]any{"ref": ref}
 				}
-				payload = map[string]any{"ref": ref}
 			}
 		}
 	}
@@ -160,17 +164,23 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 	if err := decoder.Decode(&snapshot); err != nil {
 		return nil, fmt.Errorf("decode Buildkite compatibility snapshot: %w", err)
 	}
+	compatibilityPayload := snapshot["payload"]
 	snapshot["payload"] = payload
 	if event := strings.TrimSpace(getenv("BUILDKITE_GITHUB_EVENT")); githubEventNamePattern.MatchString(event) {
-		snapshot["event"] = event
-		// Buildkite can associate a push-created build with an open pull
-		// request. Keep the authoritative execution ref consistent with the
-		// linked webhook event rather than retaining refs/pull/<n>/head.
-		if event == "push" {
-			if tag := strings.TrimSpace(getenv("BUILDKITE_TAG")); tag != "" {
-				snapshot["ref"] = "refs/tags/" + tag
-			} else if branch := strings.TrimSpace(getenv("BUILDKITE_BRANCH")); branch != "" {
-				snapshot["ref"] = "refs/heads/" + branch
+		if event == "push" && buildkitePushRepresentsPullRequest(getenv) {
+			// A push payload describes only the latest branch update, not the
+			// complete pull request. Retain the trusted compatibility payload and
+			// do not promote the push webhook to pull request admission evidence.
+			snapshot["event"] = "pull_request"
+			snapshot["payload"] = compatibilityPayload
+		} else {
+			snapshot["event"] = event
+			if event == "push" {
+				if tag := strings.TrimSpace(getenv("BUILDKITE_TAG")); tag != "" {
+					snapshot["ref"] = "refs/tags/" + tag
+				} else if branch := strings.TrimSpace(getenv("BUILDKITE_BRANCH")); branch != "" {
+					snapshot["ref"] = "refs/heads/" + branch
+				}
 			}
 		}
 	}
@@ -197,6 +207,15 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 		return nil, fmt.Errorf("encode Buildkite webhook snapshot: %w", err)
 	}
 	return result, nil
+}
+
+func buildkitePushRepresentsPullRequest(getenv func(string) string) bool {
+	provider, _, _, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+	if err != nil || provider != "github" || strings.TrimSpace(getenv("BUILDKITE_GITHUB_EVENT")) != "push" {
+		return false
+	}
+	number, err := strconv.Atoi(getenv("BUILDKITE_PULL_REQUEST"))
+	return err == nil && number > 0
 }
 
 func validateBuildkiteMergeGroup(snapshot map[string]any, getenv func(string) string) error {
