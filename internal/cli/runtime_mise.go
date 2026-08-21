@@ -19,6 +19,7 @@ import (
 	"time"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const (
@@ -32,6 +33,12 @@ const (
 
 func resolveRuntimeMise(ctx context.Context, configured, dataDir, privateRuntime string, stderr io.Writer) (string, error) {
 	return resolveRuntimeMiseWithInstaller(ctx, configured, dataDir, privateRuntime, stderr, installRuntimeMise)
+}
+
+func resolveRuntimeMiseVersion(ctx context.Context, configured, dataDir, privateRuntime string, stderr io.Writer, clientVersion string) (string, error) {
+	return resolveRuntimeMiseWithInstaller(ctx, configured, dataDir, privateRuntime, stderr, func(ctx context.Context, dataDir, privateRuntime string, stderr io.Writer) (string, error) {
+		return installRuntimeMiseVersion(ctx, dataDir, privateRuntime, stderr, clientVersion)
+	})
 }
 
 func resolveRuntimeMiseWithInstaller(ctx context.Context, configured, dataDir, privateRuntime string, stderr io.Writer, install func(context.Context, string, string, io.Writer) (string, error)) (string, error) {
@@ -175,6 +182,10 @@ func selectRuntimeMiseRelease(goos, goarch string) (runtimeMiseRelease, error) {
 }
 
 func installRuntimeMise(ctx context.Context, dataDir, privateRuntime string, stderr io.Writer) (string, error) {
+	return installRuntimeMiseVersion(ctx, dataDir, privateRuntime, stderr, "")
+}
+
+func installRuntimeMiseVersion(ctx context.Context, dataDir, privateRuntime string, stderr io.Writer, clientVersion string) (string, error) {
 	selected, err := selectRuntimeMiseRelease(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return "", err
@@ -195,6 +206,7 @@ func installRuntimeMise(ctx context.Context, dataDir, privateRuntime string, std
 	}
 	_, _ = fmt.Fprintf(stderr, "~~~ :mise: Install mise %s\n", buildkitepipeline.MinimumMiseVersion)
 	url := fmt.Sprintf("https://github.com/jdx/mise/releases/download/v%s/mise-v%s-%s.tar.gz", buildkitepipeline.MinimumMiseVersion, buildkitepipeline.MinimumMiseVersion, selected.asset)
+	requestUserAgent := useragent.FromVersion(clientVersion)
 	client := &http.Client{
 		Timeout: 2 * time.Minute,
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
@@ -204,10 +216,11 @@ func installRuntimeMise(ctx context.Context, dataDir, privateRuntime string, std
 			if len(via) >= 10 {
 				return errors.New("too many mise download redirects")
 			}
+			request.Header.Set("User-Agent", requestUserAgent)
 			return nil
 		},
 	}
-	cached, err := installRuntimeMiseFromPlatform(ctx, root, selected.cacheKey, client, url, selected.archiveDigest, selected.binaryDigest)
+	cached, err := installRuntimeMiseFromPlatform(ctx, root, selected.cacheKey, client, url, selected.archiveDigest, selected.binaryDigest, clientVersion)
 	if err != nil {
 		return "", err
 	}
@@ -254,11 +267,11 @@ func pinRuntimeMise(ctx context.Context, cached, privateRuntime, expectedDigest 
 	return resolved, nil
 }
 
-func installRuntimeMiseFrom(ctx context.Context, root string, client *http.Client, sourceURL, archiveDigest, binaryDigest string) (string, error) {
-	return installRuntimeMiseFromPlatform(ctx, root, "linux-x64", client, sourceURL, archiveDigest, binaryDigest)
+func installRuntimeMiseFrom(ctx context.Context, root string, client *http.Client, sourceURL, archiveDigest, binaryDigest, clientVersion string) (string, error) {
+	return installRuntimeMiseFromPlatform(ctx, root, "linux-x64", client, sourceURL, archiveDigest, binaryDigest, clientVersion)
 }
 
-func installRuntimeMiseFromPlatform(ctx context.Context, root, cacheKey string, client *http.Client, sourceURL, archiveDigest, binaryDigest string) (string, error) {
+func installRuntimeMiseFromPlatform(ctx context.Context, root, cacheKey string, client *http.Client, sourceURL, archiveDigest, binaryDigest, clientVersion string) (string, error) {
 	destinationDir := filepath.Join(root, cacheKey)
 	parent := filepath.Dir(destinationDir)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -279,7 +292,7 @@ func installRuntimeMiseFromPlatform(ctx context.Context, root, cacheKey string, 
 	}
 	defer func() { _ = os.RemoveAll(staging) }()
 	archive := filepath.Join(staging, "mise.tar.gz")
-	if err := downloadRuntimeMise(ctx, client, sourceURL, archive, archiveDigest); err != nil {
+	if err := downloadRuntimeMise(ctx, client, sourceURL, archive, archiveDigest, clientVersion); err != nil {
 		return "", err
 	}
 	stagedExecutable := filepath.Join(staging, "mise")
@@ -317,11 +330,12 @@ func installRuntimeMiseFromPlatform(ctx context.Context, root, cacheKey string, 
 	return resolved, nil
 }
 
-func downloadRuntimeMise(ctx context.Context, client *http.Client, sourceURL, destination, expectedDigest string) error {
+func downloadRuntimeMise(ctx context.Context, client *http.Client, sourceURL, destination, expectedDigest, clientVersion string) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return fmt.Errorf("create mise download request: %w", err)
 	}
+	request.Header.Set("User-Agent", useragent.FromVersion(clientVersion))
 	response, err := client.Do(request)
 	if err != nil {
 		return fmt.Errorf("download mise: %w", err)

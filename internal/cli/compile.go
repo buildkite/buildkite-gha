@@ -14,7 +14,8 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
-func compile(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+func compile(args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
+	version := commandVersion(clientVersion)
 	workflowPath, eventPath, format, err := compileArgs(args)
 	if err != nil {
 		return usageError(stderr, "compile: %v", err)
@@ -33,7 +34,7 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 	if !ok {
 		return 1
 	}
-	repositorySource, cleanup, sourceErr := newHostedActionSource(ctx, "", nil, nil)
+	repositorySource, cleanup, sourceErr := newHostedActionSource(ctx, "", clientVersion, nil, nil)
 	if sourceErr != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: configure public repository source: %v\n", sourceErr)
 		return 1

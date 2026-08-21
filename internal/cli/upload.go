@@ -36,11 +36,11 @@ const (
 	workflowCheckSummaryNotice    = "\n\n_Additional diagnostics omitted at the provider check summary size limit._\n"
 )
 
-func upload(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
-	return uploadFromPlatform(runtime.GOOS, runtime.GOARCH, args, stdout, stderr, version, agent)
+func upload(args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
+	return uploadFromPlatform(runtime.GOOS, runtime.GOARCH, args, stdout, stderr, commandVersion(clientVersion), clientVersion, agent)
 }
 
-func uploadFromPlatform(goos, goarch string, args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+func uploadFromPlatform(goos, goarch string, args []string, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) int {
 	platform, err := importerPlatform(goos, goarch)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
@@ -51,6 +51,7 @@ func uploadFromPlatform(goos, goarch string, args []string, stdout, stderr io.Wr
 		return usageError(stderr, "upload: %v", err)
 	}
 	uploadArguments.importerPlatform = platform
+	uploadArguments.clientVersion = clientVersion
 	return uploadParsed(uploadArguments, stdout, stderr, version, agent)
 }
 
@@ -127,7 +128,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: workflow paths matched only reusable workflow_call workflows; there is nothing to upload")
 		return 1
 	}
-	anonymousSource, cleanupAnonymousSource, sourceErr := newHostedActionSource(ctx, "", nil, nil)
+	anonymousSource, cleanupAnonymousSource, sourceErr := newHostedActionSource(ctx, "", uploadArguments.clientVersion, nil, nil)
 	if sourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
@@ -174,14 +175,14 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		return 1
 	}
-	authentication := importerJobActionSourceAuthentication(stderr)
+	authentication := importerJobActionSourceAuthentication(stderr, uploadArguments.clientVersion)
 	var sourceOptions []actionsource.Option
 	if effectiveEvent.Event.Provider == "github" {
 		if authenticationOption := authentication.option(effectiveEvent.Event.Repository.Owner + "/" + effectiveEvent.Event.Repository.Name); authenticationOption != nil {
 			sourceOptions = append(sourceOptions, authenticationOption)
 		}
 	}
-	authenticatedSource, cleanupSource, sourceErr := newHostedActionSource(ctx, "", sourceOptions, nil)
+	authenticatedSource, cleanupSource, sourceErr := newHostedActionSource(ctx, "", uploadArguments.clientVersion, sourceOptions, nil)
 	if sourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
@@ -229,7 +230,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		validationOptions.RepositorySource = repositorySource
 		validations[i], validationErrs[i] = compiler.ValidateEventWithOptionsContext(ctx, input.Path, input.Source, effectiveEvent.Source, validationOptions)
 	}
-	suggestedTargets, err := suggestedRunnerTargets(ctx, validations)
+	suggestedTargets, err := suggestedRunnerTargets(ctx, validations, uploadArguments.clientVersion)
 	if err != nil {
 		if ctx.Err() != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", ctx.Err())
@@ -697,6 +698,7 @@ type parsedUploadArgs struct {
 	workflowOperands         []string
 	explicitWorkflowPaths    bool
 	eventPath                string
+	clientVersion            string
 	runtimeDistributionPaths map[compiler.Platform]string
 	runnerTargets            map[string]compiler.RunnerTarget
 	oidc                     *plan.OIDCConfiguration

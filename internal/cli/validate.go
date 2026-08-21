@@ -20,7 +20,8 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
-func validate(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+func validate(args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
+	version := commandVersion(clientVersion)
 	args, actionCacheDir, err := validateActionCacheArgs(args)
 	if err != nil {
 		return usageError(stderr, "validate: %v", err)
@@ -83,7 +84,7 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 	cleanupSource := func() {}
 	if repositorySource == nil {
 		var sourceErr error
-		repositorySource, cleanupSource, sourceErr = newHostedActionSource(ctx, actionCacheDir, nil, nil)
+		repositorySource, cleanupSource, sourceErr = newHostedActionSource(ctx, actionCacheDir, version, nil, nil)
 		if sourceErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: configure public repository source: %v\n", sourceErr)
 			return 1
@@ -219,7 +220,7 @@ func validateAllEvents(ctx context.Context, out processingOutput, workflowPath, 
 func validateAllEventsSource(ctx context.Context, out processingOutput, workflowPath string, source []byte, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
 	cleanup := func() {}
 	if runtime == nil || runtime.actionSource == nil {
-		actionSource, sourceCleanup, sourceErr := newHostedActionSource(ctx, actionCacheDir, nil, nil)
+		actionSource, sourceCleanup, sourceErr := newHostedActionSource(ctx, actionCacheDir, version, nil, nil)
 		cleanup = sourceCleanup
 		if sourceErr != nil {
 			validationReport := compatibility.EnvironmentProcessingReport(workflowPath, hostedProfile, "public repository source could not be configured")

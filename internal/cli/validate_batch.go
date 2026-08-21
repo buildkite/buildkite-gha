@@ -57,7 +57,8 @@ func (w *synchronizedWriter) Write(data []byte) (int, error) {
 	return w.w.Write(data)
 }
 
-func validateBatch(args []string, stderr io.Writer, version string) int {
+func validateBatch(args []string, stderr io.Writer, clientVersion string) int {
+	version := commandVersion(clientVersion)
 	options, err := parseBatchValidationArgs(args)
 	if err != nil {
 		return usageError(stderr, "validate-batch: %v", err)
@@ -80,7 +81,7 @@ func validateBatch(args []string, stderr io.Writer, version string) int {
 		}
 		resolverOptions = append(resolverOptions, actionsource.WithGitHubAPITokenProvider(func(context.Context) (string, error) { return token, nil }))
 	}
-	actionSource, cleanup, resolutionSnapshotID, err := newHostedActionSourceWithSnapshot(context.Background(), options.actionCacheDir, resolverOptions, storeOptions)
+	actionSource, cleanup, resolutionSnapshotID, err := newHostedActionSourceWithSnapshot(context.Background(), options.actionCacheDir, clientVersion, resolverOptions, storeOptions)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate-batch: %v\n", err)
 		return 1

@@ -209,8 +209,11 @@ func TestInstallRuntimeMiseDownloadsVerifiesAndReusesCache(t *testing.T) {
 	archiveHash := sha256.Sum256(archive)
 	binaryHash := sha256.Sum256(binary)
 	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		requests++
+		if request.Header.Get("User-Agent") != "buildkite-gha/1.2.3" {
+			t.Errorf("User-Agent = %q", request.Header.Get("User-Agent"))
+		}
 		_, _ = response.Write(archive)
 	}))
 	defer server.Close()
@@ -229,7 +232,7 @@ func TestInstallRuntimeMiseDownloadsVerifiesAndReusesCache(t *testing.T) {
 	root := filepath.Join(logicalParent, "cache")
 	want := filepath.Join(realParent, "cache", "linux-x64", "mise")
 	for range 2 {
-		got, err := installRuntimeMiseFrom(t.Context(), root, server.Client(), server.URL, hex.EncodeToString(archiveHash[:]), hex.EncodeToString(binaryHash[:]))
+		got, err := installRuntimeMiseFrom(t.Context(), root, server.Client(), server.URL, hex.EncodeToString(archiveHash[:]), hex.EncodeToString(binaryHash[:]), "1.2.3")
 		if err != nil || got != want {
 			t.Fatalf("installRuntimeMiseFrom() = %q, %v", got, err)
 		}
@@ -250,7 +253,7 @@ func TestInstallRuntimeMiseRejectsInvalidArchive(t *testing.T) {
 	}))
 	defer server.Close()
 	binaryHash := sha256.Sum256(binary)
-	if _, err := installRuntimeMiseFrom(t.Context(), t.TempDir(), server.Client(), server.URL, strings.Repeat("0", 64), hex.EncodeToString(binaryHash[:])); err == nil || !strings.Contains(err.Error(), "archive checksum") {
+	if _, err := installRuntimeMiseFrom(t.Context(), t.TempDir(), server.Client(), server.URL, strings.Repeat("0", 64), hex.EncodeToString(binaryHash[:]), "test-version"); err == nil || !strings.Contains(err.Error(), "archive checksum") {
 		t.Fatalf("installRuntimeMiseFrom() error = %v", err)
 	}
 }
@@ -285,7 +288,7 @@ func TestManagedMiseCacheIsNotExecutedBeforePrivateCopy(t *testing.T) {
 	if err := os.WriteFile(cached, binary, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	got, err := installRuntimeMiseFrom(t.Context(), root, nil, "", "", hex.EncodeToString(digest[:]))
+	got, err := installRuntimeMiseFrom(t.Context(), root, nil, "", "", hex.EncodeToString(digest[:]), "test-version")
 	if err != nil || got != cached {
 		t.Fatalf("installRuntimeMiseFrom() = %q, %v; want cache hit %q", got, err, cached)
 	}
@@ -310,7 +313,7 @@ func TestManagedMiseColdCacheIsNotExecutedBeforePrivateCopy(t *testing.T) {
 		_, _ = response.Write(archive)
 	}))
 	defer server.Close()
-	cached, err := installRuntimeMiseFrom(t.Context(), t.TempDir(), server.Client(), server.URL, hex.EncodeToString(archiveDigest[:]), hex.EncodeToString(binaryDigest[:]))
+	cached, err := installRuntimeMiseFrom(t.Context(), t.TempDir(), server.Client(), server.URL, hex.EncodeToString(archiveDigest[:]), hex.EncodeToString(binaryDigest[:]), "test-version")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,7 @@ import (
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 )
 
-func suggestedRunnerTargets(ctx context.Context, reports []compiler.Report) (map[string]compiler.RunnerTarget, error) {
+func suggestedRunnerTargets(ctx context.Context, reports []compiler.Report, clientVersion string) (map[string]compiler.RunnerTarget, error) {
 	endpoint := os.Getenv("BUILDKITE_AGENT_ENDPOINT")
 	jobID := os.Getenv("BUILDKITE_JOB_ID")
 	jobToken := os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN")
@@ -19,9 +19,10 @@ func suggestedRunnerTargets(ctx context.Context, reports []compiler.Report) (map
 		return nil, nil
 	}
 	resolver, err := gharuntime.NewAgentRunnerResolver(gharuntime.AgentRunnerResolverConfig{
-		Endpoint: endpoint,
-		JobID:    jobID,
-		JobToken: jobToken,
+		Endpoint:      endpoint,
+		JobID:         jobID,
+		JobToken:      jobToken,
+		ClientVersion: clientVersion,
 	})
 	if err != nil {
 		return nil, err

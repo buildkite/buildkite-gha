@@ -14,6 +14,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const (
@@ -124,6 +126,7 @@ type Client struct {
 	eventsURL     string
 	jobToken      string
 	clientVersion string
+	userAgent     string
 	client        *http.Client
 	timeout       time.Duration
 }
@@ -156,10 +159,12 @@ func New(config Config) (*Client, error) {
 	if timeout <= 0 || timeout > defaultTimeout {
 		timeout = defaultTimeout
 	}
+	clientVersion := boundedClientVersion(config.ClientVersion)
 	return &Client{
 		eventsURL:     u.String(),
 		jobToken:      config.JobToken,
-		clientVersion: boundedClientVersion(config.ClientVersion),
+		clientVersion: clientVersion,
+		userAgent:     useragent.FromVersion(config.ClientVersion),
 		client:        &bounded,
 		timeout:       timeout,
 	}, nil
@@ -219,6 +224,7 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 	}
 	request.Header.Set("Authorization", "Token "+c.jobToken)
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", c.userAgent)
 	response, err := c.client.Do(request)
 	if err != nil {
 		return fmt.Errorf("send telemetry event: %w", err)

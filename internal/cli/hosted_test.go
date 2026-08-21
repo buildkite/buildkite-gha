@@ -613,7 +613,7 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	t.Setenv("BUILDKITE_JOB_ID", "")
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "")
 	var warnings bytes.Buffer
-	authentication := importerJobActionSourceAuthentication(&warnings)
+	authentication := importerJobActionSourceAuthentication(&warnings, "test-version")
 	token, err := authentication.token(t.Context(), "buildkite/buildkite-gha")
 	if err != nil || token != "" || authentication.provider != nil || !strings.Contains(warnings.String(), "authentication is unavailable") {
 		t.Fatalf("ambient GitHub token authentication = provider %v, token %q, error %v, warnings %q", authentication.provider != nil, token, err, warnings.String())
@@ -624,7 +624,7 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
-	if authentication := importerJobActionSourceAuthentication(io.Discard); authentication.provider == nil {
+	if authentication := importerJobActionSourceAuthentication(io.Discard, "test-version"); authentication.provider == nil {
 		t.Fatal("job-scoped Agent configuration did not configure action-source authentication")
 	}
 }

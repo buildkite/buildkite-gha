@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const (
@@ -118,7 +119,7 @@ func pluginRuntimeAsset(platform compiler.Platform) string {
 
 func acquirePluginRuntime(ctx context.Context, version string, platform compiler.Platform, client *http.Client, baseURL, cachePath string) (runtimeDistribution, error) {
 	asset := pluginRuntimeAsset(platform)
-	checksums, err := downloadPluginReleaseFile(ctx, client, baseURL+"/v"+version+"/checksums.txt", pluginChecksumLimit)
+	checksums, err := downloadPluginReleaseFile(ctx, client, baseURL+"/v"+version+"/checksums.txt", version, pluginChecksumLimit)
 	if err != nil {
 		return runtimeDistribution{}, fmt.Errorf("download release checksums: %w", err)
 	}
@@ -128,7 +129,7 @@ func acquirePluginRuntime(ctx context.Context, version string, platform compiler
 	}
 	archive := readVerifiedPluginArchiveCache(cachePath, expected)
 	if archive == nil {
-		archive, err = downloadPluginReleaseFile(ctx, client, baseURL+"/v"+version+"/"+asset, pluginArchiveLimit)
+		archive, err = downloadPluginReleaseFile(ctx, client, baseURL+"/v"+version+"/"+asset, version, pluginArchiveLimit)
 		if err != nil {
 			return runtimeDistribution{}, fmt.Errorf("download %s runtime: %w", platform, err)
 		}
@@ -148,11 +149,12 @@ func acquirePluginRuntime(ctx context.Context, version string, platform compiler
 	return runtimeDistribution{contents: contents, digest: fmt.Sprintf("sha256:%x", digest)}, nil
 }
 
-func downloadPluginReleaseFile(ctx context.Context, client *http.Client, source string, limit int64) ([]byte, error) {
+func downloadPluginReleaseFile(ctx context.Context, client *http.Client, source, version string, limit int64) ([]byte, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
 	if err != nil || request.URL.Scheme != "https" {
 		return nil, fmt.Errorf("release URL must use HTTPS")
 	}
+	request.Header.Set("User-Agent", useragent.FromVersion(version))
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, err

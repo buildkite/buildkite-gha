@@ -23,7 +23,7 @@ func TestAgentOIDCTokensMintsRequestedAudienceAndConfiguredClaims(t *testing.T) 
 		if request.URL.Path != "/jobs/"+testCacheJobID+"/oidc/tokens" {
 			t.Errorf("path = %q", request.URL.Path)
 		}
-		if request.Method != http.MethodPost || request.Header.Get("Authorization") != "Token job-secret" || request.Header.Get("Accept") != "application/json" || request.Header.Get("Content-Type") != "application/json" {
+		if request.Method != http.MethodPost || request.Header.Get("Authorization") != "Token job-secret" || request.Header.Get("Accept") != "application/json" || request.Header.Get("Content-Type") != "application/json" || request.Header.Get("User-Agent") != "buildkite-gha/1.2.3" {
 			t.Errorf("request = %s headers %#v", request.Method, request.Header)
 		}
 		body, err := io.ReadAll(request.Body)
@@ -43,6 +43,7 @@ func TestAgentOIDCTokensMintsRequestedAudienceAndConfiguredClaims(t *testing.T) 
 		Claims:         []string{"organization_id"},
 		AWSSessionTags: []string{"organization_slug", "pipeline_id"},
 		SubjectClaim:   "pipeline_id",
+		ClientVersion:  "1.2.3",
 	})
 	if err != nil {
 		t.Fatal(err)

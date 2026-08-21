@@ -47,13 +47,13 @@ func run(args []string, stdout, stderr io.Writer, clientVersion string, agentRun
 			}
 			switch args[0] {
 			case "validate":
-				return validate(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
+				return validate(args[1:], stdout, stderr, clientVersion, transport.Agent{Runner: agentRunner})
 			case "validate-batch":
-				return validateBatch(args[1:], stderr, version)
+				return validateBatch(args[1:], stderr, clientVersion)
 			case "compile":
-				return compile(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
+				return compile(args[1:], stdout, stderr, clientVersion, transport.Agent{Runner: agentRunner})
 			case "upload":
-				return upload(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
+				return upload(args[1:], stdout, stderr, clientVersion, transport.Agent{Runner: agentRunner})
 			case "run-job":
 				return runJob(args[1:], stdout, stderr, version, clientVersion, transport.Agent{Runner: agentRunner})
 			default:

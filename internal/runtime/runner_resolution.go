@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const runnerResolutionResponseLimit = 64 << 10
@@ -28,15 +30,17 @@ type RunnerSuggestion struct {
 }
 
 type AgentRunnerResolverConfig struct {
-	Endpoint string
-	JobID    string
-	JobToken string
-	Client   *http.Client
+	Endpoint      string
+	JobID         string
+	JobToken      string
+	ClientVersion string
+	Client        *http.Client
 }
 
 type AgentRunnerResolver struct {
 	resolveURL string
 	jobToken   string
+	userAgent  string
 	client     *http.Client
 }
 
@@ -58,7 +62,10 @@ func NewAgentRunnerResolver(config AgentRunnerResolverConfig) (*AgentRunnerResol
 	if bounded.Timeout == 0 {
 		bounded.Timeout = 15 * time.Second
 	}
-	return &AgentRunnerResolver{resolveURL: resolveURL, jobToken: config.JobToken, client: &bounded}, nil
+	return &AgentRunnerResolver{
+		resolveURL: resolveURL, jobToken: config.JobToken,
+		userAgent: useragent.FromVersion(config.ClientVersion), client: &bounded,
+	}, nil
 }
 
 func (c *AgentRunnerResolver) Resolve(ctx context.Context, requirements []RunnerRequirement) ([]RunnerSuggestion, error) {
@@ -107,6 +114,7 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 	request.Header.Set("Authorization", "Token "+c.jobToken)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", c.userAgent)
 	response, err := c.client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("request runner resolution: %w", err)
