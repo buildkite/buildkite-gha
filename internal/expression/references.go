@@ -750,7 +750,7 @@ func evaluateKnownStepExpression(node actionlint.ExprNode, context Context, unkn
 	evaluator.resolve = func(root string, path []string) (any, error) {
 		switch {
 		case strings.EqualFold(root, "inputs") && len(path) == 1:
-			if context.Inputs == nil || unknownInputs[strings.ToLower(path[0])] {
+			if (context.Inputs == nil && context.WorkflowInputs == nil) || unknownInputs[strings.ToLower(path[0])] {
 				return nil, errKnownStepValueUnavailable
 			}
 			return resolveRuntimeReferenceWithMissingMembers(root, path, context)
@@ -766,10 +766,13 @@ func evaluateKnownStepExpression(node actionlint.ExprNode, context Context, unkn
 		}
 	}
 	evaluator.resolveRoot = func(root string) (any, error) {
-		if !strings.EqualFold(root, "inputs") || context.Inputs == nil || len(unknownInputs) != 0 {
+		if !strings.EqualFold(root, "inputs") || (context.Inputs == nil && context.WorkflowInputs == nil) || len(unknownInputs) != 0 {
 			return nil, errKnownStepValueUnavailable
 		}
-		return context.Inputs, nil
+		if context.Inputs != nil {
+			return context.Inputs, nil
+		}
+		return context.WorkflowInputs, nil
 	}
 	evaluator.truthy = githubTruthy
 	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {

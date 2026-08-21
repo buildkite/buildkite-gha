@@ -94,6 +94,17 @@ type actionRequirements struct {
 	requiredSecrets        map[string]bool
 }
 
+type actionPlanningContext struct {
+	workflowInputs        map[string]any
+	unknownWorkflowInputs map[string]bool
+	environment           map[string]string
+}
+
+type actionStepPlanningContext struct {
+	actionPlanningContext
+	condition string
+}
+
 // validateActionResolutions resolves each independent root invocation before
 // plan construction. It deliberately aggregates failures while sharing one
 // immutable source snapshot; no plan can be emitted unless every root passes.
@@ -216,21 +227,18 @@ func compileActionLocks(ctx context.Context, workspace string, actionSource Acti
 }
 
 func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
-	return compileActionInvocationsWithStepContext(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil, nil)
+	return compileActionInvocationsWithStepContext(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil)
 }
 
-func compileActionInvocationsWithStepContext(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, conditions []string, environments []map[string]string) (actionCompilation, error) {
+func compileActionInvocationsWithStepContext(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, stepContexts []actionStepPlanningContext) (actionCompilation, error) {
 	if workspace == "" {
 		return actionCompilation{}, fmt.Errorf("workflow path must identify a repository root")
 	}
 	if suppliedInputs != nil && len(suppliedInputs) != len(refs) {
 		return actionCompilation{}, fmt.Errorf("action references and supplied inputs have different lengths")
 	}
-	if conditions != nil && len(conditions) != len(refs) {
-		return actionCompilation{}, fmt.Errorf("action references and conditions have different lengths")
-	}
-	if environments != nil && len(environments) != len(refs) {
-		return actionCompilation{}, fmt.Errorf("action references and environments have different lengths")
+	if stepContexts != nil && len(stepContexts) != len(refs) {
+		return actionCompilation{}, fmt.Errorf("action references and step contexts have different lengths")
 	}
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
@@ -267,17 +275,17 @@ func compileActionInvocationsWithStepContext(ctx context.Context, workspace stri
 	var githubTokenActions []string
 	if suppliedInputs != nil {
 		for i, root := range roots {
-			var environment map[string]string
-			if environments != nil {
-				environment = knownValues(resolveKnownValues(environments[i], expression.Context{GitHub: map[string]any{"server_url": serverURL}}, nil))
+			var stepContext actionStepPlanningContext
+			if stepContexts != nil {
+				stepContext = stepContexts[i]
 			}
-			requirements, err := root.inspectInvocation(suppliedInputs[i], true, serverURL, environment)
+			requirements, err := root.inspectInvocation(suppliedInputs[i], true, serverURL, stepContext.actionPlanningContext)
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
 			mainReachable := true
-			if conditions != nil {
-				run, known, conditionErr := expression.EvaluateKnownCondition(conditions[i], expression.ConditionContext{GitHub: map[string]any{"server_url": serverURL}}, nil)
+			if stepContexts != nil {
+				run, known, conditionErr := expression.EvaluateKnownCondition(stepContext.condition, expression.ConditionContext{Inputs: stepContext.workflowInputs, Env: stepContext.environment, GitHub: map[string]any{"server_url": serverURL}}, stepContext.unknownWorkflowInputs)
 				if conditionErr != nil {
 					return actionCompilation{}, fmt.Errorf("compile action %q condition: %w", refs[i], conditionErr)
 				}
@@ -394,7 +402,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	return n, nil
 }
 
-func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string, environment map[string]string) (actionRequirements, error) {
+func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string, planning actionPlanningContext) (actionRequirements, error) {
 	requirements := actionRequirements{requiredSecrets: map[string]bool{}}
 	for _, suppliedName := range sortedKeys(supplied) {
 		value := supplied[suppliedName]
@@ -423,7 +431,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		}
 		if workflowAuthored {
 			requirements.githubToken = requirements.githubToken || referencesToken
-			_, preparesInputs, preparationErr := n.preparationFields(serverURL, environment)
+			_, preparesInputs, preparationErr := n.preparationFields(serverURL, planning)
 			if preparationErr != nil {
 				return actionRequirements{}, preparationErr
 			}
@@ -440,12 +448,12 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	if n.native {
 		return requirements, nil
 	}
-	effectiveInputs, unknownInputs, defaultsRequireToken, err := n.effectiveInputs(supplied, serverURL, workflowAuthored, environment)
+	effectiveInputs, unknownInputs, defaultsRequireToken, err := n.effectiveInputs(supplied, serverURL, workflowAuthored, planning)
 	if err != nil {
 		return actionRequirements{}, err
 	}
 	requirements.githubToken = requirements.githubToken || defaultsRequireToken
-	_, preparesInputs, err := n.preparationFields(serverURL, environment)
+	_, preparesInputs, err := n.preparationFields(serverURL, planning)
 	if err != nil {
 		return actionRequirements{}, err
 	}
@@ -461,13 +469,14 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		requirements.githubToken = requirements.githubToken || requiresToken
 	}
 	for i, step := range n.metadata.Runs.Steps {
-		run, known, err := compositeStepCondition(step.If, effectiveInputs, unknownInputs, environment, serverURL)
+		run, known, err := compositeStepCondition(step.If, effectiveInputs, unknownInputs, planning.environment, serverURL)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d condition: %w", i+1, err)
 		}
 		stepReachable := !known || run
-		stepEnvironment := knownValues(resolveKnownValues(step.Env, expression.Context{Inputs: effectiveInputs, Env: environment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs))
-		childEnvironment := mergeKnownValues(environment, stepEnvironment)
+		stepEnvironment := knownValues(resolveKnownValues(step.Env, expression.Context{Inputs: effectiveInputs, Env: planning.environment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs))
+		childPlanning := planning
+		childPlanning.environment = mergeKnownValues(planning.environment, stepEnvironment)
 		var child *actionNode
 		preparesEnvironment, preparesInputs := false, false
 		if step.Uses != "" {
@@ -475,7 +484,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			if child == nil {
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q is missing", i+1, step.Uses)
 			}
-			preparesEnvironment, preparesInputs, err = child.preparationFields(serverURL, childEnvironment)
+			preparesEnvironment, preparesInputs, err = child.preparationFields(serverURL, childPlanning)
 			if err != nil {
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 			}
@@ -522,8 +531,8 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
 			}
 		}
-		childInputs := resolveKnownValues(step.With, expression.Context{Inputs: effectiveInputs, Env: childEnvironment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs)
-		childRequirements, err := child.inspectInvocation(childInputs, false, serverURL, childEnvironment)
+		childInputs := resolveKnownValues(step.With, expression.Context{Inputs: effectiveInputs, Env: childPlanning.environment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs)
+		childRequirements, err := child.inspectInvocation(childInputs, false, serverURL, childPlanning)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 		}
@@ -536,7 +545,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	return requirements, nil
 }
 
-func (n *actionNode) preparationFields(serverURL string, knownEnvironment map[string]string) (environment, inputs bool, err error) {
+func (n *actionNode) preparationFields(serverURL string, planning actionPlanningContext) (environment, inputs bool, err error) {
 	if n.lock.Source != "github" {
 		return false, false, nil
 	}
@@ -546,19 +555,19 @@ func (n *actionNode) preparationFields(serverURL string, knownEnvironment map[st
 	if n.metadata.Runs.Pre == "" {
 		return false, false, nil
 	}
-	run, known, err := expression.EvaluateKnownCondition(n.metadata.Runs.PreIf, expression.ConditionContext{Env: knownEnvironment, GitHub: map[string]any{"server_url": serverURL}}, nil)
+	run, known, err := expression.EvaluateKnownCondition(n.metadata.Runs.PreIf, expression.ConditionContext{Inputs: planning.workflowInputs, Env: planning.environment, GitHub: map[string]any{"server_url": serverURL}}, planning.unknownWorkflowInputs)
 	if err != nil {
 		return false, false, err
 	}
 	return true, !known || run, nil
 }
 
-func (n *actionNode) effectiveInputs(supplied map[string]string, serverURL string, workflowAuthored bool, environment map[string]string) (map[string]string, map[string]bool, bool, error) {
+func (n *actionNode) effectiveInputs(supplied map[string]string, serverURL string, workflowAuthored bool, planning actionPlanningContext) (map[string]string, map[string]bool, bool, error) {
 	inputs := make(map[string]string, len(n.metadata.Inputs)+len(supplied))
 	unknown := map[string]bool{}
 	resolvedSupplied := supplied
 	if workflowAuthored {
-		resolvedSupplied = resolveKnownValues(supplied, expression.Context{Env: environment, GitHub: map[string]any{"server_url": serverURL}}, nil)
+		resolvedSupplied = resolveKnownValues(supplied, expression.Context{WorkflowInputs: planning.workflowInputs, Env: planning.environment, GitHub: map[string]any{"server_url": serverURL}}, planning.unknownWorkflowInputs)
 	}
 	for _, name := range sortedKeys(resolvedSupplied) {
 		value := resolvedSupplied[name]

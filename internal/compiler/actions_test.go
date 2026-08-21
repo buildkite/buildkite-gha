@@ -708,7 +708,7 @@ runs:
 		roots:   map[string]string{"owner/parent": parent, "owner/child": child},
 		commits: map[string]string{"owner/parent": strings.Repeat("a", 40), "owner/child": strings.Repeat("b", 40)},
 	}
-	compiled, err := compileActionInvocationsWithStepContext(t.Context(), t.TempDir(), source, "https://github.com", []string{"owner/parent@v1"}, []map[string]string{nil}, []string{"${{ false }}"}, nil)
+	compiled, err := compileActionInvocationsWithStepContext(t.Context(), t.TempDir(), source, "https://github.com", []string{"owner/parent@v1"}, []map[string]string{nil}, []actionStepPlanningContext{{condition: "${{ false }}"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -834,8 +834,10 @@ runs:
 		t.Context(), t.TempDir(), source, "https://github.com",
 		[]string{"owner/child@v1"},
 		[]map[string]string{{"token": "${{ github.token }}"}},
-		[]string{"${{ false }}"},
-		[]map[string]string{{"RUN_PRE": "false"}},
+		[]actionStepPlanningContext{{
+			actionPlanningContext: actionPlanningContext{environment: map[string]string{"RUN_PRE": "false"}},
+			condition:             "${{ false }}",
+		}},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -983,6 +985,19 @@ runs:
 			t.Fatalf("server URL %q requires GitHub token = %t, want %t", test.serverURL, compiled.requiresGitHubToken, test.want)
 		}
 	}
+
+	stepContext := actionStepPlanningContext{actionPlanningContext: actionPlanningContext{workflowInputs: map[string]any{"enabled": false}}}
+	compiled, err := compileActionInvocationsWithStepContext(
+		t.Context(), workspace, nil, "https://github.com",
+		[]string{"./guarded"}, []map[string]string{{"enabled": "${{ inputs.enabled }}"}},
+		[]actionStepPlanningContext{stepContext},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("known false workflow input kept a forwarded token guard reachable")
+	}
 }
 
 func TestCompileActionInvocationsGatesMainAuthorityByWorkflowCondition(t *testing.T) {
@@ -998,14 +1013,24 @@ runs:
 	for _, test := range []struct {
 		serverURL string
 		condition string
+		inputs    map[string]any
+		unknown   map[string]bool
+		env       map[string]string
 		want      bool
 	}{
 		{serverURL: "https://github.com", condition: "${{ false }}"},
 		{serverURL: "https://github.com", condition: "${{ github.server_url == 'https://github.com' }}", want: true},
 		{serverURL: "https://origin.cursor.com", condition: "${{ github.server_url == 'https://github.com' }}"},
 		{serverURL: "https://github.com", condition: "${{ env.RUNTIME == 'yes' }}", want: true},
+		{serverURL: "https://github.com", condition: "${{ inputs.enabled == 'true' }}", inputs: map[string]any{"enabled": false}},
+		{serverURL: "https://github.com", condition: "${{ inputs.enabled == 'true' }}", inputs: map[string]any{"enabled": false}, unknown: map[string]bool{"enabled": true}, want: true},
+		{serverURL: "https://github.com", condition: "${{ env.RUN_ACTION == 'true' }}", env: map[string]string{"RUN_ACTION": "false"}},
 	} {
-		compiled, err := compileActionInvocationsWithStepContext(t.Context(), workspace, nil, test.serverURL, []string{"./token"}, []map[string]string{nil}, []string{test.condition}, nil)
+		stepContext := actionStepPlanningContext{
+			actionPlanningContext: actionPlanningContext{workflowInputs: test.inputs, unknownWorkflowInputs: test.unknown, environment: test.env},
+			condition:             test.condition,
+		}
+		compiled, err := compileActionInvocationsWithStepContext(t.Context(), workspace, nil, test.serverURL, []string{"./token"}, []map[string]string{nil}, []actionStepPlanningContext{stepContext})
 		if err != nil {
 			t.Fatal(err)
 		}

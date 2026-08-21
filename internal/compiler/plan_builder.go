@@ -402,13 +402,27 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 		built.capabilities = capabilities
 		return built, nil
 	}
-	actionConditions := make([]string, len(actionIndexes))
-	actionEnvironments := make([]map[string]string, len(actionIndexes))
-	for i, stepIndex := range actionIndexes {
-		actionConditions[i] = steps[stepIndex].Condition
-		actionEnvironments[i] = steps[stepIndex].Env
+	serverURL := plan.EventServerURL(b.ir.Event.Provider)
+	unknownWorkflowInputs := make(map[string]bool, len(instance.DeferredInputs))
+	for name := range instance.DeferredInputs {
+		unknownWorkflowInputs[name] = true
 	}
-	compiled, err := compileActionInvocationsWithStepContext(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs, actionConditions, actionEnvironments)
+	workflowContext := expression.Context{WorkflowInputs: instance.Inputs, GitHub: map[string]any{"server_url": serverURL}}
+	jobEnvironment := knownValues(resolveKnownValues(instance.Env, workflowContext, unknownWorkflowInputs))
+	actionStepContexts := make([]actionStepPlanningContext, len(actionIndexes))
+	for i, stepIndex := range actionIndexes {
+		workflowContext.Env = jobEnvironment
+		stepEnvironment := knownValues(resolveKnownValues(steps[stepIndex].Env, workflowContext, unknownWorkflowInputs))
+		actionStepContexts[i] = actionStepPlanningContext{
+			actionPlanningContext: actionPlanningContext{
+				workflowInputs:        instance.Inputs,
+				unknownWorkflowInputs: unknownWorkflowInputs,
+				environment:           mergeKnownValues(jobEnvironment, stepEnvironment),
+			},
+			condition: steps[stepIndex].Condition,
+		}
+	}
+	compiled, err := compileActionInvocationsWithStepContext(b.ctx, instance.RepositoryRoot, b.actionSource, serverURL, actionRefs, actionInputs, actionStepContexts)
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
