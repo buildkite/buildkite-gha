@@ -667,6 +667,22 @@ func TestRunJobContainerLifecycleAndEnvironment(t *testing.T) {
 	}
 }
 
+func TestRunJobContainerUsesPlanSelectedImageWithoutRuntimeEvaluation(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	j := jobContainerPlan(t, workspace, nil)
+	j.Container.Image = "ghcr.io/acme/tool:25"
+	if _, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(t.Context(), j, workspace); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.calls(t)
+	pull := jobDockerCallIndex(calls, "pull", j.Container.Image)
+	create := jobDockerCallIndex(calls, "create")
+	if pull < 0 || create < pull || !slices.Contains(calls[create].Args, j.Container.Image) {
+		t.Fatalf("selected image was not pulled and created unchanged: %#v", calls)
+	}
+}
+
 func TestRunJobContainerDefaultsRunStepsToSh(t *testing.T) {
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()

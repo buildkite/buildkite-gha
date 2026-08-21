@@ -3733,6 +3733,86 @@ func TestCompilePlansEmitV8ForContainers(t *testing.T) {
 	}
 }
 
+func TestCompilePlansResolveJobContainerImageExpressions(t *testing.T) {
+	workflowSource := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: ['24', '25']
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/${{ vars.IMAGE }}:${{ matrix.version }}
+    steps: [{run: true}]
+`)
+	options := defaultOptions()
+	options.Vars.Buildkite = map[string]string{"IMAGE": "tool"}
+	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 || plans[0].Container == nil || plans[1].Container == nil || plans[0].Container.Image != "ghcr.io/buildkite/tool:24" || plans[1].Container.Image != "ghcr.io/buildkite/tool:25" {
+		t.Fatalf("compiled container images = %#v, %#v", plans[0].Container, plans[1].Container)
+	}
+	if encoded, err := plan.Encode(plans[0]); err != nil || bytes.Contains(encoded, []byte("${{")) {
+		t.Fatalf("encoded plan retained an expression: %s, %v", encoded, err)
+	}
+}
+
+func TestCompilePlansResolveReusableWorkflowInputJobContainerImage(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    uses: ./.github/workflows/container.yml
+    with:
+      image: node:24
+`)
+	writeWorkflow(t, repository, "container.yml", `on:
+  workflow_call:
+    inputs:
+      image:
+        required: true
+        type: string
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ inputs.image }}
+    steps: [{run: true}]
+`)
+	plans, err := compileUntrustedPlans(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Container == nil || plans[0].Container.Image != "node:24" {
+		t.Fatalf("reusable job container = %#v", plans)
+	}
+}
+
+func TestCompilePlansRejectInvalidJobContainerImageExpressions(t *testing.T) {
+	for name, image := range map[string]string{
+		"secret":        "${{ secrets.IMAGE }}",
+		"needs output":  "${{ needs.build.outputs.image }}",
+		"step output":   "${{ steps.build.outputs.image }}",
+		"whole context": "${{ github }}",
+		"boolean":       "${{ true }}",
+		"empty":         "${{ '' }}",
+		"invalid":       "${{ 'bad image' }}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			workflowSource := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: \"" + image + "\"\n    steps: [{run: true}]\n")
+			_, err := compileUntrustedPlans("containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), "gha-untrusted")
+			if err == nil || !strings.Contains(err.Error(), "resolve job container") {
+				t.Fatalf("compile error = %v", err)
+			}
+			if strings.Contains(err.Error(), "[REDACTED:") {
+				t.Fatalf("compile error leaked a secret: %v", err)
+			}
+		})
+	}
+}
+
 func TestCompilePlansResolveStaticServiceContainerFields(t *testing.T) {
 	workflowSource := []byte(`on: push
 jobs:

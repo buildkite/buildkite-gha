@@ -206,6 +206,17 @@ func TestParseOwnsLiteralContainersInDeclarationOrder(t *testing.T) {
 	}
 }
 
+func TestParseRetainsJobContainerImageExpression(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: ghcr.io/acme/tool:${{ matrix.version }}\n    steps: [{run: true}]\n")
+	parsed, err := Parse("containers.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Jobs[0].Container.Image; got != "ghcr.io/acme/tool:${{ matrix.version }}" {
+		t.Fatalf("container image = %q", got)
+	}
+}
+
 func TestParseContainerImageRegistryPorts(t *testing.T) {
 	for _, test := range []struct {
 		image string

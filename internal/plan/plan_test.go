@@ -1134,6 +1134,8 @@ func TestContainerImageGrammarMatchesSchema(t *testing.T) {
 		{"localhost:0/private/service", false},
 		{"localhost:65536/private/service", false},
 		{"LOCALHOST:5000/private/service", false},
+		{"${{ matrix.image }}", false},
+		{"${{ secrets.IMAGE }}", false},
 		{"${{ needs.build.outputs.image }}", false},
 	} {
 		t.Run(test.image, func(t *testing.T) {

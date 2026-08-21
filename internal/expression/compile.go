@@ -386,6 +386,34 @@ func EvaluateCompileTemplate(template string, context CompileContext) (string, e
 	}
 }
 
+// EvaluateCompileStringTemplate evaluates a compile-time template whose
+// complete-expression form must produce a string. Interpolated scalar values
+// retain the normal template rendering rules.
+func EvaluateCompileStringTemplate(template string, context CompileContext) (string, error) {
+	if expr, err := Parse(template, 1, 1); err == nil {
+		value, err := EvaluateCompile(expr, context)
+		if err != nil {
+			return "", err
+		}
+		text, ok := value.(string)
+		if !ok {
+			return "", fmt.Errorf("expression resolved to %T, want string", value)
+		}
+		if strings.Contains(text, "${{") {
+			return "", fmt.Errorf("compile-time expression result contains expression syntax")
+		}
+		return text, nil
+	}
+	evaluated, err := EvaluateCompileTemplate(template, context)
+	if err != nil {
+		return "", err
+	}
+	if strings.Contains(evaluated, "${{") {
+		return "", fmt.Errorf("compile-time expression result contains expression syntax")
+	}
+	return evaluated, nil
+}
+
 // EvaluateAvailableCompileTemplate folds each graph-time expression that can be
 // resolved independently and preserves expressions that need runtime context.
 func EvaluateAvailableCompileTemplate(template string, context CompileContext) (string, error) {
