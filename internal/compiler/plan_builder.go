@@ -413,9 +413,10 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 		stepEnvironment := knownValues(resolveKnownValues(steps[stepIndex].Env, workflowContext, unknownWorkflowInputs))
 		actionStepContexts[i] = actionStepPlanningContext{
 			actionPlanningContext: actionPlanningContext{
-				workflowInputs:        instance.Inputs,
-				unknownWorkflowInputs: unknownWorkflowInputs,
-				environment:           stepEnvironment,
+				workflowInputs:         instance.Inputs,
+				unknownWorkflowInputs:  unknownWorkflowInputs,
+				environment:            stepEnvironment,
+				preparationEnvironment: stepEnvironment,
 			},
 			condition: steps[stepIndex].Condition,
 		}

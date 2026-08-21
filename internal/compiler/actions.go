@@ -91,13 +91,15 @@ type actionCompilation struct {
 type actionRequirements struct {
 	githubToken            bool
 	preparationGitHubToken bool
+	preparationMutatesEnv  bool
 	requiredSecrets        map[string]bool
 }
 
 type actionPlanningContext struct {
-	workflowInputs        map[string]any
-	unknownWorkflowInputs map[string]bool
-	environment           map[string]string
+	workflowInputs         map[string]any
+	unknownWorkflowInputs  map[string]bool
+	environment            map[string]string
+	preparationEnvironment map[string]string
 }
 
 type actionStepPlanningContext struct {
@@ -459,6 +461,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	}
 	requirements.preparationGitHubToken = requirements.preparationGitHubToken || preparesInputs && defaultsRequireToken
 	if n.runtime != metadata.RuntimeComposite {
+		requirements.preparationMutatesEnv = preparesInputs
 		return requirements, nil
 	}
 	for _, name := range sortedKeys(n.metadata.Outputs) {
@@ -480,8 +483,10 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		}
 		stepReachable := !known || run
 		stepEnvironment := knownValues(resolveKnownValues(step.Env, expression.Context{Inputs: effectiveInputs, Env: currentPlanning.environment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs))
+		preparationStepEnvironment := knownValues(resolveKnownValues(step.Env, expression.Context{Inputs: effectiveInputs, Env: currentPlanning.preparationEnvironment, GitHub: map[string]any{"server_url": serverURL}}, unknownInputs))
 		childPlanning := currentPlanning
 		childPlanning.environment = mergeKnownValues(currentPlanning.environment, stepEnvironment)
+		childPlanning.preparationEnvironment = mergeKnownValues(currentPlanning.preparationEnvironment, preparationStepEnvironment)
 		var child *actionNode
 		preparesEnvironment, preparesInputs := false, false
 		if step.Uses != "" {
@@ -545,6 +550,10 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		}
 		requirements.githubToken = requirements.githubToken || stepReachable && childRequirements.githubToken
 		requirements.preparationGitHubToken = requirements.preparationGitHubToken || n.lock.Source == "github" && childRequirements.preparationGitHubToken
+		if n.lock.Source == "github" && childRequirements.preparationMutatesEnv {
+			requirements.preparationMutatesEnv = true
+			planning.preparationEnvironment = nil
+		}
 		for name := range childRequirements.requiredSecrets {
 			requirements.requiredSecrets[name] = true
 		}
@@ -562,7 +571,7 @@ func (n *actionNode) preparationFields(serverURL string, planning actionPlanning
 	if n.metadata.Runs.Pre == "" {
 		return false, false, nil
 	}
-	run, known, err := expression.EvaluateKnownCondition(n.metadata.Runs.PreIf, expression.ConditionContext{Inputs: planning.workflowInputs, Env: planning.environment, GitHub: map[string]any{"server_url": serverURL}}, planning.unknownWorkflowInputs)
+	run, known, err := expression.EvaluateKnownCondition(n.metadata.Runs.PreIf, expression.ConditionContext{Inputs: planning.workflowInputs, Env: planning.preparationEnvironment, GitHub: map[string]any{"server_url": serverURL}}, planning.unknownWorkflowInputs)
 	if err != nil {
 		return false, false, err
 	}

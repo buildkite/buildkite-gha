@@ -835,7 +835,7 @@ runs:
 		[]string{"owner/child@v1"},
 		[]map[string]string{{"token": "${{ github.token }}"}},
 		[]actionStepPlanningContext{{
-			actionPlanningContext: actionPlanningContext{environment: map[string]string{"RUN_PRE": "false"}},
+			actionPlanningContext: actionPlanningContext{environment: map[string]string{"RUN_PRE": "false"}, preparationEnvironment: map[string]string{"RUN_PRE": "false"}},
 			condition:             "${{ false }}",
 		}},
 	)
@@ -871,6 +871,47 @@ runs:
 	}
 	if !compiled.requiresGitHubToken {
 		t.Fatal("mutable environment made a later token-bearing composite step unreachable")
+	}
+}
+
+func TestCompileActionInvocationsKeepsPreparationEnvironmentAcrossShellSteps(t *testing.T) {
+	parent, child := t.TempDir(), t.TempDir()
+	writeAction(t, child, "", `name: child
+runs:
+  using: node24
+  pre: pre.js
+  pre-if: env.RUN_PRE == 'true'
+  main: index.js
+`)
+	if err := os.WriteFile(filepath.Join(child, "pre.js"), []byte("// fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, parent, "", `name: parent
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo RUN_PRE=true >> "$GITHUB_ENV"
+    - if: ${{ false }}
+      uses: owner/child@v1
+      with:
+        token: ${{ github.token }}
+`)
+	source := classifiedActionSource{
+		roots:   map[string]string{"owner/parent": parent, "owner/child": child},
+		commits: map[string]string{"owner/parent": strings.Repeat("a", 40), "owner/child": strings.Repeat("b", 40)},
+	}
+	knownEnvironment := map[string]string{"RUN_PRE": "false"}
+	compiled, err := compileActionInvocationsWithStepContext(
+		t.Context(), t.TempDir(), source, "https://github.com",
+		[]string{"owner/parent@v1"}, []map[string]string{nil},
+		[]actionStepPlanningContext{{actionPlanningContext: actionPlanningContext{environment: knownEnvironment, preparationEnvironment: knownEnvironment}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("run-only child invalidated the fixed preparation environment")
 	}
 }
 
