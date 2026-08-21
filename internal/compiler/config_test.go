@@ -146,6 +146,24 @@ func TestCompileTreatsBlankRunNameAsAbsentAndLocatesUnsupportedContext(t *testin
 	}
 }
 
+func TestValidateRunNameDoesNotEvaluateRequiredDispatchInputs(t *testing.T) {
+	workflow := []byte(`name: Deploy
+run-name: Deploy ${{ fromJSON(inputs.config).target }}
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        required: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	if _, err := Validate("deploy.yml", workflow); err != nil {
+		t.Fatalf("event-independent validation evaluated required input: %v", err)
+	}
+}
+
 func TestCompileOptionsRejectCaseCollisionsWithinOneVarsSource(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n")
 	_, err := CompileWithOptions("vars.yml", workflow, pushEvent(t), Options{

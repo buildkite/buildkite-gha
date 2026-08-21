@@ -195,7 +195,7 @@ func ValidateWithOptionsContext(ctx context.Context, path string, source []byte,
 	context := compileContext(event, nil, path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	context.GitHub["head_ref"] = "validation"
-	_, runNameErr := resolveWorkflowRunName(path, parsed, context)
+	runNameErr := validateWorkflowRunName(path, parsed)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
@@ -359,6 +359,18 @@ func resolveWorkflowRunName(path string, parsed *workflow.Workflow, context expr
 	position := parsed.RunNameSpan.Start
 	return "", attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, position.Line, position.Column, "", "", "", 0,
 		fmt.Errorf("%s:%d:%d: workflow run-name: %w", path, position.Line, position.Column, err))
+}
+
+func validateWorkflowRunName(path string, parsed *workflow.Workflow) error {
+	if strings.TrimSpace(parsed.RunName) == "" {
+		return nil
+	}
+	if err := expression.ValidateRunName(parsed.RunName); err != nil {
+		position := parsed.RunNameSpan.Start
+		return attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, position.Line, position.Column, "", "", "", 0,
+			fmt.Errorf("%s:%d:%d: workflow run-name: %w", path, position.Line, position.Column, err))
+	}
+	return nil
 }
 
 func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string, map[string]string, string) {
