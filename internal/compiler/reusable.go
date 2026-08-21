@@ -432,7 +432,7 @@ func resolveCallSecretAuthority(path string, job workflow.Job, call *workflow.Re
 		mapping := call.Secrets[target]
 		_, declared := callee.CallSecrets[target]
 		if !declared {
-			return secretAuthority{}, locatedJobError(path, job, mapping.Span.Start.Line, mapping.Span.Start.Column, fmt.Sprintf("secret mapping target %q is not declared by reusable workflow %q", mapping.Target, call.Uses))
+			return secretAuthority{}, locatedJobError(path, job, mapping.Span.Start.Line, mapping.Span.Start.Column, fmt.Sprintf("secret mapping target %q is not declared by reusable workflow %q", target, call.Uses))
 		}
 		if target == "GITHUB_TOKEN" {
 			return secretAuthority{}, locatedJobError(path, job, mapping.Span.Start.Line, mapping.Span.Start.Column, "GITHUB_TOKEN cannot be an explicit secret mapping target")

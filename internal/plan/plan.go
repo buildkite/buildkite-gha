@@ -608,7 +608,7 @@ func (job Job) Validate() error {
 		if !secretNamePattern.MatchString(name) || i > 0 && job.RequiredSecrets[i-1] == name {
 			return fmt.Errorf("job plan contains invalid or repeated required secret %q", name)
 		}
-		if name == "GITHUB_TOKEN" {
+		if strings.EqualFold(name, "GITHUB_TOKEN") {
 			return fmt.Errorf("job plan must provide GITHUB_TOKEN through the scoped workflow token contract")
 		}
 		normalized := strings.ToUpper(name)

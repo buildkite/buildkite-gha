@@ -1088,7 +1088,7 @@ func TestGitHubWorkflowTokenContractAndSchema(t *testing.T) {
 		}, want: "overlaps ordinary secret authority"},
 		{name: "reserved ambient secret", edit: func(j *Job) {
 			j.RequiredCapabilities = []string{"provider-token-write", "secrets"}
-			j.RequiredSecrets = []string{"GITHUB_TOKEN"}
+			j.RequiredSecrets = []string{"github_token"}
 		}, want: "scoped workflow token contract"},
 		{name: "other provider", edit: func(j *Job) { j.Event.Provider = "cursor-origin" }, want: "valid github.com event repository"},
 	} {

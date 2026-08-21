@@ -572,7 +572,6 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 				}
 				target := strings.ToUpper(name)
 				out.Reusable.Secrets[target] = SecretMapping{
-					Target: target,
 					Source: source,
 					Span:   spanFrom(secret.Value.Pos, secret.Value.Value),
 				}

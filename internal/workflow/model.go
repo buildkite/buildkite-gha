@@ -193,9 +193,8 @@ type ReusableWorkflowCall struct {
 }
 
 // SecretMapping binds one callee alias to a direct caller secret reference.
-// Both names are normalized for case-insensitive lookup; Span owns the source.
+// The source is normalized for case-insensitive lookup; Span owns the source.
 type SecretMapping struct {
-	Target string `json:"target"`
 	Source string `json:"source"`
 	Span   Span   `json:"span"`
 }
