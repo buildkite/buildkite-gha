@@ -33,7 +33,7 @@ func TestValidateJobVolume(t *testing.T) {
 			t.Errorf("ValidateJobVolume(%q) = %v", value, err)
 		}
 	}
-	for _, value := range []string{"/tmp:/data", "cache:data", "cache:/", "cache:/data/../other", "cache:/__w", "cache:/__buildkite-gha/runtime", "cache:/data:z"} {
+	for _, value := range []string{"v:/data", "/tmp:/data", "cache:data", "cache:/", "cache:/data/../other", "cache:/__w", "cache:/__buildkite-gha/runtime", "cache:/data:z"} {
 		if err := ValidateJobVolume(value); err == nil {
 			t.Errorf("ValidateJobVolume(%q) accepted invalid volume", value)
 		}

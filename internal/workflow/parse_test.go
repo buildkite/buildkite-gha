@@ -366,6 +366,7 @@ func TestParseRejectsUnsafeJobContainerOptionsAndVolumes(t *testing.T) {
 		"entrypoint option":       "options: --entrypoint sh",
 		"option expression":       "options: --cpus ${{ matrix.cpus }}",
 		"host bind":               "volumes: ['/tmp:/data']",
+		"short volume name":       "volumes: ['v:/data']",
 		"duplicate target":        "volumes: ['one:/data', 'two:/data']",
 		"workspace overlap":       "volumes: ['cache:/__w/repo']",
 		"volume expression":       "volumes: ['${{ matrix.name }}:/data']",
