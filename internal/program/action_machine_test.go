@@ -367,6 +367,60 @@ func TestActionMachineCompositeContinueOnErrorDoesNotTolerateAdapterFailure(t *t
 	}
 }
 
+func TestActionMachineNestedPreparationPreservesHardAdapterFailure(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{
+			{ContinueOnError: true, Invocation: &Invocation{Lock: "nested"}},
+		}}},
+		"nested": {Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{
+			{Invocation: &Invocation{Lock: "child"}},
+		}}},
+		"child": js("pre", "main", ""),
+	}
+	machine := NewActionMachine(actions, &traceAdapter{executionErrors: map[string]error{"pre": fmt.Errorf("adapter setup failed")}}, traceState{})
+	_, execution, err := machine.Prepare(t.Context(), invocation("root", "root"), Frame{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Failure == nil || !execution.Failure.Hard {
+		t.Fatalf("Prepare() execution = %#v, want hard nested adapter failure", execution)
+	}
+}
+
+func TestActionMachineInvocationExpressionFailuresAreSoft(t *testing.T) {
+	tests := map[string]Action{
+		"javascript pre-if": {
+			Runtime:    ActionRuntimeJavaScript,
+			JavaScript: &JavaScriptAction{Pre: "pre", PreCondition: site("invalid"), Main: "main"},
+		},
+		"docker environment": {
+			Runtime: ActionRuntimeDocker,
+			Docker:  &DockerAction{Env: []Binding{binding("value", "invalid")}},
+		},
+		"docker argument": {
+			Runtime: ActionRuntimeDocker,
+			Docker:  &DockerAction{Arguments: []Site{site("invalid")}},
+		},
+		"composite output": {
+			Runtime:   ActionRuntimeComposite,
+			Composite: &CompositeAction{},
+			Outputs:   []Binding{binding("value", "invalid")},
+		},
+	}
+	for name, action := range tests {
+		t.Run(name, func(t *testing.T) {
+			machine := NewActionMachine(map[string]Action{"action": action}, &traceAdapter{evaluationErrors: map[string]error{"invalid": fmt.Errorf("invalid expression")}}, traceState{})
+			_, execution, err := machine.Invoke(t.Context(), invocation("action", "action"), Frame{})
+			if err != nil {
+				t.Fatalf("Invoke() error = %v, want failed execution", err)
+			}
+			if execution.Failure == nil || execution.Failure.Hard {
+				t.Fatalf("Invoke() execution = %#v, want soft expression failure", execution)
+			}
+		})
+	}
+}
+
 func TestActionMachinePostConditionFailureDoesNotSkipOlderPost(t *testing.T) {
 	newer := js("", "newer-main", "newer-post")
 	newer.JavaScript.PostCondition = site("invalid")
