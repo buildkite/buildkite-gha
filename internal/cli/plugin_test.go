@@ -356,6 +356,29 @@ func TestPluginIgnoresJobPermissionsForHostedGitHubToken(t *testing.T) {
 	t.Fatalf("uploaded artifacts = %#v, want job plan", runner.uploaded)
 }
 
+func TestPluginResolvesWorkflowFromBuildCheckoutOutsideWorkingDirectory(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"deploy.yml": "name: Deploy\non: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(t.TempDir())
+	configuration, err := json.Marshal(map[string]any{"workflow": ".github/workflows/deploy.yml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	setCLIPluginBuildkiteEnvironment(t, "plugin-checkout-path")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, want 0; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Uploaded 1 job") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
 func TestPluginUploadsPluralWorkflowList(t *testing.T) {
 	requireImporterHost(t)
 	configuration, err := json.Marshal(map[string]any{
@@ -402,7 +425,7 @@ func TestPluginRejectsNonExplicitWorkflowSelectors(t *testing.T) {
 		{name: "all shorthand", field: "workflow", workflows: "*", want: "explicit paths"},
 		{name: "string glob", field: "workflow", workflows: filepath.Join(workflowDirectory, "*.yml"), want: "explicit paths"},
 		{name: "array glob", field: "workflows", workflows: []string{filepath.Join(workflowDirectory, "*.yml")}, want: "explicit paths"},
-		{name: "directory", field: "workflow", workflows: workflowDirectory, want: "does not name a regular tracked file"},
+		{name: "directory", field: "workflow", workflows: workflowDirectory, want: "directory"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			configuration, err := json.Marshal(map[string]any{test.field: test.workflows})

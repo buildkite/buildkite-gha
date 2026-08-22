@@ -310,6 +310,9 @@ repository. Directories and globs are rejected. The optional `oidc` object
 accepts non-empty `claims`, `aws-session-tags`, and `subject-claim` values.
 Unknown fields and invalid values fail before upload.
 
+The plugin resolves relative workflow paths from `BUILDKITE_BUILD_CHECKOUT_PATH`,
+not the command hook's working directory.
+
 The importer reuses its verified executable for jobs on the same platform. It
 downloads the other platform's distribution from the same release only when a
 workflow needs it. Runner mappings apply to generated jobs, not the importer.
