@@ -334,6 +334,9 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		if err != nil {
 			return reusableResolution{}, err
 		}
+		if job.MaxParallel != nil && len(matrices) > 1 {
+			return reusableResolution{}, jobError(path, job, "strategy.max-parallel on a reusable-workflow matrix cannot be preserved when the called jobs are flattened")
+		}
 		var members []string
 		var callOutputs []needOutputBinding
 		callNamespaces := make(map[string]struct{}, len(matrices))

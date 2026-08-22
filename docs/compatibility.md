@@ -544,7 +544,7 @@ selectors that require an incompatible operating system or architecture.
 | --- | --- | --- |
 | `matrix` | 🟡 Supported subset | Literal rows. Authored values and expression-valued definitions can use compile-time `github`, `event`, `vars`, reusable-workflow `inputs`, and `fromJSON` values. |
 | `include`, `exclude` | 🟡 Supported subset | Literal combinations or expressions that resolve to arrays of objects during compilation. |
-| `max-parallel` | 🟡 Supported subset | Literal value. |
+| `max-parallel` | 🟡 Supported subset | Literal value on ordinary job matrices. Reusable-workflow call matrices with more than one instance are rejected because flattening cannot preserve invocation-level parallelism. |
 | `fail-fast` | ➖ Accepted, no effect | A failed matrix entry does not cancel its siblings. |
 
 A strategy can combine parallelism, static matrix values, and exclusions:

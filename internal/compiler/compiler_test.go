@@ -1232,6 +1232,28 @@ jobs:
 	}
 }
 
+func TestCompileRejectsMaxParallelOnReusableWorkflowMatrix(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    strategy:
+      max-parallel: 1
+      matrix: ${{ fromJSON('{"target":["one","two"]}') }}
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	_, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err == nil || !strings.Contains(err.Error(), "strategy.max-parallel on a reusable-workflow matrix cannot be preserved") {
+		t.Fatalf("Compile() error = %v, want reusable max-parallel rejection", err)
+	}
+}
+
 func TestCompileBindsNestedReusableCallGuardsToCallerNeeds(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
@@ -2283,6 +2305,25 @@ jobs:
 				t.Fatal("runtime-dependent authored matrix value was not rejected")
 			}
 		})
+	}
+}
+
+func TestValidateLocatesFailingMatrixSectionExpression(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [linux]
+        include: ${{ fromJSON('[{"os":"linux"}]') }}
+        exclude: ${{ fromJSON('invalid') }}
+    steps: [{run: true}]
+`)
+	_, err := Validate("matrix.yml", source)
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) || finding.Line != 9 || !strings.Contains(err.Error(), "matrix exclude") {
+		t.Fatalf("Validate() finding = %#v, error = %v; want exclude expression at line 9", finding, err)
 	}
 }
 

@@ -150,7 +150,7 @@ func (e *jobGraphExpansion) expandMatrices() {
 		var matrices []map[string]any
 		if deferred {
 			e.result.runtimeMatrixBoundary = true
-			line, column := matrixErrorPosition(job)
+			line, column := matrixErrorPosition(job, err)
 			if err == nil {
 				e.result.runtimeMatrices = append(e.result.runtimeMatrices, descriptor)
 				err = errors.New("runtime matrix source is valid, but continuation upload is disabled because Buildkite transport has no authoritative current-attempt fence and durable idempotency boundary")
@@ -164,7 +164,7 @@ func (e *jobGraphExpansion) expandMatrices() {
 			matrices, err = expandMatrix(sourced.path, job, matrixContext)
 		}
 		if err != nil {
-			line, column := matrixErrorPosition(job)
+			line, column := matrixErrorPosition(job, err)
 			e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
 				Path: sourced.path, Line: line, Column: column, Job: job.ID,
@@ -178,10 +178,14 @@ func (e *jobGraphExpansion) expandMatrices() {
 	}
 }
 
-func matrixErrorPosition(job workflow.Job) (int, int) {
+func matrixErrorPosition(job workflow.Job, err error) (int, int) {
 	line, column := job.Span.Start.Line, job.Span.Start.Column
 	if job.Matrix == nil {
 		return line, column
+	}
+	var positioned matrixPositionError
+	if errors.As(err, &positioned) {
+		return positioned.span.Start.Line, positioned.span.Start.Column
 	}
 	line, column = job.Matrix.Span.Start.Line, job.Matrix.Span.Start.Column
 	if job.Matrix.Expression != nil {

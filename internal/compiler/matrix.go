@@ -18,14 +18,22 @@ import (
 
 const maxMatrixInstances = 256
 
+type matrixPositionError struct {
+	err  error
+	span expression.Span
+}
+
+func (e matrixPositionError) Error() string { return e.err.Error() }
+func (e matrixPositionError) Unwrap() error { return e.err }
+
 func expandMatrix(path string, job workflow.Job, context expression.CompileContext) ([]map[string]any, error) {
 	if job.Matrix == nil {
 		return []map[string]any{nil}, nil
 	}
 	matrix, err := resolveMatrix(job.Matrix, context)
 	if err != nil {
-		line, column := matrixErrorPosition(job)
-		return nil, locatedJobError(path, job, line, column, err.Error())
+		line, column := matrixErrorPosition(job, err)
+		return nil, locatedJobWrappedError(path, job, line, column, "", err)
 	}
 	matrices, err := expandMatrixDefinition(matrix)
 	if err != nil {
@@ -104,11 +112,11 @@ func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (
 	if matrix.Expression != nil {
 		value, err := expression.EvaluateCompile(*matrix.Expression, context)
 		if err != nil {
-			return nil, matrixExpressionError(err)
+			return nil, matrixPositionError{err: matrixExpressionError(err), span: matrix.Expression.Span}
 		}
 		object, ok := value.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("matrix expression resolved to %T, want object", value)
+			return nil, matrixPositionError{err: fmt.Errorf("matrix expression resolved to %T, want object", value), span: matrix.Expression.Span}
 		}
 		return matrixFromObject(object)
 	}
@@ -130,11 +138,11 @@ func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (
 		}
 		value, err := expression.EvaluateCompile(*row.Expression, context)
 		if err != nil {
-			return nil, fmt.Errorf("matrix dimension %q: %w", row.Name, matrixExpressionError(err))
+			return nil, matrixPositionError{err: fmt.Errorf("matrix dimension %q: %w", row.Name, matrixExpressionError(err)), span: row.Expression.Span}
 		}
 		values, ok := value.([]any)
 		if !ok {
-			return nil, fmt.Errorf("matrix dimension %q resolved to %T, want array", row.Name, value)
+			return nil, matrixPositionError{err: fmt.Errorf("matrix dimension %q resolved to %T, want array", row.Name, value), span: row.Expression.Span}
 		}
 		resolved.Rows[i].Expression = nil
 		resolved.Rows[i].Values = make([]workflow.Value, len(values))
@@ -144,10 +152,16 @@ func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (
 	}
 	var err error
 	if resolved.Include, err = resolveMatrixCombinations("include", matrix.Include, matrix.IncludeExpression, context); err != nil {
+		if matrix.IncludeExpression != nil {
+			return nil, matrixPositionError{err: err, span: matrix.IncludeExpression.Span}
+		}
 		return nil, err
 	}
 	resolved.IncludeExpression = nil
 	if resolved.Exclude, err = resolveMatrixCombinations("exclude", matrix.Exclude, matrix.ExcludeExpression, context); err != nil {
+		if matrix.ExcludeExpression != nil {
+			return nil, matrixPositionError{err: err, span: matrix.ExcludeExpression.Span}
+		}
 		return nil, err
 	}
 	resolved.ExcludeExpression = nil
