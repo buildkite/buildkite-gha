@@ -643,6 +643,22 @@ func TestInventoryActionAuthorityIncludesCompositeConditionToken(t *testing.T) {
 	}
 }
 
+func TestInventoryActionAuthorityRetainsTokenAfterUnknownStepOutput(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{
+			{ID: "decide", Run: &Run{Command: testActionSite("echo decide")}},
+			{Condition: testActionSite("steps.decide.outputs.use == 'true'"), Run: &Run{Command: testActionSite("echo ${{ github.token }}")}},
+		}}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("unknown prior step output pruned reachable GitHub token authority")
+	}
+}
+
 func TestInventoryActionAuthorityIgnoresUnevaluatedCompositeName(t *testing.T) {
 	actions := map[string]Action{
 		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{{

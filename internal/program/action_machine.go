@@ -964,6 +964,12 @@ func (m *ActionMachine[S]) resolveInputs(ctx context.Context, bindings []Binding
 		}
 		inputs.Fields[name] = analysis.Value
 	}
+	for _, definition := range action.Inputs {
+		name := strings.ToLower(definition.Name)
+		if _, exists := inputs.Fields[name]; definition.Required && !exists {
+			return ValueObject{}, fmt.Errorf("required action input %q is missing", definition.Name)
+		}
+	}
 	return inputs, nil
 }
 

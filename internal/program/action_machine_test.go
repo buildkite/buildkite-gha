@@ -218,6 +218,15 @@ func TestActionMachineFailedPreSuppressesMainAndRetainsPost(t *testing.T) {
 	requireTrace(t, machine, "exec:action:pre env=?/? input=?", "exec:action:post env=?/? input=?")
 }
 
+func TestActionMachineRejectsMissingRequiredInput(t *testing.T) {
+	action := js("", "main", "")
+	action.Inputs = []ActionInput{{Name: "token", Required: true}}
+	machine := NewActionMachine(map[string]Action{"action": action}, &traceAdapter{}, traceState{})
+	if _, _, err := machine.Invoke(t.Context(), invocation("action", "action"), Frame{}); err == nil || !strings.Contains(err.Error(), `required action input "token" is missing`) {
+		t.Fatalf("Invoke() error = %v, want missing required input", err)
+	}
+}
+
 func TestActionMachineCompositeImplicitSuccessSkipsAfterFailure(t *testing.T) {
 	failure := Execution{Outcomes: OutcomeFailure, Failure: &ExecutionFailure{Cause: fmt.Errorf("failed")}}
 	actions := map[string]Action{
