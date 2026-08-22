@@ -1278,6 +1278,10 @@ func applyPaths(env map[string]string, paths []string) {
 }
 
 func githubContext(job plan.Job) map[string]any {
+	var event map[string]any
+	if job.Event.Payload != nil {
+		event = *job.Event.Payload
+	}
 	return map[string]any{
 		"action_path":       "",
 		"action_ref":        "",
@@ -1292,6 +1296,7 @@ func githubContext(job plan.Job) map[string]any {
 		"sha":               job.Event.SHA,
 		"actor":             job.Event.Actor,
 		"event_name":        job.Event.Name,
+		"event":             event,
 		"server_url":        plan.EventServerURL(job.Event.Provider),
 		"workflow":          workflowDisplayName(job),
 		"job":               job.Workflow.LogicalJobID,

@@ -1,7 +1,9 @@
 package plan
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -31,6 +33,53 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 		t.Fatalf("decoded fixture lost trust bindings: %#v", job)
 	}
 	validateJobPlanSchema(t, source)
+}
+
+func TestRetainedEventPayloadRoundTripAndValidation(t *testing.T) {
+	job := validJob()
+	payloadMap := map[string]any{"action": "opened", "pull_request": map[string]any{"number": json.Number("42")}}
+	job.Event.Payload = &payloadMap
+	payload, err := json.Marshal(job.Event.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.Event.PayloadDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(payload))
+
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJobPlanSchema(t, encoded)
+	decoded, err := Decode(encoded)
+	if err != nil || !reflect.DeepEqual(decoded.Event.Payload, job.Event.Payload) {
+		t.Fatalf("Decode() retained payload = %#v, %v", decoded.Event.Payload, err)
+	}
+
+	tampered := decoded
+	(*tampered.Event.Payload)["action"] = "closed"
+	if err := tampered.Validate(); err == nil || !strings.Contains(err.Error(), "does not match its digest") {
+		t.Fatalf("Validate() tampered payload error = %v", err)
+	}
+
+	oversized := validJob()
+	oversizedPayload := map[string]any{"body": strings.Repeat("x", MaxEventPayloadBytes)}
+	oversized.Event.Payload = &oversizedPayload
+	if err := oversized.Validate(); err == nil || !strings.Contains(err.Error(), "event payload exceeds") {
+		t.Fatalf("Validate() oversized payload error = %v", err)
+	}
+
+	empty := validJob()
+	emptyPayload := map[string]any{}
+	empty.Event.Payload = &emptyPayload
+	empty.Event.PayloadDigest = fmt.Sprintf("sha256:%x", sha256.Sum256([]byte("{}")))
+	encoded, err = Encode(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err = Decode(encoded)
+	if err != nil || decoded.Event.Payload == nil || len(*decoded.Event.Payload) != 0 {
+		t.Fatalf("Decode() empty retained payload = %#v, %v", decoded.Event.Payload, err)
+	}
 }
 
 func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {

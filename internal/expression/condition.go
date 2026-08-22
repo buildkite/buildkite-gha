@@ -159,9 +159,6 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		if strings.EqualFold(root, "github") && len(path) != 0 {
 			if strings.EqualFold(path[0], "event") {
-				if len(path) == 1 {
-					return fmt.Errorf("whole github.event access is unsupported")
-				}
 				return nil
 			}
 			switch strings.ToLower(path[0]) {
@@ -252,6 +249,9 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 		}
 		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, or runner.temp", reference)
 	case "github":
+		if len(path) >= 1 && strings.EqualFold(path[0], "event") {
+			return nil
+		}
 		if len(path) == 1 {
 			switch strings.ToLower(path[0]) {
 			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha":
@@ -323,6 +323,18 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 		}
 		staticRoot, path, err := referencePath(node)
 		if err != nil {
+			if root == "github" && isGitHubEventAccess(node) {
+				var validationErr error
+				actionlint.VisitExprNode(node, func(candidate, _ actionlint.ExprNode, entering bool) {
+					if !entering || validationErr != nil {
+						return
+					}
+					if index, ok := candidate.(*actionlint.IndexAccessNode); ok {
+						validationErr = validator.validate(index.Index)
+					}
+				})
+				return validationErr
+			}
 			return fmt.Errorf("dynamic lifecycle condition access is unsupported")
 		}
 		return validateConditionReference(staticRoot, path, scope)
@@ -362,7 +374,9 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 			return fmt.Errorf("whole condition context %q is unsupported", root)
 		}
 	case "github":
-		return fmt.Errorf("dynamic or whole github access is unsupported")
+		if !isGitHubEventAccess(node) {
+			return fmt.Errorf("dynamic or whole github access is unsupported")
+		}
 	default:
 		return fmt.Errorf("condition context %q is unsupported", root)
 	}
@@ -413,6 +427,9 @@ func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 	}
 	if empty {
 		return !context.Unsuccessful && !context.Cancelled, nil
+	}
+	if err := validateConditionNode(node, StepCondition, nil, false); err != nil {
+		return false, err
 	}
 	if !containsStatusFunction(node) && (context.Unsuccessful || context.Cancelled) {
 		return false, nil
@@ -521,6 +538,15 @@ func resolveConditionRoot(root string, context ConditionContext) (any, error) {
 			steps[name] = map[string]any{"outputs": step.Outputs, "outcome": step.Outcome, "conclusion": step.Conclusion}
 		}
 		return steps, nil
+	case "github":
+		event, found, err := objectValue(context.GitHub, "event")
+		if err != nil {
+			return nil, err
+		}
+		if !found || event == nil {
+			return nil, fmt.Errorf("condition requires an event payload that is unavailable in this job plan")
+		}
+		return context.GitHub, nil
 	default:
 		return nil, fmt.Errorf("condition context %q is unsupported", root)
 	}
@@ -571,6 +597,15 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 	case len(path) == 3 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")):
 		return resolveServiceValue(context.Services, path[1], path[2], "condition")
 	case strings.EqualFold(root, "github"):
+		if len(path) >= 1 && strings.EqualFold(path[0], "event") {
+			event, found, err := objectValue(context.GitHub, path[0])
+			if err != nil {
+				return nil, err
+			}
+			if !found || event == nil {
+				return nil, fmt.Errorf("condition requires an event payload that is unavailable in this job plan")
+			}
+		}
 		if value, ok := lookupRuntimeValue(context.GitHub, path); ok {
 			return value, nil
 		}

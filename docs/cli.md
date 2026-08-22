@@ -261,8 +261,8 @@ when it runs inside a Buildkite job.
 ```
 
 The snapshot supplies compile-time context. Plans retain the event name,
-repository, refs, SHA, actor, and a payload digest. They do not retain the
-payload itself, so runtime expressions cannot use `github.event`.
+repository, refs, SHA, actor, and a payload digest. A plan also retains the
+payload when its job needs whole or runtime-selected `github.event` access.
 
 The snapshot is compatibility data, not authorization.
 
