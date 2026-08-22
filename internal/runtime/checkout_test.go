@@ -1379,7 +1379,7 @@ printf '%s\n' "$*" >> ` + shellTestQuote(trustedLog) + `
 	if err := os.WriteFile(trustedGit, []byte(trustedScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	trustedLFSScript := "#!/bin/sh\nprintf 'git-lfs %s\\n' \"$*\" >> " + shellTestQuote(trustedLog) + "\n"
+	trustedLFSScript := "#!/bin/sh\ngit --version\nprintf 'git-lfs %s\\n' \"$*\" >> " + shellTestQuote(trustedLog) + "\n"
 	if err := os.WriteFile(trustedGitLFS, []byte(trustedLFSScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
