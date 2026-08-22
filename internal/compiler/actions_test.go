@@ -1222,7 +1222,9 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		"        with:\n          fetch-depth: '100'\n",
 		"        with:\n          ref: ${{ github.sha }}\n",
 		"        with:\n          ref: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
-		"        with:\n          ref: test-catalog\n          path: test-catalog\n          fetch-depth: '100'\n          persist-credentials: false\n",
+		"        with:\n          ref: test-catalog\n          path: sources/test-catalog\n          fetch-depth: '100'\n          persist-credentials: false\n",
+		"        with:\n          clean: false\n          filter: blob:none\n          lfs: true\n",
+		"        with:\n          sparse-checkout: |\n            src\n            docs\n          sparse-checkout-cone-mode: false\n",
 		"        with:\n          submodules: ' ReCuRsIvE '\n",
 	}
 	for _, with := range accepted {
@@ -1241,7 +1243,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		"ref":         "          ref: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
 		"ssh-key":     "          ssh-key: key\n",
 		"submodules":  "          submodules: yes\n",
-		"path":        "          path: nested/path\n",
+		"path":        "          path: nested/.git/path\n",
 		"fetch-depth": "          fetch-depth: '-1'\n",
 		"credentials": "          persist-credentials: true\n",
 	}

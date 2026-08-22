@@ -105,34 +105,64 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 		"GIT_SSH_COMMAND":        "false",
 		"GIT_PROTOCOL_FROM_USER": "0",
 	}
+	lfs := checkoutInputTrue(checkoutInput(inputs, "lfs"))
+	if !lfs {
+		env["GIT_LFS_SKIP_SMUDGE"] = "1"
+	}
 	base := checkoutGitBaseArgs()
-	run := func(runEnv map[string]string, args ...string) error {
-		if err := r.runStreaming(ctx, processor, checkoutDirectory, runEnv, git, append(base, args...)...); err != nil {
+	runWithBase := func(runEnv map[string]string, commandBase []string, withCredentials bool, args ...string) error {
+		if withCredentials {
+			if err := r.runRepositoryProviderCheckoutGit(ctx, processor, checkoutDirectory, runEnv, git, commandBase, args, credentialHost); err != nil {
+				return fmt.Errorf("%s git %s: %w", adapter, args[0], err)
+			}
+			return nil
+		}
+		if err := r.runStreaming(ctx, processor, checkoutDirectory, runEnv, git, append(commandBase, args...)...); err != nil {
 			return fmt.Errorf("%s git %s: %w", adapter, args[0], err)
 		}
 		return nil
 	}
-	if err := run(env, "init", "--template=", "."); err != nil {
+	run := func(runEnv map[string]string, withCredentials bool, args ...string) error {
+		return runWithBase(runEnv, base, withCredentials, args...)
+	}
+	if err := run(env, false, "init", "--template=", "."); err != nil {
 		return result, err
 	}
-	if err := run(env, "remote", "add", "origin", url); err != nil {
+	if err := run(env, false, "remote", "add", "origin", url); err != nil {
 		return result, err
+	}
+	lfsBase := checkoutGitBaseArgsWithHooks()
+	if lfs {
+		if err := runWithBase(env, lfsBase, false, "lfs", "install", "--local"); err != nil {
+			return result, err
+		}
 	}
 	fetchArgs := checkoutFetchArgs(inputs, job.Event.SHA)
-	if credentialed {
-		if err := r.runRepositoryProviderCheckoutFetch(ctx, processor, checkoutDirectory, env, git, base, fetchArgs, credentialHost); err != nil {
-			return result, fmt.Errorf("%s git fetch: %w", adapter, err)
-		}
-	} else if err := run(env, fetchArgs...); err != nil {
+	if err := run(env, credentialed, fetchArgs...); err != nil {
 		return result, err
 	}
 	checkoutTarget := checkoutRevision(inputs, job.Event.SHA)
-	if err := run(env, "checkout", "--detach", checkoutTarget); err != nil {
+	sparse := checkoutSparsePatterns(inputs)
+	if lfs && len(sparse) == 0 {
+		if err := run(env, credentialed, "lfs", "fetch", "origin", checkoutTarget); err != nil {
+			return result, err
+		}
+	}
+	if err := configureSparseCheckout(checkoutDirectory, inputs, func(args ...string) error {
+		return run(env, false, args...)
+	}); err != nil {
+		return result, fmt.Errorf("%s sparse checkout: %w", adapter, err)
+	}
+	checkoutBase := base
+	if lfs {
+		checkoutBase = lfsBase
+	}
+	if err := runWithBase(env, checkoutBase, credentialed && lfs && len(sparse) != 0, "checkout", "--detach", checkoutTarget); err != nil {
 		return result, err
 	}
 	mode := checkoutSubmoduleMode(inputs)
 	if mode != "" {
-		if err := r.runCheckoutSubmodules(ctx, processor, checkoutDirectory, git, env, base, checkoutFetchDepth(inputs) != "0", mode == "recursive", credentialed, credentialHost); err != nil {
+		if err := r.runCheckoutSubmodules(ctx, processor, checkoutDirectory, git, env, base, checkoutFetchDepth(inputs), mode == "recursive", credentialed, credentialHost); err != nil {
 			return result, fmt.Errorf("%s submodules: %w", adapter, err)
 		}
 	}
@@ -211,6 +241,19 @@ func checkoutGitBaseArgs() []string {
 	}
 }
 
+func checkoutGitBaseArgsWithHooks() []string {
+	base := checkoutGitBaseArgs()
+	args := make([]string, 0, len(base)-2)
+	for i := 0; i < len(base); i++ {
+		if i+1 < len(base) && base[i] == "-c" && base[i+1] == "core.hooksPath=/dev/null" {
+			i++
+			continue
+		}
+		args = append(args, base[i])
+	}
+	return args
+}
+
 func checkoutSubmoduleMode(inputs map[string]string) string {
 	for name, value := range inputs {
 		if strings.EqualFold(name, "submodules") {
@@ -252,11 +295,11 @@ func (w *checkoutSubmoduleStatusWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (r Runner) runCheckoutSubmodules(ctx context.Context, processor *commandProcessor, workspace string, git string, env map[string]string, base []string, depthOne, recursive, credentialed bool, credentialHost string) error {
+func (r Runner) runCheckoutSubmodules(ctx context.Context, processor *commandProcessor, workspace string, git string, env map[string]string, base []string, depth string, recursive, credentialed bool, credentialHost string) error {
 	policy := append(append([]string{}, base...), "-c", "url.https://github.com/.insteadOf=git@github.com:")
 	run := func(withCredentials bool, args ...string) error {
 		if withCredentials {
-			if err := r.runRepositoryProviderCheckoutFetch(ctx, processor, workspace, env, git, policy, args, credentialHost); err != nil {
+			if err := r.runRepositoryProviderCheckoutGit(ctx, processor, workspace, env, git, policy, args, credentialHost); err != nil {
 				return fmt.Errorf("git %s: %w", args[0], err)
 			}
 			return nil
@@ -270,8 +313,8 @@ func (r Runner) runCheckoutSubmodules(ctx context.Context, processor *commandPro
 	syncArgs := []string{"submodule", "sync"}
 	updateArgs := []string{"submodule", "update", "--init", "--force"}
 	statusArgs := []string{"submodule", "status"}
-	if depthOne {
-		updateArgs = append(updateArgs, "--depth=1")
+	if depth != "0" {
+		updateArgs = append(updateArgs, "--depth="+depth)
 	}
 	if recursive {
 		syncArgs = append(syncArgs, "--recursive")
@@ -315,10 +358,56 @@ func prepareCheckoutDirectory(workspace string, inputs map[string]string) (strin
 		}
 		return "", fmt.Errorf("checkout path %q already exists; clean behavior is unsupported", path)
 	}
-	if err := os.Mkdir(directory, 0o755); err != nil {
+	parent := workspace
+	parts := strings.Split(path, "/")
+	for _, part := range parts[:len(parts)-1] {
+		parent = filepath.Join(parent, part)
+		info, err := os.Lstat(parent)
+		switch {
+		case os.IsNotExist(err):
+			continue
+		case err != nil:
+			return "", err
+		case !info.IsDir() || info.Mode()&os.ModeSymlink != 0:
+			return "", fmt.Errorf("checkout path %q has a non-directory or symbolic-link parent", path)
+		}
+	}
+	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return "", err
 	}
 	return directory, nil
+}
+
+func checkoutSparsePatterns(inputs map[string]string) []string {
+	value := checkoutInput(inputs, "sparse-checkout")
+	if value == "" {
+		return nil
+	}
+	var patterns []string
+	for _, line := range strings.Split(value, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			patterns = append(patterns, line)
+		}
+	}
+	return patterns
+}
+
+func configureSparseCheckout(checkoutDirectory string, inputs map[string]string, run func(...string) error) error {
+	patterns := checkoutSparsePatterns(inputs)
+	if len(patterns) == 0 {
+		return nil
+	}
+	if checkoutInputTrue(checkoutInput(inputs, "sparse-checkout-cone-mode")) || checkoutInput(inputs, "sparse-checkout-cone-mode") == "" {
+		return run(append([]string{"sparse-checkout", "set", "--"}, patterns...)...)
+	}
+	if err := run("config", "core.sparseCheckout", "true"); err != nil {
+		return err
+	}
+	info := filepath.Join(checkoutDirectory, ".git", "info")
+	if err := os.MkdirAll(info, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(info, "sparse-checkout"), []byte("\n"+strings.Join(patterns, "\n")+"\n"), 0o600)
 }
 
 func checkoutRefOutput(inputs map[string]string, eventRef string) string {
@@ -349,6 +438,13 @@ func checkoutFetchArgs(inputs map[string]string, sha string) []string {
 	args := []string{"fetch", "--no-tags", "--no-recurse-submodules"}
 	if progress {
 		args = append(args, "--progress")
+	}
+	filter := checkoutInput(inputs, "filter")
+	if filter == "" && len(checkoutSparsePatterns(inputs)) != 0 {
+		filter = "blob:none"
+	}
+	if filter != "" {
+		args = append(args, "--filter="+filter)
 	}
 	if depth == "0" {
 		args = append(args,
@@ -421,7 +517,7 @@ func repositoryProviderCheckoutCredentialArgs(base []string, agent, host string)
 	)
 }
 
-func (r Runner) runRepositoryProviderCheckoutFetch(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, git string, base, fetchArgs []string, credentialHost string) error {
+func (r Runner) runRepositoryProviderCheckoutGit(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, git string, base, commandArgs []string, credentialHost string) error {
 	credentials := r.RepositoryCredentials
 	if credentials == nil || credentials.Agent == "" || !filepath.IsAbs(credentials.Agent) {
 		return fmt.Errorf("repository-provider credentials were not resolved before workflow execution")
@@ -441,7 +537,7 @@ func (r Runner) runRepositoryProviderCheckoutFetch(ctx context.Context, processo
 	}
 	maps.Copy(credentialEnv, credentials.proxyEnvironment)
 	credentialArgs := repositoryProviderCheckoutCredentialArgs(base, credentials.Agent, credentialHost)
-	cmd := exec.Command(git, append(credentialArgs, fetchArgs...)...)
+	cmd := exec.Command(git, append(credentialArgs, commandArgs...)...)
 	cmd.Dir = workspace
 	cmd.Env = processEnv(credentialEnv)
 	return processor.scrubError(r.runStreamingCommand(ctx, processor, cmd))

@@ -148,11 +148,19 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 			if depth, err := strconv.ParseUint(value, 10, 31); err == nil && depth <= 1<<31-1 {
 				continue
 			}
-		case "clean", "set-safe-directory":
+		case "clean":
+			if actionBoolean(value) {
+				continue
+			}
+		case "set-safe-directory":
 			if actionTrue(value) {
 				continue
 			}
-		case "lfs", "allow-unsafe-pr-checkout":
+		case "lfs":
+			if actionBoolean(value) {
+				continue
+			}
+		case "allow-unsafe-pr-checkout":
 			if actionFalse(value) {
 				continue
 			}
@@ -173,15 +181,23 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 			if value == "" || validCheckoutPath(value) {
 				continue
 			}
-		case "ssh-key", "ssh-known-hosts", "sparse-checkout":
+		case "ssh-key", "ssh-known-hosts":
 			if value == "" {
+				continue
+			}
+		case "sparse-checkout":
+			if validSparseCheckout(value) {
 				continue
 			}
 		case "filter":
-			if value == "" {
+			if validCheckoutFilter(value) {
 				continue
 			}
-		case "ssh-strict", "sparse-checkout-cone-mode":
+		case "sparse-checkout-cone-mode":
+			if actionBoolean(value) {
+				continue
+			}
+		case "ssh-strict":
 			if actionTrue(value) {
 				continue
 			}
@@ -244,5 +260,33 @@ func ValidCheckoutSHA(value string) bool {
 }
 
 func validCheckoutPath(value string) bool {
-	return len(value) <= 255 && value != "." && value != ".." && !strings.EqualFold(value, ".git") && !strings.Contains(value, "/") && !strings.Contains(value, "\\") && !strings.ContainsAny(value, "\r\n\x00") && filepath.IsLocal(value)
+	if len(value) > 1024 || value == "." || value == ".." || strings.Contains(value, "\\") || strings.ContainsAny(value, "\r\n\x00") || !filepath.IsLocal(value) {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." || strings.EqualFold(part, ".git") {
+			return false
+		}
+	}
+	return true
+}
+
+func validCheckoutFilter(value string) bool {
+	return value == "" || len(value) <= 1024 && !strings.ContainsAny(value, "\r\n\x00")
+}
+
+func validSparseCheckout(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) > 1<<20 || strings.ContainsRune(value, '\x00') {
+		return false
+	}
+	lines := 0
+	for _, line := range strings.Split(value, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines++
+		}
+	}
+	return lines > 0 && lines <= 1000
 }
