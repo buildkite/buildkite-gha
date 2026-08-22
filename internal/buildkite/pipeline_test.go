@@ -763,6 +763,22 @@ func TestEmitWrapsNestedReusableWorkflowConcurrencyGates(t *testing.T) {
 	}
 }
 
+func TestEmitRejectsReusableConcurrencyGroupSharedWithPrerequisite(t *testing.T) {
+	group := "buildkite-gha/concurrency/deploy"
+	_, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Jobs: []Job{
+			{Key: "prepare", Label: "Prepare", Queue: "linux", PlanDigest: testDigest("prepare"), Concurrency: 1, ConcurrencyGroup: group},
+			{Key: "approve", Label: "Approve", Queue: "linux", PlanDigest: testDigest("approve"), Dependencies: []string{"prepare"}},
+			{Key: "deploy", Label: "Deploy", Queue: "linux", PlanDigest: testDigest("deploy"), Dependencies: []string{"approve"}, ConcurrencyGates: []ConcurrencyGate{{ID: "call", Group: group}}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), `shares group with prerequisite job "prepare"`) {
+		t.Fatalf("Emit() error = %v, want shared prerequisite group rejection", err)
+	}
+}
+
 func TestEmitUsesDefaultAgentTargetingWhenQueueIsEmpty(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep:       "importer",

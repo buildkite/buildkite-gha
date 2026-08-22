@@ -1038,6 +1038,82 @@ jobs:
 	}
 }
 
+func TestCompileRejectsReusableWorkflowConcurrencySharedWithPrerequisite(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+concurrency: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    concurrency: DEPLOY
+    steps: [{run: true}]
+  approve:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  call:
+    needs: approve
+    uses: ./.github/workflows/reusable.yml
+`)
+	_, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), `shares group with prerequisite job "gha-prepare"`) {
+		t.Fatalf("CompileBundle() error = %v, want shared prerequisite group rejection", err)
+	}
+}
+
+func TestCompileRejectsGuardedReusableWorkflowConcurrency(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+concurrency: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    if: false
+    uses: ./.github/workflows/reusable.yml
+`)
+	_, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "called-workflow concurrency is unsupported for guarded reusable-workflow calls") {
+		t.Fatalf("CompileBundle() error = %v, want guarded concurrency rejection", err)
+	}
+}
+
+func TestCompileRejectsNestedReusableWorkflowConcurrencyUnderGuard(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "middle.yml", `on: workflow_call
+jobs:
+  nested:
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+concurrency: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/middle.yml
+`)
+	_, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "called-workflow concurrency is unsupported for guarded reusable-workflow calls") {
+		t.Fatalf("CompileBundle() error = %v, want inherited guarded concurrency rejection", err)
+	}
+}
+
 func TestCompileBundleDeclaresSecretCapabilityAndNames(t *testing.T) {
 	source := []byte("name: secrets\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets['deploy_token'] }}\n    steps:\n      - run: echo \\\"${{ secrets.CANARY }}\\\"\n")
 	event := readFile(t, smokePath("events", "push.json"))

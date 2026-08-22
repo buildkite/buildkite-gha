@@ -379,6 +379,9 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			}
 			calleeConcurrencyGates := concurrencyGates
 			if callee.Concurrency != nil {
+				if len(calleeGuards) != 0 {
+					return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "called-workflow concurrency is unsupported for guarded reusable-workflow calls")
+				}
 				concurrencyContext := resolver.context
 				concurrencyContext.Inputs = callInputs.values
 				concurrencyContext.Matrix = nil

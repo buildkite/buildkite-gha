@@ -503,7 +503,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 func prepareReusableConcurrencyGates(jobs []Job) ([]preparedConcurrencyGate, error) {
 	var gates []preparedConcurrencyGate
 	indexes := make(map[string]int)
+	jobsByKey := make(map[string]Job, len(jobs))
 	for _, job := range jobs {
+		jobsByKey[job.Key] = job
 		parentID := ""
 		seen := make(map[string]bool, len(job.ConcurrencyGates))
 		for _, declared := range job.ConcurrencyGates {
@@ -527,6 +529,28 @@ func prepareReusableConcurrencyGates(jobs []Job) ([]preparedConcurrencyGate, err
 			}
 			gates[index].Members = append(gates[index].Members, job.Key)
 			parentID = declared.ID
+		}
+	}
+	for _, gate := range gates {
+		members := make(map[string]bool, len(gate.Members))
+		seen := make(map[string]bool)
+		var prerequisites []string
+		for _, key := range gate.Members {
+			members[key] = true
+			prerequisites = append(prerequisites, jobsByKey[key].Dependencies...)
+		}
+		for len(prerequisites) != 0 {
+			key := prerequisites[0]
+			prerequisites = prerequisites[1:]
+			if members[key] || seen[key] {
+				continue
+			}
+			seen[key] = true
+			job := jobsByKey[key]
+			if job.Concurrency > 0 && job.ConcurrencyGroup == gate.Group {
+				return nil, fmt.Errorf("reusable-workflow concurrency gate %q shares group with prerequisite job %q", gate.ID, key)
+			}
+			prerequisites = append(prerequisites, job.Dependencies...)
 		}
 	}
 	return gates, nil
