@@ -373,8 +373,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram program.
 	contexts := make([]program.ActionAuthorityContext, len(actionIndexes))
 	immutableActionSteps := make(map[int]bool)
 	for i, stepIndex := range actionIndexes {
-		ref, err := actionsource.Parse(actionRefs[i])
-		if err == nil && actionintegration.UsesNativeAdapter(actionintegration.Identity{Source: "github", Repository: ref.Owner + "/" + ref.Repository, Path: ref.Path}) {
+		if usesNativeActionAdapter(actionRefs[i]) {
 			immutableActionSteps[stepIndex] = true
 		}
 	}
@@ -434,6 +433,16 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram program.
 		built.authorization.DockerCapabilitySources = append(built.authorization.DockerCapabilitySources, "dockerfile-actions")
 	}
 	return built, nil
+}
+
+func usesNativeActionAdapter(raw string) bool {
+	ref, err := actionsource.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return actionintegration.UsesNativeAdapter(actionintegration.Identity{
+		Source: "github", Repository: strings.ToLower(ref.Owner + "/" + ref.Repository), Path: strings.ToLower(ref.Path),
+	})
 }
 
 func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, built *builtPlanActions) error {

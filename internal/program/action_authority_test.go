@@ -361,6 +361,24 @@ func TestInventoryActionAuthorityForgetsStepEnvironmentDependingOnMutableInherit
 	}
 }
 
+func TestInventoryActionAuthorityRetainsStepEnvironmentResolvedBeforeFirstAction(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "github", Runtime: ActionRuntimeJavaScript, JavaScript: &JavaScriptAction{
+			Main: "index.js", Post: "post.js", PostCondition: testActionSite("env.FLAG == 'true' && github.token != ''"),
+		}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{EnvironmentLayers: [][]Binding{
+		{{Name: "BASE", Value: testWorkflowSite("false")}},
+		{{Name: "FLAG", Value: testWorkflowSite("${{ env.BASE }}")}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("post condition forgot the step environment resolved before the first action ran")
+	}
+}
+
 func TestInventoryActionAuthorityEvaluatesChildStableEnvironmentWithParentInputs(t *testing.T) {
 	actions := map[string]Action{
 		"root": {

@@ -1155,6 +1155,12 @@ func TestCompileActionLocksDoesNotValidateUnusedNativeLifecycle(t *testing.T) {
 	}
 }
 
+func TestUsesNativeActionAdapterNormalizesReferenceCase(t *testing.T) {
+	if !usesNativeActionAdapter("Actions/Checkout@v4") {
+		t.Fatal("mixed-case checkout reference did not select the native adapter")
+	}
+}
+
 func TestCompileActionLocksAllowsOnlyAuditedCacheCommits(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	for _, path := range []string{"", "restore", "save"} {

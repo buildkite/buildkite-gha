@@ -41,9 +41,14 @@ func InventoryActionAuthority(actions map[string]Action, invocation ActionInvoca
 	if err != nil {
 		return Authority{}, err
 	}
-	stableKnown, err := actionPhaseKnownReferences(context, true)
-	if err != nil {
-		return Authority{}, err
+	stableKnown := withoutKnownEnvironment(mainKnown)
+	if len(context.EnvironmentLayers) != 0 {
+		for _, binding := range context.EnvironmentLayers[len(context.EnvironmentLayers)-1] {
+			name := "env." + strings.ToLower(binding.Name)
+			if value, ok := mainKnown[name]; ok {
+				stableKnown[name] = value
+			}
+		}
 	}
 	planner.workflowInputScope = known
 	mainReachable := true
