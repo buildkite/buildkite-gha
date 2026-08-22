@@ -258,6 +258,7 @@ func TestRunJobHydratesNeedsAndPublishesAuthoritativeResult(t *testing.T) {
 	}}
 	job.Env = map[string]string{"RESULT": "${{ needs.producer.outputs.result }}"}
 	job.Steps = []plan.Step{{ID: "consume", Kind: "run", Command: `test "$RESULT" = "hydrated"`}}
+	job.Program.Job.Steps[0].ID = "consume"
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
 

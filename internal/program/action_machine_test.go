@@ -387,6 +387,38 @@ func TestActionMachineNestedPreparationPreservesHardAdapterFailure(t *testing.T)
 	}
 }
 
+func TestActionMachineDoesNotRetryToleratedPreparationFailure(t *testing.T) {
+	child := js("pre", "main", "")
+	child.JavaScript.PreCondition = site("env:run")
+	actions := map[string]Action{
+		"root": {Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{
+			{ContinueOnError: true, Invocation: &Invocation{Lock: "child"}},
+		}}},
+		"child": child,
+	}
+	adapter := &traceAdapter{evaluationErrors: map[string]error{"env:run": fmt.Errorf("invalid pre-if")}}
+	machine := NewActionMachine(actions, adapter, traceState{})
+	frame, execution, err := machine.Prepare(t.Context(), invocation("root", "root"), Frame{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Outcomes != OutcomeSuccess {
+		t.Fatalf("Prepare() outcome = %v, want tolerated success", execution.Outcomes)
+	}
+	delete(adapter.evaluationErrors, "env:run")
+	frame.Environment = ValueObject{Fields: map[string]expression.AbstractValue{"run": known(true)}}
+	_, execution, err = machine.Invoke(t.Context(), invocation("root", "root"), frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Outcomes != OutcomeSuccess {
+		t.Fatalf("Invoke() outcome = %v, want tolerated success", execution.Outcomes)
+	}
+	if slices.ContainsFunc(machine.State().events, func(event string) bool { return strings.Contains(event, ":main ") }) {
+		t.Fatalf("child main ran after its preparation failed: %q", machine.State().events)
+	}
+}
+
 func TestActionMachineInvocationExpressionFailuresAreSoft(t *testing.T) {
 	tests := map[string]Action{
 		"javascript pre-if": {

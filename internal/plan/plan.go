@@ -525,9 +525,7 @@ func (job Job) validateExecutionPrograms() error {
 			return err
 		}
 	}
-	normalizedSteps := make(map[string]program.Step, len(job.Program.Job.Steps))
 	for _, step := range job.Program.Job.Steps {
-		normalizedSteps[step.ID] = step
 		if step.Invocation != nil {
 			if step.Invocation.Lock != "" {
 				if _, ok := job.ActionPrograms[step.Invocation.Lock]; ok {
@@ -537,12 +535,18 @@ func (job Job) validateExecutionPrograms() error {
 			}
 		}
 	}
-	for _, step := range job.Steps {
+	if len(job.Program.Job.Steps) != len(job.Steps) {
+		return fmt.Errorf("resolved steps do not match the normalized workflow step order")
+	}
+	for i, step := range job.Steps {
+		normalized := job.Program.Job.Steps[i]
+		if normalized.ID != step.ID || normalized.Kind != step.Kind {
+			return fmt.Errorf("resolved step %d does not match the normalized workflow step order", i+1)
+		}
 		if step.Action == nil {
 			continue
 		}
-		normalized, ok := normalizedSteps[step.ID]
-		if !ok || normalized.Invocation == nil || normalized.Invocation.Lock != step.Action.Lock || normalized.Invocation.Uses.Source != step.Uses {
+		if normalized.Invocation == nil || normalized.Invocation.Lock != step.Action.Lock || normalized.Invocation.Uses.Source != step.Uses {
 			return fmt.Errorf("resolved action step %q does not match its normalized invocation", step.ID)
 		}
 		if _, ok := job.ActionPrograms[step.Action.Lock]; !ok {
