@@ -602,7 +602,14 @@ func TestActionLockResolverFailsClosed(t *testing.T) {
 
 func TestVerifiedActionEntrypointStaysWithinRepository(t *testing.T) {
 	parent := t.TempDir()
+	realRepository := filepath.Join(parent, "real-repository")
 	repository := filepath.Join(parent, "repository")
+	if err := os.MkdirAll(realRepository, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realRepository, repository); err != nil {
+		t.Fatal(err)
+	}
 	action := filepath.Join(repository, "action")
 	dist := filepath.Join(repository, "dist")
 	if err := os.MkdirAll(action, 0o755); err != nil {
