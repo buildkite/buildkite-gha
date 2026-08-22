@@ -50,127 +50,127 @@ const (
 )
 
 type Position struct {
-	Line   int
-	Column int
+	Line   int `json:"line"`
+	Column int `json:"column"`
 }
 
 // Location retains the workflow source and stable normalized field path used
 // for diagnostics and coverage tests.
 type Location struct {
-	File  string
-	Field string
-	Start Position
-	End   Position
+	File  string   `json:"file"`
+	Field string   `json:"field"`
+	Start Position `json:"start"`
+	End   Position `json:"end"`
 }
 
 // Site is one expression or template evaluated at a defined execution point.
 type Site struct {
-	Source     string
-	Surface    Surface
-	Result     ResultType
-	Provenance Provenance
-	Purpose    Purpose
-	Location   Location
+	Source     string     `json:"source"`
+	Surface    Surface    `json:"surface"`
+	Result     ResultType `json:"result"`
+	Provenance Provenance `json:"provenance"`
+	Purpose    Purpose    `json:"purpose"`
+	Location   Location   `json:"location"`
 }
 
 type Binding struct {
-	Name  string
-	Value Site
+	Name  string `json:"name"`
+	Value Site   `json:"value"`
 }
 
 type BoolControl struct {
-	Literal    bool
-	Expression *Site
+	Literal    bool  `json:"literal"`
+	Expression *Site `json:"expression,omitempty"`
 }
 
 type NumberControl struct {
-	Literal    float64
-	Expression *Site
+	Literal    float64 `json:"literal"`
+	Expression *Site   `json:"expression,omitempty"`
 }
 
 type Defaults struct {
-	Shell            Site
-	WorkingDirectory Site
+	Shell            Site `json:"shell"`
+	WorkingDirectory Site `json:"working_directory"`
 }
 
 type Container struct {
-	Image Site
-	Env   []Binding
-	Ports []Site
+	Image Site      `json:"image"`
+	Env   []Binding `json:"env"`
+	Ports []Site    `json:"ports"`
 }
 
 type ContainerCredentials struct {
-	Username Site
-	Password Site
+	Username Site `json:"username"`
+	Password Site `json:"password"`
 }
 
 type ServiceContainer struct {
-	Image       Site
-	Credentials *ContainerCredentials
-	Env         []Binding
-	Ports       []Site
-	Volumes     []Site
-	Options     Site
-	Command     Site
-	Entrypoint  Site
+	Image       Site                  `json:"image"`
+	Credentials *ContainerCredentials `json:"credentials,omitempty"`
+	Env         []Binding             `json:"env"`
+	Ports       []Site                `json:"ports"`
+	Volumes     []Site                `json:"volumes"`
+	Options     Site                  `json:"options"`
+	Command     Site                  `json:"command"`
+	Entrypoint  Site                  `json:"entrypoint"`
 }
 
 type Service struct {
-	Name      string
-	Container ServiceContainer
+	Name      string           `json:"name"`
+	Container ServiceContainer `json:"container"`
 }
 
 type Services struct {
-	Static  []Service
-	Dynamic *Site
+	Static  []Service `json:"static"`
+	Dynamic *Site     `json:"dynamic,omitempty"`
 }
 
 type Run struct {
-	Command          Site
-	Shell            Site
-	WorkingDirectory Site
+	Command          Site `json:"command"`
+	Shell            Site `json:"shell"`
+	WorkingDirectory Site `json:"working_directory"`
 }
 
 type Invocation struct {
-	Uses Site
-	With []Binding
-	Lock string
+	Uses Site      `json:"uses"`
+	With []Binding `json:"with"`
+	Lock string    `json:"lock"`
 }
 
 type Step struct {
-	ID              string
-	Kind            string
-	Background      bool
-	Targets         []string
-	Source          Location
-	Env             []Binding
-	Condition       Site
-	ContinueOnError BoolControl
-	TimeoutMinutes  NumberControl
-	Name            Site
-	Run             *Run
-	Invocation      *Invocation
+	ID              string        `json:"id"`
+	Kind            string        `json:"kind"`
+	Background      bool          `json:"background"`
+	Targets         []string      `json:"targets"`
+	Source          Location      `json:"source"`
+	Env             []Binding     `json:"env"`
+	Condition       Site          `json:"condition"`
+	ContinueOnError BoolControl   `json:"continue_on_error"`
+	TimeoutMinutes  NumberControl `json:"timeout_minutes"`
+	Name            Site          `json:"name"`
+	Run             *Run          `json:"run,omitempty"`
+	Invocation      *Invocation   `json:"invocation,omitempty"`
 }
 
 type Guard struct {
-	Condition Site
+	Condition Site `json:"condition"`
 }
 
 type Job struct {
-	Guards          []Guard
-	Condition       Site
-	ContinueOnError bool
-	TimeoutMinutes  float64
-	Env             []Binding
-	Defaults        Defaults
-	Container       *Container
-	Services        Services
-	Steps           []Step
-	Outputs         []Binding
+	Guards          []Guard    `json:"guards"`
+	Condition       Site       `json:"condition"`
+	ContinueOnError bool       `json:"continue_on_error"`
+	TimeoutMinutes  float64    `json:"timeout_minutes"`
+	Env             []Binding  `json:"env"`
+	Defaults        Defaults   `json:"defaults"`
+	Container       *Container `json:"container,omitempty"`
+	Services        Services   `json:"services"`
+	Steps           []Step     `json:"steps"`
+	Outputs         []Binding  `json:"outputs"`
 }
 
 type Program struct {
-	Job Job
+	Job Job `json:"job"`
 }
 
 type ActionRuntime string
@@ -183,51 +183,51 @@ const (
 )
 
 type ActionInput struct {
-	Name     string
-	Required bool
-	Default  *Site
+	Name     string `json:"name"`
+	Required bool   `json:"required"`
+	Default  *Site  `json:"default,omitempty"`
 }
 
 type JavaScriptAction struct {
-	NodeMajor     int
-	Pre           string
-	PreCondition  Site
-	Main          string
-	Post          string
-	PostCondition Site
+	NodeMajor     int    `json:"node_major"`
+	Pre           string `json:"pre"`
+	PreCondition  Site   `json:"pre_condition"`
+	Main          string `json:"main"`
+	Post          string `json:"post"`
+	PostCondition Site   `json:"post_condition"`
 }
 
 type DockerAction struct {
-	Arguments []Site
-	Env       []Binding
+	Arguments []Site    `json:"arguments"`
+	Env       []Binding `json:"env"`
 }
 
 type CompositeStep struct {
-	ID              string
-	Name            Site
-	Condition       Site
-	ContinueOnError bool
-	Env             []Binding
-	Run             *Run
-	Invocation      *Invocation
+	ID              string      `json:"id"`
+	Name            Site        `json:"name"`
+	Condition       Site        `json:"condition"`
+	ContinueOnError bool        `json:"continue_on_error"`
+	Env             []Binding   `json:"env"`
+	Run             *Run        `json:"run,omitempty"`
+	Invocation      *Invocation `json:"invocation,omitempty"`
 }
 
 type CompositeAction struct {
-	Steps []CompositeStep
+	Steps []CompositeStep `json:"steps"`
 }
 
 // Action is the immutable execution model derived from one resolved action
 // manifest. Source locks retain repository identity and tree verification.
 type Action struct {
-	Name       string
-	Source     string
-	Runtime    ActionRuntime
-	Inputs     []ActionInput
-	Outputs    []Binding
-	JavaScript *JavaScriptAction
-	Composite  *CompositeAction
-	Docker     *DockerAction
-	Location   Location
+	Name       string            `json:"name"`
+	Source     string            `json:"source"`
+	Runtime    ActionRuntime     `json:"runtime"`
+	Inputs     []ActionInput     `json:"inputs"`
+	Outputs    []Binding         `json:"outputs"`
+	JavaScript *JavaScriptAction `json:"javascript,omitempty"`
+	Composite  *CompositeAction  `json:"composite,omitempty"`
+	Docker     *DockerAction     `json:"docker,omitempty"`
+	Location   Location          `json:"location"`
 }
 
 // VisitSites walks every action-authored expression site in lifecycle order.

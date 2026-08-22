@@ -29,6 +29,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
@@ -3253,7 +3254,7 @@ runs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "METADATA_ONLY") || strings.Contains(string(encoded), "DEPLOY_TOKEN") {
+	if strings.Contains(string(encoded), "DEPLOY_TOKEN") {
 		t.Fatalf("top-level action env leaked into plan: %s", encoded)
 	}
 
@@ -7294,14 +7295,26 @@ func runtimePlan(t *testing.T, workspace, workflowPath string, steps []plan.Step
 	}
 	digest := sha256.Sum256(source)
 	requiresMise := true
+	location := program.Location{}
+	site := func(surface program.Surface, result program.ResultType) program.Site {
+		return program.Site{Surface: surface, Result: result, Provenance: program.ProvenanceWorkflow, Purpose: program.PurposeExpression, Location: location}
+	}
+	programSteps := make([]program.Step, len(steps))
+	for i, step := range steps {
+		programSteps[i] = program.Step{ID: step.ID, Kind: step.Kind, Condition: site(program.SurfaceStepCondition, program.ResultBoolean), Name: site(program.SurfaceStepTemplate, program.ResultString)}
+	}
 	return plan.Job{
 		Schema: plan.Schema, Compiler: plan.Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
-		Runtime:      &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
-		Workflow:     plan.Workflow{Path: workflowPath, Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "fixture"},
-		Event:        plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
-		Target:       plan.Target{StepKey: "gha-fixture", Queue: "ubuntu-latest"},
-		Steps:        steps,
-		RequiresMise: &requiresMise,
+		Runtime:  &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
+		Workflow: plan.Workflow{Path: workflowPath, Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "fixture"},
+		Event:    plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
+		Target:   plan.Target{StepKey: "gha-fixture", Queue: "ubuntu-latest"},
+		Steps:    steps,
+		Program: program.Program{Job: program.Job{Condition: site(program.SurfaceJobCondition, program.ResultBoolean), Defaults: program.Defaults{
+			Shell: site(program.SurfaceJobDefault, program.ResultString), WorkingDirectory: site(program.SurfaceJobDefault, program.ResultString),
+		}, Steps: programSteps}},
+		ActionPrograms: map[string]program.Action{},
+		RequiresMise:   &requiresMise,
 	}
 }
 

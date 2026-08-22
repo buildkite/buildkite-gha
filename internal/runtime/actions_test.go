@@ -21,6 +21,7 @@ import (
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
 type fakeActionMaterializer struct {
@@ -78,6 +79,45 @@ func workflowJob(t *testing.T, workspace string) plan.Job {
 	}
 	h := sha256.Sum256(b)
 	return plan.Job{Workflow: plan.Workflow{Path: ".github/workflows/test.yml", Digest: "sha256:" + hex.EncodeToString(h[:])}}
+}
+
+func TestActionLockResolverUsesNormalizedProgramWithoutParsingMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	job := workflowJob(t, workspace)
+	actionPath := filepath.Join(workspace, "action")
+	if err := os.Mkdir(actionPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionPath, "action.yml"), []byte("not: [valid"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionPath, "index.js"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const lockID = "a-0000000000000001"
+	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "action", SourceDigest: digestTree(t, actionPath)}}
+	job.ActionPrograms = map[string]program.Action{lockID: {
+		Name: "compiled action", Source: "workspace", Runtime: program.ActionRuntimeJavaScript,
+		JavaScript: &program.JavaScriptAction{NodeMajor: 24, Main: "index.js"},
+	}}
+
+	action, _, err := newActionLockResolver(job, workspace, nil).resolve(t.Context(), plan.ActionSelector{Lock: lockID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action.Name != "compiled action" || action.Runs.Main != "index.js" {
+		t.Fatalf("resolved normalized action = %#v", action)
+	}
+}
+
+func TestActionMetadataRejectsMalformedNormalizedCompositeStep(t *testing.T) {
+	_, err := actionMetadata(program.Action{
+		Runtime:   program.ActionRuntimeComposite,
+		Composite: &program.CompositeAction{Steps: []program.CompositeStep{{}}},
+	}, t.TempDir(), t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "must have exactly one execution") {
+		t.Fatalf("malformed composite step error = %v", err)
+	}
 }
 
 func TestActionLockResolverGitHubExactSourceSingleFlightAndTampering(t *testing.T) {

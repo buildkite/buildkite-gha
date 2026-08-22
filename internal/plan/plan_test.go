@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -30,6 +31,26 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 		t.Fatalf("decoded fixture lost trust bindings: %#v", job)
 	}
 	validateJobPlanSchema(t, source)
+}
+
+func TestNormalizedProgramsAreRequiredAtThePlanBoundary(t *testing.T) {
+	job := validJob()
+	job.Program = program.Program{}
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "normalized workflow program is required") {
+		t.Fatalf("missing workflow program error = %v", err)
+	}
+
+	job = validJob()
+	job.ActionPrograms = nil
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "action_programs must be a concrete object") {
+		t.Fatalf("missing action programs error = %v", err)
+	}
+
+	job = validJob()
+	job.ActionPrograms["a-0000000000000001"] = program.Action{Source: "workspace", Runtime: program.ActionRuntimeNative}
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "has no matching lock") {
+		t.Fatalf("unlocked action program error = %v", err)
+	}
 }
 
 func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
@@ -782,6 +803,10 @@ func leftPadHex(value int) string {
 }
 
 func validJob() Job {
+	location := program.Location{}
+	site := func(surface program.Surface, result program.ResultType) program.Site {
+		return program.Site{Surface: surface, Result: result, Provenance: program.ProvenanceWorkflow, Purpose: program.PurposeExpression, Location: location}
+	}
 	return Job{
 		Schema:               Schema,
 		Compiler:             Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
@@ -791,7 +816,15 @@ func validJob() Job {
 		Target:               Target{StepKey: "gha-test", Queue: "ubuntu-latest"},
 		RequiredCapabilities: []string{},
 		Steps:                []Step{{ID: "step-1", Kind: "run", Command: "true"}},
-		RequiresMise:         new(bool),
+		Program: program.Program{Job: program.Job{
+			Condition: site(program.SurfaceJobCondition, program.ResultBoolean),
+			Defaults: program.Defaults{
+				Shell: site(program.SurfaceJobDefault, program.ResultString), WorkingDirectory: site(program.SurfaceJobDefault, program.ResultString),
+			},
+			Steps: []program.Step{{ID: "step-1", Kind: "run", Condition: site(program.SurfaceStepCondition, program.ResultBoolean), Name: site(program.SurfaceStepTemplate, program.ResultString)}},
+		}},
+		ActionPrograms: map[string]program.Action{},
+		RequiresMise:   new(bool),
 	}
 }
 

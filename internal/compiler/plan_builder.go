@@ -627,6 +627,9 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram 
 
 func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.Program, runtimeDistributionDigest string, steps []plan.Step, actions builtPlanActions, needSources map[string][]plan.NeedSource, needOutputs map[string][]plan.NeedOutput, deferredInputs map[string]plan.DeferredInput, callGuards []plan.CallGuard, secrets []string, githubToken *plan.GitHubToken) plan.Job {
 	programJob := workflowProgram.Job
+	if actions.programs == nil {
+		actions.programs = map[string]program.Action{}
+	}
 	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
@@ -668,6 +671,8 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		Outputs:                 programBindingMap(programJob.Outputs),
 		Steps:                   steps,
 		Actions:                 actions.locks,
+		Program:                 workflowProgram,
+		ActionPrograms:          actions.programs,
 	}
 	job.RequiresMise = &actions.requiresMise
 	if programJob.Container != nil {

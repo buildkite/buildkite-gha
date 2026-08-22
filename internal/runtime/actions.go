@@ -13,6 +13,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
 // ActionMaterializer materializes an already resolved, immutable action source.
@@ -165,22 +166,25 @@ func (r *actionLockResolver) verifyWorkspace(lock plan.ActionLock) (metadata.Met
 	if err := verifyWorkflow(r.job, r.workspace); err != nil {
 		return metadata.Metadata{}, fmt.Errorf("workspace action workflow verification failed: %w", err)
 	}
-	resolved, err := metadata.Load(r.workspace, lock.Path)
+	actionPath, err := verifiedActionPath(r.workspace, lock.Path)
 	if err != nil {
-		return metadata.Metadata{}, fmt.Errorf("resolve workspace action before metadata load: %w", err)
+		return metadata.Metadata{}, fmt.Errorf("resolve workspace action: %w", err)
 	}
-	digest, err := source.DigestTree(resolved.Path)
+	digest, err := source.DigestTree(actionPath)
 	if err != nil {
-		return metadata.Metadata{}, fmt.Errorf("digest workspace action tree before metadata load: %w", err)
+		return metadata.Metadata{}, fmt.Errorf("digest workspace action tree: %w", err)
 	}
 	if digest != lock.SourceDigest {
 		return metadata.Metadata{}, fmt.Errorf("workspace action digest mismatch: lock binds %s, tree has %s", lock.SourceDigest, digest)
+	}
+	if action, ok := r.job.ActionPrograms[lock.ID]; ok {
+		return actionMetadata(action, actionPath, actionPath)
 	}
 	m, err := metadata.Load(r.workspace, lock.Path)
 	if err != nil {
 		return metadata.Metadata{}, fmt.Errorf("load workspace action: %w", err)
 	}
-	if m.Path != resolved.Path {
+	if m.Path != actionPath {
 		return metadata.Metadata{}, fmt.Errorf("workspace action path mutated during metadata load")
 	}
 	digest, err = source.DigestTree(m.Path)
@@ -247,6 +251,13 @@ func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLock
 	if digest != lock.SourceDigest {
 		return metadata.Metadata{}, fmt.Errorf("materialized repository tree digest mismatch: lock binds %s, tree has %s", lock.SourceDigest, digest)
 	}
+	if action, ok := r.job.ActionPrograms[lock.ID]; ok {
+		actionPath, err := verifiedActionPath(repositoryRoot, lock.Path)
+		if err != nil {
+			return metadata.Metadata{}, fmt.Errorf("resolve materialized action: %w", err)
+		}
+		return actionMetadata(action, actionPath, repositoryRoot)
+	}
 	m, err := metadata.Load(repositoryRoot, lock.Path)
 	if err != nil {
 		// Admitted legacy releases predate the supported metadata set, and a
@@ -266,6 +277,103 @@ func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLock
 	}
 	m.SourceRoot = repositoryRoot
 	return m, nil
+}
+
+func verifiedActionPath(root, relative string) (string, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	candidate := filepath.Join(root, filepath.FromSlash(relative))
+	candidate, err = filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, candidate)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes verified source root")
+	}
+	info, err := os.Stat(candidate)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("action path is not a directory")
+	}
+	return candidate, nil
+}
+
+func actionMetadata(action program.Action, actionPath, sourceRoot string) (metadata.Metadata, error) {
+	m := metadata.Metadata{Name: action.Name, Path: actionPath, SourceRoot: sourceRoot, Inputs: make(map[string]metadata.Input, len(action.Inputs)), Outputs: make(map[string]metadata.Output, len(action.Outputs))}
+	for _, input := range action.Inputs {
+		var value *string
+		if input.Default != nil {
+			source := input.Default.Source
+			value = &source
+		}
+		m.Inputs[input.Name] = metadata.Input{Required: input.Required, Default: value}
+	}
+	for _, output := range action.Outputs {
+		m.Outputs[output.Name] = metadata.Output{Value: output.Value.Source}
+	}
+	switch action.Runtime {
+	case program.ActionRuntimeJavaScript:
+		if action.JavaScript == nil {
+			return metadata.Metadata{}, fmt.Errorf("normalized JavaScript action has no lifecycle")
+		}
+		if action.JavaScript.NodeMajor != 16 && action.JavaScript.NodeMajor != 24 {
+			return metadata.Metadata{}, fmt.Errorf("normalized JavaScript action has unsupported Node.js runtime %d", action.JavaScript.NodeMajor)
+		}
+		using := string(metadata.RuntimeNode24)
+		if action.JavaScript.NodeMajor == 16 {
+			using = string(metadata.RuntimeNode16)
+		}
+		m.Runs = metadata.Runs{Using: using, Pre: action.JavaScript.Pre, PreIf: action.JavaScript.PreCondition.Source, Main: action.JavaScript.Main, Post: action.JavaScript.Post, PostIf: action.JavaScript.PostCondition.Source}
+	case program.ActionRuntimeComposite:
+		if action.Composite == nil {
+			return metadata.Metadata{}, fmt.Errorf("normalized composite action has no execution body")
+		}
+		m.Runs.Using = string(metadata.RuntimeComposite)
+		m.Runs.Steps = make([]metadata.CompositeStep, len(action.Composite.Steps))
+		for i, step := range action.Composite.Steps {
+			if (step.Run == nil) == (step.Invocation == nil) {
+				return metadata.Metadata{}, fmt.Errorf("normalized composite action step %d must have exactly one execution", i+1)
+			}
+			lowered := metadata.CompositeStep{ID: step.ID, Name: step.Name.Source, If: step.Condition.Source, ContinueOnError: step.ContinueOnError, Env: bindingSources(step.Env)}
+			if step.Run != nil {
+				lowered.Run, lowered.Shell, lowered.WorkingDirectory = step.Run.Command.Source, step.Run.Shell.Source, step.Run.WorkingDirectory.Source
+			} else {
+				lowered.Uses, lowered.With = step.Invocation.Uses.Source, bindingSources(step.Invocation.With)
+			}
+			m.Runs.Steps[i] = lowered
+		}
+	case program.ActionRuntimeDocker:
+		if action.Docker == nil {
+			return metadata.Metadata{}, fmt.Errorf("normalized Docker action has no execution body")
+		}
+		m.Runs.Using, m.Runs.Image = string(metadata.RuntimeDocker), "Dockerfile"
+		m.Runs.Args = make([]string, len(action.Docker.Arguments))
+		for i, argument := range action.Docker.Arguments {
+			m.Runs.Args[i] = argument.Source
+		}
+		m.Runs.Env = bindingSources(action.Docker.Env)
+	case program.ActionRuntimeNative:
+	default:
+		return metadata.Metadata{}, fmt.Errorf("normalized action has unsupported runtime %q", action.Runtime)
+	}
+	return m, nil
+}
+
+func bindingSources(bindings []program.Binding) map[string]string {
+	if len(bindings) == 0 {
+		return nil
+	}
+	values := make(map[string]string, len(bindings))
+	for _, binding := range bindings {
+		values[binding.Name] = binding.Value.Source
+	}
+	return values
 }
 
 func (entry *actionLockEntry) materialize(ctx context.Context, materializer ActionMaterializer, resolved source.Resolved) (source.Materialized, error) {

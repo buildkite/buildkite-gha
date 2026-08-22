@@ -1,6 +1,6 @@
 [
   {
-    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json",
+    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json",
     "compiler": {
       "version": "0.0.0-test",
       "distribution_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -69,10 +69,374 @@
         }
       }
     ],
+    "program": {
+      "job": {
+        "guards": null,
+        "condition": {
+          "source": "",
+          "surface": "job-condition",
+          "result": "boolean",
+          "provenance": "workflow",
+          "purpose": "expression",
+          "location": {
+            "file": "./.github/workflows/shell.yml",
+            "field": "job.if",
+            "start": {
+              "line": 10,
+              "column": 3
+            },
+            "end": {
+              "line": 22,
+              "column": 1
+            }
+          }
+        },
+        "continue_on_error": false,
+        "timeout_minutes": 0,
+        "env": null,
+        "defaults": {
+          "shell": {
+            "source": "",
+            "surface": "job-default",
+            "result": "string",
+            "provenance": "workflow",
+            "purpose": "expression",
+            "location": {
+              "file": "./.github/workflows/shell.yml",
+              "field": "job.defaults.run.shell",
+              "start": {
+                "line": 10,
+                "column": 3
+              },
+              "end": {
+                "line": 22,
+                "column": 1
+              }
+            }
+          },
+          "working_directory": {
+            "source": "",
+            "surface": "job-default",
+            "result": "string",
+            "provenance": "workflow",
+            "purpose": "expression",
+            "location": {
+              "file": "./.github/workflows/shell.yml",
+              "field": "job.defaults.run.working-directory",
+              "start": {
+                "line": 10,
+                "column": 3
+              },
+              "end": {
+                "line": 22,
+                "column": 1
+              }
+            }
+          }
+        },
+        "services": {
+          "static": null
+        },
+        "steps": [
+          {
+            "id": "produce",
+            "kind": "run",
+            "background": false,
+            "targets": null,
+            "source": {
+              "file": "./.github/workflows/shell.yml",
+              "field": "job.steps[0]",
+              "start": {
+                "line": 15,
+                "column": 9
+              },
+              "end": {
+                "line": 15,
+                "column": 54
+              }
+            },
+            "env": null,
+            "condition": {
+              "source": "",
+              "surface": "step-condition",
+              "result": "boolean",
+              "provenance": "workflow",
+              "purpose": "expression",
+              "location": {
+                "file": "./.github/workflows/shell.yml",
+                "field": "job.steps[0].if",
+                "start": {
+                  "line": 15,
+                  "column": 9
+                },
+                "end": {
+                  "line": 15,
+                  "column": 54
+                }
+              }
+            },
+            "continue_on_error": {
+              "literal": false
+            },
+            "timeout_minutes": {
+              "literal": 0
+            },
+            "name": {
+              "source": "Produce bounded output",
+              "surface": "step-template",
+              "result": "string",
+              "provenance": "workflow",
+              "purpose": "expression",
+              "location": {
+                "file": "./.github/workflows/shell.yml",
+                "field": "job.steps[0].name",
+                "start": {
+                  "line": 15,
+                  "column": 9
+                },
+                "end": {
+                  "line": 15,
+                  "column": 54
+                }
+              }
+            },
+            "run": {
+              "command": {
+                "source": "echo \"result=smoke-shell\" \u003e\u003e \"$GITHUB_OUTPUT\"",
+                "surface": "step-template",
+                "result": "string",
+                "provenance": "workflow",
+                "purpose": "expression",
+                "location": {
+                  "file": "./.github/workflows/shell.yml",
+                  "field": "job.steps[0].run",
+                  "start": {
+                    "line": 15,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 54
+                  }
+                }
+              },
+              "shell": {
+                "source": "bash",
+                "surface": "step-template",
+                "result": "string",
+                "provenance": "workflow",
+                "purpose": "expression",
+                "location": {
+                  "file": "./.github/workflows/shell.yml",
+                  "field": "job.steps[0].shell",
+                  "start": {
+                    "line": 15,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 54
+                  }
+                }
+              },
+              "working_directory": {
+                "source": "",
+                "surface": "step-template",
+                "result": "string",
+                "provenance": "workflow",
+                "purpose": "expression",
+                "location": {
+                  "file": "./.github/workflows/shell.yml",
+                  "field": "job.steps[0].working-directory",
+                  "start": {
+                    "line": 15,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 15,
+                    "column": 54
+                  }
+                }
+              }
+            }
+          },
+          {
+            "id": "step-2",
+            "kind": "run",
+            "background": false,
+            "targets": null,
+            "source": {
+              "file": "./.github/workflows/shell.yml",
+              "field": "job.steps[1]",
+              "start": {
+                "line": 20,
+                "column": 9
+              },
+              "end": {
+                "line": 22,
+                "column": 1
+              }
+            },
+            "env": [
+              {
+                "name": "CANARY",
+                "value": {
+                  "source": "shell-secret-canary-7f4c2a91",
+                  "surface": "step-template",
+                  "result": "string",
+                  "provenance": "workflow",
+                  "purpose": "expression",
+                  "location": {
+                    "file": "./.github/workflows/shell.yml",
+                    "field": "job.steps[1].env.CANARY",
+                    "start": {
+                      "line": 20,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 22,
+                      "column": 1
+                    }
+                  }
+                }
+              }
+            ],
+            "condition": {
+              "source": "",
+              "surface": "step-condition",
+              "result": "boolean",
+              "provenance": "workflow",
+              "purpose": "expression",
+              "location": {
+                "file": "./.github/workflows/shell.yml",
+                "field": "job.steps[1].if",
+                "start": {
+                  "line": 20,
+                  "column": 9
+                },
+                "end": {
+                  "line": 22,
+                  "column": 1
+                }
+              }
+            },
+            "continue_on_error": {
+              "literal": false
+            },
+            "timeout_minutes": {
+              "literal": 0
+            },
+            "name": {
+              "source": "Mask fixture before logging",
+              "surface": "step-template",
+              "result": "string",
+              "provenance": "workflow",
+              "purpose": "expression",
+              "location": {
+                "file": "./.github/workflows/shell.yml",
+                "field": "job.steps[1].name",
+                "start": {
+                  "line": 20,
+                  "column": 9
+                },
+                "end": {
+                  "line": 22,
+                  "column": 1
+                }
+              }
+            },
+            "run": {
+              "command": {
+                "source": "echo \"::add-mask::$CANARY\"\nprintf 'MASKED_CANARY=%s\\n' \"$CANARY\"\n",
+                "surface": "step-template",
+                "result": "string",
+                "provenance": "workflow",
+                "purpose": "expression",
+                "location": {
+                  "file": "./.github/workflows/shell.yml",
+                  "field": "job.steps[1].run",
+                  "start": {
+                    "line": 20,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 1
+                  }
+                }
+              },
+              "shell": {
+                "source": "bash",
+                "surface": "step-template",
+                "result": "string",
+                "provenance": "workflow",
+                "purpose": "expression",
+                "location": {
+                  "file": "./.github/workflows/shell.yml",
+                  "field": "job.steps[1].shell",
+                  "start": {
+                    "line": 20,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 1
+                  }
+                }
+              },
+              "working_directory": {
+                "source": "",
+                "surface": "step-template",
+                "result": "string",
+                "provenance": "workflow",
+                "purpose": "expression",
+                "location": {
+                  "file": "./.github/workflows/shell.yml",
+                  "field": "job.steps[1].working-directory",
+                  "start": {
+                    "line": 20,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 22,
+                    "column": 1
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "outputs": [
+          {
+            "name": "result",
+            "value": {
+              "source": "${{ steps.produce.outputs.result }}",
+              "surface": "job-output",
+              "result": "string",
+              "provenance": "workflow",
+              "purpose": "expression",
+              "location": {
+                "file": "./.github/workflows/shell.yml",
+                "field": "job.outputs.result",
+                "start": {
+                  "line": 10,
+                  "column": 3
+                },
+                "end": {
+                  "line": 22,
+                  "column": 1
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "action_programs": {},
     "requires_mise": false
   },
   {
-    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json",
+    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json",
     "compiler": {
       "version": "0.0.0-test",
       "distribution_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -109,7 +473,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:0512162f5009d09b762e6eff9e406f1cff715580619c28d427ab5c06e16d4d62"
+          "plan_digest": "sha256:3c574e8ebeb95e2eaa0feac072f22f050db3db518ad21acf50fbc6307b7730d8"
         }
       ]
     },
@@ -136,10 +500,251 @@
         }
       }
     ],
+    "program": {
+      "job": {
+        "guards": null,
+        "condition": {
+          "source": "",
+          "surface": "job-condition",
+          "result": "boolean",
+          "provenance": "workflow",
+          "purpose": "expression",
+          "location": {
+            "file": "./.github/workflows/shell.yml",
+            "field": "job.if",
+            "start": {
+              "line": 28,
+              "column": 3
+            },
+            "end": {
+              "line": 39,
+              "column": 1
+            }
+          }
+        },
+        "continue_on_error": false,
+        "timeout_minutes": 0,
+        "env": null,
+        "defaults": {
+          "shell": {
+            "source": "",
+            "surface": "job-default",
+            "result": "string",
+            "provenance": "workflow",
+            "purpose": "expression",
+            "location": {
+              "file": "./.github/workflows/shell.yml",
+              "field": "job.defaults.run.shell",
+              "start": {
+                "line": 28,
+                "column": 3
+              },
+              "end": {
+                "line": 39,
+                "column": 1
+              }
+            }
+          },
+          "working_directory": {
+            "source": "",
+            "surface": "job-default",
+            "result": "string",
+            "provenance": "workflow",
+            "purpose": "expression",
+            "location": {
+              "file": "./.github/workflows/shell.yml",
+              "field": "job.defaults.run.working-directory",
+              "start": {
+                "line": 28,
+                "column": 3
+              },
+              "end": {
+                "line": 39,
+                "column": 1
+              }
+            }
+          }
+        },
+        "services": {
+          "static": null
+        },
+        "steps": [
+          {
+            "id": "step-1",
+            "kind": "run",
+            "background": false,
+            "targets": null,
+            "source": {
+              "file": "./.github/workflows/shell.yml",
+              "field": "job.steps[0]",
+              "start": {
+                "line": 36,
+                "column": 9
+              },
+              "end": {
+                "line": 39,
+                "column": 1
+              }
+            },
+            "env": [
+              {
+                "name": "RESULT",
+                "value": {
+                  "source": "${{ needs.producer.outputs.result }}",
+                  "surface": "step-template",
+                  "result": "string",
+                  "provenance": "workflow",
+                  "purpose": "expression",
+                  "location": {
+                    "file": "./.github/workflows/shell.yml",
+                    "field": "job.steps[0].env.RESULT",
+                    "start": {
+                      "line": 36,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 39,
+                      "column": 1
+                    }
+                  }
+                }
+              },
+              {
+                "name": "VARIANT",
+                "value": {
+                  "source": "${{ matrix.variant }}",
+                  "surface": "step-template",
+                  "result": "string",
+                  "provenance": "workflow",
+                  "purpose": "expression",
+                  "location": {
+                    "file": "./.github/workflows/shell.yml",
+                    "field": "job.steps[0].env.VARIANT",
+                    "start": {
+                      "line": 36,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 39,
+                      "column": 1
+                    }
+                  }
+                }
+              }
+            ],
+            "condition": {
+              "source": "",
+              "surface": "step-condition",
+              "result": "boolean",
+              "provenance": "workflow",
+              "purpose": "expression",
+              "location": {
+                "file": "./.github/workflows/shell.yml",
+                "field": "job.steps[0].if",
+                "start": {
+                  "line": 36,
+                  "column": 9
+                },
+                "end": {
+                  "line": 39,
+                  "column": 1
+                }
+              }
+            },
+            "continue_on_error": {
+              "literal": false
+            },
+            "timeout_minutes": {
+              "literal": 0
+            },
+            "name": {
+              "source": "Consume bounded output",
+              "surface": "step-template",
+              "result": "string",
+              "provenance": "workflow",
+              "purpose": "expression",
+              "location": {
+                "file": "./.github/workflows/shell.yml",
+                "field": "job.steps[0].name",
+                "start": {
+                  "line": 36,
+                  "column": 9
+                },
+                "end": {
+                  "line": 39,
+                  "column": 1
+                }
+              }
+            },
+            "run": {
+              "command": {
+                "source": "test \"$RESULT\" = \"smoke-shell\"\nprintf 'SMOKE_OBSERVATION={\"result\":\"%s\",\"variant\":\"%s\"}\\n' \\\n  \"$RESULT\" \"$VARIANT\"\n",
+                "surface": "step-template",
+                "result": "string",
+                "provenance": "workflow",
+                "purpose": "expression",
+                "location": {
+                  "file": "./.github/workflows/shell.yml",
+                  "field": "job.steps[0].run",
+                  "start": {
+                    "line": 36,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 39,
+                    "column": 1
+                  }
+                }
+              },
+              "shell": {
+                "source": "bash",
+                "surface": "step-template",
+                "result": "string",
+                "provenance": "workflow",
+                "purpose": "expression",
+                "location": {
+                  "file": "./.github/workflows/shell.yml",
+                  "field": "job.steps[0].shell",
+                  "start": {
+                    "line": 36,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 39,
+                    "column": 1
+                  }
+                }
+              },
+              "working_directory": {
+                "source": "",
+                "surface": "step-template",
+                "result": "string",
+                "provenance": "workflow",
+                "purpose": "expression",
+                "location": {
+                  "file": "./.github/workflows/shell.yml",
+                  "field": "job.steps[0].working-directory",
+                  "start": {
+                    "line": 36,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 39,
+                    "column": 1
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "outputs": null
+      }
+    },
+    "action_programs": {},
     "requires_mise": false
   },
   {
-    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json",
+    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json",
     "compiler": {
       "version": "0.0.0-test",
       "distribution_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -176,7 +781,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:0512162f5009d09b762e6eff9e406f1cff715580619c28d427ab5c06e16d4d62"
+          "plan_digest": "sha256:3c574e8ebeb95e2eaa0feac072f22f050db3db518ad21acf50fbc6307b7730d8"
         }
       ]
     },
@@ -203,6 +808,247 @@
         }
       }
     ],
+    "program": {
+      "job": {
+        "guards": null,
+        "condition": {
+          "source": "",
+          "surface": "job-condition",
+          "result": "boolean",
+          "provenance": "workflow",
+          "purpose": "expression",
+          "location": {
+            "file": "./.github/workflows/shell.yml",
+            "field": "job.if",
+            "start": {
+              "line": 28,
+              "column": 3
+            },
+            "end": {
+              "line": 39,
+              "column": 1
+            }
+          }
+        },
+        "continue_on_error": false,
+        "timeout_minutes": 0,
+        "env": null,
+        "defaults": {
+          "shell": {
+            "source": "",
+            "surface": "job-default",
+            "result": "string",
+            "provenance": "workflow",
+            "purpose": "expression",
+            "location": {
+              "file": "./.github/workflows/shell.yml",
+              "field": "job.defaults.run.shell",
+              "start": {
+                "line": 28,
+                "column": 3
+              },
+              "end": {
+                "line": 39,
+                "column": 1
+              }
+            }
+          },
+          "working_directory": {
+            "source": "",
+            "surface": "job-default",
+            "result": "string",
+            "provenance": "workflow",
+            "purpose": "expression",
+            "location": {
+              "file": "./.github/workflows/shell.yml",
+              "field": "job.defaults.run.working-directory",
+              "start": {
+                "line": 28,
+                "column": 3
+              },
+              "end": {
+                "line": 39,
+                "column": 1
+              }
+            }
+          }
+        },
+        "services": {
+          "static": null
+        },
+        "steps": [
+          {
+            "id": "step-1",
+            "kind": "run",
+            "background": false,
+            "targets": null,
+            "source": {
+              "file": "./.github/workflows/shell.yml",
+              "field": "job.steps[0]",
+              "start": {
+                "line": 36,
+                "column": 9
+              },
+              "end": {
+                "line": 39,
+                "column": 1
+              }
+            },
+            "env": [
+              {
+                "name": "RESULT",
+                "value": {
+                  "source": "${{ needs.producer.outputs.result }}",
+                  "surface": "step-template",
+                  "result": "string",
+                  "provenance": "workflow",
+                  "purpose": "expression",
+                  "location": {
+                    "file": "./.github/workflows/shell.yml",
+                    "field": "job.steps[0].env.RESULT",
+                    "start": {
+                      "line": 36,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 39,
+                      "column": 1
+                    }
+                  }
+                }
+              },
+              {
+                "name": "VARIANT",
+                "value": {
+                  "source": "${{ matrix.variant }}",
+                  "surface": "step-template",
+                  "result": "string",
+                  "provenance": "workflow",
+                  "purpose": "expression",
+                  "location": {
+                    "file": "./.github/workflows/shell.yml",
+                    "field": "job.steps[0].env.VARIANT",
+                    "start": {
+                      "line": 36,
+                      "column": 9
+                    },
+                    "end": {
+                      "line": 39,
+                      "column": 1
+                    }
+                  }
+                }
+              }
+            ],
+            "condition": {
+              "source": "",
+              "surface": "step-condition",
+              "result": "boolean",
+              "provenance": "workflow",
+              "purpose": "expression",
+              "location": {
+                "file": "./.github/workflows/shell.yml",
+                "field": "job.steps[0].if",
+                "start": {
+                  "line": 36,
+                  "column": 9
+                },
+                "end": {
+                  "line": 39,
+                  "column": 1
+                }
+              }
+            },
+            "continue_on_error": {
+              "literal": false
+            },
+            "timeout_minutes": {
+              "literal": 0
+            },
+            "name": {
+              "source": "Consume bounded output",
+              "surface": "step-template",
+              "result": "string",
+              "provenance": "workflow",
+              "purpose": "expression",
+              "location": {
+                "file": "./.github/workflows/shell.yml",
+                "field": "job.steps[0].name",
+                "start": {
+                  "line": 36,
+                  "column": 9
+                },
+                "end": {
+                  "line": 39,
+                  "column": 1
+                }
+              }
+            },
+            "run": {
+              "command": {
+                "source": "test \"$RESULT\" = \"smoke-shell\"\nprintf 'SMOKE_OBSERVATION={\"result\":\"%s\",\"variant\":\"%s\"}\\n' \\\n  \"$RESULT\" \"$VARIANT\"\n",
+                "surface": "step-template",
+                "result": "string",
+                "provenance": "workflow",
+                "purpose": "expression",
+                "location": {
+                  "file": "./.github/workflows/shell.yml",
+                  "field": "job.steps[0].run",
+                  "start": {
+                    "line": 36,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 39,
+                    "column": 1
+                  }
+                }
+              },
+              "shell": {
+                "source": "bash",
+                "surface": "step-template",
+                "result": "string",
+                "provenance": "workflow",
+                "purpose": "expression",
+                "location": {
+                  "file": "./.github/workflows/shell.yml",
+                  "field": "job.steps[0].shell",
+                  "start": {
+                    "line": 36,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 39,
+                    "column": 1
+                  }
+                }
+              },
+              "working_directory": {
+                "source": "",
+                "surface": "step-template",
+                "result": "string",
+                "provenance": "workflow",
+                "purpose": "expression",
+                "location": {
+                  "file": "./.github/workflows/shell.yml",
+                  "field": "job.steps[0].working-directory",
+                  "start": {
+                    "line": 36,
+                    "column": 9
+                  },
+                  "end": {
+                    "line": 39,
+                    "column": 1
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "outputs": null
+      }
+    },
+    "action_programs": {},
     "requires_mise": false
   }
 ]

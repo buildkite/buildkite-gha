@@ -19,6 +19,7 @@ import (
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -133,6 +134,7 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 		Steps:        []plan.Step{{ID: "produce", Kind: "run", Command: `echo "result=cli-ok" >> "$GITHUB_OUTPUT"`}},
 		RequiresMise: &requiresMise,
 	}
+	addCLIProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -836,6 +838,7 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
 		RequiresMise:         &requiresMise,
 	}
+	addCLIProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -859,7 +862,7 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 
 func cliRunJobPlan() plan.Job {
 	requiresMise := false
-	return plan.Job{
+	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
 			Version:            "dev",
@@ -877,6 +880,22 @@ func cliRunJobPlan() plan.Job {
 		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
 		RequiresMise:         &requiresMise,
 	}
+	addCLIProgram(&job)
+	return job
+}
+
+func addCLIProgram(job *plan.Job) {
+	site := func(surface program.Surface, result program.ResultType) program.Site {
+		return program.Site{Surface: surface, Result: result, Provenance: program.ProvenanceWorkflow, Purpose: program.PurposeExpression}
+	}
+	steps := make([]program.Step, len(job.Steps))
+	for i, step := range job.Steps {
+		steps[i] = program.Step{ID: step.ID, Kind: step.Kind, Condition: site(program.SurfaceStepCondition, program.ResultBoolean), Name: site(program.SurfaceStepTemplate, program.ResultString)}
+	}
+	job.Program = program.Program{Job: program.Job{Condition: site(program.SurfaceJobCondition, program.ResultBoolean), Defaults: program.Defaults{
+		Shell: site(program.SurfaceJobDefault, program.ResultString), WorkingDirectory: site(program.SurfaceJobDefault, program.ResultString),
+	}, Steps: steps}}
+	job.ActionPrograms = map[string]program.Action{}
 }
 
 func writeCLIJobPlan(t *testing.T, job plan.Job) (string, string) {
