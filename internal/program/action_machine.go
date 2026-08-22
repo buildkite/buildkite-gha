@@ -374,7 +374,7 @@ func (m *ActionMachine[S]) prepare(ctx context.Context, invocation ActionInvocat
 			var childExecution Execution
 			childFrame, childExecution, err := m.prepare(ctx, child, childAction, invocationFrame)
 			if err != nil {
-				failure := Execution{Outcomes: OutcomeFailure, Failure: &ExecutionFailure{Cause: fmt.Errorf("composite action step %d child %q: %w", i+1, step.Invocation.Uses.Source, err)}}
+				failure := failureExecution(fmt.Errorf("composite action step %d child %q: %w", i+1, step.Invocation.Uses.Source, err))
 				if !step.ContinueOnError {
 					return Frame{}, failure, nil
 				}
@@ -497,12 +497,14 @@ func (m *ActionMachine[S]) invoke(ctx context.Context, invocation ActionInvocati
 		if _, prepared := m.prepared[invocation.ID]; !prepared {
 			overlay, preFrame, err := m.enterEnvironment(ctx, invocation.Environment, frame)
 			if err != nil {
-				return Frame{}, Execution{}, err
+				execution := failureExecution(err)
+				return applyExecution(frame, execution), execution, nil
 			}
 			preFrame.CurrentLock = invocation.Lock
 			condition, err := m.evaluateCondition(ctx, lifecycleConditionSite(action.JavaScript.PreCondition), preFrame)
 			if err != nil {
-				return Frame{}, Execution{}, fmt.Errorf("action pre-if: %w", err)
+				execution := failureExecution(fmt.Errorf("action pre-if: %w", err))
+				return applyExecution(frame, execution), execution, nil
 			}
 			switch condition {
 			case GuardUnknown:
@@ -1080,13 +1082,15 @@ func (m *ActionMachine[S]) invokeDocker(ctx context.Context, invocation ActionIn
 	}
 	environment, err := m.evaluateBindings(ctx, action.Docker.Env, frame)
 	if err != nil {
-		return Frame{}, Execution{}, fmt.Errorf("docker environment: %w", err)
+		execution := failureExecution(fmt.Errorf("docker environment: %w", err))
+		return applyExecution(parent, execution), execution, nil
 	}
 	arguments := make([]expression.AbstractValue, 0, len(action.Docker.Arguments))
 	for i, site := range action.Docker.Arguments {
 		analysis, err := m.evaluate(ctx, site, frame)
 		if err != nil {
-			return Frame{}, Execution{}, fmt.Errorf("docker argument %d: %w", i+1, err)
+			execution := failureExecution(fmt.Errorf("docker argument %d: %w", i+1, err))
+			return applyExecution(parent, execution), execution, nil
 		}
 		arguments = append(arguments, analysis.Value)
 	}
@@ -1194,9 +1198,10 @@ func (m *ActionMachine[S]) invokeComposite(ctx context.Context, invocation Actio
 	}
 	outputs, err := m.evaluateBindings(ctx, action.Outputs, frame)
 	if err != nil {
-		return Frame{}, Execution{}, fmt.Errorf("composite action outputs: %w", err)
+		result = accumulateExecutions(result, failureExecution(fmt.Errorf("composite action outputs: %w", err)))
+	} else {
+		result.Outputs = outputs
 	}
-	result.Outputs = outputs
 	m.stepScopes[invocation.ID] = cloneStepFrames(frame.Steps)
 	m.updateNestedPostSteps(invocation.ID, frame.Steps)
 	return applyExecution(parent, result), result, nil
