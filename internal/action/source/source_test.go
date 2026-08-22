@@ -31,10 +31,21 @@ func TestParse(t *testing.T) {
 			t.Errorf("Parse(%q) = %#v, %v", good, r, err)
 		}
 	}
-	for _, bad := range []string{"", "./local@v1", "owner@v1", "owner/repo", "owner/repo@", "owner//repo@v1", "owner/repo/../x@v1", `owner/repo\x@v1`, "owner/repo@a?b", "owner/repo@${{ x }}", "-owner/repo@v1", "owner/repo.git@v1", "owner/repo@a//b"} {
+	for _, bad := range []string{"", "./local@v1", "owner@v1", "owner/repo", "owner/repo@", "owner//repo@v1", "owner/./x@v1", "owner/../x@v1", "owner/..github/x@v1", "owner/.github/../x@v1", `owner/repo\x@v1`, "owner/repo@a?b", "owner/repo@${{ x }}", "-owner/repo@v1", "owner/repo.git@v1", "owner/repo@a//b"} {
 		if _, err := Parse(bad); err == nil {
 			t.Errorf("Parse(%q) succeeded", bad)
 		}
+	}
+}
+
+func TestParseDotPrefixedRepository(t *testing.T) {
+	raw := "GaloisInc/.github/.github/workflows/haskell-ci.yml@v2"
+	got, err := Parse(raw)
+	want := Reference{
+		Owner: "GaloisInc", Repository: ".github", Path: ".github/workflows/haskell-ci.yml", Ref: "v2", Raw: raw,
+	}
+	if err != nil || got != want {
+		t.Fatalf("Parse(%q) = %#v, %v; want %#v", raw, got, err, want)
 	}
 }
 
@@ -959,7 +970,7 @@ func TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease(t *testing.T) {
 
 func TestStoreMaintenanceUsesLRUAndCleansOnlyUnlockedPartials(t *testing.T) {
 	root := t.TempDir()
-	repository := filepath.Join(root, "owner", "repo")
+	repository := filepath.Join(root, "owner", ".github")
 	if err := os.MkdirAll(repository, 0o755); err != nil {
 		t.Fatal(err)
 	}
