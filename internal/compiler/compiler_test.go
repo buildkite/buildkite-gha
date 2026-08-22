@@ -3885,6 +3885,7 @@ func TestCompilePlansEmitV8ForContainers(t *testing.T) {
 	if len(plans) != 1 || plans[0].Schema != plan.Schema || plans[0].Container == nil || !slices.Equal(plans[0].Container.Volumes, []string{"cache:/cache:ro", "/anonymous", "/srv/data:/data"}) || plans[0].Container.Options != `--privileged --label "description=two words"` || len(plans[0].Services) != 1 || !slices.Equal(plans[0].RequiredCapabilities, []string{"docker", "network"}) {
 		t.Fatalf("container plan = %#v", plans)
 	}
+	validateCompiledPlansAgainstSchema(t, plans)
 }
 
 func TestCompilePlansResolveJobContainerImageExpressions(t *testing.T) {
