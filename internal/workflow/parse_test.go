@@ -407,6 +407,25 @@ jobs:
 	}
 }
 
+func TestParseOwnsReusableWorkflowConcurrency(t *testing.T) {
+	parsed, err := Parse("reusable.yml", []byte(`on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+concurrency: deploy-${{ inputs.target }}
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.Callable || parsed.Concurrency == nil || parsed.Concurrency.Group != "deploy-${{ inputs.target }}" {
+		t.Fatalf("reusable workflow concurrency = callable %t, %#v", parsed.Callable, parsed.Concurrency)
+	}
+}
+
 func TestParseOwnsWorkflowLiteralCancellation(t *testing.T) {
 	for _, test := range []struct {
 		name, source string
@@ -780,6 +799,30 @@ jobs:
 	}
 	if matrix.IncludeExpression.Span.Start.Line != 8 || matrix.IncludeExpression.Span.Start.Column != 18 {
 		t.Fatalf("matrix include expression span = %#v", matrix.IncludeExpression.Span)
+	}
+}
+
+func TestParseRetainsMatrixExcludeExpression(t *testing.T) {
+	parsed, err := Parse("matrix.yml", []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        exclude: ${{ fromJSON(vars.EXCLUDE) }}
+    steps:
+      - run: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	matrix := parsed.Jobs[0].Matrix
+	if matrix == nil || matrix.ExcludeExpression == nil || matrix.ExcludeExpression.Text != "${{ fromJSON(vars.EXCLUDE) }}" {
+		t.Fatalf("matrix exclude expression = %#v", matrix)
+	}
+	if matrix.ExcludeExpression.Span.Start.Line != 8 || matrix.ExcludeExpression.Span.Start.Column != 18 {
+		t.Fatalf("matrix exclude expression span = %#v", matrix.ExcludeExpression.Span)
 	}
 }
 

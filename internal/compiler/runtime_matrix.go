@@ -59,7 +59,7 @@ func hasRuntimeMatrixBoundary(parsed *workflow.Workflow) bool {
 		if job.Matrix == nil {
 			continue
 		}
-		for _, candidate := range []*expression.Expression{job.Matrix.Expression, job.Matrix.IncludeExpression} {
+		for _, candidate := range []*expression.Expression{job.Matrix.Expression, job.Matrix.IncludeExpression, job.Matrix.ExcludeExpression} {
 			if candidate == nil {
 				continue
 			}

@@ -206,6 +206,7 @@ type Matrix struct {
 	Include           []MatrixCombination    `json:"include,omitempty"`
 	IncludeExpression *expression.Expression `json:"include_expression,omitempty"`
 	Exclude           []MatrixCombination    `json:"exclude,omitempty"`
+	ExcludeExpression *expression.Expression `json:"exclude_expression,omitempty"`
 	Span              Span                   `json:"span"`
 }
 

@@ -41,6 +41,7 @@ type sourcedJob struct {
 	jobPermissionsIgnored bool
 	reusableCall          workflow.Position
 	callGuards            []sourcedCallGuard
+	concurrencyGates      []WorkflowConcurrencyGate
 }
 
 type secretAuthority struct {
@@ -95,9 +96,11 @@ type reusableResolver struct {
 	rootPermissions       *workflow.Permissions
 	expanded              int
 	runtimeMatrixBoundary bool
+	warnings              []Warning
+	warnedCancellation    map[workflow.Position]bool
 }
 
-func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource) ([]sourcedJob, bool, error) {
+func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource) ([]sourcedJob, []Warning, bool, error) {
 	digest := "sha256:" + sha256Sum(source)
 	runtimeMatrixBoundary := hasRuntimeMatrixBoundary(parsed)
 	if !hasReusableCall(parsed) {
@@ -106,12 +109,12 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 		if isRepositoryWorkflowPath(path) {
 			repositoryRoot, canonicalPath, err := workflowRepository(path)
 			if err != nil {
-				return nil, runtimeMatrixBoundary, err
+				return nil, nil, runtimeMatrixBoundary, err
 			}
 			root = repositoryRoot
 			sourcePath, err = repositoryWorkflowPath(repositoryRoot, canonicalPath)
 			if err != nil {
-				return nil, runtimeMatrixBoundary, err
+				return nil, nil, runtimeMatrixBoundary, err
 			}
 		}
 		jobs := make([]sourcedJob, len(parsed.Jobs))
@@ -120,7 +123,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 		for i, job := range parsed.Jobs {
 			resolvedJob, err := applyStaticInputs(sourcePath, job, context.Inputs)
 			if err != nil {
-				return nil, runtimeMatrixBoundary, err
+				return nil, nil, runtimeMatrixBoundary, err
 			}
 			job = resolvedJob
 			job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, nil, false)
@@ -133,18 +136,19 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
 		if _, err := resolveWorkflowCallOutputs(sourcePath, parsed.CallOutputs, workflowJobs, replacements); err != nil {
-			return nil, runtimeMatrixBoundary, err
+			return nil, nil, runtimeMatrixBoundary, err
 		}
-		return jobs, runtimeMatrixBoundary, nil
+		return jobs, nil, runtimeMatrixBoundary, nil
 	}
 
 	rootSource, err := localReusableWorkflowSource(path)
 	if err != nil {
-		return nil, runtimeMatrixBoundary, err
+		return nil, nil, runtimeMatrixBoundary, err
 	}
 	resolver := reusableResolver{
 		workspaceRoot: rootSource.repositoryRoot, repositorySource: newMemoizedActionSource(repositorySource), stack: []reusableSourceIdentity{rootSource.identity}, context: context,
 		rootPermissions: effectivePermissions(nil, parsed.Permissions, nil, false), runtimeMatrixBoundary: runtimeMatrixBoundary,
+		warnedCancellation: make(map[workflow.Position]bool),
 	}
 	defer func() {
 		for _, materialized := range resolver.materialized {
@@ -152,8 +156,8 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 		}
 	}()
 	resolver.discoverRuntimeMatrixBoundaries(ctx, rootSource, parsed, 0, map[string]int{rootSource.identity.key(): 0})
-	resolution, err := resolver.resolve(ctx, rootSource, digest, parsed, "", "", reusableInputs{values: context.Inputs}, nil, nil, secretAuthority{unrestricted: true}, false, workflow.Position{}, nil, 0)
-	return resolution.jobs, resolver.runtimeMatrixBoundary, err
+	resolution, err := resolver.resolve(ctx, rootSource, digest, parsed, "", "", reusableInputs{values: context.Inputs}, nil, nil, secretAuthority{unrestricted: true}, false, workflow.Position{}, nil, nil, 0)
+	return resolution.jobs, resolver.warnings, resolver.runtimeMatrixBoundary, err
 }
 
 func hasReusableCall(parsed *workflow.Workflow) bool {
@@ -202,7 +206,7 @@ func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(ctx context.Co
 	}
 }
 
-func (resolver *reusableResolver) resolve(ctx context.Context, current reusableWorkflowSource, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs reusableInputs, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secrets secretAuthority, tokenPolicyNarrowed bool, reusableCallPosition workflow.Position, callGuards []sourcedCallGuard, depth int) (reusableResolution, error) {
+func (resolver *reusableResolver) resolve(ctx context.Context, current reusableWorkflowSource, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs reusableInputs, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secrets secretAuthority, tokenPolicyNarrowed bool, reusableCallPosition workflow.Position, callGuards []sourcedCallGuard, concurrencyGates []WorkflowConcurrencyGate, depth int) (reusableResolution, error) {
 	path := current.displayPath
 	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
@@ -240,11 +244,6 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				return reusableResolution{}, err
 			}
 		}
-		if job.Reusable != nil {
-			if err := rejectCallMatrixExpressions(path, job); err != nil {
-				return reusableResolution{}, err
-			}
-		}
 		callNeedBindings := replacementNeeds(job.Needs, replacements)
 		needBindings := callNeedBindings
 		if len(job.Needs) == 0 {
@@ -274,7 +273,8 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				Job: job, path: path, digest: digest, root: resolver.workspaceRoot, remote: cloneRemoteWorkflowSource(current.remote), inputs: cloneReusableInputs(inputs),
 				secretAuthority: cloneSecretAuthority(secrets), needBindings: needBindings,
 				tokenPolicyNarrowed: jobTokenPolicyNarrowed, jobPermissionsIgnored: jobPermissionsIgnored, reusableCall: reusableCallPosition,
-				callGuards: cloneSourcedCallGuards(callGuards),
+				callGuards:       cloneSourcedCallGuards(callGuards),
+				concurrencyGates: append([]WorkflowConcurrencyGate(nil), concurrencyGates...),
 			})
 			replacements[id] = needBinding{members: []string{job.ID}}
 			continue
@@ -326,14 +326,18 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		if err != nil {
 			return reusableResolution{}, err
 		}
-		if callee.Concurrency != nil {
-			return reusableResolution{}, fmt.Errorf("%s:%d:%d: workflow concurrency in a called reusable workflow is unsupported", calleeSource.displayPath, callee.Concurrency.Span.Start.Line, callee.Concurrency.Span.Start.Column)
-		}
 		calleeDigest := "sha256:" + sha256Sum(source)
 
-		matrices, err := expandMatrix(path, job, expression.CompileContext{})
+		matrixContext := resolver.context
+		matrixContext.Inputs = inputs.values
+		matrixContext.Matrix = nil
+		matrixContext.Strategy = nil
+		matrices, err := expandMatrix(path, job, matrixContext)
 		if err != nil {
 			return reusableResolution{}, err
+		}
+		if job.MaxParallel != nil && len(matrices) > 1 {
+			return reusableResolution{}, jobError(path, job, "strategy.max-parallel on a reusable-workflow matrix cannot be preserved when the called jobs are flattened")
 		}
 		var members []string
 		var callOutputs []needOutputBinding
@@ -375,8 +379,37 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			if depth == 0 {
 				calleeCallPosition = call.Span.Start
 			}
+			calleeConcurrencyGates := concurrencyGates
+			if callee.Concurrency != nil {
+				if len(calleeGuards) != 0 {
+					return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "called-workflow concurrency is unsupported for guarded reusable-workflow calls")
+				}
+				concurrencyContext := resolver.context
+				concurrencyContext.Inputs = callInputs.values
+				concurrencyContext.Matrix = nil
+				concurrencyContext.Strategy = nil
+				group, err := resolveConcurrency(calleeSource.displayPath, "", callee.Concurrency, concurrencyContext, nil)
+				if err != nil {
+					return reusableResolution{}, err
+				}
+				cancelInProgress, err := resolveWorkflowCancellation(calleeSource.displayPath, callee.Concurrency, concurrencyContext)
+				if err != nil {
+					return reusableResolution{}, err
+				}
+				if len(needs) != 0 {
+					return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "called-workflow concurrency is unsupported for reusable-workflow calls with prerequisites")
+				}
+				calleeConcurrencyGates = append(append([]WorkflowConcurrencyGate(nil), concurrencyGates...), WorkflowConcurrencyGate{ID: callNamespace, Group: group})
+				if cancelInProgress && !resolver.warnedCancellation[calleeCallPosition] {
+					resolver.warnedCancellation[calleeCallPosition] = true
+					resolver.warnings = append(resolver.warnings, Warning{
+						Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: calleeCallPosition.Line, Column: calleeCallPosition.Column,
+						Message: fmt.Sprintf("called workflow %q concurrency cancel-in-progress is not enforced; Buildkite has no concurrency-group cancellation contract", call.Uses),
+					})
+				}
+			}
 			resolver.stack = append(resolver.stack, calleeSource.identity)
-			calleeResolution, err := resolver.resolve(ctx, calleeSource, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, calleeSecrets, jobTokenPolicyNarrowed, calleeCallPosition, calleeGuards, depth+1)
+			calleeResolution, err := resolver.resolve(ctx, calleeSource, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, calleeSecrets, jobTokenPolicyNarrowed, calleeCallPosition, calleeGuards, calleeConcurrencyGates, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {
 				message := "reusable workflow could not be resolved"
@@ -1093,6 +1126,12 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 		if job.Matrix.Expression != nil {
 			jobValues = append(jobValues, job.Matrix.Expression.Text)
 		}
+		if job.Matrix.IncludeExpression != nil {
+			jobValues = append(jobValues, job.Matrix.IncludeExpression.Text)
+		}
+		if job.Matrix.ExcludeExpression != nil {
+			jobValues = append(jobValues, job.Matrix.ExcludeExpression.Text)
+		}
 		for _, row := range job.Matrix.Rows {
 			if row.Expression != nil {
 				jobValues = append(jobValues, row.Expression.Text)
@@ -1139,35 +1178,6 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 		for _, value := range stepValues {
 			if hasUnresolvedTemplateInput(value, deferredInputs) {
 				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
-			}
-		}
-	}
-	return nil
-}
-
-func rejectCallMatrixExpressions(path string, job workflow.Job) error {
-	if job.Matrix == nil {
-		return nil
-	}
-	if job.Matrix.Expression != nil {
-		return locatedJobError(path, job, job.Matrix.Expression.Span.Start.Line, job.Matrix.Expression.Span.Start.Column, "expression-valued reusable-workflow matrices are unsupported")
-	}
-	for _, row := range job.Matrix.Rows {
-		if row.Expression != nil {
-			return locatedJobError(path, job, row.Expression.Span.Start.Line, row.Expression.Span.Start.Column, fmt.Sprintf("expression-valued reusable-workflow matrix dimension %q is unsupported", row.Name))
-		}
-		for _, value := range row.Values {
-			if containsExpression(value.Data) {
-				return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "runtime-dependent reusable-workflow matrix value is unsupported")
-			}
-		}
-	}
-	for _, combinations := range [][]workflow.MatrixCombination{job.Matrix.Include, job.Matrix.Exclude} {
-		for _, combination := range combinations {
-			for _, value := range combination.Values {
-				if containsExpression(value.Data) {
-					return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "runtime-dependent reusable-workflow matrix value is unsupported")
-				}
 			}
 		}
 	}
@@ -1236,17 +1246,30 @@ func deferredInputPlaceholders(inputs map[string]needBinding) map[string]any {
 
 func cloneMatrixWithInputs(matrix *workflow.Matrix, inputs map[string]any) *workflow.Matrix {
 	out := *matrix
+	out.Expression = cloneMatrixExpressionWithInputs(matrix.Expression, inputs)
+	out.IncludeExpression = cloneMatrixExpressionWithInputs(matrix.IncludeExpression, inputs)
+	out.ExcludeExpression = cloneMatrixExpressionWithInputs(matrix.ExcludeExpression, inputs)
 	out.Rows = append([]workflow.MatrixRow(nil), matrix.Rows...)
 	for i := range out.Rows {
+		out.Rows[i].Expression = cloneMatrixExpressionWithInputs(matrix.Rows[i].Expression, inputs)
 		out.Rows[i].Values = append([]workflow.Value(nil), out.Rows[i].Values...)
 		for j := range out.Rows[i].Values {
-			if text, ok := out.Rows[i].Values[j].Data.(string); ok {
-				out.Rows[i].Values[j].Data = replaceStaticInputs(text, inputs)
-			}
+			out.Rows[i].Values[j].Data = resolveAuthoredMatrixInputs(out.Rows[i].Values[j].Data, inputs)
 		}
 	}
 	out.Include = cloneMatrixCombinations(matrix.Include, inputs)
 	out.Exclude = cloneMatrixCombinations(matrix.Exclude, inputs)
+	return &out
+}
+
+func cloneMatrixExpressionWithInputs(expr *expression.Expression, inputs map[string]any) *expression.Expression {
+	if expr == nil {
+		return nil
+	}
+	out := *expr
+	if resolved, err := expression.SubstituteCompileInputs(expr.Text, inputs); err == nil {
+		out.Text = resolved
+	}
 	return &out
 }
 
@@ -1256,13 +1279,46 @@ func cloneMatrixCombinations(combinations []workflow.MatrixCombination, inputs m
 		out[i] = combination
 		out[i].Values = make(map[string]workflow.Value, len(combination.Values))
 		for name, value := range combination.Values {
-			if text, ok := value.Data.(string); ok {
-				value.Data = replaceStaticInputs(text, inputs)
-			}
+			value.Data = resolveAuthoredMatrixInputs(value.Data, inputs)
 			out[i].Values[name] = value
 		}
 	}
 	return out
+}
+
+func resolveAuthoredMatrixInputs(value any, inputs map[string]any) any {
+	switch value := value.(type) {
+	case string:
+		resolved, err := expression.SubstituteCompileInputs(value, inputs)
+		if err != nil || resolved == value {
+			return value
+		}
+		if expr, err := expression.Parse(resolved, 1, 1); err == nil {
+			if evaluated, available, err := expression.EvaluateCompileAvailable(expr, expression.CompileContext{}); err == nil && available {
+				if text, ok := evaluated.(string); !ok || !strings.Contains(text, "${{") {
+					return evaluated
+				}
+			}
+		}
+		if evaluated, err := expression.EvaluateAvailableCompileTemplate(resolved, expression.CompileContext{}); err == nil {
+			return evaluated
+		}
+		return value
+	case []any:
+		resolved := make([]any, len(value))
+		for i, item := range value {
+			resolved[i] = resolveAuthoredMatrixInputs(item, inputs)
+		}
+		return resolved
+	case map[string]any:
+		resolved := make(map[string]any, len(value))
+		for _, key := range sortedKeys(value) {
+			resolved[key] = resolveAuthoredMatrixInputs(value[key], inputs)
+		}
+		return resolved
+	default:
+		return value
+	}
 }
 
 func replaceMapInputs(values map[string]string, inputs map[string]any) map[string]string {
