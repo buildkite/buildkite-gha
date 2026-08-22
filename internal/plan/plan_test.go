@@ -53,6 +53,43 @@ func TestNormalizedProgramsAreRequiredAtThePlanBoundary(t *testing.T) {
 	}
 }
 
+func TestNormalizedCompositeChildrenMustMatchActionLocks(t *testing.T) {
+	const parentID = "a-0000000000000001"
+	const childID = "a-0000000000000002"
+	digest := "sha256:" + strings.Repeat("4", 64)
+	job := validJob()
+	job.Steps = []Step{{ID: "step-1", Kind: "uses", Uses: "./parent", Action: &ActionSelector{Lock: parentID}}}
+	job.Program.Job.Steps = []program.Step{{
+		ID: "step-1", Kind: "uses", Invocation: &program.Invocation{Uses: program.Site{Source: "./parent"}, Lock: parentID},
+	}}
+	job.Actions = []ActionLock{
+		{ID: parentID, Source: "workspace", Path: "parent", SourceDigest: digest, Children: map[string]ActionSelector{"./child": {Lock: childID}}},
+		{ID: childID, Source: "workspace", Path: "child", SourceDigest: digest},
+	}
+	job.ActionPrograms = map[string]program.Action{
+		parentID: {Source: "workspace", Runtime: program.ActionRuntimeComposite, Composite: &program.CompositeAction{Steps: []program.CompositeStep{{
+			Invocation: &program.Invocation{Uses: program.Site{Source: "./child"}, Lock: childID},
+		}}}},
+		childID: {Source: "workspace", Runtime: program.ActionRuntimeNative},
+	}
+	if _, err := Encode(job); err != nil {
+		t.Fatalf("valid normalized composite children: %v", err)
+	}
+
+	delete(job.ActionPrograms, childID)
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "references missing action program") {
+		t.Fatalf("missing child program error = %v", err)
+	}
+
+	job.ActionPrograms[childID] = program.Action{Source: "workspace", Runtime: program.ActionRuntimeNative}
+	job.ActionPrograms[parentID] = program.Action{Source: "workspace", Runtime: program.ActionRuntimeComposite, Composite: &program.CompositeAction{Steps: []program.CompositeStep{{
+		Invocation: &program.Invocation{Uses: program.Site{Source: "./other"}, Lock: childID},
+	}}}}
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "child selector does not match") {
+		t.Fatalf("mismatched child selector error = %v", err)
+	}
+}
+
 func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 	job := validJob()
 	job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v1"

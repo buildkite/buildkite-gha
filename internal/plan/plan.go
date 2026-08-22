@@ -516,7 +516,7 @@ func (job Job) validateExecutionPrograms() error {
 		if action.Source != lock.Source {
 			return fmt.Errorf("normalized action program %q source does not match its lock", id)
 		}
-		if err := validateActionProgram(id, action, locks); err != nil {
+		if err := validateActionProgram(id, action, locks, job.ActionPrograms); err != nil {
 			return err
 		}
 	}
@@ -533,7 +533,7 @@ func (job Job) validateExecutionPrograms() error {
 	return nil
 }
 
-func validateActionProgram(id string, action program.Action, locks map[string]ActionLock) error {
+func validateActionProgram(id string, action program.Action, locks map[string]ActionLock, actions map[string]program.Action) error {
 	shapes := 0
 	if action.JavaScript != nil {
 		shapes++
@@ -562,8 +562,12 @@ func validateActionProgram(id string, action program.Action, locks map[string]Ac
 				return fmt.Errorf("normalized composite action program %q step %d must have exactly one execution", id, i+1)
 			}
 			if step.Invocation != nil {
-				if _, ok := locks[step.Invocation.Lock]; !ok {
+				if _, ok := actions[step.Invocation.Lock]; !ok {
 					return fmt.Errorf("normalized composite action program %q step %d references missing action program %q", id, i+1, step.Invocation.Lock)
+				}
+				child, ok := locks[id].Children[step.Invocation.Uses.Source]
+				if !ok || child.Lock != step.Invocation.Lock {
+					return fmt.Errorf("normalized composite action program %q step %d child selector does not match its lock", id, i+1)
 				}
 			}
 		}
