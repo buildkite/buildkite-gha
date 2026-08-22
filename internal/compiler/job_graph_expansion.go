@@ -346,13 +346,25 @@ func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any
 		Outputs: cloneMap(job.Outputs), Container: job.Container, Services: services,
 		ServicesExpression: job.ServicesExpression, SourcePath: sourced.path, SourceDigest: sourced.digest,
 		RemoteWorkflow: cloneRemoteWorkflowSource(sourced.remote), RepositoryRoot: sourced.root, Source: job.Span,
+		Positions:       clonePositionMap(job.Positions),
 		secretAuthority: sourced.secretAuthority, tokenPolicyNarrowed: sourced.tokenPolicyNarrowed,
 		jobPermissionsIgnored: sourced.jobPermissionsIgnored, reusableCall: sourced.reusableCall,
 	}
 	for _, guard := range sourced.callGuards {
-		candidate.CallGuards = append(candidate.CallGuards, CallGuard{Condition: guard.condition, Inputs: cloneAnyMap(guard.inputs.values)})
+		candidate.CallGuards = append(candidate.CallGuards, CallGuard{Condition: guard.condition, Inputs: cloneAnyMap(guard.inputs.values), SourcePath: guard.sourcePath, Position: guard.position})
 	}
 	return candidate
+}
+
+func clonePositionMap(source map[string]workflow.Position) map[string]workflow.Position {
+	if source == nil {
+		return nil
+	}
+	clone := make(map[string]workflow.Position, len(source))
+	for name, position := range source {
+		clone[name] = position
+	}
+	return clone
 }
 
 func (e *jobGraphExpansion) jobBlocked(sourced sourcedJob) bool {

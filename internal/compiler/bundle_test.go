@@ -1504,7 +1504,8 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - run: echo '${{ %s }}'
+      - name: Locate the run expression, not this name
+        run: echo '${{ %s }}'
 `, test.expression))
 			_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 			if err == nil {
@@ -1514,7 +1515,7 @@ jobs:
 			if !errors.As(err, &finding) {
 				t.Fatalf("CompileBundle() error = %T, want ProcessingFinding", err)
 			}
-			if finding.Path != "workflow.yml" || finding.Line != 14 || finding.Column != 9 || finding.Job != "test" || finding.Step != 1 {
+			if finding.Path != "workflow.yml" || finding.Line != 15 || finding.Column != 14 || finding.Job != "test" || finding.Step != 1 {
 				t.Fatalf("finding attribution = %#v", finding)
 			}
 			if !strings.Contains(finding.Message, "Reference a specific scalar property") || !strings.Contains(finding.Message, "full event payload is unavailable at runtime") {
@@ -1524,6 +1525,32 @@ jobs:
 				t.Fatalf("finding detail = %q, want %q", finding.Detail, want)
 			}
 		})
+	}
+}
+
+func TestCompileBundleLocatesUnsupportedJobEventAccess(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      EVENT: ${{ toJSON(github.event) }}
+    steps:
+      - run: true
+`)
+	_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	var finding *ProcessingFinding
+	if err == nil || !errors.As(err, &finding) {
+		t.Fatalf("CompileBundle() finding = %#v, error = %v", finding, err)
+	}
+	if finding.Path != "workflow.yml" || finding.Line != 9 || finding.Column != 14 || finding.Job != "test" || finding.Step != 0 {
+		t.Fatalf("finding attribution = %#v", finding)
+	}
+	if finding.Detail != `Expression in job.env.EVENT: "${{ toJSON(github.event) }}"` {
+		t.Fatalf("finding detail = %q", finding.Detail)
 	}
 }
 

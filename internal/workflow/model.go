@@ -138,14 +138,16 @@ type Job struct {
 	DefaultWorkingDirectory string                 `json:"default_working_directory,omitempty"`
 	Steps                   []Step                 `json:"steps"`
 	Span                    Span                   `json:"span"`
+	Positions               map[string]Position    `json:"-"`
 }
 
 // Container is the statically owned subset of a GitHub Actions container.
 type Container struct {
-	Image string            `json:"image"`
-	Env   map[string]string `json:"env,omitempty"`
-	Ports []string          `json:"ports,omitempty"`
-	Span  Span              `json:"span"`
+	Image     string              `json:"image"`
+	Env       map[string]string   `json:"env,omitempty"`
+	Ports     []string            `json:"ports,omitempty"`
+	Span      Span                `json:"span"`
+	Positions map[string]Position `json:"-"`
 }
 
 // Service is a named service container. Services retain workflow declaration
@@ -166,6 +168,7 @@ type ServiceContainer struct {
 	Command     string                `json:"command,omitempty"`
 	Entrypoint  string                `json:"entrypoint,omitempty"`
 	Span        Span                  `json:"span"`
+	Positions   map[string]Position   `json:"-"`
 }
 
 type ContainerCredentials struct {
@@ -214,22 +217,23 @@ type Value struct {
 
 // Step is the execution data retained in the workflow compiler IR.
 type Step struct {
-	ID                        string            `json:"id,omitempty"`
-	Name                      string            `json:"name,omitempty"`
-	Kind                      string            `json:"kind"`
-	Background                bool              `json:"background,omitempty"`
-	Targets                   []string          `json:"targets,omitempty"`
-	Run                       string            `json:"run,omitempty"`
-	Uses                      string            `json:"uses,omitempty"`
-	Shell                     string            `json:"shell,omitempty"`
-	WorkingDirectory          string            `json:"working_directory,omitempty"`
-	Env                       map[string]string `json:"env,omitempty"`
-	With                      map[string]string `json:"with,omitempty"`
-	If                        string            `json:"if,omitempty"`
-	IfSpan                    Span              `json:"-"`
-	ContinueOnError           bool              `json:"continue_on_error,omitempty"`
-	ContinueOnErrorExpression string            `json:"continue_on_error_expression,omitempty"`
-	TimeoutMinutes            float64           `json:"timeout_minutes,omitempty"`
-	TimeoutMinutesExpression  string            `json:"timeout_minutes_expression,omitempty"`
-	Span                      Span              `json:"span"`
+	ID                        string              `json:"id,omitempty"`
+	Name                      string              `json:"name,omitempty"`
+	Kind                      string              `json:"kind"`
+	Background                bool                `json:"background,omitempty"`
+	Targets                   []string            `json:"targets,omitempty"`
+	Run                       string              `json:"run,omitempty"`
+	Uses                      string              `json:"uses,omitempty"`
+	Shell                     string              `json:"shell,omitempty"`
+	WorkingDirectory          string              `json:"working_directory,omitempty"`
+	Env                       map[string]string   `json:"env,omitempty"`
+	With                      map[string]string   `json:"with,omitempty"`
+	If                        string              `json:"if,omitempty"`
+	IfSpan                    Span                `json:"-"`
+	ContinueOnError           bool                `json:"continue_on_error,omitempty"`
+	ContinueOnErrorExpression string              `json:"continue_on_error_expression,omitempty"`
+	TimeoutMinutes            float64             `json:"timeout_minutes,omitempty"`
+	TimeoutMinutesExpression  string              `json:"timeout_minutes_expression,omitempty"`
+	Span                      Span                `json:"span"`
+	Positions                 map[string]Position `json:"-"`
 }

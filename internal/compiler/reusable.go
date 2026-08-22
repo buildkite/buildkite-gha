@@ -47,6 +47,8 @@ type sourcedCallGuard struct {
 	condition    string
 	inputs       reusableInputs
 	needBindings map[string]needBinding
+	sourcePath   string
+	position     workflow.Position
 }
 
 type reusableInputs struct {
@@ -289,6 +291,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			}
 			calleeGuards = append(cloneSourcedCallGuards(callGuards), sourcedCallGuard{
 				condition: condition, inputs: cloneReusableInputs(inputs), needBindings: cloneNeedBindings(callNeedBindings),
+				sourcePath: path, position: job.IfSpan.Start,
 			})
 		}
 		if call.Secrets {
@@ -610,6 +613,7 @@ func cloneSourcedCallGuards(guards []sourcedCallGuard) []sourcedCallGuard {
 	for i, guard := range guards {
 		cloned[i] = sourcedCallGuard{
 			condition: guard.condition, inputs: cloneReusableInputs(guard.inputs), needBindings: cloneNeedBindings(guard.needBindings),
+			sourcePath: guard.sourcePath, position: guard.position,
 		}
 	}
 	return cloned
