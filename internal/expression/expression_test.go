@@ -1390,6 +1390,19 @@ func TestNestedMatrixReferencesAreSupported(t *testing.T) {
 	}
 }
 
+func TestEvaluateCompileTemplateResolvesReusableWorkflowConcurrencyInputs(t *testing.T) {
+	context := CompileContext{Inputs: map[string]any{"target": "production"}}
+	got, err := EvaluateCompileTemplate("deploy-${{ inputs.target }}", context)
+	if err != nil || got != "deploy-production" {
+		t.Fatalf("EvaluateCompileTemplate() = %q, %v", got, err)
+	}
+	for _, template := range []string{"${{ needs.prepare.result }}", "${{ strategy.job-index }}"} {
+		if _, err := EvaluateCompileTemplate(template, context); err == nil {
+			t.Errorf("EvaluateCompileTemplate(%q) accepted a runtime-only concurrency value", template)
+		}
+	}
+}
+
 func TestEvaluateConditionSupportsBracketFormGitHubReferences(t *testing.T) {
 	for condition, want := range map[string]bool{
 		"github['event_name'] == 'push'":       true,

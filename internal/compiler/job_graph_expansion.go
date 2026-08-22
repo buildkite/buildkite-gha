@@ -20,6 +20,7 @@ type jobGraphExpansionResult struct {
 	jobs                  []ParsedJob
 	notEvaluatedJobs      map[string]bool
 	notEvaluatedInstances map[string]bool
+	warnings              []Warning
 }
 
 // jobGraphExpansion carries state while a flattened logical job graph is
@@ -69,7 +70,7 @@ func jobGraphExpansionReport(expanded jobGraphExpansionResult, warnings []Warnin
 	return Report{
 		LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates),
 		Jobs: expanded.candidates, RuntimeMatrixBoundary: expanded.runtimeMatrixBoundary,
-		RuntimeMatrices: expanded.runtimeMatrices, ParsedJobs: expanded.jobs, Warnings: warnings,
+		RuntimeMatrices: expanded.runtimeMatrices, ParsedJobs: expanded.jobs, Warnings: append(warnings, expanded.warnings...),
 		NotEvaluatedJobs: expanded.notEvaluatedJobs, NotEvaluatedInstances: expanded.notEvaluatedInstances,
 	}
 }
@@ -77,18 +78,18 @@ func jobGraphExpansionReport(expanded jobGraphExpansionResult, warnings []Warnin
 // expandJobGraph resolves reusable workflow calls, then turns the parsed
 // logical job graph into deterministic JobInstance values and report data.
 func expandJobGraph(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (jobGraphExpansionResult, error) {
-	resolved, runtimeMatrixBoundary, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource)
+	resolved, warnings, runtimeMatrixBoundary, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource)
 	if err != nil {
 		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
 		for _, job := range parsed.Jobs {
 			notEvaluatedJobs[job.ID] = true
 		}
-		return jobGraphExpansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs, runtimeMatrixBoundary: runtimeMatrixBoundary}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
+		return jobGraphExpansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs, runtimeMatrixBoundary: runtimeMatrixBoundary, warnings: warnings}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
 	}
 	expansion := jobGraphExpansion{
 		path: path, context: context, options: options,
 		result: jobGraphExpansionResult{
-			jobs: processingJobs(path, parsed, resolved), runtimeMatrixBoundary: runtimeMatrixBoundary,
+			jobs: processingJobs(path, parsed, resolved), runtimeMatrixBoundary: runtimeMatrixBoundary, warnings: warnings,
 			notEvaluatedJobs: make(map[string]bool), notEvaluatedInstances: make(map[string]bool),
 		},
 		acceptedIndex:  make(map[string]int, len(resolved)),
@@ -350,6 +351,7 @@ func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any
 		ContinueOnError: job.ContinueOnError, TimeoutMinutes: job.TimeoutMinutes,
 		DefaultShell: job.DefaultShell, DefaultWorkingDirectory: job.DefaultWorkingDirectory,
 		Outputs: cloneMap(job.Outputs), Container: job.Container, Services: services,
+		ConcurrencyGates:   append([]WorkflowConcurrencyGate(nil), sourced.concurrencyGates...),
 		ServicesExpression: job.ServicesExpression, SourcePath: sourced.path, SourceDigest: sourced.digest,
 		RemoteWorkflow: cloneRemoteWorkflowSource(sourced.remote), RepositoryRoot: sourced.root, Source: job.Span,
 		secretAuthority: sourced.secretAuthority, tokenPolicyNarrowed: sourced.tokenPolicyNarrowed,

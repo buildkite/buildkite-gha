@@ -208,6 +208,11 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 			RequiresMise:       job.NeedsMise(),
 			SoftFail:           job.ContinueOnError,
 		}
+		for _, gate := range ir.Jobs[i].ConcurrencyGates {
+			jobs[i].ConcurrencyGates = append(jobs[i].ConcurrencyGates, buildkitepipeline.ConcurrencyGate{
+				ID: gate.ID, Group: buildkiteConcurrencyGroup(ir.Event.Repository, gate.Group),
+			})
+		}
 		if ir.Jobs[i].Platform == PlatformLinuxAMD64 {
 			jobs[i].RuntimeImage = ir.Jobs[i].RuntimeImage
 			if jobs[i].RuntimeImage == "" {

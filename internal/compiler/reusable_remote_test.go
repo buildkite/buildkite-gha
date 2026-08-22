@@ -147,6 +147,40 @@ jobs:
 	}
 }
 
+func TestCompilePublicReusableWorkflowConcurrency(t *testing.T) {
+	callerRoot := t.TempDir()
+	callerPath := writeWorkflow(t, callerRoot, "caller.yml", `on: push
+jobs:
+  delegated:
+    uses: owner/workflows/.github/workflows/deploy.yml@v1
+    with:
+      target: production
+`)
+	remoteRoot := t.TempDir()
+	writeWorkflow(t, remoteRoot, "deploy.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+concurrency: deploy-${{ inputs.target }}
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	options := defaultOptions()
+	options.RepositorySource = MemoizeRepositorySource(newFakeReusableRepositorySource(t, map[string]string{"owner/workflows": remoteRoot}))
+	bundle, err := CompileBundleWithOptions(callerPath, readFile(t, callerPath), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Jobs) != 1 || len(bundle.IR.Jobs[0].ConcurrencyGates) != 1 || bundle.IR.Jobs[0].ConcurrencyGates[0].Group != "deploy-production" {
+		t.Fatalf("public reusable concurrency = %#v", bundle.IR.Jobs)
+	}
+	if count := strings.Count(string(bundle.Pipeline), "concurrency_group:"); count != 2 {
+		t.Fatalf("public reusable concurrency gates = %d, want 2\n%s", count, bundle.Pipeline)
+	}
+}
+
 func TestCompileRejectsSecretInheritanceIntoRemoteReusableWorkflows(t *testing.T) {
 	for _, test := range []struct {
 		name   string

@@ -313,6 +313,7 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Caller-visible aggregate results.
 - Outputs mapped directly from `jobs.<job>.outputs.<name>`.
 - Call-level `if` over caller `github`, `vars`, `inputs`, direct `needs`, and status functions.
+- Workflow-level concurrency in local and public called workflows. Groups may use the called workflow's static inputs. Each static call-matrix instance gets its own workflow gate.
 
 **❌ Unsupported:**
 
@@ -322,7 +323,6 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Compound `needs`-dependent inputs or dynamic matrices.
 - Input defaults that reference `inputs`.
 - Literal or compound output expressions.
-- Top-level concurrency in the called workflow.
 
 Job-level `uses`, `with`, and `secrets` follow these boundaries.
 
@@ -445,9 +445,45 @@ jobs:
     concurrency: deploy-${{ matrix.target }}
 ```
 
+Called workflows keep workflow-level concurrency around all flattened jobs. Inputs can derive the group from a caller matrix:
+
+```yaml
+# .github/workflows/deploy.yml
+on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        required: true
+
+concurrency: deploy-${{ inputs.target }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps: [{run: ./plan}]
+  apply:
+    needs: plan
+    runs-on: ubuntu-latest
+    steps: [{run: ./apply}]
+```
+
+```yaml
+jobs:
+  deploy:
+    strategy:
+      matrix:
+        target: [staging, production]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      target: ${{ matrix.target }}
+```
+
+Nested called workflows keep nested gates. Jobs within one called workflow remain parallel except for their declared `needs` and job-level concurrency. Calls with `if` or `needs`, and jobs or nested called workflows that reuse an enclosing workflow group, are unsupported because Buildkite cannot preserve GitHub's admission order for those cases.
+
 Buildkite queues every waiting entry. It does not replace GitHub's existing pending entry. The `queue` key is unsupported.
 
-Workflow-level literal or expression-resolved `cancel-in-progress: true` emits a warning and does not cancel. Job-level cancellation remains unsupported. Buildkite **Cancel Intermediate Builds** and **Skip Intermediate Builds** settings can approximate same-branch cancellation.
+Workflow-level literal or expression-resolved `cancel-in-progress: true`, including in called workflows, emits a warning and does not cancel. Job-level cancellation remains unsupported. Buildkite's uploaded step contract has no concurrency-group cancellation field; `concurrency_method` controls admission order only. Buildkite **Cancel Intermediate Builds** and **Skip Intermediate Builds** settings can approximate same-branch cancellation.
 
 Cancel the whole Buildkite build rather than one job when a workflow-level concurrency gate is active.
 
