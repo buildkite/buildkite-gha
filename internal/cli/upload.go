@@ -193,7 +193,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	}
 	defer cleanupSource()
 	sourceSwitch.set(authenticatedSource)
-	populateChangedPaths(&effectiveEvent.TriggerSnapshot, effectiveEvent.Event, effectiveEvent.Origin, workflows)
+	populateChangedPaths(&effectiveEvent.TriggerSnapshot, effectiveEvent.Event, effectiveEvent.Origin, workflows, uploadArguments.checkoutPath)
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i := range workflows {
 		if workflows[i].ReusableOnly {
@@ -621,11 +621,7 @@ func expandExplicitWorkflowPaths(operands []string, checkoutPath string) ([]work
 	if len(operands) == 0 {
 		return nil, fmt.Errorf("workflow path is required")
 	}
-	gitArgs := []string{"rev-parse", "--show-toplevel"}
-	if checkoutPath != "" {
-		gitArgs = append([]string{"-C", checkoutPath}, gitArgs...)
-	}
-	rootBytes, err := exec.Command("git", gitArgs...).Output()
+	rootBytes, err := gitRootCommand(checkoutPath).Output()
 	if err != nil {
 		if checkoutPath != "" {
 			return nil, fmt.Errorf("locate git repository from BUILDKITE_BUILD_CHECKOUT_PATH %q: %w", checkoutPath, err)

@@ -47,14 +47,15 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	if err != nil {
 		return usageError(stderr, "plugin: %v", err)
 	}
-	if err := normalizePluginCommit(ctx, os.Getenv, os.Setenv, runner); err != nil {
+	checkoutPath := os.Getenv("BUILDKITE_BUILD_CHECKOUT_PATH")
+	if err := normalizePluginCommit(ctx, checkoutPath, os.Getenv, os.Setenv, runner); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", err)
 		return 1
 	}
 	return uploadParsedContext(ctx, parsedUploadArgs{
 		workflowOperands:       configuration.Workflows,
 		explicitWorkflowPaths:  true,
-		checkoutPath:           os.Getenv("BUILDKITE_BUILD_CHECKOUT_PATH"),
+		checkoutPath:           checkoutPath,
 		clientVersion:          clientVersion,
 		runnerTargets:          configuration.runnerTargets,
 		oidc:                   configuration.OIDC,
@@ -239,11 +240,11 @@ func pluginNonEmptyStringList(value any, field string) ([]string, error) {
 	return result, nil
 }
 
-func normalizePluginCommit(ctx context.Context, getenv func(string) string, setenv func(string, string) error, runner transport.Runner) error {
+func normalizePluginCommit(ctx context.Context, checkoutPath string, getenv func(string) string, setenv func(string, string) error, runner transport.Runner) error {
 	if validBuildkiteCommit(getenv("BUILDKITE_COMMIT")) {
 		return nil
 	}
-	output, err := runner.Run(ctx, "", "git", []string{"rev-parse", "HEAD"}, nil)
+	output, err := runner.Run(ctx, checkoutPath, "git", []string{"rev-parse", "HEAD"}, nil)
 	if err != nil {
 		return fmt.Errorf("resolve BUILDKITE_COMMIT from checked-out HEAD: %w", err)
 	}

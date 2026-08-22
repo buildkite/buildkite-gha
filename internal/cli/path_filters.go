@@ -24,7 +24,14 @@ const (
 	zeroGitCommit                      = "0000000000000000000000000000000000000000"
 )
 
-func populateChangedPaths(snapshot *buildkitepipeline.TriggerEventSnapshot, event compiler.Event, origin effectiveEventOrigin, workflows []workflowInput) {
+func gitRootCommand(checkoutPath string) *exec.Cmd {
+	if checkoutPath != "" {
+		return exec.Command("git", "-C", checkoutPath, "rev-parse", "--show-toplevel")
+	}
+	return exec.Command("git", "rev-parse", "--show-toplevel")
+}
+
+func populateChangedPaths(snapshot *buildkitepipeline.TriggerEventSnapshot, event compiler.Event, origin effectiveEventOrigin, workflows []workflowInput, checkoutPath string) {
 	if event.Event != "pull_request" && event.Event != "push" {
 		return
 	}
@@ -43,9 +50,9 @@ func populateChangedPaths(snapshot *buildkitepipeline.TriggerEventSnapshot, even
 		if !workflowsUsePathFilters(workflows, event.Event) {
 			return
 		}
-		paths, workflowErrors, err := pushChangedPaths(event, workflows)
+		paths, workflowErrors, err := pushChangedPaths(event, workflows, checkoutPath)
 		if err != nil {
-			setPathFiltersError(snapshot, workflows, event.Event, err.Error(), true)
+			setPathFiltersError(snapshot, workflows, event.Event, err.Error(), true, checkoutPath)
 			return
 		}
 		snapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{Paths: append([]string{}, paths...)}
@@ -60,17 +67,17 @@ func populateChangedPaths(snapshot *buildkitepipeline.TriggerEventSnapshot, even
 	}
 	pullRequestNumber, err := strconv.Atoi(os.Getenv("BUILDKITE_PULL_REQUEST"))
 	if err != nil || pullRequestNumber <= 0 {
-		setPathFiltersError(snapshot, workflows, event.Event, "pull request path filters require the Buildkite pull request number", closed)
+		setPathFiltersError(snapshot, workflows, event.Event, "pull request path filters require the Buildkite pull request number", closed, checkoutPath)
 		return
 	}
 	baseRef := os.Getenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH")
 	if baseRef == "" {
-		setPathFiltersError(snapshot, workflows, event.Event, "pull request path filters require the Buildkite pull request base branch", closed)
+		setPathFiltersError(snapshot, workflows, event.Event, "pull request path filters require the Buildkite pull request base branch", closed, checkoutPath)
 		return
 	}
-	paths, workflowErrors, err := pullRequestChangedPaths(event, pullRequestNumber, baseRef, workflows)
+	paths, workflowErrors, err := pullRequestChangedPaths(event, pullRequestNumber, baseRef, workflows, checkoutPath)
 	if err != nil {
-		setPathFiltersError(snapshot, workflows, event.Event, err.Error(), closed)
+		setPathFiltersError(snapshot, workflows, event.Event, err.Error(), closed, checkoutPath)
 		return
 	}
 	snapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{Paths: append([]string{}, paths...)}
@@ -82,7 +89,7 @@ func populateChangedPaths(snapshot *buildkitepipeline.TriggerEventSnapshot, even
 	}
 }
 
-func pushChangedPaths(event compiler.Event, workflows []workflowInput) ([]string, map[string]string, error) {
+func pushChangedPaths(event compiler.Event, workflows []workflowInput, checkoutPath string) ([]string, map[string]string, error) {
 	if event.Provider != "github" {
 		return nil, nil, fmt.Errorf("push path filters require a GitHub repository webhook")
 	}
@@ -109,7 +116,7 @@ func pushChangedPaths(event compiler.Event, workflows []workflowInput) ([]string
 		return nil, nil, fmt.Errorf("webhook push before commit is inconsistent with ref creation")
 	}
 
-	rootBytes, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	rootBytes, err := gitRootCommand(checkoutPath).Output()
 	if err != nil {
 		return nil, nil, fmt.Errorf("locate checked-out git repository: %w", err)
 	}
@@ -306,9 +313,9 @@ func gitIsAncestor(root, ancestor, descendant string) (bool, error) {
 	return false, err
 }
 
-func setPathFiltersError(snapshot *buildkitepipeline.TriggerEventSnapshot, workflows []workflowInput, event, reason string, filteredOnly bool) {
+func setPathFiltersError(snapshot *buildkitepipeline.TriggerEventSnapshot, workflows []workflowInput, event, reason string, filteredOnly bool, checkoutPath string) {
 	snapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{UnavailableReason: reason}
-	rootBytes, rootErr := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	rootBytes, rootErr := gitRootCommand(checkoutPath).Output()
 	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
 	for i := range workflows {
 		if workflowUsesPathFilters(workflows[i], event) || !filteredOnly && rootErr == nil && gitTracksWorkflow(root, workflows[i]) {
@@ -326,7 +333,7 @@ func workflowsUsePathFilters(workflows []workflowInput, event string) bool {
 	return false
 }
 
-func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRef string, workflows []workflowInput) ([]string, map[string]string, error) {
+func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRef string, workflows []workflowInput, checkoutPath string) ([]string, map[string]string, error) {
 	pullRequest, ok := event.Payload["pull_request"].(map[string]any)
 	if !ok {
 		return nil, nil, fmt.Errorf("event snapshot requires payload.pull_request")
@@ -355,7 +362,7 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 	if headSHA != event.SHA {
 		return nil, nil, fmt.Errorf("pull request head SHA does not match the checked-out event SHA")
 	}
-	rootBytes, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	rootBytes, err := gitRootCommand(checkoutPath).Output()
 	if err != nil {
 		return nil, nil, fmt.Errorf("locate checked-out git repository: %w", err)
 	}

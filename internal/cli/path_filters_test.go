@@ -83,11 +83,17 @@ func TestPushChangedPathsBindsWebhookAndLocalDiff(t *testing.T) {
 		}
 	}
 	event := newEvent(base, after, false, false, after)
-	paths, workflowErrors, err := pushChangedPaths(event, []workflowInput{input})
+	paths, workflowErrors, err := pushChangedPaths(event, []workflowInput{input}, "")
 	want := []string{"docs/old.md", "src/main.go", "src/tool"}
 	if err != nil || !reflect.DeepEqual(paths, want) || len(workflowErrors) != 0 {
 		t.Fatalf("normal push paths/errors = %#v / %#v / %v, want %#v", paths, workflowErrors, err, want)
 	}
+	t.Chdir(t.TempDir())
+	paths, _, err = pushChangedPaths(event, []workflowInput{input}, repository)
+	if err != nil || !reflect.DeepEqual(paths, want) {
+		t.Fatalf("push paths outside checkout = %#v, %v", paths, err)
+	}
+	t.Chdir(repository)
 
 	runGit("checkout", "-q", "-B", "force", base)
 	if err := os.WriteFile(filepath.Join(repository, "src/main.go"), []byte("package forced\n"), 0o600); err != nil {
@@ -98,7 +104,7 @@ func TestPushChangedPathsBindsWebhookAndLocalDiff(t *testing.T) {
 	forceAfter := runGit("rev-parse", "HEAD")
 	runGit("update-ref", "refs/remotes/origin/main", forceAfter)
 	forceEvent := newEvent(after, forceAfter, false, true, forceAfter)
-	if paths, _, err := pushChangedPaths(forceEvent, []workflowInput{input}); err != nil || !reflect.DeepEqual(paths, want) {
+	if paths, _, err := pushChangedPaths(forceEvent, []workflowInput{input}, ""); err != nil || !reflect.DeepEqual(paths, want) {
 		t.Fatalf("force push paths = %#v, %v", paths, err)
 	}
 
@@ -117,33 +123,33 @@ func TestPushChangedPathsBindsWebhookAndLocalDiff(t *testing.T) {
 	newAfter := runGit("rev-parse", "HEAD")
 	runGit("update-ref", "refs/remotes/origin/main", newAfter)
 	newBranchEvent := newEvent(zeroGitCommit, newAfter, true, false, first, newAfter)
-	if paths, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err != nil || !reflect.DeepEqual(paths, []string{"src/main.go"}) {
+	if paths, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}, ""); err != nil || !reflect.DeepEqual(paths, []string{"src/main.go"}) {
 		t.Fatalf("new-branch push paths = %#v, %v", paths, err)
 	}
 
 	newBranchEvent.Payload["repository"].(map[string]any)["full_name"] = "attacker/other"
-	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err == nil || !strings.Contains(err.Error(), "repository does not match") {
+	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}, ""); err == nil || !strings.Contains(err.Error(), "repository does not match") {
 		t.Fatalf("mismatched repository error = %v", err)
 	}
 	newBranchEvent.Payload["repository"].(map[string]any)["full_name"] = "buildkite/buildkite-gha"
 	newBranchEvent.Payload["deleted"] = true
-	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err == nil || !strings.Contains(err.Error(), "deleted-ref") {
+	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}, ""); err == nil || !strings.Contains(err.Error(), "deleted-ref") {
 		t.Fatalf("deleted ref error = %v", err)
 	}
 	newBranchEvent.Payload["deleted"] = false
 	newBranchEvent.Payload["commits"] = []any{map[string]any{"id": first}}
-	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err == nil || !strings.Contains(err.Error(), "complete pushed commit evidence") {
+	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}, ""); err == nil || !strings.Contains(err.Error(), "complete pushed commit evidence") {
 		t.Fatalf("incomplete new-branch commits error = %v", err)
 	}
 	newBranchEvent.Payload["commits"] = []any{map[string]any{"id": first}, map[string]any{"id": newAfter}}
 	input.Source = []byte("modified worktree workflow\n")
-	if _, workflowErrors, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err != nil || !strings.Contains(workflowErrors["ci.yml"], "does not match the pushed commit") {
+	if _, workflowErrors, err := pushChangedPaths(newBranchEvent, []workflowInput{input}, ""); err != nil || !strings.Contains(workflowErrors["ci.yml"], "does not match the pushed commit") {
 		t.Fatalf("mismatched workflow result = %#v, %v", workflowErrors, err)
 	}
 	if err := os.WriteFile(filepath.Join(repository, ".git", "shallow"), []byte(base+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}); err == nil || !strings.Contains(err.Error(), "non-shallow checkout") {
+	if _, _, err := pushChangedPaths(newBranchEvent, []workflowInput{input}, ""); err == nil || !strings.Contains(err.Error(), "non-shallow checkout") {
 		t.Fatalf("shallow checkout error = %v", err)
 	}
 }
@@ -208,20 +214,26 @@ func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 		Source:        filteredWorkflow,
 		Triggers:      []workflow.Trigger{{Event: "pull_request", Paths: []string{"src/**"}}},
 	}
-	paths, workflowErrors, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{input})
+	paths, workflowErrors, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{input}, "")
 	if err != nil || !reflect.DeepEqual(paths, []string{"src/main.go"}) {
 		t.Fatalf("pullRequestChangedPaths() = %#v, %v", paths, err)
 	}
 	if len(workflowErrors) != 0 {
 		t.Fatalf("workflow errors = %#v", workflowErrors)
 	}
+	t.Chdir(t.TempDir())
+	paths, _, err = pullRequestChangedPaths(event, 42, "main", []workflowInput{input}, repository)
+	if err != nil || !reflect.DeepEqual(paths, []string{"src/main.go"}) {
+		t.Fatalf("pull request paths outside checkout = %#v, %v", paths, err)
+	}
+	t.Chdir(repository)
 	pullRequest := event.Payload["pull_request"].(map[string]any)
 	delete(pullRequest, "mergeable")
-	if paths, _, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{input}); err != nil || !reflect.DeepEqual(paths, []string{"src/main.go"}) {
+	if paths, _, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{input}, ""); err != nil || !reflect.DeepEqual(paths, []string{"src/main.go"}) {
 		t.Fatalf("unknown mergeability result = %#v, %v", paths, err)
 	}
 	pullRequest["mergeable"] = false
-	if _, _, err := pullRequestChangedPaths(event, 42, "main", nil); err == nil || !strings.Contains(err.Error(), "mergeable synthetic merge") {
+	if _, _, err := pullRequestChangedPaths(event, 42, "main", nil, ""); err == nil || !strings.Contains(err.Error(), "mergeable synthetic merge") {
 		t.Fatalf("conflicted pull request error = %v", err)
 	}
 	pullRequest["mergeable"] = true
@@ -231,12 +243,12 @@ func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 		Source:        []byte("different\n"),
 		Triggers:      []workflow.Trigger{{Event: "pull_request", Paths: []string{"src/**"}}},
 	}
-	_, workflowErrors, err = pullRequestChangedPaths(event, 42, "main", []workflowInput{workflow})
+	_, workflowErrors, err = pullRequestChangedPaths(event, 42, "main", []workflowInput{workflow}, "")
 	if err != nil || !strings.Contains(workflowErrors["ci.yml"], "does not match the event merge commit") {
 		t.Fatalf("workflow merge source result = %#v, %v", workflowErrors, err)
 	}
 	pullRequest["base"].(map[string]any)["sha"] = head
-	if _, _, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{input}); err == nil || !strings.Contains(err.Error(), "does not bind the event base and head") {
+	if _, _, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{input}, ""); err == nil || !strings.Contains(err.Error(), "does not bind the event base and head") {
 		t.Fatalf("forged base SHA error = %v", err)
 	}
 }
@@ -313,7 +325,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 	_, workflowErrors, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{{
 		Path: workflowPath, CanonicalPath: "ci.yml", Source: unfiltered,
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
-	}})
+	}}, "")
 	if err != nil || !strings.Contains(workflowErrors["ci.yml"], "does not match the event merge commit") {
 		t.Fatalf("merge-added path filter result = %#v, %v", workflowErrors, err)
 	}
@@ -321,7 +333,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 	_, workflowErrors, err = pullRequestChangedPaths(event, 42, "main", []workflowInput{{
 		Path: workflowPath, CanonicalPath: "ci.yml", Source: withoutPullRequest,
 		Triggers: []workflow.Trigger{{Event: "push"}},
-	}})
+	}}, "")
 	if err != nil || !strings.Contains(workflowErrors["ci.yml"], "does not match the event merge commit") {
 		t.Fatalf("merge-added pull request trigger result = %#v, %v", workflowErrors, err)
 	}
@@ -329,7 +341,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 	_, workflowErrors, err = pullRequestChangedPaths(event, 42, "main", []workflowInput{{
 		Path: customPath, CanonicalPath: customPath,
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
-	}})
+	}}, "")
 	if err != nil || len(workflowErrors) != 0 {
 		t.Fatalf("unfiltered custom workflow result = %#v, %v", workflowErrors, err)
 	}
@@ -343,7 +355,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	}}
 	snapshot := buildkitepipeline.TriggerEventSnapshot{}
-	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, closedWorkflows)
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, closedWorkflows, "")
 	if closedWorkflows[0].PathFiltersError != "" {
 		t.Fatalf("unfiltered closed workflow provenance error = %q", closedWorkflows[0].PathFiltersError)
 	}
@@ -353,7 +365,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	})
 	snapshot = buildkitepipeline.TriggerEventSnapshot{}
-	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, closedWorkflows)
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, closedWorkflows, "")
 	if !strings.Contains(closedWorkflows[0].PathFiltersError, "does not bind the event base and head") {
 		t.Fatalf("filtered closed workflow provenance error = %q", closedWorkflows[0].PathFiltersError)
 	}
@@ -368,7 +380,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	}}
 	snapshot = buildkitepipeline.TriggerEventSnapshot{}
-	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, customWorkflows)
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, customWorkflows, "")
 	if customWorkflows[0].PathFiltersError != "" {
 		t.Fatalf("unfiltered custom workflow provenance error = %q", customWorkflows[0].PathFiltersError)
 	}
@@ -379,7 +391,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	}}
 	snapshot = buildkitepipeline.TriggerEventSnapshot{}
-	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, workflows)
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, workflows, "")
 	if !strings.Contains(workflows[0].PathFiltersError, "merge commit SHAs") {
 		t.Fatalf("missing merge commit workflow error = %q", workflows[0].PathFiltersError)
 	}
@@ -388,7 +400,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 	pullRequest["head"].(map[string]any)["sha"] = ""
 	workflows[0].PathFiltersError = ""
 	snapshot = buildkitepipeline.TriggerEventSnapshot{}
-	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, workflows)
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, workflows, "")
 	if !strings.Contains(workflows[0].PathFiltersError, "base, head, and merge commit SHAs") {
 		t.Fatalf("missing base and head workflow error = %q", workflows[0].PathFiltersError)
 	}
@@ -445,7 +457,7 @@ func TestPopulateChangedPathsRequiresLinkedWebhook(t *testing.T) {
 			snapshot := buildkitepipeline.TriggerEventSnapshot{}
 			populateChangedPaths(&snapshot, compiler.Event{Event: event}, effectiveEventFromPath, []workflowInput{{
 				Triggers: []workflow.Trigger{{Event: event, Paths: []string{"src/**"}}},
-			}})
+			}}, "")
 			if snapshot.ChangedPaths.Paths != nil || !strings.Contains(snapshot.ChangedPaths.UnavailableReason, event+" path filters require linked Buildkite webhook") {
 				t.Fatalf("changed-path snapshot = %#v", snapshot)
 			}

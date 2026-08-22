@@ -684,7 +684,7 @@ func TestNormalizePluginCommit(t *testing.T) {
 	t.Run("preserves valid full commit", func(t *testing.T) {
 		runner := &cliCaptureRunner{}
 		setCalls := 0
-		err := normalizePluginCommit(t.Context(), func(string) string { return fullCommit }, func(string, string) error {
+		err := normalizePluginCommit(t.Context(), "", func(string) string { return fullCommit }, func(string, string) error {
 			setCalls++
 			return nil
 		}, runner)
@@ -695,20 +695,20 @@ func TestNormalizePluginCommit(t *testing.T) {
 	t.Run("resolves symbolic commit from HEAD", func(t *testing.T) {
 		runner := &cliCaptureRunner{gitOutput: []byte(fullCommit + "\n")}
 		name, value := "", ""
-		err := normalizePluginCommit(t.Context(), func(string) string { return "HEAD" }, func(gotName, gotValue string) error {
+		err := normalizePluginCommit(t.Context(), "/checkout", func(string) string { return "HEAD" }, func(gotName, gotValue string) error {
 			name, value = gotName, gotValue
 			return nil
 		}, runner)
 		if err != nil || name != "BUILDKITE_COMMIT" || value != fullCommit {
 			t.Fatalf("normalizePluginCommit() = %q, %q, %v", name, value, err)
 		}
-		if len(runner.commands) != 1 || runner.commands[0].name != "git" || !slices.Equal(runner.commands[0].args, []string{"rev-parse", "HEAD"}) {
+		if len(runner.commands) != 1 || runner.commands[0].dir != "/checkout" || runner.commands[0].name != "git" || !slices.Equal(runner.commands[0].args, []string{"rev-parse", "HEAD"}) {
 			t.Fatalf("commands = %#v, want exact git rev-parse HEAD invocation", runner.commands)
 		}
 	})
 	t.Run("propagates resolution failure", func(t *testing.T) {
 		runner := &cliCaptureRunner{gitErr: errors.New("no checkout")}
-		err := normalizePluginCommit(t.Context(), func(string) string { return "HEAD" }, func(string, string) error { return nil }, runner)
+		err := normalizePluginCommit(t.Context(), "", func(string) string { return "HEAD" }, func(string, string) error { return nil }, runner)
 		if err == nil || !strings.Contains(err.Error(), "resolve BUILDKITE_COMMIT from checked-out HEAD: no checkout") {
 			t.Fatalf("normalizePluginCommit() error = %v", err)
 		}
