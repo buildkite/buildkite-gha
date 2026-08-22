@@ -479,7 +479,7 @@ jobs:
       target: ${{ matrix.target }}
 ```
 
-Nested called workflows keep nested gates. Jobs within one called workflow remain parallel except for their declared `needs` and job-level concurrency. Calls with `if` or `needs` and jobs that reuse their enclosing workflow group are unsupported because Buildkite cannot preserve GitHub's admission order for those cases.
+Nested called workflows keep nested gates. Jobs within one called workflow remain parallel except for their declared `needs` and job-level concurrency. Calls with `if` or `needs`, and jobs or nested called workflows that reuse an enclosing workflow group, are unsupported because Buildkite cannot preserve GitHub's admission order for those cases.
 
 Buildkite queues every waiting entry. It does not replace GitHub's existing pending entry. The `queue` key is unsupported.
 

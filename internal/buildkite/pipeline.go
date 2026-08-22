@@ -247,6 +247,13 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		if workflow.ConcurrencyGate != nil {
+			for _, gate := range gates {
+				if gate.Group == workflow.ConcurrencyGate.Group {
+					return nil, fmt.Errorf("reusable-workflow concurrency gate %q shares group with enclosing workflow gate", gate.ID)
+				}
+			}
+		}
 		for gateIndex := range gates {
 			gate := &gates[gateIndex]
 			gateNamespace := pipeline.CompilerStep + "\x00" + gate.ID
@@ -536,6 +543,15 @@ func prepareReusableConcurrencyGates(jobs []Job) ([]preparedConcurrencyGate, err
 			}
 			gates[index].Members = append(gates[index].Members, job.Key)
 			parentID = declared.ID
+		}
+	}
+	for _, gate := range gates {
+		for parentID := gate.ParentID; parentID != ""; {
+			parent := gates[indexes[parentID]]
+			if parent.Group == gate.Group {
+				return nil, fmt.Errorf("reusable-workflow concurrency gate %q shares group with enclosing gate %q", gate.ID, parent.ID)
+			}
+			parentID = parent.ParentID
 		}
 	}
 	for _, gate := range gates {

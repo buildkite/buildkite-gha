@@ -811,6 +811,40 @@ func TestEmitRejectsConcurrencyGroupSharedWithMemberJob(t *testing.T) {
 	}
 }
 
+func TestEmitRejectsConcurrencyGroupSharedWithEnclosingGate(t *testing.T) {
+	group := "buildkite-gha/concurrency/deploy"
+	tests := []struct {
+		name     string
+		pipeline Pipeline
+		want     string
+	}{
+		{
+			name: "workflow",
+			pipeline: Pipeline{
+				CompilerStep: "importer", DistributionDigest: testDigest("distribution"), ConcurrencyGate: &ConcurrencyGate{Group: group},
+				Jobs: []Job{{Key: "deploy", Label: "Deploy", Queue: "linux", PlanDigest: testDigest("workflow-gate"), ConcurrencyGates: []ConcurrencyGate{{ID: "call", Group: group}}}},
+			},
+			want: `concurrency gate "call" shares group with enclosing workflow gate`,
+		},
+		{
+			name: "nested reusable workflow",
+			pipeline: Pipeline{
+				CompilerStep: "importer", DistributionDigest: testDigest("distribution"),
+				Jobs: []Job{{Key: "deploy", Label: "Deploy", Queue: "linux", PlanDigest: testDigest("nested-gate"), ConcurrencyGates: []ConcurrencyGate{{ID: "outer", Group: group}, {ID: "inner", Group: group}}}},
+			},
+			want: `concurrency gate "inner" shares group with enclosing gate "outer"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Emit(test.pipeline)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Emit() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestEmitUsesDefaultAgentTargetingWhenQueueIsEmpty(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep:       "importer",
