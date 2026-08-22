@@ -206,6 +206,7 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 			PlanDigest:         artifact.Digest,
 			Dependencies:       append([]string(nil), ir.Jobs[i].Needs...),
 			RequiresMise:       job.NeedsMise(),
+			Cache:              ir.Jobs[i].Cache,
 			SoftFail:           job.ContinueOnError,
 		}
 		if ir.Jobs[i].Platform == PlatformLinuxAMD64 {

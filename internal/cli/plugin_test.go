@@ -157,7 +157,7 @@ func TestParsePluginConfiguration(t *testing.T) {
     "subject-claim": "pipeline_id"
   },
   "runners": [
-    {"runs-on":"ubuntu-latest","queue":"hosted","image":"` + image + `"},
+    {"runs-on":"ubuntu-latest","queue":"hosted","image":"` + image + `","cache":{"paths":["/home/runner/.gradle/caches","/home/runner/.gradle/wrapper"],"name":"gradle-${BUILDKITE_BRANCH}","size":"40g"}},
     {"runs-on":"macos-14","queue":"macos-sonoma-arm64"}
   ]
 }`)
@@ -170,7 +170,7 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if configuration.OIDC == nil || !slices.Equal(configuration.OIDC.Claims, []string{"organization_id", "future_server_claim"}) || !slices.Equal(configuration.OIDC.AWSSessionTags, []string{"organization_slug", "pipeline_id"}) || configuration.OIDC.SubjectClaim != "pipeline_id" {
 		t.Fatalf("OIDC configuration = %#v", configuration.OIDC)
 	}
-	if got := configuration.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {
+	if got := configuration.runnerTargets["ubuntu-latest"]; got.Queue != "hosted" || got.Platform != compiler.PlatformLinuxAMD64 || got.Image != image || got.Cache == nil || !slices.Equal(got.Cache.Paths, []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper"}) || got.Cache.Name != "gradle-${BUILDKITE_BRANCH}" || got.Cache.Size != "40g" {
 		t.Fatalf("Linux target = %#v", got)
 	}
 	if got := configuration.runnerTargets["macos-14"]; got != (compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
@@ -225,6 +225,15 @@ func TestParsePluginConfiguration(t *testing.T) {
 		{name: "null image", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","image":null}]}`, want: "immutable registry"},
 		{name: "mutable image", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","image":"ubuntu:latest"}]}`, want: "immutable registry"},
 		{name: "Darwin image", source: `{"workflow":"ci.yml","runners":[{"runs-on":"macos-14","queue":"macos","image":"` + image + `"}]}`, want: "unsupported on darwin/arm64"},
+		{name: "null cache", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":null}]}`, want: "cache must be a JSON object"},
+		{name: "unknown cache field", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[".cache"],"scope":"branch"}}]}`, want: "cache contains unknown field"},
+		{name: "missing cache paths", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"name":"dependencies"}}]}`, want: "cache paths is required"},
+		{name: "empty cache paths", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[]}}]}`, want: "cache paths must be a non-empty array"},
+		{name: "duplicate cache path", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[".cache",".cache"]}}]}`, want: "may only be configured once"},
+		{name: "invalid cache name", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[".cache"],"name":"bad_name"}}]}`, want: "cache name must be"},
+		{name: "arbitrary cache name variable", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[".cache"],"name":"${HOME}-cache"}}]}`, want: "cache name must be"},
+		{name: "undersized cache", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[".cache"],"size":"19g"}}]}`, want: "at least 20 gigabytes"},
+		{name: "invalid cache size unit", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[".cache"],"size":"20GB"}}]}`, want: "Ng format"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := parsePluginConfiguration(test.source); err == nil || !strings.Contains(err.Error(), test.want) {
@@ -250,8 +259,8 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 			"aws-session-tags": []string{"pipeline_id"},
 			"subject-claim":    "pipeline_id",
 		},
-		"runners": []map[string]string{
-			{"runs-on": "ubuntu-latest", "queue": "hosted"},
+		"runners": []map[string]any{
+			{"runs-on": "ubuntu-latest", "queue": "hosted", "cache": map[string]any{"paths": []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper"}, "name": "gradle-cache", "size": "40g"}},
 		},
 	})
 	if err != nil {
@@ -283,6 +292,11 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 				Image   string            `yaml:"image"`
 				Agents  map[string]string `yaml:"agents"`
 				Command string            `yaml:"command"`
+				Cache   struct {
+					Paths []string `yaml:"paths"`
+					Name  string   `yaml:"name"`
+					Size  string   `yaml:"size"`
+				} `yaml:"cache"`
 			} `yaml:"steps"`
 		} `yaml:"steps"`
 	}
@@ -293,7 +307,7 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 		t.Fatalf("workflow groups = %#v", pipeline.Steps)
 	}
 	for _, step := range pipeline.Steps[0].Steps {
-		if step.Agents["queue"] != "hosted" || step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") || !strings.Contains(step.Command, "useradd --create-home") || !strings.Contains(step.Command, "sudo -n --preserve-env --user runner") {
+		if step.Agents["queue"] != "hosted" || step.Image != defaultNobleRunnerImage || !slices.Equal(step.Cache.Paths, []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper"}) || step.Cache.Name != "gradle-cache" || step.Cache.Size != "40g" || !strings.Contains(step.Command, "--hosted-tool-cache") || !strings.Contains(step.Command, "useradd --create-home") || !strings.Contains(step.Command, "chown -R runner") || !strings.Contains(step.Command, "sudo -n --preserve-env --user runner") {
 			t.Fatalf("plugin profile was not applied: %#v", step)
 		}
 	}

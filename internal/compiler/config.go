@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
@@ -80,12 +82,16 @@ type VariableSources struct {
 	Buildkite map[string]string
 }
 
+// CacheVolume is one Buildkite Hosted cache volume attached to a runner target.
+type CacheVolume = buildkitepipeline.CacheVolume
+
 // RunnerTarget atomically selects one Buildkite queue, execution platform, and
-// optional immutable runtime image.
+// optional immutable runtime image and cache volume.
 type RunnerTarget struct {
 	Queue    string
 	Platform Platform
 	Image    string
+	Cache    *CacheVolume
 }
 
 // RunnerSelector maps one complete runs-on selector to a target without
@@ -194,7 +200,7 @@ func (options Options) validate() error {
 		if err := validateRunnerTarget(make(map[string]RunnerTarget), strings.Join(selector.Labels, ", "), selector.Target); err != nil {
 			return err
 		}
-		if existing, ok := selectors[key]; ok && existing != selector.Target {
+		if existing, ok := selectors[key]; ok && !runnerTargetsEqual(existing, selector.Target) {
 			return fmt.Errorf("runner selector has conflicting target mappings")
 		}
 		selectors[key] = selector.Target
@@ -255,12 +261,24 @@ func validateRunnerTarget(labels map[string]RunnerTarget, label string, target R
 	if target.Platform == PlatformDarwinARM64 && target.Image != "" {
 		return fmt.Errorf("runner label %q cannot select a runtime image on darwin/arm64", label)
 	}
+	if target.Cache != nil {
+		if err := buildkitepipeline.ValidateCacheVolume(*target.Cache); err != nil {
+			return fmt.Errorf("runner label %q has invalid cache configuration: %w", label, err)
+		}
+	}
 	normalized := strings.ToLower(strings.TrimSpace(label))
-	if existing, ok := labels[normalized]; ok && existing != target {
+	if existing, ok := labels[normalized]; ok && !runnerTargetsEqual(existing, target) {
 		return fmt.Errorf("runner label %q has conflicting target mappings", label)
 	}
 	labels[normalized] = target
 	return nil
+}
+
+func runnerTargetsEqual(first, second RunnerTarget) bool {
+	if first.Queue != second.Queue || first.Platform != second.Platform || first.Image != second.Image {
+		return false
+	}
+	return cachesEqual(first.Cache, second.Cache)
 }
 
 func (sources VariableSources) snapshot() map[string]string {
@@ -363,8 +381,8 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 		if !ok {
 			return RunnerTarget{}, rejectRunner(reasonUnmappedLabel, "runner label %q is not mapped by policy", label)
 		}
-		if resolved && target != mapped {
-			if target.Platform == mapped.Platform && target.Image == mapped.Image {
+		if resolved && !runnerTargetsEqual(target, mapped) {
+			if target.Queue != mapped.Queue && target.Platform == mapped.Platform && target.Image == mapped.Image && cachesEqual(target.Cache, mapped.Cache) {
 				return RunnerTarget{}, rejectRunner(reasonConflictingQueues, "runner labels resolve to conflicting queues %q and %q", target.Queue, mapped.Queue)
 			}
 			return RunnerTarget{}, rejectRunner(reasonConflictingTarget, "runner labels resolve to conflicting targets %q and %q", targetDescription(target), targetDescription(mapped))
@@ -474,7 +492,17 @@ func targetDescription(target RunnerTarget) string {
 	if target.Image != "" {
 		description += "#" + target.Image
 	}
+	if target.Cache != nil {
+		description += "#cache=" + target.Cache.Name + ":" + target.Cache.Size + ":" + strings.Join(target.Cache.Paths, ",")
+	}
 	return description
+}
+
+func cachesEqual(first, second *CacheVolume) bool {
+	if first == nil || second == nil {
+		return first == nil && second == nil
+	}
+	return first.Name == second.Name && first.Size == second.Size && slices.Equal(first.Paths, second.Paths)
 }
 
 func contains(values []string, wanted string) bool {

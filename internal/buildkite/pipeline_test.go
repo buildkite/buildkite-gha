@@ -773,6 +773,78 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 	}
 }
 
+func TestEmitMergesConfiguredAndManagedCacheVolume(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Jobs: []Job{{
+			Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan"), RequiresMise: true,
+			Cache: &CacheVolume{Paths: []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper"}, Name: "dependencies", Size: "40g"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Command string `yaml:"command"`
+			Cache   struct {
+				Paths []string `yaml:"paths"`
+				Name  string   `yaml:"name"`
+				Size  string   `yaml:"size"`
+			} `yaml:"cache"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 {
+		t.Fatalf("steps = %#v", document.Steps)
+	}
+	step := document.Steps[0]
+	wantPaths := []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper", platformMiseCachePath("linux/amd64")}
+	if !slices.Equal(step.Cache.Paths, wantPaths) || step.Cache.Name != "dependencies" || step.Cache.Size != "40g" {
+		t.Fatalf("merged cache = %#v, want paths %#v with configured name and size", step.Cache, wantPaths)
+	}
+	for _, path := range []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper"} {
+		if !strings.Contains(step.Command, "readlink -f -- '"+path+"'") {
+			t.Fatalf("runner-home cache path %q is not made writable by runner:\n%s", path, step.Command)
+		}
+	}
+	if !strings.Contains(step.Command, `case "$cache_target" in /cache/bkcache/*)`) || !strings.Contains(step.Command, `chown -R runner:"$runner_group" "$cache_target"`) {
+		t.Fatalf("cache ownership is not constrained to the Buildkite volume:\n%s", step.Command)
+	}
+}
+
+func TestEmitConfiguredCacheUsesBuildkiteDefaultsWithoutMise(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Jobs:               []Job{{Key: "shell", Label: "Shell", PlanDigest: testDigest("plan"), Cache: &CacheVolume{Paths: []string{".cache"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Cache struct {
+				Paths []string `yaml:"paths"`
+				Name  string   `yaml:"name"`
+				Size  string   `yaml:"size"`
+			} `yaml:"cache"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 || !slices.Equal(document.Steps[0].Cache.Paths, []string{".cache"}) || document.Steps[0].Cache.Name != "" || document.Steps[0].Cache.Size != "" || strings.Contains(string(output), "BUILDKITE_GHA_MISE_DATA_DIR") {
+		t.Fatalf("configured cache did not preserve Buildkite defaults:\n%s", output)
+	}
+	if !strings.Contains(string(output), "readlink -f -- '.cache'") {
+		t.Fatalf("relative cache path is not made writable by runner:\n%s", output)
+	}
+}
+
 func TestEmitDarwinActionRuntimeUsesNativePlatformCache(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep: "importer",

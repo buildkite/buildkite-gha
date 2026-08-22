@@ -535,6 +535,11 @@ platform, and immutable Linux image. The importer applies that target verbatim
 and publishes returned fallback warnings as annotations. The server rejects
 selectors that require an incompatible operating system or architecture.
 
+Explicit mappings can also attach one [Buildkite Hosted cache
+volume](cli.md#configure-generated-job-cache-volumes) to generated jobs. This
+configuration is outside the GitHub workflow and does not change workflow
+syntax or action inputs.
+
 `validate --profile hosted` has no job-scoped API and admits only the local
 `macos-latest` preset.
 

@@ -320,6 +320,53 @@ The importer reuses its verified executable for jobs on the same platform. It
 downloads the other platform's distribution from the same release only when a
 workflow needs it. Runner mappings apply to generated jobs, not the importer.
 
+### Configure generated-job cache volumes
+
+An explicit runner mapping can attach one Buildkite Hosted cache volume to each
+generated job using that mapping:
+
+```yaml
+plugins:
+  - github-actions#latest:
+      workflow: .github/workflows/ci.yml
+      runners:
+        - runs-on: ubuntu-latest
+          queue: hosted
+          cache:
+            paths:
+              - /home/runner/.gradle/caches
+              - /home/runner/.gradle/wrapper
+            name: gradle-dependencies
+            size: 40g
+```
+
+`cache.paths` is a required, non-empty list of unique, non-empty paths. Paths
+may be relative to the generated job's working directory or absolute. `name`
+and `size` are optional. Names follow Buildkite's 100-character
+letters-numbers-hyphens format and may contain `${BUILDKITE_*}` variables.
+Sizes use `Ng` and must be at least `20g`. Without a name or size, Buildkite
+uses its pipeline-scoped name and 20 GB defaults.
+
+Each Buildkite step supports one cache volume. When a job also needs the
+internally managed mise cache, `buildkite-gha` adds the mise path to the same
+volume. A configured name and size apply to that combined volume; otherwise,
+the managed mise name and Buildkite's default size remain unchanged. Jobs with
+neither configuration emit no `cache` attribute.
+
+Generated Linux jobs run as `runner`. Configured cache paths are made writable
+by that user after the bootstrap verifies that they target the Buildkite cache
+volume. Prefer narrowly scoped paths.
+For example, caching an entire Gradle User Home also persists `init.d` scripts
+and other executable configuration, increasing the impact of cache poisoning.
+Caching only `caches` and `wrapper` reduces that exposure, but a cache-volume
+miss does not provide setup-gradle's archive-cache fallback once the mounted
+`caches` directory exists.
+
+Cache volumes are best-effort accelerators, scoped to the Buildkite pipeline
+and cluster. They commit after successful jobs and are abandoned after failed
+jobs. Do not use them as durable or trusted storage. See [Buildkite cache
+volumes](https://buildkite.com/docs/agent/buildkite-hosted/cache-volumes).
+
 ### Select workflows
 
 Pass every workflow path explicitly:
