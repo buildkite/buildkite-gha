@@ -1,6 +1,7 @@
 package program
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -17,25 +18,57 @@ type EvaluationContext struct {
 // The normalized interpreter and the legacy runtime can therefore be tested
 // against the same expression inputs before the plan-schema cutover.
 func EvaluateSite(site Site, context EvaluationContext) (any, error) {
+	var value any
+	var err error
 	switch site.Surface {
 	case SurfaceJobCondition, SurfaceStepCondition:
-		return expression.EvaluateCondition(site.Source, context.Condition)
+		value, err = expression.EvaluateCondition(site.Source, context.Condition)
 	case SurfaceJobEnvironment:
-		return expression.EvaluateJobEnvironment(site.Source, context.Expression)
+		value, err = expression.EvaluateJobEnvironment(site.Source, context.Expression)
 	case SurfaceJobDefault:
-		return expression.EvaluateJobDefault(site.Source, context.Expression)
+		value, err = expression.EvaluateJobDefault(site.Source, context.Expression)
 	case SurfaceJobOutput:
-		return expression.EvaluateJobOutput(site.Source, context.Expression)
+		value, err = expression.EvaluateJobOutput(site.Source, context.Expression)
 	case SurfaceStepTemplate:
-		return expression.EvaluateStep(site.Source, context.Expression)
+		value, err = expression.EvaluateStep(site.Source, context.Expression)
 	case SurfaceStepControl:
-		return expression.EvaluateStepControl(site.Source, context.Expression)
+		value, err = expression.EvaluateStepControl(site.Source, context.Expression)
 	case SurfaceRuntimeTemplate, SurfaceServiceCredential:
-		return expression.Evaluate(site.Source, context.Expression)
+		value, err = expression.Evaluate(site.Source, context.Expression)
 	case SurfaceServiceMap:
-		return expression.EvaluateObject(site.Source, context.Expression)
+		value, err = expression.EvaluateObject(site.Source, context.Expression)
 	default:
 		return nil, fmt.Errorf("unsupported expression surface %q", site.Surface)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !matchesResultType(value, site.Result) {
+		return nil, fmt.Errorf("expression produced %T, want %s", value, site.Result)
+	}
+	return value, nil
+}
+
+func matchesResultType(value any, result ResultType) bool {
+	switch result {
+	case ResultString:
+		_, ok := value.(string)
+		return ok
+	case ResultBoolean:
+		_, ok := value.(bool)
+		return ok
+	case ResultNumber:
+		switch value.(type) {
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
+			return true
+		default:
+			return false
+		}
+	case ResultObject:
+		_, ok := value.([]expression.ObjectEntry)
+		return ok
+	default:
+		return false
 	}
 }
 
