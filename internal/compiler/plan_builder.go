@@ -43,6 +43,11 @@ type builtPlanActions struct {
 	resolved            bool
 }
 
+var (
+	errRetainedGitHubEvent  = errors.New("github.event cannot be retained in a job plan")
+	errEventActionReference = errors.New("github.event cannot select an action reference")
+)
+
 func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, []PlanAuthorization, []JobEvaluation, error) {
 	payload, err := json.Marshal(ir.Event.Payload)
 	if err != nil {
@@ -165,7 +170,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 	context.Inputs = instance.Inputs
 	context.Matrix = instance.Matrix
 
-	reduceTemplate := func(value string) (string, error) {
+	reduceTemplateValue := func(value string) (string, error) {
 		if value == "" {
 			return value, nil
 		}
@@ -182,11 +187,11 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 			return "", err
 		}
 		if referencesEvent || referencesEventAlias {
-			return "", fmt.Errorf("github.event cannot be retained in a job plan")
+			return "", errRetainedGitHubEvent
 		}
 		return reduced, nil
 	}
-	reduceCondition := func(value string) (string, error) {
+	reduceConditionValue := func(value string) (string, error) {
 		if value == "" {
 			return value, nil
 		}
@@ -206,28 +211,45 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 			return "", err
 		}
 		if referencesEvent {
-			return "", fmt.Errorf("github.event cannot be retained in a job plan")
+			return "", errRetainedGitHubEvent
 		}
 		return reduced, nil
 	}
-	reduceTypedExpression := func(value string) (string, error) {
-		referencesEvent, err := expression.ReferencesGitHubEvent(value)
-		if err != nil || !referencesEvent {
-			return value, err
+	reduceTemplate := func(value, field string, position workflow.Position, step int) (string, error) {
+		reduced, err := reduceTemplateValue(value)
+		if err != nil {
+			return "", planExpressionFinding(instance, field, value, position, step, err)
 		}
-		reduced, err := reduceCondition(value)
+		return reduced, nil
+	}
+	reduceCondition := func(value, field string, position workflow.Position, step int) (string, error) {
+		reduced, err := reduceConditionValue(value)
+		if err != nil {
+			return "", planExpressionFinding(instance, field, value, position, step, err)
+		}
+		return reduced, nil
+	}
+	reduceTypedExpression := func(value, field string, position workflow.Position, step int) (string, error) {
+		referencesEvent, err := expression.ReferencesGitHubEvent(value)
+		if err != nil {
+			return "", planExpressionFinding(instance, field, value, position, step, err)
+		}
+		if !referencesEvent {
+			return value, nil
+		}
+		reduced, err := reduceCondition(value, field, position, step)
 		if err != nil {
 			return "", err
 		}
 		return "${{ " + reduced + " }}", nil
 	}
-	reduceMap := func(values map[string]string) (map[string]string, error) {
+	reduceMap := func(values map[string]string, field string, position workflow.Position, step int) (map[string]string, error) {
 		if values == nil {
 			return nil, nil
 		}
 		result := cloneMap(values)
 		for _, name := range sortedValueKeys(result) {
-			value, err := reduceTemplate(result[name])
+			value, err := reduceTemplate(result[name], fmt.Sprintf("%s.%s", field, name), position, step)
 			if err != nil {
 				return nil, err
 			}
@@ -235,13 +257,13 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		}
 		return result, nil
 	}
-	reduceSlice := func(values []string) ([]string, error) {
+	reduceSlice := func(values []string, field string, position workflow.Position) ([]string, error) {
 		if values == nil {
 			return nil, nil
 		}
 		result := append([]string(nil), values...)
 		for i := range result {
-			value, err := reduceTemplate(result[i])
+			value, err := reduceTemplate(result[i], fmt.Sprintf("%s[%d]", field, i), position, 0)
 			if err != nil {
 				return nil, err
 			}
@@ -251,24 +273,32 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 	}
 
 	var err error
-	if instance.If, err = reduceCondition(instance.If); err != nil {
+	if instance.If, err = reduceCondition(instance.If, "job.if", instance.Source.Start, 0); err != nil {
 		return JobInstance{}, err
 	}
-	for _, field := range []*string{&instance.DefaultShell, &instance.DefaultWorkingDirectory, &instance.ServicesExpression} {
-		if *field, err = reduceTemplate(*field); err != nil {
+	jobFields := []struct {
+		name  string
+		value *string
+	}{
+		{"job.defaults.run.shell", &instance.DefaultShell},
+		{"job.defaults.run.working-directory", &instance.DefaultWorkingDirectory},
+		{"job.services", &instance.ServicesExpression},
+	}
+	for _, field := range jobFields {
+		if *field.value, err = reduceTemplate(*field.value, field.name, instance.Source.Start, 0); err != nil {
 			return JobInstance{}, err
 		}
 	}
-	if instance.Env, err = reduceMap(instance.Env); err != nil {
+	if instance.Env, err = reduceMap(instance.Env, "job.env", instance.Source.Start, 0); err != nil {
 		return JobInstance{}, err
 	}
-	if instance.Outputs, err = reduceMap(instance.Outputs); err != nil {
+	if instance.Outputs, err = reduceMap(instance.Outputs, "job.outputs", instance.Source.Start, 0); err != nil {
 		return JobInstance{}, err
 	}
 
 	instance.CallGuards = append([]CallGuard(nil), instance.CallGuards...)
 	for i := range instance.CallGuards {
-		if instance.CallGuards[i].Condition, err = reduceCondition(instance.CallGuards[i].Condition); err != nil {
+		if instance.CallGuards[i].Condition, err = reduceCondition(instance.CallGuards[i].Condition, fmt.Sprintf("job.call-guards[%d]", i), instance.Source.Start, 0); err != nil {
 			return JobInstance{}, err
 		}
 	}
@@ -276,36 +306,55 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 	instance.Steps = append([]workflow.Step(nil), instance.Steps...)
 	for i := range instance.Steps {
 		step := &instance.Steps[i]
-		if step.If, err = reduceCondition(step.If); err != nil {
+		field := fmt.Sprintf("steps[%d]", i+1)
+		if step.If, err = reduceCondition(step.If, field+".if", step.IfSpan.Start, i+1); err != nil {
 			return JobInstance{}, err
 		}
-		for _, field := range []*string{&step.Name, &step.Run, &step.Shell, &step.WorkingDirectory} {
-			if *field, err = reduceTemplate(*field); err != nil {
+		stepTemplates := []struct {
+			name  string
+			value *string
+		}{{"name", &step.Name}, {"run", &step.Run}, {"shell", &step.Shell}, {"working-directory", &step.WorkingDirectory}}
+		for _, template := range stepTemplates {
+			if *template.value, err = reduceTemplate(*template.value, field+"."+template.name, step.Span.Start, i+1); err != nil {
 				return JobInstance{}, err
 			}
 		}
-		for _, field := range []*string{&step.ContinueOnErrorExpression, &step.TimeoutMinutesExpression} {
-			if *field, err = reduceTypedExpression(*field); err != nil {
+		typedExpressions := []struct {
+			name  string
+			value *string
+		}{{"continue-on-error", &step.ContinueOnErrorExpression}, {"timeout-minutes", &step.TimeoutMinutesExpression}}
+		for _, typed := range typedExpressions {
+			if *typed.value, err = reduceTypedExpression(*typed.value, field+"."+typed.name, step.Span.Start, i+1); err != nil {
 				return JobInstance{}, err
 			}
 		}
-		if step.Env, err = reduceMap(step.Env); err != nil {
+		if step.Env, err = reduceMap(step.Env, field+".env", step.Span.Start, i+1); err != nil {
 			return JobInstance{}, err
 		}
-		if step.With, err = reduceMap(step.With); err != nil {
+		if step.With, err = reduceMap(step.With, field+".with", step.Span.Start, i+1); err != nil {
 			return JobInstance{}, err
+		}
+		referencesEvent, referencesErr := expression.TemplateReferencesGitHubEvent(step.Uses)
+		if referencesErr == nil && !referencesEvent {
+			referencesEvent, referencesErr = expression.TemplateUsesContext(step.Uses, "event")
+		}
+		if referencesErr != nil {
+			return JobInstance{}, planExpressionFinding(instance, field+".uses", step.Uses, step.Span.Start, i+1, referencesErr)
+		}
+		if referencesEvent {
+			return JobInstance{}, planExpressionFinding(instance, field+".uses", step.Uses, step.Span.Start, i+1, errEventActionReference)
 		}
 	}
 
 	if instance.Container != nil {
 		container := *instance.Container
-		if container.Image, err = reduceTemplate(container.Image); err != nil {
+		if container.Image, err = reduceTemplate(container.Image, "job.container.image", container.Span.Start, 0); err != nil {
 			return JobInstance{}, err
 		}
-		if container.Env, err = reduceMap(container.Env); err != nil {
+		if container.Env, err = reduceMap(container.Env, "job.container.env", container.Span.Start, 0); err != nil {
 			return JobInstance{}, err
 		}
-		if container.Ports, err = reduceSlice(container.Ports); err != nil {
+		if container.Ports, err = reduceSlice(container.Ports, "job.container.ports", container.Span.Start); err != nil {
 			return JobInstance{}, err
 		}
 		instance.Container = &container
@@ -314,26 +363,31 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 	instance.Services = append([]workflow.Service(nil), instance.Services...)
 	for i := range instance.Services {
 		container := instance.Services[i].Container
-		for _, field := range []*string{&container.Image, &container.Options, &container.Command, &container.Entrypoint} {
-			if *field, err = reduceTemplate(*field); err != nil {
+		field := fmt.Sprintf("job.services.%s", instance.Services[i].Name)
+		serviceFields := []struct {
+			name  string
+			value *string
+		}{{"image", &container.Image}, {"options", &container.Options}, {"command", &container.Command}, {"entrypoint", &container.Entrypoint}}
+		for _, serviceField := range serviceFields {
+			if *serviceField.value, err = reduceTemplate(*serviceField.value, field+"."+serviceField.name, container.Span.Start, 0); err != nil {
 				return JobInstance{}, err
 			}
 		}
-		if container.Env, err = reduceMap(container.Env); err != nil {
+		if container.Env, err = reduceMap(container.Env, field+".env", container.Span.Start, 0); err != nil {
 			return JobInstance{}, err
 		}
-		if container.Ports, err = reduceSlice(container.Ports); err != nil {
+		if container.Ports, err = reduceSlice(container.Ports, field+".ports", container.Span.Start); err != nil {
 			return JobInstance{}, err
 		}
-		if container.Volumes, err = reduceSlice(container.Volumes); err != nil {
+		if container.Volumes, err = reduceSlice(container.Volumes, field+".volumes", container.Span.Start); err != nil {
 			return JobInstance{}, err
 		}
 		if container.Credentials != nil {
 			credentials := *container.Credentials
-			if credentials.Username, err = reduceTemplate(credentials.Username); err != nil {
+			if credentials.Username, err = reduceTemplate(credentials.Username, field+".credentials.username", container.Span.Start, 0); err != nil {
 				return JobInstance{}, err
 			}
-			if credentials.Password, err = reduceTemplate(credentials.Password); err != nil {
+			if credentials.Password, err = reduceTemplate(credentials.Password, field+".credentials.password", container.Span.Start, 0); err != nil {
 				return JobInstance{}, err
 			}
 			container.Credentials = &credentials
@@ -696,12 +750,29 @@ func cloneOIDCConfiguration(configuration *plan.OIDCConfiguration) *plan.OIDCCon
 	}
 }
 
-func planConstructionFinding(instance JobInstance, err error) error {
-	return &ProcessingFinding{
+func planExpressionFinding(instance JobInstance, field, source string, position workflow.Position, step int, err error) error {
+	finding := &ProcessingFinding{
 		Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility",
-		Path: instance.SourcePath, Line: instance.Source.Start.Line, Column: instance.Source.Start.Column,
-		Job: instance.LogicalJobID, Instance: instance.Key, Err: err,
+		Path: instance.SourcePath, Line: position.Line, Column: position.Column,
+		Job: instance.LogicalJobID, Instance: instance.Key, Step: step,
+		Err: fmt.Errorf("%s:%d:%d: job %q %s expression %q: %w", instance.SourcePath, position.Line, position.Column, instance.LogicalJobID, field, source, err),
 	}
+	if errors.Is(err, errRetainedGitHubEvent) || strings.Contains(err.Error(), "whole github.event access is unsupported") {
+		finding.Message = "This expression uses the whole GitHub event or accesses it dynamically. Reference a specific scalar property, such as github.event.pull_request.head.sha. The full event payload is unavailable at runtime."
+		finding.Detail = fmt.Sprintf("Expression in %s: %q", field, source)
+	} else if errors.Is(err, errEventActionReference) {
+		finding.Message = "An action reference must be a static value and cannot use github.event. Replace the expression with a literal owner/repository/path@ref or local action path."
+		finding.Detail = fmt.Sprintf("Expression in %s: %q", field, source)
+	}
+	return finding
+}
+
+func planConstructionFinding(instance JobInstance, err error) error {
+	return attributedProcessingFinding(
+		StagePlans, CodePlanConstruction, "compatibility",
+		instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column,
+		instance.LogicalJobID, instance.Key, "", 0, err,
+	)
 }
 
 func requiredSecrets(instance JobInstance, actionRequired []string, actionInputsInspected bool) ([]string, bool, error) {
@@ -713,7 +784,7 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 			return err
 		}
 		if referencesEvent {
-			return fmt.Errorf("github.event cannot be retained in a job plan")
+			return errRetainedGitHubEvent
 		}
 		names, err := expression.SecretReferences(value)
 		if err != nil {
@@ -742,7 +813,7 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 			return err
 		}
 		if referencesEvent {
-			return fmt.Errorf("github.event cannot be retained in a job plan")
+			return errRetainedGitHubEvent
 		}
 		names, err := expression.ConditionSecretReferences(value)
 		if err != nil {

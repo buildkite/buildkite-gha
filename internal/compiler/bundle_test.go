@@ -1481,6 +1481,52 @@ jobs:
 	}
 }
 
+func TestCompileBundleExplainsUnsupportedRetainedEventAccess(t *testing.T) {
+	tests := []struct {
+		name       string
+		expression string
+	}{
+		{name: "whole event", expression: "toJSON(github.event)"},
+		{name: "dynamic property", expression: "github.event[needs.prepare.outputs.property]"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := []byte(fmt.Sprintf(`on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      property: ${{ steps.select.outputs.property }}
+    steps:
+      - id: select
+        run: echo 'property=action' >> "$GITHUB_OUTPUT"
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ %s }}'
+`, test.expression))
+			_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err == nil {
+				t.Fatal("CompileBundle() succeeded, want unsupported event access")
+			}
+			var finding *ProcessingFinding
+			if !errors.As(err, &finding) {
+				t.Fatalf("CompileBundle() error = %T, want ProcessingFinding", err)
+			}
+			if finding.Path != "workflow.yml" || finding.Line != 14 || finding.Column != 9 || finding.Job != "test" || finding.Step != 1 {
+				t.Fatalf("finding attribution = %#v", finding)
+			}
+			if !strings.Contains(finding.Message, "Reference a specific scalar property") || !strings.Contains(finding.Message, "full event payload is unavailable at runtime") {
+				t.Fatalf("finding message = %q", finding.Message)
+			}
+			if want := fmt.Sprintf(`Expression in steps[1].run: "echo '${{ %s }}'"`, test.expression); finding.Detail != want {
+				t.Fatalf("finding detail = %q, want %q", finding.Detail, want)
+			}
+		})
+	}
+}
+
 func TestCompileBundleDoesNotReduceEventExpressionsInActionReferences(t *testing.T) {
 	source := []byte(`on: push
 jobs:
@@ -1496,8 +1542,9 @@ jobs:
   "payload": {"action_ref": "owner/action@1111111111111111111111111111111111111111"}
 }`)
 	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained") {
-		t.Fatalf("CompileBundle() error = %v, want static action reference rejection", err)
+	var finding *ProcessingFinding
+	if err == nil || !errors.As(err, &finding) || !strings.Contains(finding.Message, "action reference must be a static value") || finding.Step != 1 || !strings.Contains(finding.Detail, "steps[1].uses") {
+		t.Fatalf("CompileBundle() finding = %#v, error = %v, want actionable static action reference rejection", finding, err)
 	}
 }
 
