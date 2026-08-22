@@ -6,7 +6,7 @@ package buildkite
 const experimentalRunnerHome = "/home/runner"
 const experimentalRunnerTemp = "/tmp/buildkite-gha-runner"
 
-func experimentalRunnerUserBootstrap(requiresMise, hostedToolCache bool) []string {
+func experimentalRunnerUserBootstrap(requiresMise, hostedToolCache bool, cache *CacheVolume) []string {
 	commands := []string{
 		`test "$(id -u)" -eq 0 || { echo 'buildkite-gha: runner user bootstrap requires root' >&2; exit 1; }`,
 		`for command in getent useradd usermod install sudo; do command -v "$command" >/dev/null 2>&1 || { echo "buildkite-gha: runner user bootstrap requires $command" >&2; exit 1; }; done`,
@@ -26,6 +26,18 @@ func experimentalRunnerUserBootstrap(requiresMise, hostedToolCache bool) []strin
 		`chmod 0440 "$plan"`,
 		`sudo -n --user runner -- test -x "$distribution" && ! sudo -n --user runner -- test -w "$distribution" || { echo 'buildkite-gha: runner runtime permissions are unsafe' >&2; exit 1; }`,
 		`sudo -n --user runner -- test -r "$plan" && ! sudo -n --user runner -- test -w "$plan" || { echo 'buildkite-gha: runner plan permissions are unsafe' >&2; exit 1; }`,
+	}
+	if cache != nil {
+		commands = append(commands, `command -v readlink >/dev/null 2>&1 || { echo 'buildkite-gha: configured cache paths require readlink' >&2; exit 1; }`)
+		for _, path := range cache.Paths {
+			commands = append(commands,
+				"cache_target=\"$(readlink -f -- "+shellQuote(path)+`)" || { echo 'buildkite-gha: configured cache path is unavailable' >&2; exit 1; }`,
+				`case "$cache_target" in /cache/bkcache/*) ;; *) echo 'buildkite-gha: configured cache path does not target the Buildkite cache volume' >&2; exit 1;; esac`,
+				`test -d "$cache_target" || { echo 'buildkite-gha: configured cache path is not a directory' >&2; exit 1; }`,
+				`chown -R runner:"$runner_group" "$cache_target"`,
+				`chmod -R u+rwX "$cache_target"`,
+			)
+		}
 	}
 	if requiresMise {
 		commands = append(commands,
