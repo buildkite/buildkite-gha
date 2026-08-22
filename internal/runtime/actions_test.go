@@ -618,8 +618,16 @@ func TestVerifiedActionEntrypointStaysWithinRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != entrypoint {
-		t.Fatalf("verified entrypoint = %q, want %q", got, entrypoint)
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantInfo, err := os.Stat(entrypoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(gotInfo, wantInfo) {
+		t.Fatalf("verified entrypoint = %q, want file %q", got, entrypoint)
 	}
 
 	outside := filepath.Join(parent, "outside.js")
