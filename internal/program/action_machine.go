@@ -378,10 +378,15 @@ func (m *ActionMachine[S]) prepare(ctx context.Context, invocation ActionInvocat
 				if !step.ContinueOnError {
 					return Frame{}, failure, nil
 				}
-				m.prepared[child.ID] = preparedInvocation{Failure: &failure}
 				childExecution = failure
 			} else {
 				invocationFrame = childFrame
+			}
+			if childExecution.Outcomes&(OutcomeFailure|OutcomeCancelled) != 0 {
+				prepared := m.prepared[child.ID]
+				failure := childExecution
+				prepared.Failure = &failure
+				m.prepared[child.ID] = prepared
 			}
 			effective := childExecution
 			if step.ContinueOnError && effective.Outcomes&OutcomeFailure != 0 && (effective.Failure == nil || !effective.Failure.Hard) {

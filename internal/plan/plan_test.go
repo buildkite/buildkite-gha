@@ -78,6 +78,37 @@ func TestResolvedActionStepsMustMatchNormalizedInvocations(t *testing.T) {
 	}
 }
 
+func TestDecodeRejectsReorderedNormalizedActionSteps(t *testing.T) {
+	const firstID = "a-0000000000000001"
+	const secondID = "a-0000000000000002"
+	digest := "sha256:" + strings.Repeat("4", 64)
+	job := validJob()
+	job.Steps = []Step{
+		{ID: "first", Kind: "uses", Uses: "./first", Action: &ActionSelector{Lock: firstID}},
+		{ID: "second", Kind: "uses", Uses: "./second", Action: &ActionSelector{Lock: secondID}},
+	}
+	job.Program.Job.Steps = []program.Step{
+		resolvedProgramStep("first", "./first", firstID),
+		resolvedProgramStep("second", "./second", secondID),
+	}
+	job.Actions = []ActionLock{
+		{ID: firstID, Source: "workspace", Path: "first", SourceDigest: digest},
+		{ID: secondID, Source: "workspace", Path: "second", SourceDigest: digest},
+	}
+	job.ActionPrograms = map[string]program.Action{
+		firstID:  {Source: "workspace", Runtime: program.ActionRuntimeComposite, Composite: &program.CompositeAction{}},
+		secondID: {Source: "workspace", Runtime: program.ActionRuntimeComposite, Composite: &program.CompositeAction{}},
+	}
+	job.Program.Job.Steps[0], job.Program.Job.Steps[1] = job.Program.Job.Steps[1], job.Program.Job.Steps[0]
+	encoded, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(encoded); err == nil || !strings.Contains(err.Error(), "normalized workflow step order") {
+		t.Fatalf("Decode() reordered steps error = %v", err)
+	}
+}
+
 func TestNormalizedNativeRuntimeMustMatchActionIntegration(t *testing.T) {
 	const actionID = "a-0000000000000001"
 	digest := "sha256:" + strings.Repeat("4", 64)
@@ -1114,6 +1145,8 @@ func TestPrerequisiteOutputProjectionContract(t *testing.T) {
 	}
 	job.NeedOutputs = map[string][]NeedOutput{"delegated": {}}
 	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build"}}
+	job.Program.Job.Steps[0].ID = "local"
+	job.Program.Job.Steps[0].Kind = "uses"
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
