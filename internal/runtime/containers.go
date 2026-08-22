@@ -58,6 +58,7 @@ type jobContainerBackend struct {
 	probedNodes               map[string]bool
 	servicePorts              map[string]expression.ServiceContext
 	existingVolumes           map[string]bool
+	volumeBaselineCaptured    bool
 	ownedVolumes              []string
 	volumesTracked            bool
 }
@@ -178,6 +179,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 			return nil, fmt.Errorf("snapshot Docker volumes: %w", volumeErr)
 		}
 		b.existingVolumes = lineSet(volumes)
+		b.volumeBaselineCaptured = true
 	}
 	if spec != nil {
 		if err = r.pullContainerImage(ctx, processor, env, docker, spec.Image); err != nil {
@@ -854,7 +856,7 @@ func (b *jobContainerBackend) cleanup(parent context.Context) error {
 	var out string
 	var queryErr error
 	if b.container != "" {
-		if !b.volumesTracked {
+		if b.volumeBaselineCaptured && !b.volumesTracked {
 			if trackErr := b.trackCreatedVolumes(ctx); trackErr != nil {
 				err = errors.Join(err, trackErr)
 			} else {
