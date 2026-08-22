@@ -81,6 +81,49 @@ func TestInventoryActionAuthorityIncludesRemotePreWhenMainIsSkipped(t *testing.T
 	}
 }
 
+func TestInventoryActionAuthorityUsesWorkflowInputsForLifecycleConditions(t *testing.T) {
+	token := testActionSite("${{ github.token }}")
+	actions := map[string]Action{
+		"root": {
+			Source: "github", Runtime: ActionRuntimeJavaScript, Inputs: []ActionInput{{Name: "publish"}, {Name: "token", Default: &token}},
+			JavaScript: &JavaScriptAction{Pre: "pre.js", PreCondition: testActionSite("inputs.publish == 'true'"), Main: "index.js"},
+		},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root", Condition: testWorkflowSite("false"), Inputs: []Binding{{Name: "publish", Value: testWorkflowSite("false")}}}, ActionAuthorityContext{WorkflowInputs: map[string]any{"publish": "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("workflow input used by pre-if did not grant GitHub token authority")
+	}
+}
+
+func TestInventoryActionAuthorityIncludesRemoteCompositePreparationInputs(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "github", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "token"}}, Composite: &CompositeAction{}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root", Condition: testWorkflowSite("false"), Inputs: []Binding{{Name: "token", Value: testWorkflowSite("${{ github.token }}")}}}, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("remote composite preparation input did not grant GitHub token authority")
+	}
+}
+
+func TestInventoryActionAuthorityTreatsOmittedOptionalInputAsEmpty(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "publish"}}, Composite: &CompositeAction{Steps: []CompositeStep{{Condition: testActionSite("inputs.publish == 'true'"), Run: &Run{Command: testActionSite("echo ${{ github.token }}")}}}}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("omitted optional input kept an unreachable token branch alive")
+	}
+}
+
 func TestInventoryActionAuthorityDoesNotGrantWholeGitHubContextFromCompositeMetadata(t *testing.T) {
 	actions := map[string]Action{
 		"root": {

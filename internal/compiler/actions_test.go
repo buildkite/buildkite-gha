@@ -599,6 +599,35 @@ runs:
 	}
 }
 
+func TestCompileActionProgramsForgetsEnvironmentAcrossWorkflowActionRoots(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "guarded", `name: guarded
+runs:
+  using: composite
+  steps:
+    - if: env.FLAG == 'true'
+      shell: sh
+      run: echo ${{ github.token }}
+`)
+	writeAction(t, workspace, "mutator", `name: mutator
+runs:
+  using: node24
+  main: index.js
+`)
+	compiled, err := compileActionPrograms(
+		t.Context(), workspace, nil, "https://github.com",
+		[]string{"./guarded", "./mutator"}, []map[string]string{{}, {}},
+		[]program.ActionInvocation{{}, {}},
+		[]program.ActionAuthorityContext{{Environment: map[string]string{"FLAG": "false"}}, {Environment: map[string]string{"FLAG": "false"}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("cross-root GITHUB_ENV mutation did not keep the guarded token path reachable")
+	}
+}
+
 func TestCompileActionInvocationsRejectsRetainedEventPayload(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "event", `name: event input

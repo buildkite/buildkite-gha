@@ -110,7 +110,9 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 		preReachable := false
 		if prepareAction && action.JavaScript.Pre != "" {
 			p.githubToken = p.githubToken || preparationEnvironmentToken
-			known := actionInputReferences(preparationScope, preparationInputs.values, preparationInputs.unknown)
+			// The current runtime evaluates lifecycle conditions with reusable-
+			// workflow inputs, not the action's resolved inputs.
+			known := preparationScope
 			analysis, err := expression.AnalyzeActionLifecycleCondition(action.JavaScript.PreCondition.Source, known)
 			if err != nil {
 				return fmt.Errorf("action pre-if: %w", err)
@@ -119,7 +121,7 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 			p.githubToken = p.githubToken || preReachable && preparationInputs.githubToken || authorityEffectsRequireToken(analysis.Effects)
 		}
 		if action.JavaScript.Post != "" && (mainReachable || preReachable) {
-			known := withoutKnownEnvironment(actionInputReferences(mainScope, mainInputs.values, mainInputs.unknown))
+			known := withoutKnownEnvironment(mainScope)
 			analysis, err := expression.AnalyzeActionLifecycleCondition(action.JavaScript.PostCondition.Source, known)
 			if err != nil {
 				return fmt.Errorf("action post-if: %w", err)
@@ -147,7 +149,7 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 		if action.Composite == nil {
 			return fmt.Errorf("action program %q has no composite execution", lock)
 		}
-		p.githubToken = p.githubToken || prepareAction && preparationEnvironmentToken
+		p.githubToken = p.githubToken || prepareAction && (preparationEnvironmentToken || preparationInputs.githubToken)
 		return p.inspectComposite(action, mainInputs, preparationInputs, mainScope, preparationScope, mainReachable, prepareAction)
 	default:
 		return fmt.Errorf("action program %q has unsupported runtime %q", lock, action.Runtime)
@@ -188,7 +190,13 @@ func (p *actionAuthorityPlanner) resolveInputs(action Action, supplied []Binding
 		return resolved, nil
 	}
 	for _, input := range action.Inputs {
-		if _, exists := resolved.values[input.Name]; exists || resolved.unknown[input.Name] || input.Default == nil {
+		if _, exists := resolved.values[input.Name]; exists || resolved.unknown[input.Name] {
+			continue
+		}
+		if input.Default == nil {
+			if !input.Required {
+				resolved.values[input.Name] = ""
+			}
 			continue
 		}
 		known = actionInputReferences(scope, resolved.values, resolved.unknown)
