@@ -542,9 +542,9 @@ selectors that require an incompatible operating system or architecture.
 
 | Key | Status | Behavior |
 | --- | --- | --- |
-| `matrix` | 🟡 Supported subset | Literal rows or compile-time `github`, `event`, `vars`, and `fromJSON` values. |
-| `include`, `exclude` | 🟡 Supported subset | Static combinations. |
-| `max-parallel` | 🟡 Supported subset | Literal value. |
+| `matrix` | 🟡 Supported subset | Literal rows. Authored values and expression-valued definitions can use compile-time `github`, `event`, `vars`, reusable-workflow `inputs`, and `fromJSON` values. |
+| `include`, `exclude` | 🟡 Supported subset | Literal combinations or expressions that resolve to arrays of objects during compilation. |
+| `max-parallel` | 🟡 Supported subset | Literal value on ordinary job matrices. Reusable-workflow call matrices with more than one instance are rejected because flattening cannot preserve invocation-level parallelism. |
 | `fail-fast` | ➖ Accepted, no effect | A failed matrix entry does not cancel its siblings. |
 
 A strategy can combine parallelism, static matrix values, and exclusions:
@@ -560,7 +560,27 @@ strategy:
         os: ubuntu-24.04
 ```
 
-A job may expand to at most 256 instances. Matrices derived from `needs` or `steps` are unsupported.
+Whole matrices, dimensions, and `include` or `exclude` lists can use static JSON:
+
+```yaml
+strategy:
+  matrix:
+    os: ${{ fromJSON(vars.OPERATING_SYSTEMS) }}
+    include: ${{ fromJSON(inputs.EXTRA_JOBS) }}
+    exclude: ${{ fromJSON(github.event.matrix_exclusions) }}
+```
+
+Static matrices on reusable-workflow calls compose with static matrices in
+called workflows, including nested calls. Each call instance receives its
+concrete `matrix` values and each called workflow receives its declared
+`inputs` before its matrix expands.
+
+A job may expand to at most 256 instances. All matrix values must be available
+before Buildkite pipeline generation. Expressions derived from `needs` outputs
+or `steps` require jobs to run before the final graph can be generated, so they
+remain unsupported. The compiler validates a narrow `needs.<job>.outputs.<name>`
+runtime-matrix shape, but does not upload a continuation pipeline because the
+transport has no authoritative current-attempt and durable idempotency fence.
 
 ### Containers and services
 

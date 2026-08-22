@@ -150,22 +150,21 @@ func (e *jobGraphExpansion) expandMatrices() {
 		var matrices []map[string]any
 		if deferred {
 			e.result.runtimeMatrixBoundary = true
-			position := job.Matrix.Span.Start
-			if job.Matrix.Expression != nil {
-				position = workflow.Position{Line: job.Matrix.Expression.Span.Start.Line, Column: job.Matrix.Expression.Span.Start.Column}
-			} else if job.Matrix.IncludeExpression != nil {
-				position = workflow.Position{Line: job.Matrix.IncludeExpression.Span.Start.Line, Column: job.Matrix.IncludeExpression.Span.Start.Column}
-			}
+			line, column := matrixErrorPosition(job, err)
 			if err == nil {
 				e.result.runtimeMatrices = append(e.result.runtimeMatrices, descriptor)
 				err = errors.New("runtime matrix source is valid, but continuation upload is disabled because Buildkite transport has no authoritative current-attempt fence and durable idempotency boundary")
 			}
-			err = locatedJobError(sourced.path, job, position.Line, position.Column, err.Error())
+			err = locatedJobError(sourced.path, job, line, column, err.Error())
 		} else {
-			matrices, err = expandMatrix(sourced.path, job, e.context)
+			matrixContext := e.context
+			matrixContext.Inputs = sourced.inputs.values
+			matrixContext.Matrix = nil
+			matrixContext.Strategy = nil
+			matrices, err = expandMatrix(sourced.path, job, matrixContext)
 		}
 		if err != nil {
-			line, column := matrixErrorPosition(job)
+			line, column := matrixErrorPosition(job, err)
 			e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
 				Path: sourced.path, Line: line, Column: column, Job: job.ID,
@@ -179,10 +178,14 @@ func (e *jobGraphExpansion) expandMatrices() {
 	}
 }
 
-func matrixErrorPosition(job workflow.Job) (int, int) {
+func matrixErrorPosition(job workflow.Job, err error) (int, int) {
 	line, column := job.Span.Start.Line, job.Span.Start.Column
 	if job.Matrix == nil {
 		return line, column
+	}
+	var positioned matrixPositionError
+	if errors.As(err, &positioned) {
+		return positioned.line, positioned.column
 	}
 	line, column = job.Matrix.Span.Start.Line, job.Matrix.Span.Start.Column
 	if job.Matrix.Expression != nil {
@@ -190,6 +193,9 @@ func matrixErrorPosition(job workflow.Job) (int, int) {
 	}
 	if job.Matrix.IncludeExpression != nil {
 		return job.Matrix.IncludeExpression.Span.Start.Line, job.Matrix.IncludeExpression.Span.Start.Column
+	}
+	if job.Matrix.ExcludeExpression != nil {
+		return job.Matrix.ExcludeExpression.Span.Start.Line, job.Matrix.ExcludeExpression.Span.Start.Column
 	}
 	return line, column
 }

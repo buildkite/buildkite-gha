@@ -240,11 +240,6 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				return reusableResolution{}, err
 			}
 		}
-		if job.Reusable != nil {
-			if err := rejectCallMatrixExpressions(path, job); err != nil {
-				return reusableResolution{}, err
-			}
-		}
 		callNeedBindings := replacementNeeds(job.Needs, replacements)
 		needBindings := callNeedBindings
 		if len(job.Needs) == 0 {
@@ -331,9 +326,16 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		}
 		calleeDigest := "sha256:" + sha256Sum(source)
 
-		matrices, err := expandMatrix(path, job, expression.CompileContext{})
+		matrixContext := resolver.context
+		matrixContext.Inputs = inputs.values
+		matrixContext.Matrix = nil
+		matrixContext.Strategy = nil
+		matrices, err := expandMatrix(path, job, matrixContext)
 		if err != nil {
 			return reusableResolution{}, err
+		}
+		if job.MaxParallel != nil && len(matrices) > 1 {
+			return reusableResolution{}, jobError(path, job, "strategy.max-parallel on a reusable-workflow matrix cannot be preserved when the called jobs are flattened")
 		}
 		var members []string
 		var callOutputs []needOutputBinding
@@ -1093,6 +1095,12 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 		if job.Matrix.Expression != nil {
 			jobValues = append(jobValues, job.Matrix.Expression.Text)
 		}
+		if job.Matrix.IncludeExpression != nil {
+			jobValues = append(jobValues, job.Matrix.IncludeExpression.Text)
+		}
+		if job.Matrix.ExcludeExpression != nil {
+			jobValues = append(jobValues, job.Matrix.ExcludeExpression.Text)
+		}
 		for _, row := range job.Matrix.Rows {
 			if row.Expression != nil {
 				jobValues = append(jobValues, row.Expression.Text)
@@ -1139,35 +1147,6 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 		for _, value := range stepValues {
 			if hasUnresolvedTemplateInput(value, deferredInputs) {
 				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
-			}
-		}
-	}
-	return nil
-}
-
-func rejectCallMatrixExpressions(path string, job workflow.Job) error {
-	if job.Matrix == nil {
-		return nil
-	}
-	if job.Matrix.Expression != nil {
-		return locatedJobError(path, job, job.Matrix.Expression.Span.Start.Line, job.Matrix.Expression.Span.Start.Column, "expression-valued reusable-workflow matrices are unsupported")
-	}
-	for _, row := range job.Matrix.Rows {
-		if row.Expression != nil {
-			return locatedJobError(path, job, row.Expression.Span.Start.Line, row.Expression.Span.Start.Column, fmt.Sprintf("expression-valued reusable-workflow matrix dimension %q is unsupported", row.Name))
-		}
-		for _, value := range row.Values {
-			if containsExpression(value.Data) {
-				return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "runtime-dependent reusable-workflow matrix value is unsupported")
-			}
-		}
-	}
-	for _, combinations := range [][]workflow.MatrixCombination{job.Matrix.Include, job.Matrix.Exclude} {
-		for _, combination := range combinations {
-			for _, value := range combination.Values {
-				if containsExpression(value.Data) {
-					return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "runtime-dependent reusable-workflow matrix value is unsupported")
-				}
 			}
 		}
 	}
@@ -1236,17 +1215,30 @@ func deferredInputPlaceholders(inputs map[string]needBinding) map[string]any {
 
 func cloneMatrixWithInputs(matrix *workflow.Matrix, inputs map[string]any) *workflow.Matrix {
 	out := *matrix
+	out.Expression = cloneMatrixExpressionWithInputs(matrix.Expression, inputs)
+	out.IncludeExpression = cloneMatrixExpressionWithInputs(matrix.IncludeExpression, inputs)
+	out.ExcludeExpression = cloneMatrixExpressionWithInputs(matrix.ExcludeExpression, inputs)
 	out.Rows = append([]workflow.MatrixRow(nil), matrix.Rows...)
 	for i := range out.Rows {
+		out.Rows[i].Expression = cloneMatrixExpressionWithInputs(matrix.Rows[i].Expression, inputs)
 		out.Rows[i].Values = append([]workflow.Value(nil), out.Rows[i].Values...)
 		for j := range out.Rows[i].Values {
-			if text, ok := out.Rows[i].Values[j].Data.(string); ok {
-				out.Rows[i].Values[j].Data = replaceStaticInputs(text, inputs)
-			}
+			out.Rows[i].Values[j].Data = resolveAuthoredMatrixInputs(out.Rows[i].Values[j].Data, inputs)
 		}
 	}
 	out.Include = cloneMatrixCombinations(matrix.Include, inputs)
 	out.Exclude = cloneMatrixCombinations(matrix.Exclude, inputs)
+	return &out
+}
+
+func cloneMatrixExpressionWithInputs(expr *expression.Expression, inputs map[string]any) *expression.Expression {
+	if expr == nil {
+		return nil
+	}
+	out := *expr
+	if resolved, err := expression.SubstituteCompileInputs(expr.Text, inputs); err == nil {
+		out.Text = resolved
+	}
 	return &out
 }
 
@@ -1256,13 +1248,46 @@ func cloneMatrixCombinations(combinations []workflow.MatrixCombination, inputs m
 		out[i] = combination
 		out[i].Values = make(map[string]workflow.Value, len(combination.Values))
 		for name, value := range combination.Values {
-			if text, ok := value.Data.(string); ok {
-				value.Data = replaceStaticInputs(text, inputs)
-			}
+			value.Data = resolveAuthoredMatrixInputs(value.Data, inputs)
 			out[i].Values[name] = value
 		}
 	}
 	return out
+}
+
+func resolveAuthoredMatrixInputs(value any, inputs map[string]any) any {
+	switch value := value.(type) {
+	case string:
+		resolved, err := expression.SubstituteCompileInputs(value, inputs)
+		if err != nil || resolved == value {
+			return value
+		}
+		if expr, err := expression.Parse(resolved, 1, 1); err == nil {
+			if evaluated, available, err := expression.EvaluateCompileAvailable(expr, expression.CompileContext{}); err == nil && available {
+				if text, ok := evaluated.(string); !ok || !strings.Contains(text, "${{") {
+					return evaluated
+				}
+			}
+		}
+		if evaluated, err := expression.EvaluateAvailableCompileTemplate(resolved, expression.CompileContext{}); err == nil {
+			return evaluated
+		}
+		return value
+	case []any:
+		resolved := make([]any, len(value))
+		for i, item := range value {
+			resolved[i] = resolveAuthoredMatrixInputs(item, inputs)
+		}
+		return resolved
+	case map[string]any:
+		resolved := make(map[string]any, len(value))
+		for _, key := range sortedKeys(value) {
+			resolved[key] = resolveAuthoredMatrixInputs(value[key], inputs)
+		}
+		return resolved
+	default:
+		return value
+	}
 }
 
 func replaceMapInputs(values map[string]string, inputs map[string]any) map[string]string {

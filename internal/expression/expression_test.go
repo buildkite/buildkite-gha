@@ -1529,6 +1529,7 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		},
 		Event:  map[string]any{"action": "opened"},
 		Vars:   map[string]string{"RUNNERS": `["ubuntu-24.04","ubuntu-22.04"]`},
+		Inputs: map[string]any{"TARGETS": `["linux","darwin"]`},
 		Matrix: map[string]any{"os": "ubuntu-24.04"},
 	}
 	tests := []struct {
@@ -1541,6 +1542,7 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ github.base_ref }}", want: "main"},
 		{expression: "${{ github.event.action }}", want: "opened"},
 		{expression: "${{ event.action }}", want: "opened"},
+		{expression: "${{ fromJSON(inputs.TARGETS) }}", want: []any{"linux", "darwin"}},
 		{expression: "${{ matrix.os }}", want: "ubuntu-24.04"},
 		{expression: "${{ vars.MISSING }}", want: nil},
 		{expression: "${{ github.event.number || github.ref }}", want: "refs/pull/42/merge"},
@@ -1579,7 +1581,7 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		if err != nil {
 			t.Fatalf("EvaluateCompile(%q) error = %v", test.expression, err)
 		}
-		if got != test.want {
+		if !reflect.DeepEqual(got, test.want) {
 			t.Fatalf("EvaluateCompile(%q) = %#v, want %#v", test.expression, got, test.want)
 		}
 	}
