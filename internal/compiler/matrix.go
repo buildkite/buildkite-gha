@@ -24,13 +24,8 @@ func expandMatrix(path string, job workflow.Job, context expression.CompileConte
 	}
 	matrix, err := resolveMatrix(job.Matrix, context)
 	if err != nil {
-		position := job.Matrix.Span.Start
-		if job.Matrix.Expression != nil {
-			position = workflow.Position{Line: job.Matrix.Expression.Span.Start.Line, Column: job.Matrix.Expression.Span.Start.Column}
-		} else if job.Matrix.IncludeExpression != nil {
-			position = workflow.Position{Line: job.Matrix.IncludeExpression.Span.Start.Line, Column: job.Matrix.IncludeExpression.Span.Start.Column}
-		}
-		return nil, locatedJobError(path, job, position.Line, position.Column, err.Error())
+		line, column := matrixErrorPosition(job)
+		return nil, locatedJobError(path, job, line, column, err.Error())
 	}
 	matrices, err := expandMatrixDefinition(matrix)
 	if err != nil {
@@ -122,7 +117,15 @@ func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (
 	for i, row := range matrix.Rows {
 		resolved.Rows[i] = row
 		if row.Expression == nil {
-			resolved.Rows[i].Values = append([]workflow.Value(nil), row.Values...)
+			resolved.Rows[i].Values = make([]workflow.Value, len(row.Values))
+			for j, matrixValue := range row.Values {
+				value, err := resolveAuthoredMatrixValue(matrixValue.Data, matrixValue.Span, context)
+				if err != nil {
+					return nil, fmt.Errorf("matrix dimension %q: %w", row.Name, matrixExpressionError(err))
+				}
+				resolved.Rows[i].Values[j] = matrixValue
+				resolved.Rows[i].Values[j].Data = value
+			}
 			continue
 		}
 		value, err := expression.EvaluateCompile(*row.Expression, context)
@@ -139,10 +142,81 @@ func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (
 			resolved.Rows[i].Values[j] = workflow.Value{Data: value, Span: row.Span}
 		}
 	}
-	if matrix.IncludeExpression != nil {
-		return nil, fmt.Errorf("runtime-dependent matrix include expressions are unsupported")
+	var err error
+	if resolved.Include, err = resolveMatrixCombinations("include", matrix.Include, matrix.IncludeExpression, context); err != nil {
+		return nil, err
 	}
+	resolved.IncludeExpression = nil
+	if resolved.Exclude, err = resolveMatrixCombinations("exclude", matrix.Exclude, matrix.ExcludeExpression, context); err != nil {
+		return nil, err
+	}
+	resolved.ExcludeExpression = nil
 	return &resolved, nil
+}
+
+func resolveMatrixCombinations(name string, combinations []workflow.MatrixCombination, expr *expression.Expression, context expression.CompileContext) ([]workflow.MatrixCombination, error) {
+	if expr == nil {
+		resolved := make([]workflow.MatrixCombination, len(combinations))
+		for i, combination := range combinations {
+			resolved[i] = combination
+			resolved[i].Values = make(map[string]workflow.Value, len(combination.Values))
+			for _, key := range sortedKeys(combination.Values) {
+				matrixValue := combination.Values[key]
+				value, err := resolveAuthoredMatrixValue(matrixValue.Data, matrixValue.Span, context)
+				if err != nil {
+					return nil, fmt.Errorf("matrix %s: %w", name, matrixExpressionError(err))
+				}
+				matrixValue.Data = value
+				resolved[i].Values[key] = matrixValue
+			}
+		}
+		return resolved, nil
+	}
+	value, err := expression.EvaluateCompile(*expr, context)
+	if err != nil {
+		return nil, fmt.Errorf("matrix %s: %w", name, matrixExpressionError(err))
+	}
+	resolved, err := matrixCombinationsFromValue(name, value)
+	if err != nil {
+		return nil, err
+	}
+	return resolved, nil
+}
+
+func resolveAuthoredMatrixValue(value any, span workflow.Span, context expression.CompileContext) (any, error) {
+	switch value := value.(type) {
+	case string:
+		if !strings.Contains(value, "${{") {
+			return value, nil
+		}
+		if expr, err := expression.Parse(value, span.Start.Line, span.Start.Column); err == nil {
+			return expression.EvaluateCompile(expr, context)
+		}
+		return expression.EvaluateCompileTemplate(value, context)
+	case []any:
+		resolved := make([]any, len(value))
+		for i, item := range value {
+			var err error
+			resolved[i], err = resolveAuthoredMatrixValue(item, span, context)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return resolved, nil
+	case map[string]any:
+		resolved := make(map[string]any, len(value))
+		for _, key := range sortedKeys(value) {
+			item := value[key]
+			var err error
+			resolved[key], err = resolveAuthoredMatrixValue(item, span, context)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return resolved, nil
+	default:
+		return value, nil
+	}
 }
 
 func matrixExpressionError(err error) error {
@@ -257,7 +331,7 @@ func reportableRunnerLabels(job workflow.Job, labels []string) []string {
 	if !strings.HasPrefix(strings.ToLower(body), "matrix.") || strings.ContainsAny(body, " []()|&") {
 		return nil
 	}
-	if job.Matrix.Expression != nil || job.Matrix.IncludeExpression != nil {
+	if job.Matrix.Expression != nil || job.Matrix.IncludeExpression != nil || job.Matrix.ExcludeExpression != nil {
 		return nil
 	}
 	for _, row := range job.Matrix.Rows {

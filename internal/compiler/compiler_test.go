@@ -557,24 +557,64 @@ jobs:
 	}
 }
 
-func TestCompileRejectsRuntimeDependentMatrixInclude(t *testing.T) {
+func TestCompileResolvesStaticMatrixIncludeAndExcludeExpressions(t *testing.T) {
 	source := []byte(`on: push
 jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-latest]
+        exclude: ${{ fromJSON(vars.EXCLUDE) }}
         include: ${{ fromJSON(vars.INCLUDE) }}
     steps:
       - run: true
 `)
-	_, err := Compile("dynamic-include.yml", source, readFile(t, smokePath("events", "push.json")))
-	if err == nil || !strings.Contains(err.Error(), "runtime-dependent matrix include expressions are unsupported") {
-		t.Fatalf("Compile() error = %v, want explicit include expression error", err)
+	options := defaultOptions()
+	options.Vars.Bridge = map[string]string{
+		"EXCLUDE": `[{"os":"macos-latest"}]`,
+		"INCLUDE": `[{"os":"ubuntu-latest","version":24},{"os":"macos-14","version":14}]`,
 	}
-	if !strings.Contains(err.Error(), "dynamic-include.yml:8:18") {
-		t.Fatalf("Compile() error = %v, want source location", err)
+	compiled, err := CompileWithOptions("static-sections.yml", source, readFile(t, smokePath("events", "push.json")), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	want := []map[string]any{
+		{"os": "ubuntu-latest", "version": float64(24)},
+		{"os": "macos-14", "version": float64(14)},
+	}
+	if len(ir.Jobs) != len(want) {
+		t.Fatalf("jobs = %d, want %d", len(ir.Jobs), len(want))
+	}
+	for i := range want {
+		if !reflect.DeepEqual(ir.Jobs[i].Matrix, want[i]) {
+			t.Fatalf("matrix instance %d = %#v, want %#v", i, ir.Jobs[i].Matrix, want[i])
+		}
+	}
+}
+
+func TestCompileBoundsStaticExpressionMatrixExpansion(t *testing.T) {
+	values := make([]string, maxMatrixInstances+1)
+	for i := range values {
+		values[i] = fmt.Sprintf("%q", fmt.Sprint(i))
+	}
+	source := []byte(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(vars.MATRIX) }}
+    steps: [{run: true}]
+`)
+	options := defaultOptions()
+	options.Vars.Bridge = map[string]string{"MATRIX": `{"value":[` + strings.Join(values, ",") + `]}`}
+	_, err := CompileWithOptions("bounded-matrix.yml", source, readFile(t, smokePath("events", "push.json")), options)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("matrix expands beyond %d instances", maxMatrixInstances)) {
+		t.Fatalf("Compile() error = %v, want static matrix instance limit", err)
 	}
 }
 
@@ -1930,18 +1970,103 @@ jobs:
 	}
 }
 
+func TestCompileResolvesStaticExpressionsInNestedReusableMatrices(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    strategy:
+      matrix: ${{ fromJSON(vars.CALLS) }}
+    uses: ./.github/workflows/middle.yml
+    with:
+      target: ${{ matrix.target }}
+      arches: '["amd64","arm64"]'
+  finish:
+    needs: call
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+      arches: {type: string, required: true}
+jobs:
+  leaf:
+    strategy:
+      matrix:
+        arch: ${{ fromJSON(inputs.arches) }}
+        include: ${{ fromJSON('[{"arch":"amd64","native":true}]') }}
+    uses: ./.github/workflows/leaf.yml
+    with:
+      target: ${{ format('{0}-{1}', inputs.target, matrix.arch) }}
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ inputs.target }}
+`)
+	options := defaultOptions()
+	options.Vars.Bridge = map[string]string{"CALLS": `{"target":["linux","darwin"]}`}
+	result, err := CompileWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 5 {
+		t.Fatalf("jobs = %d, want four composed instances and one fan-in", len(ir.Jobs))
+	}
+	runs := make([]string, 0, 4)
+	for _, job := range ir.Jobs[:4] {
+		runs = append(runs, job.Steps[0].Run)
+	}
+	sort.Strings(runs)
+	wantRuns := []string{"echo darwin-amd64", "echo darwin-arm64", "echo linux-amd64", "echo linux-arm64"}
+	if !reflect.DeepEqual(runs, wantRuns) {
+		t.Fatalf("nested matrix runs = %#v, want %#v", runs, wantRuns)
+	}
+	if got := len(ir.Jobs[4].Needs); got != 4 {
+		t.Fatalf("fan-in dependencies = %d, want 4", got)
+	}
+}
+
 func TestCompileRejectsRuntimeExpressionsLaunderedThroughReusableInputs(t *testing.T) {
-	t.Run("matrix expression", func(t *testing.T) {
+	t.Run("unavailable static matrix value", func(t *testing.T) {
 		repository := t.TempDir()
 		path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    strategy:\n      matrix: ${{ fromJSON(vars.MATRIX) }}\n    uses: ./.github/workflows/reusable.yml\n")
 		writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-		if err == nil || !strings.Contains(err.Error(), "expression-valued reusable-workflow matrices are unsupported") {
-			t.Fatalf("Compile() error = %v, want explicit call-matrix rejection", err)
+		if err == nil || !strings.Contains(err.Error(), `compile-time expression references unavailable value "vars.matrix"`) {
+			t.Fatalf("Compile() error = %v, want unavailable static value rejection", err)
 		}
 	})
 
-	t.Run("matrix value", func(t *testing.T) {
+	t.Run("unavailable github value", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    strategy:
+      matrix:
+        target: ["${{ github.run_id }}"]
+    uses: ./.github/workflows/reusable.yml
+`)
+		writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), `compile-time expression references unavailable value "github.run_id"`) {
+			t.Fatalf("Compile() error = %v, want unavailable GitHub value rejection", err)
+		}
+	})
+
+	t.Run("static matrix value", func(t *testing.T) {
 		repository := t.TempDir()
 		path := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -1954,9 +2079,16 @@ jobs:
       target: ${{ matrix.target }}
 `)
 		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ${{ inputs.target }}\n")
-		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-		if err == nil || !strings.Contains(err.Error(), "runtime-dependent reusable-workflow matrix value is unsupported") {
-			t.Fatalf("Compile() error = %v, want matrix expression rejection", err)
+		result, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ir IR
+		if err := json.Unmarshal(result, &ir); err != nil {
+			t.Fatal(err)
+		}
+		if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo main" {
+			t.Fatalf("resolved reusable matrix value = %#v", ir.Jobs)
 		}
 	})
 
@@ -1988,7 +2120,7 @@ jobs:
 	})
 }
 
-func TestExpandMatrixPreservesRegressedStaticExpressionValues(t *testing.T) {
+func TestExpandMatrixRejectsRuntimeExpressionsInAuthoredValues(t *testing.T) {
 	tests := []struct {
 		name   string
 		source string
@@ -2096,22 +2228,18 @@ jobs:
 			if err != nil {
 				t.Fatal(err)
 			}
-			matrixJobs := 0
+			rejected := false
 			for _, job := range parsed.Jobs {
 				if job.Matrix == nil {
 					continue
 				}
-				matrixJobs++
-				matrices, err := expandMatrix(test.name, job, expression.CompileContext{})
-				if err != nil {
-					t.Fatalf("expandMatrix(%q): %v", job.ID, err)
-				}
-				if len(matrices) == 0 {
-					t.Fatalf("expandMatrix(%q) returned no combinations", job.ID)
+				_, err := expandMatrix(test.name, job, expression.CompileContext{})
+				if err != nil && strings.Contains(err.Error(), "runtime-dependent matrix expressions are unsupported") {
+					rejected = true
 				}
 			}
-			if matrixJobs == 0 {
-				t.Fatal("fixture has no matrix jobs")
+			if !rejected {
+				t.Fatal("runtime-dependent authored matrix value was not rejected")
 			}
 		})
 	}

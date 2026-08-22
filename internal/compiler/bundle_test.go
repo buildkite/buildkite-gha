@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -410,6 +411,56 @@ func TestCompileBundleNamespacesMaxParallelConcurrency(t *testing.T) {
 		if !strings.Contains(job.ConcurrencyGroup, "/0123456789abcdef/test") {
 			t.Fatalf("matrix concurrency group = %q, want workflow namespace", job.ConcurrencyGroup)
 		}
+	}
+}
+
+func TestCompileBundlePreservesStaticExpressionMatrixFanOutAndFanIn(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  build:
+    strategy:
+      max-parallel: 1
+      matrix:
+        os: ${{ fromJSON(vars.OSES) }}
+        exclude: ${{ fromJSON(vars.EXCLUDE) }}
+        include: ${{ fromJSON(vars.INCLUDE) }}
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  finish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	options := defaultOptions()
+	options.Vars.Bridge = map[string]string{
+		"OSES":    `["linux","darwin"]`,
+		"EXCLUDE": `[{"os":"darwin"}]`,
+		"INCLUDE": `[{"os":"linux","arch":"amd64"},{"os":"darwin","arch":"arm64"}]`,
+	}
+	bundle, err := CompileBundleWithOptions("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 3 || len(bundle.GeneratedWorkflow.Jobs) != 3 {
+		t.Fatalf("bundle jobs = plans %d, pipeline %d; want two matrix instances and fan-in", len(bundle.Plans), len(bundle.GeneratedWorkflow.Jobs))
+	}
+	wantMatrices := []map[string]any{
+		{"arch": "amd64", "os": "linux"},
+		{"arch": "arm64", "os": "darwin"},
+	}
+	for i, want := range wantMatrices {
+		if !reflect.DeepEqual(bundle.Plans[i].Job.Matrix, want) {
+			t.Fatalf("plan matrix %d = %#v, want %#v", i, bundle.Plans[i].Job.Matrix, want)
+		}
+		generated := bundle.GeneratedWorkflow.Jobs[i]
+		if generated.Concurrency != 1 || generated.ConcurrencyGroup == "" {
+			t.Fatalf("pipeline max-parallel job %d = concurrency %d, group %q", i, generated.Concurrency, generated.ConcurrencyGroup)
+		}
+	}
+	wantDependencies := []string{bundle.Plans[0].Job.Target.StepKey, bundle.Plans[1].Job.Target.StepKey}
+	sort.Strings(wantDependencies)
+	if !reflect.DeepEqual(bundle.Plans[2].Job.Dependencies, wantDependencies) || !reflect.DeepEqual(bundle.GeneratedWorkflow.Jobs[2].Dependencies, wantDependencies) {
+		t.Fatalf("fan-in = plan %#v, pipeline %#v; want %#v", bundle.Plans[2].Job.Dependencies, bundle.GeneratedWorkflow.Jobs[2].Dependencies, wantDependencies)
 	}
 }
 
