@@ -350,7 +350,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 			return nil, fmt.Errorf("create job container: %w", createErr)
 		}
 		if len(spec.Volumes) != 0 {
-			if err = b.trackContainerVolumes(ctx, "job container", b.container); err != nil {
+			if err = b.trackJobContainerVolumes(ctx); err != nil {
 				return nil, err
 			}
 		}
@@ -477,6 +477,12 @@ func (b *jobContainerBackend) reconcileCreatedService(ctx context.Context, index
 
 func (b *jobContainerBackend) trackServiceVolumes(ctx context.Context, serviceID, reference string) error {
 	return b.trackContainerVolumes(ctx, fmt.Sprintf("service %q", serviceID), reference)
+}
+
+func (b *jobContainerBackend) trackJobContainerVolumes(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), b.runner.cleanupTimeout())
+	defer cancel()
+	return b.trackContainerVolumes(ctx, "job container", b.container)
 }
 
 func (b *jobContainerBackend) trackContainerVolumes(ctx context.Context, subject, reference string) error {
