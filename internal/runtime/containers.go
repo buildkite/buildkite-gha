@@ -851,6 +851,9 @@ func (b *jobContainerBackend) cleanup(parent context.Context) error {
 	var queryErr error
 	if b.container != "" {
 		if !b.containerCreated {
+			if trackErr := b.trackCreatedVolumes(ctx); trackErr != nil {
+				err = errors.Join(err, trackErr)
+			}
 			reference, reconcileErr := b.reconcileCreatedJob(ctx)
 			if reconcileErr != nil {
 				err = errors.Join(err, reconcileErr)

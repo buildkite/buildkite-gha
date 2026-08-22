@@ -486,6 +486,15 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		_ = os.Remove(network)
 		os.Exit(0)
 	case "volume-ls":
+		if scenario == "fail-create-reconcile-once" {
+			if _, err := os.Stat(filepath.Join(root, "current-volumes")); err == nil {
+				marker := filepath.Join(root, "failed-volume-reconcile")
+				if _, err := os.Stat(marker); errors.Is(err, os.ErrNotExist) {
+					_ = os.WriteFile(marker, nil, 0o600)
+					os.Exit(43)
+				}
+			}
+		}
 		if data, err := os.ReadFile(filepath.Join(root, "existing-volumes")); err == nil {
 			fmt.Print(string(data))
 		}
@@ -1534,7 +1543,7 @@ func TestRunJobContainerCleanupRetriesAmbiguousCreateReconciliation(t *testing.T
 	f := newJobDocker(t, "fail-create-reconcile-once")
 	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
 		t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(),
-		&plan.Container{Image: "alpine"}, nil,
+		&plan.Container{Image: "alpine", Volumes: []string{"cache:/cache"}}, nil,
 	)
 	if err == nil || !strings.Contains(err.Error(), "create job container") {
 		t.Fatalf("startJobContainer() error = %v", err)
@@ -1547,7 +1556,8 @@ func TestRunJobContainerCleanupRetriesAmbiguousCreateReconciliation(t *testing.T
 		}
 		removed = removed || slices.Equal(call.Args, []string{"rm", "--force", "job-container-id"})
 	}
-	if reconciles != 2 || !removed {
+	removedVolumes, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
+	if reconciles != 2 || !removed || readErr != nil || strings.TrimSpace(string(removedVolumes)) != "cache" {
 		t.Fatalf("ambiguous create cleanup calls = %#v", f.calls(t))
 	}
 }
