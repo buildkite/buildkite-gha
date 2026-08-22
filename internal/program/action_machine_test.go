@@ -14,11 +14,16 @@ import (
 type traceState struct{ events []string }
 
 type traceAdapter struct {
-	executions map[string]Execution
+	executions       map[string]Execution
+	evaluationErrors map[string]error
+	executionErrors  map[string]error
 }
 
 func (a *traceAdapter) Evaluate(_ context.Context, state traceState, site Site, frame FrameView) (traceState, expression.Analysis, error) {
 	state.events = append(state.events, "eval:"+site.Source)
+	if err := a.evaluationErrors[site.Source]; err != nil {
+		return state, expression.Analysis{}, err
+	}
 	var value expression.AbstractValue
 	switch site.Source {
 	case "true":
@@ -44,6 +49,9 @@ func (a *traceAdapter) Evaluate(_ context.Context, state traceState, site Site, 
 func (a *traceAdapter) Execute(_ context.Context, state traceState, operation LeafOperation, _ FrameView) (traceState, Execution, error) {
 	state.events = append(state.events, fmt.Sprintf("exec:%s:%s env=%s/%s input=%s", operation.InvocationID, operation.Entrypoint,
 		valueString(operation.Environment.Fields["value"]), valueString(operation.Environment.Fields["live"]), valueString(operation.Inputs.Fields["value"])))
+	if err := a.executionErrors[operation.Entrypoint]; err != nil {
+		return state, Execution{}, err
+	}
 	if execution, ok := a.executions[operation.Entrypoint]; ok {
 		return state, execution, nil
 	}
@@ -232,8 +240,12 @@ func TestActionMachineRejectsMissingRequiredInput(t *testing.T) {
 	action := js("", "main", "")
 	action.Inputs = []ActionInput{{Name: "token", Required: true}}
 	machine := NewActionMachine(map[string]Action{"action": action}, &traceAdapter{}, traceState{})
-	if _, _, err := machine.Invoke(t.Context(), invocation("action", "action"), Frame{}); err == nil || !strings.Contains(err.Error(), `required action input "token" is missing`) {
-		t.Fatalf("Invoke() error = %v, want missing required input", err)
+	_, execution, err := machine.Invoke(t.Context(), invocation("action", "action"), Frame{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Failure == nil || !execution.Failure.Hard || !strings.Contains(execution.Failure.Cause.Error(), `required action input "token" is missing`) {
+		t.Fatalf("Invoke() execution = %#v, want hard missing required input failure", execution)
 	}
 }
 
@@ -311,6 +323,104 @@ func TestActionMachineCompositeContinueOnErrorDoesNotTolerateHardFailure(t *test
 	if slices.ContainsFunc(machine.State().events, func(event string) bool { return strings.Contains(event, ":after ") }) {
 		t.Fatalf("step after hard failure ran: %q", machine.State().events)
 	}
+}
+
+func TestActionMachineCompositeContinueOnErrorHandlesEvaluationFailure(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{
+			{ContinueOnError: true, Env: []Binding{binding("value", "invalid")}, Run: &Run{Command: site("never")}},
+			{Invocation: &Invocation{Lock: "after"}},
+		}}},
+		"after": js("", "after", ""),
+	}
+	machine := NewActionMachine(actions, &traceAdapter{evaluationErrors: map[string]error{"invalid": fmt.Errorf("invalid expression value")}}, traceState{})
+	_, execution, err := machine.Invoke(t.Context(), invocation("root", "root"), Frame{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Outcomes != OutcomeSuccess || execution.Failure != nil {
+		t.Fatalf("composite execution = %#v, want tolerated failure", execution)
+	}
+	if !slices.ContainsFunc(machine.State().events, func(event string) bool { return strings.Contains(event, ":after ") }) {
+		t.Fatalf("step after tolerated evaluation failure did not run: %q", machine.State().events)
+	}
+}
+
+func TestActionMachineCompositeContinueOnErrorDoesNotTolerateAdapterFailure(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{
+			{ContinueOnError: true, Run: &Run{Command: site("fail")}},
+			{Invocation: &Invocation{Lock: "after"}},
+		}}},
+		"after": js("", "after", ""),
+	}
+	machine := NewActionMachine(actions, &traceAdapter{executionErrors: map[string]error{"": fmt.Errorf("adapter setup failed")}}, traceState{})
+	_, execution, err := machine.Invoke(t.Context(), invocation("root", "root"), Frame{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Failure == nil || !execution.Failure.Hard {
+		t.Fatalf("composite execution = %#v, want hard adapter failure", execution)
+	}
+	if slices.ContainsFunc(machine.State().events, func(event string) bool { return strings.Contains(event, ":after ") }) {
+		t.Fatalf("step after adapter failure ran: %q", machine.State().events)
+	}
+}
+
+func TestActionMachinePostConditionFailureDoesNotSkipOlderPost(t *testing.T) {
+	newer := js("", "newer-main", "newer-post")
+	newer.JavaScript.PostCondition = site("invalid")
+	actions := map[string]Action{"older": js("", "older-main", "older-post"), "newer": newer}
+	machine := NewActionMachine(actions, &traceAdapter{evaluationErrors: map[string]error{"invalid": fmt.Errorf("invalid post condition")}}, traceState{})
+	frame := Frame{}
+	for _, inv := range []ActionInvocation{invocation("older", "older"), invocation("newer", "newer")} {
+		var err error
+		frame, _, err = machine.Invoke(t.Context(), inv, frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, execution, err := machine.Finish(t.Context(), frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Outcomes&OutcomeFailure == 0 {
+		t.Fatalf("finish outcome = %v, want failed post", execution.Outcomes)
+	}
+	if !slices.ContainsFunc(machine.State().events, func(event string) bool { return strings.Contains(event, ":older-post ") }) {
+		t.Fatalf("older post did not run after newer condition failed: %q", machine.State().events)
+	}
+}
+
+func TestActionMachineRegistersPostOnlyAfterAdapterStartsPhase(t *testing.T) {
+	t.Run("adapter setup failure", func(t *testing.T) {
+		action := js("pre", "main", "post")
+		machine := NewActionMachine(map[string]Action{"action": action}, &traceAdapter{executionErrors: map[string]error{"pre": fmt.Errorf("adapter setup failed")}}, traceState{})
+		registrations := 0
+		machine.SetPostRegistrationCallback(func() { registrations++ })
+		if _, _, err := machine.Prepare(t.Context(), invocation("action", "action"), Frame{}); err == nil {
+			t.Fatal("Prepare() succeeded")
+		}
+		if registrations != 0 {
+			t.Fatalf("post registrations = %d, want 0", registrations)
+		}
+	})
+	t.Run("pre and main share one registration", func(t *testing.T) {
+		action := js("pre", "main", "post")
+		machine := NewActionMachine(map[string]Action{"action": action}, &traceAdapter{}, traceState{})
+		registrations := 0
+		machine.SetPostRegistrationCallback(func() { registrations++ })
+		frame, _, err := machine.Prepare(t.Context(), invocation("action", "action"), Frame{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err = machine.Invoke(t.Context(), invocation("action", "action"), frame); err != nil {
+			t.Fatal(err)
+		}
+		if registrations != 1 {
+			t.Fatalf("post registrations = %d, want 1", registrations)
+		}
+	})
 }
 
 func TestActionMachineNestedPostSeesParentCompositeStepScope(t *testing.T) {

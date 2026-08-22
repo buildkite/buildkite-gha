@@ -62,6 +62,22 @@ func TestInventoryActionAuthorityFollowsCompositeReachability(t *testing.T) {
 	}
 }
 
+func TestInventoryActionAuthorityKeepsUnknownGitHubPropertiesReachable(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{{
+			Condition: testActionSite("github.event_name == 'push'"),
+			Run:       &Run{Command: testActionSite("echo ${{ github.token }}")},
+		}}}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("unknown github.event_name pruned reachable GitHub token authority")
+	}
+}
+
 func TestInventoryActionAuthorityIncludesRemotePreWhenMainIsSkipped(t *testing.T) {
 	value := testActionSite("${{ github.token }}")
 	actions := map[string]Action{

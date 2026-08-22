@@ -457,6 +457,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	r.prepared = remotePreparations{}
 	r.preFailures = make(map[int]stepExecution)
 	r.actionSessions = make(map[int]*actionSession)
+	r.actionPosts = &actionPostSequence{}
 	return r.runPreActions(ctx, runCtx)
 }
 
@@ -487,12 +488,13 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 				hardFailure = true
 				break
 			}
+			invocation.Environment = job.Program.Job.Steps[stepIndex].Env
 			if _, ok := job.ActionPrograms[invocation.Lock]; !ok {
 				runErr = errors.Join(runErr, markHardJobFailure(fmt.Errorf("prepare action %q: normalized program %q is missing", step.Uses, invocation.Lock)))
 				hardFailure = true
 				break
 			}
-			session := newActionSession(r)
+			session := newActionSession(r, stepIndex)
 			r.actionSessions[stepIndex] = session
 			source, err := actions.source(*step.Action)
 			if err != nil {
@@ -516,22 +518,12 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 			wasUnsuccessful := preStatus.unsuccessful
 			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes)
 			bindHashFilesContext(preCtx, &preEval)
-			stepEnv, envErr := evaluateStepMap(step.Env, preEval)
-			if envErr != nil {
-				cancelPre()
-				execution := classifyStepExecutionWithControls(ctx, preCtx, step, newResult(), fmt.Errorf("action %q pre environment: %w", step.Uses, envErr), preEval)
-				preFailures[stepIndex] = execution
-				preStatus.unsuccessful = wasUnsuccessful || execution.conclusion != "success"
-				continue
-			}
-			preEval.Env = mergeStringMaps(preEval.Env, stepEnv)
 			session.adapter.eval = preEval
 			if step.TimeoutMinutesExpression != "" {
 				session.adapter.preparation = &remotePreparationTimeout{step: step, eval: preEval}
 			}
-			_, explicitStepPATH := stepEnv["PATH"]
-			explicitPATH := r.explicitJobPATH || preEval.Env["PATH"] != r.implicitJobPATH || explicitStepPATH
-			_, preExecution, preErr := session.machine.Prepare(preCtx, invocation, actionFrame(preEval, preEval.Env, stepEnv, explicitPATH))
+			explicitPATH := r.explicitJobPATH || preEval.Env["PATH"] != r.implicitJobPATH
+			_, preExecution, preErr := session.machine.Prepare(preCtx, invocation, actionFrame(preEval, preEval.Env, nil, explicitPATH))
 			if session.adapter.preparation != nil {
 				session.adapter.preparation.close()
 			}
@@ -717,17 +709,16 @@ func (r *jobRun) runPostActions(runCtx context.Context) (JobResult, error) {
 	runErr := r.runErr
 	postCtx, cancelPosts := postPhaseContext(runCtx, r.postActionTimeout(), r.cleanupTimeout())
 	defer cancelPosts()
-	for stepIndex := len(r.job.Steps) - 1; stepIndex >= 0; stepIndex-- {
-		session := r.actionSessions[stepIndex]
-		if session == nil {
-			continue
-		}
+	registrations := r.actionPosts.snapshot()
+	for i := len(registrations) - 1; i >= 0; i-- {
+		registration := registrations[i]
+		session := registration.session
 		postEval := cloneExpressionContext(eval)
 		postEval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
 		postEval.Env = jobResult.Env
 		bindHashFilesContext(postCtx, &postEval)
 		session.adapter.eval = postEval
-		_, execution, machineErr := session.machine.Finish(postCtx, actionFrame(postEval, postEval.Env, nil, r.explicitJobPATH))
+		_, execution, machineErr := session.machine.FinishOne(postCtx, actionFrame(postEval, postEval.Env, nil, r.explicitJobPATH))
 		postResult := session.drain()
 		commitResultEnvironment(jobResult.Env, postResult)
 		mergeInto(jobResult.State, postResult.State)
@@ -740,7 +731,7 @@ func (r *jobRun) runPostActions(runCtx context.Context) (JobResult, error) {
 			machineErr = markHardJobFailure(machineErr)
 		}
 		if machineErr != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("post action at step %d: %w", stepIndex+1, machineErr))
+			runErr = errors.Join(runErr, fmt.Errorf("post action at step %d: %w", registration.stepIndex+1, machineErr))
 		}
 	}
 	r.eval = eval

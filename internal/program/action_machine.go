@@ -154,6 +154,7 @@ type ActionMachine[S any] struct {
 	state      S
 	prepared   map[string]preparedInvocation
 	posts      []registeredPost
+	postAdded  func()
 	active     map[string]bool
 	stepScopes map[string]map[string]StepFrame
 }
@@ -166,6 +167,13 @@ func NewActionMachine[S any](actions map[string]Action, adapter ActionAdapter[S]
 }
 
 func (m *ActionMachine[S]) State() S { return m.state }
+
+// SetPostRegistrationCallback observes concrete post registrations without
+// taking ownership of their lifecycle state. Speculative clones do not inherit
+// the callback.
+func (m *ActionMachine[S]) SetPostRegistrationCallback(callback func()) {
+	m.postAdded = callback
+}
 
 func (m *ActionMachine[S]) Prepare(ctx context.Context, invocation ActionInvocation, frame Frame) (Frame, Execution, error) {
 	if invocation.ID == "" {
@@ -201,66 +209,91 @@ func (m *ActionMachine[S]) Invoke(ctx context.Context, invocation ActionInvocati
 
 func (m *ActionMachine[S]) Finish(ctx context.Context, frame Frame) (Frame, Execution, error) {
 	result := successfulExecution()
-	for i := len(m.posts) - 1; i >= 0; i-- {
-		post := m.posts[i]
-		action, err := m.action(post.Lock)
-		if err != nil {
-			return Frame{}, Execution{}, err
+	var finishErr error
+	for len(m.posts) != 0 {
+		var execution Execution
+		var err error
+		frame, execution, err = m.FinishOne(ctx, frame)
+		finishErr = errors.Join(finishErr, err)
+		if execution.Outcomes != 0 {
+			result = accumulateExecutions(result, execution)
 		}
-		if action.JavaScript == nil || action.JavaScript.Post == "" {
-			continue
-		}
-		postFrame := cloneFrame(post.Frame)
-		postFrame.Environment = overlayEnvironment(frame.Environment, post.Overlay)
-		if separator := strings.LastIndex(post.InvocationID, "/"); separator >= 0 {
-			if steps, ok := m.stepScopes[post.InvocationID[:separator]]; ok {
-				postFrame.Steps = cloneStepFrames(steps)
-			}
-		} else {
-			postFrame.Steps = cloneStepFrames(frame.Steps)
-		}
-		postFrame.JobStatus = frame.JobStatus
-		for _, input := range action.Inputs {
-			if input.Default == nil || post.Supplied[strings.ToLower(input.Name)] {
-				continue
-			}
-			referencesStatus, err := expression.ReferencesJobStatus(input.Default.Source)
-			if err != nil {
-				return Frame{}, Execution{}, fmt.Errorf("action input %q default: %w", input.Name, err)
-			}
-			if !referencesStatus {
-				continue
-			}
-			analysis, err := m.evaluate(ctx, *input.Default, postFrame)
-			if err != nil {
-				return Frame{}, Execution{}, fmt.Errorf("action input %q post default: %w", input.Name, err)
-			}
-			if postFrame.ActionInputs.Fields == nil {
-				postFrame.ActionInputs.Fields = map[string]expression.AbstractValue{}
-			}
-			postFrame.ActionInputs.Fields[strings.ToLower(input.Name)] = analysis.Value
-		}
-		condition, err := m.evaluateCondition(ctx, lifecycleConditionSite(action.JavaScript.PostCondition), postFrame)
-		if err != nil {
-			return Frame{}, Execution{}, fmt.Errorf("action post-if: %w", err)
-		}
-		if condition == GuardFalse {
-			continue
-		}
-		operation := LeafOperation{
-			Kind: LeafJavaScript, Phase: PhasePost, Lock: post.Lock, InvocationID: post.InvocationID,
-			Entrypoint: action.JavaScript.Post, NodeMajor: action.JavaScript.NodeMajor,
-			Inputs: postFrame.ActionInputs, Environment: postFrame.Environment,
-		}
-		execution, err := m.execute(ctx, operation, postFrame)
-		if err != nil {
-			return Frame{}, Execution{}, err
-		}
-		frame = applyExecution(frame, execution)
-		frame.JobStatus = advanceJobStatus(frame.JobStatus, execution.Outcomes)
-		result = accumulateExecutions(result, execution)
 	}
-	return frame, result, nil
+	return frame, result, finishErr
+}
+
+// FinishOne runs the most recently registered post in this machine. The post
+// is removed before evaluation so failures cannot make it runnable twice.
+func (m *ActionMachine[S]) FinishOne(ctx context.Context, frame Frame) (Frame, Execution, error) {
+	if len(m.posts) == 0 {
+		return frame, Execution{}, fmt.Errorf("finish action post: registration stack is empty")
+	}
+	post := m.posts[len(m.posts)-1]
+	m.posts = m.posts[:len(m.posts)-1]
+	action, err := m.action(post.Lock)
+	if err != nil {
+		return frame, Execution{}, err
+	}
+	if action.JavaScript == nil || action.JavaScript.Post == "" {
+		return frame, successfulExecution(), nil
+	}
+	postFrame := cloneFrame(post.Frame)
+	postFrame.Environment = overlayEnvironment(frame.Environment, post.Overlay)
+	if separator := strings.LastIndex(post.InvocationID, "/"); separator >= 0 {
+		if steps, ok := m.stepScopes[post.InvocationID[:separator]]; ok {
+			postFrame.Steps = cloneStepFrames(steps)
+		}
+	} else {
+		postFrame.Steps = cloneStepFrames(frame.Steps)
+	}
+	postFrame.JobStatus = frame.JobStatus
+	for _, input := range action.Inputs {
+		if input.Default == nil || post.Supplied[strings.ToLower(input.Name)] {
+			continue
+		}
+		referencesStatus, err := expression.ReferencesJobStatus(input.Default.Source)
+		if err != nil {
+			execution := failureExecution(fmt.Errorf("action input %q default: %w", input.Name, err))
+			return applyFailedPost(frame, execution), execution, nil
+		}
+		if !referencesStatus {
+			continue
+		}
+		analysis, err := m.evaluate(ctx, *input.Default, postFrame)
+		if err != nil {
+			execution := failureExecution(fmt.Errorf("action input %q post default: %w", input.Name, err))
+			return applyFailedPost(frame, execution), execution, nil
+		}
+		if postFrame.ActionInputs.Fields == nil {
+			postFrame.ActionInputs.Fields = map[string]expression.AbstractValue{}
+		}
+		postFrame.ActionInputs.Fields[strings.ToLower(input.Name)] = analysis.Value
+	}
+	condition, err := m.evaluateCondition(ctx, lifecycleConditionSite(action.JavaScript.PostCondition), postFrame)
+	if err != nil {
+		execution := failureExecution(fmt.Errorf("action post-if: %w", err))
+		return applyFailedPost(frame, execution), execution, nil
+	}
+	if condition == GuardFalse {
+		return frame, successfulExecution(), nil
+	}
+	operation := LeafOperation{
+		Kind: LeafJavaScript, Phase: PhasePost, Lock: post.Lock, InvocationID: post.InvocationID,
+		Entrypoint: action.JavaScript.Post, NodeMajor: action.JavaScript.NodeMajor,
+		Inputs: postFrame.ActionInputs, Environment: postFrame.Environment,
+	}
+	execution, err := m.execute(ctx, operation, postFrame)
+	if err != nil {
+		return frame, Execution{}, err
+	}
+	frame = applyExecution(frame, execution)
+	frame.JobStatus = advanceJobStatus(frame.JobStatus, execution.Outcomes)
+	return frame, execution, nil
+}
+
+func applyFailedPost(frame Frame, execution Execution) Frame {
+	frame.JobStatus = advanceJobStatus(frame.JobStatus, execution.Outcomes)
+	return frame
 }
 
 func (m *ActionMachine[S]) action(lock string) (Action, error) {
@@ -291,12 +324,14 @@ func (m *ActionMachine[S]) prepare(ctx context.Context, invocation ActionInvocat
 		}
 		overlay, invocationFrame, err := m.enterEnvironment(ctx, invocation.Environment, frame)
 		if err != nil {
-			return Frame{}, Execution{}, err
+			execution := failureExecution(err)
+			return applyExecution(frame, execution), execution, nil
 		}
 		invocationFrame.CurrentLock = invocation.Lock
 		condition, err := m.evaluateCondition(ctx, lifecycleConditionSite(action.JavaScript.PreCondition), invocationFrame)
 		if err != nil {
-			return Frame{}, Execution{}, fmt.Errorf("action pre-if: %w", err)
+			execution := failureExecution(fmt.Errorf("action pre-if: %w", err))
+			return applyExecution(frame, execution), execution, nil
 		}
 		if condition == GuardFalse {
 			m.prepared[invocation.ID] = preparedInvocation{}
@@ -312,11 +347,13 @@ func (m *ActionMachine[S]) prepare(ctx context.Context, invocation ActionInvocat
 		}
 		inputs, err := m.resolveInputs(ctx, invocation.Inputs, action, frame)
 		if err != nil {
-			return Frame{}, Execution{}, err
+			execution := failureExecution(err)
+			return applyExecution(frame, execution), execution, nil
 		}
 		_, invocationFrame, err := m.enterEnvironment(ctx, invocation.Environment, frame)
 		if err != nil {
-			return Frame{}, Execution{}, err
+			execution := failureExecution(err)
+			return applyExecution(frame, execution), execution, nil
 		}
 		invocationFrame.ActionInputs = inputs
 		invocationFrame.CurrentLock = invocation.Lock
@@ -365,15 +402,12 @@ func (m *ActionMachine[S]) prepare(ctx context.Context, invocation ActionInvocat
 func (m *ActionMachine[S]) prepareJavaScript(ctx context.Context, invocation ActionInvocation, action Action, parent Frame, overlay ValueObject, invocationFrame Frame, possible bool) (Frame, Execution, error) {
 	inputs, err := m.resolveInputs(ctx, invocation.Inputs, action, parent)
 	if err != nil {
-		return Frame{}, Execution{}, err
+		execution := failureExecution(err)
+		return applyExecution(parent, execution), execution, nil
 	}
 	invocationFrame.ActionInputs = inputs
 	prepared := preparedInvocation{Overlay: overlay, Inputs: inputs, Possible: possible}
 	m.prepared[invocation.ID] = prepared
-	if action.JavaScript.Post != "" {
-		m.registerPost(invocation.ID, invocation.Lock, action.JavaScript.PostCondition, invocationFrame, overlay, invocation.Inputs, possible)
-		prepared.PostRegistered = true
-	}
 	operation := LeafOperation{
 		Kind: LeafJavaScript, Phase: PhasePre, Lock: invocation.Lock, InvocationID: invocation.ID,
 		Entrypoint: action.JavaScript.Pre, NodeMajor: action.JavaScript.NodeMajor,
@@ -384,6 +418,10 @@ func (m *ActionMachine[S]) prepareJavaScript(ctx context.Context, invocation Act
 		return Frame{}, Execution{}, err
 	}
 	invocationFrame = applyExecution(invocationFrame, execution)
+	if action.JavaScript.Post != "" {
+		m.registerPost(invocation.ID, invocation.Lock, action.JavaScript.PostCondition, invocationFrame, overlay, invocation.Inputs, possible)
+		prepared.PostRegistered = true
+	}
 	prepared.State = cloneValueObject(execution.State)
 	invocationFrame.State = cloneValueObject(prepared.State)
 	if execution.Outcomes&(OutcomeFailure|OutcomeCancelled) != 0 {
@@ -490,11 +528,13 @@ func (m *ActionMachine[S]) invoke(ctx context.Context, invocation ActionInvocati
 		inputs, err = m.resolveInputs(ctx, invocation.Inputs, action, frame)
 	}
 	if err != nil {
-		return Frame{}, Execution{}, err
+		execution := failureExecution(err)
+		return applyExecution(frame, execution), execution, nil
 	}
 	overlay, invocationFrame, err := m.enterEnvironment(ctx, invocation.Environment, frame)
 	if err != nil {
-		return Frame{}, Execution{}, err
+		execution := failureExecution(err)
+		return applyExecution(frame, execution), execution, nil
 	}
 	invocationFrame.ActionInputs = inputs
 	invocationFrame.CurrentLock = invocation.Lock
@@ -538,12 +578,37 @@ func (m *ActionMachine[S]) execute(ctx context.Context, operation LeafOperation,
 	var err error
 	m.state, execution, err = m.adapter.Execute(ctx, m.state, operation, frame.view())
 	if err != nil {
-		return Execution{}, err
+		return Execution{}, &adapterExecutionError{err: err}
 	}
 	if execution.Outcomes == 0 {
 		return Execution{}, fmt.Errorf("%s leaf returned no outcome", operation.Kind)
 	}
 	return execution, nil
+}
+
+type adapterExecutionError struct{ err error }
+
+func (e *adapterExecutionError) Error() string     { return e.err.Error() }
+func (e *adapterExecutionError) Unwrap() error     { return e.err }
+func (e *adapterExecutionError) HardFailure() bool { return true }
+
+type hardProgramError struct{ err error }
+
+func (e *hardProgramError) Error() string     { return e.err.Error() }
+func (e *hardProgramError) Unwrap() error     { return e.err }
+func (e *hardProgramError) HardFailure() bool { return true }
+
+type hardFailureMarker interface {
+	HardFailure() bool
+}
+
+func failureExecution(err error) Execution {
+	hard := false
+	var marker hardFailureMarker
+	if errors.As(err, &marker) {
+		hard = hard || marker.HardFailure()
+	}
+	return Execution{Outcomes: OutcomeFailure, Failure: &ExecutionFailure{Cause: err, Hard: hard}}
 }
 
 func guardDecision(analysis expression.Analysis) (GuardDecision, error) {
@@ -862,6 +927,9 @@ func (m *ActionMachine[S]) registerPost(id, lock string, condition Site, frame F
 		}
 	}
 	m.posts = append(m.posts, registeredPost{InvocationID: id, Lock: lock, Condition: condition, Frame: cloneFrame(frame), Overlay: cloneValueObject(overlay), Supplied: suppliedNames, Possible: possible})
+	if m.postAdded != nil {
+		m.postAdded()
+	}
 }
 
 func (m *ActionMachine[S]) updatePostFrame(id string, frame Frame) {
@@ -972,7 +1040,7 @@ func (m *ActionMachine[S]) resolveInputs(ctx context.Context, bindings []Binding
 	for _, definition := range action.Inputs {
 		name := strings.ToLower(definition.Name)
 		if _, exists := inputs.Fields[name]; definition.Required && !exists {
-			return ValueObject{}, fmt.Errorf("required action input %q is missing", definition.Name)
+			return ValueObject{}, &hardProgramError{err: fmt.Errorf("required action input %q is missing", definition.Name)}
 		}
 	}
 	return inputs, nil
@@ -985,9 +1053,6 @@ func (m *ActionMachine[S]) invokeJavaScript(ctx context.Context, invocation Acti
 	if prepared, ok := m.prepared[invocation.ID]; ok {
 		frame.State = cloneValueObject(prepared.State)
 	}
-	if action.JavaScript.Post != "" {
-		m.registerPost(invocation.ID, invocation.Lock, action.JavaScript.PostCondition, frame, overlay, invocation.Inputs, false)
-	}
 	execution, err := m.execute(ctx, LeafOperation{
 		Kind: LeafJavaScript, Phase: PhaseMain, Lock: invocation.Lock, InvocationID: invocation.ID,
 		Entrypoint: action.JavaScript.Main, NodeMajor: action.JavaScript.NodeMajor,
@@ -995,6 +1060,9 @@ func (m *ActionMachine[S]) invokeJavaScript(ctx context.Context, invocation Acti
 	}, frame)
 	if err != nil {
 		return Frame{}, Execution{}, err
+	}
+	if action.JavaScript.Post != "" {
+		m.registerPost(invocation.ID, invocation.Lock, action.JavaScript.PostCondition, frame, overlay, invocation.Inputs, false)
 	}
 	frame = applyExecution(frame, execution)
 	frame.State = overlayValueObject(frame.State, execution.State)
@@ -1075,11 +1143,13 @@ func (m *ActionMachine[S]) invokeComposite(ctx context.Context, invocation Actio
 		case step.Run != nil:
 			_, stepFrame, err = m.enterEnvironment(ctx, step.Env, stepFrame)
 			if err != nil {
-				return Frame{}, Execution{}, fmt.Errorf("composite action step %d environment: %w", i+1, err)
+				execution = failureExecution(fmt.Errorf("composite action step %d environment: %w", i+1, err))
+				goto complete
 			}
 			operation, operationErr := m.runOperation(ctx, invocation, i, *step.Run, stepFrame)
 			if operationErr != nil {
-				return Frame{}, Execution{}, operationErr
+				execution = failureExecution(operationErr)
+				goto complete
 			}
 			execution, err = m.executePossibly(ctx, operation, stepFrame, condition)
 		case step.Invocation != nil:
@@ -1089,7 +1159,9 @@ func (m *ActionMachine[S]) invokeComposite(ctx context.Context, invocation Actio
 			}
 			childAction, actionErr := m.action(child.Lock)
 			if actionErr != nil {
-				return Frame{}, Execution{}, fmt.Errorf("composite action step %d: %w", i+1, actionErr)
+				execution = failureExecution(fmt.Errorf("composite action step %d: %w", i+1, actionErr))
+				execution.Failure.Hard = true
+				goto complete
 			}
 			if condition == GuardUnknown {
 				_, execution, err = m.invokeUnknown(ctx, child, childAction, stepFrame)
@@ -1100,7 +1172,7 @@ func (m *ActionMachine[S]) invokeComposite(ctx context.Context, invocation Actio
 			execution = successfulExecution()
 		}
 		if err != nil {
-			return Frame{}, Execution{}, fmt.Errorf("composite action step %d: %w", i+1, err)
+			execution = failureExecution(fmt.Errorf("composite action step %d: %w", i+1, err))
 		}
 	complete:
 		frame = applyExecution(frame, execution)

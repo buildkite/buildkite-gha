@@ -4143,8 +4143,30 @@ func TestConcurrentPostActionsRunLIFOByRegistration(t *testing.T) {
 	}
 	background := strings.Index(logs.String(), "post:background")
 	foreground := strings.Index(logs.String(), "post:foreground")
-	if foreground < 0 || background < 0 || foreground > background {
+	if foreground < 0 || background < 0 || background > foreground {
 		t.Fatalf("concurrent post logs are not registration-order LIFO: %q", logs.String())
+	}
+}
+
+func TestActionWithoutPreEvaluatesStepEnvironmentAtMainTime(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/check/action.yml", `name: Check environment
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: test "$VALUE" = ready
+`)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "build", Kind: "run", Shell: "sh", Command: `printf '%s\n' 'value="ready"' >> "$GITHUB_OUTPUT"`},
+		{ID: "check", Kind: "uses", Uses: "./.github/actions/check", Env: map[string]string{"VALUE": "${{ fromJSON(steps.build.outputs.value) }}"}},
+	})
+
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 }
 

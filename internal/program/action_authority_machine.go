@@ -341,7 +341,7 @@ func authorityFrame(context ActionAuthorityContext, mutable bool) Frame {
 	frame := Frame{
 		WorkflowInputs: authorityObject(context.WorkflowInputs, context.UnknownWorkflowInputs),
 		Environment:    ValueObject{Fields: map[string]expression.AbstractValue{}, Open: mutable},
-		GitHub:         ValueObject{Fields: map[string]expression.AbstractValue{"server_url": {Known: true, Value: context.ServerURL}}},
+		GitHub:         ValueObject{Fields: map[string]expression.AbstractValue{"server_url": {Known: true, Value: context.ServerURL}}, Open: true},
 		Matrix:         authorityObject(context.Matrix, nil),
 	}
 	if !mutable {
