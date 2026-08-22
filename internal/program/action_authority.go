@@ -373,7 +373,7 @@ func (p *actionAuthorityPlanner) inspectComposite(action Action, mainInputs, pre
 		if err := p.inspect(step.Invocation.Lock, step.Invocation.With, step.Invocation.With, mainKnown, childMainScope, childPreparationScope, childStableScope, stepReachable, preparationReachable, preparationEnvironmentToken, false); err != nil {
 			return fmt.Errorf("composite action step %d child %q: %w", i+1, step.Invocation.Uses.Source, err)
 		}
-		if stepReachable {
+		if stepReachable && p.actions[step.Invocation.Lock].Runtime != ActionRuntimeNative {
 			mainKnown = withoutKnownEnvironment(mainKnown)
 		}
 		if preparationReachable && p.preparationEnvironmentChanges != preparationChanges {
@@ -484,11 +484,21 @@ func actionPhaseKnownReferences(context ActionAuthorityContext, mutable bool) (m
 	if !mutable {
 		return workflowKnownReferences(context)
 	}
-	context.Environment = nil
-	if len(context.EnvironmentLayers) != 0 {
-		context.EnvironmentLayers = context.EnvironmentLayers[len(context.EnvironmentLayers)-1:]
+	known, err := workflowKnownReferences(context)
+	if err != nil {
+		return nil, err
 	}
-	return workflowKnownReferences(context)
+	stable := withoutKnownEnvironment(known)
+	if len(context.EnvironmentLayers) == 0 {
+		return stable, nil
+	}
+	for _, binding := range context.EnvironmentLayers[len(context.EnvironmentLayers)-1] {
+		name := "env." + strings.ToLower(binding.Name)
+		if value, ok := known[name]; ok {
+			stable[name] = value
+		}
+	}
+	return stable, nil
 }
 
 // WorkflowEnvironmentMutableBefore reports whether an earlier workflow step

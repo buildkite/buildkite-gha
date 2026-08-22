@@ -340,6 +340,27 @@ func TestInventoryActionAuthorityRetainsStableInvocationEnvironmentForPost(t *te
 	}
 }
 
+func TestInventoryActionAuthorityEvaluatesStableInvocationEnvironmentBeforeMainMutation(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "github", Runtime: ActionRuntimeJavaScript, JavaScript: &JavaScriptAction{
+			Main: "index.js", Post: "post.js", PostCondition: testActionSite("env.FLAG == 'true' && github.token != ''"),
+		}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{
+		EnvironmentLayers: [][]Binding{
+			{{Name: "BASE", Value: testWorkflowSite("false")}},
+			{{Name: "FLAG", Value: testWorkflowSite("${{ env.BASE }}")}},
+		},
+		MainEnvironmentMutable: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("post condition forgot the invocation environment resolved before main ran")
+	}
+}
+
 func TestInventoryActionAuthorityEvaluatesChildStableEnvironmentWithParentInputs(t *testing.T) {
 	actions := map[string]Action{
 		"root": {
@@ -708,6 +729,26 @@ func TestInventoryActionAuthorityForgetsParentEnvironmentAfterChildAction(t *tes
 	}
 	if !authority.GitHubToken {
 		t.Fatal("a child action could not override the parent environment for a later sibling")
+	}
+}
+
+func TestInventoryActionAuthorityRetainsEnvironmentAfterNativeChild(t *testing.T) {
+	actions := map[string]Action{
+		"root": {
+			Source: "workspace", Runtime: ActionRuntimeComposite,
+			Composite: &CompositeAction{Steps: []CompositeStep{
+				{Invocation: &Invocation{Lock: "native", Uses: testActionSite("buildkite/native")}},
+				{Condition: testActionSite("env.FLAG == 'true'"), Run: &Run{Command: testActionSite("echo ${{ github.token }}")}},
+			}},
+		},
+		"native": {Source: "native", Runtime: ActionRuntimeNative},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{Environment: map[string]string{"FLAG": "false"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("native child discarded an environment value it cannot change")
 	}
 }
 
