@@ -1552,7 +1552,7 @@ jobs:
 
 func TestRequiredSecretsDoesNotInterpretConditionLiteralsAsTemplates(t *testing.T) {
 	instance := JobInstance{If: "'${{ github.token }} ${{ secrets.DEPLOY }} ${{ github.event.action }}' == runner.os"}
-	secrets, referencesToken, err := requiredSecrets(instance, nil, false)
+	secrets, referencesToken, err := requiredSecrets(lowerWorkflowProgram(instance), false, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
