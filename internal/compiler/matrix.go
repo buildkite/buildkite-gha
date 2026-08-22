@@ -261,19 +261,20 @@ func matrixFromObject(object map[string]any) (*workflow.Matrix, error) {
 		matrix.Rows = append(matrix.Rows, row)
 	}
 	var err error
-	if matrix.Include, err = matrixCombinationsFromValue("include", object["include"]); err != nil {
-		return nil, err
+	if value, ok := object["include"]; ok {
+		if matrix.Include, err = matrixCombinationsFromValue("include", value); err != nil {
+			return nil, err
+		}
 	}
-	if matrix.Exclude, err = matrixCombinationsFromValue("exclude", object["exclude"]); err != nil {
-		return nil, err
+	if value, ok := object["exclude"]; ok {
+		if matrix.Exclude, err = matrixCombinationsFromValue("exclude", value); err != nil {
+			return nil, err
+		}
 	}
 	return matrix, nil
 }
 
 func matrixCombinationsFromValue(name string, value any) ([]workflow.MatrixCombination, error) {
-	if value == nil {
-		return nil, nil
-	}
 	items, ok := value.([]any)
 	if !ok {
 		return nil, fmt.Errorf("matrix %s resolved to %T, want array", name, value)

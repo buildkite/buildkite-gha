@@ -2327,6 +2327,23 @@ jobs:
 	}
 }
 
+func TestValidateRejectsNullMatrixSectionExpression(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [linux]
+        exclude: ${{ github.event.matrix_exclusions }}
+    steps: [{run: true}]
+`)
+	_, err := Validate("matrix.yml", source)
+	if err == nil || !strings.Contains(err.Error(), "matrix exclude resolved to <nil>, want array") {
+		t.Fatalf("Validate() error = %v, want null exclude rejection", err)
+	}
+}
+
 func TestCompileResolvesGitHubRefNameInMatrixDimension(t *testing.T) {
 	workflow := []byte(`on: push
 jobs:
