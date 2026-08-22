@@ -490,13 +490,13 @@ func actionPhaseKnownReferences(context ActionAuthorityContext, mutable bool) (m
 // WorkflowEnvironmentMutableBefore reports whether an earlier workflow step
 // can execute and append to GITHUB_ENV before the selected step.
 func WorkflowEnvironmentMutableBefore(steps []Step, before int, context ActionAuthorityContext) (bool, error) {
-	known, err := workflowKnownReferences(context)
-	if err != nil {
-		return false, err
-	}
+	background := map[string]bool{}
 	for _, step := range steps[:before] {
-		if step.Run == nil && step.Invocation == nil {
-			continue
+		stepContext := context
+		stepContext.EnvironmentLayers = append(append([][]Binding(nil), context.EnvironmentLayers...), step.Env)
+		known, err := workflowKnownReferences(stepContext)
+		if err != nil {
+			return false, err
 		}
 		analysis, err := expression.AnalyzeCondition(step.Condition.Source, known, expression.GitHubTokenWorkflowContext)
 		if err != nil {
@@ -505,9 +505,25 @@ func WorkflowEnvironmentMutableBefore(steps []Step, before int, context ActionAu
 			}
 			return true, nil
 		}
-		if !analysis.Value.Known || analysis.Value.Value == true {
-			return true, nil
+		if analysis.Value.Known && analysis.Value.Value != true {
+			continue
 		}
+		if step.Kind == "wait" || step.Kind == "cancel" {
+			for _, target := range step.Targets {
+				if background[target] {
+					return true, nil
+				}
+			}
+			continue
+		}
+		if step.Run == nil && step.Invocation == nil {
+			continue
+		}
+		if step.Background {
+			background[step.ID] = true
+			continue
+		}
+		return true, nil
 	}
 	return false, nil
 }

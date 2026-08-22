@@ -356,6 +356,46 @@ func TestWorkflowEnvironmentMutableBeforeSkipsKnownFalseSteps(t *testing.T) {
 	}
 }
 
+func TestWorkflowEnvironmentMutableBeforeUsesStepEnvironmentAndBackgroundBarriers(t *testing.T) {
+	jobEnv := []Binding{{Name: "ENABLED", Value: testWorkflowSite("false")}}
+	stepEnv := []Binding{{Name: "ENABLED", Value: testWorkflowSite("true")}}
+	foreground := []Step{
+		{Env: stepEnv, Condition: testWorkflowSite("env.ENABLED == 'true'"), Run: &Run{Command: testWorkflowSite("echo foreground")}},
+		{Run: &Run{Command: testWorkflowSite("echo target")}},
+	}
+	mutable, err := WorkflowEnvironmentMutableBefore(foreground, 1, ActionAuthorityContext{EnvironmentLayers: [][]Binding{jobEnv}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mutable {
+		t.Fatal("step environment did not make an earlier foreground step reachable")
+	}
+
+	background := []Step{
+		{ID: "background", Background: true, Run: &Run{Command: testWorkflowSite("echo background")}},
+		{Run: &Run{Command: testWorkflowSite("echo target")}},
+	}
+	mutable, err = WorkflowEnvironmentMutableBefore(background, 1, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutable {
+		t.Fatal("unawaited background step made environment immediately mutable")
+	}
+	barrier := []Step{
+		background[0],
+		{Kind: "wait", Targets: []string{"background"}},
+		{Run: &Run{Command: testWorkflowSite("echo target")}},
+	}
+	mutable, err = WorkflowEnvironmentMutableBefore(barrier, 2, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mutable {
+		t.Fatal("background barrier did not make committed environment mutable")
+	}
+}
+
 func TestInventoryActionAuthorityRetainsPreparationEnvironmentAfterCompositeWithoutPre(t *testing.T) {
 	actions := map[string]Action{
 		"root": {
