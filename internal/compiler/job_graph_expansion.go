@@ -288,6 +288,9 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 					Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
 				})
 				valid = false
+			} else if target.Cache != nil && instanceJob.Container != nil {
+				e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, job.Span.Start.Line, job.Span.Start.Column, job.ID, key, "", 0, jobError(jobPath, job, "runner cache volumes are unsupported for jobs with a container")))
+				valid = false
 			}
 		}
 		concurrencyGroup, concurrencyErr := resolveConcurrency(jobPath, job.ID, job.Concurrency, jobContext, matrix)

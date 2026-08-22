@@ -90,6 +90,19 @@ jobs:
 	}
 }
 
+func TestCompileBundleRejectsRunnerCacheForJobContainer(t *testing.T) {
+	options := defaultOptions()
+	options.Runners.Labels = nil
+	options.Runners.Targets = map[string]RunnerTarget{
+		"ubuntu-latest": {Platform: PlatformLinuxAMD64, Cache: &CacheVolume{Paths: []string{"/home/runner/.cache"}}},
+	}
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: node:24\n    steps: [{run: true}]\n")
+	_, err := CompileBundleWithOptions("containers.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err == nil || !strings.Contains(err.Error(), "runner cache volumes are unsupported for jobs with a container") {
+		t.Fatalf("CompileBundleWithOptions() error = %v, want runner cache container rejection", err)
+	}
+}
+
 func TestCompileBundleDoesNotActivateValidatedRuntimeMatrixWithoutFencing(t *testing.T) {
 	source := []byte(`on: push
 jobs:

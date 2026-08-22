@@ -627,6 +627,9 @@ transport has no authoritative current-attempt and durable idempotency fence.
 
 **🟡 Supported subset.** Linux jobs support job containers and GitHub-compatible services. A typical PostgreSQL service works without Buildkite-specific syntax:
 
+Runner-mapped Buildkite cache volumes are not supported for jobs that set
+`container`.
+
 ```yaml
 services:
   postgres:

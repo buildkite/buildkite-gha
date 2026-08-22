@@ -352,6 +352,8 @@ volume. A configured name and size apply to that combined volume; otherwise,
 the managed mise name and Buildkite's default size remain unchanged. Jobs with
 neither configuration emit no `cache` attribute.
 
+Runner cache volumes are not supported for workflow jobs that set `container`.
+
 Generated Linux jobs run as `runner`. Configured cache paths are made writable
 by that user after the bootstrap verifies that they target the Buildkite cache
 volume. Prefer narrowly scoped paths.
