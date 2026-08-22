@@ -64,6 +64,11 @@ func isHardJobFailure(err error) bool {
 	return errors.As(err, &target)
 }
 
+func isExplicitlySoftFailure(err error) bool {
+	var marker interface{ HardFailure() bool }
+	return errors.As(err, &marker) && !marker.HardFailure()
+}
+
 func markWorkflowJobFailure(err error) error {
 	if err == nil {
 		return nil

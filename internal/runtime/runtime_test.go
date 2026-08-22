@@ -6568,7 +6568,7 @@ func TestRemoteActionPostRegistrationFollowsStartedLifecycle(t *testing.T) {
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: skipped remote lifecycle\n")
 	remote := t.TempDir()
-	writeFixtureFile(t, remote, "with-pre/action.yml", "name: with pre\ninputs:\n  token:\n    required: true\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, remote, "with-pre/action.yml", "name: with pre\ninputs:\n  token:\n    required: true\n  message:\n    required: true\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
 	for _, phase := range []string{"pre", "main", "post"} {
 		writeFixtureFile(t, remote, "with-pre/"+phase+".js", "")
 	}
@@ -6578,6 +6578,10 @@ func TestRemoteActionPostRegistrationFollowsStartedLifecycle(t *testing.T) {
 	writeFixtureFile(t, remote, "pre-if-false/action.yml", "name: pre condition false\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: success() && env.RUN_PRE == 'true'\n  main: main.js\n  post: post.js\n")
 	for _, phase := range []string{"pre", "main", "post"} {
 		writeFixtureFile(t, remote, "pre-if-false/"+phase+".js", "")
+	}
+	writeFixtureFile(t, remote, "invalid-timeout/action.yml", "name: invalid timeout\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	for _, phase := range []string{"pre", "main", "post"} {
+		writeFixtureFile(t, remote, "invalid-timeout/"+phase+".js", "")
 	}
 	writeFixtureFile(t, remote, "main-fails/action.yml", "name: main fails\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
 	writeFixtureFile(t, remote, "main-fails/main.js", "")
@@ -6590,7 +6594,7 @@ if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
 action=$(basename "$(dirname "$1")")
 phase=$(basename "$1" .js)
 printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
-if [ "$action:$phase" = with-pre:pre ]; then test "$INPUT_TOKEN" = ghs_scoped_pre; fi
+if [ "$action:$phase" = with-pre:pre ]; then test "$INPUT_TOKEN" = ghs_scoped_pre; test "$INPUT_MESSAGE" = new; fi
 if [ "$action:$phase" = main-fails:main ]; then exit 7; fi
 `)
 	if err := os.Chmod(fakeNode, 0o700); err != nil {
@@ -6598,22 +6602,24 @@ if [ "$action:$phase" = main-fails:main ]; then exit 7; fi
 	}
 	digest := digestTree(t, remote)
 	withPreID, withoutPreID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
-	falsePreID, mainFailsID := remoteLifecycleLockID(3), remoteLifecycleLockID(4)
+	falsePreID, invalidTimeoutID, mainFailsID := remoteLifecycleLockID(3), remoteLifecycleLockID(4), remoteLifecycleLockID(5)
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
-		{ID: "with-pre", Kind: "uses", Uses: remoteLifecycleUses("with-pre"), Action: &plan.ActionSelector{Lock: withPreID}, With: map[string]string{"token": "${{ github.token }}"}, Env: map[string]string{"MINUTES": "5"}, TimeoutMinutesExpression: "${{ fromJSON(env.MINUTES) }}"},
+		{ID: "with-pre", Kind: "uses", Uses: remoteLifecycleUses("with-pre"), Action: &plan.ActionSelector{Lock: withPreID}, With: map[string]string{"token": "${{ github.token }}", "message": "${{ env.FLAG }}"}, Env: map[string]string{"MINUTES": "5", "FLAG": "new"}, TimeoutMinutesExpression: "${{ fromJSON(env.MINUTES) }}"},
 		{ID: "without-pre", Kind: "uses", Uses: remoteLifecycleUses("without-pre"), Action: &plan.ActionSelector{Lock: withoutPreID}, Condition: "failure()"},
 		{ID: "pre-if-false", Kind: "uses", Uses: remoteLifecycleUses("pre-if-false"), Action: &plan.ActionSelector{Lock: falsePreID}, Condition: "failure()", TimeoutMinutesExpression: "${{ fromJSON('invalid') }}"},
+		{ID: "invalid-timeout", Kind: "uses", Uses: remoteLifecycleUses("invalid-timeout"), Action: &plan.ActionSelector{Lock: invalidTimeoutID}, Env: map[string]string{"ALLOW": "true"}, TimeoutMinutesExpression: "${{ fromJSON('invalid') }}", ContinueOnErrorExpression: "${{ env.ALLOW == 'true' }}"},
 		{ID: "main-fails", Kind: "uses", Uses: remoteLifecycleUses("main-fails"), Action: &plan.ActionSelector{Lock: mainFailsID}},
 	})
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network", "provider-token-write"}
 	job.GitHubToken = &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": "read"}}
 	job.Event.Repository = "owner/repo"
-	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
+	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle, "FLAG": "old"}
 	job.Actions = []plan.ActionLock{
 		remoteLifecycleLock(withPreID, "with-pre", digest, nil),
 		remoteLifecycleLock(withoutPreID, "without-pre", digest, nil),
 		remoteLifecycleLock(falsePreID, "pre-if-false", digest, nil),
+		remoteLifecycleLock(invalidTimeoutID, "invalid-timeout", digest, nil),
 		remoteLifecycleLock(mainFailsID, "main-fails", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}

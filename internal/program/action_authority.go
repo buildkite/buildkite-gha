@@ -50,7 +50,7 @@ func InventoryActionAuthority(actions map[string]Action, invocation ActionInvoca
 		return Authority{}, preparation.Failure.Cause
 	}
 	mainFrame := authorityFrame(context, context.MainEnvironmentMutable)
-	mainFrame.Environment.Open = mainFrame.Environment.Open || preparationFrame.Environment.Open
+	mainFrame.Environment = joinValueObjects(mainFrame.Environment, preparationFrame.Environment)
 	mainFrame, execution, err := machine.Invoke(contextpkg.Background(), invocation, mainFrame)
 	if err != nil {
 		return Authority{}, err

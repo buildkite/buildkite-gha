@@ -97,6 +97,24 @@ func TestInventoryActionAuthorityIncludesRemotePreWhenMainIsSkipped(t *testing.T
 	}
 }
 
+func TestInventoryActionAuthorityReevaluatesDefaultsAfterPossiblePreEffects(t *testing.T) {
+	value := testActionSite("${{ env.FLAG == 'yes' && github.token || '' }}")
+	actions := map[string]Action{
+		"root": {
+			Source: "github", Runtime: ActionRuntimeJavaScript,
+			Inputs:     []ActionInput{{Name: "token", Default: &value}},
+			JavaScript: &JavaScriptAction{Pre: "pre.js", Main: "index.js"},
+		},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{Environment: map[string]string{"FLAG": "no"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("possible pre environment effects pruned main-time GitHub token authority")
+	}
+}
+
 func TestInventoryActionAuthorityIncludesInlineJavaScriptPre(t *testing.T) {
 	for _, test := range []struct {
 		name    string

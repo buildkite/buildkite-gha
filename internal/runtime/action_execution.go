@@ -488,8 +488,8 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 				hardFailure = true
 				break
 			}
-			invocation.Environment = job.Program.Job.Steps[stepIndex].Env
-			if _, ok := job.ActionPrograms[invocation.Lock]; !ok {
+			action, ok := job.ActionPrograms[invocation.Lock]
+			if !ok {
 				runErr = errors.Join(runErr, markHardJobFailure(fmt.Errorf("prepare action %q: normalized program %q is missing", step.Uses, invocation.Lock)))
 				hardFailure = true
 				break
@@ -518,12 +518,27 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 			wasUnsuccessful := preStatus.unsuccessful
 			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes)
 			bindHashFilesContext(preCtx, &preEval)
+			var stepEnv map[string]string
+			if action.Source != "workspace" && (action.Runtime == program.ActionRuntimeComposite || action.Runtime == program.ActionRuntimeJavaScript && action.JavaScript != nil && action.JavaScript.Pre != "") {
+				stepEnv, err = evaluateStepMap(step.Env, preEval)
+				if err != nil {
+					execution := classifyStepExecutionWithControls(ctx, preCtx, step, newResult(), fmt.Errorf("action %q pre environment: %w", step.Uses, err), preEval)
+					preFailures[stepIndex] = execution
+					if execution.conclusion != "success" {
+						preStatus.unsuccessful = true
+					}
+					cancelPre()
+					continue
+				}
+				preEval.Env = mergeStringMaps(preEval.Env, stepEnv)
+			}
 			session.adapter.eval = preEval
 			if step.TimeoutMinutesExpression != "" {
 				session.adapter.preparation = &remotePreparationTimeout{step: step, eval: preEval}
 			}
-			explicitPATH := r.explicitJobPATH || preEval.Env["PATH"] != r.implicitJobPATH
-			_, preExecution, preErr := session.machine.Prepare(preCtx, invocation, actionFrame(preEval, preEval.Env, nil, explicitPATH))
+			_, explicitStepPATH := stepEnv["PATH"]
+			explicitPATH := r.explicitJobPATH || preEval.Env["PATH"] != r.implicitJobPATH || explicitStepPATH
+			_, preExecution, preErr := session.machine.Prepare(preCtx, invocation, actionFrame(preEval, preEval.Env, stepEnv, explicitPATH))
 			if session.adapter.preparation != nil {
 				session.adapter.preparation.close()
 			}
@@ -535,7 +550,7 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 			eval.Env = jobResult.Env
 			if preErr == nil {
 				preErr = actionExecutionError(preExecution)
-			} else if preCtx.Err() == nil {
+			} else if preCtx.Err() == nil && !isExplicitlySoftFailure(preErr) {
 				preErr = markHardJobFailure(preErr)
 			}
 			if preErr != nil {
