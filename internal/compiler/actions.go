@@ -265,6 +265,11 @@ func compileActionPrograms(ctx context.Context, workspace string, actionSource A
 	requiredSecrets := map[string]bool{}
 	var githubTokenActions []string
 	if suppliedInputs != nil {
+		anyPreparationPhase := false
+		for _, root := range roots {
+			anyPreparationPhase = anyPreparationPhase || program.ActionPreparesExecutablePhase(programs, root.lock.ID)
+		}
+		preparationEnvironmentMutable := false
 		for i, root := range roots {
 			invocations[i].Lock = root.lock.ID
 			planning := program.ActionAuthorityContext{ServerURL: serverURL}
@@ -272,13 +277,8 @@ func compileActionPrograms(ctx context.Context, workspace string, actionSource A
 				planning = contexts[i]
 				planning.ServerURL = serverURL
 			}
-			// Earlier workflow steps and action phases may append to GITHUB_ENV.
-			// Forget inherited values, but retain this step's explicit env layer:
-			// it is reapplied at runtime and overrides inherited mutations.
-			planning.Environment = nil
-			if len(planning.EnvironmentLayers) != 0 {
-				planning.EnvironmentLayers = planning.EnvironmentLayers[len(planning.EnvironmentLayers)-1:]
-			}
+			planning.PreparationEnvironmentMutable = planning.PreparationEnvironmentMutable || preparationEnvironmentMutable
+			planning.MainEnvironmentMutable = planning.MainEnvironmentMutable || anyPreparationPhase || i > 0
 			requirements, err := program.InventoryActionAuthority(programs, invocations[i], planning)
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
@@ -290,6 +290,7 @@ func compileActionPrograms(ctx context.Context, workspace string, actionSource A
 			for _, name := range requirements.Secrets {
 				requiredSecrets[name] = true
 			}
+			preparationEnvironmentMutable = preparationEnvironmentMutable || program.ActionPreparesExecutablePhase(programs, root.lock.ID)
 		}
 	}
 	secretNames := sortedKeys(requiredSecrets)

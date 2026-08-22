@@ -203,9 +203,11 @@ func TestRunnerDirectReferencesWorkAcrossRuntimeEvaluationSurfaces(t *testing.T)
 	}
 }
 
-func TestValidateStepConditionSupportsGitHubToken(t *testing.T) {
-	if err := ValidateCondition("github.token != ''", StepCondition); err != nil {
-		t.Fatal(err)
+func TestValidateStepConditionRejectsActionOnlyContexts(t *testing.T) {
+	for _, condition := range []string{"github.token != ''", "toJSON(inputs) != '{}'"} {
+		if err := ValidateCondition(condition, StepCondition); err == nil {
+			t.Errorf("ValidateCondition(%q) accepted an action-only context", condition)
+		}
 	}
 }
 

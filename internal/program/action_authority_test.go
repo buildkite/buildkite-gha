@@ -223,17 +223,111 @@ func TestInventoryActionAuthorityRetainsNestedMatrixReferences(t *testing.T) {
 	}
 }
 
-func TestInventoryActionAuthorityKeepsRuntimeDependentDefaultErrorsConservative(t *testing.T) {
-	defaultValue := testActionSite("${{ inputs.enabled && fromJSON('bad') && github.token || '' }}")
+func TestInventoryActionAuthorityTreatsMissingConcreteMatrixMemberAsNull(t *testing.T) {
 	actions := map[string]Action{
-		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "token", Default: &defaultValue}}, Composite: &CompositeAction{}},
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "token"}}, Composite: &CompositeAction{}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{
+		Lock: "root", Inputs: []Binding{{Name: "token", Value: testWorkflowSite("${{ matrix.missing && github.token || '' }}")}},
+	}, ActionAuthorityContext{Matrix: map[string]any{"present": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("missing concrete matrix member retained GitHub token authority")
+	}
+}
+
+func TestInventoryActionAuthorityRetainsWorkflowInputAggregate(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "token"}}, Composite: &CompositeAction{}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{
+		Lock: "root", Inputs: []Binding{{Name: "token", Value: testWorkflowSite("${{ inputs[matrix.key] && github.token || '' }}")}},
+	}, ActionAuthorityContext{WorkflowInputs: map[string]any{"publish": false}, Matrix: map[string]any{"key": "publish"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("known-false computed workflow input retained GitHub token authority")
+	}
+}
+
+func TestInventoryActionAuthorityTreatsLaterAbsentInputAsEmptyInDefault(t *testing.T) {
+	token := testActionSite("${{ inputs.enabled && github.token || '' }}")
+	actions := map[string]Action{
+		"root": {
+			Source: "workspace", Runtime: ActionRuntimeComposite,
+			Inputs: []ActionInput{{Name: "token", Default: &token}, {Name: "enabled"}}, Composite: &CompositeAction{},
+		},
 	}
 	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if authority.GitHubToken {
+		t.Fatal("later absent input kept a known-false default token branch reachable")
+	}
+}
+
+func TestInventoryActionAuthorityKeepsRuntimeDependentDefaultErrorsConservative(t *testing.T) {
+	defaultValue := testActionSite("${{ inputs.enabled && fromJSON('bad') && github.token || '' }}")
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "enabled"}, {Name: "token", Default: &defaultValue}}, Composite: &CompositeAction{}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{
+		Lock: "root", Inputs: []Binding{{Name: "enabled", Value: testWorkflowSite("${{ inputs.enabled }}")}},
+	}, ActionAuthorityContext{UnknownWorkflowInputs: map[string]bool{"enabled": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !authority.GitHubToken {
 		t.Fatal("runtime-dependent default error did not retain conservative token authority")
+	}
+}
+
+func TestInventoryActionAuthorityRetainsStableInvocationEnvironmentForPost(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "github", Runtime: ActionRuntimeJavaScript, JavaScript: &JavaScriptAction{
+			Main: "index.js", Post: "post.js", PostCondition: testActionSite("env.FLAG == 'true' && github.token != ''"),
+		}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{
+		EnvironmentLayers: [][]Binding{
+			{{Name: "FLAG", Value: testWorkflowSite("true")}},
+			{{Name: "FLAG", Value: testWorkflowSite("false")}},
+		},
+		MainEnvironmentMutable: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("post condition forgot the stable invocation environment")
+	}
+}
+
+func TestInventoryActionAuthorityRetainsPreparationEnvironmentAfterCompositeWithoutPre(t *testing.T) {
+	actions := map[string]Action{
+		"root": {
+			Source: "github", Runtime: ActionRuntimeComposite,
+			Composite: &CompositeAction{Steps: []CompositeStep{
+				{Invocation: &Invocation{Lock: "composite", Uses: testActionSite("owner/composite@v1")}},
+				{Invocation: &Invocation{Lock: "pre", Uses: testActionSite("owner/pre@v1")}},
+			}},
+		},
+		"composite": {Source: "github", Runtime: ActionRuntimeComposite, Composite: &CompositeAction{}},
+		"pre": {
+			Source: "github", Runtime: ActionRuntimeJavaScript,
+			JavaScript: &JavaScriptAction{Pre: "pre.js", PreCondition: testActionSite("env.FLAG == 'true' && github.token != ''"), Main: "index.js"},
+		},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{Environment: map[string]string{"FLAG": "false"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("remote composite without a pre phase erased the preparation environment")
 	}
 }
 

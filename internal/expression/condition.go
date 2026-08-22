@@ -42,6 +42,10 @@ const (
 	// actionLifecycleCondition is evaluated for action pre-if and post-if
 	// metadata. It has its own context policy and no implicit success guard.
 	actionLifecycleCondition
+	// compositeActionCondition is evaluated for a composite action's step if.
+	// It admits action-authored token and aggregate-input access without
+	// broadening workflow-authored step conditions.
+	compositeActionCondition
 )
 
 // ValidateCondition verifies that a job or step condition uses only expression
@@ -257,7 +261,7 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha":
 				return nil
 			case "token":
-				if scope == StepCondition || scope == actionLifecycleCondition {
+				if scope == actionLifecycleCondition || scope == compositeActionCondition {
 					return nil
 				}
 			}
@@ -345,7 +349,11 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 			return validator.validate(node.Index)
 		}
 		return fmt.Errorf("unsupported condition access expression")
-	case "matrix", "needs", "inputs":
+	case "matrix", "needs":
+	case "inputs":
+		if _, whole := node.(*actionlint.VariableNode); whole && scope != compositeActionCondition {
+			return fmt.Errorf("whole condition context %q is unsupported", root)
+		}
 	case "vars":
 		if _, whole := node.(*actionlint.VariableNode); whole {
 			return fmt.Errorf("whole condition context %q is unsupported", root)

@@ -131,6 +131,9 @@ func analyzeActionInputDefault(node actionlint.ExprNode, knownReferences map[str
 		if value, ok := knownReferences[strings.ToLower(referenceName(root, path))]; ok {
 			return knownAnalysis(value), nil
 		}
+		if value, ok := knownObjectReference(knownReferences, root, path); ok {
+			return knownAnalysis(value), nil
+		}
 		return Analysis{}, nil
 	}
 	evaluator.call = func(evaluator *expressionEvaluator[Analysis], node *actionlint.FuncCallNode) (Analysis, error) {
@@ -182,6 +185,15 @@ func AnalyzeCondition(source string, knownReferences map[string]any, wholeGitHub
 	return analyzeCondition(source, knownReferences, wholeGitHub)
 }
 
+// AnalyzeCompositeActionCondition evaluates a composite action's step
+// condition with its action-authored expression surface.
+func AnalyzeCompositeActionCondition(source string, knownReferences map[string]any) (Analysis, error) {
+	if err := validateCondition(source, compositeActionCondition, nil, false); err != nil {
+		return Analysis{}, err
+	}
+	return analyzeCondition(source, knownReferences, GitHubTokenCompositeContext)
+}
+
 // AnalyzeActionLifecycleCondition evaluates pre-if or post-if with retained
 // planning values while preserving unknown runtime state.
 func AnalyzeActionLifecycleCondition(source string, knownReferences map[string]any) (Analysis, error) {
@@ -216,6 +228,9 @@ func analyzeRuntimeNode(node actionlint.ExprNode, surface evaluationSurface, kno
 		if value, ok := knownReferences[name]; ok {
 			return knownAnalysis(value), nil
 		}
+		if value, ok := knownObjectReference(knownReferences, root, path); ok {
+			return knownAnalysis(value), nil
+		}
 		return Analysis{}, nil
 	}
 	evaluator.resolveRoot = func(root string) (Analysis, error) {
@@ -244,6 +259,21 @@ func analyzeRuntimeNode(node actionlint.ExprNode, surface evaluationSurface, kno
 		}
 	}
 	return evaluator.evaluate(node)
+}
+
+func knownObjectReference(knownReferences map[string]any, root string, path []string) (any, bool) {
+	value, ok := knownReferences[strings.ToLower(root)]
+	if !ok {
+		return nil, false
+	}
+	for _, name := range path {
+		object, objectOK := value.(map[string]any)
+		if !objectOK {
+			return nil, false
+		}
+		value = object[strings.ToLower(name)]
+	}
+	return value, true
 }
 
 func analyzeRuntimeTemplate(template string, analyze func(actionlint.ExprNode) (Analysis, error)) (Analysis, error) {

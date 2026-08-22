@@ -369,7 +369,9 @@ jobs:
 
 ### Permissions
 
-**🟡 Supported subset.** Permissions matter only when a job statically references `secrets.GITHUB_TOKEN` or `github.token`, or an effective action input default can reach `github.token` for the event provider.
+**🟡 Supported subset.** Permissions matter only when a job statically references
+`secrets.GITHUB_TOKEN` or `github.token`, or reachable action metadata can reach
+`github.token` for the event provider.
 
 A workflow-level permissions map can request repository access:
 

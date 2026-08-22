@@ -616,7 +616,7 @@ runs:
 `)
 	compiled, err := compileActionPrograms(
 		t.Context(), workspace, nil, "https://github.com",
-		[]string{"./guarded", "./mutator"}, []map[string]string{{}, {}},
+		[]string{"./mutator", "./guarded"}, []map[string]string{{}, {}},
 		[]program.ActionInvocation{{}, {}},
 		[]program.ActionAuthorityContext{{Environment: map[string]string{"FLAG": "false"}}, {Environment: map[string]string{"FLAG": "false"}}},
 	)
@@ -628,7 +628,7 @@ runs:
 	}
 }
 
-func TestCompileActionProgramsForgetsInheritedEnvironmentForSingleRoot(t *testing.T) {
+func TestCompileActionProgramsRetainsEnvironmentForFirstRootWithoutPreparation(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "guarded", `name: guarded
 runs:
@@ -646,8 +646,8 @@ runs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !compiled.requiresGitHubToken {
-		t.Fatal("single-root planning trusted environment that an earlier phase can mutate")
+	if compiled.requiresGitHubToken {
+		t.Fatal("single-root planning forgot an environment no earlier phase can mutate")
 	}
 }
 

@@ -9,12 +9,14 @@ import (
 )
 
 type ActionAuthorityContext struct {
-	ServerURL             string
-	WorkflowInputs        map[string]any
-	UnknownWorkflowInputs map[string]bool
-	Matrix                map[string]any
-	Environment           map[string]string
-	EnvironmentLayers     [][]Binding
+	ServerURL                     string
+	WorkflowInputs                map[string]any
+	UnknownWorkflowInputs         map[string]bool
+	Matrix                        map[string]any
+	Environment                   map[string]string
+	EnvironmentLayers             [][]Binding
+	MainEnvironmentMutable        bool
+	PreparationEnvironmentMutable bool
 }
 
 type ActionInvocation struct {
@@ -31,10 +33,22 @@ func InventoryActionAuthority(actions map[string]Action, invocation ActionInvoca
 	if err != nil {
 		return Authority{}, err
 	}
+	mainKnown, err := actionPhaseKnownReferences(context, context.MainEnvironmentMutable)
+	if err != nil {
+		return Authority{}, err
+	}
+	preparationKnown, err := actionPhaseKnownReferences(context, context.PreparationEnvironmentMutable)
+	if err != nil {
+		return Authority{}, err
+	}
+	stableKnown, err := actionPhaseKnownReferences(context, true)
+	if err != nil {
+		return Authority{}, err
+	}
 	planner.workflowInputScope = known
 	mainReachable := true
 	if invocation.Condition.Source != "" {
-		analysis, err := expression.AnalyzeCondition(invocation.Condition.Source, known, expression.GitHubTokenWorkflowContext)
+		analysis, err := expression.AnalyzeCondition(invocation.Condition.Source, mainKnown, expression.GitHubTokenWorkflowContext)
 		if err != nil {
 			if validationErr := expression.ValidateCondition(invocation.Condition.Source, expression.StepCondition); validationErr != nil {
 				return Authority{}, err
@@ -48,7 +62,7 @@ func InventoryActionAuthority(actions map[string]Action, invocation ActionInvoca
 			mainReachable, _ = analysis.Value.Value.(bool)
 		}
 	}
-	if err := planner.inspect(invocation.Lock, invocation.Inputs, invocation.Inputs, known, known, mainReachable, true, false, true); err != nil {
+	if err := planner.inspect(invocation.Lock, invocation.Inputs, invocation.Inputs, mainKnown, preparationKnown, stableKnown, mainReachable, true, false, true); err != nil {
 		return Authority{}, err
 	}
 	authority := Authority{GitHubToken: planner.githubToken, Secrets: make([]string, 0, len(planner.secrets))}
@@ -74,7 +88,7 @@ type effectiveActionInputs struct {
 	githubToken bool
 }
 
-func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationSupplied []Binding, mainScope, preparationScope map[string]any, mainReachable, preparationReachable, preparationEnvironmentToken, workflowAuthored bool) error {
+func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationSupplied []Binding, mainScope, preparationScope, stableScope map[string]any, mainReachable, preparationReachable, preparationEnvironmentToken, workflowAuthored bool) error {
 	action, ok := p.actions[lock]
 	if !ok {
 		return fmt.Errorf("action program %q is missing", lock)
@@ -145,7 +159,7 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 			p.githubToken = p.githubToken || preReachable && inputs.githubToken
 		}
 		if action.JavaScript.Post != "" && (mainReachable || preReachable) {
-			known := workflowInputReferences(withoutKnownEnvironment(mainScope), p.workflowInputScope)
+			known := workflowInputReferences(retainStableEnvironment(mainScope, stableScope), p.workflowInputScope)
 			analysis, err := expression.AnalyzeActionLifecycleCondition(action.JavaScript.PostCondition.Source, known)
 			if err != nil {
 				if validationErr := expression.ValidateActionLifecycleCondition(action.JavaScript.PostCondition.Source); validationErr != nil {
@@ -182,7 +196,7 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 			return fmt.Errorf("action program %q has no composite execution", lock)
 		}
 		p.githubToken = p.githubToken || prepareAction && (preparationEnvironmentToken || preparationInputs.githubToken)
-		return p.inspectComposite(action, mainInputs, preparationInputs, mainScope, preparationScope, mainReachable, prepareAction)
+		return p.inspectComposite(action, mainInputs, preparationInputs, mainScope, preparationScope, stableScope, mainReachable, prepareAction)
 	default:
 		return fmt.Errorf("action program %q has unsupported runtime %q", lock, action.Runtime)
 	}
@@ -242,6 +256,11 @@ func (p *actionAuthorityPlanner) resolveInputs(action Action, supplied []Binding
 			continue
 		}
 		known = actionInputReferences(scope, resolved.values, resolved.unknown, resolved.omitted)
+		for _, later := range action.Inputs {
+			if _, exists := resolved.values[later.Name]; !exists && !resolved.unknown[later.Name] {
+				known["inputs."+later.Name] = ""
+			}
+		}
 		analysis, err := expression.AnalyzeActionInputDefault(input.Default.Source, known)
 		if err != nil {
 			serverURL, _ := known["github.server_url"].(string)
@@ -287,15 +306,12 @@ func (p *actionAuthorityPlanner) inventorySupplied(binding Binding, definition A
 	return nil
 }
 
-func (p *actionAuthorityPlanner) inspectComposite(action Action, mainInputs, preparationInputs effectiveActionInputs, mainScope, preparationScope map[string]any, mainReachable, preparationReachable bool) error {
+func (p *actionAuthorityPlanner) inspectComposite(action Action, mainInputs, preparationInputs effectiveActionInputs, mainScope, preparationScope, stableScope map[string]any, mainReachable, preparationReachable bool) error {
 	mainKnown := actionInputReferences(mainScope, mainInputs.values, mainInputs.unknown, mainInputs.omitted)
 	preparationKnown := actionInputReferences(preparationScope, preparationInputs.values, preparationInputs.unknown, preparationInputs.omitted)
 	for i, step := range action.Composite.Steps {
-		condition, err := expression.AnalyzeCondition(step.Condition.Source, mainKnown, expression.GitHubTokenCompositeContext)
+		condition, err := expression.AnalyzeCompositeActionCondition(step.Condition.Source, mainKnown)
 		if err != nil {
-			if validationErr := expression.ValidateCondition(step.Condition.Source, expression.StepCondition); validationErr != nil {
-				return fmt.Errorf("composite action step %d condition: %w", i+1, err)
-			}
 			requiresToken, fallbackErr := expression.ConditionReferencesGitHubToken(step.Condition.Source)
 			if fallbackErr != nil {
 				return fmt.Errorf("composite action step %d condition: %w", i+1, err)
@@ -319,7 +335,7 @@ func (p *actionAuthorityPlanner) inspectComposite(action Action, mainInputs, pre
 		}
 		if step.Invocation == nil {
 			if stepReachable && step.Run != nil {
-				mainKnown = withoutKnownEnvironment(mainKnown)
+				mainKnown = retainStableEnvironment(mainKnown, stableScope)
 			}
 			continue
 		}
@@ -336,15 +352,18 @@ func (p *actionAuthorityPlanner) inspectComposite(action Action, mainInputs, pre
 		if err != nil {
 			return fmt.Errorf("composite action step %d preparation environment: %w", i+1, err)
 		}
-		if err := p.inspect(step.Invocation.Lock, step.Invocation.With, step.Invocation.With, childMainScope, childPreparationScope, stepReachable, preparationReachable, preparationEnvironmentToken, false); err != nil {
+		childStableScope, _, err := overlayActionEnvironment(stableScope, step.Env)
+		if err != nil {
+			return fmt.Errorf("composite action step %d stable environment: %w", i+1, err)
+		}
+		if err := p.inspect(step.Invocation.Lock, step.Invocation.With, step.Invocation.With, childMainScope, childPreparationScope, childStableScope, stepReachable, preparationReachable, preparationEnvironmentToken, false); err != nil {
 			return fmt.Errorf("composite action step %d child %q: %w", i+1, step.Invocation.Uses.Source, err)
 		}
 		if stepReachable {
-			mainKnown = withoutKnownEnvironment(mainKnown)
+			mainKnown = retainStableEnvironment(mainKnown, stableScope)
 		}
-		child := p.actions[step.Invocation.Lock]
-		if preparationReachable && child.Source == "github" && (child.Runtime == ActionRuntimeComposite || child.JavaScript != nil && child.JavaScript.Pre != "") {
-			preparationKnown = withoutKnownEnvironment(preparationKnown)
+		if preparationReachable && ActionPreparesExecutablePhase(p.actions, step.Invocation.Lock) {
+			preparationKnown = retainStableEnvironment(preparationKnown, stableScope)
 		}
 	}
 	for _, output := range action.Outputs {
@@ -395,10 +414,16 @@ func (p *actionAuthorityPlanner) inspectMetadataTemplate(site Site, known map[st
 
 func workflowKnownReferences(context ActionAuthorityContext) (map[string]any, error) {
 	known := map[string]any{"github.server_url": context.ServerURL}
+	workflowInputs := make(map[string]any, len(context.WorkflowInputs))
 	for name, value := range context.WorkflowInputs {
-		if !context.UnknownWorkflowInputs[strings.ToLower(name)] {
-			known["inputs."+strings.ToLower(name)] = value
+		name = strings.ToLower(name)
+		if !context.UnknownWorkflowInputs[name] {
+			known["inputs."+name] = value
+			workflowInputs[name] = value
 		}
+	}
+	if len(context.UnknownWorkflowInputs) == 0 && context.WorkflowInputs != nil {
+		known["inputs"] = workflowInputs
 	}
 	for name, value := range context.Environment {
 		known["env."+strings.ToLower(name)] = value
@@ -439,6 +464,37 @@ func workflowKnownReferences(context ActionAuthorityContext) (map[string]any, er
 		}
 	}
 	return known, nil
+}
+
+func actionPhaseKnownReferences(context ActionAuthorityContext, mutable bool) (map[string]any, error) {
+	if !mutable {
+		return workflowKnownReferences(context)
+	}
+	context.Environment = nil
+	if len(context.EnvironmentLayers) != 0 {
+		context.EnvironmentLayers = context.EnvironmentLayers[len(context.EnvironmentLayers)-1:]
+	}
+	return workflowKnownReferences(context)
+}
+
+// ActionPreparesExecutablePhase reports whether remote preparation can execute
+// a JavaScript pre phase in this action graph.
+func ActionPreparesExecutablePhase(actions map[string]Action, lock string) bool {
+	action, ok := actions[lock]
+	if !ok || action.Source != "github" {
+		return false
+	}
+	if action.JavaScript != nil {
+		return action.JavaScript.Pre != ""
+	}
+	if action.Composite != nil {
+		for _, step := range action.Composite.Steps {
+			if step.Invocation != nil && ActionPreparesExecutablePhase(actions, step.Invocation.Lock) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func normalizeKnownValue(value any) any {
@@ -541,6 +597,16 @@ func withoutKnownEnvironment(known map[string]any) map[string]any {
 	result := make(map[string]any, len(known))
 	for name, value := range known {
 		if !strings.HasPrefix(name, "env.") {
+			result[name] = value
+		}
+	}
+	return result
+}
+
+func retainStableEnvironment(known, stable map[string]any) map[string]any {
+	result := withoutKnownEnvironment(known)
+	for name, value := range stable {
+		if strings.HasPrefix(name, "env.") {
 			result[name] = value
 		}
 	}
