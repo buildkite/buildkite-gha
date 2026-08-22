@@ -493,6 +493,9 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		_ = os.Remove(network)
 		os.Exit(0)
 	case "volume-ls":
+		if scenario == "fail-volume-snapshot" {
+			os.Exit(43)
+		}
 		if scenario == "fail-create-reconcile-once" || scenario == "fail-job-volume-tracking-once" {
 			if _, err := os.Stat(filepath.Join(root, "current-volumes")); err == nil {
 				marker := filepath.Join(root, "failed-volume-reconcile")
@@ -1581,6 +1584,25 @@ func TestRunJobContainerCleanupRetriesSuccessfulCreateVolumeTracking(t *testing.
 	removedVolumes, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
 	if readErr != nil || strings.TrimSpace(string(removedVolumes)) != "cache" {
 		t.Fatalf("removed volumes = %q, %v", removedVolumes, readErr)
+	}
+}
+
+func TestRunJobContainerFailedVolumeSnapshotDoesNotClaimHostVolumes(t *testing.T) {
+	f := newJobDocker(t, "fail-volume-snapshot")
+	if err := os.WriteFile(filepath.Join(f.root, "existing-volumes"), []byte("shared\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
+		t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(),
+		&plan.Container{Image: "alpine", Volumes: []string{"cache:/cache"}}, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "snapshot Docker volumes") {
+		t.Fatalf("startJobContainer() error = %v", err)
+	}
+	for _, call := range f.calls(t) {
+		if len(call.Args) >= 2 && call.Args[0] == "volume" && call.Args[1] == "rm" {
+			t.Fatalf("failed baseline cleanup claimed host volumes: %#v", f.calls(t))
+		}
 	}
 }
 

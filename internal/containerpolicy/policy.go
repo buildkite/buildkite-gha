@@ -44,13 +44,9 @@ func ValidateJobVolume(value string) error {
 	case 1:
 		target = parts[0]
 	case 2:
-		if parts[1] == "ro" || parts[1] == "rw" {
-			target, mode = parts[0], parts[1]
-		} else {
-			source, target = parts[0], parts[1]
-			if source == "" {
-				return fmt.Errorf("volume source is empty")
-			}
+		source, target = parts[0], parts[1]
+		if source == "" {
+			return fmt.Errorf("volume source is empty")
 		}
 	case 3:
 		source, target, mode = parts[0], parts[1], parts[2]
@@ -58,7 +54,7 @@ func ValidateJobVolume(value string) error {
 			return fmt.Errorf("volume source is empty")
 		}
 	default:
-		return fmt.Errorf("volume must be DESTINATION[:ro|rw] or SOURCE:DESTINATION[:ro|rw]")
+		return fmt.Errorf("volume must be DESTINATION or SOURCE:DESTINATION[:ro|rw]")
 	}
 	if source != "" && !path.IsAbs(source) && !volumeNamePattern.MatchString(source) {
 		return fmt.Errorf("volume source %q must be a name or absolute host path", source)
