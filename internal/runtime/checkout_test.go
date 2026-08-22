@@ -416,11 +416,63 @@ func TestCheckoutSubmoduleInputMode(t *testing.T) {
 	}
 }
 
-func TestCheckoutLFSCommandsUseInstalledHooksOnly(t *testing.T) {
-	regular := strings.Join(checkoutGitBaseArgs(), " ")
-	lfs := strings.Join(checkoutGitBaseArgsWithHooks(), " ")
-	if !strings.Contains(regular, "core.hooksPath=/dev/null") || strings.Contains(lfs, "core.hooksPath") {
-		t.Fatalf("checkout hook isolation: regular = %q, LFS = %q", regular, lfs)
+func TestCheckoutLFSFiltersPinExecutable(t *testing.T) {
+	gitLFS := "/opt/pinned lfs/git-lfs'quoted"
+	filterArgs := strings.Join(checkoutGitLFSFilterArgs(checkoutGitBaseArgs(), gitLFS), "\n")
+	aliasArgs := strings.Join(checkoutGitLFSAliasArgs(checkoutGitBaseArgs(), gitLFS), "\n")
+	if !strings.Contains(filterArgs, "core.hooksPath=/dev/null") || !strings.Contains(filterArgs, `'/opt/pinned lfs/git-lfs'\''quoted' filter-process`) || strings.Contains(filterArgs, "filter.lfs.process=git-lfs") || !strings.Contains(aliasArgs, `alias.lfs=!'/opt/pinned lfs/git-lfs'\''quoted'`) {
+		t.Fatalf("checkout LFS arguments: filters = %q, alias = %q", filterArgs, aliasArgs)
+	}
+}
+
+func TestCheckoutLFSSubmodulesPinExecutable(t *testing.T) {
+	workspace := canonicalTempDir(t)
+	gitLog := filepath.Join(t.TempDir(), "git.log")
+	sha := strings.Repeat("a", 40)
+	git := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
+case "$*" in
+  *" init --template= .") mkdir -p .git ;;
+  *" checkout --detach "*) printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD ;;
+esac
+`
+	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitLFS := filepath.Join(t.TempDir(), "git-lfs")
+	if err := os.WriteFile(gitLFS, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "buildkite/buildkite-gha", SHA: sha}}
+	if _, err := (Runner{Git: git, GitLFS: gitLFS}).runCheckout(t.Context(), newCommandProcessor(io.Discard, io.Discard), workspace, job, actionintegration.CheckoutV7Commit, map[string]string{"lfs": "true", "submodules": "true"}); err != nil {
+		t.Fatal(err)
+	}
+	commands, err := os.ReadFile(gitLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(commands)), "\n") {
+		if strings.Contains(line, "submodule ") && !strings.Contains(line, "filter.lfs.process="+checkoutGitLFSExecutable(gitLFS)+" filter-process") {
+			t.Fatalf("submodule command did not pin Git LFS: %q", line)
+		}
+	}
+}
+
+func TestCheckoutGitLFSAliasInvokesPinnedExecutable(t *testing.T) {
+	workspace := t.TempDir()
+	runTestGit(t, workspace, "init", "--initial-branch=main")
+	argsLog := filepath.Join(t.TempDir(), "args")
+	gitLFS := filepath.Join(t.TempDir(), "git-lfs-pinned")
+	if err := os.WriteFile(gitLFS, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > "+shellTestQuote(argsLog)+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	args := checkoutGitLFSAliasArgs(checkoutGitBaseArgs(), gitLFS)
+	args = append(args, "lfs", "fetch", "origin", "revision")
+	runTestGit(t, workspace, args...)
+	if got, err := os.ReadFile(argsLog); err != nil || strings.TrimSpace(string(got)) != "fetch origin revision" {
+		t.Fatalf("pinned Git LFS arguments = %q, %v", got, err)
 	}
 }
 
@@ -927,6 +979,18 @@ func TestCheckoutRejectsInvalidRepositoryBeforeInspectingWorkspace(t *testing.T)
 	}
 }
 
+func TestCheckoutRejectsUnavailableLFSBeforeCreatingPath(t *testing.T) {
+	workspace := t.TempDir()
+	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "buildkite/buildkite-gha", SHA: strings.Repeat("a", 40)}}
+	inputs := map[string]string{"lfs": "true", "path": "sources/application"}
+	if _, err := (Runner{}).runCheckout(t.Context(), newCommandProcessor(io.Discard, io.Discard), workspace, job, actionintegration.CheckoutV7Commit, inputs); err == nil || !strings.Contains(err.Error(), "requires Git LFS to be resolved") {
+		t.Fatalf("unavailable Git LFS error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "sources")); !os.IsNotExist(err) {
+		t.Fatalf("unavailable Git LFS created checkout path: %v", err)
+	}
+}
+
 func TestCheckoutUsesCommandScopedAgentCredentialHelper(t *testing.T) {
 	workspace := canonicalTempDir(t)
 	checkoutDirectory := filepath.Join(workspace, "test-catalog")
@@ -991,9 +1055,15 @@ assert_no_proxy_environment() {
   test -z "${no_proxy+x}"
 }
 operation=
+lfs_command=
 for argument in "$@"; do
+  if [ "$argument" = lfs ]; then lfs_command=true; fi
   case "$argument" in init|remote|fetch|checkout) operation="$argument"; break ;; esac
 done
+if [ "$lfs_command" = true ]; then
+  case "$*" in *"alias.lfs=!` + checkoutGitLFSExecutable(filepath.Join(filepath.Dir(git), "git-lfs")) + `"*) ;; *) exit 43 ;; esac
+fi
+test -z "${GIT_EXEC_PATH+x}"
 case "$operation" in
   init)
     test -z "$GIT_ASKPASS"
@@ -1041,10 +1111,18 @@ case "$operation" in
     ;;
   checkout)
     test -z "$GIT_ASKPASS"
-    test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}"
-    test -z "${BUILDKITE_JOB_ID+x}"
-    test -z "${BUILDKITE_NO_HTTP2+x}"
-    assert_no_proxy_environment
+    test "$BUILDKITE_AGENT_ACCESS_TOKEN" = job-secret
+    test "$BUILDKITE_JOB_ID" = 11111111-1111-4111-8111-111111111111
+    helper=
+    filter=
+    for argument in "$@"; do
+      case "$argument" in
+        credential.https://github.com.helper=!*) helper=true ;;
+        filter.lfs.process=*) filter=true ;;
+      esac
+    done
+    test "$helper" = true
+    test "$filter" = true
     printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD
     ;;
 esac
@@ -1069,7 +1147,8 @@ printf '%s|%s\n' "$PWD" "$*" >> ` + shellTestQuote(gitLog) + `
 	for name := range proxyEnvironment {
 		t.Setenv(name, "http://late-workflow-value.invalid")
 	}
-	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(t.Context(), processor, workspace, job, actionintegration.CheckoutV7Commit, map[string]string{"path": "test-catalog", "lfs": "true"})
+	gitLFS := filepath.Join(filepath.Dir(git), "git-lfs")
+	result, err := (Runner{Git: git, GitLFS: gitLFS, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(t.Context(), processor, workspace, job, actionintegration.CheckoutV7Commit, map[string]string{"path": "test-catalog", "lfs": "true", "filter": "blob:none"})
 	if err != nil {
 		t.Fatalf("runCheckout() error = %v, logs = %q", err, logs.String())
 	}
@@ -1087,8 +1166,8 @@ printf '%s|%s\n' "$PWD" "$*" >> ` + shellTestQuote(gitLog) + `
 		t.Fatalf("checkout exposed repository token in Git arguments or logs: %q / %q", gitBytes, logs.String())
 	}
 	for _, command := range []string{
-		"lfs install --local",
-		"fetch --no-tags --no-recurse-submodules --progress --depth=1 origin " + sha,
+		"lfs install --local --skip-repo",
+		"fetch --no-tags --no-recurse-submodules --progress --filter=blob:none --depth=1 origin " + sha,
 		"lfs fetch origin " + sha,
 		"checkout --detach " + sha,
 	} {
@@ -1096,16 +1175,15 @@ printf '%s|%s\n' "$PWD" "$*" >> ` + shellTestQuote(gitLog) + `
 			t.Fatalf("checkout command log lacks %q: %q", command, gitBytes)
 		}
 	}
-	if strings.Count(string(gitBytes), "git-credentials-helper") != 2 {
-		t.Fatalf("credential helper was not confined to fetch and LFS fetch commands: %q", gitBytes)
+	if strings.Count(string(gitBytes), "git-credentials-helper") != 3 {
+		t.Fatalf("credential helper was not confined to fetch, LFS fetch, and filtered checkout commands: %q", gitBytes)
 	}
 	for line := range strings.SplitSeq(strings.TrimSpace(string(gitBytes)), "\n") {
 		if !strings.HasPrefix(line, checkoutDirectory+"|") {
 			t.Fatalf("Git command ran outside checkout path %q: %q", checkoutDirectory, line)
 		}
-		lfsHookCommand := strings.Contains(line, "lfs install --local") || strings.Contains(line, "checkout --detach")
-		if strings.Contains(line, "core.hooksPath=/dev/null") == lfsHookCommand {
-			t.Fatalf("Git command has incorrect hook policy: %q", line)
+		if !strings.Contains(line, "core.hooksPath=/dev/null") {
+			t.Fatalf("Git command lacks hook isolation: %q", line)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(workspace, ".git")); !os.IsNotExist(err) {
@@ -1251,12 +1329,18 @@ func TestRepositoryProviderCheckoutPinsGitAndAgentBeforeActionPreHooks(t *testin
 	trustedLog := filepath.Join(t.TempDir(), "trusted-git.log")
 	trustedDir := t.TempDir()
 	trustedGit := filepath.Join(trustedDir, "git")
+	trustedGitLFS := filepath.Join(trustedDir, "git-lfs")
 	trustedScript := `#!/bin/sh
 set -eu
 operation=
+lfs_command=
 for argument in "$@"; do
+  if [ "$argument" = lfs ]; then lfs_command=true; fi
   case "$argument" in init|remote|fetch|checkout) operation="$argument"; break ;; esac
 done
+if [ "$lfs_command" = true ]; then
+  case "$*" in *"alias.lfs=!` + checkoutGitLFSExecutable(trustedGitLFS) + `"*) ;; *) exit 43 ;; esac
+fi
 case "$operation" in
   init) mkdir -p .git ;;
   fetch)
@@ -1277,6 +1361,9 @@ esac
 printf '%s\n' "$*" >> ` + shellTestQuote(trustedLog) + `
 `
 	if err := os.WriteFile(trustedGit, []byte(trustedScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(trustedGitLFS, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	trustedAgentMarker := filepath.Join(t.TempDir(), "trusted-agent-ran")
@@ -1305,10 +1392,19 @@ printf 'username=token\npassword=%s\n' ` + shellTestQuote(repositoryToken) + `
 	if err := os.Symlink(trustedAgent, lookupAgent); err != nil {
 		t.Fatal(err)
 	}
+	lookupGitLFS := filepath.Join(lookupDir, "git-lfs")
+	if err := os.Symlink(trustedGitLFS, lookupGitLFS); err != nil {
+		t.Fatal(err)
+	}
 	poisonDir := canonicalTempDir(t)
 	poisonGitMarker := filepath.Join(t.TempDir(), "poison-git-ran")
 	poisonGit := filepath.Join(poisonDir, "git")
 	if err := os.WriteFile(poisonGit, []byte("#!/bin/sh\ntouch "+shellTestQuote(poisonGitMarker)+"\nexit 97\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	poisonGitLFSMarker := filepath.Join(t.TempDir(), "poison-git-lfs-ran")
+	poisonGitLFS := filepath.Join(poisonDir, "git-lfs")
+	if err := os.WriteFile(poisonGitLFS, []byte("#!/bin/sh\ntouch "+shellTestQuote(poisonGitLFSMarker)+"\nexit 98\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	poisonAgentMarker := filepath.Join(t.TempDir(), "poison-agent-ran")
@@ -1336,6 +1432,8 @@ fi
 if [ "${1##*/}" = pre.js ]; then
   rm -f "$LOOKUP_GIT"
   ln -s "$POISON_GIT" "$LOOKUP_GIT"
+  rm -f "$LOOKUP_GIT_LFS"
+  ln -s "$POISON_GIT_LFS" "$LOOKUP_GIT_LFS"
   rm -f "$LOOKUP_AGENT"
   ln -s "$POISON_AGENT" "$LOOKUP_AGENT"
 fi
@@ -1362,14 +1460,16 @@ fi
 		Target:               plan.Target{StepKey: "gha-checkout", Queue: "trusted"},
 		RequiredCapabilities: []string{"network", "provider-token-read"},
 		Env: map[string]string{
-			"LOOKUP_AGENT": lookupAgent,
-			"LOOKUP_GIT":   lookupGit,
-			"POISON_AGENT": poisonAgent,
-			"POISON_GIT":   poisonGit,
+			"LOOKUP_AGENT":   lookupAgent,
+			"LOOKUP_GIT":     lookupGit,
+			"LOOKUP_GIT_LFS": lookupGitLFS,
+			"POISON_AGENT":   poisonAgent,
+			"POISON_GIT":     poisonGit,
+			"POISON_GIT_LFS": poisonGitLFS,
 		},
 		Steps: []plan.Step{
 			{ID: "poison", Kind: "uses", Uses: "owner/repo/poison@v1", Action: &plan.ActionSelector{Lock: poisonID}},
-			{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &plan.ActionSelector{Lock: checkoutID}},
+			{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", With: map[string]string{"filter": "blob:none", "lfs": "true"}, Action: &plan.ActionSelector{Lock: checkoutID}},
 		},
 		Actions: []plan.ActionLock{
 			{ID: poisonID, Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: strings.Repeat("b", 40), Path: "poison", SourceDigest: remoteDigest},
@@ -1393,16 +1493,23 @@ fi
 	if target, err := filepath.EvalSymlinks(lookupAgent); err != nil || target != poisonAgent {
 		t.Fatalf("pre-hook Agent replacement = %q, %v; want %q", target, err, poisonAgent)
 	}
+	if target, err := filepath.EvalSymlinks(lookupGitLFS); err != nil || target != poisonGitLFS {
+		t.Fatalf("pre-hook Git LFS replacement = %q, %v; want %q", target, err, poisonGitLFS)
+	}
 	if _, err := os.Stat(trustedAgentMarker); err != nil {
 		t.Fatalf("trusted Agent credential helper did not run: %v", err)
 	}
-	for name, marker := range map[string]string{"Git selected through poisoned PATH": poisonGitMarker, "Agent helper selected through poisoned PATH": poisonAgentMarker} {
+	for name, marker := range map[string]string{"Git selected through poisoned PATH": poisonGitMarker, "Git LFS selected through poisoned PATH": poisonGitLFSMarker, "Agent helper selected through poisoned PATH": poisonAgentMarker} {
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
 	if strings.Contains(logs.String(), repositoryToken) {
 		t.Fatalf("checkout exposed repository token in logs: %q", logs.String())
+	}
+	gitLog, err := os.ReadFile(trustedLog)
+	if err != nil || !strings.Contains(string(gitLog), "filter.lfs.process='"+trustedGitLFS+"' filter-process") {
+		t.Fatalf("checkout did not pin Git LFS in filter command: %q, %v", gitLog, err)
 	}
 }
 

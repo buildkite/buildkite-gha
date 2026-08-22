@@ -107,6 +107,11 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			return JobResult{}, err
 		}
 		r.Git = git
+		if gitLFS, lfsErr := resolveHostExecutableBeforeWorkflow(r.GitLFS, "git-lfs", "native checkout Git LFS"); lfsErr == nil {
+			r.GitLFS = gitLFS
+		} else {
+			r.GitLFS = ""
+		}
 	}
 	if job.HasCapability("provider-token-write") && r.WorkflowToken == nil {
 		return JobResult{}, fmt.Errorf("provider-token-write capability requires the GitHub workflow token provider")
