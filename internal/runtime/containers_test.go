@@ -1468,6 +1468,21 @@ func TestRunJobContainerLaterServiceCreateFailureCleansExactServices(t *testing.
 	}
 }
 
+func TestRunJobContainerAmbiguousCreateFailureCleansNamedVolume(t *testing.T) {
+	f := newJobDocker(t, "fail-create")
+	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
+		t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(),
+		&plan.Container{Image: "alpine", Volumes: []string{"cache:/cache"}}, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "create job container") {
+		t.Fatalf("startJobContainer() error = %v", err)
+	}
+	removed, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
+	if readErr != nil || strings.TrimSpace(string(removed)) != "cache" {
+		t.Fatalf("removed volumes = %q, %v", removed, readErr)
+	}
+}
+
 func TestRunJobContainerServiceReadinessCancellationCleansEverything(t *testing.T) {
 	t.Parallel()
 
