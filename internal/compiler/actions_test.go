@@ -618,7 +618,10 @@ runs:
 		t.Context(), workspace, nil, "https://github.com",
 		[]string{"./mutator", "./guarded"}, []map[string]string{{}, {}},
 		[]program.ActionInvocation{{}, {}},
-		[]program.ActionAuthorityContext{{Environment: map[string]string{"FLAG": "false"}}, {Environment: map[string]string{"FLAG": "false"}}},
+		[]program.ActionAuthorityContext{
+			{Environment: map[string]string{"FLAG": "false"}},
+			{Environment: map[string]string{"FLAG": "false"}, MainEnvironmentMutable: true},
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -648,6 +651,43 @@ runs:
 	}
 	if compiled.requiresGitHubToken {
 		t.Fatal("single-root planning forgot an environment no earlier phase can mutate")
+	}
+}
+
+func TestCompileActionProgramsRetainsEnvironmentWhenDeclaredPreIsKnownSkipped(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	writeAction(t, workspace, "guarded", `name: guarded
+runs:
+  using: composite
+  steps:
+    - if: env.FLAG == 'true'
+      shell: sh
+      run: echo ${{ github.token }}
+`)
+	writeAction(t, remote, "", `name: skipped pre
+runs:
+  using: node24
+  pre: pre.js
+  pre-if: false
+  main: index.js
+`)
+	if err := os.WriteFile(filepath.Join(remote, "pre.js"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(remote, "index.js"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compileActionPrograms(
+		t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, "https://github.com",
+		[]string{"./guarded", "owner/action@v1"}, []map[string]string{{}, {}},
+		[]program.ActionInvocation{{}, {}},
+		[]program.ActionAuthorityContext{{Environment: map[string]string{"FLAG": "false"}}, {Environment: map[string]string{"FLAG": "false"}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("known-skipped remote pre phase made the environment mutable")
 	}
 }
 

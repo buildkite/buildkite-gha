@@ -65,7 +65,10 @@ func InventoryActionAuthority(actions map[string]Action, invocation ActionInvoca
 	if err := planner.inspect(invocation.Lock, invocation.Inputs, invocation.Inputs, mainKnown, preparationKnown, stableKnown, mainReachable, true, false, true); err != nil {
 		return Authority{}, err
 	}
-	authority := Authority{GitHubToken: planner.githubToken, Secrets: make([]string, 0, len(planner.secrets))}
+	authority := Authority{
+		GitHubToken: planner.githubToken, PreparationEnvironmentMutable: planner.preparationEnvironmentMutable,
+		Secrets: make([]string, 0, len(planner.secrets)),
+	}
 	for name := range planner.secrets {
 		authority.Secrets = append(authority.Secrets, name)
 	}
@@ -74,11 +77,12 @@ func InventoryActionAuthority(actions map[string]Action, invocation ActionInvoca
 }
 
 type actionAuthorityPlanner struct {
-	actions            map[string]Action
-	secrets            map[string]struct{}
-	githubToken        bool
-	active             map[string]bool
-	workflowInputScope map[string]any
+	actions                       map[string]Action
+	secrets                       map[string]struct{}
+	githubToken                   bool
+	active                        map[string]bool
+	workflowInputScope            map[string]any
+	preparationEnvironmentMutable bool
 }
 
 type effectiveActionInputs struct {
@@ -157,6 +161,7 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 				p.githubToken = p.githubToken || authorityEffectsRequireToken(analysis.Effects)
 			}
 			p.githubToken = p.githubToken || preReachable && inputs.githubToken
+			p.preparationEnvironmentMutable = p.preparationEnvironmentMutable || prepareAction && preReachable
 		}
 		if action.JavaScript.Post != "" && (mainReachable || preReachable) {
 			known := workflowInputReferences(retainStableEnvironment(mainScope, stableScope), p.workflowInputScope)
@@ -312,6 +317,9 @@ func (p *actionAuthorityPlanner) inspectComposite(action Action, mainInputs, pre
 	for i, step := range action.Composite.Steps {
 		condition, err := expression.AnalyzeCompositeActionCondition(step.Condition.Source, mainKnown)
 		if err != nil {
+			if validationErr := expression.ValidateCompositeActionCondition(step.Condition.Source); validationErr != nil {
+				return fmt.Errorf("composite action step %d condition: %w", i+1, err)
+			}
 			requiresToken, fallbackErr := expression.ConditionReferencesGitHubToken(step.Condition.Source)
 			if fallbackErr != nil {
 				return fmt.Errorf("composite action step %d condition: %w", i+1, err)
@@ -352,17 +360,19 @@ func (p *actionAuthorityPlanner) inspectComposite(action Action, mainInputs, pre
 		if err != nil {
 			return fmt.Errorf("composite action step %d preparation environment: %w", i+1, err)
 		}
-		childStableScope, _, err := overlayActionEnvironment(stableScope, step.Env)
+		stableKnown := actionInputReferences(stableScope, mainInputs.values, mainInputs.unknown, mainInputs.omitted)
+		childStableScope, _, err := overlayActionEnvironment(stableKnown, step.Env)
 		if err != nil {
 			return fmt.Errorf("composite action step %d stable environment: %w", i+1, err)
 		}
+		preparationWasMutable := p.preparationEnvironmentMutable
 		if err := p.inspect(step.Invocation.Lock, step.Invocation.With, step.Invocation.With, childMainScope, childPreparationScope, childStableScope, stepReachable, preparationReachable, preparationEnvironmentToken, false); err != nil {
 			return fmt.Errorf("composite action step %d child %q: %w", i+1, step.Invocation.Uses.Source, err)
 		}
 		if stepReachable {
 			mainKnown = retainStableEnvironment(mainKnown, stableScope)
 		}
-		if preparationReachable && ActionPreparesExecutablePhase(p.actions, step.Invocation.Lock) {
+		if preparationReachable && p.preparationEnvironmentMutable != preparationWasMutable {
 			preparationKnown = retainStableEnvironment(preparationKnown, stableScope)
 		}
 	}
@@ -477,24 +487,29 @@ func actionPhaseKnownReferences(context ActionAuthorityContext, mutable bool) (m
 	return workflowKnownReferences(context)
 }
 
-// ActionPreparesExecutablePhase reports whether remote preparation can execute
-// a JavaScript pre phase in this action graph.
-func ActionPreparesExecutablePhase(actions map[string]Action, lock string) bool {
-	action, ok := actions[lock]
-	if !ok || action.Source != "github" {
-		return false
+// WorkflowEnvironmentMutableBefore reports whether an earlier workflow step
+// can execute and append to GITHUB_ENV before the selected step.
+func WorkflowEnvironmentMutableBefore(steps []Step, before int, context ActionAuthorityContext) (bool, error) {
+	known, err := workflowKnownReferences(context)
+	if err != nil {
+		return false, err
 	}
-	if action.JavaScript != nil {
-		return action.JavaScript.Pre != ""
-	}
-	if action.Composite != nil {
-		for _, step := range action.Composite.Steps {
-			if step.Invocation != nil && ActionPreparesExecutablePhase(actions, step.Invocation.Lock) {
-				return true
+	for _, step := range steps[:before] {
+		if step.Run == nil && step.Invocation == nil {
+			continue
+		}
+		analysis, err := expression.AnalyzeCondition(step.Condition.Source, known, expression.GitHubTokenWorkflowContext)
+		if err != nil {
+			if validationErr := expression.ValidateCondition(step.Condition.Source, expression.StepCondition); validationErr != nil {
+				return false, err
 			}
+			return true, nil
+		}
+		if !analysis.Value.Known || analysis.Value.Value == true {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func normalizeKnownValue(value any) any {

@@ -86,6 +86,12 @@ func ValidateActionLifecycleCondition(source string) error {
 	return validateCondition(source, actionLifecycleCondition, nil, false)
 }
 
+// ValidateCompositeActionCondition verifies a composite action's step
+// condition without broadening workflow-authored step conditions.
+func ValidateCompositeActionCondition(source string) error {
+	return validateCondition(source, compositeActionCondition, nil, false)
+}
+
 func validateLifecycleDelimiters(source string) error {
 	condition := strings.TrimSpace(source)
 	if strings.HasPrefix(condition, "${{") != strings.HasSuffix(condition, "}}") {

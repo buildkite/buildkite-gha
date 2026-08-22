@@ -14,8 +14,9 @@ type AuthorityOptions struct {
 // Authority is the workflow-authored secret inventory retained by the current
 // plan contract.
 type Authority struct {
-	Secrets     []string
-	GitHubToken bool
+	Secrets                       []string
+	GitHubToken                   bool
+	PreparationEnvironmentMutable bool
 }
 
 // InventoryAuthority validates and inventories every compiler-owned site in

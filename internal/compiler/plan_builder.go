@@ -378,10 +378,17 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram program.
 			unknownInputs[strings.ToLower(name)] = true
 		}
 		environment := [][]program.Binding{workflowProgram.Job.Env, step.Env}
+		environmentMutable, err := program.WorkflowEnvironmentMutableBefore(workflowProgram.Job.Steps, stepIndex, program.ActionAuthorityContext{
+			WorkflowInputs: instance.Inputs, UnknownWorkflowInputs: unknownInputs,
+			Matrix: instance.Matrix, EnvironmentLayers: [][]program.Binding{workflowProgram.Job.Env},
+		})
+		if err != nil {
+			return built, fmt.Errorf("build plan for job %q: plan action environment: %w", instance.LogicalJobID, err)
+		}
 		contexts[i] = program.ActionAuthorityContext{
 			WorkflowInputs: instance.Inputs, UnknownWorkflowInputs: unknownInputs,
 			Matrix: instance.Matrix, EnvironmentLayers: environment,
-			MainEnvironmentMutable: stepIndex > 0,
+			MainEnvironmentMutable: environmentMutable,
 		}
 	}
 	compiled, err := compileActionPrograms(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs, invocations, contexts)

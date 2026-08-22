@@ -265,11 +265,27 @@ func compileActionPrograms(ctx context.Context, workspace string, actionSource A
 	requiredSecrets := map[string]bool{}
 	var githubTokenActions []string
 	if suppliedInputs != nil {
-		anyPreparationPhase := false
-		for _, root := range roots {
-			anyPreparationPhase = anyPreparationPhase || program.ActionPreparesExecutablePhase(programs, root.lock.ID)
-		}
+		preparationMutability := make([]bool, len(roots))
 		preparationEnvironmentMutable := false
+		for i, root := range roots {
+			preparation := program.ActionAuthorityContext{}
+			if contexts != nil {
+				preparation = contexts[i]
+			}
+			preparation.ServerURL = serverURL
+			preparation.PreparationEnvironmentMutable = preparation.PreparationEnvironmentMutable || preparationEnvironmentMutable
+			invocation := invocations[i]
+			invocation.Lock = root.lock.ID
+			invocation.Condition = program.Site{Source: "false"}
+			requirements, err := program.InventoryActionAuthority(programs, invocation, preparation)
+			if err != nil {
+				return actionCompilation{}, fmt.Errorf("compile action %q preparation: %w", refs[i], err)
+			}
+			preparationMutability[i] = requirements.PreparationEnvironmentMutable
+			preparationEnvironmentMutable = preparationEnvironmentMutable || requirements.PreparationEnvironmentMutable
+		}
+		anyPreparationPhase := preparationEnvironmentMutable
+		preparationEnvironmentMutable = false
 		for i, root := range roots {
 			invocations[i].Lock = root.lock.ID
 			planning := program.ActionAuthorityContext{ServerURL: serverURL}
@@ -278,7 +294,7 @@ func compileActionPrograms(ctx context.Context, workspace string, actionSource A
 				planning.ServerURL = serverURL
 			}
 			planning.PreparationEnvironmentMutable = planning.PreparationEnvironmentMutable || preparationEnvironmentMutable
-			planning.MainEnvironmentMutable = planning.MainEnvironmentMutable || anyPreparationPhase || i > 0
+			planning.MainEnvironmentMutable = planning.MainEnvironmentMutable || anyPreparationPhase
 			requirements, err := program.InventoryActionAuthority(programs, invocations[i], planning)
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
@@ -290,7 +306,7 @@ func compileActionPrograms(ctx context.Context, workspace string, actionSource A
 			for _, name := range requirements.Secrets {
 				requiredSecrets[name] = true
 			}
-			preparationEnvironmentMutable = preparationEnvironmentMutable || program.ActionPreparesExecutablePhase(programs, root.lock.ID)
+			preparationEnvironmentMutable = preparationEnvironmentMutable || preparationMutability[i]
 		}
 	}
 	secretNames := sortedKeys(requiredSecrets)

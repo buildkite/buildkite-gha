@@ -188,7 +188,7 @@ func AnalyzeCondition(source string, knownReferences map[string]any, wholeGitHub
 // AnalyzeCompositeActionCondition evaluates a composite action's step
 // condition with its action-authored expression surface.
 func AnalyzeCompositeActionCondition(source string, knownReferences map[string]any) (Analysis, error) {
-	if err := validateCondition(source, compositeActionCondition, nil, false); err != nil {
+	if err := ValidateCompositeActionCondition(source); err != nil {
 		return Analysis{}, err
 	}
 	return analyzeCondition(source, knownReferences, GitHubTokenCompositeContext)

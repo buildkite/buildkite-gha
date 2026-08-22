@@ -307,6 +307,55 @@ func TestInventoryActionAuthorityRetainsStableInvocationEnvironmentForPost(t *te
 	}
 }
 
+func TestInventoryActionAuthorityEvaluatesChildStableEnvironmentWithParentInputs(t *testing.T) {
+	actions := map[string]Action{
+		"root": {
+			Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "enabled"}},
+			Composite: &CompositeAction{Steps: []CompositeStep{{
+				Env:        []Binding{{Name: "FLAG", Value: testActionSite("${{ inputs.enabled }}")}},
+				Invocation: &Invocation{Lock: "child", Uses: testActionSite("./child")},
+			}}},
+		},
+		"child": {Source: "workspace", Runtime: ActionRuntimeJavaScript, JavaScript: &JavaScriptAction{
+			Main: "index.js", Post: "post.js", PostCondition: testActionSite("env.FLAG == 'true' && github.token != ''"),
+		}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{
+		Lock: "root", Inputs: []Binding{{Name: "enabled", Value: testWorkflowSite("false")}},
+	}, ActionAuthorityContext{MainEnvironmentMutable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("child post condition did not evaluate stable environment with parent action inputs")
+	}
+}
+
+func TestInventoryActionAuthorityRejectsInvalidCompositeConditionAfterAnalysisError(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{{
+			Condition: testActionSite("secrets.UNSUPPORTED != ''"), Run: &Run{Command: testActionSite("echo ok")},
+		}}}},
+	}
+	if _, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{}); err == nil {
+		t.Fatal("invalid composite condition passed token-only fallback")
+	}
+}
+
+func TestWorkflowEnvironmentMutableBeforeSkipsKnownFalseSteps(t *testing.T) {
+	steps := []Step{
+		{Condition: testWorkflowSite("matrix.enabled"), Run: &Run{Command: testWorkflowSite("echo skipped")}},
+		{Run: &Run{Command: testWorkflowSite("echo target")}},
+	}
+	mutable, err := WorkflowEnvironmentMutableBefore(steps, 1, ActionAuthorityContext{Matrix: map[string]any{"enabled": false}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutable {
+		t.Fatal("known-false earlier workflow step made environment mutable")
+	}
+}
+
 func TestInventoryActionAuthorityRetainsPreparationEnvironmentAfterCompositeWithoutPre(t *testing.T) {
 	actions := map[string]Action{
 		"root": {
