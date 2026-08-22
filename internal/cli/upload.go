@@ -645,19 +645,20 @@ func expandExplicitWorkflowPaths(operands []string, checkoutPath string) ([]work
 		}
 		canonical := filepath.ToSlash(filepath.Clean(relative))
 		info, statErr := os.Lstat(absolute)
-		if statErr != nil && strings.ContainsAny(operand, "*?[") {
-			return nil, fmt.Errorf("workflow list entries must be explicit paths; glob pattern %q is not allowed", operand)
-		}
 		if statErr == nil && !info.Mode().IsRegular() {
 			return nil, requireRegularWorkflowFile(absolute, operand)
+		}
+		output, gitErr := exec.Command("git", "-C", root, "ls-files", "-z", "--", ":(top,literal)"+canonical).Output()
+		entries := bytes.Split(output, []byte{0})
+		tracked := gitErr == nil && len(entries) == 2 && string(entries[0]) == canonical && len(entries[1]) == 0
+		if !tracked && strings.ContainsAny(operand, "*?[") {
+			return nil, fmt.Errorf("workflow list entries must be explicit paths; glob pattern %q is not allowed", operand)
 		}
 		extension := filepath.Ext(canonical)
 		if extension != ".yml" && extension != ".yaml" {
 			return nil, fmt.Errorf("workflow path %q must end in .yml or .yaml", operand)
 		}
-		output, err := exec.Command("git", "-C", root, "ls-files", "-z", "--", ":(top,literal)"+canonical).Output()
-		entries := bytes.Split(output, []byte{0})
-		if err != nil || len(entries) != 2 || string(entries[0]) != canonical || len(entries[1]) != 0 {
+		if !tracked {
 			return nil, fmt.Errorf("workflow path %q is not tracked by git", operand)
 		}
 		if err := requireRegularWorkflowFile(absolute, operand); err != nil {

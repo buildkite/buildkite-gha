@@ -440,9 +440,9 @@ func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 
 func TestExpandExplicitWorkflowPathsExplainsTrackedFileMissingFromCheckout(t *testing.T) {
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"deploy.yml": "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		"deploy[prod].yml": "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 	})
-	workflowPath := filepath.Join(".github", "workflows", "deploy.yml")
+	workflowPath := filepath.Join(".github", "workflows", "deploy[prod].yml")
 	if err := os.Remove(filepath.Join(repository, workflowPath)); err != nil {
 		t.Fatal(err)
 	}
