@@ -12,12 +12,14 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
-const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json"
+const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json"
 
 const MaxNeedProducers = 1024
 const MaxNeedOutputs = 64
@@ -321,16 +323,18 @@ type Job struct {
 	CallGuards           []CallGuard              `json:"call_guards,omitempty"`
 	// Needs is populated only from verified producer-attributed manifests at
 	// runtime. It is never accepted from or encoded into an immutable plan.
-	Needs                   map[string]Need   `json:"-"`
-	Env                     map[string]string `json:"env,omitempty"`
-	Condition               string            `json:"condition,omitempty"`
-	ContinueOnError         bool              `json:"continue_on_error,omitempty"`
-	TimeoutMinutes          float64           `json:"timeout_minutes,omitempty"`
-	DefaultShell            string            `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
-	Outputs                 map[string]string `json:"outputs,omitempty"`
-	Steps                   []Step            `json:"steps"`
-	Actions                 []ActionLock      `json:"actions,omitempty"`
+	Needs                   map[string]Need           `json:"-"`
+	Env                     map[string]string         `json:"env,omitempty"`
+	Condition               string                    `json:"condition,omitempty"`
+	ContinueOnError         bool                      `json:"continue_on_error,omitempty"`
+	TimeoutMinutes          float64                   `json:"timeout_minutes,omitempty"`
+	DefaultShell            string                    `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory string                    `json:"default_working_directory,omitempty"`
+	Outputs                 map[string]string         `json:"outputs,omitempty"`
+	Steps                   []Step                    `json:"steps"`
+	Actions                 []ActionLock              `json:"actions,omitempty"`
+	Program                 program.Program           `json:"program"`
+	ActionPrograms          map[string]program.Action `json:"action_programs"`
 	// RequiresMise is the compiler's explicit action-runtime decision.
 	RequiresMise       *bool                       `json:"requires_mise,omitempty"`
 	Container          *Container                  `json:"container,omitempty"`
@@ -410,6 +414,9 @@ func Decode(source []byte) (Job, error) {
 	if err := job.Validate(); err != nil {
 		return Job{}, err
 	}
+	if err := job.validateExecutionPrograms(); err != nil {
+		return Job{}, err
+	}
 	return job, nil
 }
 
@@ -478,6 +485,9 @@ func Encode(job Job) ([]byte, error) {
 	if err := job.Validate(); err != nil {
 		return nil, err
 	}
+	if err := job.validateExecutionPrograms(); err != nil {
+		return nil, err
+	}
 	var out bytes.Buffer
 	encoder := json.NewEncoder(&out)
 	encoder.SetEscapeHTML(false)
@@ -486,6 +496,112 @@ func Encode(job Job) ([]byte, error) {
 		return nil, fmt.Errorf("encode job plan: %w", err)
 	}
 	return out.Bytes(), nil
+}
+
+func (job Job) validateExecutionPrograms() error {
+	if job.ActionPrograms == nil {
+		return fmt.Errorf("job plan action_programs must be a concrete object")
+	}
+	if len(job.Program.Job.Steps) == 0 {
+		return fmt.Errorf("job plan normalized workflow program is required")
+	}
+	locks := make(map[string]ActionLock, len(job.Actions))
+	for _, lock := range job.Actions {
+		locks[lock.ID] = lock
+	}
+	for id, action := range job.ActionPrograms {
+		lock, ok := locks[id]
+		if !ok {
+			return fmt.Errorf("normalized action program %q has no matching lock", id)
+		}
+		if action.Source != lock.Source {
+			return fmt.Errorf("normalized action program %q source does not match its lock", id)
+		}
+		native := integration.UsesNativeAdapter(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+		if (action.Runtime == program.ActionRuntimeNative) != native {
+			return fmt.Errorf("normalized action program %q native runtime does not match its lock integration", id)
+		}
+		if err := validateActionProgram(id, action, locks, job.ActionPrograms); err != nil {
+			return err
+		}
+	}
+	for _, step := range job.Program.Job.Steps {
+		if step.Invocation != nil {
+			if step.Invocation.Lock != "" {
+				if _, ok := job.ActionPrograms[step.Invocation.Lock]; ok {
+					continue
+				}
+				return fmt.Errorf("normalized workflow action step %q references missing action program %q", step.ID, step.Invocation.Lock)
+			}
+		}
+	}
+	if len(job.Program.Job.Steps) != len(job.Steps) {
+		return fmt.Errorf("resolved steps do not match the normalized workflow step order")
+	}
+	for i, step := range job.Steps {
+		normalized := job.Program.Job.Steps[i]
+		if normalized.ID != step.ID || normalized.Kind != step.Kind {
+			return fmt.Errorf("resolved step %d does not match the normalized workflow step order", i+1)
+		}
+		if step.Action == nil {
+			continue
+		}
+		if normalized.Invocation == nil || normalized.Invocation.Lock != step.Action.Lock || normalized.Invocation.Uses.Source != step.Uses {
+			return fmt.Errorf("resolved action step %q does not match its normalized invocation", step.ID)
+		}
+		if _, ok := job.ActionPrograms[step.Action.Lock]; !ok {
+			return fmt.Errorf("resolved action step %q references missing action program %q", step.ID, step.Action.Lock)
+		}
+	}
+	return nil
+}
+
+func validateActionProgram(id string, action program.Action, locks map[string]ActionLock, actions map[string]program.Action) error {
+	shapes := 0
+	if action.JavaScript != nil {
+		shapes++
+	}
+	if action.Composite != nil {
+		shapes++
+	}
+	if action.Docker != nil {
+		shapes++
+	}
+	switch action.Runtime {
+	case program.ActionRuntimeNative:
+		if shapes != 0 {
+			return fmt.Errorf("normalized native action program %q has an execution body", id)
+		}
+	case program.ActionRuntimeJavaScript:
+		if shapes != 1 || action.JavaScript == nil || action.JavaScript.Main == "" || action.JavaScript.NodeMajor != 16 && action.JavaScript.NodeMajor != 24 {
+			return fmt.Errorf("normalized JavaScript action program %q has an invalid lifecycle", id)
+		}
+	case program.ActionRuntimeComposite:
+		if shapes != 1 || action.Composite == nil {
+			return fmt.Errorf("normalized composite action program %q has an invalid execution body", id)
+		}
+		for i, step := range action.Composite.Steps {
+			if (step.Run == nil) == (step.Invocation == nil) {
+				return fmt.Errorf("normalized composite action program %q step %d must have exactly one execution", id, i+1)
+			}
+			if step.Invocation != nil {
+				if _, ok := actions[step.Invocation.Lock]; !ok {
+					return fmt.Errorf("normalized composite action program %q step %d references missing action program %q", id, i+1, step.Invocation.Lock)
+				}
+				child, ok := locks[id].Children[step.Invocation.Uses.Source]
+				if !ok || child.Lock != step.Invocation.Lock {
+					return fmt.Errorf("normalized composite action program %q step %d child selector does not match its lock", id, i+1)
+				}
+			}
+		}
+	case program.ActionRuntimeDocker:
+		if shapes != 1 || action.Docker == nil {
+			return fmt.Errorf("normalized Docker action program %q has an invalid execution body", id)
+		}
+	default:
+		return fmt.Errorf("normalized action program %q has unsupported runtime %q", id, action.Runtime)
+	}
+	return nil
 }
 
 func (job Job) Validate() error {

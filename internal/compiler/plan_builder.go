@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/program"
@@ -35,6 +36,7 @@ type planBuilder struct {
 
 type builtPlanActions struct {
 	locks               []plan.ActionLock
+	programs            map[string]program.Action
 	capabilities        []string
 	authorization       PlanAuthorization
 	requiredSecrets     []string
@@ -121,7 +123,7 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	workflowProgram := lowerWorkflowProgram(instance)
 	steps := projectPlanSteps(workflowProgram.Job.Steps)
 	actionIndexes, actionRefs, actionInputs := programActionInvocations(workflowProgram.Job.Steps)
-	actions, err := b.buildActions(instance, steps, actionIndexes, actionRefs, actionInputs)
+	actions, err := b.buildActions(instance, workflowProgram, steps, actionIndexes, actionRefs, actionInputs)
 	if err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
@@ -348,7 +350,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 	return instance, nil
 }
 
-func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actionIndexes []int, actionRefs []string, actionInputs []map[string]string) (builtPlanActions, error) {
+func (b planBuilder) buildActions(instance JobInstance, workflowProgram program.Program, steps []plan.Step, actionIndexes []int, actionRefs []string, actionInputs []map[string]string) (builtPlanActions, error) {
 	built := builtPlanActions{requiresMise: len(actionRefs) != 0, resolved: b.options.ResolveActions}
 	if len(actionRefs) != 0 && !built.resolved {
 		built.resolved = true
@@ -367,11 +369,41 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 		built.capabilities = capabilities
 		return built, nil
 	}
-	compiled, err := compileActionInvocations(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs)
+	invocations := make([]program.ActionInvocation, len(actionIndexes))
+	contexts := make([]program.ActionAuthorityContext, len(actionIndexes))
+	immutableActionSteps := make(map[int]bool)
+	for i, stepIndex := range actionIndexes {
+		if usesNativeActionAdapter(actionRefs[i]) {
+			immutableActionSteps[stepIndex] = true
+		}
+	}
+	for i, stepIndex := range actionIndexes {
+		step := workflowProgram.Job.Steps[stepIndex]
+		invocations[i] = program.ActionInvocation{Inputs: step.Invocation.With, Condition: step.Condition}
+		unknownInputs := make(map[string]bool, len(instance.DeferredInputs))
+		for name := range instance.DeferredInputs {
+			unknownInputs[strings.ToLower(name)] = true
+		}
+		environment := [][]program.Binding{workflowProgram.Job.Env, step.Env}
+		environmentMutable, err := program.WorkflowEnvironmentMutableBefore(workflowProgram.Job.Steps, stepIndex, program.ActionAuthorityContext{
+			WorkflowInputs: instance.Inputs, UnknownWorkflowInputs: unknownInputs,
+			Matrix: instance.Matrix, EnvironmentLayers: [][]program.Binding{workflowProgram.Job.Env},
+		}, immutableActionSteps)
+		if err != nil {
+			return built, fmt.Errorf("build plan for job %q: plan action environment: %w", instance.LogicalJobID, err)
+		}
+		contexts[i] = program.ActionAuthorityContext{
+			WorkflowInputs: instance.Inputs, UnknownWorkflowInputs: unknownInputs,
+			Matrix: instance.Matrix, EnvironmentLayers: environment,
+			MainEnvironmentMutable: environmentMutable,
+		}
+	}
+	compiled, err := compileActionPrograms(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs, invocations, contexts)
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
 	built.requiresMise = compiled.requiresMise
+	built.programs = compiled.programs
 	built.requiresGitHubToken = compiled.requiresGitHubToken
 	built.requiredSecrets = compiled.requiredSecrets
 	built.authorization.GitHubTokenActions = append([]string(nil), compiled.githubTokenActions...)
@@ -401,6 +433,16 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 		built.authorization.DockerCapabilitySources = append(built.authorization.DockerCapabilitySources, "dockerfile-actions")
 	}
 	return built, nil
+}
+
+func usesNativeActionAdapter(raw string) bool {
+	ref, err := actionsource.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return actionintegration.UsesNativeAdapter(actionintegration.Identity{
+		Source: "github", Repository: strings.ToLower(ref.Owner + "/" + ref.Repository), Path: strings.ToLower(ref.Path),
+	})
 }
 
 func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, built *builtPlanActions) error {
@@ -568,7 +610,7 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram 
 		policyWorkflow = filepath.Base(instance.SourcePath)
 	}
 	if len(b.ir.Workflow.WorkflowTokenPermissions) == 0 {
-		reference := "an action input default that references github.token"
+		reference := "an action that references github.token in its metadata"
 		if referencesGitHubTokenSecret {
 			reference = "secrets.GITHUB_TOKEN"
 		} else if referencesGitHubToken {
@@ -585,6 +627,9 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram 
 
 func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.Program, runtimeDistributionDigest string, steps []plan.Step, actions builtPlanActions, needSources map[string][]plan.NeedSource, needOutputs map[string][]plan.NeedOutput, deferredInputs map[string]plan.DeferredInput, callGuards []plan.CallGuard, secrets []string, githubToken *plan.GitHubToken) plan.Job {
 	programJob := workflowProgram.Job
+	if actions.programs == nil {
+		actions.programs = map[string]program.Action{}
+	}
 	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
@@ -626,6 +671,8 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		Outputs:                 programBindingMap(programJob.Outputs),
 		Steps:                   steps,
 		Actions:                 actions.locks,
+		Program:                 workflowProgram,
+		ActionPrograms:          actions.programs,
 	}
 	job.RequiresMise = &actions.requiresMise
 	if programJob.Container != nil {

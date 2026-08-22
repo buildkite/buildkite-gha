@@ -42,6 +42,10 @@ const (
 	// actionLifecycleCondition is evaluated for action pre-if and post-if
 	// metadata. It has its own context policy and no implicit success guard.
 	actionLifecycleCondition
+	// compositeActionCondition is evaluated for a composite action's step if.
+	// It admits action-authored token and aggregate-input access without
+	// broadening workflow-authored step conditions.
+	compositeActionCondition
 )
 
 // ValidateCondition verifies that a job or step condition uses only expression
@@ -80,6 +84,12 @@ func ValidateActionLifecycleCondition(source string) error {
 		return err
 	}
 	return validateCondition(source, actionLifecycleCondition, nil, false)
+}
+
+// ValidateCompositeActionCondition verifies a composite action's step
+// condition without broadening workflow-authored step conditions.
+func ValidateCompositeActionCondition(source string) error {
+	return validateCondition(source, compositeActionCondition, nil, false)
 }
 
 func validateLifecycleDelimiters(source string) error {
@@ -256,6 +266,10 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			switch strings.ToLower(path[0]) {
 			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha":
 				return nil
+			case "token":
+				if scope == actionLifecycleCondition || scope == compositeActionCondition {
+					return nil
+				}
 			}
 		}
 		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are actor, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, and sha", reference)
@@ -342,11 +356,11 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 		}
 		return fmt.Errorf("unsupported condition access expression")
 	case "matrix", "needs":
-	case "vars":
-		if _, whole := node.(*actionlint.VariableNode); whole {
+	case "inputs":
+		if _, whole := node.(*actionlint.VariableNode); whole && scope != compositeActionCondition {
 			return fmt.Errorf("whole condition context %q is unsupported", root)
 		}
-	case "inputs":
+	case "vars":
 		if _, whole := node.(*actionlint.VariableNode); whole {
 			return fmt.Errorf("whole condition context %q is unsupported", root)
 		}

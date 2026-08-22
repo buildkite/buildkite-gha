@@ -41,8 +41,9 @@ type hardJobFailure struct {
 	err error
 }
 
-func (e *hardJobFailure) Error() string { return e.err.Error() }
-func (e *hardJobFailure) Unwrap() error { return e.err }
+func (e *hardJobFailure) Error() string     { return e.err.Error() }
+func (e *hardJobFailure) Unwrap() error     { return e.err }
+func (e *hardJobFailure) HardFailure() bool { return true }
 
 type workflowJobFailure struct {
 	err error
@@ -61,6 +62,11 @@ func markHardJobFailure(err error) error {
 func isHardJobFailure(err error) bool {
 	var target *hardJobFailure
 	return errors.As(err, &target)
+}
+
+func isExplicitlySoftFailure(err error) bool {
+	var marker interface{ HardFailure() bool }
+	return errors.As(err, &marker) && !marker.HardFailure()
 }
 
 func markWorkflowJobFailure(err error) error {

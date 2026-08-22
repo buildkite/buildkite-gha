@@ -146,6 +146,58 @@ Reusable workflows continue to flatten before plan construction. Their
 expanded jobs then use the same normalization path as direct jobs, eliminating
 separate authority treatment for called-workflow fields.
 
+### Shared action machine contract
+
+Use `program.Action` as the machine's immutable syntax tree. Do not add a
+second bytecode or convert it back into action metadata. The machine owns:
+
+- ordered supplied inputs and defaults
+- preparation, main, and post ordering
+- action and composite conditions
+- composite child order, status, and `continue-on-error`
+- environment overlays and command-mutation barriers
+- post registration and reverse execution
+- output timing and recursive or native dispatch
+
+The machine keeps expression-visible invocation state in a common frame.
+Concrete values use the same value domain as abstract planning with
+`Known: true`; unknown values exist only during planning. Adapters receive the
+frame but cannot choose lifecycle order or register posts.
+
+```go
+type ActionAdapter[S any] interface {
+    Evaluate(context.Context, S, Site, FrameView) (S, expression.Analysis, error)
+    Execute(context.Context, S, LeafOperation, FrameView) (S, Execution, error)
+    Fork(S) (S, S)
+    Join(S, S) S
+}
+```
+
+`FrameView` is read-only and keeps workflow inputs, action inputs, environment,
+step statuses and outputs, invocation state, GitHub context, and job status in
+distinct scopes. `LeafOperation` is a closed set of fully evaluated JavaScript,
+Docker, shell, and native operations. It cannot contain lifecycle conditions,
+child invocations, post registration, or `continue-on-error`.
+
+`Execution` exposes only machine-visible effects: possible outcomes, outputs,
+invocation state, environment assignments, and `PATH` prepends. Runtime-only
+effects such as logs, summaries, annotations, and artifacts stay in adapter
+state `S`. Runtime returns one outcome and known closed values. Planning may
+return several outcomes, open objects, and unknown environment mutation.
+Process or action failure is an execution outcome; adapter errors mean the
+adapter could not produce a valid result.
+
+The machine converts condition analysis to an explicit true, false, or unknown
+guard decision. For an unknown guard it forks both its own session state and
+adapter state, executes both branches, and joins them independently. Runtime
+must reject unknown decisions. Missing fields in a closed value object are
+omitted; present unknown fields are unresolved values.
+
+The machine persists prepared invocations and registered posts across three
+entry points: prepare all resolved remote roots, invoke one workflow action
+step, and finish registered posts. This retains the existing job scheduler
+without letting it interpret action lifecycle metadata.
+
 ## Scope
 
 This work centralizes expression reachability, field ownership, and action
@@ -187,7 +239,7 @@ invocations.
 Use test-only differential fixtures to compare legacy runtime results with the
 program runtime adapter. Do not add production fallback between representations.
 
-### 3. Normalize resolved actions
+### 3. Normalize and cut over resolved actions
 
 Lower action input declarations, ordered defaults, lifecycle conditions,
 composite steps, outputs, and child selectors into action programs keyed by
@@ -198,10 +250,16 @@ conditional post registration, and reverse post execution.
 Derive action authority by abstractly executing this program. Runtime executes
 the same program with the concrete adapter.
 
-### 4. Cut over the plan contract
+Deliver the machine, both adapters, and plan cutover in one integration PR,
+organized as compiling review commits. A planning-only machine has one real
+consumer and can drift before runtime adopts it. A concrete adapter without a
+required normalized plan needs a legacy production fallback. Neither state is
+mergeable.
 
-Bump the plan schema and require normalized execution programs. Reject plans
-that combine normalized authority data with legacy raw execution fields.
+Bump the plan schema and require normalized execution programs. Executable
+plans cannot contain unresolved actions or legacy raw execution alternatives.
+Runtime verifies source content and entrypoints but does not load `action.yml`
+or reconstruct metadata to derive execution behavior.
 
 Delete:
 

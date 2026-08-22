@@ -430,7 +430,7 @@ func githubTokenAdmissionDiagnostic(artifact compiler.PlanArtifact, reason strin
 		if len(quoted) > 1 {
 			actionLabel = "actions"
 		}
-		causes = append(causes, actionLabel+" "+strings.Join(quoted, ", ")+" defaults an input to github.token")
+		causes = append(causes, actionLabel+" "+strings.Join(quoted, ", ")+" requires github.token in its metadata")
 	}
 	if len(causes) == 0 {
 		causes = append(causes, "the compiled job requests a workflow token")
