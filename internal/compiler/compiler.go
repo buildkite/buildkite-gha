@@ -476,6 +476,7 @@ func resolveCompileContainer(container *workflow.Container, context expression.C
 	resolved := *container
 	resolved.Env = cloneMap(container.Env)
 	resolved.Ports = append([]string(nil), container.Ports...)
+	resolved.Volumes = append([]string(nil), container.Volumes...)
 	if strings.Contains(resolved.Image, "${{") {
 		image, err := expression.EvaluateCompileStringTemplate(resolved.Image, context)
 		if err != nil {

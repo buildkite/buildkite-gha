@@ -152,10 +152,12 @@ type Job struct {
 
 // Container is the statically owned subset of a GitHub Actions container.
 type Container struct {
-	Image string            `json:"image"`
-	Env   map[string]string `json:"env,omitempty"`
-	Ports []string          `json:"ports,omitempty"`
-	Span  Span              `json:"span"`
+	Image   string            `json:"image"`
+	Env     map[string]string `json:"env,omitempty"`
+	Ports   []string          `json:"ports,omitempty"`
+	Volumes []string          `json:"volumes,omitempty"`
+	Options string            `json:"options,omitempty"`
+	Span    Span              `json:"span"`
 }
 
 // Service is a named service container. Services retain workflow declaration

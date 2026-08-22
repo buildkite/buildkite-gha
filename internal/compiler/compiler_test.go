@@ -4173,12 +4173,12 @@ func readFile(t *testing.T, path string) []byte {
 }
 
 func TestCompilePlansEmitV8ForContainers(t *testing.T) {
-	workflowSource := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: node:24\n    services:\n      redis: {image: redis:7}\n    steps:\n      - run: true\n")
+	workflowSource := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      volumes: ['cache:/cache:ro']\n      options: --cpus=2 --memory 1g\n    services:\n      redis: {image: redis:7}\n    steps:\n      - run: true\n")
 	plans, err := compileUntrustedPlans("containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Schema != plan.Schema || plans[0].Container == nil || len(plans[0].Services) != 1 || !slices.Equal(plans[0].RequiredCapabilities, []string{"docker", "network"}) {
+	if len(plans) != 1 || plans[0].Schema != plan.Schema || plans[0].Container == nil || !slices.Equal(plans[0].Container.Volumes, []string{"cache:/cache:ro"}) || plans[0].Container.Options != "--cpus=2 --memory 1g" || len(plans[0].Services) != 1 || !slices.Equal(plans[0].RequiredCapabilities, []string{"docker", "network"}) {
 		t.Fatalf("container plan = %#v", plans)
 	}
 }

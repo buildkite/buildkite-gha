@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/buildkite/buildkite-gha/internal/containerpolicy"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
@@ -87,6 +88,9 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 	if spec != nil {
 		if err := validateEnvironmentNames(spec.Env); err != nil {
 			return nil, fmt.Errorf("job container environment: %w", err)
+		}
+		if err := containerpolicy.ValidateJobVolumes(spec.Volumes); err != nil {
+			return nil, fmt.Errorf("job container: %w", err)
 		}
 	}
 	for serviceID, service := range services {
@@ -166,12 +170,20 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 		}
 	}
 	workflowFailure = true
-	if len(services) != 0 {
+	if len(services) != 0 || spec != nil && len(spec.Volumes) != 0 {
 		volumes, volumeErr := boundedDockerOutput(ctx, env, docker, "volume", "ls", "--quiet")
 		if volumeErr != nil {
 			return nil, fmt.Errorf("snapshot Docker volumes: %w", volumeErr)
 		}
 		b.existingVolumes = lineSet(volumes)
+		if spec != nil {
+			for _, volume := range spec.Volumes {
+				name := containerpolicy.JobVolumeName(volume)
+				if b.existingVolumes[name] {
+					return nil, fmt.Errorf("job container volume %q already exists", name)
+				}
+			}
+		}
 	}
 	if spec != nil {
 		if err = r.pullContainerImage(ctx, processor, env, docker, spec.Image); err != nil {
@@ -309,13 +321,26 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 			}
 			args = append(args, "--mount", mount)
 		}
+		options, optionErr := containerpolicy.JobOptions(spec.Options)
+		if optionErr != nil {
+			return nil, fmt.Errorf("job container options: %w", optionErr)
+		}
+		args = append(args, options...)
 		for _, name := range sortedKeys(spec.Env) {
 			args = append(args, "--env", name+"="+spec.Env[name])
 		}
 		args = appendPublishedPorts(args, spec.Ports)
+		for _, volume := range spec.Volumes {
+			args = append(args, "--volume", volume)
+		}
 		args = append(args, spec.Image, "-c", "while :; do sleep 3600; done")
 		if _, err = boundedDockerOutput(ctx, env, docker, args...); err != nil {
 			return nil, fmt.Errorf("create job container: %w", err)
+		}
+		if len(spec.Volumes) != 0 {
+			if err = b.trackContainerVolumes(ctx, "job container", b.container); err != nil {
+				return nil, err
+			}
 		}
 		if _, err = boundedDockerOutput(ctx, env, docker, "start", b.container); err != nil {
 			return nil, fmt.Errorf("start job container: %w", err)
@@ -439,10 +464,14 @@ func (b *jobContainerBackend) reconcileCreatedService(ctx context.Context, index
 }
 
 func (b *jobContainerBackend) trackServiceVolumes(ctx context.Context, serviceID, reference string) error {
+	return b.trackContainerVolumes(ctx, fmt.Sprintf("service %q", serviceID), reference)
+}
+
+func (b *jobContainerBackend) trackContainerVolumes(ctx context.Context, subject, reference string) error {
 	const format = `{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}`
 	output, err := boundedDockerOutput(ctx, b.env, b.docker, "inspect", "--format", format, reference)
 	if err != nil {
-		return fmt.Errorf("inspect service %q volumes: %w", serviceID, err)
+		return fmt.Errorf("inspect %s volumes: %w", subject, err)
 	}
 	for volume := range lineSet(output) {
 		if !b.existingVolumes[volume] && !slices.Contains(b.ownedVolumes, volume) {
@@ -465,49 +494,7 @@ func validateServiceOptions(options []string) error {
 // actions/runner ProcessStartInfo.Arguments path. Single quotes are ordinary
 // characters; double quotes group arguments; backslashes only escape quotes.
 func dockerArgumentList(value string) ([]string, error) {
-	var args []string
-	for i := 0; i < len(value); {
-		for i < len(value) && (value[i] == ' ' || value[i] == '\t') {
-			i++
-		}
-		if i == len(value) {
-			break
-		}
-		var arg strings.Builder
-		quoted := false
-		for i < len(value) {
-			if !quoted && (value[i] == ' ' || value[i] == '\t') {
-				break
-			}
-			backslashes := 0
-			for i < len(value) && value[i] == '\\' {
-				backslashes++
-				i++
-			}
-			copyCharacter := true
-			if i < len(value) && value[i] == '"' {
-				if backslashes%2 == 0 {
-					if quoted && i+1 < len(value) && value[i+1] == '"' {
-						i++
-					} else {
-						copyCharacter = false
-						quoted = !quoted
-					}
-				}
-				backslashes /= 2
-			}
-			arg.WriteString(strings.Repeat("\\", backslashes))
-			if i == len(value) || !quoted && (value[i] == ' ' || value[i] == '\t') {
-				break
-			}
-			if copyCharacter {
-				arg.WriteByte(value[i])
-			}
-			i++
-		}
-		args = append(args, arg.String())
-	}
-	return args, nil
+	return containerpolicy.ArgumentList(value), nil
 }
 
 var dockerPortLine = regexp.MustCompile(`^([0-9]+)/([A-Za-z0-9]+) -> (?:[^:]+|\[[^]]+\]):([0-9]+)$`)

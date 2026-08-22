@@ -15,6 +15,7 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/containerpolicy"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 )
 
@@ -254,9 +255,11 @@ type Step struct {
 }
 
 type Container struct {
-	Image string            `json:"image"`
-	Env   map[string]string `json:"env,omitempty"`
-	Ports []string          `json:"ports,omitempty"`
+	Image   string            `json:"image"`
+	Env     map[string]string `json:"env,omitempty"`
+	Ports   []string          `json:"ports,omitempty"`
+	Volumes []string          `json:"volumes,omitempty"`
+	Options string            `json:"options,omitempty"`
 }
 
 type ContainerCredentials struct {
@@ -567,7 +570,7 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job containers and services require network capability")
 		}
 		if job.Container != nil {
-			if err := validateContainer(job.Container.Image, job.Container.Env, job.Container.Ports); err != nil {
+			if err := validateContainer(*job.Container); err != nil {
 				return fmt.Errorf("job container: %w", err)
 			}
 		}
@@ -1201,18 +1204,18 @@ func compareNeedOutput(left, right NeedOutput) int {
 	return strings.Compare(left.Output, right.Output)
 }
 
-func validateContainer(image string, env map[string]string, ports []string) error {
-	if !ValidContainerImageReference(image) {
+func validateContainer(container Container) error {
+	if !ValidContainerImageReference(container.Image) {
 		return fmt.Errorf("invalid image reference")
 	}
-	if err := validateContainerImageEnv(image, env); err != nil {
+	if err := validateContainerImageEnv(container.Image, container.Env); err != nil {
 		return err
 	}
-	if len(ports) > 128 {
+	if len(container.Ports) > 128 {
 		return fmt.Errorf("more than 128 ports")
 	}
 	seen := map[string]bool{}
-	for _, port := range ports {
+	for _, port := range container.Ports {
 		if seen[port] {
 			return fmt.Errorf("repeated port %q", port)
 		}
@@ -1220,6 +1223,12 @@ func validateContainer(image string, env map[string]string, ports []string) erro
 		if !containerPortPattern.MatchString(port) {
 			return fmt.Errorf("invalid port %q", port)
 		}
+	}
+	if err := containerpolicy.ValidateJobVolumes(container.Volumes); err != nil {
+		return err
+	}
+	if _, err := containerpolicy.JobOptions(container.Options); err != nil {
+		return fmt.Errorf("invalid options: %w", err)
 	}
 	return nil
 }

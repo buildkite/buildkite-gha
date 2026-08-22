@@ -631,9 +631,11 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 	job.RequiresMise = &actions.requiresMise
 	if programJob.Container != nil {
 		job.Container = &plan.Container{
-			Image: programJob.Container.Image.Source,
-			Env:   programBindingMap(programJob.Container.Env),
-			Ports: programSiteSources(programJob.Container.Ports),
+			Image:   programJob.Container.Image.Source,
+			Env:     programBindingMap(programJob.Container.Env),
+			Ports:   programSiteSources(programJob.Container.Ports),
+			Volumes: programSiteSources(programJob.Container.Volumes),
+			Options: programJob.Container.Options.Source,
 		}
 	}
 	if programJob.Services.Dynamic != nil {
