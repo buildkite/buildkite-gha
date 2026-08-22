@@ -236,6 +236,40 @@ func TestActionMachineFailedPreSuppressesMainAndRetainsPost(t *testing.T) {
 	requireTrace(t, machine, "exec:action:pre env=?/? input=?", "exec:action:post env=?/? input=?")
 }
 
+func TestActionMachineMixedPreKeepsMainReachable(t *testing.T) {
+	mixed := Execution{Outcomes: OutcomeSuccess | OutcomeFailure | OutcomeCancelled}
+	machine := NewActionMachine(map[string]Action{"action": js("pre", "main", "post")}, &traceAdapter{executions: map[string]Execution{"pre": mixed}}, traceState{})
+	frame, _, err := machine.Prepare(t.Context(), invocation("action", "action"), Frame{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, _, err = machine.Invoke(t.Context(), invocation("action", "action"), frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = machine.Finish(t.Context(), frame); err != nil {
+		t.Fatal(err)
+	}
+	requireTrace(t, machine, "exec:action:pre env=?/? input=?", "exec:action:main env=?/? input=?", "exec:action:post env=?/? input=?")
+}
+
+func TestActionMachineUnknownPreGuardKeepsSuccessfulArm(t *testing.T) {
+	action := js("pre", "main", "")
+	action.JavaScript.PreCondition = site("unknown")
+	failure := Execution{Outcomes: OutcomeFailure, Failure: &ExecutionFailure{Cause: fmt.Errorf("pre failed")}}
+	machine := NewActionMachine(map[string]Action{"action": action}, &traceAdapter{executions: map[string]Execution{"pre": failure}}, traceState{})
+	frame, _, err := machine.Prepare(t.Context(), invocation("action", "action"), Frame{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = machine.Invoke(t.Context(), invocation("action", "action"), frame); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(machine.State().events, func(event string) bool { return strings.Contains(event, ":main ") }) {
+		t.Fatalf("main was unreachable after joining failed and skipped pre arms: %q", machine.State().events)
+	}
+}
+
 func TestActionMachineRejectsMissingRequiredInput(t *testing.T) {
 	action := js("", "main", "")
 	action.Inputs = []ActionInput{{Name: "token", Required: true}}

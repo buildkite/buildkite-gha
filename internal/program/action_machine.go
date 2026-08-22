@@ -382,7 +382,7 @@ func (m *ActionMachine[S]) prepare(ctx context.Context, invocation ActionInvocat
 			} else {
 				invocationFrame = childFrame
 			}
-			if childExecution.Outcomes&(OutcomeFailure|OutcomeCancelled) != 0 {
+			if !canSucceed(childExecution) && childExecution.Outcomes&(OutcomeFailure|OutcomeCancelled) != 0 {
 				prepared := m.prepared[child.ID]
 				failure := childExecution
 				prepared.Failure = &failure
@@ -429,7 +429,7 @@ func (m *ActionMachine[S]) prepareJavaScript(ctx context.Context, invocation Act
 	}
 	prepared.State = cloneValueObject(execution.State)
 	invocationFrame.State = cloneValueObject(prepared.State)
-	if execution.Outcomes&(OutcomeFailure|OutcomeCancelled) != 0 {
+	if !canSucceed(execution) && execution.Outcomes&(OutcomeFailure|OutcomeCancelled) != 0 {
 		failure := execution
 		prepared.Failure = &failure
 	}
@@ -520,7 +520,7 @@ func (m *ActionMachine[S]) invoke(ctx context.Context, invocation ActionInvocati
 			if err != nil {
 				return Frame{}, Execution{}, err
 			}
-			if prefix.Outcomes&(OutcomeFailure|OutcomeCancelled) != 0 {
+			if !canSucceed(prefix) && prefix.Outcomes&(OutcomeFailure|OutcomeCancelled) != 0 {
 				delete(m.prepared, invocation.ID)
 				return frame, prefix, nil
 			}
@@ -595,9 +595,15 @@ func (m *ActionMachine[S]) execute(ctx context.Context, operation LeafOperation,
 
 type adapterExecutionError struct{ err error }
 
-func (e *adapterExecutionError) Error() string     { return e.err.Error() }
-func (e *adapterExecutionError) Unwrap() error     { return e.err }
-func (e *adapterExecutionError) HardFailure() bool { return true }
+func (e *adapterExecutionError) Error() string { return e.err.Error() }
+func (e *adapterExecutionError) Unwrap() error { return e.err }
+func (e *adapterExecutionError) HardFailure() bool {
+	var marker hardFailureMarker
+	if errors.As(e.err, &marker) {
+		return marker.HardFailure()
+	}
+	return true
+}
 
 type hardProgramError struct{ err error }
 
@@ -675,6 +681,8 @@ func normalizeValueObject(object ValueObject) ValueObject {
 }
 
 func successfulExecution() Execution { return Execution{Outcomes: OutcomeSuccess} }
+
+func canSucceed(execution Execution) bool { return execution.Outcomes&OutcomeSuccess != 0 }
 
 func frameWithEnvironment(frame Frame, environment ValueObject) Frame {
 	frame.Environment = cloneValueObject(environment)
@@ -876,20 +884,44 @@ func (m *ActionMachine[S]) clone(state S) *ActionMachine[S] {
 
 func joinPrepared(left, right map[string]preparedInvocation) map[string]preparedInvocation {
 	result := make(map[string]preparedInvocation, len(left)+len(right))
-	for id, invocation := range left {
-		result[id] = invocation
+	ids := make(map[string]struct{}, len(left)+len(right))
+	for id := range left {
+		ids[id] = struct{}{}
 	}
-	for id, invocation := range right {
-		if previous, ok := result[id]; ok {
-			invocation.Overlay = joinValueObjects(previous.Overlay, invocation.Overlay)
-			invocation.Inputs = joinValueObjects(previous.Inputs, invocation.Inputs)
-			invocation.State = joinValueObjects(previous.State, invocation.State)
-			invocation.PostRegistered = previous.PostRegistered || invocation.PostRegistered
-			invocation.Possible = previous.Possible || invocation.Possible
-		} else {
-			invocation.Possible = true
+	for id := range right {
+		ids[id] = struct{}{}
+	}
+	for id := range ids {
+		leftInvocation, leftOK := left[id]
+		rightInvocation, rightOK := right[id]
+		if !leftOK {
+			rightInvocation.Failure = nil
+			rightInvocation.Possible = true
+			result[id] = rightInvocation
+			continue
 		}
-		result[id] = invocation
+		if !rightOK {
+			leftInvocation.Failure = nil
+			leftInvocation.Possible = true
+			result[id] = leftInvocation
+			continue
+		}
+		leftInvocation.Overlay = joinValueObjects(leftInvocation.Overlay, rightInvocation.Overlay)
+		leftInvocation.Inputs = joinValueObjects(leftInvocation.Inputs, rightInvocation.Inputs)
+		leftInvocation.State = joinValueObjects(leftInvocation.State, rightInvocation.State)
+		leftInvocation.PostRegistered = leftInvocation.PostRegistered || rightInvocation.PostRegistered
+		leftInvocation.Possible = leftInvocation.Possible || rightInvocation.Possible
+		if leftInvocation.Failure != nil && rightInvocation.Failure != nil {
+			failure := joinExecutions(*leftInvocation.Failure, *rightInvocation.Failure)
+			if !canSucceed(failure) {
+				leftInvocation.Failure = &failure
+			} else {
+				leftInvocation.Failure = nil
+			}
+		} else {
+			leftInvocation.Failure = nil
+		}
+		result[id] = leftInvocation
 	}
 	return result
 }

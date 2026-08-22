@@ -52,11 +52,17 @@ type remotePreparationTimeout struct {
 	cancel   context.CancelFunc
 }
 
+type softActionControlError struct{ err error }
+
+func (e *softActionControlError) Error() string     { return e.err.Error() }
+func (e *softActionControlError) Unwrap() error     { return e.err }
+func (e *softActionControlError) HardFailure() bool { return false }
+
 func (t *remotePreparationTimeout) context(parent context.Context) (context.Context, error) {
 	if !t.resolved {
 		step, err := evaluateStepTimeout(t.step, t.eval)
 		if err != nil {
-			return nil, fmt.Errorf("controls: %w", err)
+			return nil, &softActionControlError{err: fmt.Errorf("controls: %w", err)}
 		}
 		t.bounded, t.cancel = stepContext(parent, step.TimeoutMinutes)
 		t.resolved = true

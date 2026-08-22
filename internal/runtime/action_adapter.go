@@ -232,7 +232,6 @@ func (a *actionAdapter) Execute(ctx context.Context, state actionAdapterState, o
 		return state, program.Execution{}, err
 	}
 	if operation.Phase == program.PhasePre && a.preparation != nil {
-		a.preparation.eval.Env = cloneStrings(environment)
 		ctx, err = a.preparation.context(ctx)
 		if err != nil {
 			return state, program.Execution{}, err
