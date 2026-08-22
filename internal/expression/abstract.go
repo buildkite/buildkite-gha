@@ -156,12 +156,20 @@ func AnalyzeActionInputDefault(template string, knownReferences map[string]any) 
 // AnalyzeStepTemplate evaluates a workflow or composite step template with
 // retained planning values. wholeGitHub records the provenance of toJSON(github).
 func AnalyzeStepTemplate(template string, knownReferences map[string]any, wholeGitHub GitHubTokenEffect) (Analysis, error) {
+	if err := ValidateStepTemplate(template); err != nil {
+		return Analysis{}, err
+	}
 	knownReferences = normalizeKnownReferences(knownReferences)
 	return analyzeRuntimeTemplate(template, func(node actionlint.ExprNode) (Analysis, error) {
-		if err := validateStepRuntimeExpression(node, true, true, nil); err != nil {
-			return Analysis{}, err
-		}
 		return analyzeRuntimeNode(node, stepRuntimeSurface, knownReferences, wholeGitHub)
+	})
+}
+
+// ValidateStepTemplate verifies every branch of a workflow or composite step
+// template without resolving runtime-dependent values.
+func ValidateStepTemplate(template string) error {
+	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
+		return validateStepRuntimeExpression(node, true, true, nil)
 	})
 }
 

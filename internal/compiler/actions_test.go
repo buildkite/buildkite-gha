@@ -927,7 +927,7 @@ jobs:
     steps:
       - uses: ./.github/actions/token
 `)
-	if err == nil || !strings.Contains(err.Error(), "action input default that references github.token") || !strings.Contains(err.Error(), "no effective permissions") {
+	if err == nil || !strings.Contains(err.Error(), "action that references github.token in its metadata") || !strings.Contains(err.Error(), "no effective permissions") {
 		t.Fatalf("compilePlansForTest() error = %v, want empty permission rejection", err)
 	}
 }

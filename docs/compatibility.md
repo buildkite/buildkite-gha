@@ -801,9 +801,9 @@ context listed below, including `token`, with sorted keys and two-space
 indentation.
 
 The compiler treats that call as a token reference, so normal permissions,
-admission, and redaction apply. Composite steps can consume an already
-authorized context, but composite metadata cannot grant token authority. A
-tokenless context is an error.
+admission, and redaction apply. A direct `github.token` reference in composite
+metadata can grant token authority. `toJSON(github)` in composite metadata can
+only consume an already authorized context; a tokenless context is an error.
 
 Job-level fields and action input defaults cannot call `toJSON(github)`. Bare,
 projected, or dynamically indexed `github`, and passing the whole context to
@@ -1098,8 +1098,9 @@ JavaScript and Docker actions with compatible bundled cache clients also receive
 event repository when it:
 
 - statically references `secrets.GITHUB_TOKEN` or `github.token`; or
-- uses an action whose effective input default can reach `github.token` for the
-  event provider.
+- uses an action whose reachable input defaults, lifecycle conditions,
+  composite steps, outputs, or Docker environment can reach `github.token` for
+  the event provider.
 
 A `github.server_url == 'https://github.com'` guard skips the token branch for
 an Origin repository. Native adapters ignore upstream input defaults, so
@@ -1154,8 +1155,8 @@ The server restricts pull requests, merge queues, and their descendants. For oth
 
 The token is not part of the initial job environment. Workflow-authored
 `github.token` references are step-only and use the same token as
-`secrets.GITHUB_TOKEN`. Effective action input defaults can also use it.
-Automatic ambient `GITHUB_TOKEN` is unsupported.
+`secrets.GITHUB_TOKEN`. Reachable action metadata can also use it. Automatic
+ambient `GITHUB_TOKEN` is unsupported.
 
 ### Other secrets and OIDC
 

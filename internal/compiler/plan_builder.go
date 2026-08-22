@@ -582,7 +582,7 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram 
 		policyWorkflow = filepath.Base(instance.SourcePath)
 	}
 	if len(b.ir.Workflow.WorkflowTokenPermissions) == 0 {
-		reference := "an action input default that references github.token"
+		reference := "an action that references github.token in its metadata"
 		if referencesGitHubTokenSecret {
 			reference = "secrets.GITHUB_TOKEN"
 		} else if referencesGitHubToken {

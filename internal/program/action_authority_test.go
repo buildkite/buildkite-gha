@@ -138,6 +138,62 @@ func TestInventoryActionAuthorityKeepsRuntimeDependentDefaultErrorsConservative(
 	}
 }
 
+func TestInventoryActionAuthorityKeepsRuntimeDependentSuppliedInputErrorsConservative(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "value"}}, Composite: &CompositeAction{}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{
+		Lock: "root", Inputs: []Binding{{Name: "value", Value: testWorkflowSite("${{ inputs.enabled && fromJSON('bad') || '' }}")}},
+	}, ActionAuthorityContext{UnknownWorkflowInputs: map[string]bool{"enabled": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("runtime-dependent tokenless supplied input requested token authority")
+	}
+}
+
+func TestInventoryActionAuthorityKeepsRuntimeDependentCompositeAnalysisConservative(t *testing.T) {
+	actions := map[string]Action{
+		"root": {
+			Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "enabled"}},
+			Composite: &CompositeAction{Steps: []CompositeStep{{
+				Condition: testActionSite("inputs.enabled && fromJSON('bad')"),
+				Run:       &Run{Command: testActionSite("echo ${{ github.token }}")},
+			}}},
+		},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{
+		Lock: "root", Inputs: []Binding{{Name: "enabled", Value: testWorkflowSite("${{ inputs.enabled }}")}},
+	}, ActionAuthorityContext{UnknownWorkflowInputs: map[string]bool{"enabled": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("runtime-dependent composite condition did not keep token branch reachable")
+	}
+}
+
+func TestInventoryActionAuthorityKeepsRuntimeDependentMetadataTokenConservative(t *testing.T) {
+	actions := map[string]Action{
+		"root": {
+			Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "enabled"}},
+			Composite: &CompositeAction{Steps: []CompositeStep{{Run: &Run{
+				Command: testActionSite("echo ${{ inputs.enabled && fromJSON('bad') && github.token || '' }}"),
+			}}}},
+		},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{
+		Lock: "root", Inputs: []Binding{{Name: "enabled", Value: testWorkflowSite("${{ inputs.enabled }}")}},
+	}, ActionAuthorityContext{UnknownWorkflowInputs: map[string]bool{"enabled": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("runtime-dependent metadata error did not retain conservative token authority")
+	}
+}
+
 func TestInventoryActionAuthorityDoesNotGrantWholeGitHubContextFromCompositeMetadata(t *testing.T) {
 	actions := map[string]Action{
 		"root": {

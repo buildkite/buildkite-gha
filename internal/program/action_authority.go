@@ -35,9 +35,15 @@ func InventoryActionAuthority(actions map[string]Action, invocation ActionInvoca
 	if invocation.Condition.Source != "" {
 		analysis, err := expression.AnalyzeCondition(invocation.Condition.Source, known, expression.GitHubTokenWorkflowContext)
 		if err != nil {
-			return Authority{}, err
-		}
-		if analysis.Value.Known {
+			if validationErr := expression.ValidateCondition(invocation.Condition.Source, expression.StepCondition); validationErr != nil {
+				return Authority{}, err
+			}
+			requiresToken, fallbackErr := expression.ConditionReferencesGitHubToken(invocation.Condition.Source)
+			if fallbackErr != nil {
+				return Authority{}, err
+			}
+			planner.githubToken = planner.githubToken || requiresToken
+		} else if analysis.Value.Known {
 			mainReachable, _ = analysis.Value.Value.(bool)
 		}
 	}
@@ -115,18 +121,36 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 			known := preparationScope
 			analysis, err := expression.AnalyzeActionLifecycleCondition(action.JavaScript.PreCondition.Source, known)
 			if err != nil {
-				return fmt.Errorf("action pre-if: %w", err)
+				if validationErr := expression.ValidateActionLifecycleCondition(action.JavaScript.PreCondition.Source); validationErr != nil {
+					return fmt.Errorf("action pre-if: %w", err)
+				}
+				requiresToken, fallbackErr := expression.ConditionReferencesGitHubToken(action.JavaScript.PreCondition.Source)
+				if fallbackErr != nil {
+					return fmt.Errorf("action pre-if: %w", err)
+				}
+				preReachable = true
+				p.githubToken = p.githubToken || requiresToken
+			} else {
+				preReachable = !analysis.Value.Known || analysis.Value.Value == true
+				p.githubToken = p.githubToken || authorityEffectsRequireToken(analysis.Effects)
 			}
-			preReachable = !analysis.Value.Known || analysis.Value.Value == true
-			p.githubToken = p.githubToken || preReachable && preparationInputs.githubToken || authorityEffectsRequireToken(analysis.Effects)
+			p.githubToken = p.githubToken || preReachable && preparationInputs.githubToken
 		}
 		if action.JavaScript.Post != "" && (mainReachable || preReachable) {
 			known := withoutKnownEnvironment(mainScope)
 			analysis, err := expression.AnalyzeActionLifecycleCondition(action.JavaScript.PostCondition.Source, known)
 			if err != nil {
-				return fmt.Errorf("action post-if: %w", err)
+				if validationErr := expression.ValidateActionLifecycleCondition(action.JavaScript.PostCondition.Source); validationErr != nil {
+					return fmt.Errorf("action post-if: %w", err)
+				}
+				requiresToken, fallbackErr := expression.ConditionReferencesGitHubToken(action.JavaScript.PostCondition.Source)
+				if fallbackErr != nil {
+					return fmt.Errorf("action post-if: %w", err)
+				}
+				p.githubToken = p.githubToken || requiresToken
+			} else {
+				p.githubToken = p.githubToken || authorityEffectsRequireToken(analysis.Effects)
 			}
-			p.githubToken = p.githubToken || authorityEffectsRequireToken(analysis.Effects)
 		}
 		return nil
 	case ActionRuntimeDocker:
@@ -177,7 +201,16 @@ func (p *actionAuthorityPlanner) resolveInputs(action Action, supplied []Binding
 		}
 		analysis, err := expression.AnalyzeStepTemplate(binding.Value.Source, known, wholeGitHub)
 		if err != nil {
-			return effectiveActionInputs{}, fmt.Errorf("action input %q: %w", binding.Name, err)
+			if validationErr := expression.ValidateStepTemplate(binding.Value.Source); validationErr != nil {
+				return effectiveActionInputs{}, fmt.Errorf("action input %q: %w", binding.Name, err)
+			}
+			requiresToken, fallbackErr := stepTemplateReferencesGitHubToken(binding.Value.Source, workflowAuthored)
+			if fallbackErr != nil {
+				return effectiveActionInputs{}, fmt.Errorf("action input %q: %w", binding.Name, err)
+			}
+			resolved.githubToken = resolved.githubToken || requiresToken
+			resolved.unknown[name] = true
+			continue
 		}
 		resolved.githubToken = resolved.githubToken || authorityEffectsRequireToken(analysis.Effects)
 		if analysis.Value.Known {
@@ -251,7 +284,15 @@ func (p *actionAuthorityPlanner) inspectComposite(action Action, mainInputs, pre
 	for i, step := range action.Composite.Steps {
 		condition, err := expression.AnalyzeCondition(step.Condition.Source, mainKnown, expression.GitHubTokenCompositeContext)
 		if err != nil {
-			return fmt.Errorf("composite action step %d condition: %w", i+1, err)
+			if validationErr := expression.ValidateCondition(step.Condition.Source, expression.StepCondition); validationErr != nil {
+				return fmt.Errorf("composite action step %d condition: %w", i+1, err)
+			}
+			requiresToken, fallbackErr := expression.ConditionReferencesGitHubToken(step.Condition.Source)
+			if fallbackErr != nil {
+				return fmt.Errorf("composite action step %d condition: %w", i+1, err)
+			}
+			p.githubToken = p.githubToken || mainReachable && requiresToken
+			condition = expression.Analysis{}
 		}
 		stepReachable := mainReachable && (!condition.Value.Known || condition.Value.Value == true)
 		p.githubToken = p.githubToken || mainReachable && authorityEffectsRequireToken(condition.Effects)
@@ -330,7 +371,17 @@ func (p *actionAuthorityPlanner) inspectMetadataTemplate(site Site, known map[st
 	}
 	analysis, err := expression.AnalyzeStepTemplate(site.Source, known, expression.GitHubTokenCompositeContext)
 	if err != nil {
-		return err
+		if validationErr := expression.ValidateStepTemplate(site.Source); validationErr != nil {
+			return err
+		}
+		requiresToken, fallbackErr := expression.ReferencesCompositeStepGitHubToken(site.Source)
+		if fallbackErr != nil {
+			return err
+		}
+		if reachable && requiresToken {
+			p.githubToken = true
+		}
+		return nil
 	}
 	if reachable && authorityEffectsRequireToken(analysis.Effects) {
 		p.githubToken = true
@@ -356,7 +407,14 @@ func workflowKnownReferences(context ActionAuthorityContext) (map[string]any, er
 		for _, binding := range layer {
 			analysis, err := expression.AnalyzeStepTemplate(binding.Value.Source, known, expression.GitHubTokenWorkflowContext)
 			if err != nil {
-				return nil, fmt.Errorf("environment %q: %w", binding.Name, err)
+				if validationErr := expression.ValidateStepTemplate(binding.Value.Source); validationErr != nil {
+					return nil, fmt.Errorf("environment %q: %w", binding.Name, err)
+				}
+				if _, fallbackErr := expression.ReferencesStepGitHubToken(binding.Value.Source); fallbackErr != nil {
+					return nil, fmt.Errorf("environment %q: %w", binding.Name, err)
+				}
+				values[strings.ToLower(binding.Name)] = expression.AbstractValue{}
+				continue
 			}
 			values[strings.ToLower(binding.Name)] = analysis.Value
 		}
@@ -397,7 +455,16 @@ func overlayActionEnvironment(scope map[string]any, bindings []Binding) (map[str
 	for _, binding := range bindings {
 		analysis, err := expression.AnalyzeStepTemplate(binding.Value.Source, scope, expression.GitHubTokenCompositeContext)
 		if err != nil {
-			return nil, false, err
+			if validationErr := expression.ValidateStepTemplate(binding.Value.Source); validationErr != nil {
+				return nil, false, err
+			}
+			requiresToken, fallbackErr := expression.ReferencesCompositeStepGitHubToken(binding.Value.Source)
+			if fallbackErr != nil {
+				return nil, false, err
+			}
+			githubToken = githubToken || requiresToken
+			delete(result, "env."+strings.ToLower(binding.Name))
+			continue
 		}
 		githubToken = githubToken || authorityEffectsRequireToken(analysis.Effects)
 		name := "env." + strings.ToLower(binding.Name)
@@ -422,4 +489,11 @@ func withoutKnownEnvironment(known map[string]any) map[string]any {
 
 func authorityEffectsRequireToken(effects expression.Effects) bool {
 	return effects.GitHubToken&(expression.GitHubTokenDirect|expression.GitHubTokenWorkflowContext) != 0
+}
+
+func stepTemplateReferencesGitHubToken(source string, workflowAuthored bool) (bool, error) {
+	if workflowAuthored {
+		return expression.ReferencesStepGitHubToken(source)
+	}
+	return expression.ReferencesCompositeStepGitHubToken(source)
 }
