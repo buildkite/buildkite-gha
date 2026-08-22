@@ -5,6 +5,7 @@ jq = "1.8.2"
 node = ["24.18.0", "20.20.2"]
 shellcheck = "0.11.0"
 goreleaser = "2.17.0"
+"go:golang.org/x/vuln/cmd/govulncheck" = "1.7.0"
 
 [settings]
 lockfile = true
@@ -43,6 +44,10 @@ depends = ["lint:go", "lint:shell"]
 [tasks.vet]
 description = "Run go vet"
 run = "echo '--- Vet Go'; go vet ./..."
+
+[tasks.vulnerability]
+description = "Check Go dependencies and the standard library for reachable vulnerabilities"
+run = "echo '--- Check vulnerabilities'; govulncheck ./..."
 
 [tasks.build]
 description = "Build all Go commands"
@@ -88,8 +93,8 @@ run = '"$MISE_CONFIG_ROOT/scripts/validate-public-workflow-corpus"'
 
 [tasks.check]
 description = "Run formatting, build, tests, lint, vet, and fixture checks"
-run = "mise run --jobs 1 format ::: build ::: build:darwin ::: test ::: test:race ::: lint ::: vet ::: smoke:local ::: release:check"
+run = "mise run --jobs 1 format ::: build ::: build:darwin ::: test ::: test:race ::: lint ::: vet ::: vulnerability ::: smoke:local ::: release:check"
 
 [tasks."check:ci"]
 description = "Run CI checks not covered by the Test Engine step"
-run = "mise run --jobs 1 format ::: build ::: build:darwin ::: test:race ::: lint ::: vet ::: smoke:local ::: release:check"
+run = "mise run --jobs 1 format ::: build ::: build:darwin ::: test:race ::: lint ::: vet ::: vulnerability ::: smoke:local ::: release:check"

@@ -62,6 +62,7 @@ steps:
 
   - group: ":test_tube: CI"
     key: "ci"
+    if: build.env("VULNERABILITY_SCAN") != "1"
     steps:
       - label: ":go: Repository checks"
         key: "checks"
@@ -151,6 +152,17 @@ steps:
         command: |
           revision="$$(git rev-parse HEAD)"
           mise exec -- go run -ldflags "-X main.revision=$$revision" ./cmd/buildkite-gha plugin
+
+  - label: ":shield: Scheduled vulnerability scan"
+    key: "vulnerability-scan"
+    if: build.env("VULNERABILITY_SCAN") == "1"
+    cache: ".buildkite/cache-volume"
+    plugins:
+      - setup-go#v0.1.0:
+          mise-version: "2026.5.12"
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: "mise run vulnerability"
 
   - wait: ~
 

@@ -1,7 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"],
-  "minimumReleaseAge": "3 days",
+  "extends": ["github>buildkite/renovate-config"],
   "automerge": true,
   "automergeType": "pr",
   "platformAutomerge": true,
@@ -15,7 +14,7 @@
   "customManagers": [
     {
       "customType": "regex",
-      "managerFilePatterns": ["/^internal\\/cli\\/cli\\.go$/"],
+      "managerFilePatterns": ["/^internal\\/cli\\/hosted\\.go$/"],
       "matchStrings": [
         "defaultNobleRunnerImage\\s+=\\s+\"buildkite\\.namespace-images\\.com/agent-base@(?<currentDigest>sha256:[a-f0-9]{64})\""
       ],
@@ -26,7 +25,7 @@
     },
     {
       "customType": "regex",
-      "managerFilePatterns": ["/^internal\\/cli\\/cli\\.go$/"],
+      "managerFilePatterns": ["/^internal\\/cli\\/hosted\\.go$/"],
       "matchStrings": [
         "defaultJammyRunnerImage\\s+=\\s+\"buildkite\\.namespace-images\\.com/agent-base@(?<currentDigest>sha256:[a-f0-9]{64})\""
       ],
