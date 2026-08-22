@@ -9,6 +9,10 @@ Follow the Buildkite [writing style guide](https://github.com/buildkite/docs/blo
 - Describe current behavior in product documentation. Durable engineering plans may live in `docs/plans/`; keep task tracking and remaining work in Linear.
 - State each fact once, then link to its source of truth. `README.md` is the overview; `docs/compatibility.md` owns supported behavior; the CLI, security, and development guides own their respective details.
 - Remove repetition, not behavior, boundaries, limits, warnings, or useful examples.
+- Update documentation in the same change as the behavior it describes. Replace outdated text instead of appending dated notes or corrections.
+- When a plan is complete, move any lasting facts into the owning product document, then remove the plan.
+- Prefer examples covered by tests. Check links and examples when changing nearby documentation.
+- Review compatibility guidance and plans regularly for stale, duplicated, or removable content.
 
 ## Cursor Cloud specific instructions
 
