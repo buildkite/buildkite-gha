@@ -2344,6 +2344,25 @@ jobs:
 	}
 }
 
+func TestValidateLocatesFailingAuthoredMatrixValue(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - ${{ github.run_id }}
+        include: ${{ fromJSON('[{"target":"linux"}]') }}
+    steps: [{run: true}]
+`)
+	_, err := Validate("matrix.yml", source)
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) || finding.Line != 8 || !strings.Contains(err.Error(), "github.run_id") {
+		t.Fatalf("Validate() finding = %#v, error = %v; want authored value at line 8", finding, err)
+	}
+}
+
 func TestCompileResolvesGitHubRefNameInMatrixDimension(t *testing.T) {
 	workflow := []byte(`on: push
 jobs:

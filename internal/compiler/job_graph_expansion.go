@@ -185,7 +185,7 @@ func matrixErrorPosition(job workflow.Job, err error) (int, int) {
 	}
 	var positioned matrixPositionError
 	if errors.As(err, &positioned) {
-		return positioned.span.Start.Line, positioned.span.Start.Column
+		return positioned.line, positioned.column
 	}
 	line, column = job.Matrix.Span.Start.Line, job.Matrix.Span.Start.Column
 	if job.Matrix.Expression != nil {
