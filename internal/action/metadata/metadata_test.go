@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -67,7 +68,7 @@ func TestValidateDockerEntrypoints(t *testing.T) {
 		{name: "exact Dockerfile", ok: true},
 		{name: "non Dockerfile image", mutate: func(m *Metadata) { m.Runs.Image = "docker://alpine" }},
 		{name: "entrypoint", mutate: func(m *Metadata) { m.Runs.Entrypoint = "main.sh" }},
-		{name: "args", mutate: func(m *Metadata) { m.Runs.Args = []string{"x"} }},
+		{name: "args", mutate: func(m *Metadata) { m.Runs.Args = []string{"", " --flag "} }, ok: true},
 		{name: "main", mutate: func(m *Metadata) { m.Runs.Main = "main.sh" }},
 		{name: "pre", mutate: func(m *Metadata) { m.Runs.Pre = "pre.sh" }},
 		{name: "pre condition", mutate: func(m *Metadata) { m.Runs.PreIf = "always()" }},
@@ -105,6 +106,73 @@ func TestValidateDockerEntrypoints(t *testing.T) {
 			}
 			if (err == nil) != test.ok {
 				t.Fatalf("validation error = %v, want success %v", err, test.ok)
+			}
+		})
+	}
+}
+
+func TestLoadDockerArgsRequiresStringSequence(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args string
+		ok   bool
+	}{
+		{name: "ordered strings", args: "[first, '', '  ', '--privileged']", ok: true},
+		{name: "empty sequence", args: "[]", ok: true},
+		{name: "scalar", args: "value"},
+		{name: "number", args: "[1]"},
+		{name: "mapping", args: "{name: value}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeAction(t, root, "Dockerfile", "FROM scratch\n")
+			writeAction(t, root, "action.yml", "runs:\n  using: docker\n  image: Dockerfile\n  args: "+test.args+"\n")
+			action, err := Load(root, ".")
+			if (err == nil) != test.ok {
+				t.Fatalf("Load() error = %v, want success %v", err, test.ok)
+			}
+			if test.ok && test.name == "ordered strings" {
+				want := []string{"first", "", "  ", "--privileged"}
+				if !slices.Equal(action.Runs.Args, want) {
+					t.Fatalf("runs.args = %#v, want %#v", action.Runs.Args, want)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadDockerArgsResolvesAliasesBeforeStringValidation(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		metadata string
+		ok       bool
+	}{
+		{name: "aliased runtime strings", ok: true, metadata: `name: &runtime docker
+runs:
+  using: *runtime
+  image: Dockerfile
+  args: [first, ""]
+`},
+		{name: "aliased runtime number", metadata: `name: &runtime docker
+runs:
+  using: *runtime
+  image: Dockerfile
+  args: [1]
+`},
+		{name: "merged runtime boolean", metadata: `runs:
+  <<: &defaults
+    using: docker
+    image: Dockerfile
+  args: [true]
+`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeAction(t, root, "Dockerfile", "FROM scratch\n")
+			writeAction(t, root, "action.yml", test.metadata)
+			_, err := Load(root, ".")
+			if (err == nil) != test.ok {
+				t.Fatalf("Load() error = %v, want success %v", err, test.ok)
 			}
 		})
 	}

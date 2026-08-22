@@ -155,6 +155,7 @@ type dockerAction struct {
 	SourceRoot   string
 	SourceDigest string
 	Dockerfile   string
+	Args         []string
 	Workspace    string
 	Env          map[string]string
 	runnerTemp   string
@@ -468,6 +469,7 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandProcessor, act
 		dockerRunEnv = mergeStringMaps(dockerEnv, cacheEnv)
 	}
 	args = append(args, image)
+	args = append(args, action.Args...)
 	ran = true
 	runErr := r.runStreaming(ctx, processor, "", dockerRunEnv, docker, args...)
 	if runErr != nil {

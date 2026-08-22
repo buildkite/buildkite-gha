@@ -617,7 +617,7 @@ Use an interpreter installed by an earlier step or included in the job image:
   run: conda info
 ```
 
-A `uses` step may call a supported local or public action. Action inputs under `with` may use supported direct interpolation. `docker://` actions and action `entrypoint` or `args` overrides are rejected.
+A `uses` step may call a supported local or public action. Action inputs under `with` may use supported direct interpolation. `docker://` actions and explicit Docker action entrypoints are rejected.
 
 Action steps can call public and local actions:
 
@@ -867,13 +867,31 @@ parts with values supported by their runtime surface.
 | Private action | ❌ Unsupported | No private action source access. |
 | JavaScript action | ✅ Supported | Declares `node16`, `node20`, or `node24`. |
 | Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; `bash`, `sh`, `python`, or a custom shell template for `run`; literal `continue-on-error`. |
-| Dockerfile action | 🟡 Supported subset | Verified local or public Dockerfile action on Linux. Rejected on macOS, including through a composite action. |
+| Dockerfile action | 🟡 Supported subset | Verified local or public Dockerfile action on Linux with optional bounded `runs.args`. Rejected on macOS, including through a composite action. |
 | `docker://` action | ❌ Unsupported | Rejected during validation. |
 | Top-level action metadata `env` | ➖ Accepted, no effect | Any valid YAML value is discarded. It is not evaluated, injected, retained in plans, or used to request secrets or tokens. |
 
 Mutable public refs are resolved during upload, then locked to a commit. The importer lazily requests one Buildkite action-source token and reuses it across all workflow roots and nested composite actions. This token authenticates only public metadata requests for repositories other than the credential repository; the credential repository and codeload requests remain anonymous. If token issuance is unavailable during rollout, resolution safely falls back to anonymous GitHub API access. Exact lowercase commit SHAs need no GitHub API lookup. Complete source trees are verified again at runtime.
 
-Nested calls from a repository-local composite must be local. Public composites may call local children or other public actions; every child is resolved and locked. Dockerfile actions cannot request credentials, volumes, arbitrary options, or privileged mode.
+Nested calls from a repository-local composite must be local. Public composites may call local children or other public actions; every child is resolved and locked.
+
+Dockerfile actions require exact `runs.image: Dockerfile`. Optional `runs.args`
+must be an ordered YAML string array. Each item becomes one argument after the
+image name, without a shell or an entrypoint override. Empty strings,
+whitespace, and shell metacharacters remain literal. Omitted or empty args keep
+the image `CMD`; any non-empty array replaces `CMD` while preserving the image
+`ENTRYPOINT`.
+
+Args may contain literals and direct `inputs.<name>` or `inputs['name']`
+interpolation. Operators, functions, whole or dynamic inputs, and every other
+context are rejected. Invocation inputs and metadata defaults resolve before
+args evaluation. Args remain in digest-bound action metadata and are not stored
+in job plans.
+
+Dockerfile actions cannot declare explicit entrypoints or pre/post lifecycle,
+or request credentials, volumes, arbitrary options, or privileged mode. An arg
+such as `--privileged` remains a container argument; it cannot become a Docker
+option.
 
 Action metadata parsing remains strict for every other unknown top-level field and for unknown nested fields. The inert top-level `env` exception does not replace workflow or action-step environments, populate `runs.env`, or add `GITHUB_TOKEN` authority.
 

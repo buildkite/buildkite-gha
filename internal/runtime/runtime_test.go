@@ -253,6 +253,7 @@ if [[ "$1" == buildx && "$2" == build ]]; then
 fi
 
 if [[ "$1" == run ]]; then
+	printf '%s\0' "$@" > "$state/run-argv"
 	if [[ -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
 		printf '%s|%s|%s' "$ACTIONS_RUNTIME_TOKEN" "${ACTIONS_RESULTS_URL:-}" "${ACTIONS_CACHE_SERVICE_V2:-}" > "$state/cache-runtime"
 	fi
@@ -263,8 +264,14 @@ if [[ "$1" == run ]]; then
   args=("$@")
   name=''
   owner=''
+  image_index=-1
+  expected_image="$(cat "$state/image-name")"
   for ((i = 0; i < ${#args[@]}; i++)); do
     arg="${args[$i]}"
+    if [[ "$arg" == "$expected_image" ]]; then
+      image_index=$i
+      break
+    fi
     case "$arg" in
       --name) name="${args[$((i + 1))]}" ;;
       --label) owner="${args[$((i + 1))]}" ;;
@@ -286,7 +293,7 @@ if [[ "$1" == run ]]; then
   [[ -n "$files" && -n "$workspace" && -n "$runner_temp" && "$workdir" == /github/workspace ]] || exit 33
   [[ -d "$workspace" && -d "$runner_temp" ]] || exit 41
   [[ "$name" == "$(cat "$state/image-name" | sed 's/-image-/-container-/')" ]] || exit 33
-  [[ "$owner" == "$(cat "$state/owner")" && "${args[$((${#args[@]} - 1))]}" == "$(cat "$state/image-name")" ]] || exit 39
+  [[ "$owner" == "$(cat "$state/owner")" && $image_index -gt 0 ]] || exit 39
   printf '%s' "$files" > "$state/command-files-path"
   touch "$state/container"
   printf 'container=ran\n' > "$files/output"
@@ -403,6 +410,21 @@ func fakeDockerAction(t *testing.T) dockerAction {
 		Name: "fake Docker", Path: path, SourceRoot: path, SourceDigest: digest,
 		Workspace: t.TempDir(), Env: map[string]string{"Z_LAST": "z", "A_FIRST": "a"},
 	}
+}
+
+func fakeDockerRunArgv(t *testing.T, fake fakeDocker) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(fake.root, "run-argv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := bytes.Split(data, []byte{0})
+	fields = fields[:len(fields)-1]
+	argv := make([]string, len(fields))
+	for i := range fields {
+		argv[i] = string(fields[i])
+	}
+	return argv
 }
 
 func callIndex(calls []fakeDockerCall, command ...string) int {
@@ -555,6 +577,99 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 				t.Fatalf("Docker call contains forbidden option %q: %s", forbidden, text)
 			}
 		}
+	}
+}
+
+func TestRunDockerAppendsExactArgsAfterImage(t *testing.T) {
+	fake := newFakeDocker(t, "success")
+	action := fakeDockerAction(t)
+	action.Args = []string{"--privileged", "", "  ", `$(touch /tmp/nope); * | &`, "a|b"}
+	if _, err := (Runner{Docker: fake.path}).runDockerAction(t.Context(), action); err != nil {
+		t.Fatal(err)
+	}
+	argv := fakeDockerRunArgv(t, fake)
+	imageBytes, err := os.ReadFile(filepath.Join(fake.root, "image-name"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := string(imageBytes)
+	imageIndex := slices.Index(argv, image)
+	if imageIndex < 0 {
+		t.Fatalf("image absent from Docker argv: %#v", argv)
+	}
+	if !slices.Equal(argv[imageIndex+1:], action.Args) {
+		t.Fatalf("Docker action argv suffix = %#v, want %#v", argv[imageIndex+1:], action.Args)
+	}
+	if slices.Contains(argv[:imageIndex], "--entrypoint") || slices.Contains(argv[:imageIndex], "--privileged") {
+		t.Fatalf("action args became Docker options: %#v", argv)
+	}
+}
+
+func TestRunJobResolvesDockerArgsFromInvocationInputsAndDefaults(t *testing.T) {
+	requireLinuxAMD64(t)
+	fake := newFakeDocker(t, "success")
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/docker.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: Docker args\n")
+	writeFixtureFile(t, workspace, "action/action.yml", `name: Docker args
+inputs:
+  supplied:
+    default: unused
+  fallback:
+    default: default value
+  blank:
+    default: ""
+runs:
+  using: docker
+  image: Dockerfile
+  args:
+    - ${{ inputs.supplied }}
+    - prefix-${{ inputs['fallback'] }}
+    - ${{ inputs.blank }}
+    - "  "
+`)
+	writeFixtureFile(t, workspace, "action/Dockerfile", "FROM scratch\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "docker", Kind: "uses", Uses: "./action", With: map[string]string{"supplied": "--privileged"},
+	}})
+	job.RequiredCapabilities = []string{"docker", "network"}
+	result, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	argv := fakeDockerRunArgv(t, fake)
+	imageBytes, err := os.ReadFile(filepath.Join(fake.root, "image-name"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := string(imageBytes)
+	imageIndex := slices.Index(argv, image)
+	want := []string{"--privileged", "prefix-default value", "", "  "}
+	if imageIndex < 0 {
+		t.Fatalf("image absent from Docker argv: %#v", argv)
+	}
+	if !slices.Equal(argv[imageIndex+1:], want) {
+		t.Fatalf("resolved Docker args = %#v, want %#v; full argv %#v", argv[imageIndex+1:], want, argv)
+	}
+}
+
+func TestRunJobRevalidatesDockerArgsWithInputsOnly(t *testing.T) {
+	requireLinuxAMD64(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/docker.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: Docker args\n")
+	writeFixtureFile(t, workspace, "action/action.yml", `runs:
+  using: docker
+  image: Dockerfile
+  args:
+    - ${{ secrets.token }}
+`)
+	writeFixtureFile(t, workspace, "action/Dockerfile", "FROM scratch\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "docker", Kind: "uses", Uses: "./action"}})
+	job.RequiredCapabilities = []string{"docker", "network"}
+	_, err := (Runner{Docker: filepath.Join(t.TempDir(), "docker-must-not-run")}).RunJob(t.Context(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), "argument 1") || !strings.Contains(err.Error(), "only inputs.<name>") {
+		t.Fatalf("RunJob() error = %v, want runtime inputs-only rejection", err)
 	}
 }
 
@@ -5048,6 +5163,64 @@ func TestDockerAction(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "masked docker probe: ***") {
 		t.Errorf("Docker logs = %q, want masked probe", logs.String())
+	}
+}
+
+func TestDockerActionArgsPreserveEntrypointAndControlCMD(t *testing.T) {
+	docker := requireDocker(t)
+	action := t.TempDir()
+	writeFixtureFile(t, action, "main.go", `package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
+func main() {
+	encoded, err := json.Marshal(os.Args[1:])
+	if err != nil {
+		panic(err)
+	}
+	output, err := os.OpenFile(os.Getenv("GITHUB_OUTPUT"), os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		panic(err)
+	}
+	defer output.Close()
+	if _, err := fmt.Fprintf(output, "args=%s\n", encoded); err != nil {
+		panic(err)
+	}
+}
+`)
+	binary := filepath.Join(action, "entrypoint")
+	build := exec.Command("go", "build", "-trimpath", "-o", binary, filepath.Join(action, "main.go"))
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build Docker args entrypoint: %v: %s", err, output)
+	}
+	writeFixtureFile(t, action, "Dockerfile", "FROM scratch\nCOPY entrypoint /entrypoint\nENTRYPOINT [\"/entrypoint\"]\nCMD [\"image-default\"]\n")
+
+	for _, test := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{name: "omitted preserves CMD", want: []string{"image-default"}},
+		{name: "nonempty replaces CMD", args: []string{"", "  ", "--privileged", `$(echo no-shell)`}, want: []string{"", "  ", "--privileged", `$(echo no-shell)`}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := (Runner{Docker: docker}).runDockerAction(t.Context(), dockerAction{Name: "Docker args", Path: action, Workspace: t.TempDir(), Args: test.args})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			if err := json.Unmarshal([]byte(result.Outputs["args"]), &got); err != nil {
+				t.Fatalf("decode observed argv %q: %v", result.Outputs["args"], err)
+			}
+			if !slices.Equal(got, test.want) {
+				t.Fatalf("entrypoint argv = %#v, want %#v", got, test.want)
+			}
+		})
 	}
 }
 
