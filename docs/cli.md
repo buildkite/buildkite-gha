@@ -340,8 +340,7 @@ plugins:
             size: 40g
 ```
 
-`cache.paths` is a required, non-empty list of unique, non-empty paths. Paths
-may be relative to the generated job's working directory or absolute. `name`
+`cache.paths` is a required, non-empty list of unique absolute paths. `name`
 and `size` are optional. Names follow Buildkite's 100-character
 letters-numbers-hyphens format and may contain `${BUILDKITE_*}` variables.
 Sizes use `Ng` and must be at least `20g`. Without a name or size, Buildkite

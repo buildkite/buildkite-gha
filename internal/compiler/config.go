@@ -200,7 +200,7 @@ func (options Options) validate() error {
 		if err := validateRunnerTarget(make(map[string]RunnerTarget), strings.Join(selector.Labels, ", "), selector.Target); err != nil {
 			return err
 		}
-		if existing, ok := selectors[key]; ok && !runnerTargetsEqual(existing, selector.Target) {
+		if existing, ok := selectors[key]; ok && !RunnerTargetsEqual(existing, selector.Target) {
 			return fmt.Errorf("runner selector has conflicting target mappings")
 		}
 		selectors[key] = selector.Target
@@ -267,14 +267,15 @@ func validateRunnerTarget(labels map[string]RunnerTarget, label string, target R
 		}
 	}
 	normalized := strings.ToLower(strings.TrimSpace(label))
-	if existing, ok := labels[normalized]; ok && !runnerTargetsEqual(existing, target) {
+	if existing, ok := labels[normalized]; ok && !RunnerTargetsEqual(existing, target) {
 		return fmt.Errorf("runner label %q has conflicting target mappings", label)
 	}
 	labels[normalized] = target
 	return nil
 }
 
-func runnerTargetsEqual(first, second RunnerTarget) bool {
+// RunnerTargetsEqual reports whether two complete runner mappings are equivalent.
+func RunnerTargetsEqual(first, second RunnerTarget) bool {
 	if first.Queue != second.Queue || first.Platform != second.Platform || first.Image != second.Image {
 		return false
 	}
@@ -381,7 +382,7 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 		if !ok {
 			return RunnerTarget{}, rejectRunner(reasonUnmappedLabel, "runner label %q is not mapped by policy", label)
 		}
-		if resolved && !runnerTargetsEqual(target, mapped) {
+		if resolved && !RunnerTargetsEqual(target, mapped) {
 			if target.Queue != mapped.Queue && target.Platform == mapped.Platform && target.Image == mapped.Image && cachesEqual(target.Cache, mapped.Cache) {
 				return RunnerTarget{}, rejectRunner(reasonConflictingQueues, "runner labels resolve to conflicting queues %q and %q", target.Queue, mapped.Queue)
 			}

@@ -955,7 +955,7 @@ func TestEmitConfiguredCacheUsesBuildkiteDefaultsWithoutMise(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
-		Jobs:               []Job{{Key: "shell", Label: "Shell", PlanDigest: testDigest("plan"), Cache: &CacheVolume{Paths: []string{".cache"}}}},
+		Jobs:               []Job{{Key: "shell", Label: "Shell", PlanDigest: testDigest("plan"), Cache: &CacheVolume{Paths: []string{"/home/runner/.cache"}}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -972,11 +972,11 @@ func TestEmitConfiguredCacheUsesBuildkiteDefaultsWithoutMise(t *testing.T) {
 	if err := yaml.Unmarshal(output, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document.Steps) != 1 || !slices.Equal(document.Steps[0].Cache.Paths, []string{".cache"}) || document.Steps[0].Cache.Name != "" || document.Steps[0].Cache.Size != "" || strings.Contains(string(output), "BUILDKITE_GHA_MISE_DATA_DIR") {
+	if len(document.Steps) != 1 || !slices.Equal(document.Steps[0].Cache.Paths, []string{"/home/runner/.cache"}) || document.Steps[0].Cache.Name != "" || document.Steps[0].Cache.Size != "" || strings.Contains(string(output), "BUILDKITE_GHA_MISE_DATA_DIR") {
 		t.Fatalf("configured cache did not preserve Buildkite defaults:\n%s", output)
 	}
-	if !strings.Contains(string(output), "readlink -f -- '.cache'") {
-		t.Fatalf("relative cache path is not made writable by runner:\n%s", output)
+	if !strings.Contains(string(output), "readlink -f -- '/home/runner/.cache'") {
+		t.Fatalf("cache path is not made writable by runner:\n%s", output)
 	}
 }
 

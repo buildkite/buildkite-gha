@@ -59,6 +59,9 @@ func ValidateCacheVolume(cache CacheVolume) error {
 		if strings.TrimSpace(path) == "" || strings.IndexFunc(path, unicode.IsControl) >= 0 {
 			return fmt.Errorf("cache paths entry %d must be a non-empty string", i)
 		}
+		if !filepath.IsAbs(path) {
+			return fmt.Errorf("cache path %q must be absolute", path)
+		}
 		if _, duplicate := seen[path]; duplicate {
 			return fmt.Errorf("cache path %q may only be configured once", path)
 		}

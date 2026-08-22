@@ -229,11 +229,12 @@ func TestParsePluginConfiguration(t *testing.T) {
 		{name: "unknown cache field", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[".cache"],"scope":"branch"}}]}`, want: "cache contains unknown field"},
 		{name: "missing cache paths", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"name":"dependencies"}}]}`, want: "cache paths is required"},
 		{name: "empty cache paths", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[]}}]}`, want: "cache paths must be a non-empty array"},
-		{name: "duplicate cache path", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[".cache",".cache"]}}]}`, want: "may only be configured once"},
-		{name: "invalid cache name", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[".cache"],"name":"bad_name"}}]}`, want: "cache name must be"},
-		{name: "arbitrary cache name variable", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[".cache"],"name":"${HOME}-cache"}}]}`, want: "cache name must be"},
-		{name: "undersized cache", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[".cache"],"size":"19g"}}]}`, want: "at least 20 gigabytes"},
-		{name: "invalid cache size unit", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[".cache"],"size":"20GB"}}]}`, want: "Ng format"},
+		{name: "relative cache path", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":[".cache"]}}]}`, want: "must be absolute"},
+		{name: "duplicate cache path", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":["/cache","/cache"]}}]}`, want: "may only be configured once"},
+		{name: "invalid cache name", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":["/cache"],"name":"bad_name"}}]}`, want: "cache name must be"},
+		{name: "arbitrary cache name variable", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":["/cache"],"name":"${HOME}-cache"}}]}`, want: "cache name must be"},
+		{name: "undersized cache", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":["/cache"],"size":"19g"}}]}`, want: "at least 20 gigabytes"},
+		{name: "invalid cache size unit", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","cache":{"paths":["/cache"],"size":"20GB"}}]}`, want: "Ng format"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := parsePluginConfiguration(test.source); err == nil || !strings.Contains(err.Error(), test.want) {
