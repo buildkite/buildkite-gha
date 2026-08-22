@@ -434,11 +434,9 @@ func verifiedActionEntrypoint(facts actionSourceFacts, entry string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("resolve normalized action entrypoint: %w", err)
 	}
-	for _, root := range []string{facts.ActionPath, facts.RepositoryRoot} {
-		rel, relErr := filepath.Rel(root, resolved)
-		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "", fmt.Errorf("normalized action entrypoint escapes verified source root")
-		}
+	rel, relErr := filepath.Rel(facts.RepositoryRoot, resolved)
+	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("normalized action entrypoint escapes verified source root")
 	}
 	info, err := os.Stat(resolved)
 	if err != nil || !info.Mode().IsRegular() {
