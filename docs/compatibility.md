@@ -909,8 +909,8 @@ the image `CMD`; any non-empty array replaces `CMD` while preserving the image
 Args may contain literals and direct `inputs.<name>` or `inputs['name']`
 interpolation. Operators, functions, whole or dynamic inputs, and every other
 context are rejected. Invocation inputs and metadata defaults resolve before
-args evaluation. Args remain in digest-bound action metadata and are not stored
-in job plans.
+args evaluation. Args remain in digest-bound action metadata and are also
+stored in the normalized action description in v2 job plans.
 
 Dockerfile actions cannot declare explicit entrypoints or pre/post lifecycle,
 or request credentials, volumes, arbitrary options, or privileged mode. An arg
