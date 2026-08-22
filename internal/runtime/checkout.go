@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
@@ -128,16 +129,27 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	run := func(runEnv map[string]string, withCredentials bool, args ...string) error {
 		return runWithBase(runEnv, base, withCredentials, args...)
 	}
+	runLFS := func(runEnv map[string]string, withCredentials bool, args ...string) error {
+		lfsEnv := checkoutGitConfigEnvironment(runEnv, base)
+		if withCredentials {
+			if err := r.runRepositoryProviderCheckoutLFS(ctx, processor, checkoutDirectory, lfsEnv, r.GitLFS, args, credentialHost); err != nil {
+				return fmt.Errorf("%s git lfs: %w", adapter, err)
+			}
+			return nil
+		}
+		if err := r.runStreaming(ctx, processor, checkoutDirectory, lfsEnv, r.GitLFS, args...); err != nil {
+			return fmt.Errorf("%s git lfs: %w", adapter, err)
+		}
+		return nil
+	}
 	if err := run(env, false, "init", "--template=", "."); err != nil {
 		return result, err
 	}
 	if err := run(env, false, "remote", "add", "origin", url); err != nil {
 		return result, err
 	}
-	lfsBase := base
 	if lfs {
-		lfsBase = checkoutGitLFSAliasArgs(base, r.GitLFS)
-		if err := runWithBase(env, lfsBase, false, "lfs", "install", "--local", "--skip-repo"); err != nil {
+		if err := runLFS(env, false, "install", "--local", "--skip-repo"); err != nil {
 			return result, err
 		}
 	}
@@ -148,7 +160,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	checkoutTarget := checkoutRevision(inputs, job.Event.SHA)
 	sparse := checkoutSparsePatterns(inputs)
 	if lfs && len(sparse) == 0 {
-		if err := runWithBase(env, lfsBase, credentialed, "lfs", "fetch", "origin", checkoutTarget); err != nil {
+		if err := runLFS(env, credentialed, "fetch", "origin", checkoutTarget); err != nil {
 			return result, err
 		}
 	}
@@ -259,12 +271,28 @@ func checkoutGitLFSFilterArgs(base []string, gitLFS string) []string {
 	)
 }
 
-func checkoutGitLFSAliasArgs(base []string, gitLFS string) []string {
-	return append(append([]string(nil), base...), "-c", "alias.lfs=!"+checkoutGitLFSExecutable(gitLFS))
-}
-
 func checkoutGitLFSExecutable(gitLFS string) string {
 	return "'" + strings.ReplaceAll(gitLFS, "'", `'\''`) + "'"
+}
+
+func checkoutGitConfigEnvironment(env map[string]string, args []string) map[string]string {
+	configured := cloneStrings(env)
+	count, _ := strconv.Atoi(configured["GIT_CONFIG_COUNT"])
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] != "-c" {
+			continue
+		}
+		key, value, ok := strings.Cut(args[i+1], "=")
+		if !ok {
+			continue
+		}
+		configured[fmt.Sprintf("GIT_CONFIG_KEY_%d", count)] = key
+		configured[fmt.Sprintf("GIT_CONFIG_VALUE_%d", count)] = value
+		count++
+		i++
+	}
+	configured["GIT_CONFIG_COUNT"] = strconv.Itoa(count)
+	return configured
 }
 
 func checkoutSubmoduleMode(inputs map[string]string) string {
@@ -538,12 +566,37 @@ func repositoryProviderCheckoutCredentialArgs(base []string, agent, host string)
 }
 
 func (r Runner) runRepositoryProviderCheckoutGit(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, git string, base, commandArgs []string, credentialHost string) error {
+	credentialEnv, err := r.repositoryProviderCheckoutCredentialEnvironment(processor, env, credentialHost)
+	if err != nil {
+		return err
+	}
+	credentialArgs := repositoryProviderCheckoutCredentialArgs(base, r.RepositoryCredentials.Agent, credentialHost)
+	cmd := exec.Command(git, append(credentialArgs, commandArgs...)...)
+	cmd.Dir = workspace
+	cmd.Env = processEnv(credentialEnv)
+	return processor.scrubError(r.runStreamingCommand(ctx, processor, cmd))
+}
+
+func (r Runner) runRepositoryProviderCheckoutLFS(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, gitLFS string, commandArgs []string, credentialHost string) error {
+	credentialEnv, err := r.repositoryProviderCheckoutCredentialEnvironment(processor, env, credentialHost)
+	if err != nil {
+		return err
+	}
+	credentialArgs := repositoryProviderCheckoutCredentialArgs(nil, r.RepositoryCredentials.Agent, credentialHost)
+	credentialEnv = checkoutGitConfigEnvironment(credentialEnv, credentialArgs)
+	cmd := exec.Command(gitLFS, commandArgs...)
+	cmd.Dir = workspace
+	cmd.Env = processEnv(credentialEnv)
+	return processor.scrubError(r.runStreamingCommand(ctx, processor, cmd))
+}
+
+func (r Runner) repositoryProviderCheckoutCredentialEnvironment(processor *commandProcessor, env map[string]string, credentialHost string) (map[string]string, error) {
 	credentials := r.RepositoryCredentials
 	if credentials == nil || credentials.Agent == "" || !filepath.IsAbs(credentials.Agent) {
-		return fmt.Errorf("repository-provider credentials were not resolved before workflow execution")
+		return nil, fmt.Errorf("repository-provider credentials were not resolved before workflow execution")
 	}
 	if credentialHost != "github.com" && credentialHost != "origin.cursor.com" {
-		return fmt.Errorf("repository-provider credentials require a supported event repository host")
+		return nil, fmt.Errorf("repository-provider credentials require a supported event repository host")
 	}
 	processor.addMask(credentials.JobToken)
 	credentialEnv := cloneStrings(env)
@@ -558,9 +611,5 @@ func (r Runner) runRepositoryProviderCheckoutGit(ctx context.Context, processor 
 	for name, value := range credentials.proxyEnvironment {
 		credentialEnv[name] = value
 	}
-	credentialArgs := repositoryProviderCheckoutCredentialArgs(base, credentials.Agent, credentialHost)
-	cmd := exec.Command(git, append(credentialArgs, commandArgs...)...)
-	cmd.Dir = workspace
-	cmd.Env = processEnv(credentialEnv)
-	return processor.scrubError(r.runStreamingCommand(ctx, processor, cmd))
+	return credentialEnv, nil
 }
