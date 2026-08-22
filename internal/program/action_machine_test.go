@@ -129,20 +129,24 @@ func TestActionMachinePreparesNestedJavaScriptDepthFirstInSourceOrder(t *testing
 	)
 }
 
-func TestActionMachineFalsePreGuardHasNoPreparationEffects(t *testing.T) {
+func TestActionMachineFalsePreGuardRemainsSkippedDuringInvocation(t *testing.T) {
 	action := js("pre", "main", "post")
-	action.Inputs = []ActionInput{{Name: "value", Default: ptrSite(site("default"))}}
-	action.JavaScript.PreCondition = site("false")
+	action.JavaScript.PreCondition = site("env:run")
 	machine := NewActionMachine(map[string]Action{"action": action}, &traceAdapter{}, traceState{})
 	inv := invocation("action", "action")
-	inv.Environment = []Binding{binding("value", "overlay")}
-	if _, _, err := machine.Prepare(t.Context(), inv, Frame{}); err != nil {
+	frame, _, err := machine.Prepare(t.Context(), inv, Frame{Environment: ValueObject{Fields: map[string]expression.AbstractValue{"run": known(false)}}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := machine.Finish(t.Context(), Frame{}); err != nil {
+	frame.Environment.Fields["run"] = known(true)
+	frame, _, err = machine.Invoke(t.Context(), inv, frame)
+	if err != nil {
 		t.Fatal(err)
 	}
-	requireTrace(t, machine, "eval:overlay", "eval:false")
+	if _, _, err = machine.Finish(t.Context(), frame); err != nil {
+		t.Fatal(err)
+	}
+	requireTrace(t, machine, "eval:env:run", "exec:action:main env=?/? input=?", "exec:action:post env=?/? input=?")
 }
 
 func ptrSite(value Site) *Site { return &value }
@@ -199,7 +203,10 @@ func TestActionMachineEnvironmentAndBindingsFollowLifecycleTime(t *testing.T) {
 }
 
 func TestActionMachineFailedPreSuppressesMainAndRetainsPost(t *testing.T) {
-	adapter := &traceAdapter{executions: map[string]Execution{"pre": {Outcomes: OutcomeFailure}}}
+	adapter := &traceAdapter{executions: map[string]Execution{"pre": {
+		Outcomes: OutcomeFailure,
+		Outputs:  ValueObject{Fields: map[string]expression.AbstractValue{"partial": known("value")}, Open: true},
+	}}}
 	machine := NewActionMachine(map[string]Action{"action": js("pre", "main", "post")}, adapter, traceState{})
 	frame, _, err := machine.Prepare(t.Context(), invocation("action", "action"), Frame{})
 	if err != nil {
@@ -211,6 +218,9 @@ func TestActionMachineFailedPreSuppressesMainAndRetainsPost(t *testing.T) {
 	}
 	if execution.Outcomes != OutcomeFailure {
 		t.Fatalf("invoke outcome = %v, want failure", execution.Outcomes)
+	}
+	if !execution.Outputs.Open || len(execution.Outputs.Fields) != 0 {
+		t.Fatalf("invoke outputs = %#v, want only preserved uncertainty", execution.Outputs)
 	}
 	if _, _, err = machine.Finish(t.Context(), frame); err != nil {
 		t.Fatal(err)
@@ -273,8 +283,33 @@ func TestActionMachineCompositeContinueOnErrorAllowsLaterSteps(t *testing.T) {
 	if execution.Outcomes != OutcomeSuccess {
 		t.Fatalf("composite outcome = %v, want success", execution.Outcomes)
 	}
+	if execution.Failure != nil {
+		t.Fatalf("composite retained tolerated failure: %v", execution.Failure)
+	}
 	if !slices.ContainsFunc(machine.State().events, func(event string) bool { return strings.Contains(event, ":after ") }) {
 		t.Fatalf("step after continued failure did not run: %q", machine.State().events)
+	}
+}
+
+func TestActionMachineCompositeContinueOnErrorDoesNotTolerateHardFailure(t *testing.T) {
+	failure := Execution{Outcomes: OutcomeFailure, Failure: &ExecutionFailure{Cause: fmt.Errorf("failed"), Hard: true}}
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{
+			{ContinueOnError: true, Run: &Run{Command: site("fail")}},
+			{Invocation: &Invocation{Lock: "after"}},
+		}}},
+		"after": js("", "after", ""),
+	}
+	machine := NewActionMachine(actions, &traceAdapter{executions: map[string]Execution{"": failure}}, traceState{})
+	_, execution, err := machine.Invoke(t.Context(), invocation("root", "root"), Frame{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Outcomes != OutcomeFailure || execution.Failure == nil || !execution.Failure.Hard {
+		t.Fatalf("composite execution = %#v, want hard failure", execution)
+	}
+	if slices.ContainsFunc(machine.State().events, func(event string) bool { return strings.Contains(event, ":after ") }) {
+		t.Fatalf("step after hard failure ran: %q", machine.State().events)
 	}
 }
 

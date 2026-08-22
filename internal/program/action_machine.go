@@ -299,6 +299,7 @@ func (m *ActionMachine[S]) prepare(ctx context.Context, invocation ActionInvocat
 			return Frame{}, Execution{}, fmt.Errorf("action pre-if: %w", err)
 		}
 		if condition == GuardFalse {
+			m.prepared[invocation.ID] = preparedInvocation{}
 			return frame, successfulExecution(), nil
 		}
 		if condition == GuardUnknown {
@@ -681,7 +682,11 @@ func joinExecutions(left, right Execution) Execution {
 }
 
 func failureOnly(execution Execution) Execution {
-	return Execution{Outcomes: execution.Outcomes, Failure: execution.Failure}
+	return Execution{
+		Outcomes: execution.Outcomes,
+		Outputs:  ValueObject{Open: execution.Outputs.Open},
+		Failure:  execution.Failure,
+	}
 }
 
 func sequenceExecutions(first, second Execution) Execution {
@@ -1101,8 +1106,9 @@ func (m *ActionMachine[S]) invokeComposite(ctx context.Context, invocation Actio
 		frame = applyExecution(frame, execution)
 		outcome := execution.Outcomes
 		conclusion := outcome
-		if step.ContinueOnError && conclusion&OutcomeFailure != 0 {
+		if step.ContinueOnError && conclusion&OutcomeFailure != 0 && (execution.Failure == nil || !execution.Failure.Hard) {
 			conclusion = (conclusion &^ OutcomeFailure) | OutcomeSuccess
+			execution.Failure = nil
 		}
 		if step.ID != "" {
 			if frame.Steps == nil {

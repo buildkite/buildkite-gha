@@ -598,6 +598,39 @@ func TestActionLockResolverFailsClosed(t *testing.T) {
 	}
 }
 
+func TestVerifiedActionEntrypointStaysWithinRepository(t *testing.T) {
+	parent := t.TempDir()
+	repository := filepath.Join(parent, "repository")
+	action := filepath.Join(repository, "action")
+	dist := filepath.Join(repository, "dist")
+	if err := os.MkdirAll(action, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dist, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entrypoint := filepath.Join(dist, "index.js")
+	if err := os.WriteFile(entrypoint, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := verifiedActionEntrypoint(actionSourceFacts{ActionPath: action, RepositoryRoot: repository}, "../dist/index.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != entrypoint {
+		t.Fatalf("verified entrypoint = %q, want %q", got, entrypoint)
+	}
+
+	outside := filepath.Join(parent, "outside.js")
+	if err := os.WriteFile(outside, []byte("no\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifiedActionEntrypoint(actionSourceFacts{ActionPath: action, RepositoryRoot: repository}, "../../outside.js"); err == nil {
+		t.Fatal("entrypoint outside repository succeeded")
+	}
+}
+
 func TestRunJobV3RemoteActionPopulatesEmptyWorkspaceBeforeLocalChild(t *testing.T) {
 	workflowSource := "name: checked out\n"
 	localSource := "name: local\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: printf '%s\\n' 'V3_LOCAL_CHILD=seen' >> \"$GITHUB_ENV\"\n"

@@ -646,9 +646,10 @@ func TestInventoryActionAuthorityIncludesCompositeConditionToken(t *testing.T) {
 func TestInventoryActionAuthorityRetainsTokenAfterUnknownStepOutput(t *testing.T) {
 	actions := map[string]Action{
 		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{
-			{ID: "decide", Run: &Run{Command: testActionSite("echo decide")}},
+			{ID: "decide", Invocation: &Invocation{Lock: "decide"}},
 			{Condition: testActionSite("steps.decide.outputs.use == 'true'"), Run: &Run{Command: testActionSite("echo ${{ github.token }}")}},
 		}}},
+		"decide": {Source: "github", Runtime: ActionRuntimeJavaScript, JavaScript: &JavaScriptAction{Pre: "pre.js", Main: "index.js"}},
 	}
 	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{})
 	if err != nil {
