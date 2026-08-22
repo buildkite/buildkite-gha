@@ -6,108 +6,68 @@ import (
 	"fmt"
 	"path"
 	"regexp"
-	"strconv"
 	"strings"
 )
 
-const MaxJobVolumes = 32
+const MaxJobVolumes = 128
+const MaxJobOptionsLength = 65536
 
-var (
-	volumeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{1,127}$`)
-	sizePattern       = regexp.MustCompile(`^[1-9][0-9]*[bBkKmMgG]?$`)
-	cpusPattern       = regexp.MustCompile(`^(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$`)
-	cpusetPattern     = regexp.MustCompile(`^[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*$`)
-	positivePattern   = regexp.MustCompile(`^[1-9][0-9]*$`)
-)
+var volumeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
 // JobOptions splits options using the GitHub runner's argument rules and
-// accepts only bounded resource controls. It returns the exact Docker argv.
+// rejects the network and entrypoint overrides that GitHub does not support.
+// It returns the exact Docker argv without invoking a shell.
 func JobOptions(value string) ([]string, error) {
-	if len(value) > 4096 || hasASCIIControl(value) || strings.Contains(value, "\"") {
-		return nil, fmt.Errorf("options exceed 4096 bytes or contain a control or quote character")
+	if len(value) > MaxJobOptionsLength || strings.ContainsAny(value, "\x00\r\n") {
+		return nil, fmt.Errorf("options exceed %d bytes or contain a control character", MaxJobOptionsLength)
 	}
 	args := ArgumentList(value)
-	if len(args) > 16 {
-		return nil, fmt.Errorf("options contain more than 16 arguments")
-	}
-	seen := map[string]bool{}
-	for i := 0; i < len(args); i++ {
-		option, optionValue, inline := strings.Cut(args[i], "=")
-		if !inline {
-			if i+1 == len(args) {
-				return nil, fmt.Errorf("option %q requires a value", option)
+	for _, arg := range args {
+		for _, unsupported := range []string{"--network", "--net", "--entrypoint"} {
+			if arg == unsupported || strings.HasPrefix(arg, unsupported+"=") {
+				return nil, fmt.Errorf("option %q is unsupported", arg)
 			}
-			i++
-			optionValue = args[i]
-		}
-		canonical := option
-		if canonical == "-m" {
-			canonical = "--memory"
-		}
-		if seen[canonical] {
-			return nil, fmt.Errorf("option %q is repeated", option)
-		}
-		seen[canonical] = true
-		valid := false
-		switch canonical {
-		case "--cpus":
-			cpus, err := strconv.ParseFloat(optionValue, 64)
-			valid = cpusPattern.MatchString(optionValue) && err == nil && cpus > 0
-		case "--cpuset-cpus":
-			valid = validCPUSet(optionValue)
-		case "--memory", "--memory-reservation", "--memory-swap", "--shm-size":
-			valid = sizePattern.MatchString(optionValue)
-		case "--pids-limit":
-			valid = positivePattern.MatchString(optionValue)
-		default:
-			return nil, fmt.Errorf("option %q is unsupported", option)
-		}
-		if !valid {
-			return nil, fmt.Errorf("option %q has invalid value %q", option, optionValue)
 		}
 	}
 	return args, nil
 }
 
-func validCPUSet(value string) bool {
-	if !cpusetPattern.MatchString(value) {
-		return false
-	}
-	for item := range strings.SplitSeq(value, ",") {
-		bounds := strings.Split(item, "-")
-		if len(bounds) == 1 {
-			continue
-		}
-		first, firstErr := strconv.Atoi(bounds[0])
-		last, lastErr := strconv.Atoi(bounds[1])
-		if firstErr != nil || lastErr != nil || first > last {
-			return false
-		}
-	}
-	return true
-}
-
-// ValidateJobVolume accepts a named volume mounted at an absolute container
-// path. Host bind mounts and runner-owned workspace/runtime targets are denied.
+// ValidateJobVolume accepts GitHub's named, anonymous, and absolute host-bind
+// volume syntax with an absolute container destination.
 func ValidateJobVolume(value string) error {
 	if value == "" || len(value) > 4096 || hasASCIIControl(value) {
 		return fmt.Errorf("volume is empty, too long, or contains a control character")
 	}
 	parts := strings.Split(value, ":")
-	if len(parts) < 2 || len(parts) > 3 || !volumeNamePattern.MatchString(parts[0]) {
-		return fmt.Errorf("volume must be NAME:/absolute/container/path[:ro|rw]")
-	}
-	target := parts[1]
-	if !strings.HasPrefix(target, "/") || target != path.Clean(target) || target == "/" {
-		return fmt.Errorf("volume target %q must be a clean absolute path", target)
-	}
-	for _, reserved := range []string{"/__w", "/__buildkite-gha"} {
-		if target == reserved || strings.HasPrefix(target, reserved+"/") {
-			return fmt.Errorf("volume target %q overlaps a runner-owned path", target)
+	var source, target, mode string
+	switch len(parts) {
+	case 1:
+		target = parts[0]
+	case 2:
+		if parts[1] == "ro" || parts[1] == "rw" {
+			target, mode = parts[0], parts[1]
+		} else {
+			source, target = parts[0], parts[1]
+			if source == "" {
+				return fmt.Errorf("volume source is empty")
+			}
 		}
+	case 3:
+		source, target, mode = parts[0], parts[1], parts[2]
+		if source == "" {
+			return fmt.Errorf("volume source is empty")
+		}
+	default:
+		return fmt.Errorf("volume must be DESTINATION[:ro|rw] or SOURCE:DESTINATION[:ro|rw]")
 	}
-	if len(parts) == 3 && parts[2] != "ro" && parts[2] != "rw" {
-		return fmt.Errorf("volume mode %q is unsupported", parts[2])
+	if source != "" && !path.IsAbs(source) && !volumeNamePattern.MatchString(source) {
+		return fmt.Errorf("volume source %q must be a name or absolute host path", source)
+	}
+	if !path.IsAbs(target) {
+		return fmt.Errorf("volume target %q must be an absolute path", target)
+	}
+	if mode != "" && mode != "ro" && mode != "rw" {
+		return fmt.Errorf("volume mode %q is unsupported", mode)
 	}
 	return nil
 }
@@ -119,7 +79,6 @@ func ValidateJobVolumes(values []string) error {
 		return fmt.Errorf("more than %d volumes", MaxJobVolumes)
 	}
 	seen := map[string]bool{}
-	seenTargets := map[string]bool{}
 	for _, value := range values {
 		if seen[value] {
 			return fmt.Errorf("volume %q is repeated", value)
@@ -128,26 +87,8 @@ func ValidateJobVolumes(values []string) error {
 		if err := ValidateJobVolume(value); err != nil {
 			return fmt.Errorf("invalid volume %q: %w", value, err)
 		}
-		target := JobVolumeTarget(value)
-		if seenTargets[target] {
-			return fmt.Errorf("volume target %q is repeated", target)
-		}
-		seenTargets[target] = true
 	}
 	return nil
-}
-
-// JobVolumeName returns the source name from a validated job volume.
-func JobVolumeName(value string) string {
-	name, _, _ := strings.Cut(value, ":")
-	return name
-}
-
-// JobVolumeTarget returns the target path from a validated job volume.
-func JobVolumeTarget(value string) string {
-	_, remainder, _ := strings.Cut(value, ":")
-	target, _, _ := strings.Cut(remainder, ":")
-	return target
 }
 
 func hasASCIIControl(value string) bool {

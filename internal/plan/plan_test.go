@@ -930,15 +930,10 @@ func TestContainerModelFields(t *testing.T) {
 	}
 }
 
-func TestJobContainerPlanRejectsUnsafeOptionsAndVolumes(t *testing.T) {
+func TestJobContainerPlanRejectsUnsupportedOptionsAndVolumes(t *testing.T) {
 	for name, container := range map[string]Container{
-		"privileged":         {Image: "node:24", Options: "--privileged"},
 		"network":            {Image: "node:24", Options: "--network=host"},
-		"unbounded memory":   {Image: "node:24", Options: "--memory-swap -1"},
-		"repeated option":    {Image: "node:24", Options: "--cpus 1 --cpus=2"},
-		"bind mount":         {Image: "node:24", Volumes: []string{"/tmp:/data"}},
-		"short volume name":  {Image: "node:24", Volumes: []string{"v:/data"}},
-		"runtime overlap":    {Image: "node:24", Volumes: []string{"cache:/__buildkite-gha/runtime"}},
+		"entrypoint":         {Image: "node:24", Options: "--entrypoint sh"},
 		"unsupported volume": {Image: "node:24", Volumes: []string{"cache:/data:z"}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -946,9 +941,22 @@ func TestJobContainerPlanRejectsUnsafeOptionsAndVolumes(t *testing.T) {
 			job.RequiredCapabilities = []string{"docker", "network"}
 			job.Container = &container
 			if err := job.Validate(); err == nil {
-				t.Fatal("Validate() accepted unsafe job container control")
+				t.Fatal("Validate() accepted unsupported job container control")
 			}
 		})
+	}
+}
+
+func TestJobContainerPlanAcceptsGitHubOptionsAndVolumes(t *testing.T) {
+	job := validJob()
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &Container{
+		Image:   "node:24",
+		Options: `--privileged --label "description=two words" --memory-swap -1`,
+		Volumes: []string{"v:/data", "/anonymous", "/tmp:/host", "one:/same", "two:/same", "cache:/__buildkite-gha/runtime"},
+	}
+	if err := job.Validate(); err != nil {
+		t.Fatalf("Validate() rejected GitHub-compatible job container controls: %v", err)
 	}
 }
 

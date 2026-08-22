@@ -2,38 +2,53 @@ package containerpolicy
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
 func TestJobOptionsAcceptedSyntax(t *testing.T) {
-	value := "--cpus=.5 --cpuset-cpus 0-2,4 -m 512m --memory-reservation=256M --memory-swap 1g --pids-limit=128 --shm-size 64m"
-	want := []string{"--cpus=.5", "--cpuset-cpus", "0-2,4", "-m", "512m", "--memory-reservation=256M", "--memory-swap", "1g", "--pids-limit=128", "--shm-size", "64m"}
+	value := `--privileged --user 1000 --label "description=two words" --mount type=tmpfs,dst=/tmp --name=custom`
+	want := []string{"--privileged", "--user", "1000", "--label", "description=two words", "--mount", "type=tmpfs,dst=/tmp", "--name=custom"}
 	got, err := JobOptions(value)
 	if err != nil || !slices.Equal(got, want) {
 		t.Fatalf("JobOptions(%q) = %#v, %v; want %#v", value, got, err, want)
 	}
 }
 
-func TestJobOptionsRejectsInvalidSyntax(t *testing.T) {
+func TestJobOptionsRejectsUnsupportedOverrides(t *testing.T) {
 	for _, value := range []string{
-		"--cpus 0", "--cpus NaN", "--cpuset-cpus 3-1", "--memory -1", "--memory 1t",
-		"--pids-limit 0", "--shm-size", "--cpus 1 --cpus=2", "--memory 1g extra",
+		"--network host", "--network=host", "--net host", "--net=host",
+		"--entrypoint sh", "--entrypoint=sh",
 	} {
 		t.Run(value, func(t *testing.T) {
 			if _, err := JobOptions(value); err == nil {
-				t.Fatal("JobOptions() accepted invalid syntax")
+				t.Fatal("JobOptions() accepted an unsupported override")
 			}
 		})
 	}
 }
 
+func TestJobOptionsInputBounds(t *testing.T) {
+	if _, err := JobOptions(strings.Repeat("x", MaxJobOptionsLength)); err != nil {
+		t.Fatalf("JobOptions() rejected the maximum input length: %v", err)
+	}
+	for _, value := range []string{strings.Repeat("x", MaxJobOptionsLength+1), "--label=a\n--privileged", "--label=a\x00b"} {
+		if _, err := JobOptions(value); err == nil {
+			t.Fatal("JobOptions() accepted out-of-bounds input")
+		}
+	}
+}
+
 func TestValidateJobVolume(t *testing.T) {
-	for _, value := range []string{"cache:/cache", "cache.v1:/var/cache:ro", "CACHE_1:/data:rw"} {
+	for _, value := range []string{
+		"v:/data", "cache:/cache", "cache.v1:/var/cache:ro", "CACHE_1:/data:rw",
+		"/anonymous", "/anonymous:ro", "/srv/cache:/cache", "/srv/cache:/cache:rw",
+	} {
 		if err := ValidateJobVolume(value); err != nil {
 			t.Errorf("ValidateJobVolume(%q) = %v", value, err)
 		}
 	}
-	for _, value := range []string{"v:/data", "/tmp:/data", "cache:data", "cache:/", "cache:/data/../other", "cache:/__w", "cache:/__buildkite-gha/runtime", "cache:/data:z"} {
+	for _, value := range []string{"-bad:/data", "relative/path:/data", "cache:data", "cache:/data:z", ":/data"} {
 		if err := ValidateJobVolume(value); err == nil {
 			t.Errorf("ValidateJobVolume(%q) accepted invalid volume", value)
 		}
@@ -41,7 +56,7 @@ func TestValidateJobVolume(t *testing.T) {
 	if err := ValidateJobVolumes([]string{"cache:/one", "cache:/one"}); err == nil {
 		t.Error("ValidateJobVolumes() accepted a repeated volume")
 	}
-	if err := ValidateJobVolumes([]string{"one:/cache", "two:/cache"}); err == nil {
-		t.Error("ValidateJobVolumes() accepted a repeated target")
+	if err := ValidateJobVolumes([]string{"one:/cache", "two:/cache"}); err != nil {
+		t.Errorf("ValidateJobVolumes() rejected Docker-owned duplicate target validation: %v", err)
 	}
 }
