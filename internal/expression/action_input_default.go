@@ -93,9 +93,9 @@ func isRunnerTempReference(root string, path []string) bool {
 }
 
 // ActionInputDefaultRequiresGitHubToken reports whether a metadata default can
-// reach github.token for the event provider. Defaults involving any other
-// runtime value require the token because those values are not known during
-// compilation.
+// reach github.token for the event provider. A token branch guarded by an
+// unknown runtime value requires the token because that value is not known
+// during compilation.
 func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, error) {
 	referencesToken, err := ReferencesGitHubToken(template)
 	if err != nil || !referencesToken {
@@ -129,8 +129,9 @@ func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, er
 					}
 				}
 			}
-			onlyKnownReferences = strings.EqualFold(root, "github") && len(path) == 1 &&
-				(strings.EqualFold(path[0], "server_url") || strings.EqualFold(path[0], "token"))
+			onlyKnownReferences = isJobCheckRunIDReference(root, path) ||
+				strings.EqualFold(root, "github") && len(path) == 1 &&
+					(strings.EqualFold(path[0], "server_url") || strings.EqualFold(path[0], "token"))
 		})
 		return nil
 	})

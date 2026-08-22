@@ -326,6 +326,8 @@ func TestActionInputDefaultRequiresGitHubTokenUsesProviderServerURL(t *testing.T
 		{name: "Origin skips GitHub.com token", template: "${{ github.server_url == 'https://github.com' && github.token || '' }}", serverURL: "https://origin.cursor.com"},
 		{name: "Origin reaches reverse guard", template: "${{ github.server_url != 'https://github.com' && github.token || '' }}", serverURL: "https://origin.cursor.com", want: true},
 		{name: "literal false skips token", template: "${{ false && github.token || '' }}", serverURL: "https://origin.cursor.com"},
+		{name: "unavailable check run skips token", template: "${{ job.check_run_id && github.token || '' }}", serverURL: "https://github.com"},
+		{name: "indexed unavailable check run skips token", template: "${{ job['check_run_id'] && github.token || '' }}", serverURL: "https://github.com"},
 		{name: "unknown guard requires token", template: "${{ inputs.use_token && github.token || '' }}", serverURL: "https://origin.cursor.com", want: true},
 		{name: "no token reference", template: "${{ github.server_url }}", serverURL: "https://origin.cursor.com"},
 	} {

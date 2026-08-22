@@ -451,6 +451,8 @@ func TestCompileActionInvocationsAcceptsUnavailableCheckRunIDDefaultWithoutAutho
 inputs:
   check-run-id:
     default: ${{ job.check_run_id }}
+  token:
+    default: ${{ job.check_run_id && github.token || '' }}
 runs:
   using: node24
   main: index.js
