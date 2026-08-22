@@ -59,6 +59,7 @@ type jobContainerBackend struct {
 	servicePorts              map[string]expression.ServiceContext
 	existingVolumes           map[string]bool
 	ownedVolumes              []string
+	volumesTracked            bool
 }
 
 func privateDocker(r Runner) (string, string, map[string]string, error) {
@@ -351,6 +352,8 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 			}
 			if trackErr := b.trackCreatedVolumes(reconcileCtx); trackErr != nil {
 				createErr = errors.Join(createErr, trackErr)
+			} else {
+				b.volumesTracked = true
 			}
 			cancelReconcile()
 			return nil, fmt.Errorf("create job container: %w", createErr)
@@ -358,6 +361,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 		if err = b.trackJobContainerVolumes(ctx); err != nil {
 			return nil, err
 		}
+		b.volumesTracked = true
 		if _, err = boundedDockerOutput(ctx, env, docker, "start", b.container); err != nil {
 			return nil, fmt.Errorf("start job container: %w", err)
 		}
@@ -850,10 +854,14 @@ func (b *jobContainerBackend) cleanup(parent context.Context) error {
 	var out string
 	var queryErr error
 	if b.container != "" {
-		if !b.containerCreated {
+		if !b.volumesTracked {
 			if trackErr := b.trackCreatedVolumes(ctx); trackErr != nil {
 				err = errors.Join(err, trackErr)
+			} else {
+				b.volumesTracked = true
 			}
+		}
+		if !b.containerCreated {
 			reference, reconcileErr := b.reconcileCreatedJob(ctx)
 			if reconcileErr != nil {
 				err = errors.Join(err, reconcileErr)

@@ -331,6 +331,13 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 			os.Exit(1)
 		}
 		if strings.Contains(strings.Join(args, " "), ".Mounts") {
+			if scenario == "fail-job-volume-tracking-once" {
+				marker := filepath.Join(root, "failed-volume-inspect")
+				if _, err := os.Stat(marker); errors.Is(err, os.ErrNotExist) {
+					_ = os.WriteFile(marker, nil, 0o600)
+					os.Exit(43)
+				}
+			}
 			data, _ := os.ReadFile(filepath.Join(root, "volumes-"+name))
 			fmt.Print(string(data))
 			os.Exit(0)
@@ -486,7 +493,7 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		_ = os.Remove(network)
 		os.Exit(0)
 	case "volume-ls":
-		if scenario == "fail-create-reconcile-once" {
+		if scenario == "fail-create-reconcile-once" || scenario == "fail-job-volume-tracking-once" {
 			if _, err := os.Stat(filepath.Join(root, "current-volumes")); err == nil {
 				marker := filepath.Join(root, "failed-volume-reconcile")
 				if _, err := os.Stat(marker); errors.Is(err, os.ErrNotExist) {
@@ -1559,6 +1566,21 @@ func TestRunJobContainerCleanupRetriesAmbiguousCreateReconciliation(t *testing.T
 	removedVolumes, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
 	if reconciles != 2 || !removed || readErr != nil || strings.TrimSpace(string(removedVolumes)) != "cache" {
 		t.Fatalf("ambiguous create cleanup calls = %#v", f.calls(t))
+	}
+}
+
+func TestRunJobContainerCleanupRetriesSuccessfulCreateVolumeTracking(t *testing.T) {
+	f := newJobDocker(t, "fail-job-volume-tracking-once")
+	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
+		t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(),
+		&plan.Container{Image: "alpine", Volumes: []string{"cache:/cache"}}, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "inspect job container volumes") {
+		t.Fatalf("startJobContainer() error = %v", err)
+	}
+	removedVolumes, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
+	if readErr != nil || strings.TrimSpace(string(removedVolumes)) != "cache" {
+		t.Fatalf("removed volumes = %q, %v", removedVolumes, readErr)
 	}
 }
 
