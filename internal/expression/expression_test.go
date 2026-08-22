@@ -2052,3 +2052,15 @@ func TestEvaluateCompileSupportsFunctionResultProjection(t *testing.T) {
 		t.Fatalf("EvaluateCompile() function projection = %#v, %v", got, err)
 	}
 }
+
+func TestEvaluateRunNameSupportsFunctionResultAccess(t *testing.T) {
+	got, err := EvaluateRunName("Deploy ${{ fromJSON(inputs.config).target }}", CompileContext{
+		Inputs: map[string]any{"config": `{"target":"production"}`},
+	})
+	if err != nil || got != "Deploy production" {
+		t.Fatalf("EvaluateRunName() = %q, %v", got, err)
+	}
+	if err := ValidateRunName("${{ fromJSON(secrets.config).target }}"); err == nil || !strings.Contains(err.Error(), `run-name context "secrets" is unavailable`) {
+		t.Fatalf("ValidateRunName() error = %v", err)
+	}
+}

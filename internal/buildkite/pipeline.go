@@ -57,6 +57,7 @@ type Pipeline struct {
 // pipeline. GroupLabel, GroupKey, and Event are required for aggregate emission.
 type Workflow struct {
 	GroupLabel      string
+	CheckName       string
 	GroupKey        string
 	Event           string
 	Condition       string
@@ -455,7 +456,10 @@ func emitWorkflowCheck(out *bytes.Buffer, indent, provider string, workflow prep
 		_, _ = fmt.Fprintf(out, "%s  - origin_check:\n", indent)
 		_, _ = fmt.Fprintf(out, "%s      key: %s\n", indent, yamlScalar(checkKey))
 	}
-	checkName := workflow.GroupLabel
+	checkName := workflow.CheckName
+	if checkName == "" {
+		checkName = workflow.GroupLabel
+	}
 	if jobLabel != "" {
 		checkName += " / " + jobLabel
 	}

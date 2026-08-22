@@ -628,9 +628,10 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 		return name + "on: " + trigger + "\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
 	}
 	sources := map[string]string{
-		"a.yml":        runnable("name: 'Shared \"checks\"'\n", "push"),
-		"b.yml":        runnable("name: 'Shared \"checks\"'\n", "pull_request"),
-		"unnamed.yml":  runnable("", "\n  push:\n    branches-ignore: [main]"),
+		"a.yml":        runnable("name: 'Shared \"checks\"'\nrun-name: Run ${{ inputs.target }} on ${{ github.ref_name }} by @${{ github.actor }}\n", "\n  push:\n  workflow_dispatch:\n    inputs:\n      target:\n        default: production"),
+		"b.yml":        runnable("name: 'Shared \"checks\"'\nrun-name: Skipped ${{ github.event_name }} run\n", "pull_request"),
+		"c.yml":        runnable("name: Manual deploy\nrun-name: Deploy ${{ inputs.target }}\n", "\n  workflow_dispatch:\n    inputs:\n      target:\n        default: production"),
+		"unnamed.yml":  runnable("run-name: '   '\n", "\n  push:\n    branches-ignore: [main]"),
 		"reusable.yml": "name: Shared\non: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
 	}
 	for name, source := range sources {
@@ -655,6 +656,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	workflowPaths := []string{
 		".github/workflows/a.yml",
 		".github/workflows/b.yml",
+		".github/workflows/c.yml",
 		".github/workflows/unnamed.yml",
 		".github/workflows/reusable.yml",
 	}
@@ -693,8 +695,9 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	want := []struct {
 		group, checkName, condition, skip string
 	}{
-		{group: `:github: workflow · Shared "checks"`, checkName: `Shared "checks" / test (push)`, condition: `(true)`},
-		{group: `:github: workflow · Shared "checks"`, checkName: `Shared "checks" (push)`, skip: "This workflow is not triggered by a `push` event"},
+		{group: `:github: workflow · Shared "checks" — Run  on main by @buildkite-gha-smoke`, checkName: `Shared "checks" / test (push)`, condition: `(true)`},
+		{group: `:github: workflow · Shared "checks" — Skipped push run`, checkName: `Shared "checks" (push)`, skip: "This workflow is not triggered by a `push` event"},
+		{group: ":github: workflow · Manual deploy", checkName: "Manual deploy (push)", skip: "This workflow is not triggered by a `push` event"},
 		{group: ":github: workflow · .github/workflows/unnamed.yml", checkName: ".github/workflows/unnamed.yml / test (push)", condition: `!("main" =~ /^main$/)`},
 	}
 	if len(pipeline.Steps) != len(want) {
@@ -1059,7 +1062,7 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	requireImporterHost(t)
 	directory := t.TempDir()
 	workflowPath := filepath.Join(directory, "invalid-push.yml")
-	workflow := "name: Invalid push\non:\n  push:\n    branches: [main]\njobs:\n  alpha:\n    runs-on: ${{ github.event.runner }}\n    steps: [{run: true}]\n  beta:\n    runs-on: ${{ github.event.runners.event_secret_key }}\n    steps: [{run: true}]\n  gamma:\n    runs-on: ${{ fromJSON(github.event.runner_json) }}\n    steps: [{run: true}]\n"
+	workflow := "name: Invalid push\nrun-name: Invalid run on ${{ github.ref_name }}\non:\n  push:\n    branches: [main]\njobs:\n  alpha:\n    runs-on: ${{ github.event.runner }}\n    steps: [{run: true}]\n  beta:\n    runs-on: ${{ github.event.runners.event_secret_key }}\n    steps: [{run: true}]\n  gamma:\n    runs-on: ${{ fromJSON(github.event.runner_json) }}\n    steps: [{run: true}]\n"
 	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1093,6 +1096,7 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 			Plugins   failureStepPlugins `yaml:"plugins"`
 			Notify    []struct {
 				GitHubCheck struct {
+					Name   string `yaml:"name"`
 					Output struct {
 						Title   string `yaml:"title"`
 						Summary string `yaml:"summary"`
@@ -1115,7 +1119,7 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	step := pipeline.Steps[0]
 	message := failureArtifactForStep(step.Plugins, runner.uploaded, "messages")
 	annotation := failureArtifactForStep(step.Plugins, runner.uploaded, "annotations")
-	if step.Label != ":github: workflow · Invalid push" || step.Condition != "" || !isGeneratedFailureCommand(step.Command) || strings.Contains(step.Command, "Runner label has no") || !strings.Contains(string(message), "Runner label has no") || !strings.Contains(string(message), "detail: Supported runner labels:") || !strings.Contains(string(annotation), `<h2 class="h4 mb2">Workflow could not be run</h2>`) || !strings.Contains(string(annotation), "Job <code>alpha</code>") || !strings.Contains(string(annotation), "Job <code>beta</code>") || !strings.Contains(string(annotation), "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || strings.Contains(step.Notify[0].GitHubCheck.Output.Summary, "<h2") || !strings.Contains(step.Notify[0].GitHubCheck.Output.Summary, "<p>") || !step.Checkout.Skip {
+	if step.Label != ":github: workflow · Invalid push — Invalid run on chore_updates" || step.Condition != "" || !isGeneratedFailureCommand(step.Command) || strings.Contains(step.Command, "Runner label has no") || !strings.Contains(string(message), "Runner label has no") || !strings.Contains(string(message), "detail: Supported runner labels:") || !strings.Contains(string(annotation), `<h2 class="h4 mb2">Workflow could not be run</h2>`) || !strings.Contains(string(annotation), "Job <code>alpha</code>") || !strings.Contains(string(annotation), "Job <code>beta</code>") || !strings.Contains(string(annotation), "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Invalid push (push)" || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || strings.Contains(step.Notify[0].GitHubCheck.Output.Summary, "<h2") || !strings.Contains(step.Notify[0].GitHubCheck.Output.Summary, "<p>") || !step.Checkout.Skip {
 		t.Fatalf("compiler failure step = %#v", step)
 	}
 	if strings.Contains(step.Notify[0].GitHubCheck.Output.Summary, "E_EXPRESSION_INVALID") {

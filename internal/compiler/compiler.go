@@ -51,6 +51,7 @@ type ExecutionBoundary struct {
 type WorkflowSource struct {
 	Path                          string             `json:"path"`
 	Name                          string             `json:"name,omitempty"`
+	RunName                       string             `json:"run_name,omitempty"`
 	Digest                        string             `json:"digest"`
 	ConcurrencyGroup              string             `json:"concurrency_group,omitempty"`
 	Triggers                      []workflow.Trigger `json:"-"`
@@ -194,12 +195,13 @@ func ValidateWithOptionsContext(ctx context.Context, path string, source []byte,
 	context := compileContext(event, nil, path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	context.GitHub["head_ref"] = "validation"
+	runNameErr := validateWorkflowRunName(path, parsed)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
 	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
-	if err := errors.Join(optionsErr, triggerErr, concurrencyErr, cancellationErr, expandErr); err != nil {
+	if err := errors.Join(optionsErr, triggerErr, runNameErr, concurrencyErr, cancellationErr, expandErr); err != nil {
 		return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
 	return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), nil
@@ -246,12 +248,13 @@ func ValidateEventWithOptionsContext(ctx context.Context, path string, source, e
 	event.Trust = options.EventTrust
 	context := compileContext(event, options.Vars.snapshot(), path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
+	_, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
 	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
-	if err := errors.Join(concurrencyErr, cancellationErr, expandErr); err != nil {
+	if err := errors.Join(runNameErr, concurrencyErr, cancellationErr, expandErr); err != nil {
 		return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), err
 	}
 	return jobGraphExpansionReport(expanded, compilerWarnings(parsed, cancelInProgress)), nil
@@ -306,6 +309,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	vars := options.Vars.snapshot()
 	context := compileContext(event, vars, path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
+	runName, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
@@ -315,7 +319,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	ir := IR{
 		Schema: schema,
 		Workflow: WorkflowSource{
-			Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
+			Path: path, Name: parsed.Name, RunName: runName, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
 			WorkflowTokenPolicyFilename: workflowTokenPolicyFilename, WorkflowTokenPermissions: workflowTokenPermissions, WorkflowTokenPolicyDiagnostic: workflowTokenPolicyDiagnostic,
 		},
 		Event:    event,
@@ -327,7 +331,46 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 		},
 		Jobs: expanded.instances,
 	}
-	return ir, errors.Join(concurrencyErr, cancellationErr, expandErr)
+	return ir, errors.Join(runNameErr, concurrencyErr, cancellationErr, expandErr)
+}
+
+// ResolveWorkflowRunName evaluates one parsed workflow's explicit run-name
+// against the event snapshot used for compilation. Dispatch inputs are only
+// available when the workflow applies to the event.
+func ResolveWorkflowRunName(path string, parsed *workflow.Workflow, event Event, applicable bool) (string, error) {
+	context := compileContext(event, nil, path, parsed.Name)
+	if applicable {
+		context.Inputs = workflowDispatchInputs(parsed, event)
+	}
+	return resolveWorkflowRunName(path, parsed, context)
+}
+
+func resolveWorkflowRunName(path string, parsed *workflow.Workflow, context expression.CompileContext) (string, error) {
+	if strings.TrimSpace(parsed.RunName) == "" {
+		return "", nil
+	}
+	resolved, err := expression.EvaluateRunName(parsed.RunName, context)
+	if err == nil {
+		if strings.TrimSpace(resolved) == "" {
+			return "", nil
+		}
+		return resolved, nil
+	}
+	position := parsed.RunNameSpan.Start
+	return "", attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, position.Line, position.Column, "", "", "", 0,
+		fmt.Errorf("%s:%d:%d: workflow run-name: %w", path, position.Line, position.Column, err))
+}
+
+func validateWorkflowRunName(path string, parsed *workflow.Workflow) error {
+	if strings.TrimSpace(parsed.RunName) == "" {
+		return nil
+	}
+	if err := expression.ValidateRunName(parsed.RunName); err != nil {
+		position := parsed.RunNameSpan.Start
+		return attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, position.Line, position.Column, "", "", "", 0,
+			fmt.Errorf("%s:%d:%d: workflow run-name: %w", path, position.Line, position.Column, err))
+	}
+	return nil
 }
 
 func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string, map[string]string, string) {

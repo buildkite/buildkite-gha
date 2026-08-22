@@ -18,6 +18,8 @@ type Span struct {
 // Workflow is the actionlint-independent syntax needed by the workflow compiler.
 type Workflow struct {
 	Name                    string                `json:"name,omitempty"`
+	RunName                 string                `json:"run_name,omitempty"`
+	RunNameSpan             Span                  `json:"-"`
 	Triggers                []Trigger             `json:"triggers,omitempty"`
 	Env                     map[string]string     `json:"env,omitempty"`
 	Permissions             *Permissions          `json:"permissions,omitempty"`

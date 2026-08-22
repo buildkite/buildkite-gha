@@ -78,6 +78,10 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if parsed.Name != nil {
 		owned.Name = parsed.Name.Value
 	}
+	if parsed.RunName != nil {
+		owned.RunName = parsed.RunName.Value
+		owned.RunNameSpan = spanFrom(parsed.RunName.Pos, parsed.RunName.Value)
+	}
 	owned.Concurrency, err = adaptConcurrency(path, "", parsed.Concurrency)
 	if err != nil {
 		return nil, err

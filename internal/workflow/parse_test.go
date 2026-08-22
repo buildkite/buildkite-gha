@@ -37,6 +37,16 @@ func TestParseSmokeWorkflowsIntoOwnedModel(t *testing.T) {
 	}
 }
 
+func TestParseRetainsRunNameAndSourceSpan(t *testing.T) {
+	parsed, err := Parse("deploy.yml", []byte("name: Deploy\nrun-name: Deploy ${{ inputs.target }} by @${{ github.actor }}\non: workflow_dispatch\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.RunName != "Deploy ${{ inputs.target }} by @${{ github.actor }}" || parsed.RunNameSpan.Start.Line != 2 || parsed.RunNameSpan.Start.Column == 0 {
+		t.Fatalf("run-name = %q at %#v", parsed.RunName, parsed.RunNameSpan)
+	}
+}
+
 func TestParsePreservesEnvironmentVariableCase(t *testing.T) {
 	source := []byte("on: push\nenv:\n  WorkflowValue: workflow\njobs:\n  build:\n    runs-on: ubuntu-latest\n    env:\n      JobValue: job\n    steps:\n      - run: true\n        env:\n          STEP_VALUE: step\n")
 	parsed, err := Parse("env.yml", source)

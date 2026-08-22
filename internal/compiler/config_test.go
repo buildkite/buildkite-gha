@@ -56,6 +56,114 @@ jobs:
 	}
 }
 
+func TestCompileResolvesRunNameFromGitHubAndDispatchInputs(t *testing.T) {
+	workflow := []byte(`name: Deploy
+run-name: Deploy ${{ inputs.target }} from ${{ github.ref_name }} by @${{ github.actor }}
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        default: staging
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	event := strings.Replace(string(pushEvent(t)), `"event": "push"`, `"event": "workflow_dispatch"`, 1)
+	event = strings.Replace(event, `"payload": {`, `"payload": {"inputs":{"target":"production"},`, 1)
+	compiled, err := CompileWithOptions("deploy.yml", workflow, []byte(event), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if ir.Workflow.Name != "Deploy" || ir.Workflow.RunName != "Deploy production from main by @buildkite-gha-smoke" {
+		t.Fatalf("workflow presentation = %#v", ir.Workflow)
+	}
+}
+
+func TestCompileResolvesMissingDispatchInputAsEmptyOnPush(t *testing.T) {
+	workflow := []byte(`name: Deploy
+run-name: Deploy ${{ inputs.target }} from ${{ github.ref_name }}
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      target:
+        default: production
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	compiled, err := CompileWithOptions("deploy.yml", workflow, pushEvent(t), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if ir.Workflow.RunName != "Deploy  from main" {
+		t.Fatalf("push run-name = %q, want missing dispatch input rendered as empty", ir.Workflow.RunName)
+	}
+}
+
+func TestCompileTreatsBlankRunNameAsAbsentAndLocatesUnsupportedContext(t *testing.T) {
+	workflow := []byte("name: CI\nrun-name: '   '\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+	compiled, err := CompileWithOptions("blank.yml", workflow, pushEvent(t), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if ir.Workflow.RunName != "" {
+		t.Fatalf("blank run-name = %q, want absent", ir.Workflow.RunName)
+	}
+	workflow = []byte("name: CI\nrun-name: ${{ github.head_ref }}\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+	compiled, err = CompileWithOptions("resolved-blank.yml", workflow, pushEvent(t), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if ir.Workflow.RunName != "" {
+		t.Fatalf("resolved blank run-name = %q, want absent", ir.Workflow.RunName)
+	}
+
+	workflow = []byte("name: CI\nrun-name: Run ${{ vars.TARGET }}\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+	if _, err := Validate("invalid.yml", workflow); err == nil || !strings.Contains(err.Error(), `invalid.yml:2:11: workflow run-name: run-name context "vars" is unavailable`) {
+		t.Fatalf("unsupported run-name validation error = %v", err)
+	}
+	_, err = CompileWithOptions("invalid.yml", workflow, pushEvent(t), defaultOptions())
+	if err == nil || !strings.Contains(err.Error(), `invalid.yml:2:11: workflow run-name: run-name context "vars" is unavailable`) {
+		t.Fatalf("unsupported run-name error = %v", err)
+	}
+}
+
+func TestValidateRunNameDoesNotEvaluateRequiredDispatchInputs(t *testing.T) {
+	workflow := []byte(`name: Deploy
+run-name: Deploy ${{ fromJSON(inputs.config).target }}
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        required: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	if _, err := Validate("deploy.yml", workflow); err != nil {
+		t.Fatalf("event-independent validation evaluated required input: %v", err)
+	}
+}
+
 func TestCompileOptionsRejectCaseCollisionsWithinOneVarsSource(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n")
 	_, err := CompileWithOptions("vars.yml", workflow, pushEvent(t), Options{

@@ -31,7 +31,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 
 | Area | Status | Initial release boundary |
 | --- | --- | --- |
-| [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name` and job names are retained. `run-name` has no effect. |
+| [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name`, explicit `run-name`, and job names are retained. `run-name` supports expressions over `github` and `inputs`. |
 | [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. `workflow_call` is supported for composition. |
 | [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64. The Agent API can map compatible selectors to hosted Linux or native macOS arm64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
@@ -90,8 +90,9 @@ and deduplicates the paths.
 
 All runnable workflows use one artifact and pipeline transaction:
 
-- A compiled workflow becomes a group labeled `:github: <workflow-name>`. An
-  unnamed workflow uses its canonical path.
+- A compiled workflow becomes a group labeled `:github: workflow ·
+  <workflow-name>`. An unnamed workflow uses its canonical path. A resolved,
+  non-empty `run-name` appends ` — <run-name>`.
 - Each child publishes a provider check named
   `<workflow-name-or-path> / <job-id> (<effective-event>)`. Matrix jobs append
   their sorted values to the job ID.
@@ -102,8 +103,9 @@ All runnable workflows use one artifact and pipeline transaction:
   each mismatch, and links to the generated step. If publication fails, upload
   warns but still succeeds.
 
-Group labels stay the same across events. Groups and replacement steps depend
-on the importer; their child jobs do not repeat that dependency.
+Workflow names, group keys, and provider-check names stay the same across
+events; only an appended run title can vary. Groups and replacement steps
+depend on the importer; their child jobs do not repeat that dependency.
 
 Reusable-only `workflow_call` files remain available to local callers but do not
 create groups. Selecting only reusable workflows is an error.
@@ -111,7 +113,8 @@ create groups. Selecting only reusable workflows is an error.
 A safe compilation or trigger-translation error replaces only that workflow
 with a failing top-level step. The step:
 
-- is labeled `:github: <workflow-name-or-path>`
+- is labeled `:github: workflow · <workflow-name-or-path>`, with the resolved
+  run title appended when present
 - publishes redacted diagnostics as a job annotation
 - publishes a `Workflow could not be run` provider check
 - limits the check summary to 65,535 bytes
@@ -142,7 +145,7 @@ preserve both fields. GitHub check summaries show only the concise message.
 | Key | Status | Behavior |
 | --- | --- | --- |
 | `name` | ✅ Supported | Available as `github.workflow` and used to name generated work. |
-| `run-name` | ➖ Accepted, no effect | Buildkite names the build. The value is not retained. |
+| `run-name` | 🟡 Supported subset | An explicit non-empty value is appended to the workflow group label. Compile-time `github` and `inputs` expressions are supported. The Buildkite build message and provider-check names do not change. |
 | `on` | 🟡 Supported subset | Does not create a Buildkite build. Selects and filters aggregate groups for the effective event as described below. |
 
 A workflow name is retained in generated work:
@@ -150,6 +153,24 @@ A workflow name is retained in generated work:
 ```yaml
 name: CI
 ```
+
+An explicit run name adds event-specific presentation without changing static
+workflow or check identity:
+
+```yaml
+name: Deploy
+run-name: Deploy ${{ inputs.target }} by @${{ github.actor }}
+```
+
+This produces `:github: workflow · Deploy — Deploy production by @octocat`.
+Omitted, blank, or blank-resolving values retain the static group label. On a
+non-dispatch event, declared dispatch inputs use their typed zero values rather
+than dispatch-only defaults. A skipped workflow does not synthesize dispatch
+inputs.
+
+GitHub also documents `vars` in its context-availability reference. The
+production importer has no authenticated GitHub variable snapshot, so `vars`
+fails with a source-located diagnostic instead of resolving as empty.
 
 Buildkite controls when a build starts. The trigger declaration controls whether and under which condition the workflow group participates in that existing build:
 

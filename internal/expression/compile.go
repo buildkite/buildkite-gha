@@ -126,6 +126,62 @@ func EvaluateReusableInputDefault(template string, context CompileContext) (any,
 	return EvaluateCompileTemplate(template, context)
 }
 
+// ValidateRunName validates the supported expression surface available while
+// creating a workflow run.
+func ValidateRunName(template string) error {
+	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
+		validator := newSemanticValidator(compileTimeSurface)
+		validator.validateReference = func(_ actionlint.ExprNode, root string, _ []string) error {
+			if !strings.EqualFold(root, "github") && !strings.EqualFold(root, "inputs") {
+				return fmt.Errorf("run-name context %q is unavailable", root)
+			}
+			return nil
+		}
+		validator.validateAccess = func(node actionlint.ExprNode) error {
+			root := referenceRoot(node)
+			if root != "" && !strings.EqualFold(root, "github") && !strings.EqualFold(root, "inputs") {
+				return fmt.Errorf("run-name context %q is unavailable", root)
+			}
+			switch node := node.(type) {
+			case *actionlint.ObjectDerefNode:
+				return validator.validate(node.Receiver)
+			case *actionlint.IndexAccessNode:
+				if err := validator.validate(node.Operand); err != nil {
+					return err
+				}
+				return validator.validate(node.Index)
+			case *actionlint.ArrayDerefNode:
+				return validator.validate(node.Receiver)
+			default:
+				return nil
+			}
+		}
+		validator.validateCompare = func(actionlint.CompareOpNodeKind) error { return nil }
+		validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
+		validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
+			if recognized, err := validatePureFunction(validator, node); recognized {
+				return err
+			}
+			return fmt.Errorf("unsupported run-name function %q", node.Callee)
+		}
+		validator.unsupported = func(actionlint.ExprNode) error {
+			return fmt.Errorf("unsupported run-name expression")
+		}
+		if err := validator.validate(node); err != nil {
+			return err
+		}
+		return validateCompileExpressionNode(node)
+	})
+}
+
+// EvaluateRunName evaluates a validated workflow run-name.
+func EvaluateRunName(template string, context CompileContext) (string, error) {
+	if err := ValidateRunName(template); err != nil {
+		return "", err
+	}
+	return EvaluateCompileTemplate(template, context)
+}
+
 func validateCompileExpressionNode(node actionlint.ExprNode) error {
 	validator := newSemanticValidator(compileTimeSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {

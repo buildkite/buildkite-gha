@@ -341,6 +341,10 @@ Upload is atomic. Compiled workflows become groups; skipped workflows become
 top-level skipped steps. Reusable-only files remain available to local callers
 but do not create groups. Selecting only reusable workflows is an error.
 
+An explicit non-empty workflow `run-name` appends ` — <run-name>` to its group
+label after resolving supported `github` and `inputs` expressions. Workflow
+names, provider-check names, and the Buildkite build message remain unchanged.
+
 See [Aggregate workflow upload](compatibility.md#aggregate-workflow-upload) for
 group labels, provider checks, and failure behavior.
 
@@ -365,8 +369,8 @@ commit, and ref remain authoritative.
 Raw webhook data is not retained in generated plans or pipeline YAML and cannot grant queues, secrets, or tokens.
 
 The selected snapshot establishes one event for applicability, compilation,
-group conditions, and provider-check names. An explicit event is never replaced
-with live Buildkite fields.
+group conditions, provider-check names, and explicit run-name evaluation. An
+explicit event is never replaced with live Buildkite fields.
 
 Linked webhook data can provide `merge_group` and `release`. Those events need
 matching Buildkite refs, commits, and activity. Release also needs a valid
