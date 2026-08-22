@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -32,9 +33,35 @@ type actionSession struct {
 	cursor  int
 }
 
-func newActionSession(run *jobRun) *actionSession {
+type actionPostRegistration struct {
+	session   *actionSession
+	stepIndex int
+}
+
+type actionPostSequence struct {
+	mu            sync.Mutex
+	registrations []actionPostRegistration
+}
+
+func (s *actionPostSequence) register(registration actionPostRegistration) {
+	s.mu.Lock()
+	s.registrations = append(s.registrations, registration)
+	s.mu.Unlock()
+}
+
+func (s *actionPostSequence) snapshot() []actionPostRegistration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]actionPostRegistration(nil), s.registrations...)
+}
+
+func newActionSession(run *jobRun, stepIndex int) *actionSession {
 	adapter, state := newActionAdapter(run)
-	return &actionSession{machine: program.NewActionMachine(run.job.ActionPrograms, adapter, state), adapter: adapter}
+	session := &actionSession{machine: program.NewActionMachine(run.job.ActionPrograms, adapter, state), adapter: adapter}
+	session.machine.SetPostRegistrationCallback(func() {
+		run.actionPosts.register(actionPostRegistration{session: session, stepIndex: stepIndex})
+	})
+	return session
 }
 
 func (s *actionSession) drain() Result {
@@ -196,12 +223,6 @@ func (a *actionAdapter) Execute(ctx context.Context, state actionAdapterState, o
 	if err != nil {
 		return state, program.Execution{}, err
 	}
-	if operation.Phase == program.PhasePre && a.preparation != nil {
-		ctx, err = a.preparation.context(ctx)
-		if err != nil {
-			return state, program.Execution{}, err
-		}
-	}
 	inputs, err := concreteStrings(operation.Inputs, "action inputs")
 	if err != nil {
 		return state, program.Execution{}, err
@@ -209,6 +230,13 @@ func (a *actionAdapter) Execute(ctx context.Context, state actionAdapterState, o
 	environment, err := concreteStrings(operation.Environment, "action environment")
 	if err != nil {
 		return state, program.Execution{}, err
+	}
+	if operation.Phase == program.PhasePre && a.preparation != nil {
+		a.preparation.eval.Env = cloneStrings(environment)
+		ctx, err = a.preparation.context(ctx)
+		if err != nil {
+			return state, program.Execution{}, err
+		}
 	}
 	environment = mergeStepEnvironment(a.run.runtimeEnv, environment)
 	processor := a.run.processor

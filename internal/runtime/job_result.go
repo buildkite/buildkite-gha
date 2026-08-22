@@ -41,8 +41,9 @@ type hardJobFailure struct {
 	err error
 }
 
-func (e *hardJobFailure) Error() string { return e.err.Error() }
-func (e *hardJobFailure) Unwrap() error { return e.err }
+func (e *hardJobFailure) Error() string     { return e.err.Error() }
+func (e *hardJobFailure) Unwrap() error     { return e.err }
+func (e *hardJobFailure) HardFailure() bool { return true }
 
 type workflowJobFailure struct {
 	err error
