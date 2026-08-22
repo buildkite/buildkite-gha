@@ -340,7 +340,7 @@ func TestInventoryActionAuthorityRetainsStableInvocationEnvironmentForPost(t *te
 	}
 }
 
-func TestInventoryActionAuthorityEvaluatesStableInvocationEnvironmentBeforeMainMutation(t *testing.T) {
+func TestInventoryActionAuthorityForgetsStepEnvironmentDependingOnMutableInheritedEnvironment(t *testing.T) {
 	actions := map[string]Action{
 		"root": {Source: "github", Runtime: ActionRuntimeJavaScript, JavaScript: &JavaScriptAction{
 			Main: "index.js", Post: "post.js", PostCondition: testActionSite("env.FLAG == 'true' && github.token != ''"),
@@ -356,8 +356,8 @@ func TestInventoryActionAuthorityEvaluatesStableInvocationEnvironmentBeforeMainM
 	if err != nil {
 		t.Fatal(err)
 	}
-	if authority.GitHubToken {
-		t.Fatal("post condition forgot the invocation environment resolved before main ran")
+	if !authority.GitHubToken {
+		t.Fatal("step environment depending on a mutable inherited value pruned a token path")
 	}
 }
 
@@ -426,12 +426,26 @@ func TestWorkflowEnvironmentMutableBeforeSkipsKnownFalseSteps(t *testing.T) {
 		{Condition: testWorkflowSite("matrix.enabled"), Run: &Run{Command: testWorkflowSite("echo skipped")}},
 		{Run: &Run{Command: testWorkflowSite("echo target")}},
 	}
-	mutable, err := WorkflowEnvironmentMutableBefore(steps, 1, ActionAuthorityContext{Matrix: map[string]any{"enabled": false}})
+	mutable, err := WorkflowEnvironmentMutableBefore(steps, 1, ActionAuthorityContext{Matrix: map[string]any{"enabled": false}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if mutable {
 		t.Fatal("known-false earlier workflow step made environment mutable")
+	}
+}
+
+func TestWorkflowEnvironmentMutableBeforeSkipsImmutableInvocation(t *testing.T) {
+	steps := []Step{
+		{Invocation: &Invocation{Uses: testWorkflowSite("actions/checkout@v4")}},
+		{Run: &Run{Command: testWorkflowSite("echo target")}},
+	}
+	mutable, err := WorkflowEnvironmentMutableBefore(steps, 1, ActionAuthorityContext{}, map[int]bool{0: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutable {
+		t.Fatal("immutable invocation made the environment mutable")
 	}
 }
 
@@ -442,7 +456,7 @@ func TestWorkflowEnvironmentMutableBeforeUsesStepEnvironmentAndBackgroundBarrier
 		{Env: stepEnv, Condition: testWorkflowSite("env.ENABLED == 'true'"), Run: &Run{Command: testWorkflowSite("echo foreground")}},
 		{Run: &Run{Command: testWorkflowSite("echo target")}},
 	}
-	mutable, err := WorkflowEnvironmentMutableBefore(foreground, 1, ActionAuthorityContext{EnvironmentLayers: [][]Binding{jobEnv}})
+	mutable, err := WorkflowEnvironmentMutableBefore(foreground, 1, ActionAuthorityContext{EnvironmentLayers: [][]Binding{jobEnv}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +468,7 @@ func TestWorkflowEnvironmentMutableBeforeUsesStepEnvironmentAndBackgroundBarrier
 		{ID: "background", Background: true, Run: &Run{Command: testWorkflowSite("echo background")}},
 		{Run: &Run{Command: testWorkflowSite("echo target")}},
 	}
-	mutable, err = WorkflowEnvironmentMutableBefore(background, 1, ActionAuthorityContext{})
+	mutable, err = WorkflowEnvironmentMutableBefore(background, 1, ActionAuthorityContext{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +480,7 @@ func TestWorkflowEnvironmentMutableBeforeUsesStepEnvironmentAndBackgroundBarrier
 		{Kind: "wait", Targets: []string{"background"}},
 		{Run: &Run{Command: testWorkflowSite("echo target")}},
 	}
-	mutable, err = WorkflowEnvironmentMutableBefore(barrier, 2, ActionAuthorityContext{})
+	mutable, err = WorkflowEnvironmentMutableBefore(barrier, 2, ActionAuthorityContext{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +492,7 @@ func TestWorkflowEnvironmentMutableBeforeUsesStepEnvironmentAndBackgroundBarrier
 		{Kind: "wait-all"},
 		{Run: &Run{Command: testWorkflowSite("echo target")}},
 	}
-	mutable, err = WorkflowEnvironmentMutableBefore(waitAll, 2, ActionAuthorityContext{})
+	mutable, err = WorkflowEnvironmentMutableBefore(waitAll, 2, ActionAuthorityContext{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +504,7 @@ func TestWorkflowEnvironmentMutableBeforeUsesStepEnvironmentAndBackgroundBarrier
 		{Kind: "wait", Targets: []string{"mixed-case"}},
 		waitAll[2],
 	}
-	mutable, err = WorkflowEnvironmentMutableBefore(caseInsensitiveTarget, 2, ActionAuthorityContext{})
+	mutable, err = WorkflowEnvironmentMutableBefore(caseInsensitiveTarget, 2, ActionAuthorityContext{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,6 +720,25 @@ func TestInventoryActionAuthorityForgetsEnvironmentAfterExecutableStep(t *testin
 	}
 	if !authority.GitHubToken {
 		t.Fatal("a preceding executable step did not make the later environment guard conservative")
+	}
+}
+
+func TestInventoryActionAuthorityForgetsExplicitEnvironmentAfterCompositeRun(t *testing.T) {
+	actions := map[string]Action{
+		"root": {
+			Source: "workspace", Runtime: ActionRuntimeComposite,
+			Composite: &CompositeAction{Steps: []CompositeStep{
+				{Run: &Run{Command: testActionSite("echo FLAG=true >> $GITHUB_ENV")}},
+				{Condition: testActionSite("env.FLAG == 'true'"), Run: &Run{Command: testActionSite("echo ${{ github.token }}")}},
+			}},
+		},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{EnvironmentLayers: [][]Binding{{{Name: "FLAG", Value: testWorkflowSite("false")}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("composite run restored an explicit environment value after it could be overwritten")
 	}
 }
 

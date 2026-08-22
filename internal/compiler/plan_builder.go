@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/program"
@@ -370,6 +371,13 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram program.
 	}
 	invocations := make([]program.ActionInvocation, len(actionIndexes))
 	contexts := make([]program.ActionAuthorityContext, len(actionIndexes))
+	immutableActionSteps := make(map[int]bool)
+	for i, stepIndex := range actionIndexes {
+		ref, err := actionsource.Parse(actionRefs[i])
+		if err == nil && actionintegration.UsesNativeAdapter(actionintegration.Identity{Source: "github", Repository: ref.Owner + "/" + ref.Repository, Path: ref.Path}) {
+			immutableActionSteps[stepIndex] = true
+		}
+	}
 	for i, stepIndex := range actionIndexes {
 		step := workflowProgram.Job.Steps[stepIndex]
 		invocations[i] = program.ActionInvocation{Inputs: step.Invocation.With, Condition: step.Condition}
@@ -381,7 +389,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram program.
 		environmentMutable, err := program.WorkflowEnvironmentMutableBefore(workflowProgram.Job.Steps, stepIndex, program.ActionAuthorityContext{
 			WorkflowInputs: instance.Inputs, UnknownWorkflowInputs: unknownInputs,
 			Matrix: instance.Matrix, EnvironmentLayers: [][]program.Binding{workflowProgram.Job.Env},
-		})
+		}, immutableActionSteps)
 		if err != nil {
 			return built, fmt.Errorf("build plan for job %q: plan action environment: %w", instance.LogicalJobID, err)
 		}

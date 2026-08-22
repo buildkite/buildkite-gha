@@ -347,7 +347,7 @@ func (p *actionAuthorityPlanner) inspectComposite(action Action, mainInputs, pre
 		}
 		if step.Invocation == nil {
 			if stepReachable && step.Run != nil {
-				mainKnown = retainStableEnvironment(mainKnown, stableScope)
+				mainKnown = withoutKnownEnvironment(mainKnown)
 			}
 			continue
 		}
@@ -484,28 +484,19 @@ func actionPhaseKnownReferences(context ActionAuthorityContext, mutable bool) (m
 	if !mutable {
 		return workflowKnownReferences(context)
 	}
-	known, err := workflowKnownReferences(context)
-	if err != nil {
-		return nil, err
-	}
-	stable := withoutKnownEnvironment(known)
+	context.Environment = nil
 	if len(context.EnvironmentLayers) == 0 {
-		return stable, nil
+		return workflowKnownReferences(context)
 	}
-	for _, binding := range context.EnvironmentLayers[len(context.EnvironmentLayers)-1] {
-		name := "env." + strings.ToLower(binding.Name)
-		if value, ok := known[name]; ok {
-			stable[name] = value
-		}
-	}
-	return stable, nil
+	context.EnvironmentLayers = context.EnvironmentLayers[len(context.EnvironmentLayers)-1:]
+	return workflowKnownReferences(context)
 }
 
 // WorkflowEnvironmentMutableBefore reports whether an earlier workflow step
 // can execute and append to GITHUB_ENV before the selected step.
-func WorkflowEnvironmentMutableBefore(steps []Step, before int, context ActionAuthorityContext) (bool, error) {
+func WorkflowEnvironmentMutableBefore(steps []Step, before int, context ActionAuthorityContext, immutableInvocations map[int]bool) (bool, error) {
 	background := map[string]bool{}
-	for _, step := range steps[:before] {
+	for i, step := range steps[:before] {
 		stepContext := context
 		stepContext.EnvironmentLayers = append(append([][]Binding(nil), context.EnvironmentLayers...), step.Env)
 		known, err := workflowKnownReferences(stepContext)
@@ -534,6 +525,9 @@ func WorkflowEnvironmentMutableBefore(steps []Step, before int, context ActionAu
 			continue
 		}
 		if step.Run == nil && step.Invocation == nil {
+			continue
+		}
+		if step.Invocation != nil && immutableInvocations[i] {
 			continue
 		}
 		if step.Background {
