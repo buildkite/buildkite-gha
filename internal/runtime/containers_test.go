@@ -284,7 +284,7 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 				os.Exit(42)
 			}
 		}
-		if scenario == "fail-create" {
+		if scenario == "fail-create" || scenario == "fail-create-reconcile-once" {
 			os.Exit(42)
 		}
 		if scenario == "block-job-create" && !strings.HasPrefix(name, "buildkite-gha-service-") {
@@ -360,6 +360,13 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		fmt.Print("diagnostic sibling-secret\n")
 		os.Exit(0)
 	case "ps":
+		if scenario == "fail-create-reconcile-once" && slices.Contains(args, "--no-trunc") {
+			marker := filepath.Join(root, "failed-job-reconcile")
+			if _, err := os.Stat(marker); errors.Is(err, os.ErrNotExist) {
+				_ = os.WriteFile(marker, nil, 0o600)
+				os.Exit(43)
+			}
+		}
 		if scenario == "query-fail" && (strings.Contains(strings.Join(args, " "), "name=") || strings.Contains(strings.Join(args, " "), "id=docker-id-buildkite-gha-job-")) {
 			os.Exit(43)
 		}
@@ -1520,6 +1527,28 @@ func TestRunJobContainerAmbiguousCreateFailureCleansNamedVolume(t *testing.T) {
 	removed, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
 	if readErr != nil || strings.TrimSpace(string(removed)) != "cache" {
 		t.Fatalf("removed volumes = %q, %v", removed, readErr)
+	}
+}
+
+func TestRunJobContainerCleanupRetriesAmbiguousCreateReconciliation(t *testing.T) {
+	f := newJobDocker(t, "fail-create-reconcile-once")
+	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
+		t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(),
+		&plan.Container{Image: "alpine"}, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "create job container") {
+		t.Fatalf("startJobContainer() error = %v", err)
+	}
+	reconciles := 0
+	removed := false
+	for _, call := range f.calls(t) {
+		if len(call.Args) != 0 && call.Args[0] == "ps" && slices.Contains(call.Args, "--no-trunc") {
+			reconciles++
+		}
+		removed = removed || slices.Equal(call.Args, []string{"rm", "--force", "job-container-id"})
+	}
+	if reconciles != 2 || !removed {
+		t.Fatalf("ambiguous create cleanup calls = %#v", f.calls(t))
 	}
 }
 

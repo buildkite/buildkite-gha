@@ -49,6 +49,7 @@ type jobContainerBackend struct {
 	env                       map[string]string
 	config                    string
 	owner, container, network string
+	containerCreated          bool
 	services                  []serviceContainer
 	workspace, temp           string
 	imagePATH                 string
@@ -330,6 +331,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 		reference := strings.TrimSpace(created)
 		if reference != "" {
 			b.container = reference
+			b.containerCreated = true
 		}
 		if createErr != nil {
 			reconcileCtx, cancelReconcile := context.WithTimeout(context.WithoutCancel(ctx), r.cleanupTimeout())
@@ -339,6 +341,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 					createErr = errors.Join(createErr, err)
 				} else if reference != "" {
 					b.container = reference
+					b.containerCreated = true
 				}
 			}
 			if reference != "" {
@@ -847,14 +850,25 @@ func (b *jobContainerBackend) cleanup(parent context.Context) error {
 	var out string
 	var queryErr error
 	if b.container != "" {
-		out, queryErr = boundedDockerOutput(ctx, b.env, b.docker, "ps", "--all", "--quiet", "--filter", "id="+b.container)
-		if queryErr != nil {
-			err = errors.Join(err, fmt.Errorf("query job container: %w", queryErr))
+		if !b.containerCreated {
+			reference, reconcileErr := b.reconcileCreatedJob(ctx)
+			if reconcileErr != nil {
+				err = errors.Join(err, reconcileErr)
+			} else if reference != "" {
+				b.container = reference
+				b.containerCreated = true
+			}
 		}
-		if queryErr != nil || strings.TrimSpace(out) != "" {
-			_, e := boundedDockerOutput(ctx, b.env, b.docker, "rm", "--force", b.container)
-			if e != nil {
-				err = errors.Join(err, fmt.Errorf("remove job container: %w", e))
+		if b.containerCreated {
+			out, queryErr = boundedDockerOutput(ctx, b.env, b.docker, "ps", "--all", "--quiet", "--filter", "id="+b.container)
+			if queryErr != nil {
+				err = errors.Join(err, fmt.Errorf("query job container: %w", queryErr))
+			}
+			if queryErr != nil || strings.TrimSpace(out) != "" {
+				_, e := boundedDockerOutput(ctx, b.env, b.docker, "rm", "--force", b.container)
+				if e != nil {
+					err = errors.Join(err, fmt.Errorf("remove job container: %w", e))
+				}
 			}
 		}
 	}
