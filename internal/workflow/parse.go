@@ -913,10 +913,7 @@ var serviceIDPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
 
 func adaptContainer(path, jobID string, in *actionlint.Container) (Container, error) {
 	if in.Image == nil || strings.TrimSpace(in.Image.Value) == "" {
-		return Container{}, locatedError(path, in.Pos, jobID, "container image must be a non-empty literal")
-	}
-	if in.Image.ContainsExpression() {
-		return Container{}, locatedError(path, in.Image.Pos, jobID, "expression-valued container image is unsupported")
+		return Container{}, locatedError(path, in.Pos, jobID, "container image must be non-empty")
 	}
 	if in.Credentials != nil {
 		return Container{}, locatedError(path, in.Credentials.Pos, jobID, "container credentials are unsupported")

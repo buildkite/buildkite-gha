@@ -243,11 +243,16 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			continue
 		}
 		e.instanceKeys[key] = job.ID
+		resolvedContainer, containerErr := resolveCompileContainer(instanceJob.Container, instanceContext)
+		instanceJob.Container = resolvedContainer
 		resolvedServices, serviceErr := resolveCompileServices(instanceJob.Services, instanceContext)
 		candidate := newJobCandidate(sourced, instanceJob, matrix, key, resolvedServices)
 
 		valid := true
-		if serviceErr != nil {
+		if containerErr != nil {
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, job.Span.Start.Line, job.Span.Start.Column, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve job container: %v", containerErr))))
+			valid = false
+		} else if serviceErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, job.Span.Start.Line, job.Span.Start.Column, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve service containers: %v", serviceErr))))
 			valid = false
 		} else if compileConditionErr != nil {

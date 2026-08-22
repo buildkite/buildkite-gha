@@ -416,6 +416,29 @@ func jobWorkflowTokenWarning(position workflow.Position) Warning {
 	}
 }
 
+func resolveCompileContainer(container *workflow.Container, context expression.CompileContext) (*workflow.Container, error) {
+	if container == nil {
+		return nil, nil
+	}
+	resolved := *container
+	resolved.Env = cloneMap(container.Env)
+	resolved.Ports = append([]string(nil), container.Ports...)
+	if strings.Contains(resolved.Image, "${{") {
+		image, err := expression.EvaluateCompileStringTemplate(resolved.Image, context)
+		if err != nil {
+			return nil, err
+		}
+		resolved.Image = image
+	}
+	if strings.TrimSpace(resolved.Image) == "" {
+		return nil, fmt.Errorf("container image resolved to an empty string")
+	}
+	if len(resolved.Image) > 512 || !plan.ValidContainerImageReference(resolved.Image) {
+		return nil, fmt.Errorf("container image resolved to an invalid image reference")
+	}
+	return &resolved, nil
+}
+
 func resolveCompileServices(services []workflow.Service, context expression.CompileContext) ([]workflow.Service, error) {
 	resolved := make([]workflow.Service, 0, len(services))
 	for _, service := range services {

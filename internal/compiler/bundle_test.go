@@ -59,6 +59,36 @@ func TestCompileBundleGoldenAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestCompileBundleGeneratesDeterministicPipelineForResolvedContainerImage(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [node:24, node:25]
+    container: ${{ matrix.image }}
+    steps: [{run: true}]
+`)
+	event := readFile(t, smokePath("events", "push.json"))
+	first, err := CompileBundle("containers.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := CompileBundle("containers.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) || len(first.Plans) != 2 || len(first.Pipeline) == 0 {
+		t.Fatalf("container bundle was not deterministic: %#v", first)
+	}
+	for i, image := range []string{"node:24", "node:25"} {
+		if first.Plans[i].Job.Container == nil || first.Plans[i].Job.Container.Image != image || bytes.Contains(first.Plans[i].Contents, []byte("${{")) {
+			t.Fatalf("plan %d container = %#v", i, first.Plans[i].Job.Container)
+		}
+	}
+}
+
 func TestCompileBundleDoesNotActivateValidatedRuntimeMatrixWithoutFencing(t *testing.T) {
 	source := []byte(`on: push
 jobs:

@@ -1607,6 +1607,27 @@ func TestEvaluateCompileTemplateSupportsGitHubRefScalars(t *testing.T) {
 	}
 }
 
+func TestEvaluateCompileStringTemplateRequiresStringCompleteExpression(t *testing.T) {
+	context := CompileContext{
+		Inputs: map[string]any{"image": "node:24", "enabled": true, "injected": "${{ secrets.TOKEN }}"},
+		Matrix: map[string]any{"version": 24},
+	}
+	for template, want := range map[string]string{
+		"${{ inputs.image }}":        "node:24",
+		"node:${{ matrix.version }}": "node:24",
+	} {
+		got, err := EvaluateCompileStringTemplate(template, context)
+		if err != nil || got != want {
+			t.Errorf("EvaluateCompileStringTemplate(%q) = %q, %v, want %q", template, got, err, want)
+		}
+	}
+	for _, template := range []string{"${{ inputs.enabled }}", "${{ matrix }}", "${{ secrets.TOKEN }}", "${{ needs.build.outputs.image }}", "${{ inputs.injected }}"} {
+		if _, err := EvaluateCompileStringTemplate(template, context); err == nil {
+			t.Errorf("EvaluateCompileStringTemplate(%q) succeeded", template)
+		}
+	}
+}
+
 func TestEncodeExpressionJSONSupportsNonFiniteNumbers(t *testing.T) {
 	got, err := encodeExpressionJSON(map[string]any{
 		"values": []any{math.Inf(1), math.Inf(-1), math.NaN()},
