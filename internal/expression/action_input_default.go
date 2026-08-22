@@ -32,6 +32,9 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 		if isJobStatusReference(root, path) {
 			return nil
 		}
+		if isJobCheckRunIDReference(root, path) {
+			return nil
+		}
 		if isRunnerTempReference(root, path) {
 			return fmt.Errorf("action input defaults cannot reference runner.temp")
 		}
@@ -79,6 +82,10 @@ func EvaluateActionInputDefault(template string, context Context) (string, error
 func isDirectRunnerDebug(node actionlint.ExprNode, root string, path []string) bool {
 	_, direct := node.(*actionlint.ObjectDerefNode)
 	return direct && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug")
+}
+
+func isJobCheckRunIDReference(root string, path []string) bool {
+	return strings.EqualFold(root, "job") && len(path) == 1 && strings.EqualFold(path[0], "check_run_id")
 }
 
 func isRunnerTempReference(root string, path []string) bool {
@@ -149,6 +156,12 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 				return nil, fmt.Errorf("expression references unavailable job.status")
 			}
 			return context.JobStatus, nil
+		}
+		if isJobCheckRunIDReference(root, path) {
+			// Buildkite creates no GitHub check run. GitHub documents this
+			// property as unavailable on GitHub Enterprise Server; unavailable
+			// properties interpolate as an empty string.
+			return "", nil
 		}
 		if isRunnerTempReference(root, path) {
 			return nil, fmt.Errorf("action input defaults cannot reference runner.temp")

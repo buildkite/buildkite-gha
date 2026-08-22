@@ -227,6 +227,9 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 		"${{ runner.debug }}",
 		"${{ runner.debug == '1' }}",
 		"${{ job.status }}",
+		"${{ job.check_run_id }}",
+		"${{ job['check_run_id'] }}",
+		"${{ job.check_run_id || 'unavailable' }}",
 		"${{ toJSON(matrix) }}",
 		"${{ true && 'quoted }} braces' || '' }}",
 		"${{ 1 > 0 }}",
@@ -235,7 +238,7 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
+	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job[env.NAME] }}", "${{ job.check_run_id.extra }}", "${{ job.name }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
@@ -354,6 +357,29 @@ func TestEvaluateActionInputDefaultSupportsJobStatus(t *testing.T) {
 	}
 	if _, err := Evaluate("${{ job.status }}", Context{JobStatus: "success"}); err == nil {
 		t.Fatal("Evaluate() accepted action-default-only job.status")
+	}
+}
+
+func TestEvaluateActionInputDefaultTreatsJobCheckRunIDAsUnavailable(t *testing.T) {
+	for _, test := range []struct {
+		template string
+		want     string
+	}{
+		{template: "${{ job.check_run_id }}", want: ""},
+		{template: "${{ job['check_run_id'] }}", want: ""},
+		{template: "${{ JOB.CHECK_RUN_ID || 'unavailable' }}", want: "unavailable"},
+		{template: "id-${{ job.check_run_id }}", want: "id-"},
+	} {
+		got, err := EvaluateActionInputDefault(test.template, Context{})
+		if err != nil || got != test.want {
+			t.Errorf("EvaluateActionInputDefault(%q) = %q, %v; want %q", test.template, got, err, test.want)
+		}
+	}
+	if err := ValidateRuntimeTemplate("${{ job.check_run_id }}"); err == nil {
+		t.Fatal("ValidateRuntimeTemplate() accepted action-default-only job.check_run_id")
+	}
+	if _, err := Evaluate("${{ job.check_run_id }}", Context{}); err == nil {
+		t.Fatal("Evaluate() accepted action-default-only job.check_run_id")
 	}
 }
 

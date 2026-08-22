@@ -3046,6 +3046,20 @@ func TestResolveActionInputsUsesRunnerDebugDefaultUnlessExplicitlySupplied(t *te
 	}
 }
 
+func TestResolveActionInputsUsesEmptyCheckRunIDDefaultUnlessExplicitlySupplied(t *testing.T) {
+	checkRunIDDefault := "${{ job.check_run_id }}"
+	action := metadata.Metadata{Inputs: map[string]metadata.Input{"check-run-id": {Default: &checkRunIDDefault}}}
+
+	inputs, err := resolveActionInputs(action, nil, expression.Context{})
+	if err != nil || inputs["check-run-id"] != "" {
+		t.Fatalf("check-run-id default = %#v, %v; want empty", inputs, err)
+	}
+	inputs, err = resolveActionInputs(action, map[string]string{"CHECK-RUN-ID": "1234"}, expression.Context{})
+	if err != nil || inputs["check-run-id"] != "1234" {
+		t.Fatalf("explicit check-run-id input = %#v, %v; want 1234", inputs, err)
+	}
+}
+
 func TestStepExpressionContextExposesScopedTokenWithoutMutatingJobContext(t *testing.T) {
 	eval := expression.Context{
 		GitHub:  map[string]any{"actor": "octocat"},
