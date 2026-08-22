@@ -285,6 +285,24 @@ func TestInventoryActionAuthorityTreatsLaterAbsentInputAsEmptyInDefault(t *testi
 	}
 }
 
+func TestInventoryActionAuthorityTreatsLaterDefaultedInputAsNullDuringEarlierDefault(t *testing.T) {
+	token := testActionSite("${{ toJSON(inputs.z_later) == 'null' && github.token || '' }}")
+	later := testActionSite("later")
+	actions := map[string]Action{
+		"root": {
+			Source: "workspace", Runtime: ActionRuntimeComposite,
+			Inputs: []ActionInput{{Name: "a_token", Default: &token}, {Name: "z_later", Default: &later}}, Composite: &CompositeAction{},
+		},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("later defaulted input did not behave as null while resolving an earlier default")
+	}
+}
+
 func TestInventoryActionAuthorityKeepsRuntimeDependentDefaultErrorsConservative(t *testing.T) {
 	defaultValue := testActionSite("${{ inputs.enabled && fromJSON('bad') && github.token || '' }}")
 	actions := map[string]Action{
@@ -616,6 +634,37 @@ func TestInventoryActionAuthorityPreparesOnlyFieldsUsedByChildLifecycle(t *testi
 				t.Fatalf("GitHub token authority = %v, want %v", authority.GitHubToken, test.wantToken)
 			}
 		})
+	}
+}
+
+func TestInventoryActionAuthorityForgetsNestedPreparationEnvironmentAfterEveryPre(t *testing.T) {
+	actions := map[string]Action{
+		"root": {
+			Source: "github", Runtime: ActionRuntimeComposite,
+			Composite: &CompositeAction{Steps: []CompositeStep{
+				{Invocation: &Invocation{Lock: "first", Uses: testActionSite("owner/first@v1")}},
+				{Env: []Binding{{Name: "FLAG", Value: testActionSite("false")}}, Invocation: &Invocation{Lock: "nested", Uses: testActionSite("owner/nested@v1")}},
+			}},
+		},
+		"first": {Source: "github", Runtime: ActionRuntimeJavaScript, JavaScript: &JavaScriptAction{Pre: "pre.js", Main: "index.js"}},
+		"nested": {
+			Source: "github", Runtime: ActionRuntimeComposite,
+			Composite: &CompositeAction{Steps: []CompositeStep{
+				{Invocation: &Invocation{Lock: "mutator", Uses: testActionSite("owner/mutator@v1")}},
+				{Invocation: &Invocation{Lock: "guarded", Uses: testActionSite("owner/guarded@v1")}},
+			}},
+		},
+		"mutator": {Source: "github", Runtime: ActionRuntimeJavaScript, JavaScript: &JavaScriptAction{Pre: "pre.js", Main: "index.js"}},
+		"guarded": {Source: "github", Runtime: ActionRuntimeJavaScript, JavaScript: &JavaScriptAction{
+			Pre: "pre.js", PreCondition: testActionSite("env.FLAG == 'true' && github.token != ''"), Main: "index.js",
+		}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root", Condition: testWorkflowSite("false")}, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("an earlier nested pre did not make the later preparation environment conservative")
 	}
 }
 

@@ -83,6 +83,7 @@ type actionAuthorityPlanner struct {
 	active                        map[string]bool
 	workflowInputScope            map[string]any
 	preparationEnvironmentMutable bool
+	preparationEnvironmentChanges int
 }
 
 type effectiveActionInputs struct {
@@ -161,7 +162,10 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 				p.githubToken = p.githubToken || authorityEffectsRequireToken(analysis.Effects)
 			}
 			p.githubToken = p.githubToken || preReachable && inputs.githubToken
-			p.preparationEnvironmentMutable = p.preparationEnvironmentMutable || prepareAction && preReachable
+			if prepareAction && preReachable {
+				p.preparationEnvironmentMutable = true
+				p.preparationEnvironmentChanges++
+			}
 		}
 		if action.JavaScript.Post != "" && (mainReachable || preReachable) {
 			known := workflowInputReferences(retainStableEnvironment(mainScope, stableScope), p.workflowInputScope)
@@ -263,7 +267,7 @@ func (p *actionAuthorityPlanner) resolveInputs(action Action, supplied []Binding
 		known = actionInputReferences(scope, resolved.values, resolved.unknown, resolved.omitted)
 		for _, later := range action.Inputs {
 			if _, exists := resolved.values[later.Name]; !exists && !resolved.unknown[later.Name] {
-				known["inputs."+later.Name] = ""
+				known["inputs."+later.Name] = nil
 			}
 		}
 		analysis, err := expression.AnalyzeActionInputDefault(input.Default.Source, known)
@@ -365,14 +369,14 @@ func (p *actionAuthorityPlanner) inspectComposite(action Action, mainInputs, pre
 		if err != nil {
 			return fmt.Errorf("composite action step %d stable environment: %w", i+1, err)
 		}
-		preparationWasMutable := p.preparationEnvironmentMutable
+		preparationChanges := p.preparationEnvironmentChanges
 		if err := p.inspect(step.Invocation.Lock, step.Invocation.With, step.Invocation.With, mainKnown, childMainScope, childPreparationScope, childStableScope, stepReachable, preparationReachable, preparationEnvironmentToken, false); err != nil {
 			return fmt.Errorf("composite action step %d child %q: %w", i+1, step.Invocation.Uses.Source, err)
 		}
 		if stepReachable {
 			mainKnown = withoutKnownEnvironment(mainKnown)
 		}
-		if preparationReachable && p.preparationEnvironmentMutable != preparationWasMutable {
+		if preparationReachable && p.preparationEnvironmentChanges != preparationChanges {
 			preparationKnown = withoutKnownEnvironment(preparationKnown)
 		}
 	}
