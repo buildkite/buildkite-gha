@@ -100,6 +100,9 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	if err != nil {
 		return result, fmt.Errorf("%s discover Git: %w", adapter, err)
 	}
+	if lfs && (!filepath.IsAbs(git) || filepath.Base(git) != "git") {
+		return result, fmt.Errorf("checkout adapter requires Git LFS to use a canonical Git executable named git")
+	}
 	env := map[string]string{
 		"HOME":                   filepath.Join(checkoutDirectory, ".no-home"),
 		"GIT_CONFIG_NOSYSTEM":    "1",
@@ -112,6 +115,10 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	}
 	if !lfs {
 		env["GIT_LFS_SKIP_SMUDGE"] = "1"
+	} else {
+		// Git LFS launches Git by name. Restrict its lookup to the directory
+		// containing the executable pinned before workflow action hooks.
+		env["PATH"] = strings.Join([]string{filepath.Dir(git), "/usr/bin", "/bin"}, string(os.PathListSeparator))
 	}
 	base := checkoutGitBaseArgs()
 	runWithBase := func(runEnv map[string]string, commandBase []string, withCredentials bool, args ...string) error {
