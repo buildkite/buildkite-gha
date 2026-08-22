@@ -124,6 +124,20 @@ func TestInventoryActionAuthorityTreatsOmittedOptionalInputAsEmpty(t *testing.T)
 	}
 }
 
+func TestInventoryActionAuthorityKeepsRuntimeDependentDefaultErrorsConservative(t *testing.T) {
+	defaultValue := testActionSite("${{ inputs.enabled && fromJSON('bad') && github.token || '' }}")
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "token", Default: &defaultValue}}, Composite: &CompositeAction{}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("runtime-dependent default error did not retain conservative token authority")
+	}
+}
+
 func TestInventoryActionAuthorityDoesNotGrantWholeGitHubContextFromCompositeMetadata(t *testing.T) {
 	actions := map[string]Action{
 		"root": {

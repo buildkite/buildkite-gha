@@ -202,7 +202,14 @@ func (p *actionAuthorityPlanner) resolveInputs(action Action, supplied []Binding
 		known = actionInputReferences(scope, resolved.values, resolved.unknown)
 		analysis, err := expression.AnalyzeActionInputDefault(input.Default.Source, known)
 		if err != nil {
-			return effectiveActionInputs{}, fmt.Errorf("action input %q default: %w", input.Name, err)
+			serverURL, _ := known["github.server_url"].(string)
+			requiresToken, fallbackErr := expression.ActionInputDefaultRequiresGitHubToken(input.Default.Source, serverURL)
+			if fallbackErr != nil {
+				return effectiveActionInputs{}, fmt.Errorf("action input %q default: %w", input.Name, err)
+			}
+			resolved.githubToken = resolved.githubToken || requiresToken
+			resolved.unknown[input.Name] = true
+			continue
 		}
 		resolved.githubToken = resolved.githubToken || authorityEffectsRequireToken(analysis.Effects)
 		if analysis.Value.Known {
