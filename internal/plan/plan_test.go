@@ -2,6 +2,7 @@ package plan
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -433,6 +434,44 @@ func TestRequiredSecretsRoundTripAsNamesOnly(t *testing.T) {
 	}
 	if !slices.Equal(decoded.RequiredSecrets, job.RequiredSecrets) {
 		t.Fatalf("required secrets = %#v", decoded.RequiredSecrets)
+	}
+}
+
+func TestSecretMappingsRoundTripAsNamesOnlyAndValidateAuthority(t *testing.T) {
+	job := validJob()
+	job.RequiredCapabilities = []string{"secrets"}
+	job.RequiredSecrets = []string{"ORIGINAL"}
+	job.SecretMappings = map[string]string{"ALIAS": "ORIGINAL"}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJobPlanSchema(t, encoded)
+	if !strings.Contains(string(encoded), `"secret_mappings"`) || !strings.Contains(string(encoded), `"ALIAS": "ORIGINAL"`) || strings.Contains(string(encoded), "secret-value") {
+		t.Fatalf("Encode() = %s", encoded)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil || !reflect.DeepEqual(decoded.SecretMappings, job.SecretMappings) {
+		t.Fatalf("Decode() mappings = %#v, error = %v", decoded.SecretMappings, err)
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*Job)
+		want string
+	}{
+		{name: "missing source", edit: func(j *Job) { j.SecretMappings["ALIAS"] = "OTHER" }, want: "undeclared source"},
+		{name: "reserved alias", edit: func(j *Job) { j.SecretMappings = map[string]string{"GITHUB_TOKEN": "ORIGINAL"} }, want: "invalid secret mapping"},
+		{name: "missing capability", edit: func(j *Job) { j.RequiredCapabilities = nil }, want: "secrets capability"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := job
+			changed.RequiredCapabilities = append([]string(nil), job.RequiredCapabilities...)
+			changed.SecretMappings = maps.Clone(job.SecretMappings)
+			test.edit(&changed)
+			if err := changed.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
 	}
 }
 
@@ -985,7 +1024,7 @@ func TestGitHubWorkflowTokenContractAndSchema(t *testing.T) {
 	job := validJob()
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
-	job.GitHubToken = &GitHubToken{Workflow: "ci.yml", Permissions: map[string]string{"contents": "read", "pull_requests": "write"}}
+	job.GitHubToken = &GitHubToken{Workflow: "ci.yml", Permissions: map[string]string{"contents": "read", "pull_requests": "write"}, Aliases: []string{"TOKEN_ALIAS"}}
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -1041,9 +1080,15 @@ func TestGitHubWorkflowTokenContractAndSchema(t *testing.T) {
 		{name: "missing workflow", edit: func(j *Job) { j.GitHubToken.Workflow = "" }, want: "simple .yml or .yaml filename"},
 		{name: "unknown permission", edit: func(j *Job) { j.GitHubToken.Permissions = map[string]string{"administration": "write"} }, want: "unsupported permission"},
 		{name: "invalid access", edit: func(j *Job) { j.GitHubToken.Permissions = map[string]string{"contents": "admin"} }, want: "unsupported permission"},
+		{name: "reserved alias", edit: func(j *Job) { j.GitHubToken.Aliases = []string{"GITHUB_TOKEN"} }, want: "invalid or repeated GitHub token alias"},
+		{name: "unsorted aliases", edit: func(j *Job) { j.GitHubToken.Aliases = []string{"Z_TOKEN", "A_TOKEN"} }, want: "aliases must be sorted"},
+		{name: "ordinary alias overlap", edit: func(j *Job) {
+			j.RequiredCapabilities = []string{"provider-token-write", "secrets"}
+			j.RequiredSecrets = []string{"TOKEN_ALIAS"}
+		}, want: "overlaps ordinary secret authority"},
 		{name: "reserved ambient secret", edit: func(j *Job) {
 			j.RequiredCapabilities = []string{"provider-token-write", "secrets"}
-			j.RequiredSecrets = []string{"GITHUB_TOKEN"}
+			j.RequiredSecrets = []string{"github_token"}
 		}, want: "scoped workflow token contract"},
 		{name: "other provider", edit: func(j *Job) { j.Event.Provider = "cursor-origin" }, want: "valid github.com event repository"},
 	} {
@@ -1055,7 +1100,7 @@ func TestGitHubWorkflowTokenContractAndSchema(t *testing.T) {
 			for name, access := range job.GitHubToken.Permissions {
 				permissions[name] = access
 			}
-			changed.GitHubToken = &GitHubToken{Workflow: job.GitHubToken.Workflow, Permissions: permissions}
+			changed.GitHubToken = &GitHubToken{Workflow: job.GitHubToken.Workflow, Permissions: permissions, Aliases: append([]string(nil), job.GitHubToken.Aliases...)}
 			test.edit(&changed)
 			if err := changed.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Validate() error = %v, want %q", err, test.want)

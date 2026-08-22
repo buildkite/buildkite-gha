@@ -53,6 +53,24 @@ func TestReferencePathOwnsOnlyOneStaticReference(t *testing.T) {
 	}
 }
 
+func TestDirectSecretReferenceAcceptsOnlyOneStaticSecret(t *testing.T) {
+	for _, source := range []string{"${{ secrets.SOURCE }}", "${{ secrets['source'] }}"} {
+		name, err := DirectSecretReference(source)
+		if err != nil || name != "SOURCE" {
+			t.Fatalf("DirectSecretReference(%q) = %q, %v", source, name, err)
+		}
+	}
+	for _, source := range []string{
+		"literal", "${{ secrets.SOURCE }}-suffix", "${{ secrets[inputs.name] }}",
+		"${{ needs.build.outputs.secret }}", "${{ vars.SECRET }}", "${{ env.SECRET }}",
+		"${{ inputs.secret }}", "${{ github.token }}", "${{ secrets.SOURCE || secrets.OTHER }}",
+	} {
+		if _, err := DirectSecretReference(source); err == nil {
+			t.Fatalf("DirectSecretReference(%q) succeeded", source)
+		}
+	}
+}
+
 func TestRuntimeMatrixOutputAcceptsOnlyExactDirectNeedOutput(t *testing.T) {
 	for _, source := range []string{
 		"${{ fromJSON(needs.build_django_matrix.outputs.include) }}",

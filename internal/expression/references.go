@@ -32,6 +32,16 @@ func ReferencePath(text string) (string, []string, error) {
 	return referencePath(node)
 }
 
+// DirectSecretReference accepts exactly one direct dot or literal-bracket
+// secret expression, such as ${{ secrets.NAME }} or ${{ secrets['NAME'] }}.
+func DirectSecretReference(text string) (string, error) {
+	root, path, err := ReferencePath(text)
+	if err != nil || !strings.EqualFold(root, "secrets") || len(path) != 1 {
+		return "", fmt.Errorf("secret mapping must be exactly ${{ secrets.NAME }} or ${{ secrets['NAME'] }}")
+	}
+	return strings.ToUpper(path[0]), nil
+}
+
 // RuntimeMatrixOutput accepts only the complete runtime matrix expression
 // fromJSON(needs.<job>.outputs.<name>). Dot access is required so the source
 // cannot hide dynamic indexes or compose the producer output with other data.

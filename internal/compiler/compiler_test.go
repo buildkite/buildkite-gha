@@ -2259,7 +2259,7 @@ jobs:
 	}
 }
 
-func TestCompileRejectsRequiredReusableWorkflowSecrets(t *testing.T) {
+func TestCompileRejectsMissingRequiredReusableWorkflowSecrets(t *testing.T) {
 	repository := t.TempDir()
 	path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n")
 	writeWorkflow(t, repository, "reusable.yml", `on:
@@ -2274,8 +2274,158 @@ jobs:
       - run: true
 `)
 	_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-	if err == nil || !strings.Contains(err.Error(), `requires unsupported secret "token"`) {
-		t.Fatalf("Compile() error = %v, want required secret rejection", err)
+	if err == nil || !strings.Contains(err.Error(), `requires secret "token"`) {
+		t.Fatalf("Compile() error = %v, want missing required secret rejection", err)
+	}
+}
+
+func TestCompileExplicitReusableWorkflowSecretMappings(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  call:
+    strategy:
+      matrix:
+        value: [one, two]
+    uses: ./.github/workflows/reusable.yml
+    secrets:
+      required_alias: ${{ secrets.ORIGINAL }}
+      duplicate_alias: ${{ secrets.ORIGINAL }}
+      token_alias: ${{ secrets.GITHUB_TOKEN }}
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    secrets:
+      required_alias:
+        required: true
+      duplicate_alias:
+      optional_alias:
+      token_alias:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      REQUIRED: ${{ secrets.required_alias }}
+      DUPLICATE: ${{ secrets['duplicate_alias'] }}
+      OPTIONAL: ${{ secrets.optional_alias }}
+      TOKEN: ${{ secrets.token_alias }}
+    steps:
+      - run: true
+`)
+	plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %d, want two matrix instances", len(plans))
+	}
+	for _, job := range plans {
+		wantMappings := map[string]string{"DUPLICATE_ALIAS": "ORIGINAL", "REQUIRED_ALIAS": "ORIGINAL"}
+		if !slices.Equal(job.RequiredSecrets, []string{"ORIGINAL"}) || !reflect.DeepEqual(job.SecretMappings, wantMappings) || !job.HasCapability("secrets") {
+			t.Fatalf("ordinary secret boundary = %#v / %#v / %#v", job.RequiredSecrets, job.SecretMappings, job.RequiredCapabilities)
+		}
+		if job.GitHubToken == nil || !slices.Equal(job.GitHubToken.Aliases, []string{"TOKEN_ALIAS"}) || !job.HasCapability("provider-token-write") {
+			t.Fatalf("token alias boundary = %#v / %#v", job.GitHubToken, job.RequiredCapabilities)
+		}
+		encoded, encodeErr := plan.Encode(job)
+		if encodeErr != nil || bytes.Contains(encoded, []byte("secret-value")) {
+			t.Fatalf("encoded plan leaked a value or failed: %v\n%s", encodeErr, encoded)
+		}
+	}
+}
+
+func TestCompilePreservesTokenAliasUsedByOptionalActionInput(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+    secrets:
+      token_alias: ${{ secrets.GITHUB_TOKEN }}
+      optional_alias: ${{ secrets.OPTIONAL }}
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    secrets:
+      token_alias:
+      optional_alias:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/optional-token
+        with:
+          token: ${{ secrets.token_alias }}
+          optional: ${{ secrets.optional_alias }}
+`)
+	writeAction(t, filepath.Join(repository, ".github", "actions"), "optional-token", `name: optional token
+inputs:
+  token:
+  optional:
+runs:
+  using: node24
+  main: index.js
+`)
+
+	plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken == nil || !slices.Equal(plans[0].GitHubToken.Aliases, []string{"TOKEN_ALIAS"}) {
+		t.Fatalf("token alias boundary = %#v", plans)
+	}
+	if len(plans[0].RequiredSecrets) != 0 || plans[0].HasCapability("secrets") {
+		t.Fatalf("optional ordinary action input granted secret authority: %#v", plans[0])
+	}
+}
+
+func TestCompileComposesNestedExplicitSecretAliasesWithoutFallback(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/middle.yml
+    secrets:
+      middle_alias: ${{ secrets.ORIGINAL_SOURCE }}
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    secrets:
+      middle_alias:
+        required: true
+      absent_optional:
+jobs:
+  nested:
+    uses: ./.github/workflows/leaf.yml
+    secrets:
+      leaf_alias: ${{ secrets.middle_alias }}
+      absent_leaf: ${{ secrets.absent_optional }}
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    secrets:
+      leaf_alias:
+        required: true
+      absent_leaf:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PRESENT: ${{ secrets.leaf_alias }}
+      ABSENT: ${{ secrets.absent_leaf }}
+    steps:
+      - run: true
+`)
+	plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || !slices.Equal(plans[0].RequiredSecrets, []string{"ORIGINAL_SOURCE"}) || !reflect.DeepEqual(plans[0].SecretMappings, map[string]string{"LEAF_ALIAS": "ORIGINAL_SOURCE"}) {
+		t.Fatalf("nested secret composition = %#v", plans)
 	}
 }
 
@@ -2936,7 +3086,7 @@ jobs:
 	}
 }
 
-func TestCompileRejectsExplicitReusableWorkflowSecretMappings(t *testing.T) {
+func TestCompileRejectsUndeclaredExplicitReusableWorkflowSecretMapping(t *testing.T) {
 	repository := t.TempDir()
 	path := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -2947,8 +3097,8 @@ jobs:
 `)
 	writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 	_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-	if err == nil || !strings.Contains(err.Error(), "reusable-workflow secret forwarding is unsupported") {
-		t.Fatalf("Compile() error = %v, want explicit secret mapping rejection", err)
+	if err == nil || !strings.Contains(err.Error(), `secret mapping target "TOKEN" is not declared`) {
+		t.Fatalf("Compile() error = %v, want undeclared explicit secret mapping rejection", err)
 	}
 }
 

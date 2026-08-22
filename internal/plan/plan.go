@@ -287,6 +287,7 @@ type DeferredInput struct {
 type GitHubToken struct {
 	Workflow    string            `json:"workflow"`
 	Permissions map[string]string `json:"permissions"`
+	Aliases     []string          `json:"aliases,omitempty"`
 }
 
 // OIDCConfiguration applies additional Buildkite claims to every OIDC token
@@ -307,6 +308,7 @@ type Job struct {
 	Target               Target                   `json:"target"`
 	RequiredCapabilities []string                 `json:"required_capabilities"`
 	RequiredSecrets      []string                 `json:"required_secrets,omitempty"`
+	SecretMappings       map[string]string        `json:"secret_mappings,omitempty"`
 	GitHubToken          *GitHubToken             `json:"github_token,omitempty"`
 	IDTokenPermission    string                   `json:"id_token_permission,omitempty"`
 	OIDC                 *OIDCConfiguration       `json:"oidc,omitempty"`
@@ -532,8 +534,8 @@ func (job Job) Validate() error {
 	if job.TimeoutMinutes < 0 || job.TimeoutMinutes > 360 {
 		return fmt.Errorf("job timeout_minutes must be between 0 and 360")
 	}
-	if len(job.Condition) > 65536 || len(job.RequiredSecrets) > 128 {
-		return fmt.Errorf("job plan condition or required secrets exceed their size limit")
+	if len(job.Condition) > 65536 || len(job.RequiredSecrets) > 128 || len(job.SecretMappings) > 128 {
+		return fmt.Errorf("job plan condition, required secrets, or secret mappings exceed their size limit")
 	}
 	if err := validateInputs(job.Inputs); err != nil {
 		return err
@@ -601,17 +603,49 @@ func (job Job) Validate() error {
 	if !sort.StringsAreSorted(job.RequiredSecrets) {
 		return fmt.Errorf("job plan required secrets must be sorted")
 	}
+	seenRequiredSecrets := make(map[string]struct{}, len(job.RequiredSecrets))
 	for i, name := range job.RequiredSecrets {
 		if !secretNamePattern.MatchString(name) || i > 0 && job.RequiredSecrets[i-1] == name {
 			return fmt.Errorf("job plan contains invalid or repeated required secret %q", name)
 		}
-		if name == "GITHUB_TOKEN" {
+		if strings.EqualFold(name, "GITHUB_TOKEN") {
 			return fmt.Errorf("job plan must provide GITHUB_TOKEN through the scoped workflow token contract")
 		}
+		normalized := strings.ToUpper(name)
+		if _, exists := seenRequiredSecrets[normalized]; exists {
+			return fmt.Errorf("job plan repeats case-insensitive required secret %q", name)
+		}
+		seenRequiredSecrets[normalized] = struct{}{}
 	}
 	if len(job.RequiredSecrets) != 0 {
 		if _, ok := capabilities["secrets"]; !ok {
 			return fmt.Errorf("job plan required secrets need the secrets capability")
+		}
+	}
+	requiredSecrets := make(map[string]struct{}, len(job.RequiredSecrets))
+	ordinaryAliases := make(map[string]struct{}, max(len(job.RequiredSecrets), len(job.SecretMappings)))
+	for _, name := range job.RequiredSecrets {
+		requiredSecrets[name] = struct{}{}
+		if len(job.SecretMappings) == 0 {
+			ordinaryAliases[strings.ToUpper(name)] = struct{}{}
+		}
+	}
+	for alias, source := range job.SecretMappings {
+		if !secretNamePattern.MatchString(alias) || strings.EqualFold(alias, "GITHUB_TOKEN") || !secretNamePattern.MatchString(source) {
+			return fmt.Errorf("job plan contains invalid secret mapping %q to %q", alias, source)
+		}
+		if _, ok := requiredSecrets[source]; !ok {
+			return fmt.Errorf("job plan secret mapping %q references undeclared source %q", alias, source)
+		}
+		normalized := strings.ToUpper(alias)
+		if _, exists := ordinaryAliases[normalized]; exists {
+			return fmt.Errorf("job plan repeats case-insensitive secret alias %q", alias)
+		}
+		ordinaryAliases[normalized] = struct{}{}
+	}
+	if len(job.SecretMappings) != 0 {
+		if _, ok := capabilities["secrets"]; !ok {
+			return fmt.Errorf("job plan secret mappings need the secrets capability")
 		}
 	}
 	_, workflowTokenCapability := capabilities["provider-token-write"]
@@ -627,6 +661,17 @@ func (job Job) Validate() error {
 		}
 		if err := validateGitHubTokenPermissions(job.GitHubToken.Permissions); err != nil {
 			return err
+		}
+		if !sort.StringsAreSorted(job.GitHubToken.Aliases) {
+			return fmt.Errorf("job plan GitHub token aliases must be sorted")
+		}
+		for i, alias := range job.GitHubToken.Aliases {
+			if !secretNamePattern.MatchString(alias) || strings.EqualFold(alias, "GITHUB_TOKEN") || i > 0 && strings.EqualFold(job.GitHubToken.Aliases[i-1], alias) {
+				return fmt.Errorf("job plan contains invalid or repeated GitHub token alias %q", alias)
+			}
+			if _, exists := ordinaryAliases[strings.ToUpper(alias)]; exists {
+				return fmt.Errorf("job plan GitHub token alias %q overlaps ordinary secret authority", alias)
+			}
 		}
 	}
 	if job.IDTokenPermission != "" && job.IDTokenPermission != "read" && job.IDTokenPermission != "write" {

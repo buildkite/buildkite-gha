@@ -38,11 +38,11 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `python`, and custom shell templates. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
-| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local and literal public GitHub workflows with static inputs, deferred string inputs from direct needs outputs, and direct job-output mappings. Local calls can inherit Buildkite secret authority. |
+| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local and literal public GitHub workflows with static inputs, deferred string inputs from direct needs outputs, and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Reusable-workflow jobs use the top-level workflow permissions. |
-| [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs and locally inherited reusable jobs resolve through the destination job's Buildkite secret authority. |
+| [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs and locally inherited or explicitly mapped reusable jobs resolve through the destination job's Buildkite secret authority. |
 | [Job and service containers](#containers-and-services) | 🟡 Supported subset | Linux job containers and broadly compatible service definitions, including explicit registry credentials. |
 | [Environments and snapshots](#job-configuration) | 🟡 Supported subset | Environments are rejected. Snapshots are accepted with no effect. |
 | [OIDC](#other-secrets-and-oidc) | 🟡 Supported subset | Host JavaScript and composite actions can request Buildkite OIDC tokens in jobs with `id-token: write`. |
@@ -304,6 +304,8 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Literal defaults and expression defaults over graph-time `github` and `vars` values.
 - Nested calls up to four levels.
 - `secrets: inherit` for repository-local calls. Each nested edge must repeat it.
+- Explicit repository-local mappings from a declared callee alias to one direct `${{ secrets.NAME }}` or `${{ secrets['NAME'] }}` caller reference.
+- Required and optional `on.workflow_call.secrets` declarations.
 - Caller-visible aggregate results.
 - Outputs mapped directly from `jobs.<job>.outputs.<name>`.
 - Call-level `if` over caller `github`, `vars`, `inputs`, direct `needs`, and status functions.
@@ -311,7 +313,8 @@ A top-level workflow that does not declare the effective event is excluded befor
 **❌ Unsupported:**
 
 - Dynamic workflow paths and private repositories.
-- `secrets: inherit` for public remote calls, explicit secret mappings, or required called-workflow secrets.
+- Secret forwarding for public remote calls.
+- Literal, compound, dynamic, or non-secret explicit mapping values.
 - Compound `needs`-dependent inputs or dynamic matrices.
 - Input defaults that reference `inputs`.
 - Literal or compound output expressions.
@@ -320,6 +323,10 @@ A top-level workflow that does not declare the effective event is excluded befor
 Job-level `uses`, `with`, and `secrets` follow these boundaries.
 
 For a local call with `secrets: inherit`, each flattened callee job requests only the static ordinary secret names referenced by that job or its workflow-authored action inputs. Inheritance is one hop: an omitted nested `secrets: inherit` removes ordinary secret authority from every job below that edge. It does not affect direct caller jobs or `GITHUB_TOKEN`.
+
+Explicit mappings must target aliases declared by the called workflow. Every required alias must receive authority; an unmapped optional alias is empty. Nested mappings compose to the original Buildkite secret name and cannot recover an omitted same-named secret. Plans contain aliases and original names, never values. The runtime retrieves each original once, registers its value with both redactors, then projects it to the callee aliases.
+
+`${{ secrets.GITHUB_TOKEN }}` may be forwarded to a declared alias. The alias remains part of the scoped workflow-token contract and never becomes an ordinary Buildkite secret.
 
 A call condition runs in caller scope before static call-matrix expansion. It keeps the implicit `success()` guard. A false condition skips every flattened descendant, including jobs with `if: always()`, and exposes `skipped` with empty outputs to downstream `needs`. Nested calls evaluate ordered outer-to-inner guards. Callee job results do not change an outer guard. Call conditions cannot use `matrix`, `strategy`, callee inputs or needs, `steps`, `env`, `runner`, or `secrets`.
 
@@ -1160,7 +1167,8 @@ Automatic ambient `GITHUB_TOKEN` is unsupported.
 ### Other secrets and OIDC
 
 **🟡 Supported subset.** Direct jobs can use static `${{ secrets.NAME }}`
-references. Local reusable-workflow jobs can use them after `secrets: inherit`.
+references. Local reusable-workflow jobs can inherit or explicitly map declared
+secret aliases.
 
 The compiler records names, not values, in the destination job plan. At
 runtime, the job calls `buildkite-agent secret get NAME` and registers the value
@@ -1181,8 +1189,9 @@ Unsupported secret uses include:
 - dynamic, whole-context, filtered, or projected access
 - conditions and other compile-time expressions
 - GitHub environments and environment secrets
-- remote inheritance and explicit reusable-workflow mappings
-- required `on.workflow_call.secrets` declarations
+- remote reusable-workflow secret forwarding
+- literals, compound expressions, or references through `needs`, `vars`, `env`,
+  `inputs`, or arbitrary `github` properties in explicit mappings
 
 Action metadata cannot add secret authority to a plan. A secret used only by an
 optional action input becomes an empty value unless another field requires it.
