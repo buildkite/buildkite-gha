@@ -96,6 +96,7 @@ type JobInstance struct {
 	RepositoryRoot          string                       `json:"-"`
 	Source                  workflow.Span                `json:"source"`
 	Positions               map[string]workflow.Position `json:"-"`
+	Sources                 map[string]string            `json:"-"`
 	secretAuthority         bool
 	tokenPolicyNarrowed     bool
 	jobPermissionsIgnored   bool
@@ -112,6 +113,7 @@ type CallGuard struct {
 	NeedOutputs    map[string][]NeedOutput  `json:"need_outputs,omitempty"`
 	SourcePath     string                   `json:"-"`
 	Position       workflow.Position        `json:"-"`
+	Source         string                   `json:"-"`
 }
 
 // DeferredInput binds one string workflow_call input to exact prerequisite

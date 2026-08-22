@@ -243,28 +243,32 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		}
 		return "${{ " + reduced + " }}", nil
 	}
-	reduceMap := func(values map[string]string, field, positionPrefix string, positions map[string]workflow.Position, fallback workflow.Position, step int) (map[string]string, error) {
+	reduceMap := func(values map[string]string, field, positionPrefix string, positions map[string]workflow.Position, sources map[string]string, fallback workflow.Position, step int) (map[string]string, error) {
 		if values == nil {
 			return nil, nil
 		}
 		result := cloneMap(values)
 		for _, name := range sortedValueKeys(result) {
-			value, err := reduceTemplate(result[name], fmt.Sprintf("%s.%s", field, name), sourcePosition(positions, positionPrefix+"."+name, fallback), step)
+			positionField := positionPrefix + "." + name
+			value, err := reduceTemplate(result[name], fmt.Sprintf("%s.%s", field, name), sourcePosition(positions, positionField, fallback), step)
 			if err != nil {
+				setFindingSource(err, fmt.Sprintf("%s.%s", field, name), sourceValue(sources, positionField, result[name]))
 				return nil, err
 			}
 			result[name] = value
 		}
 		return result, nil
 	}
-	reduceSlice := func(values []string, field, positionPrefix string, positions map[string]workflow.Position, fallback workflow.Position) ([]string, error) {
+	reduceSlice := func(values []string, field, positionPrefix string, positions map[string]workflow.Position, sources map[string]string, fallback workflow.Position) ([]string, error) {
 		if values == nil {
 			return nil, nil
 		}
 		result := append([]string(nil), values...)
 		for i := range result {
-			value, err := reduceTemplate(result[i], fmt.Sprintf("%s[%d]", field, i), sourcePosition(positions, fmt.Sprintf("%s[%d]", positionPrefix, i), fallback), 0)
+			positionField := fmt.Sprintf("%s[%d]", positionPrefix, i)
+			value, err := reduceTemplate(result[i], fmt.Sprintf("%s[%d]", field, i), sourcePosition(positions, positionField, fallback), 0)
 			if err != nil {
+				setFindingSource(err, fmt.Sprintf("%s[%d]", field, i), sourceValue(sources, positionField, result[i]))
 				return nil, err
 			}
 			result[i] = value
@@ -274,6 +278,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 
 	var err error
 	if instance.If, err = reduceCondition(instance.If, "job.if", sourcePosition(instance.Positions, "if", instance.Source.Start), 0); err != nil {
+		setFindingSource(err, "job.if", sourceValue(instance.Sources, "if", instance.If))
 		return JobInstance{}, err
 	}
 	jobFields := []struct {
@@ -287,13 +292,14 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 	}
 	for _, field := range jobFields {
 		if *field.value, err = reduceTemplate(*field.value, field.name, sourcePosition(instance.Positions, field.position, instance.Source.Start), 0); err != nil {
+			setFindingSource(err, field.name, sourceValue(instance.Sources, field.position, *field.value))
 			return JobInstance{}, err
 		}
 	}
-	if instance.Env, err = reduceMap(instance.Env, "job.env", "env", instance.Positions, instance.Source.Start, 0); err != nil {
+	if instance.Env, err = reduceMap(instance.Env, "job.env", "env", instance.Positions, instance.Sources, instance.Source.Start, 0); err != nil {
 		return JobInstance{}, err
 	}
-	if instance.Outputs, err = reduceMap(instance.Outputs, "job.outputs", "outputs", instance.Positions, instance.Source.Start, 0); err != nil {
+	if instance.Outputs, err = reduceMap(instance.Outputs, "job.outputs", "outputs", instance.Positions, instance.Sources, instance.Source.Start, 0); err != nil {
 		return JobInstance{}, err
 	}
 
@@ -310,7 +316,11 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 			if position.Line == 0 || position.Column == 0 {
 				position = instance.Source.Start
 			}
-			return JobInstance{}, planExpressionFinding(instance, path, fmt.Sprintf("job.call-guards[%d]", i), guard.Condition, position, 0, guardErr)
+			source := guard.Source
+			if source == "" {
+				source = guard.Condition
+			}
+			return JobInstance{}, planExpressionFinding(instance, path, fmt.Sprintf("job.call-guards[%d]", i), source, position, 0, guardErr)
 		}
 		guard.Condition = reduced
 	}
@@ -320,6 +330,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		step := &instance.Steps[i]
 		field := fmt.Sprintf("steps[%d]", i+1)
 		if step.If, err = reduceCondition(step.If, field+".if", sourcePosition(step.Positions, "if", step.IfSpan.Start), i+1); err != nil {
+			setFindingSource(err, field+".if", sourceValue(step.Sources, "if", step.If))
 			return JobInstance{}, err
 		}
 		stepTemplates := []struct {
@@ -328,6 +339,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		}{{"name", &step.Name}, {"run", &step.Run}, {"shell", &step.Shell}, {"working-directory", &step.WorkingDirectory}}
 		for _, template := range stepTemplates {
 			if *template.value, err = reduceTemplate(*template.value, field+"."+template.name, sourcePosition(step.Positions, template.name, step.Span.Start), i+1); err != nil {
+				setFindingSource(err, field+"."+template.name, sourceValue(step.Sources, template.name, *template.value))
 				return JobInstance{}, err
 			}
 		}
@@ -337,13 +349,14 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		}{{"continue-on-error", &step.ContinueOnErrorExpression}, {"timeout-minutes", &step.TimeoutMinutesExpression}}
 		for _, typed := range typedExpressions {
 			if *typed.value, err = reduceTypedExpression(*typed.value, field+"."+typed.name, sourcePosition(step.Positions, typed.name, step.Span.Start), i+1); err != nil {
+				setFindingSource(err, field+"."+typed.name, sourceValue(step.Sources, typed.name, *typed.value))
 				return JobInstance{}, err
 			}
 		}
-		if step.Env, err = reduceMap(step.Env, field+".env", "env", step.Positions, step.Span.Start, i+1); err != nil {
+		if step.Env, err = reduceMap(step.Env, field+".env", "env", step.Positions, step.Sources, step.Span.Start, i+1); err != nil {
 			return JobInstance{}, err
 		}
-		if step.With, err = reduceMap(step.With, field+".with", "with", step.Positions, step.Span.Start, i+1); err != nil {
+		if step.With, err = reduceMap(step.With, field+".with", "with", step.Positions, step.Sources, step.Span.Start, i+1); err != nil {
 			return JobInstance{}, err
 		}
 		referencesEvent, referencesErr := expression.TemplateReferencesGitHubEvent(step.Uses)
@@ -351,22 +364,23 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 			referencesEvent, referencesErr = expression.TemplateUsesContext(step.Uses, "event")
 		}
 		if referencesErr != nil {
-			return JobInstance{}, planExpressionFinding(instance, instance.SourcePath, field+".uses", step.Uses, sourcePosition(step.Positions, "uses", step.Span.Start), i+1, referencesErr)
+			return JobInstance{}, planExpressionFinding(instance, instance.SourcePath, field+".uses", sourceValue(step.Sources, "uses", step.Uses), sourcePosition(step.Positions, "uses", step.Span.Start), i+1, referencesErr)
 		}
 		if referencesEvent {
-			return JobInstance{}, planExpressionFinding(instance, instance.SourcePath, field+".uses", step.Uses, sourcePosition(step.Positions, "uses", step.Span.Start), i+1, errEventActionReference)
+			return JobInstance{}, planExpressionFinding(instance, instance.SourcePath, field+".uses", sourceValue(step.Sources, "uses", step.Uses), sourcePosition(step.Positions, "uses", step.Span.Start), i+1, errEventActionReference)
 		}
 	}
 
 	if instance.Container != nil {
 		container := *instance.Container
 		if container.Image, err = reduceTemplate(container.Image, "job.container.image", sourcePosition(container.Positions, "image", container.Span.Start), 0); err != nil {
+			setFindingSource(err, "job.container.image", sourceValue(container.Sources, "image", container.Image))
 			return JobInstance{}, err
 		}
-		if container.Env, err = reduceMap(container.Env, "job.container.env", "env", container.Positions, container.Span.Start, 0); err != nil {
+		if container.Env, err = reduceMap(container.Env, "job.container.env", "env", container.Positions, container.Sources, container.Span.Start, 0); err != nil {
 			return JobInstance{}, err
 		}
-		if container.Ports, err = reduceSlice(container.Ports, "job.container.ports", "ports", container.Positions, container.Span.Start); err != nil {
+		if container.Ports, err = reduceSlice(container.Ports, "job.container.ports", "ports", container.Positions, container.Sources, container.Span.Start); err != nil {
 			return JobInstance{}, err
 		}
 		instance.Container = &container
@@ -382,24 +396,27 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		}{{"image", &container.Image}, {"options", &container.Options}, {"command", &container.Command}, {"entrypoint", &container.Entrypoint}}
 		for _, serviceField := range serviceFields {
 			if *serviceField.value, err = reduceTemplate(*serviceField.value, field+"."+serviceField.name, sourcePosition(container.Positions, serviceField.name, container.Span.Start), 0); err != nil {
+				setFindingSource(err, field+"."+serviceField.name, sourceValue(container.Sources, serviceField.name, *serviceField.value))
 				return JobInstance{}, err
 			}
 		}
-		if container.Env, err = reduceMap(container.Env, field+".env", "env", container.Positions, container.Span.Start, 0); err != nil {
+		if container.Env, err = reduceMap(container.Env, field+".env", "env", container.Positions, container.Sources, container.Span.Start, 0); err != nil {
 			return JobInstance{}, err
 		}
-		if container.Ports, err = reduceSlice(container.Ports, field+".ports", "ports", container.Positions, container.Span.Start); err != nil {
+		if container.Ports, err = reduceSlice(container.Ports, field+".ports", "ports", container.Positions, container.Sources, container.Span.Start); err != nil {
 			return JobInstance{}, err
 		}
-		if container.Volumes, err = reduceSlice(container.Volumes, field+".volumes", "volumes", container.Positions, container.Span.Start); err != nil {
+		if container.Volumes, err = reduceSlice(container.Volumes, field+".volumes", "volumes", container.Positions, container.Sources, container.Span.Start); err != nil {
 			return JobInstance{}, err
 		}
 		if container.Credentials != nil {
 			credentials := *container.Credentials
 			if credentials.Username, err = reduceTemplate(credentials.Username, field+".credentials.username", sourcePosition(container.Positions, "credentials.username", container.Span.Start), 0); err != nil {
+				setFindingSource(err, field+".credentials.username", sourceValue(container.Sources, "credentials.username", credentials.Username))
 				return JobInstance{}, err
 			}
 			if credentials.Password, err = reduceTemplate(credentials.Password, field+".credentials.password", sourcePosition(container.Positions, "credentials.password", container.Span.Start), 0); err != nil {
+				setFindingSource(err, field+".credentials.password", sourceValue(container.Sources, "credentials.password", credentials.Password))
 				return JobInstance{}, err
 			}
 			container.Credentials = &credentials
@@ -767,6 +784,25 @@ func sourcePosition(positions map[string]workflow.Position, field string, fallba
 		return position
 	}
 	return fallback
+}
+
+func sourceValue(sources map[string]string, field, fallback string) string {
+	if source, ok := sources[field]; ok {
+		return source
+	}
+	return fallback
+}
+
+func setFindingSource(err error, field, source string) {
+	var finding *ProcessingFinding
+	if errors.As(err, &finding) {
+		finding.Detail = fmt.Sprintf("Expression in %s: %q", field, source)
+		cause := errors.Unwrap(finding.Err)
+		if cause == nil {
+			cause = finding.Err
+		}
+		finding.Err = fmt.Errorf("%s:%d:%d: job %q %s expression %q: %w", finding.Path, finding.Line, finding.Column, finding.Job, field, source, cause)
+	}
 }
 
 func planExpressionFinding(instance JobInstance, sourcePath, field, source string, position workflow.Position, step int, err error) error {

@@ -29,6 +29,8 @@ type Workflow struct {
 	RequiredCallSecrets     []string              `json:"required_call_secrets,omitempty"`
 	Callable                bool                  `json:"callable,omitempty"`
 	Jobs                    []Job                 `json:"jobs"`
+	Positions               map[string]Position   `json:"-"`
+	Sources                 map[string]string     `json:"-"`
 }
 
 // ReusableOnly reports whether the workflow can only be invoked through
@@ -139,6 +141,7 @@ type Job struct {
 	Steps                   []Step                 `json:"steps"`
 	Span                    Span                   `json:"span"`
 	Positions               map[string]Position    `json:"-"`
+	Sources                 map[string]string      `json:"-"`
 }
 
 // Container is the statically owned subset of a GitHub Actions container.
@@ -148,6 +151,7 @@ type Container struct {
 	Ports     []string            `json:"ports,omitempty"`
 	Span      Span                `json:"span"`
 	Positions map[string]Position `json:"-"`
+	Sources   map[string]string   `json:"-"`
 }
 
 // Service is a named service container. Services retain workflow declaration
@@ -169,6 +173,7 @@ type ServiceContainer struct {
 	Entrypoint  string                `json:"entrypoint,omitempty"`
 	Span        Span                  `json:"span"`
 	Positions   map[string]Position   `json:"-"`
+	Sources     map[string]string     `json:"-"`
 }
 
 type ContainerCredentials struct {
@@ -236,4 +241,5 @@ type Step struct {
 	TimeoutMinutesExpression  string              `json:"timeout_minutes_expression,omitempty"`
 	Span                      Span                `json:"span"`
 	Positions                 map[string]Position `json:"-"`
+	Sources                   map[string]string   `json:"-"`
 }

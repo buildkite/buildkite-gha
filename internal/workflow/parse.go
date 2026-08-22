@@ -46,6 +46,7 @@ type rawServiceContainer struct {
 	Entrypoint  string
 	Order       int
 	Positions   map[string]Position
+	Sources     map[string]string
 }
 
 // Parse uses actionlint as the syntax frontend and immediately converts its AST
@@ -74,7 +75,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, fmt.Errorf("%s: parse scalar values: %w", path, err)
 	}
 
-	owned := &Workflow{}
+	owned := &Workflow{Positions: map[string]Position{}, Sources: map[string]string{}}
 	owned.Triggers = adaptTriggers(parsed.On)
 	if parsed.Name != nil {
 		owned.Name = parsed.Name.Value
@@ -98,6 +99,8 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, locatedError(path, parsed.Env.Expression.Pos, "workflow", "expression-valued workflow env is unsupported")
 	}
 	owned.Env = adaptEnv(parsed.Env)
+	owned.Positions = mergePositions(owned.Positions, adaptEnvPositions("env", parsed.Env))
+	owned.Sources = mergeSources(owned.Sources, mapSources("env", owned.Env))
 	envNames := make([]string, 0, len(owned.Env))
 	for name := range owned.Env {
 		envNames = append(envNames, name)
@@ -111,9 +114,13 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if parsed.Defaults != nil && parsed.Defaults.Run != nil {
 		if parsed.Defaults.Run.Shell != nil {
 			owned.DefaultShell = parsed.Defaults.Run.Shell.Value
+			owned.Positions["defaults.run.shell"] = pointSpan(parsed.Defaults.Run.Shell.Pos).Start
+			owned.Sources["defaults.run.shell"] = owned.DefaultShell
 		}
 		if parsed.Defaults.Run.WorkingDirectory != nil {
 			owned.DefaultWorkingDirectory = parsed.Defaults.Run.WorkingDirectory.Value
+			owned.Positions["defaults.run.working-directory"] = pointSpan(parsed.Defaults.Run.WorkingDirectory.Pos).Start
+			owned.Sources["defaults.run.working-directory"] = owned.DefaultWorkingDirectory
 		}
 		if err := expression.ValidateRuntimeTemplate(owned.DefaultShell); err != nil {
 			return nil, fmt.Errorf("%s: workflow default shell: %w", path, err)
@@ -191,12 +198,23 @@ func Parse(path string, source []byte) (*Workflow, error) {
 			job.Concurrency.CancelInProgress = true
 			job.Concurrency.CancelInProgressPosition = position
 		}
+		for name := range owned.Env {
+			field := "env." + name
+			if _, exists := job.Env[name]; !exists {
+				job.Positions[field] = owned.Positions[field]
+				job.Sources[field] = owned.Sources[field]
+			}
+		}
 		job.Env = mergeEnv(owned.Env, job.Env)
 		if job.DefaultShell == "" {
 			job.DefaultShell = owned.DefaultShell
+			job.Positions["defaults.run.shell"] = owned.Positions["defaults.run.shell"]
+			job.Sources["defaults.run.shell"] = owned.Sources["defaults.run.shell"]
 		}
 		if job.DefaultWorkingDirectory == "" {
 			job.DefaultWorkingDirectory = owned.DefaultWorkingDirectory
+			job.Positions["defaults.run.working-directory"] = owned.Positions["defaults.run.working-directory"]
+			job.Sources["defaults.run.working-directory"] = owned.Sources["defaults.run.working-directory"]
 		}
 		owned.Jobs = append(owned.Jobs, job)
 	}
@@ -407,7 +425,7 @@ func rawConcurrencyCancellation(concurrency *yaml.Node) *Position {
 }
 
 func validateRawContainer(path string, node *yaml.Node, service bool) (rawServiceContainer, []expectedActionlintDiagnostic, error) {
-	extra := rawServiceContainer{Positions: map[string]Position{}}
+	extra := rawServiceContainer{Positions: map[string]Position{}, Sources: map[string]string{}}
 	var diagnostics []expectedActionlintDiagnostic
 	image := node
 	if node.Kind == yaml.MappingNode {
@@ -436,10 +454,12 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 				if username != nil {
 					extra.Credentials.Username = username.Value
 					extra.Positions["credentials.username"] = nodePosition(username)
+					extra.Sources["credentials.username"] = username.Value
 				}
 				if password != nil {
 					extra.Credentials.Password = password.Value
 					extra.Positions["credentials.password"] = nodePosition(password)
+					extra.Sources["credentials.password"] = password.Value
 				}
 				if (username == nil) != (password == nil) {
 					diagnostics = append(diagnostics, expectedActionlintDiagnostic{Position: nodePosition(mappingKey(node, "credentials")), Prefix: "both \"username\" and \"password\" must be specified"})
@@ -456,6 +476,7 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 					}
 					*field.dest = value.Value
 					extra.Positions[field.name] = nodePosition(value)
+					extra.Sources[field.name] = value.Value
 					key := mappingKey(node, field.name)
 					diagnostics = append(diagnostics, expectedActionlintDiagnostic{Position: nodePosition(key), Prefix: "unexpected key \"" + field.name + "\""})
 				}
@@ -470,6 +491,7 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 	}
 	extra.Image = image.Value
 	extra.Positions["image"] = nodePosition(image)
+	extra.Sources["image"] = image.Value
 	env := mappingValue(node, "env")
 	if env != nil && env.Kind == yaml.MappingNode {
 		if len(env.Content)/2 > 256 {
@@ -491,6 +513,7 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 				}
 				extra.Env[key.Value] = value.Value
 				extra.Positions["env."+key.Value] = nodePosition(value)
+				extra.Sources["env."+key.Value] = value.Value
 			}
 		}
 		if total > 1048576 {
@@ -511,6 +534,7 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 			if service {
 				extra.Ports = append(extra.Ports, port.Value)
 				extra.Positions[fmt.Sprintf("ports[%d]", i)] = nodePosition(port)
+				extra.Sources[fmt.Sprintf("ports[%d]", i)] = port.Value
 			}
 		}
 	}
@@ -526,6 +550,7 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 				}
 				extra.Volumes = append(extra.Volumes, volume.Value)
 				extra.Positions[fmt.Sprintf("volumes[%d]", i)] = nodePosition(volume)
+				extra.Sources[fmt.Sprintf("volumes[%d]", i)] = volume.Value
 			}
 		}
 		if options := mappingValue(node, "options"); options != nil {
@@ -534,13 +559,14 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 			}
 			extra.Options = options.Value
 			extra.Positions["options"] = nodePosition(options)
+			extra.Sources["options"] = options.Value
 		}
 	}
 	return extra, diagnostics, nil
 }
 
 func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurrency map[Position]stepConcurrency, serviceContainers map[string]rawServiceContainer) (Job, error) {
-	out := Job{ID: in.ID.Value, Span: pointSpan(in.Pos), Positions: map[string]Position{}}
+	out := Job{ID: in.ID.Value, Span: pointSpan(in.Pos), Positions: map[string]Position{}, Sources: map[string]string{}}
 	if in.Environment != nil {
 		return Job{}, locatedError(path, in.Environment.Pos, fmt.Sprintf("job %q", in.ID.Value), "GitHub environments and environment secrets are unsupported")
 	}
@@ -576,6 +602,7 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		out.If = in.If.Value
 		out.IfSpan = spanFrom(in.If.Pos, in.If.Value)
 		out.Positions["if"] = pointSpan(in.If.Pos).Start
+		out.Sources["if"] = out.If
 	}
 	if in.Container != nil {
 		container, err := adaptContainer(path, in.ID.Value, in.Container)
@@ -588,6 +615,7 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		if in.Services.Expression != nil {
 			out.ServicesExpression = in.Services.Expression.Value
 			out.Positions["services"] = pointSpan(in.Services.Expression.Pos).Start
+			out.Sources["services"] = out.ServicesExpression
 			if err := expression.ValidateServiceMapRuntimeExpression(out.ServicesExpression); err != nil {
 				return Job{}, locatedError(path, in.Services.Expression.Pos, in.ID.Value, err.Error())
 			}
@@ -641,14 +669,17 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 	}
 	out.Env = adaptEnv(in.Env)
 	out.Positions = mergePositions(out.Positions, adaptEnvPositions("env", in.Env))
+	out.Sources = mergeSources(out.Sources, mapSources("env", out.Env))
 	if in.Defaults != nil && in.Defaults.Run != nil {
 		if in.Defaults.Run.Shell != nil {
 			out.DefaultShell = in.Defaults.Run.Shell.Value
 			out.Positions["defaults.run.shell"] = pointSpan(in.Defaults.Run.Shell.Pos).Start
+			out.Sources["defaults.run.shell"] = out.DefaultShell
 		}
 		if in.Defaults.Run.WorkingDirectory != nil {
 			out.DefaultWorkingDirectory = in.Defaults.Run.WorkingDirectory.Value
 			out.Positions["defaults.run.working-directory"] = pointSpan(in.Defaults.Run.WorkingDirectory.Pos).Start
+			out.Sources["defaults.run.working-directory"] = out.DefaultWorkingDirectory
 		}
 	}
 	if len(in.Outputs) != 0 {
@@ -656,6 +687,7 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		for name, output := range in.Outputs {
 			out.Outputs[name] = output.Value.Value
 			out.Positions["outputs."+name] = pointSpan(output.Value.Pos).Start
+			out.Sources["outputs."+name] = output.Value.Value
 		}
 	}
 	for _, need := range in.Needs {
@@ -727,23 +759,26 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 			out.Span.End = barrier.Span.End
 			continue
 		}
-		owned := Step{Background: control.Background, Targets: append([]string(nil), control.Targets...), Span: pointSpan(step.Pos), Positions: map[string]Position{}}
+		owned := Step{Background: control.Background, Targets: append([]string(nil), control.Targets...), Span: pointSpan(step.Pos), Positions: map[string]Position{}, Sources: map[string]string{}}
 		if step.ID != nil {
 			owned.ID = step.ID.Value
 		}
 		if step.Name != nil {
 			owned.Name = step.Name.Value
 			owned.Positions["name"] = pointSpan(step.Name.Pos).Start
+			owned.Sources["name"] = owned.Name
 		}
 		if step.If != nil {
 			owned.If = step.If.Value
 			owned.IfSpan = spanFrom(step.If.Pos, step.If.Value)
 			owned.Positions["if"] = pointSpan(step.If.Pos).Start
+			owned.Sources["if"] = owned.If
 		}
 		if step.ContinueOnError != nil {
 			if step.ContinueOnError.Expression != nil {
 				owned.ContinueOnErrorExpression = step.ContinueOnError.Expression.Value
 				owned.Positions["continue-on-error"] = pointSpan(step.ContinueOnError.Expression.Pos).Start
+				owned.Sources["continue-on-error"] = owned.ContinueOnErrorExpression
 			} else {
 				owned.ContinueOnError = step.ContinueOnError.Value
 			}
@@ -752,6 +787,7 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 			if step.TimeoutMinutes.Expression != nil {
 				owned.TimeoutMinutesExpression = step.TimeoutMinutes.Expression.Value
 				owned.Positions["timeout-minutes"] = pointSpan(step.TimeoutMinutes.Expression.Pos).Start
+				owned.Sources["timeout-minutes"] = owned.TimeoutMinutesExpression
 			} else {
 				owned.TimeoutMinutes = step.TimeoutMinutes.Value
 			}
@@ -761,18 +797,22 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		}
 		owned.Env = adaptEnv(step.Env)
 		owned.Positions = mergePositions(owned.Positions, adaptEnvPositions("env", step.Env))
+		owned.Sources = mergeSources(owned.Sources, mapSources("env", owned.Env))
 		switch exec := step.Exec.(type) {
 		case *actionlint.ExecRun:
 			owned.Kind = "run"
 			owned.Run = exec.Run.Value
 			owned.Positions["run"] = pointSpan(exec.Run.Pos).Start
+			owned.Sources["run"] = owned.Run
 			if exec.Shell != nil {
 				owned.Shell = exec.Shell.Value
 				owned.Positions["shell"] = pointSpan(exec.Shell.Pos).Start
+				owned.Sources["shell"] = owned.Shell
 			}
 			if exec.WorkingDirectory != nil {
 				owned.WorkingDirectory = exec.WorkingDirectory.Value
 				owned.Positions["working-directory"] = pointSpan(exec.WorkingDirectory.Pos).Start
+				owned.Sources["working-directory"] = owned.WorkingDirectory
 			}
 			owned.Span = spanFrom(step.Pos, exec.Run.Value)
 		case *actionlint.ExecAction:
@@ -786,11 +826,13 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 			owned.Kind = "uses"
 			owned.Uses = exec.Uses.Value
 			owned.Positions["uses"] = pointSpan(exec.Uses.Pos).Start
+			owned.Sources["uses"] = owned.Uses
 			if len(exec.Inputs) != 0 {
 				owned.With = make(map[string]string, len(exec.Inputs))
 				for name, input := range exec.Inputs {
 					owned.With[name] = input.Value.Value
 					owned.Positions["with."+name] = pointSpan(input.Value.Pos).Start
+					owned.Sources["with."+name] = input.Value.Value
 				}
 			}
 			owned.Span = spanFrom(step.Pos, exec.Uses.Value)
@@ -955,6 +997,27 @@ func mergePositions(base, additional map[string]Position) map[string]Position {
 	return base
 }
 
+func mapSources(prefix string, values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	sources := make(map[string]string, len(values))
+	for name, value := range values {
+		sources[prefix+"."+name] = value
+	}
+	return sources
+}
+
+func mergeSources(base, additional map[string]string) map[string]string {
+	if base == nil && len(additional) != 0 {
+		base = make(map[string]string, len(additional))
+	}
+	for name, source := range additional {
+		base[name] = source
+	}
+	return base
+}
+
 var serviceIDPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
 
 func adaptContainer(path, jobID string, in *actionlint.Container) (Container, error) {
@@ -980,14 +1043,16 @@ func adaptContainer(path, jobID string, in *actionlint.Container) (Container, er
 			}
 		}
 	}
-	out := Container{Image: in.Image.Value, Env: adaptEnv(in.Env), Span: pointSpan(in.Pos), Positions: map[string]Position{"image": pointSpan(in.Image.Pos).Start}}
+	out := Container{Image: in.Image.Value, Env: adaptEnv(in.Env), Span: pointSpan(in.Pos), Positions: map[string]Position{"image": pointSpan(in.Image.Pos).Start}, Sources: map[string]string{"image": in.Image.Value}}
 	out.Positions = mergePositions(out.Positions, adaptEnvPositions("env", in.Env))
+	out.Sources = mergeSources(out.Sources, mapSources("env", out.Env))
 	for i, port := range in.Ports {
 		if port.ContainsExpression() {
 			return Container{}, locatedError(path, port.Pos, jobID, "expression-valued container port is unsupported")
 		}
 		out.Ports = append(out.Ports, port.Value)
 		out.Positions[fmt.Sprintf("ports[%d]", i)] = pointSpan(port.Pos).Start
+		out.Sources[fmt.Sprintf("ports[%d]", i)] = port.Value
 	}
 	return out, nil
 }
@@ -999,7 +1064,7 @@ func adaptServiceContainer(path, jobID string, in *actionlint.Container, raw raw
 	if in.Env != nil && in.Env.Expression != nil {
 		return ServiceContainer{}, locatedError(path, in.Env.Expression.Pos, jobID, "expression-valued service container env is unsupported")
 	}
-	out := ServiceContainer{Image: raw.Image, Credentials: raw.Credentials, Env: raw.Env, Ports: raw.Ports, Volumes: raw.Volumes, Options: raw.Options, Command: raw.Command, Entrypoint: raw.Entrypoint, Span: pointSpan(in.Pos), Positions: raw.Positions}
+	out := ServiceContainer{Image: raw.Image, Credentials: raw.Credentials, Env: raw.Env, Ports: raw.Ports, Volumes: raw.Volumes, Options: raw.Options, Command: raw.Command, Entrypoint: raw.Entrypoint, Span: pointSpan(in.Pos), Positions: raw.Positions, Sources: raw.Sources}
 	return out, nil
 }
 
@@ -1337,7 +1402,7 @@ func parseParallelStep(path string, node *yaml.Node) (Step, error) {
 	if execution.Kind != yaml.ScalarNode || execution.ShortTag() == "!!null" || strings.TrimSpace(execution.Value) == "" {
 		return Step{}, yamlNodeError(path, execution, "parallel member execution must be a non-empty scalar")
 	}
-	step := Step{Span: yamlStepSpan(node, execution), Positions: map[string]Position{}}
+	step := Step{Span: yamlStepSpan(node, execution), Positions: map[string]Position{}, Sources: map[string]string{}}
 	var err error
 	if step.ID, err = optionalString(entries["id"]); err != nil {
 		return Step{}, yamlNodeError(path, entries["id"], "parallel member id must be a string")
@@ -1347,6 +1412,7 @@ func parseParallelStep(path string, node *yaml.Node) (Step, error) {
 	}
 	if entries["name"] != nil {
 		step.Positions["name"] = nodePosition(entries["name"])
+		step.Sources["name"] = step.Name
 	}
 	if step.If, err = optionalScalar(entries["if"]); err != nil {
 		return Step{}, yamlNodeError(path, entries["if"], "parallel member if must be a scalar")
@@ -1354,11 +1420,13 @@ func parseParallelStep(path string, node *yaml.Node) (Step, error) {
 	if value := entries["if"]; value != nil {
 		step.IfSpan = yamlStepSpan(value, value)
 		step.Positions["if"] = nodePosition(value)
+		step.Sources["if"] = step.If
 	}
 	if step.Env, err = scalarMap(entries["env"]); err != nil {
 		return Step{}, yamlNodeError(path, entries["env"], "parallel member env must be a scalar mapping")
 	}
 	step.Positions = mergePositions(step.Positions, scalarMapPositions("env", entries["env"]))
+	step.Sources = mergeSources(step.Sources, mapSources("env", step.Env))
 	if value := entries["continue-on-error"]; value != nil {
 		if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!bool" {
 			return Step{}, yamlNodeError(path, value, "parallel member continue-on-error must be a literal boolean")
@@ -1383,17 +1451,20 @@ func parseParallelStep(path string, node *yaml.Node) (Step, error) {
 		step.Kind = "run"
 		step.Run = run.Value
 		step.Positions["run"] = nodePosition(run)
+		step.Sources["run"] = step.Run
 		if step.Shell, err = optionalScalar(entries["shell"]); err != nil {
 			return Step{}, yamlNodeError(path, entries["shell"], "parallel member shell must be a scalar")
 		}
 		if entries["shell"] != nil {
 			step.Positions["shell"] = nodePosition(entries["shell"])
+			step.Sources["shell"] = step.Shell
 		}
 		if step.WorkingDirectory, err = optionalScalar(entries["working-directory"]); err != nil {
 			return Step{}, yamlNodeError(path, entries["working-directory"], "parallel member working-directory must be a scalar")
 		}
 		if entries["working-directory"] != nil {
 			step.Positions["working-directory"] = nodePosition(entries["working-directory"])
+			step.Sources["working-directory"] = step.WorkingDirectory
 		}
 		return step, nil
 	}
@@ -1403,10 +1474,12 @@ func parseParallelStep(path string, node *yaml.Node) (Step, error) {
 	step.Kind = "uses"
 	step.Uses = uses.Value
 	step.Positions["uses"] = nodePosition(uses)
+	step.Sources["uses"] = step.Uses
 	if step.With, err = scalarMap(entries["with"]); err != nil {
 		return Step{}, yamlNodeError(path, entries["with"], "parallel member with must be a scalar mapping")
 	}
 	step.Positions = mergePositions(step.Positions, scalarMapPositions("with", entries["with"]))
+	step.Sources = mergeSources(step.Sources, mapSources("with", step.With))
 	for name, value := range step.With {
 		lower := strings.ToLower(name)
 		if lower != name {
@@ -1414,6 +1487,8 @@ func parseParallelStep(path string, node *yaml.Node) (Step, error) {
 			step.With[lower] = value
 			step.Positions["with."+lower] = step.Positions["with."+name]
 			delete(step.Positions, "with."+name)
+			step.Sources["with."+lower] = step.Sources["with."+name]
+			delete(step.Sources, "with."+name)
 		}
 	}
 	_, hasEntrypoint := step.With["entrypoint"]

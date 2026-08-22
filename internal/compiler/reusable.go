@@ -45,6 +45,7 @@ type sourcedJob struct {
 
 type sourcedCallGuard struct {
 	condition    string
+	source       string
 	inputs       reusableInputs
 	needBindings map[string]needBinding
 	sourcePath   string
@@ -290,7 +291,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow call condition: %v", err))
 			}
 			calleeGuards = append(cloneSourcedCallGuards(callGuards), sourcedCallGuard{
-				condition: condition, inputs: cloneReusableInputs(inputs), needBindings: cloneNeedBindings(callNeedBindings),
+				condition: condition, source: sourceValue(job.Sources, "if", job.If), inputs: cloneReusableInputs(inputs), needBindings: cloneNeedBindings(callNeedBindings),
 				sourcePath: path, position: job.IfSpan.Start,
 			})
 		}
@@ -612,7 +613,7 @@ func cloneSourcedCallGuards(guards []sourcedCallGuard) []sourcedCallGuard {
 	cloned := make([]sourcedCallGuard, len(guards))
 	for i, guard := range guards {
 		cloned[i] = sourcedCallGuard{
-			condition: guard.condition, inputs: cloneReusableInputs(guard.inputs), needBindings: cloneNeedBindings(guard.needBindings),
+			condition: guard.condition, source: guard.source, inputs: cloneReusableInputs(guard.inputs), needBindings: cloneNeedBindings(guard.needBindings),
 			sourcePath: guard.sourcePath, position: guard.position,
 		}
 	}

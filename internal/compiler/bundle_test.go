@@ -1554,6 +1554,57 @@ jobs:
 	}
 }
 
+func TestCompileBundleRetainedEventDiagnosticUsesAuthoredExpression(t *testing.T) {
+	source := []byte(`on:
+  workflow_dispatch:
+    inputs:
+      label:
+        type: string
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ inputs.label }}' '${{ github.event }}'
+`)
+	event := []byte(`{
+  "provider": "github", "event": "workflow_dispatch",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"inputs": {"label": "event-derived-sensitive-value"}}
+}`)
+	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	var finding *ProcessingFinding
+	if err == nil || !errors.As(err, &finding) {
+		t.Fatalf("CompileBundle() finding = %#v, error = %v", finding, err)
+	}
+	if finding.Detail != `Expression in steps[1].run: "echo '${{ inputs.label }}' '${{ github.event }}'"` {
+		t.Fatalf("finding detail = %q", finding.Detail)
+	}
+	if strings.Contains(err.Error(), "event-derived-sensitive-value") {
+		t.Fatalf("finding exposed an event-derived input: %v", err)
+	}
+}
+
+func TestCompileBundleLocatesInheritedWorkflowEventAccess(t *testing.T) {
+	source := []byte(`on: push
+env:
+  EVENT: ${{ github.event }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+	_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	var finding *ProcessingFinding
+	if err == nil || !errors.As(err, &finding) {
+		t.Fatalf("CompileBundle() finding = %#v, error = %v", finding, err)
+	}
+	if finding.Line != 3 || finding.Column != 10 || finding.Detail != `Expression in job.env.EVENT: "${{ github.event }}"` {
+		t.Fatalf("inherited workflow finding = %#v, error = %v", finding, err)
+	}
+}
+
 func TestCompileBundleDoesNotReduceEventExpressionsInActionReferences(t *testing.T) {
 	source := []byte(`on: push
 jobs:
