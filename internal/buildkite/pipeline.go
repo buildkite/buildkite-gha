@@ -222,6 +222,13 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			}
 			usedDigests[job.PlanDigest] = job.Key
 		}
+		if workflow.ConcurrencyGate != nil {
+			for _, job := range jobs {
+				if job.Concurrency > 0 && job.ConcurrencyGroup == workflow.ConcurrencyGate.Group {
+					return nil, fmt.Errorf("workflow concurrency gate shares group with member job %q", job.Key)
+				}
+			}
+		}
 		prepared[i] = preparedWorkflow{Workflow: workflow, Jobs: jobs, Grouped: aggregate || workflow.GroupLabel != "", Aggregate: aggregate}
 		if workflow.ConcurrencyGate != nil {
 			gateNamespace := pipeline.CompilerStep
@@ -533,34 +540,25 @@ func prepareReusableConcurrencyGates(jobs []Job) ([]preparedConcurrencyGate, err
 	}
 	for _, gate := range gates {
 		members := make(map[string]bool, len(gate.Members))
-		seen := make(map[string]bool)
-		var prerequisites []string
 		for _, key := range gate.Members {
-			members[key] = true
-			prerequisites = append(prerequisites, jobsByKey[key].Dependencies...)
-		}
-		for len(prerequisites) != 0 {
-			key := prerequisites[0]
-			prerequisites = prerequisites[1:]
-			if members[key] || seen[key] {
-				continue
-			}
-			seen[key] = true
 			job := jobsByKey[key]
 			if job.Concurrency > 0 && job.ConcurrencyGroup == gate.Group {
-				return nil, fmt.Errorf("reusable-workflow concurrency gate %q shares group with prerequisite job %q", gate.ID, key)
+				return nil, fmt.Errorf("reusable-workflow concurrency gate %q shares group with member job %q", gate.ID, key)
 			}
-			prerequisites = append(prerequisites, job.Dependencies...)
+			members[key] = true
+		}
+		for _, key := range gate.Members {
+			for _, dependency := range jobsByKey[key].Dependencies {
+				if !members[dependency] {
+					return nil, fmt.Errorf("reusable-workflow concurrency gate %q has an external prerequisite", gate.ID)
+				}
+			}
 		}
 	}
 	return gates, nil
 }
 
 func reusableGateOpenDependencies(workflow preparedWorkflow, gate preparedConcurrencyGate, openKeys map[string]string, compilerStep string) []dependency {
-	member := make(map[string]bool, len(gate.Members))
-	for _, key := range gate.Members {
-		member[key] = true
-	}
 	seen := make(map[string]bool)
 	var dependencies []dependency
 	add := func(step string, allowFailure bool) {
@@ -576,17 +574,6 @@ func reusableGateOpenDependencies(workflow preparedWorkflow, gate preparedConcur
 		add(workflow.GateOpenKey, false)
 	case !workflow.Aggregate:
 		add(compilerStep, false)
-	}
-	jobs := make(map[string]Job, len(workflow.Jobs))
-	for _, job := range workflow.Jobs {
-		jobs[job.Key] = job
-	}
-	for _, key := range gate.Members {
-		for _, jobDependency := range jobs[key].Dependencies {
-			if !member[jobDependency] {
-				add(jobDependency, true)
-			}
-		}
 	}
 	return dependencies
 }

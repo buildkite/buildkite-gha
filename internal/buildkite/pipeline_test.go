@@ -718,8 +718,8 @@ func TestEmitWrapsNestedReusableWorkflowConcurrencyGates(t *testing.T) {
 		DistributionDigest: testDigest("distribution"),
 		Jobs: []Job{
 			{Key: "prepare", Label: "Prepare", Queue: "linux", PlanDigest: testDigest("prepare")},
-			{Key: "outer_start", Label: "Outer start", Queue: "linux", PlanDigest: testDigest("outer-start"), Dependencies: []string{"prepare"}, ConcurrencyGates: []ConcurrencyGate{outer}},
-			{Key: "inner", Label: "Inner", Queue: "mac", PlanDigest: testDigest("inner"), Dependencies: []string{"outer_start"}, ConcurrencyGates: []ConcurrencyGate{outer, inner}},
+			{Key: "outer_start", Label: "Outer start", Queue: "linux", PlanDigest: testDigest("outer-start"), ConcurrencyGates: []ConcurrencyGate{outer}},
+			{Key: "inner", Label: "Inner", Queue: "mac", PlanDigest: testDigest("inner"), ConcurrencyGates: []ConcurrencyGate{outer, inner}},
 			{Key: "outer_finish", Label: "Outer finish", Queue: "linux", PlanDigest: testDigest("outer-finish"), Dependencies: []string{"inner"}, ConcurrencyGates: []ConcurrencyGate{outer}},
 		},
 	}
@@ -749,10 +749,10 @@ func TestEmitWrapsNestedReusableWorkflowConcurrencyGates(t *testing.T) {
 	}
 	outerOpen, outerClose := document.Steps[0], document.Steps[1]
 	innerOpen, innerClose := document.Steps[2], document.Steps[3]
-	if outerOpen.ConcurrencyGroup != outer.Group || outerOpen.Agents["queue"] != "linux" || len(outerOpen.DependsOn) != 2 || outerOpen.DependsOn[1].Step != "prepare" || !outerOpen.DependsOn[1].AllowFailure {
+	if outerOpen.ConcurrencyGroup != outer.Group || outerOpen.Agents["queue"] != "mac" || len(outerOpen.DependsOn) != 1 || outerOpen.DependsOn[0].Step != "importer" || outerOpen.DependsOn[0].AllowFailure {
 		t.Fatalf("outer opening gate = %#v", outerOpen)
 	}
-	if innerOpen.ConcurrencyGroup != inner.Group || innerOpen.Agents["queue"] != "mac" || len(innerOpen.DependsOn) != 2 || innerOpen.DependsOn[0].Step != outerOpen.Key || innerOpen.DependsOn[0].AllowFailure || innerOpen.DependsOn[1].Step != "outer_start" || !innerOpen.DependsOn[1].AllowFailure {
+	if innerOpen.ConcurrencyGroup != inner.Group || innerOpen.Agents["queue"] != "mac" || len(innerOpen.DependsOn) != 1 || innerOpen.DependsOn[0].Step != outerOpen.Key || innerOpen.DependsOn[0].AllowFailure {
 		t.Fatalf("inner opening gate = %#v", innerOpen)
 	}
 	if innerClose.ConcurrencyGroup != inner.Group || len(innerClose.DependsOn) != 1 || innerClose.DependsOn[0].Step != "inner" || !innerClose.DependsOn[0].AllowFailure {
@@ -763,19 +763,51 @@ func TestEmitWrapsNestedReusableWorkflowConcurrencyGates(t *testing.T) {
 	}
 }
 
-func TestEmitRejectsReusableConcurrencyGroupSharedWithPrerequisite(t *testing.T) {
-	group := "buildkite-gha/concurrency/deploy"
+func TestEmitRejectsReusableConcurrencyWithExternalPrerequisite(t *testing.T) {
 	_, err := Emit(Pipeline{
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
 		Jobs: []Job{
-			{Key: "prepare", Label: "Prepare", Queue: "linux", PlanDigest: testDigest("prepare"), Concurrency: 1, ConcurrencyGroup: group},
-			{Key: "approve", Label: "Approve", Queue: "linux", PlanDigest: testDigest("approve"), Dependencies: []string{"prepare"}},
-			{Key: "deploy", Label: "Deploy", Queue: "linux", PlanDigest: testDigest("deploy"), Dependencies: []string{"approve"}, ConcurrencyGates: []ConcurrencyGate{{ID: "call", Group: group}}},
+			{Key: "prepare", Label: "Prepare", Queue: "linux", PlanDigest: testDigest("prepare")},
+			{Key: "deploy", Label: "Deploy", Queue: "linux", PlanDigest: testDigest("deploy"), Dependencies: []string{"prepare"}, ConcurrencyGates: []ConcurrencyGate{{ID: "call", Group: "buildkite-gha/concurrency/deploy"}}},
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), `shares group with prerequisite job "prepare"`) {
-		t.Fatalf("Emit() error = %v, want shared prerequisite group rejection", err)
+	if err == nil || !strings.Contains(err.Error(), `concurrency gate "call" has an external prerequisite`) {
+		t.Fatalf("Emit() error = %v, want external prerequisite rejection", err)
+	}
+}
+
+func TestEmitRejectsConcurrencyGroupSharedWithMemberJob(t *testing.T) {
+	group := "buildkite-gha/concurrency/deploy"
+	tests := []struct {
+		name     string
+		pipeline Pipeline
+		want     string
+	}{
+		{
+			name: "workflow",
+			pipeline: Pipeline{
+				CompilerStep: "importer", DistributionDigest: testDigest("distribution"), ConcurrencyGate: &ConcurrencyGate{Group: group},
+				Jobs: []Job{{Key: "deploy", Label: "Deploy", Queue: "linux", PlanDigest: testDigest("workflow-deploy"), Concurrency: 1, ConcurrencyGroup: group}},
+			},
+			want: `workflow concurrency gate shares group with member job "deploy"`,
+		},
+		{
+			name: "reusable workflow",
+			pipeline: Pipeline{
+				CompilerStep: "importer", DistributionDigest: testDigest("distribution"),
+				Jobs: []Job{{Key: "deploy", Label: "Deploy", Queue: "linux", PlanDigest: testDigest("reusable-deploy"), Concurrency: 1, ConcurrencyGroup: group, ConcurrencyGates: []ConcurrencyGate{{ID: "call", Group: group}}}},
+			},
+			want: `reusable-workflow concurrency gate "call" shares group with member job "deploy"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Emit(test.pipeline)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Emit() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

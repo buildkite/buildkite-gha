@@ -394,6 +394,9 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				if err != nil {
 					return reusableResolution{}, err
 				}
+				if len(needs) != 0 {
+					return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "called-workflow concurrency is unsupported for reusable-workflow calls with prerequisites")
+				}
 				calleeConcurrencyGates = append(append([]WorkflowConcurrencyGate(nil), concurrencyGates...), WorkflowConcurrencyGate{ID: callNamespace, Group: group})
 				if cancelInProgress && !resolver.warnedCancellation[calleeCallPosition] {
 					resolver.warnedCancellation[calleeCallPosition] = true

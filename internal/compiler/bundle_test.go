@@ -1038,7 +1038,7 @@ jobs:
 	}
 }
 
-func TestCompileRejectsReusableWorkflowConcurrencySharedWithPrerequisite(t *testing.T) {
+func TestCompileRejectsReusableWorkflowConcurrencyWithPrerequisite(t *testing.T) {
 	repository := t.TempDir()
 	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
 concurrency: deploy
@@ -1051,7 +1051,6 @@ jobs:
 jobs:
   prepare:
     runs-on: ubuntu-latest
-    concurrency: DEPLOY
     steps: [{run: true}]
   approve:
     needs: prepare
@@ -1062,8 +1061,8 @@ jobs:
     uses: ./.github/workflows/reusable.yml
 `)
 	_, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), `shares group with prerequisite job "gha-prepare"`) {
-		t.Fatalf("CompileBundle() error = %v, want shared prerequisite group rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "called-workflow concurrency is unsupported for reusable-workflow calls with prerequisites") {
+		t.Fatalf("CompileBundle() error = %v, want concurrency prerequisite rejection", err)
 	}
 }
 
