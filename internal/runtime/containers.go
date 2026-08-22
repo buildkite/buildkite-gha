@@ -336,15 +336,17 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 		args = append(args, spec.Image, "-c", "while :; do sleep 3600; done")
 		if _, err = boundedDockerOutput(ctx, env, docker, args...); err != nil {
 			createErr := err
-			exists, queryErr := b.jobContainerExists(ctx)
+			reconcileCtx, cancelReconcile := context.WithTimeout(context.WithoutCancel(ctx), r.cleanupTimeout())
+			exists, queryErr := b.jobContainerExists(reconcileCtx)
 			if queryErr != nil {
 				createErr = errors.Join(createErr, fmt.Errorf("reconcile job container create: %w", queryErr))
 			}
 			if exists && len(spec.Volumes) != 0 {
-				if trackErr := b.trackContainerVolumes(ctx, "job container", b.container); trackErr != nil {
+				if trackErr := b.trackContainerVolumes(reconcileCtx, "job container", b.container); trackErr != nil {
 					createErr = errors.Join(createErr, trackErr)
 				}
 			}
+			cancelReconcile()
 			return nil, fmt.Errorf("create job container: %w", createErr)
 		}
 		if len(spec.Volumes) != 0 {

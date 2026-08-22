@@ -279,6 +279,9 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		if scenario == "fail-create" {
 			os.Exit(42)
 		}
+		if scenario == "block-job-create" && !strings.HasPrefix(name, "buildkite-gha-service-") {
+			select {}
+		}
 		fmt.Print("docker-id-" + name)
 		os.Exit(0)
 	case "start":
@@ -1475,6 +1478,39 @@ func TestRunJobContainerAmbiguousCreateFailureCleansNamedVolume(t *testing.T) {
 		&plan.Container{Image: "alpine", Volumes: []string{"cache:/cache"}}, nil,
 	)
 	if err == nil || !strings.Contains(err.Error(), "create job container") {
+		t.Fatalf("startJobContainer() error = %v", err)
+	}
+	removed, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
+	if readErr != nil || strings.TrimSpace(string(removed)) != "cache" {
+		t.Fatalf("removed volumes = %q, %v", removed, readErr)
+	}
+}
+
+func TestRunJobContainerCreateCancellationCleansNamedVolume(t *testing.T) {
+	f := newJobDocker(t, "block-job-create")
+	w, tmp := t.TempDir(), t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
+			ctx, newCommandProcessor(io.Discard, io.Discard), w, tmp,
+			&plan.Container{Image: "alpine", Volumes: []string{"cache:/cache"}}, nil,
+		)
+		done <- err
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(f.root, "container")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("job container create did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "create job container") {
 		t.Fatalf("startJobContainer() error = %v", err)
 	}
 	removed, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
