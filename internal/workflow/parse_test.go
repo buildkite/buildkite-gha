@@ -555,6 +555,18 @@ func TestParseContainerShortForms(t *testing.T) {
 	}
 }
 
+func TestParseContainerUnderAliasedJobID(t *testing.T) {
+	source := []byte("on: push\nenv: {ID: &job-id test}\njobs:\n  *job-id:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      ports: [8080]\n      volumes: ['cache:/cache']\n      options: --cpus 2\n    steps: [{run: true}]\n")
+	parsed, err := Parse("alias.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := parsed.Jobs[0].Container
+	if container == nil || !slices.Equal(container.Ports, []string{"8080"}) || !slices.Equal(container.Volumes, []string{"cache:/cache"}) || container.Options != "--cpus 2" {
+		t.Fatalf("container = %#v", container)
+	}
+}
+
 func TestParseRetainsSequentialRuntimeControls(t *testing.T) {
 	source := []byte("name: runtime\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    if: always()\n    continue-on-error: true\n    timeout-minutes: 5\n    steps:\n      - run: echo ok\n        if: success()\n        timeout-minutes: 2\n        continue-on-error: true\n")
 	parsed, err := Parse("workflow.yml", source)

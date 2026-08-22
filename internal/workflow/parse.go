@@ -343,7 +343,7 @@ func validateRawContainers(path string, document *yaml.Node) (map[string]rawServ
 		return rawContainers, diagnostics, nil
 	}
 	for i := 0; i+1 < len(jobs.Content); i += 2 {
-		jobID := strings.ToLower(jobs.Content[i].Value)
+		jobID := strings.ToLower(resolveAlias(jobs.Content[i]).Value)
 		job := jobs.Content[i+1]
 		if container := mappingValue(job, "container"); container != nil {
 			extra, _, err := validateRawContainer(path, container, false)

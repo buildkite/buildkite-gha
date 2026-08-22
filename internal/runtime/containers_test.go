@@ -1519,6 +1519,22 @@ func TestRunJobContainerCreateCancellationCleansNamedVolume(t *testing.T) {
 	}
 }
 
+func TestTrackJobContainerVolumesSurvivesSetupCancellation(t *testing.T) {
+	f := newJobDocker(t, "")
+	if err := os.WriteFile(filepath.Join(f.root, "container"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "volumes-job"), []byte("cache\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	b := &jobContainerBackend{runner: Runner{Docker: f.path}, docker: f.path, env: map[string]string{"DOCKER_CONFIG": t.TempDir()}, container: "job", existingVolumes: map[string]bool{}}
+	if err := b.trackJobContainerVolumes(ctx); err != nil || !slices.Equal(b.ownedVolumes, []string{"cache"}) {
+		t.Fatalf("trackJobContainerVolumes() volumes = %#v, error = %v", b.ownedVolumes, err)
+	}
+}
+
 func TestRunJobContainerServiceReadinessCancellationCleansEverything(t *testing.T) {
 	t.Parallel()
 
