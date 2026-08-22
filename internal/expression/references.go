@@ -415,6 +415,16 @@ func ReferencesGitHubEvent(source string) (bool, error) {
 	return nodeReferencesCompileGitHubEvent(node), nil
 }
 
+// ConditionReferencesGitHubEventPayload reports whether a condition reads the
+// event payload, excluding event-derived identity fields folded by the compiler.
+func ConditionReferencesGitHubEventPayload(source string) (bool, error) {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return false, err
+	}
+	return nodeReferencesGitHubEventPayload(node), nil
+}
+
 // TemplateReferencesGitHubEvent reports whether an interpolated template
 // retains the compile-time-only event payload.
 func TemplateReferencesGitHubEvent(template string) (bool, error) {

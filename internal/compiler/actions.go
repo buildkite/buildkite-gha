@@ -378,11 +378,52 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string) (actionRequirements, error) {
 	requirements := actionRequirements{requiredSecrets: map[string]bool{}}
 	for _, condition := range []string{n.metadata.Runs.PreIf, n.metadata.Runs.PostIf} {
-		referencesEvent, err := expression.ReferencesGitHubEvent(condition)
+		referencesEvent, err := expression.ConditionReferencesGitHubEventPayload(condition)
 		if err != nil {
 			return actionRequirements{}, err
 		}
 		requirements.eventPayload = requirements.eventPayload || referencesEvent
+	}
+	inspectTemplate := func(value string) error {
+		referencesEvent, err := expression.TemplateReferencesGitHubEvent(value)
+		if err != nil {
+			return err
+		}
+		requirements.eventPayload = requirements.eventPayload || referencesEvent
+		return nil
+	}
+	if n.runtime == metadata.RuntimeDocker {
+		for _, name := range sortedKeys(n.metadata.Runs.Env) {
+			if err := inspectTemplate(n.metadata.Runs.Env[name]); err != nil {
+				return actionRequirements{}, err
+			}
+		}
+	}
+	if n.runtime == metadata.RuntimeComposite {
+		for _, name := range sortedKeys(n.metadata.Outputs) {
+			if err := inspectTemplate(n.metadata.Outputs[name].Value); err != nil {
+				return actionRequirements{}, err
+			}
+		}
+		for _, step := range n.metadata.Runs.Steps {
+			referencesEvent, err := expression.ConditionReferencesGitHubEventPayload(step.If)
+			if err != nil {
+				return actionRequirements{}, err
+			}
+			requirements.eventPayload = requirements.eventPayload || referencesEvent
+			for _, value := range []string{step.Run, step.WorkingDirectory} {
+				if err := inspectTemplate(value); err != nil {
+					return actionRequirements{}, err
+				}
+			}
+			for _, values := range []map[string]string{step.Env, step.With} {
+				for _, name := range sortedKeys(values) {
+					if err := inspectTemplate(values[name]); err != nil {
+						return actionRequirements{}, err
+					}
+				}
+			}
+		}
 	}
 	for _, suppliedName := range sortedKeys(supplied) {
 		value := supplied[suppliedName]

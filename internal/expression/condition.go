@@ -324,7 +324,16 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 		staticRoot, path, err := referencePath(node)
 		if err != nil {
 			if root == "github" && isGitHubEventAccess(node) {
-				return nil
+				var validationErr error
+				actionlint.VisitExprNode(node, func(candidate, _ actionlint.ExprNode, entering bool) {
+					if !entering || validationErr != nil {
+						return
+					}
+					if index, ok := candidate.(*actionlint.IndexAccessNode); ok {
+						validationErr = validator.validate(index.Index)
+					}
+				})
+				return validationErr
 			}
 			return fmt.Errorf("dynamic lifecycle condition access is unsupported")
 		}

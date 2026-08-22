@@ -228,6 +228,8 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 		"${{ runner.debug == '1' }}",
 		"${{ job.status }}",
 		"${{ toJSON(matrix) }}",
+		"${{ github.event[inputs.field] || 'fallback' }}",
+		"${{ toJSON(github.event.*.name) }}",
 		"${{ true && 'quoted }} braces' || '' }}",
 		"${{ 1 > 0 }}",
 	} {
@@ -235,13 +237,24 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
+	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ github.event[secrets.FIELD] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
 	}
 	if _, err := EvaluateActionInputDefault("${{ runner.temp || '' }}", Context{Runner: map[string]string{"temp": "/runner/temp"}}); err == nil {
 		t.Fatal("EvaluateActionInputDefault() accepted runner.temp")
+	}
+}
+
+func TestEvaluateActionInputDefaultSupportsDynamicEventAccess(t *testing.T) {
+	context := Context{
+		GitHub: map[string]any{"event": map[string]any{"action": "opened"}},
+		Inputs: map[string]string{"field": "action"},
+	}
+	got, err := EvaluateActionInputDefault("${{ github.event[inputs.field] }}", context)
+	if err != nil || got != "opened" {
+		t.Fatalf("EvaluateActionInputDefault() = %q, %v, want opened", got, err)
 	}
 }
 
@@ -1208,6 +1221,7 @@ func TestValidateActionLifecycleCondition(t *testing.T) {
 		"vars[env.FLAG] == 'true'",
 		"steps[env.STEP].conclusion == 'success'",
 		"inputs[env.INPUT] == true",
+		"github.event[secrets.FIELD] == 'opened'",
 		"unknown()",
 	} {
 		if err := ValidateActionLifecycleCondition(condition); err == nil {

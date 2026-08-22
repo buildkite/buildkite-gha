@@ -590,6 +590,42 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsRequiresEventPayloadForCompositeMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "event", `name: event composite
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo '${{ toJSON(github.event) }}'
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./event"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresEventPayload {
+		t.Fatal("composite metadata event did not require the retained event payload")
+	}
+}
+
+func TestCompileActionInvocationsDoesNotRetainPayloadForEventIdentity(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "identity", `name: identity lifecycle
+runs:
+  using: node24
+  main: index.js
+  post: index.js
+  post-if: github.ref_name == 'main'
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./identity"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresEventPayload {
+		t.Fatal("event identity unnecessarily required the retained event payload")
+	}
+}
+
 func TestCompileActionInvocationsRejectsSecretAuthorityFromMetadataDefaults(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "secrets", `name: secret default
