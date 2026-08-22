@@ -45,9 +45,12 @@ Run untrusted jobs on a queue with:
 - a clean environment for every job
 - host-level CPU, memory, disk, and network limits
 
-Service options can grant privileges, mount host paths, and publish ports. The
-private Docker network, ownership labels, and cleanup checks reduce accidental
-residue. They do not contain hostile code.
+Job container options are limited to resource controls. Job container volumes
+accept named Docker volumes, not host bind mounts, and cannot replace the
+runner-owned workspace or runtime mounts. Service options can grant privileges,
+mount host paths, and publish ports. The private Docker network, ownership
+labels, and cleanup checks reduce accidental residue. They do not contain
+hostile code.
 
 On a persistent self-hosted agent, workflow code can read exposed host
 resources and leave state for later jobs.

@@ -30,6 +30,7 @@ import (
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/containerpolicy"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
@@ -869,6 +870,77 @@ func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 	jobrm, netrm := strings.Index(joined, "rm --force --volumes "+creates[2].Args[2]), strings.Index(joined, "network rm")
 	if jobrm < 0 || jobrm >= arm || arm >= zrm || zrm >= netrm {
 		t.Fatalf("cleanup order: %s", joined)
+	}
+}
+
+func TestRunJobContainerOptionsAndVolumesExactArguments(t *testing.T) {
+	f := newJobDocker(t, "")
+	w := t.TempDir()
+	j := jobContainerPlan(t, w, nil)
+	j.Container.Env = map[string]string{"Z": "last", "A": "first"}
+	j.Container.Ports = []string{"8080"}
+	j.Container.Volumes = []string{"cache:/cache:ro"}
+	j.Container.Options = "--cpus 1.5 --memory=2g --shm-size 64m"
+	j.Container.Image = "node:24"
+	if _, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(t.Context(), j, w); err != nil {
+		t.Fatal(err)
+	}
+	runtimeExecutable, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range f.calls(t) {
+		if len(call.Args) == 0 || call.Args[0] != "create" || !slices.Contains(call.Args, "node:24") {
+			continue
+		}
+		want := []string{
+			"create", "--name", call.Args[2], "--label", "com.buildkite.gha=true", "--label", call.Args[6], "--network", call.Args[8],
+			"--mount", "type=bind,source=" + w + ",target=" + jobContainerWorkspace,
+			"--mount", call.Args[12],
+			"--mount", "type=bind,source=" + runtimeExecutable + ",target=" + jobContainerRuntime + ",readonly",
+			"--workdir", jobContainerWorkspace, "--entrypoint", "sh",
+			"--cpus", "1.5", "--memory=2g", "--shm-size", "64m",
+			"--env", "A=first", "--env", "Z=last", "--publish", "8080", "--volume", "cache:/cache:ro",
+			"node:24", "-c", "while :; do sleep 3600; done",
+		}
+		if !slices.Equal(call.Args, want) {
+			t.Fatalf("job container create argv = %#v\nwant = %#v", call.Args, want)
+		}
+		removed, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
+		if readErr != nil || strings.TrimSpace(string(removed)) != "cache" {
+			t.Fatalf("removed job volumes = %q, %v", removed, readErr)
+		}
+		return
+	}
+	t.Fatal("job container create call not found")
+}
+
+func TestJobContainerOptionsRejectDockerAuthority(t *testing.T) {
+	for _, options := range []string{"--privileged", "--network host", "--volume /:/host", "--cap-add SYS_ADMIN", "--device /dev/kvm", "--pid=host", "--entrypoint sh"} {
+		t.Run(options, func(t *testing.T) {
+			if _, err := containerpolicy.JobOptions(options); err == nil {
+				t.Fatal("JobOptions() accepted Docker authority")
+			}
+		})
+	}
+}
+
+func TestJobContainerRejectsPreexistingNamedVolume(t *testing.T) {
+	f := newJobDocker(t, "")
+	if err := os.WriteFile(filepath.Join(f.root, "existing-volumes"), []byte("cache\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
+		t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(),
+		&plan.Container{Image: "node:24", Volumes: []string{"cache:/cache"}}, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), `job container volume "cache" already exists`) {
+		t.Fatalf("startJobContainer() error = %v", err)
+	}
+	for _, call := range f.calls(t) {
+		if len(call.Args) != 0 && call.Args[0] == "create" {
+			t.Fatalf("pre-existing volume reached docker create: %#v", call.Args)
+		}
 	}
 }
 

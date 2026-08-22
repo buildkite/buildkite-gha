@@ -581,14 +581,16 @@ services:
       --health-retries 10
 ```
 
-Services support `image`, `credentials`, `env`, `ports`, `volumes`, `options`, `command`, and `entrypoint`.
+Job containers support `image`, `env`, `ports`, and a bounded subset of `volumes` and `options`. Services support `image`, `credentials`, `env`, `ports`, `volumes`, `options`, `command`, and `entrypoint`.
 
 - Job container images can use compile-time `github`, `inputs`, `vars`, `strategy`, and `matrix` values. The complete image must resolve to a non-empty string and a valid image reference during compilation. Secrets, `needs`, step outputs, and whole or dynamic contexts are unsupported.
+- Job container volumes accept `NAME:/absolute/container/path`, optionally followed by `:ro` or `:rw`. Volume names contain up to 128 letters, digits, periods, underscores, or hyphens and start with a letter or digit. A job can define 32 unique volumes. Host bind mounts, expressions, and targets under `/__w` or `/__buildkite-gha` are unsupported.
+- Job container options accept `--cpus`, `--cpuset-cpus`, `--memory` (or `-m`), `--memory-reservation`, `--memory-swap`, `--pids-limit`, and `--shm-size`. Use `--flag value` or `--flag=value`, without quotes or expressions. Each option can appear once. Other Docker options are unsupported because they can override runner-owned lifecycle, isolation, networking, mounts, or privileges.
 - Service fields can use compile-time `github`, `inputs`, `vars`, `strategy`, and `matrix` values or runtime `needs` outputs. An empty evaluated image skips the service.
 - A complete non-credential service map can use `${{ fromJSON(needs.<job>.outputs.<name>) }}`. Declare credentials statically so the compiler can prove their secret authority.
 - Credentials accept direct values and `github`, `vars`, `secrets`, or `env` expressions. Passwords pass to `docker login` through standard input. Authentication uses a private per-job Docker configuration and never reads ambient Docker credentials.
-- Docker options pass through except `--network` and its `--net` aliases, which GitHub Actions does not support. Options can grant privileges, mount host paths, publish ports, and change resource settings.
-- Named, anonymous, and absolute bind volumes are supported.
+- Service Docker options pass through except `--network` and its `--net` aliases, which GitHub Actions does not support. Service options can grant privileges, mount host paths, publish ports, and change resource settings.
+- Service named, anonymous, and absolute bind volumes are supported.
 - A job can define 32 services. Each service can define 256 environment entries and 128 ports or volumes.
 
 Implicit GHCR authentication is unsupported; provide explicit credentials. Mutable tags resolve at job start. Use a digest when image immutability matters. Job container images must provide `sh` and run the mounted self-contained Linux runtime executable.
@@ -597,7 +599,7 @@ Each job uses a private Docker bridge network. Container jobs reach services by 
 
 A service with a Docker health check must become healthy before steps run. A service without one is ready after it starts. Failures include bounded status, health, port, and log diagnostics.
 
-Cleanup removes the job container, emits masked and bounded service logs, then removes services in declaration order, the network, newly created volumes, and private Docker configuration. Remaining owned resources fail the job. Docker resources are not a security or resource-isolation boundary: the hosted queue must isolate the whole job and enforce host CPU, memory, disk, and network limits. See the [security model](security.md#isolate-the-whole-job).
+Cleanup removes the job container, emits masked and bounded service logs, then removes services in declaration order, the network, newly created job and service volumes, and private Docker configuration. A job container volume name that existed before the job is rejected rather than attached. Remaining owned resources fail the job. Docker resources are not a security or resource-isolation boundary: the hosted queue must isolate the whole job and enforce host CPU, memory, disk, and network limits. See the [security model](security.md#isolate-the-whole-job).
 
 macOS jobs reject containers, services, Dockerfile actions, and Docker capability.
 
