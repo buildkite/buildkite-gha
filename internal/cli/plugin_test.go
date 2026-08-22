@@ -356,6 +356,29 @@ func TestPluginIgnoresJobPermissionsForHostedGitHubToken(t *testing.T) {
 	t.Fatalf("uploaded artifacts = %#v, want job plan", runner.uploaded)
 }
 
+func TestPluginResolvesWorkflowFromBuildCheckoutOutsideWorkingDirectory(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"deploy.yml": "name: Deploy\non: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(t.TempDir())
+	configuration, err := json.Marshal(map[string]any{"workflow": ".github/workflows/deploy.yml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	setCLIPluginBuildkiteEnvironment(t, "plugin-checkout-path")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, want 0; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Uploaded 1 job") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
 func TestPluginUploadsPluralWorkflowList(t *testing.T) {
 	requireImporterHost(t)
 	configuration, err := json.Marshal(map[string]any{
@@ -402,7 +425,7 @@ func TestPluginRejectsNonExplicitWorkflowSelectors(t *testing.T) {
 		{name: "all shorthand", field: "workflow", workflows: "*", want: "explicit paths"},
 		{name: "string glob", field: "workflow", workflows: filepath.Join(workflowDirectory, "*.yml"), want: "explicit paths"},
 		{name: "array glob", field: "workflows", workflows: []string{filepath.Join(workflowDirectory, "*.yml")}, want: "explicit paths"},
-		{name: "directory", field: "workflow", workflows: workflowDirectory, want: "does not name a regular tracked file"},
+		{name: "directory", field: "workflow", workflows: workflowDirectory, want: "directory"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			configuration, err := json.Marshal(map[string]any{test.field: test.workflows})
@@ -661,7 +684,7 @@ func TestNormalizePluginCommit(t *testing.T) {
 	t.Run("preserves valid full commit", func(t *testing.T) {
 		runner := &cliCaptureRunner{}
 		setCalls := 0
-		err := normalizePluginCommit(t.Context(), func(string) string { return fullCommit }, func(string, string) error {
+		err := normalizePluginCommit(t.Context(), "", func(string) string { return fullCommit }, func(string, string) error {
 			setCalls++
 			return nil
 		}, runner)
@@ -672,20 +695,20 @@ func TestNormalizePluginCommit(t *testing.T) {
 	t.Run("resolves symbolic commit from HEAD", func(t *testing.T) {
 		runner := &cliCaptureRunner{gitOutput: []byte(fullCommit + "\n")}
 		name, value := "", ""
-		err := normalizePluginCommit(t.Context(), func(string) string { return "HEAD" }, func(gotName, gotValue string) error {
+		err := normalizePluginCommit(t.Context(), "/checkout", func(string) string { return "HEAD" }, func(gotName, gotValue string) error {
 			name, value = gotName, gotValue
 			return nil
 		}, runner)
 		if err != nil || name != "BUILDKITE_COMMIT" || value != fullCommit {
 			t.Fatalf("normalizePluginCommit() = %q, %q, %v", name, value, err)
 		}
-		if len(runner.commands) != 1 || runner.commands[0].name != "git" || !slices.Equal(runner.commands[0].args, []string{"rev-parse", "HEAD"}) {
+		if len(runner.commands) != 1 || runner.commands[0].dir != "/checkout" || runner.commands[0].name != "git" || !slices.Equal(runner.commands[0].args, []string{"rev-parse", "HEAD"}) {
 			t.Fatalf("commands = %#v, want exact git rev-parse HEAD invocation", runner.commands)
 		}
 	})
 	t.Run("propagates resolution failure", func(t *testing.T) {
 		runner := &cliCaptureRunner{gitErr: errors.New("no checkout")}
-		err := normalizePluginCommit(t.Context(), func(string) string { return "HEAD" }, func(string, string) error { return nil }, runner)
+		err := normalizePluginCommit(t.Context(), "", func(string) string { return "HEAD" }, func(string, string) error { return nil }, runner)
 		if err == nil || !strings.Contains(err.Error(), "resolve BUILDKITE_COMMIT from checked-out HEAD: no checkout") {
 			t.Fatalf("normalizePluginCommit() error = %v", err)
 		}
@@ -764,6 +787,7 @@ func TestPluginCarriesReleaseCommitIntoPlans(t *testing.T) {
 func setCLIPluginBuildkiteEnvironment(t *testing.T, stepKey string) {
 	t.Helper()
 	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", "")
 	t.Setenv("BUILDKITE_STEP_KEY", stepKey)
 	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
 	t.Setenv("BUILDKITE_COMMIT", "0123456789abcdef0123456789abcdef01234567")

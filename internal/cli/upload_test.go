@@ -339,7 +339,7 @@ func TestRunUploadRejectsExplicitTrackedSymlinks(t *testing.T) {
 			t.Setenv("BUILDKITE_STEP_KEY", "symlink-importer")
 			runner := &cliCaptureRunner{}
 			var stdout, stderr bytes.Buffer
-			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/linked.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "does not name a regular tracked file") {
+			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/linked.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "symbolic link") {
 				t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 			}
 			if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
@@ -387,11 +387,11 @@ func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 
 	aPath := filepath.Join(".github", "workflows", "a.yml")
 	bPath := filepath.Join(".github", "workflows", "b.yaml")
-	first, err := expandExplicitWorkflowPaths([]string{filepath.Join(repository, bPath), "./" + aPath, aPath})
+	first, err := expandExplicitWorkflowPaths([]string{filepath.Join(repository, bPath), "./" + aPath, aPath}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := expandExplicitWorkflowPaths([]string{aPath, filepath.Join(repository, bPath)})
+	second, err := expandExplicitWorkflowPaths([]string{aPath, filepath.Join(repository, bPath)}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +403,7 @@ func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 			t.Fatalf("explicit workflow identity = %#v", input)
 		}
 	}
-	metacharacter, err := expandExplicitWorkflowPaths([]string{filepath.Join(".github", "workflows", "workflow[1].yml"), aPath})
+	metacharacter, err := expandExplicitWorkflowPaths([]string{filepath.Join(".github", "workflows", "workflow[1].yml"), aPath}, "")
 	if err != nil || len(metacharacter) != 2 || metacharacter[1].CanonicalPath != ".github/workflows/workflow[1].yml" {
 		t.Fatalf("literal metacharacter list = %#v, %v", metacharacter, err)
 	}
@@ -411,7 +411,7 @@ func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	leadingDash, err := expandExplicitWorkflowPaths(operands)
+	leadingDash, err := expandExplicitWorkflowPaths(operands, "")
 	if err != nil || len(leadingDash) != 2 || leadingDash[0].CanonicalPath != "-leading.yml" {
 		t.Fatalf("leading-dash explicit path = %#v, %v", leadingDash, err)
 	}
@@ -423,18 +423,33 @@ func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 	}{
 		{name: "mixed glob and literal", operands: []string{filepath.Join(".github", "workflows", "*.yml"), aPath}, want: "glob pattern"},
 		{name: "multiple globs", operands: []string{filepath.Join(".github", "workflows", "*.yml"), filepath.Join(".github", "workflows", "*.yaml")}, want: "glob pattern"},
-		{name: "missing", operands: []string{filepath.Join(".github", "workflows", "missing.yml"), aPath}, want: "regular tracked file"},
+		{name: "missing", operands: []string{filepath.Join(".github", "workflows", "missing.yml"), aPath}, want: "not tracked by git"},
 		{name: "untracked", operands: []string{untrackedPath, aPath}, want: "not tracked by git"},
-		{name: "directory", operands: []string{workflowDirectory, aPath}, want: "regular tracked file"},
+		{name: "directory", operands: []string{workflowDirectory, aPath}, want: "directory"},
 		{name: "outside repository", operands: []string{outsidePath, aPath}, want: "outside the checked-out git repository"},
 		{name: "non-workflow extension", operands: []string{notePath, aPath}, want: "must end in .yml or .yaml"},
-		{name: "symlink", operands: []string{symlinkPath, aPath}, want: "regular tracked file"},
+		{name: "symlink", operands: []string{symlinkPath, aPath}, want: "symbolic link"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := expandExplicitWorkflowPaths(test.operands); err == nil || !strings.Contains(err.Error(), test.want) {
+			if _, err := expandExplicitWorkflowPaths(test.operands, ""); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("expandExplicitWorkflowPaths(%q) error = %v, want %q", test.operands, err, test.want)
 			}
 		})
+	}
+}
+
+func TestExpandExplicitWorkflowPathsExplainsTrackedFileMissingFromCheckout(t *testing.T) {
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"deploy[prod].yml": "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	workflowPath := filepath.Join(".github", "workflows", "deploy[prod].yml")
+	if err := os.Remove(filepath.Join(repository, workflowPath)); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	_, err := expandExplicitWorkflowPaths([]string{workflowPath}, "")
+	if err == nil || !strings.Contains(err.Error(), "tracked by git but missing from the checkout") || !strings.Contains(err.Error(), "sparse-checkout") {
+		t.Fatalf("expandExplicitWorkflowPaths() error = %v", err)
 	}
 }
 
@@ -524,7 +539,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 		filepath.Join(workflowDirectory, "shell.yml"),
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	inputs, err := expandExplicitWorkflowPaths(workflowPaths)
+	inputs, err := expandExplicitWorkflowPaths(workflowPaths, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -93,7 +93,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	var workflows []workflowInput
 	var err error
 	if uploadArguments.explicitWorkflowPaths {
-		workflows, err = expandExplicitWorkflowPaths(workflowOperands)
+		workflows, err = expandExplicitWorkflowPaths(workflowOperands, uploadArguments.checkoutPath)
 	} else {
 		workflows, err = resolveWorkflowOperands(workflowOperands)
 	}
@@ -194,7 +194,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	}
 	defer cleanupSource()
 	sourceSwitch.set(authenticatedSource)
-	populateChangedPaths(&effectiveEvent.TriggerSnapshot, effectiveEvent.Event, effectiveEvent.Origin, workflows)
+	populateChangedPaths(&effectiveEvent.TriggerSnapshot, effectiveEvent.Event, effectiveEvent.Origin, workflows, uploadArguments.checkoutPath)
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i := range workflows {
 		if workflows[i].ReusableOnly {
@@ -621,14 +621,14 @@ type workflowInput struct {
 
 func resolveWorkflowOperands(operands []string) ([]workflowInput, error) {
 	if len(operands) != 1 {
-		return expandExplicitWorkflowPaths(operands)
+		return expandExplicitWorkflowPaths(operands, "")
 	}
 	path, err := filepath.Abs(operands[0])
 	if err != nil {
 		return nil, fmt.Errorf("resolve workflow path %q: %w", operands[0], err)
 	}
 	if err := requireRegularWorkflowFile(path, operands[0]); err != nil {
-		return expandExplicitWorkflowPaths(operands)
+		return expandExplicitWorkflowPaths(operands, "")
 	}
 	extension := filepath.Ext(path)
 	if extension != ".yml" && extension != ".yaml" {
@@ -644,18 +644,25 @@ func resolveWorkflowOperands(operands []string) ([]workflowInput, error) {
 	return workflowInputs([]workflowInput{{Path: path, CanonicalPath: canonical}}, false)
 }
 
-func expandExplicitWorkflowPaths(operands []string) ([]workflowInput, error) {
+func expandExplicitWorkflowPaths(operands []string, checkoutPath string) ([]workflowInput, error) {
 	if len(operands) == 0 {
 		return nil, fmt.Errorf("workflow path is required")
 	}
-	rootBytes, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	rootBytes, err := gitRootCommand(checkoutPath).Output()
 	if err != nil {
+		if checkoutPath != "" {
+			return nil, fmt.Errorf("locate git repository from BUILDKITE_BUILD_CHECKOUT_PATH %q: %w", checkoutPath, err)
+		}
 		return nil, fmt.Errorf("locate checked-out git repository: %w", err)
 	}
 	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
 	matches := make([]workflowInput, 0, len(operands))
 	for _, operand := range operands {
-		absolute, err := filepath.Abs(operand)
+		inputPath := operand
+		if checkoutPath != "" && !filepath.IsAbs(inputPath) {
+			inputPath = filepath.Join(root, inputPath)
+		}
+		absolute, err := filepath.Abs(inputPath)
 		if err != nil {
 			return nil, fmt.Errorf("resolve workflow path %q: %w", operand, err)
 		}
@@ -664,23 +671,25 @@ func expandExplicitWorkflowPaths(operands []string) ([]workflowInput, error) {
 			return nil, fmt.Errorf("workflow path %q is outside the checked-out git repository", operand)
 		}
 		canonical := filepath.ToSlash(filepath.Clean(relative))
-		if err := requireRegularWorkflowFile(absolute, operand); err != nil {
-			if strings.ContainsAny(operand, "*?[") {
-				return nil, fmt.Errorf("workflow list entries must be explicit paths; glob pattern %q is not allowed", operand)
-			}
-			return nil, err
+		info, statErr := os.Lstat(absolute)
+		if statErr == nil && !info.Mode().IsRegular() {
+			return nil, requireRegularWorkflowFile(absolute, operand)
+		}
+		output, gitErr := exec.Command("git", "-C", root, "ls-files", "-z", "--", ":(top,literal)"+canonical).Output()
+		entries := bytes.Split(output, []byte{0})
+		tracked := gitErr == nil && len(entries) == 2 && string(entries[0]) == canonical && len(entries[1]) == 0
+		if !tracked && strings.ContainsAny(operand, "*?[") {
+			return nil, fmt.Errorf("workflow list entries must be explicit paths; glob pattern %q is not allowed", operand)
 		}
 		extension := filepath.Ext(canonical)
 		if extension != ".yml" && extension != ".yaml" {
 			return nil, fmt.Errorf("workflow path %q must end in .yml or .yaml", operand)
 		}
-		output, err := exec.Command("git", "-C", root, "ls-files", "-z", "--", ":(top,literal)"+canonical).Output()
-		entries := bytes.Split(output, []byte{0})
-		if err != nil || len(entries) != 2 || string(entries[0]) != canonical || len(entries[1]) != 0 {
-			if strings.ContainsAny(operand, "*?[") {
-				return nil, fmt.Errorf("workflow list entries must be explicit paths; glob pattern %q is not allowed", operand)
-			}
+		if !tracked {
 			return nil, fmt.Errorf("workflow path %q is not tracked by git", operand)
+		}
+		if err := requireRegularWorkflowFile(absolute, operand); err != nil {
+			return nil, err
 		}
 		matches = append(matches, workflowInput{Path: filepath.Join(root, filepath.FromSlash(canonical)), CanonicalPath: canonical})
 	}
@@ -689,8 +698,20 @@ func expandExplicitWorkflowPaths(operands []string) ([]workflowInput, error) {
 
 func requireRegularWorkflowFile(path, displayPath string) error {
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return fmt.Errorf("workflow path %q does not name a regular tracked file", displayPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("workflow path %q is tracked by git but missing from the checkout; restore the file or check sparse-checkout configuration", displayPath)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect workflow path %q: %w", displayPath, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("workflow path %q is a symbolic link; workflow paths must be regular tracked files", displayPath)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("workflow path %q is a directory; workflow paths must be regular tracked files", displayPath)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("workflow path %q is not a regular file", displayPath)
 	}
 	return nil
 }
@@ -720,6 +741,7 @@ func workflowInputs(matches []workflowInput, namespaceKeys bool) ([]workflowInpu
 type parsedUploadArgs struct {
 	workflowOperands         []string
 	explicitWorkflowPaths    bool
+	checkoutPath             string
 	eventPath                string
 	clientVersion            string
 	runtimeDistributionPaths map[compiler.Platform]string
