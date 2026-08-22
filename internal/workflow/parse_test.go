@@ -407,6 +407,25 @@ jobs:
 	}
 }
 
+func TestParseOwnsReusableWorkflowConcurrency(t *testing.T) {
+	parsed, err := Parse("reusable.yml", []byte(`on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+concurrency: deploy-${{ inputs.target }}
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.Callable || parsed.Concurrency == nil || parsed.Concurrency.Group != "deploy-${{ inputs.target }}" {
+		t.Fatalf("reusable workflow concurrency = callable %t, %#v", parsed.Callable, parsed.Concurrency)
+	}
+}
+
 func TestParseOwnsWorkflowLiteralCancellation(t *testing.T) {
 	for _, test := range []struct {
 		name, source string

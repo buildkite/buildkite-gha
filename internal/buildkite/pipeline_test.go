@@ -586,7 +586,7 @@ func TestEmitAggregateWorkflowConcurrencyDependencies(t *testing.T) {
 		t.Fatalf("aggregate concurrency group = %#v\n%s", document.Steps, output)
 	}
 	openKey, closeKey := concurrencyGateKeys("importer\x00workflow-ci", pipeline.Workflows[0].ConcurrencyGate.Group, pipeline.Workflows[0].Jobs)
-	open, producer, consumer, close := document.Steps[0].Steps[0], document.Steps[0].Steps[1], document.Steps[0].Steps[2], document.Steps[0].Steps[3]
+	open, close, producer, consumer := document.Steps[0].Steps[0], document.Steps[0].Steps[1], document.Steps[0].Steps[2], document.Steps[0].Steps[3]
 	if open.Key != openKey || len(open.DependsOn) != 0 {
 		t.Fatalf("aggregate opening gate = %#v", open)
 	}
@@ -676,7 +676,7 @@ func TestEmitWrapsJobsInWorkflowConcurrencyGate(t *testing.T) {
 		t.Fatalf("steps = %#v\n%s", document.Steps, output)
 	}
 	openKey, closeKey := concurrencyGateKeys(pipeline.CompilerStep, pipeline.ConcurrencyGate.Group, pipeline.Jobs)
-	open, producer, consumer, close := document.Steps[0], document.Steps[1], document.Steps[2], document.Steps[3]
+	open, close, producer, consumer := document.Steps[0], document.Steps[1], document.Steps[2], document.Steps[3]
 	if open.Key != openKey || open.Concurrency != 1 || open.ConcurrencyGroup != pipeline.ConcurrencyGate.Group || len(open.DependsOn) != 1 || open.DependsOn[0].Step != "importer" || open.DependsOn[0].AllowFailure {
 		t.Fatalf("opening gate = %#v", open)
 	}
@@ -707,6 +707,59 @@ func TestEmitWrapsJobsInWorkflowConcurrencyGate(t *testing.T) {
 		if !dependency.AllowFailure {
 			t.Fatalf("closing gate has strict generated dependency: %#v", close.DependsOn)
 		}
+	}
+}
+
+func TestEmitWrapsNestedReusableWorkflowConcurrencyGates(t *testing.T) {
+	outer := ConcurrencyGate{ID: "call", Group: "buildkite-gha/concurrency/outer"}
+	inner := ConcurrencyGate{ID: "call-inner", Group: "buildkite-gha/concurrency/inner"}
+	pipeline := Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Jobs: []Job{
+			{Key: "prepare", Label: "Prepare", Queue: "linux", PlanDigest: testDigest("prepare")},
+			{Key: "outer_start", Label: "Outer start", Queue: "linux", PlanDigest: testDigest("outer-start"), Dependencies: []string{"prepare"}, ConcurrencyGates: []ConcurrencyGate{outer}},
+			{Key: "inner", Label: "Inner", Queue: "mac", PlanDigest: testDigest("inner"), Dependencies: []string{"outer_start"}, ConcurrencyGates: []ConcurrencyGate{outer, inner}},
+			{Key: "outer_finish", Label: "Outer finish", Queue: "linux", PlanDigest: testDigest("outer-finish"), Dependencies: []string{"inner"}, ConcurrencyGates: []ConcurrencyGate{outer}},
+		},
+	}
+	output, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type emittedDependency struct {
+		Step         string `yaml:"step"`
+		AllowFailure bool   `yaml:"allow_failure"`
+	}
+	type emittedStep struct {
+		Label            string              `yaml:"label"`
+		Key              string              `yaml:"key"`
+		ConcurrencyGroup string              `yaml:"concurrency_group"`
+		DependsOn        []emittedDependency `yaml:"depends_on"`
+		Agents           map[string]string   `yaml:"agents"`
+	}
+	var document struct {
+		Steps []emittedStep `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 8 {
+		t.Fatalf("nested reusable gate steps = %d, want 8\n%s", len(document.Steps), output)
+	}
+	outerOpen, outerClose := document.Steps[0], document.Steps[1]
+	innerOpen, innerClose := document.Steps[2], document.Steps[3]
+	if outerOpen.ConcurrencyGroup != outer.Group || outerOpen.Agents["queue"] != "linux" || len(outerOpen.DependsOn) != 2 || outerOpen.DependsOn[1].Step != "prepare" || !outerOpen.DependsOn[1].AllowFailure {
+		t.Fatalf("outer opening gate = %#v", outerOpen)
+	}
+	if innerOpen.ConcurrencyGroup != inner.Group || innerOpen.Agents["queue"] != "mac" || len(innerOpen.DependsOn) != 2 || innerOpen.DependsOn[0].Step != outerOpen.Key || innerOpen.DependsOn[0].AllowFailure || innerOpen.DependsOn[1].Step != "outer_start" || !innerOpen.DependsOn[1].AllowFailure {
+		t.Fatalf("inner opening gate = %#v", innerOpen)
+	}
+	if innerClose.ConcurrencyGroup != inner.Group || len(innerClose.DependsOn) != 1 || innerClose.DependsOn[0].Step != "inner" || !innerClose.DependsOn[0].AllowFailure {
+		t.Fatalf("inner closing gate = %#v", innerClose)
+	}
+	if outerClose.ConcurrencyGroup != outer.Group || len(outerClose.DependsOn) != 4 || outerClose.DependsOn[3].Step != innerClose.Key || !outerClose.DependsOn[3].AllowFailure {
+		t.Fatalf("outer closing gate = %#v", outerClose)
 	}
 }
 
