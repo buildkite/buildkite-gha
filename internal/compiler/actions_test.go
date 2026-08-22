@@ -550,7 +550,7 @@ runs:
 	}
 }
 
-func TestCompileActionInvocationsRejectsRetainedEventPayload(t *testing.T) {
+func TestCompileActionInvocationsRequiresRetainedEventPayload(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "event", `name: event input
 inputs:
@@ -560,12 +560,33 @@ runs:
   using: node24
   main: index.js
 `)
-	_, err := compileActionInvocations(
+	compiled, err := compileActionInvocations(
 		t.Context(), workspace, nil, "https://github.com", []string{"./event"},
 		[]map[string]string{{"action": "${{ github.event.action }}"}},
 	)
-	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained in a job plan") {
-		t.Fatalf("retained action input event error = %v", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresEventPayload {
+		t.Fatal("action input event did not require the retained event payload")
+	}
+}
+
+func TestCompileActionInvocationsRequiresEventPayloadForLifecycleCondition(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "event", `name: event lifecycle
+runs:
+  using: node24
+  main: index.js
+  post: index.js
+  post-if: github.event[env.EVENT_FIELD] == 'opened'
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./event"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresEventPayload {
+		t.Fatal("action lifecycle event did not require the retained event payload")
 	}
 }
 

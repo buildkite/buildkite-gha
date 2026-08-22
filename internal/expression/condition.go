@@ -159,9 +159,6 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		if strings.EqualFold(root, "github") && len(path) != 0 {
 			if strings.EqualFold(path[0], "event") {
-				if len(path) == 1 {
-					return fmt.Errorf("whole github.event access is unsupported")
-				}
 				return nil
 			}
 			switch strings.ToLower(path[0]) {
@@ -252,6 +249,9 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 		}
 		return fmt.Errorf("condition reference %q is unsupported; expected runner.os, runner.arch, or runner.temp", reference)
 	case "github":
+		if len(path) >= 1 && strings.EqualFold(path[0], "event") {
+			return nil
+		}
 		if len(path) == 1 {
 			switch strings.ToLower(path[0]) {
 			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha":
@@ -323,6 +323,9 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 		}
 		staticRoot, path, err := referencePath(node)
 		if err != nil {
+			if root == "github" && isGitHubEventAccess(node) {
+				return nil
+			}
 			return fmt.Errorf("dynamic lifecycle condition access is unsupported")
 		}
 		return validateConditionReference(staticRoot, path, scope)
@@ -362,7 +365,9 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 			return fmt.Errorf("whole condition context %q is unsupported", root)
 		}
 	case "github":
-		return fmt.Errorf("dynamic or whole github access is unsupported")
+		if !isGitHubEventAccess(node) {
+			return fmt.Errorf("dynamic or whole github access is unsupported")
+		}
 	default:
 		return fmt.Errorf("condition context %q is unsupported", root)
 	}
@@ -571,6 +576,15 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 	case len(path) == 3 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")):
 		return resolveServiceValue(context.Services, path[1], path[2], "condition")
 	case strings.EqualFold(root, "github"):
+		if len(path) >= 1 && strings.EqualFold(path[0], "event") {
+			event, found, err := objectValue(context.GitHub, path[0])
+			if err != nil {
+				return nil, err
+			}
+			if !found || event == nil {
+				return nil, fmt.Errorf("condition requires an event payload that is unavailable in this job plan")
+			}
+		}
 		if value, ok := lookupRuntimeValue(context.GitHub, path); ok {
 			return value, nil
 		}

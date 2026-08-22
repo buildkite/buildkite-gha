@@ -1496,8 +1496,45 @@ jobs:
   "payload": {"action_ref": "owner/action@1111111111111111111111111111111111111111"}
 }`)
 	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained") {
+	if err == nil || !strings.Contains(err.Error(), "github.event cannot select an action reference") {
 		t.Fatalf("CompileBundle() error = %v, want static action reference rejection", err)
+	}
+}
+
+func TestCompileBundleRetainsEventPayloadOnlyForJobsThatNeedIt(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  whole-event:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ toJSON(github.event) }}'
+  scalar-event:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ github.event.action }}'
+`)
+	event := []byte(`{
+  "provider": "github", "event": "push",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"action": "opened", "commits": [{"id": "2222222222222222222222222222222222222222"}]}
+}`)
+	bundle, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d, want 2", len(bundle.Plans))
+	}
+	jobs := map[string]plan.Job{}
+	for _, artifact := range bundle.Plans {
+		jobs[artifact.Job.Workflow.LogicalJobID] = artifact.Job
+	}
+	if jobs["whole-event"].Event.Payload == nil || !strings.Contains(jobs["whole-event"].Steps[0].Command, "github.event") {
+		t.Fatalf("whole-event plan did not retain its runtime payload: %#v", jobs["whole-event"])
+	}
+	if jobs["scalar-event"].Event.Payload != nil || jobs["scalar-event"].Steps[0].Command != "echo 'opened'" {
+		t.Fatalf("scalar-event plan retained an unnecessary payload: %#v", jobs["scalar-event"])
 	}
 }
 

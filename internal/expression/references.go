@@ -247,6 +247,24 @@ func referencesGitHubToken(template string, allowContextSerialization, contextSe
 	return found, err
 }
 
+func isGitHubEventAccess(node actionlint.ExprNode) bool {
+	for {
+		if root, path, err := referencePath(node); err == nil {
+			return strings.EqualFold(root, "github") && len(path) >= 1 && strings.EqualFold(path[0], "event")
+		}
+		switch access := node.(type) {
+		case *actionlint.ObjectDerefNode:
+			node = access.Receiver
+		case *actionlint.IndexAccessNode:
+			node = access.Operand
+		case *actionlint.ArrayDerefNode:
+			node = access.Receiver
+		default:
+			return false
+		}
+	}
+}
+
 // ConditionReferencesGitHubToken reports direct token references in one
 // condition without interpreting string literal contents as templates.
 func ConditionReferencesGitHubToken(source string) (bool, error) {

@@ -354,6 +354,9 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 			return fmt.Errorf("runtime context %q is unavailable in this field", root)
 		}
 		if strings.EqualFold(root, "github") {
+			if len(path) >= 1 && strings.EqualFold(path[0], "event") {
+				return nil
+			}
 			if len(path) != 1 {
 				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))
 			}
@@ -393,8 +396,12 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 			return fmt.Errorf("runtime context %q is unavailable in this field", root)
 		}
 		switch root {
-		case "github", "secrets":
-			return fmt.Errorf("dynamic or whole %s access is unsupported", root)
+		case "github":
+			if !isGitHubEventAccess(access) {
+				return fmt.Errorf("dynamic or whole github access is unsupported")
+			}
+		case "secrets":
+			return fmt.Errorf("dynamic or whole secrets access is unsupported")
 		case "steps", "needs":
 			return fmt.Errorf("computed or aggregate %s access is unsupported", root)
 		case "job":
@@ -540,6 +547,15 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 	case runtimeReferenceServiceValue:
 		return resolveServiceValue(context.Services, path[1], path[2], "expression")
 	case runtimeReferenceGitHub:
+		if strings.EqualFold(path[0], "event") {
+			event, found, err := objectValue(context.GitHub, path[0])
+			if err != nil {
+				return nil, err
+			}
+			if !found || event == nil {
+				return nil, fmt.Errorf("expression requires an event payload that is unavailable in this job plan")
+			}
+		}
 		value, ok := lookupRuntimeValue(context.GitHub, path)
 		if !ok {
 			if !allowMissing || context.GitHub == nil || strings.EqualFold(path[0], "token") {

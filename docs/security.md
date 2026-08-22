@@ -80,6 +80,17 @@ trusted or grant credentials.
 Explicit and generated event snapshots provide compatibility context. They do
 not authorize path-filter admission, queues, secrets, or tokens.
 
+The compiler resolves ordinary scalar `github.event.*` references before it
+creates a plan. If a job needs the whole event or a property selected at
+runtime, its plan retains the event payload so retries remain self-contained.
+The retained payload is limited to 25 MiB and verified against the event digest.
+It has the same retention and access boundary as the immutable job plan and
+Buildkite build.
+
+The snapshot remains untrusted input. The compiler does not add issued tokens,
+resolved secrets, registry credentials, OIDC tokens, or internal admission
+metadata to it. Those values stay on their separate credential boundaries.
+
 ### Reusable-workflow guards
 
 Reusable-workflow call conditions become immutable plan guards. They run in the
@@ -132,8 +143,8 @@ runtime registers the token with both Buildkite Agent redaction and local
 redaction.
 
 The serialized context contains only the fields listed in the
-[compatibility reference](compatibility.md#runtime-interpolation). It does not
-contain `github.event` or the full event payload.
+[compatibility reference](compatibility.md#runtime-interpolation). A plan also
+contains `github.event` when that job requires runtime event access.
 
 For non-pull-request builds, a user who can create a build at any commit may
 choose code that requests the workflow's allowed permissions. Enable write
