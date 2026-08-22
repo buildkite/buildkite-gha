@@ -17,7 +17,8 @@ import (
 
 // Metadata is the supported subset of a local action.yml or action.yaml file.
 type Metadata struct {
-	Path string `yaml:"-"`
+	Path       string `yaml:"-"`
+	SourcePath string `yaml:"-"`
 	// SourceRoot is the verified tree whose digest binds this action. For a
 	// workspace action it is Path; for a materialized GitHub action it is the
 	// repository root.
@@ -150,7 +151,11 @@ func Load(root, path string) (Metadata, error) {
 		return Metadata{}, fmt.Errorf("local action %q has no action.yml or action.yaml", path)
 	}
 
-	metadata := Metadata{Path: actionPath}
+	sourcePath, err := filepath.Rel(root, metadataPath)
+	if err != nil {
+		return Metadata{}, fmt.Errorf("locate action metadata: %w", err)
+	}
+	metadata := Metadata{Path: actionPath, SourcePath: filepath.ToSlash(sourcePath)}
 	var document yaml.Node
 	documentDecoder := yaml.NewDecoder(bytes.NewReader(source))
 	if err := documentDecoder.Decode(&document); err != nil {

@@ -6,16 +6,20 @@ package program
 type Surface string
 
 const (
-	SurfaceJobCondition      Surface = "job-condition"
-	SurfaceStepCondition     Surface = "step-condition"
-	SurfaceJobEnvironment    Surface = "job-environment"
-	SurfaceJobDefault        Surface = "job-default"
-	SurfaceJobOutput         Surface = "job-output"
-	SurfaceStepTemplate      Surface = "step-template"
-	SurfaceStepControl       Surface = "step-control"
-	SurfaceRuntimeTemplate   Surface = "runtime-template"
-	SurfaceServiceCredential Surface = "service-credential"
-	SurfaceServiceMap        Surface = "service-map"
+	SurfaceJobCondition       Surface = "job-condition"
+	SurfaceStepCondition      Surface = "step-condition"
+	SurfaceJobEnvironment     Surface = "job-environment"
+	SurfaceJobDefault         Surface = "job-default"
+	SurfaceJobOutput          Surface = "job-output"
+	SurfaceStepTemplate       Surface = "step-template"
+	SurfaceStepControl        Surface = "step-control"
+	SurfaceRuntimeTemplate    Surface = "runtime-template"
+	SurfaceServiceCredential  Surface = "service-credential"
+	SurfaceServiceMap         Surface = "service-map"
+	SurfaceActionInputDefault Surface = "action-input-default"
+	SurfaceActionLifecycle    Surface = "action-lifecycle-condition"
+	SurfaceCompositeTemplate  Surface = "composite-template"
+	SurfaceDockerArgument     Surface = "docker-argument"
 )
 
 // ResultType records the value shape required by an expression site.
@@ -28,11 +32,13 @@ const (
 	ResultObject  ResultType = "object"
 )
 
-// Provenance records who authored an expression. Action metadata gains its own
-// provenance when resolved actions are normalized in the next delivery slice.
+// Provenance records who authored an expression.
 type Provenance string
 
-const ProvenanceWorkflow Provenance = "workflow"
+const (
+	ProvenanceWorkflow Provenance = "workflow"
+	ProvenanceAction   Provenance = "action"
+)
 
 // Purpose identifies sites with an authority exception. Supplied action inputs
 // may delegate ordinary-secret inventory to resolved action metadata.
@@ -165,6 +171,121 @@ type Job struct {
 
 type Program struct {
 	Job Job
+}
+
+type ActionRuntime string
+
+const (
+	ActionRuntimeNative     ActionRuntime = "native"
+	ActionRuntimeJavaScript ActionRuntime = "javascript"
+	ActionRuntimeComposite  ActionRuntime = "composite"
+	ActionRuntimeDocker     ActionRuntime = "docker"
+)
+
+type ActionInput struct {
+	Name     string
+	Required bool
+	Default  *Site
+}
+
+type JavaScriptAction struct {
+	NodeMajor     int
+	Pre           string
+	PreCondition  Site
+	Main          string
+	Post          string
+	PostCondition Site
+}
+
+type DockerAction struct {
+	Arguments []Site
+	Env       []Binding
+}
+
+type CompositeStep struct {
+	ID              string
+	Name            Site
+	Condition       Site
+	ContinueOnError bool
+	Env             []Binding
+	Run             *Run
+	Invocation      *Invocation
+}
+
+type CompositeAction struct {
+	Steps []CompositeStep
+}
+
+// Action is the immutable execution model derived from one resolved action
+// manifest. Source locks retain repository identity and tree verification.
+type Action struct {
+	Name       string
+	Source     string
+	Runtime    ActionRuntime
+	Inputs     []ActionInput
+	Outputs    []Binding
+	JavaScript *JavaScriptAction
+	Composite  *CompositeAction
+	Docker     *DockerAction
+	Location   Location
+}
+
+// VisitSites walks every action-authored expression site in lifecycle order.
+func (a Action) VisitSites(visit func(Site) error) error {
+	for _, input := range a.Inputs {
+		if input.Default != nil {
+			if err := visitSite(*input.Default, visit); err != nil {
+				return err
+			}
+		}
+	}
+	if a.JavaScript != nil {
+		if err := visitSite(a.JavaScript.PreCondition, visit); err != nil {
+			return err
+		}
+		if err := visitSite(a.JavaScript.PostCondition, visit); err != nil {
+			return err
+		}
+	}
+	if a.Docker != nil {
+		for _, argument := range a.Docker.Arguments {
+			if err := visitSite(argument, visit); err != nil {
+				return err
+			}
+		}
+		if err := visitBindings(a.Docker.Env, visit); err != nil {
+			return err
+		}
+	}
+	if a.Composite != nil {
+		for _, step := range a.Composite.Steps {
+			if err := visitSite(step.Condition, visit); err != nil {
+				return err
+			}
+			if err := visitSite(step.Name, visit); err != nil {
+				return err
+			}
+			if err := visitBindings(step.Env, visit); err != nil {
+				return err
+			}
+			if step.Run != nil {
+				for _, site := range []Site{step.Run.Command, step.Run.Shell, step.Run.WorkingDirectory} {
+					if err := visitSite(site, visit); err != nil {
+						return err
+					}
+				}
+			}
+			if step.Invocation != nil {
+				if err := visitSite(step.Invocation.Uses, visit); err != nil {
+					return err
+				}
+				if err := visitBindings(step.Invocation.With, visit); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return visitBindings(a.Outputs, visit)
 }
 
 // VisitSites walks every expression-bearing field once in execution order.

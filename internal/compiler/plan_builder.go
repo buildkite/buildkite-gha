@@ -35,6 +35,7 @@ type planBuilder struct {
 
 type builtPlanActions struct {
 	locks               []plan.ActionLock
+	programs            map[string]program.Action
 	capabilities        []string
 	authorization       PlanAuthorization
 	requiredSecrets     []string
@@ -121,7 +122,7 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	workflowProgram := lowerWorkflowProgram(instance)
 	steps := projectPlanSteps(workflowProgram.Job.Steps)
 	actionIndexes, actionRefs, actionInputs := programActionInvocations(workflowProgram.Job.Steps)
-	actions, err := b.buildActions(instance, steps, actionIndexes, actionRefs, actionInputs)
+	actions, err := b.buildActions(instance, workflowProgram, steps, actionIndexes, actionRefs, actionInputs)
 	if err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
@@ -348,7 +349,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 	return instance, nil
 }
 
-func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actionIndexes []int, actionRefs []string, actionInputs []map[string]string) (builtPlanActions, error) {
+func (b planBuilder) buildActions(instance JobInstance, workflowProgram program.Program, steps []plan.Step, actionIndexes []int, actionRefs []string, actionInputs []map[string]string) (builtPlanActions, error) {
 	built := builtPlanActions{requiresMise: len(actionRefs) != 0, resolved: b.options.ResolveActions}
 	if len(actionRefs) != 0 && !built.resolved {
 		built.resolved = true
@@ -367,11 +368,24 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 		built.capabilities = capabilities
 		return built, nil
 	}
-	compiled, err := compileActionInvocations(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs)
+	invocations := make([]program.ActionInvocation, len(actionIndexes))
+	contexts := make([]program.ActionAuthorityContext, len(actionIndexes))
+	for i, stepIndex := range actionIndexes {
+		step := workflowProgram.Job.Steps[stepIndex]
+		invocations[i] = program.ActionInvocation{Inputs: step.Invocation.With, Condition: step.Condition}
+		unknownInputs := make(map[string]bool, len(instance.DeferredInputs))
+		for name := range instance.DeferredInputs {
+			unknownInputs[strings.ToLower(name)] = true
+		}
+		environment := [][]program.Binding{workflowProgram.Job.Env, step.Env}
+		contexts[i] = program.ActionAuthorityContext{WorkflowInputs: instance.Inputs, UnknownWorkflowInputs: unknownInputs, Matrix: instance.Matrix, EnvironmentLayers: environment}
+	}
+	compiled, err := compileActionPrograms(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs, invocations, contexts)
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
 	built.requiresMise = compiled.requiresMise
+	built.programs = compiled.programs
 	built.requiresGitHubToken = compiled.requiresGitHubToken
 	built.requiredSecrets = compiled.requiredSecrets
 	built.authorization.GitHubTokenActions = append([]string(nil), compiled.githubTokenActions...)

@@ -20,6 +20,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
 type fakeActionSource struct {
@@ -445,6 +446,51 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsNormalizesResolvedActionManifest(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "javascript", `name: normalized JavaScript
+inputs:
+  required:
+    required: true
+  optional:
+    default: ${{ github.actor }}
+runs:
+  using: node24
+  pre: pre.js
+  pre-if: inputs.optional != ''
+  main: index.js
+  post: post.js
+  post-if: always()
+`)
+	for _, name := range []string{"pre.js", "index.js", "post.js"} {
+		if err := os.WriteFile(filepath.Join(workspace, "javascript", name), []byte(""), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./javascript"}, []map[string]string{{"required": "value"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compiled.selectors) != 1 || len(compiled.programs) != 1 {
+		t.Fatalf("normalized actions = %#v, selectors = %#v", compiled.programs, compiled.selectors)
+	}
+	action := compiled.programs[compiled.selectors[0].Lock]
+	if action.Name != "normalized JavaScript" || action.Source != "workspace" || action.Runtime != program.ActionRuntimeJavaScript || action.JavaScript == nil {
+		t.Fatalf("normalized action = %#v", action)
+	}
+	if action.JavaScript.NodeMajor != 24 || action.JavaScript.Pre != "pre.js" || action.JavaScript.Main != "index.js" || action.JavaScript.Post != "post.js" ||
+		action.JavaScript.PreCondition.Source != "inputs.optional != ''" || action.JavaScript.PostCondition.Source != "always()" {
+		t.Fatalf("normalized JavaScript lifecycle = %#v", action.JavaScript)
+	}
+	if len(action.Inputs) != 2 || action.Inputs[0].Name != "optional" || action.Inputs[0].Default == nil || action.Inputs[0].Default.Source != "${{ github.actor }}" ||
+		action.Inputs[1].Name != "required" || !action.Inputs[1].Required {
+		t.Fatalf("normalized inputs = %#v", action.Inputs)
+	}
+	if action.Location.File == "" || action.Inputs[0].Default.Provenance != program.ProvenanceAction {
+		t.Fatalf("normalized provenance = %#v, location = %#v", action.Inputs[0].Default, action.Location)
+	}
+}
+
 func TestCompileActionInvocationsScopesWorkflowAuthoredSecretsByInputContract(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "secrets", `name: secret inputs
@@ -525,7 +571,7 @@ runs:
 	}
 }
 
-func TestCompileActionInvocationsRejectsGitHubTokenAuthorityFromCompositeMetadata(t *testing.T) {
+func TestCompileActionInvocationsGrantsDirectGitHubTokenAuthorityFromCompositeMetadata(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "child", `name: child
 inputs:
@@ -544,9 +590,12 @@ runs:
         token: ${{ github.token }}-${{ toJSON(github) }}
 `)
 
-	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
-	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant github.token authority") {
-		t.Fatalf("composite metadata token error = %v", err)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("direct composite-authored github.token did not grant token authority")
 	}
 }
 
