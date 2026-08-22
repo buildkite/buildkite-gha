@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -516,11 +517,17 @@ func (job Job) validateExecutionPrograms() error {
 		if action.Source != lock.Source {
 			return fmt.Errorf("normalized action program %q source does not match its lock", id)
 		}
+		native := integration.UsesNativeAdapter(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+		if (action.Runtime == program.ActionRuntimeNative) != native {
+			return fmt.Errorf("normalized action program %q native runtime does not match its lock integration", id)
+		}
 		if err := validateActionProgram(id, action, locks, job.ActionPrograms); err != nil {
 			return err
 		}
 	}
+	normalizedSteps := make(map[string]program.Step, len(job.Program.Job.Steps))
 	for _, step := range job.Program.Job.Steps {
+		normalizedSteps[step.ID] = step
 		if step.Invocation != nil {
 			if step.Invocation.Lock != "" {
 				if _, ok := job.ActionPrograms[step.Invocation.Lock]; ok {
@@ -528,6 +535,18 @@ func (job Job) validateExecutionPrograms() error {
 				}
 				return fmt.Errorf("normalized workflow action step %q references missing action program %q", step.ID, step.Invocation.Lock)
 			}
+		}
+	}
+	for _, step := range job.Steps {
+		if step.Action == nil {
+			continue
+		}
+		normalized, ok := normalizedSteps[step.ID]
+		if !ok || normalized.Invocation == nil || normalized.Invocation.Lock != step.Action.Lock || normalized.Invocation.Uses.Source != step.Uses {
+			return fmt.Errorf("resolved action step %q does not match its normalized invocation", step.ID)
+		}
+		if _, ok := job.ActionPrograms[step.Action.Lock]; !ok {
+			return fmt.Errorf("resolved action step %q references missing action program %q", step.ID, step.Action.Lock)
 		}
 	}
 	return nil

@@ -1530,6 +1530,14 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 				return nil, err
 			}
 		case "workspace":
+			if normalized, ok := actions.job.ActionPrograms[lock.ID]; ok {
+				var err error
+				action, err = actionMetadata(normalized, "", "")
+				if err != nil {
+					return nil, fmt.Errorf("classify normalized workspace action %q: %w", lock.ID, err)
+				}
+				break
+			}
 			loaded, err := metadata.Load(actions.workspace, lock.Path)
 			if err != nil {
 				unknownWorkspaceRuntime = true

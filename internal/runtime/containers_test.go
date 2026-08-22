@@ -32,6 +32,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
 // fakeJobDocker deliberately goes through a shell and a fresh copy of this test
@@ -1877,6 +1878,30 @@ func TestRunJobContainerDoesNotProbeConfiguredNodeForCompositeOnlyActions(t *tes
 		if slices.Contains(call.Args, "/__buildkite-gha/node24") && slices.Contains(call.Args, "--version") {
 			t.Fatalf("composite-only container probed Node: %#v", call.Args)
 		}
+	}
+}
+
+func TestActionContainerMountsUsesNormalizedWorkspaceRuntime(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "action/action.yml", "name: stale metadata\nruns:\n  using: composite\n  steps: []\n")
+	node := filepath.Join(t.TempDir(), "node24")
+	writeFixtureFile(t, filepath.Dir(node), filepath.Base(node), "#!/bin/sh\n")
+	if err := os.Chmod(node, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lockID := remoteLifecycleLockID(1)
+	job := jobContainerPlan(t, workspace, []plan.Step{{ID: "action", Kind: "uses", Uses: "./action", Action: &plan.ActionSelector{Lock: lockID}}})
+	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "action", SourceDigest: digestTree(t, filepath.Join(workspace, "action"))}}
+	job.ActionPrograms = map[string]program.Action{
+		lockID: {Source: "workspace", Runtime: program.ActionRuntimeJavaScript, JavaScript: &program.JavaScriptAction{NodeMajor: 24, Main: "index.js"}},
+	}
+	actions := newActionLockResolver(job, workspace, nil)
+	mounts, err := newJobRun(Runner{Node24: node}).actionContainerMounts(t.Context(), actions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(mounts, func(mount containerMount) bool { return mount.target == "/__buildkite-gha/node24" }) {
+		t.Fatalf("normalized Node 24 action mounts = %#v", mounts)
 	}
 }
 
