@@ -787,6 +787,7 @@ func TestPluginCarriesReleaseCommitIntoPlans(t *testing.T) {
 func setCLIPluginBuildkiteEnvironment(t *testing.T, stepKey string) {
 	t.Helper()
 	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", "")
 	t.Setenv("BUILDKITE_STEP_KEY", stepKey)
 	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
 	t.Setenv("BUILDKITE_COMMIT", "0123456789abcdef0123456789abcdef01234567")
