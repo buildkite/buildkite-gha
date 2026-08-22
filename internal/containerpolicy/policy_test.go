@@ -41,4 +41,7 @@ func TestValidateJobVolume(t *testing.T) {
 	if err := ValidateJobVolumes([]string{"cache:/one", "cache:/one"}); err == nil {
 		t.Error("ValidateJobVolumes() accepted a repeated volume")
 	}
+	if err := ValidateJobVolumes([]string{"one:/cache", "two:/cache"}); err == nil {
+		t.Error("ValidateJobVolumes() accepted a repeated target")
+	}
 }

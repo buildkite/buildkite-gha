@@ -533,6 +533,7 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 				return extra, nil, rawError(path, volumes, "invalid "+subject+" volumes")
 			}
 			seen := map[string]bool{}
+			seenTargets := map[string]bool{}
 			for _, volume := range volumes.Content {
 				if volume.Kind != yaml.ScalarNode || len(volume.Value) > 4096 || strings.ContainsAny(volume.Value, "\x00\r\n") || seen[volume.Value] {
 					return extra, nil, rawError(path, volume, "invalid or repeated "+subject+" volume")
@@ -544,6 +545,11 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 					if err := containerpolicy.ValidateJobVolume(volume.Value); err != nil {
 						return extra, nil, rawError(path, volume, "invalid container volume: "+err.Error())
 					}
+					target := containerpolicy.JobVolumeTarget(volume.Value)
+					if seenTargets[target] {
+						return extra, nil, rawError(path, volume, "repeated container volume target "+target)
+					}
+					seenTargets[target] = true
 				}
 				seen[volume.Value] = true
 				extra.Volumes = append(extra.Volumes, volume.Value)
