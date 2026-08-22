@@ -70,8 +70,8 @@ jobs:
         image: [node:24, node:25]
     container:
       image: ${{ matrix.image }}
-      volumes: [cache:/cache:ro]
-      options: --cpus 2
+      volumes: [cache:/cache:ro, /anonymous, /srv/data:/data]
+      options: --privileged --label "description=two words"
     steps: [{run: true}]
 `)
 	event := readFile(t, smokePath("events", "push.json"))
@@ -88,7 +88,7 @@ jobs:
 	}
 	for i, image := range []string{"node:24", "node:25"} {
 		container := first.Plans[i].Job.Container
-		if container == nil || container.Image != image || !slices.Equal(container.Volumes, []string{"cache:/cache:ro"}) || container.Options != "--cpus 2" || bytes.Contains(first.Plans[i].Contents, []byte("${{")) {
+		if container == nil || container.Image != image || !slices.Equal(container.Volumes, []string{"cache:/cache:ro", "/anonymous", "/srv/data:/data"}) || container.Options != `--privileged --label "description=two words"` || bytes.Contains(first.Plans[i].Contents, []byte("${{")) {
 			t.Fatalf("plan %d container = %#v", i, first.Plans[i].Job.Container)
 		}
 	}

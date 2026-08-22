@@ -45,10 +45,11 @@ Run untrusted jobs on a queue with:
 - a clean environment for every job
 - host-level CPU, memory, disk, and network limits
 
-Job container options are limited to resource controls. Job container volumes
-accept named Docker volumes, not host bind mounts, and cannot replace the
-runner-owned workspace or runtime mounts. Service options can grant privileges,
-mount host paths, and publish ports. The private Docker network, ownership
+Job and service container options can grant privileges, mount host paths,
+publish ports, and override Docker settings. Job container options cannot
+override the runner-owned network or entrypoint, but other Docker create
+options pass through. Job container volumes accept named volumes, anonymous
+volumes, and absolute host bind mounts. The private Docker network, ownership
 labels, and cleanup checks reduce accidental residue. They do not contain
 hostile code.
 
