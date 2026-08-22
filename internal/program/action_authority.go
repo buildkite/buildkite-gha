@@ -31,6 +31,7 @@ func InventoryActionAuthority(actions map[string]Action, invocation ActionInvoca
 	if err != nil {
 		return Authority{}, err
 	}
+	planner.workflowInputScope = known
 	mainReachable := true
 	if invocation.Condition.Source != "" {
 		analysis, err := expression.AnalyzeCondition(invocation.Condition.Source, known, expression.GitHubTokenWorkflowContext)
@@ -59,15 +60,17 @@ func InventoryActionAuthority(actions map[string]Action, invocation ActionInvoca
 }
 
 type actionAuthorityPlanner struct {
-	actions     map[string]Action
-	secrets     map[string]struct{}
-	githubToken bool
-	active      map[string]bool
+	actions            map[string]Action
+	secrets            map[string]struct{}
+	githubToken        bool
+	active             map[string]bool
+	workflowInputScope map[string]any
 }
 
 type effectiveActionInputs struct {
 	values      map[string]any
 	unknown     map[string]bool
+	omitted     map[string]bool
 	githubToken bool
 }
 
@@ -115,10 +118,10 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 		}
 		preReachable := false
 		if action.JavaScript.Pre != "" && (prepareAction || mainReachable) {
-			known := mainScope
+			known := workflowInputReferences(mainScope, p.workflowInputScope)
 			inputs := mainInputs
 			if prepareAction {
-				known = preparationScope
+				known = workflowInputReferences(preparationScope, p.workflowInputScope)
 				inputs = preparationInputs
 				p.githubToken = p.githubToken || preparationEnvironmentToken
 			}
@@ -142,7 +145,7 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 			p.githubToken = p.githubToken || preReachable && inputs.githubToken
 		}
 		if action.JavaScript.Post != "" && (mainReachable || preReachable) {
-			known := withoutKnownEnvironment(mainScope)
+			known := workflowInputReferences(withoutKnownEnvironment(mainScope), p.workflowInputScope)
 			analysis, err := expression.AnalyzeActionLifecycleCondition(action.JavaScript.PostCondition.Source, known)
 			if err != nil {
 				if validationErr := expression.ValidateActionLifecycleCondition(action.JavaScript.PostCondition.Source); validationErr != nil {
@@ -162,7 +165,7 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 		if action.Docker == nil {
 			return fmt.Errorf("action program %q has no Docker execution", lock)
 		}
-		known := actionInputReferences(mainScope, mainInputs.values, mainInputs.unknown)
+		known := actionInputReferences(mainScope, mainInputs.values, mainInputs.unknown, mainInputs.omitted)
 		for _, binding := range action.Docker.Env {
 			if err := p.inspectMetadataTemplate(binding.Value, known, mainReachable); err != nil {
 				return err
@@ -186,7 +189,7 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 }
 
 func (p *actionAuthorityPlanner) resolveInputs(action Action, supplied []Binding, scope map[string]any, workflowAuthored, resolveDefaults bool) (effectiveActionInputs, error) {
-	resolved := effectiveActionInputs{values: map[string]any{}, unknown: map[string]bool{}}
+	resolved := effectiveActionInputs{values: map[string]any{}, unknown: map[string]bool{}, omitted: map[string]bool{}}
 	definitions := make(map[string]ActionInput, len(action.Inputs))
 	for _, input := range action.Inputs {
 		definitions[input.Name] = input
@@ -234,10 +237,11 @@ func (p *actionAuthorityPlanner) resolveInputs(action Action, supplied []Binding
 		if input.Default == nil {
 			if !input.Required {
 				resolved.values[input.Name] = ""
+				resolved.omitted[input.Name] = true
 			}
 			continue
 		}
-		known = actionInputReferences(scope, resolved.values, resolved.unknown)
+		known = actionInputReferences(scope, resolved.values, resolved.unknown, resolved.omitted)
 		analysis, err := expression.AnalyzeActionInputDefault(input.Default.Source, known)
 		if err != nil {
 			serverURL, _ := known["github.server_url"].(string)
@@ -284,8 +288,8 @@ func (p *actionAuthorityPlanner) inventorySupplied(binding Binding, definition A
 }
 
 func (p *actionAuthorityPlanner) inspectComposite(action Action, mainInputs, preparationInputs effectiveActionInputs, mainScope, preparationScope map[string]any, mainReachable, preparationReachable bool) error {
-	mainKnown := actionInputReferences(mainScope, mainInputs.values, mainInputs.unknown)
-	preparationKnown := actionInputReferences(preparationScope, preparationInputs.values, preparationInputs.unknown)
+	mainKnown := actionInputReferences(mainScope, mainInputs.values, mainInputs.unknown, mainInputs.omitted)
+	preparationKnown := actionInputReferences(preparationScope, preparationInputs.values, preparationInputs.unknown, preparationInputs.omitted)
 	for i, step := range action.Composite.Steps {
 		condition, err := expression.AnalyzeCondition(step.Condition.Source, mainKnown, expression.GitHubTokenCompositeContext)
 		if err != nil {
@@ -403,8 +407,9 @@ func workflowKnownReferences(context ActionAuthorityContext) (map[string]any, er
 		matrix := make(map[string]any, len(context.Matrix))
 		for name, value := range context.Matrix {
 			name = strings.ToLower(name)
+			value = normalizeKnownValue(value)
 			matrix[name] = value
-			known["matrix."+name] = value
+			retainKnownReferences(known, "matrix."+name, value)
 		}
 		known["matrix"] = matrix
 	}
@@ -436,7 +441,35 @@ func workflowKnownReferences(context ActionAuthorityContext) (map[string]any, er
 	return known, nil
 }
 
-func actionInputReferences(scope, inputs map[string]any, unknown map[string]bool) map[string]any {
+func normalizeKnownValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		normalized := make(map[string]any, len(value))
+		for name, child := range value {
+			normalized[strings.ToLower(name)] = normalizeKnownValue(child)
+		}
+		return normalized
+	case []any:
+		normalized := make([]any, len(value))
+		for i, child := range value {
+			normalized[i] = normalizeKnownValue(child)
+		}
+		return normalized
+	default:
+		return value
+	}
+}
+
+func retainKnownReferences(known map[string]any, prefix string, value any) {
+	known[prefix] = value
+	if object, ok := value.(map[string]any); ok {
+		for name, child := range object {
+			retainKnownReferences(known, prefix+"."+name, child)
+		}
+	}
+}
+
+func actionInputReferences(scope, inputs map[string]any, unknown, omitted map[string]bool) map[string]any {
 	known := make(map[string]any, len(scope)+len(inputs)+1)
 	for name, value := range scope {
 		if name != "inputs" && !strings.HasPrefix(name, "inputs.") {
@@ -447,7 +480,28 @@ func actionInputReferences(scope, inputs map[string]any, unknown map[string]bool
 		known["inputs."+strings.ToLower(name)] = value
 	}
 	if len(unknown) == 0 && inputs != nil {
-		known["inputs"] = inputs
+		aggregate := make(map[string]any, len(inputs)-len(omitted))
+		for name, value := range inputs {
+			if !omitted[name] {
+				aggregate[name] = value
+			}
+		}
+		known["inputs"] = aggregate
+	}
+	return known
+}
+
+func workflowInputReferences(scope, workflowScope map[string]any) map[string]any {
+	known := make(map[string]any, len(scope))
+	for name, value := range scope {
+		if name != "inputs" && !strings.HasPrefix(name, "inputs.") {
+			known[name] = value
+		}
+	}
+	for name, value := range workflowScope {
+		if name == "inputs" || strings.HasPrefix(name, "inputs.") {
+			known[name] = value
+		}
 	}
 	return known
 }

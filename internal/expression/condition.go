@@ -345,12 +345,8 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 			return validator.validate(node.Index)
 		}
 		return fmt.Errorf("unsupported condition access expression")
-	case "matrix", "needs":
+	case "matrix", "needs", "inputs":
 	case "vars":
-		if _, whole := node.(*actionlint.VariableNode); whole {
-			return fmt.Errorf("whole condition context %q is unsupported", root)
-		}
-	case "inputs":
 		if _, whole := node.(*actionlint.VariableNode); whole {
 			return fmt.Errorf("whole condition context %q is unsupported", root)
 		}

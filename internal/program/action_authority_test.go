@@ -170,6 +170,59 @@ func TestInventoryActionAuthorityTreatsOmittedOptionalInputAsEmpty(t *testing.T)
 	}
 }
 
+func TestInventoryActionAuthorityKeepsOmittedOptionalInputOutOfAggregate(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "publish"}}, Composite: &CompositeAction{Steps: []CompositeStep{{
+			Condition: testActionSite(`!contains(toJSON(inputs), '"publish"')`), Run: &Run{Command: testActionSite("echo ${{ github.token }}")},
+		}}}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("omitted optional input appeared in aggregate inputs")
+	}
+}
+
+func TestInventoryActionAuthorityUsesWorkflowInputsForNestedLifecycle(t *testing.T) {
+	token := testActionSite("${{ github.token }}")
+	actions := map[string]Action{
+		"root": {
+			Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "publish"}},
+			Composite: &CompositeAction{Steps: []CompositeStep{{Invocation: &Invocation{Lock: "child", Uses: testActionSite("owner/child@v1")}}}},
+		},
+		"child": {
+			Source: "github", Runtime: ActionRuntimeJavaScript, Inputs: []ActionInput{{Name: "token", Default: &token}},
+			JavaScript: &JavaScriptAction{Pre: "pre.js", PreCondition: testActionSite("inputs.publish == 'true'"), Main: "index.js"},
+		},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{
+		Lock: "root", Inputs: []Binding{{Name: "publish", Value: testWorkflowSite("false")}},
+	}, ActionAuthorityContext{WorkflowInputs: map[string]any{"publish": "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("nested lifecycle condition did not use workflow inputs")
+	}
+}
+
+func TestInventoryActionAuthorityRetainsNestedMatrixReferences(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "token"}}, Composite: &CompositeAction{}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{
+		Lock: "root", Inputs: []Binding{{Name: "token", Value: testWorkflowSite("${{ matrix.config.publish && github.token || '' }}")}},
+	}, ActionAuthorityContext{Matrix: map[string]any{"config": map[string]any{"publish": false}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("known-false nested matrix value retained GitHub token authority")
+	}
+}
+
 func TestInventoryActionAuthorityKeepsRuntimeDependentDefaultErrorsConservative(t *testing.T) {
 	defaultValue := testActionSite("${{ inputs.enabled && fromJSON('bad') && github.token || '' }}")
 	actions := map[string]Action{

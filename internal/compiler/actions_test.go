@@ -628,6 +628,55 @@ runs:
 	}
 }
 
+func TestCompileActionProgramsForgetsInheritedEnvironmentForSingleRoot(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "guarded", `name: guarded
+runs:
+  using: composite
+  steps:
+    - if: env.FLAG == 'true'
+      shell: sh
+      run: echo ${{ github.token }}
+`)
+	compiled, err := compileActionPrograms(
+		t.Context(), workspace, nil, "https://github.com",
+		[]string{"./guarded"}, []map[string]string{{}}, []program.ActionInvocation{{}},
+		[]program.ActionAuthorityContext{{Environment: map[string]string{"FLAG": "false"}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("single-root planning trusted environment that an earlier phase can mutate")
+	}
+}
+
+func TestCompileActionProgramsRetainsExplicitStepEnvironment(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "guarded", `name: guarded
+runs:
+  using: composite
+  steps:
+    - if: env.FLAG == 'true'
+      shell: sh
+      run: echo ${{ github.token }}
+`)
+	compiled, err := compileActionPrograms(
+		t.Context(), workspace, nil, "https://github.com",
+		[]string{"./guarded"}, []map[string]string{{}}, []program.ActionInvocation{{}},
+		[]program.ActionAuthorityContext{{EnvironmentLayers: [][]program.Binding{
+			{{Name: "FLAG", Value: program.Site{Source: "true"}}},
+			{{Name: "FLAG", Value: program.Site{Source: "false"}}},
+		}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("explicit step environment did not prune a known-false token branch")
+	}
+}
+
 func TestCompileActionInvocationsRejectsRetainedEventPayload(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "event", `name: event input

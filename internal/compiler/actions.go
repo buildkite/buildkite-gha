@@ -272,12 +272,12 @@ func compileActionPrograms(ctx context.Context, workspace string, actionSource A
 				planning = contexts[i]
 				planning.ServerURL = serverURL
 			}
-			// Remote pre hooks all run before workflow action mains, and every
-			// executable phase may append to GITHUB_ENV. Across multiple roots,
-			// no root can safely prune authority using the initial environment.
-			if len(roots) > 1 {
-				planning.Environment = nil
-				planning.EnvironmentLayers = nil
+			// Earlier workflow steps and action phases may append to GITHUB_ENV.
+			// Forget inherited values, but retain this step's explicit env layer:
+			// it is reapplied at runtime and overrides inherited mutations.
+			planning.Environment = nil
+			if len(planning.EnvironmentLayers) != 0 {
+				planning.EnvironmentLayers = planning.EnvironmentLayers[len(planning.EnvironmentLayers)-1:]
 			}
 			requirements, err := program.InventoryActionAuthority(programs, invocations[i], planning)
 			if err != nil {
