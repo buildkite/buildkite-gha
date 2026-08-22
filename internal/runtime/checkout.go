@@ -81,6 +81,10 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 		return result, fmt.Errorf("%s: %w", adapter, err)
 	}
 	inputs = checkoutInputsWithReleaseDefaults(commit, inputs)
+	lfs := checkoutInputTrue(checkoutInput(inputs, "lfs"))
+	if lfs && (r.GitLFS == "" || !filepath.IsAbs(r.GitLFS)) {
+		return result, fmt.Errorf("checkout adapter requires Git LFS to be resolved before workflow execution")
+	}
 	checkoutDirectory, err := prepareCheckoutDirectory(workspace, inputs)
 	if err != nil {
 		return result, fmt.Errorf("%s: %w", adapter, err)
@@ -105,7 +109,6 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 		"GIT_SSH_COMMAND":        "false",
 		"GIT_PROTOCOL_FROM_USER": "0",
 	}
-	lfs := checkoutInputTrue(checkoutInput(inputs, "lfs"))
 	if !lfs {
 		env["GIT_LFS_SKIP_SMUDGE"] = "1"
 	}
@@ -131,9 +134,10 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	if err := run(env, false, "remote", "add", "origin", url); err != nil {
 		return result, err
 	}
-	lfsBase := checkoutGitBaseArgsWithHooks()
+	lfsBase := base
 	if lfs {
-		if err := runWithBase(env, lfsBase, false, "lfs", "install", "--local"); err != nil {
+		lfsBase = checkoutGitLFSAliasArgs(base, r.GitLFS)
+		if err := runWithBase(env, lfsBase, false, "lfs", "install", "--local", "--skip-repo"); err != nil {
 			return result, err
 		}
 	}
@@ -144,7 +148,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	checkoutTarget := checkoutRevision(inputs, job.Event.SHA)
 	sparse := checkoutSparsePatterns(inputs)
 	if lfs && len(sparse) == 0 {
-		if err := run(env, credentialed, "lfs", "fetch", "origin", checkoutTarget); err != nil {
+		if err := runWithBase(env, lfsBase, credentialed, "lfs", "fetch", "origin", checkoutTarget); err != nil {
 			return result, err
 		}
 	}
@@ -155,14 +159,18 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	}
 	checkoutBase := base
 	if lfs {
-		checkoutBase = lfsBase
+		checkoutBase = checkoutGitLFSFilterArgs(base, r.GitLFS)
 	}
-	if err := runWithBase(env, checkoutBase, credentialed && lfs && len(sparse) != 0, "checkout", "--detach", checkoutTarget); err != nil {
+	if err := runWithBase(env, checkoutBase, credentialed && checkoutFilter(inputs) != "", "checkout", "--detach", checkoutTarget); err != nil {
 		return result, err
 	}
 	mode := checkoutSubmoduleMode(inputs)
 	if mode != "" {
-		if err := r.runCheckoutSubmodules(ctx, processor, checkoutDirectory, git, env, base, checkoutFetchDepth(inputs), mode == "recursive", credentialed, credentialHost); err != nil {
+		submoduleBase := base
+		if lfs {
+			submoduleBase = checkoutGitLFSFilterArgs(base, r.GitLFS)
+		}
+		if err := r.runCheckoutSubmodules(ctx, processor, checkoutDirectory, git, env, submoduleBase, checkoutFetchDepth(inputs), mode == "recursive", credentialed, credentialHost); err != nil {
 			return result, fmt.Errorf("%s submodules: %w", adapter, err)
 		}
 	}
@@ -241,17 +249,22 @@ func checkoutGitBaseArgs() []string {
 	}
 }
 
-func checkoutGitBaseArgsWithHooks() []string {
-	base := checkoutGitBaseArgs()
-	args := make([]string, 0, len(base)-2)
-	for i := 0; i < len(base); i++ {
-		if i+1 < len(base) && base[i] == "-c" && base[i+1] == "core.hooksPath=/dev/null" {
-			i++
-			continue
-		}
-		args = append(args, base[i])
-	}
-	return args
+func checkoutGitLFSFilterArgs(base []string, gitLFS string) []string {
+	executable := checkoutGitLFSExecutable(gitLFS)
+	return append(append([]string(nil), base...),
+		"-c", "filter.lfs.clean="+executable+" clean -- %f",
+		"-c", "filter.lfs.smudge="+executable+" smudge -- %f",
+		"-c", "filter.lfs.process="+executable+" filter-process",
+		"-c", "filter.lfs.required=true",
+	)
+}
+
+func checkoutGitLFSAliasArgs(base []string, gitLFS string) []string {
+	return append(append([]string(nil), base...), "-c", "alias.lfs=!"+checkoutGitLFSExecutable(gitLFS))
+}
+
+func checkoutGitLFSExecutable(gitLFS string) string {
+	return "'" + strings.ReplaceAll(gitLFS, "'", `'\''`) + "'"
 }
 
 func checkoutSubmoduleMode(inputs map[string]string) string {
@@ -439,10 +452,7 @@ func checkoutFetchArgs(inputs map[string]string, sha string) []string {
 	if progress {
 		args = append(args, "--progress")
 	}
-	filter := checkoutInput(inputs, "filter")
-	if filter == "" && len(checkoutSparsePatterns(inputs)) != 0 {
-		filter = "blob:none"
-	}
+	filter := checkoutFilter(inputs)
 	if filter != "" {
 		args = append(args, "--filter="+filter)
 	}
@@ -467,6 +477,16 @@ func checkoutFetchArgs(inputs map[string]string, sha string) []string {
 		args = append(args, "+refs/tags/*:refs/tags/*")
 	}
 	return args
+}
+
+func checkoutFilter(inputs map[string]string) string {
+	if filter := checkoutInput(inputs, "filter"); filter != "" {
+		return filter
+	}
+	if len(checkoutSparsePatterns(inputs)) != 0 {
+		return "blob:none"
+	}
+	return ""
 }
 
 func checkoutFetchRevision(inputs map[string]string, sha string) string {

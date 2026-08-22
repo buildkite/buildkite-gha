@@ -986,7 +986,7 @@ The `ref` and `commit` outputs are unavailable for v1.2.0, v2.8.0, and v3.7.0. U
 
 The `false` value and omission do not run submodule commands. The `true` value runs native Git for direct children, and `recursive` includes nested children. Relative URLs and `fetch-depth` follow native Git behavior. Public and private GitHub submodules are supported under the job's repository access; external HTTPS submodules are anonymous. `git@github.com:` URLs are rewritten to HTTPS. Other SSH and non-HTTPS transports are unsupported.
 
-Sparse checkout applies `blob:none` automatically unless `filter` is explicit. Cone mode treats each line as a directory. Non-cone mode uses Git ignore-style patterns. LFS installs repository-local hooks before fetch. A regular checkout fetches the selected revision's LFS objects before checkout; sparse checkout lets Git LFS download only materialized paths.
+Sparse checkout applies `blob:none` automatically unless `filter` is explicit. Cone mode treats each line as a directory. Non-cone mode uses Git ignore-style patterns. LFS configures repository-local filters before fetch without installing push or locking hooks. A regular checkout fetches the selected revision's LFS objects before checkout; sparse checkout lets Git LFS download only materialized paths.
 
 ```yaml
 - uses: actions/checkout@v7
