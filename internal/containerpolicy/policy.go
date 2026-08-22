@@ -13,7 +13,7 @@ import (
 const MaxJobVolumes = 32
 
 var (
-	volumeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	volumeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{1,127}$`)
 	sizePattern       = regexp.MustCompile(`^[1-9][0-9]*[bBkKmMgG]?$`)
 	cpusPattern       = regexp.MustCompile(`^(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$`)
 	cpusetPattern     = regexp.MustCompile(`^[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*$`)

@@ -992,6 +992,7 @@ func TestJobContainerPlanRejectsUnsafeOptionsAndVolumes(t *testing.T) {
 		"unbounded memory":   {Image: "node:24", Options: "--memory-swap -1"},
 		"repeated option":    {Image: "node:24", Options: "--cpus 1 --cpus=2"},
 		"bind mount":         {Image: "node:24", Volumes: []string{"/tmp:/data"}},
+		"short volume name":  {Image: "node:24", Volumes: []string{"v:/data"}},
 		"runtime overlap":    {Image: "node:24", Volumes: []string{"cache:/__buildkite-gha/runtime"}},
 		"unsupported volume": {Image: "node:24", Volumes: []string{"cache:/data:z"}},
 	} {
