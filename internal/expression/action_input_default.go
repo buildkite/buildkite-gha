@@ -101,48 +101,23 @@ func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, er
 	if err != nil || !referencesToken {
 		return referencesToken, err
 	}
-	onlyKnownReferences := true
+	requiresToken := false
 	err = visitTemplateExpressions(template, func(expression actionlint.ExprNode) error {
-		actionlint.VisitExprNode(expression, func(node, parent actionlint.ExprNode, entering bool) {
-			if !entering || !onlyKnownReferences {
-				return
-			}
-			switch node.(type) {
-			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-			default:
-				return
-			}
-			root, path, referenceErr := referencePath(node)
-			if referenceErr != nil {
-				onlyKnownReferences = false
-				return
-			}
-			if len(path) == 0 {
-				switch parent := parent.(type) {
-				case *actionlint.ObjectDerefNode:
-					if parent.Receiver == node {
-						return
-					}
-				case *actionlint.IndexAccessNode:
-					if parent.Operand == node {
-						return
-					}
-				}
-			}
-			onlyKnownReferences = isJobCheckRunIDReference(root, path) ||
-				strings.EqualFold(root, "github") && len(path) == 1 &&
-					(strings.EqualFold(path[0], "server_url") || strings.EqualFold(path[0], "token"))
+		analysis, analysisErr := analyzeActionInputDefault(expression, map[string]any{
+			"github.server_url": serverURL,
+			"job.check_run_id":  "",
 		})
+		if analysisErr != nil {
+			// Runtime-dependent evaluation failures previously fell back to
+			// conservative authority. Preserve that behavior while the
+			// exhaustive reference pass above continues to own validation.
+			requiresToken = true
+			return nil
+		}
+		requiresToken = requiresToken || analysis.Effects.GitHubToken != 0
 		return nil
 	})
-	if err != nil {
-		return false, err
-	}
-	if !onlyKnownReferences {
-		return true, nil
-	}
-	_, err = EvaluateActionInputDefault(template, Context{GitHub: map[string]any{"server_url": serverURL}})
-	return err != nil, nil
+	return requiresToken, err
 }
 
 func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (any, error) {
