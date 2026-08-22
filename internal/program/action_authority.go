@@ -301,11 +301,6 @@ func (p *actionAuthorityPlanner) inspectComposite(action Action, mainInputs, pre
 		}
 		stepReachable := mainReachable && (!condition.Value.Known || condition.Value.Value == true)
 		p.githubToken = p.githubToken || mainReachable && authorityEffectsRequireToken(condition.Effects)
-		for _, site := range []Site{step.Name} {
-			if err := p.inspectMetadataTemplate(site, mainKnown, stepReachable); err != nil {
-				return fmt.Errorf("composite action step %d: %w", i+1, err)
-			}
-		}
 		for _, binding := range step.Env {
 			if err := p.inspectMetadataTemplate(binding.Value, mainKnown, stepReachable); err != nil {
 				return fmt.Errorf("composite action step %d environment %q: %w", i+1, binding.Name, err)

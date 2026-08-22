@@ -203,6 +203,12 @@ func TestRunnerDirectReferencesWorkAcrossRuntimeEvaluationSurfaces(t *testing.T)
 	}
 }
 
+func TestValidateStepConditionSupportsGitHubToken(t *testing.T) {
+	if err := ValidateCondition("github.token != ''", StepCondition); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *testing.T) {
 	for _, template := range []string{
 		"${{ github.server_url == 'https://github.com' && github.token || '' }}",

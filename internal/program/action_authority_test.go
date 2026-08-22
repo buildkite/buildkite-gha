@@ -257,6 +257,36 @@ func TestInventoryActionAuthorityDoesNotGrantWholeGitHubContextFromCompositeMeta
 	}
 }
 
+func TestInventoryActionAuthorityIncludesCompositeConditionToken(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{{
+			Condition: testActionSite("github.token != ''"), Run: &Run{Command: testActionSite("echo ok")},
+		}}}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("composite condition did not grant GitHub token authority")
+	}
+}
+
+func TestInventoryActionAuthorityIgnoresUnevaluatedCompositeName(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{{
+			Name: testActionSite("${{ github.token }}"), Run: &Run{Command: testActionSite("echo ok")},
+		}}}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("unevaluated composite name granted GitHub token authority")
+	}
+}
+
 func TestInventoryActionAuthorityPreparesOnlyFieldsUsedByChildLifecycle(t *testing.T) {
 	for _, test := range []struct {
 		name      string

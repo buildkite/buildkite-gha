@@ -257,7 +257,7 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha":
 				return nil
 			case "token":
-				if scope == actionLifecycleCondition {
+				if scope == StepCondition || scope == actionLifecycleCondition {
 					return nil
 				}
 			}
