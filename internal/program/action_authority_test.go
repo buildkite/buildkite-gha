@@ -170,6 +170,21 @@ func TestInventoryActionAuthorityTreatsOmittedOptionalInputAsEmpty(t *testing.T)
 	}
 }
 
+func TestInventoryActionAuthorityTreatsOmittedOptionalInputAsNull(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "publish"}}, Composite: &CompositeAction{Steps: []CompositeStep{{
+			Condition: testActionSite("toJSON(inputs.publish) == 'null'"), Run: &Run{Command: testActionSite("echo ${{ github.token }}")},
+		}}}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("omitted optional input did not behave as null when referenced directly")
+	}
+}
+
 func TestInventoryActionAuthorityKeepsOmittedOptionalInputOutOfAggregate(t *testing.T) {
 	actions := map[string]Action{
 		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "publish"}}, Composite: &CompositeAction{Steps: []CompositeStep{{
@@ -328,6 +343,31 @@ func TestInventoryActionAuthorityEvaluatesChildStableEnvironmentWithParentInputs
 	}
 	if authority.GitHubToken {
 		t.Fatal("child post condition did not evaluate stable environment with parent action inputs")
+	}
+}
+
+func TestInventoryActionAuthorityResolvesChildInputsBeforeChildEnvironment(t *testing.T) {
+	actions := map[string]Action{
+		"root": {
+			Source: "workspace", Runtime: ActionRuntimeComposite,
+			Composite: &CompositeAction{Steps: []CompositeStep{{
+				Env:        []Binding{{Name: "FLAG", Value: testActionSite("false")}},
+				Invocation: &Invocation{Lock: "child", Uses: testActionSite("./child"), With: []Binding{{Name: "enabled", Value: testActionSite("${{ env.FLAG }}")}}},
+			}}},
+		},
+		"child": {
+			Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "enabled"}},
+			Composite: &CompositeAction{Steps: []CompositeStep{{
+				Condition: testActionSite("inputs.enabled == 'true'"), Run: &Run{Command: testActionSite("echo ${{ github.token }}")},
+			}}},
+		},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{Environment: map[string]string{"FLAG": "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("child input used the child environment instead of the parent environment")
 	}
 }
 
@@ -596,6 +636,29 @@ func TestInventoryActionAuthorityForgetsEnvironmentAfterExecutableStep(t *testin
 	}
 	if !authority.GitHubToken {
 		t.Fatal("a preceding executable step did not make the later environment guard conservative")
+	}
+}
+
+func TestInventoryActionAuthorityForgetsParentEnvironmentAfterChildAction(t *testing.T) {
+	actions := map[string]Action{
+		"root": {
+			Source: "workspace", Runtime: ActionRuntimeComposite,
+			Composite: &CompositeAction{Steps: []CompositeStep{
+				{Invocation: &Invocation{Lock: "child", Uses: testActionSite("./child")}},
+				{Condition: testActionSite("env.FLAG == 'true'"), Run: &Run{Command: testActionSite("echo ${{ github.token }}")}},
+			}},
+		},
+		"child": {
+			Source: "workspace", Runtime: ActionRuntimeComposite,
+			Composite: &CompositeAction{Steps: []CompositeStep{{Run: &Run{Command: testActionSite("echo FLAG=true >> $GITHUB_ENV")}}}},
+		},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{Environment: map[string]string{"FLAG": "false"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !authority.GitHubToken {
+		t.Fatal("a child action could not override the parent environment for a later sibling")
 	}
 }
 

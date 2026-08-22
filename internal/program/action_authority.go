@@ -62,7 +62,7 @@ func InventoryActionAuthority(actions map[string]Action, invocation ActionInvoca
 			mainReachable, _ = analysis.Value.Value.(bool)
 		}
 	}
-	if err := planner.inspect(invocation.Lock, invocation.Inputs, invocation.Inputs, mainKnown, preparationKnown, stableKnown, mainReachable, true, false, true); err != nil {
+	if err := planner.inspect(invocation.Lock, invocation.Inputs, invocation.Inputs, mainKnown, mainKnown, preparationKnown, stableKnown, mainReachable, true, false, true); err != nil {
 		return Authority{}, err
 	}
 	authority := Authority{
@@ -92,7 +92,7 @@ type effectiveActionInputs struct {
 	githubToken bool
 }
 
-func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationSupplied []Binding, mainScope, preparationScope, stableScope map[string]any, mainReachable, preparationReachable, preparationEnvironmentToken, workflowAuthored bool) error {
+func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationSupplied []Binding, mainInputScope, mainScope, preparationScope, stableScope map[string]any, mainReachable, preparationReachable, preparationEnvironmentToken, workflowAuthored bool) error {
 	action, ok := p.actions[lock]
 	if !ok {
 		return fmt.Errorf("action program %q is missing", lock)
@@ -114,7 +114,7 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 	}
 
 	resolveDefaults := action.Runtime != ActionRuntimeNative
-	mainInputs, err := p.resolveInputs(action, mainSupplied, mainScope, workflowAuthored, resolveDefaults)
+	mainInputs, err := p.resolveInputs(action, mainSupplied, mainInputScope, workflowAuthored, resolveDefaults)
 	if err != nil {
 		return err
 	}
@@ -255,7 +255,7 @@ func (p *actionAuthorityPlanner) resolveInputs(action Action, supplied []Binding
 		}
 		if input.Default == nil {
 			if !input.Required {
-				resolved.values[input.Name] = ""
+				resolved.values[input.Name] = nil
 				resolved.omitted[input.Name] = true
 			}
 			continue
@@ -366,14 +366,14 @@ func (p *actionAuthorityPlanner) inspectComposite(action Action, mainInputs, pre
 			return fmt.Errorf("composite action step %d stable environment: %w", i+1, err)
 		}
 		preparationWasMutable := p.preparationEnvironmentMutable
-		if err := p.inspect(step.Invocation.Lock, step.Invocation.With, step.Invocation.With, childMainScope, childPreparationScope, childStableScope, stepReachable, preparationReachable, preparationEnvironmentToken, false); err != nil {
+		if err := p.inspect(step.Invocation.Lock, step.Invocation.With, step.Invocation.With, mainKnown, childMainScope, childPreparationScope, childStableScope, stepReachable, preparationReachable, preparationEnvironmentToken, false); err != nil {
 			return fmt.Errorf("composite action step %d child %q: %w", i+1, step.Invocation.Uses.Source, err)
 		}
 		if stepReachable {
-			mainKnown = retainStableEnvironment(mainKnown, stableScope)
+			mainKnown = withoutKnownEnvironment(mainKnown)
 		}
 		if preparationReachable && p.preparationEnvironmentMutable != preparationWasMutable {
-			preparationKnown = retainStableEnvironment(preparationKnown, stableScope)
+			preparationKnown = withoutKnownEnvironment(preparationKnown)
 		}
 	}
 	for _, output := range action.Outputs {
