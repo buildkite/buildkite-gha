@@ -394,6 +394,30 @@ func TestWorkflowEnvironmentMutableBeforeUsesStepEnvironmentAndBackgroundBarrier
 	if !mutable {
 		t.Fatal("background barrier did not make committed environment mutable")
 	}
+	waitAll := []Step{
+		{ID: "Mixed-Case", Background: true, Run: &Run{Command: testWorkflowSite("echo background")}},
+		{Kind: "wait-all"},
+		{Run: &Run{Command: testWorkflowSite("echo target")}},
+	}
+	mutable, err = WorkflowEnvironmentMutableBefore(waitAll, 2, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mutable {
+		t.Fatal("wait-all did not make committed background environment mutable")
+	}
+	caseInsensitiveTarget := []Step{
+		waitAll[0],
+		{Kind: "wait", Targets: []string{"mixed-case"}},
+		waitAll[2],
+	}
+	mutable, err = WorkflowEnvironmentMutableBefore(caseInsensitiveTarget, 2, ActionAuthorityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mutable {
+		t.Fatal("case-insensitive background target did not commit mutable environment")
+	}
 }
 
 func TestInventoryActionAuthorityRetainsPreparationEnvironmentAfterCompositeWithoutPre(t *testing.T) {

@@ -508,9 +508,12 @@ func WorkflowEnvironmentMutableBefore(steps []Step, before int, context ActionAu
 		if analysis.Value.Known && analysis.Value.Value != true {
 			continue
 		}
+		if step.Kind == "wait-all" && len(background) != 0 {
+			return true, nil
+		}
 		if step.Kind == "wait" || step.Kind == "cancel" {
 			for _, target := range step.Targets {
-				if background[target] {
+				if background[strings.ToLower(target)] {
 					return true, nil
 				}
 			}
@@ -520,7 +523,7 @@ func WorkflowEnvironmentMutableBefore(steps []Step, before int, context ActionAu
 			continue
 		}
 		if step.Background {
-			background[step.ID] = true
+			background[strings.ToLower(step.ID)] = true
 			continue
 		}
 		return true, nil
