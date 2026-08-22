@@ -387,15 +387,15 @@ func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 
 	aPath := filepath.Join(".github", "workflows", "a.yml")
 	bPath := filepath.Join(".github", "workflows", "b.yaml")
-	first, err := expandExplicitWorkflowPaths([]string{filepath.Join(repository, bPath), "./" + aPath, aPath}, "")
+	first, firstSkipped, err := expandExplicitWorkflowPaths([]string{filepath.Join(repository, bPath), "./" + aPath, aPath}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := expandExplicitWorkflowPaths([]string{aPath, filepath.Join(repository, bPath)}, "")
+	second, secondSkipped, err := expandExplicitWorkflowPaths([]string{aPath, filepath.Join(repository, bPath)}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(first, second) || len(first) != 2 || first[0].CanonicalPath != ".github/workflows/a.yml" || first[1].CanonicalPath != ".github/workflows/b.yaml" {
+	if len(firstSkipped) != 0 || len(secondSkipped) != 0 || !reflect.DeepEqual(first, second) || len(first) != 2 || first[0].CanonicalPath != ".github/workflows/a.yml" || first[1].CanonicalPath != ".github/workflows/b.yaml" {
 		t.Fatalf("canonical explicit inputs = %#v and %#v", first, second)
 	}
 	for _, input := range first {
@@ -403,17 +403,21 @@ func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 			t.Fatalf("explicit workflow identity = %#v", input)
 		}
 	}
-	metacharacter, err := expandExplicitWorkflowPaths([]string{filepath.Join(".github", "workflows", "workflow[1].yml"), aPath}, "")
-	if err != nil || len(metacharacter) != 2 || metacharacter[1].CanonicalPath != ".github/workflows/workflow[1].yml" {
+	metacharacter, metacharacterSkipped, err := expandExplicitWorkflowPaths([]string{filepath.Join(".github", "workflows", "workflow[1].yml"), aPath}, "")
+	if err != nil || len(metacharacterSkipped) != 0 || len(metacharacter) != 2 || metacharacter[1].CanonicalPath != ".github/workflows/workflow[1].yml" {
 		t.Fatalf("literal metacharacter list = %#v, %v", metacharacter, err)
 	}
 	operands, _, err := uploadArgs([]string{"--", "-leading.yml", aPath})
 	if err != nil {
 		t.Fatal(err)
 	}
-	leadingDash, err := expandExplicitWorkflowPaths(operands, "")
-	if err != nil || len(leadingDash) != 2 || leadingDash[0].CanonicalPath != "-leading.yml" {
+	leadingDash, leadingDashSkipped, err := expandExplicitWorkflowPaths(operands, "")
+	if err != nil || len(leadingDashSkipped) != 0 || len(leadingDash) != 2 || leadingDash[0].CanonicalPath != "-leading.yml" {
 		t.Fatalf("leading-dash explicit path = %#v, %v", leadingDash, err)
+	}
+	selected, skipped, err := expandExplicitWorkflowPaths([]string{filepath.Join(".github", "workflows", "missing.yml"), untrackedPath, aPath}, "")
+	if err != nil || len(selected) != 1 || selected[0].CanonicalPath != ".github/workflows/a.yml" || !reflect.DeepEqual(skipped, []string{filepath.Join(".github", "workflows", "missing.yml"), untrackedPath}) {
+		t.Fatalf("missing and untracked selection = %#v, skipped %#v, error %v", selected, skipped, err)
 	}
 
 	for _, test := range []struct {
@@ -423,15 +427,13 @@ func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 	}{
 		{name: "mixed glob and literal", operands: []string{filepath.Join(".github", "workflows", "*.yml"), aPath}, want: "glob pattern"},
 		{name: "multiple globs", operands: []string{filepath.Join(".github", "workflows", "*.yml"), filepath.Join(".github", "workflows", "*.yaml")}, want: "glob pattern"},
-		{name: "missing", operands: []string{filepath.Join(".github", "workflows", "missing.yml"), aPath}, want: "not tracked by git"},
-		{name: "untracked", operands: []string{untrackedPath, aPath}, want: "not tracked by git"},
 		{name: "directory", operands: []string{workflowDirectory, aPath}, want: "directory"},
 		{name: "outside repository", operands: []string{outsidePath, aPath}, want: "outside the checked-out git repository"},
 		{name: "non-workflow extension", operands: []string{notePath, aPath}, want: "must end in .yml or .yaml"},
 		{name: "symlink", operands: []string{symlinkPath, aPath}, want: "symbolic link"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := expandExplicitWorkflowPaths(test.operands, ""); err == nil || !strings.Contains(err.Error(), test.want) {
+			if _, _, err := expandExplicitWorkflowPaths(test.operands, ""); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("expandExplicitWorkflowPaths(%q) error = %v, want %q", test.operands, err, test.want)
 			}
 		})
@@ -447,7 +449,7 @@ func TestExpandExplicitWorkflowPathsExplainsTrackedFileMissingFromCheckout(t *te
 		t.Fatal(err)
 	}
 	t.Chdir(repository)
-	_, err := expandExplicitWorkflowPaths([]string{workflowPath}, "")
+	_, _, err := expandExplicitWorkflowPaths([]string{workflowPath}, "")
 	if err == nil || !strings.Contains(err.Error(), "tracked by git but missing from the checkout") || !strings.Contains(err.Error(), "sparse-checkout") {
 		t.Fatalf("expandExplicitWorkflowPaths() error = %v", err)
 	}
@@ -510,16 +512,20 @@ func TestRunUploadRejectsWorkflowSelectorsBeforeBuildkite(t *testing.T) {
 	t.Chdir(repository)
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "invalid-list-importer")
-	for _, operands := range [][]string{
-		{"*"},
-		{filepath.Join(".github", "workflows", "*.yml")},
-		{filepath.Join(".github", "workflows", "*.yml"), filepath.Join(".github", "workflows", "a.yml")},
+	for _, test := range []struct {
+		operands []string
+		want     string
+	}{
+		{operands: []string{"*"}, want: "glob pattern"},
+		{operands: []string{filepath.Join(".github", "workflows", "*.yml")}, want: "glob pattern"},
+		{operands: []string{filepath.Join(".github", "workflows", "*.yml"), filepath.Join(".github", "workflows", "a.yml")}, want: "glob pattern"},
+		{operands: []string{filepath.Join(".github", "workflows", "missing.yml"), filepath.Join(".github", "workflows", "a.yml")}, want: "not tracked by git"},
 	} {
 		runner := &cliCaptureRunner{}
 		var stdout, stderr bytes.Buffer
-		args := append([]string{"upload"}, operands...)
-		if code := run(args, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "glob pattern") {
-			t.Fatalf("run(%q) code/stderr = %d / %q", operands, code, stderr.String())
+		args := append([]string{"upload"}, test.operands...)
+		if code := run(args, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), test.want) {
+			t.Fatalf("run(%q) code/stderr = %d / %q", test.operands, code, stderr.String())
 		}
 		if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
 			t.Fatalf("invalid workflow selector reached Buildkite: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
@@ -539,9 +545,12 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 		filepath.Join(workflowDirectory, "shell.yml"),
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	inputs, err := expandExplicitWorkflowPaths(workflowPaths, "")
+	inputs, skipped, err := expandExplicitWorkflowPaths(workflowPaths, "")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("skipped workflow paths = %#v", skipped)
 	}
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "aggregate-importer")

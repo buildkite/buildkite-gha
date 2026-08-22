@@ -305,10 +305,13 @@ configuration from `BUILDKITE_PLUGIN_CONFIGURATION`. It accepts:
 - plugin-owned `version`, `source-ref`, and `minimum-release-age` fields
 - the Boolean `experimental-runner-user` field
 
-Each workflow path must be a regular, tracked `.yml` or `.yaml` file inside the
-repository. Directories and globs are rejected. The optional `oidc` object
-accepts non-empty `claims`, `aws-session-tags`, and `subject-claim` values.
-Unknown fields and invalid values fail before upload.
+Missing or untracked workflow paths warn and are skipped. If every configured
+path is missing or untracked, the plugin succeeds without uploading a pipeline.
+Every present path must be a regular, tracked `.yml` or `.yaml` file inside the
+repository. Directories, tracked files missing from the checkout, symlinks, and
+globs are rejected. The optional `oidc` object accepts non-empty `claims`,
+`aws-session-tags`, and `subject-claim` values. Unknown fields and invalid values
+fail before upload.
 
 The plugin resolves relative workflow paths from `BUILDKITE_BUILD_CHECKOUT_PATH`,
 not the command hook's working directory.
