@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -189,6 +190,39 @@ func bindHashFilesContext(ctx context.Context, eval *expression.Context) {
 }
 
 func (r *jobRun) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
+	if step.Kind == "uses" {
+		if step.Action == nil {
+			return classifyStepExecution(jobCtx, runCtx, step, newResult(), markHardJobFailure(fmt.Errorf("action step %q has no immutable selector", step.ID)))
+		}
+		stepIndex, err := strconv.Atoi(invocationID)
+		if err != nil {
+			return classifyStepExecution(jobCtx, runCtx, step, newResult(), markHardJobFailure(fmt.Errorf("action invocation ID %q is invalid", invocationID)))
+		}
+		session := r.actionSessions[stepIndex]
+		if session == nil {
+			return classifyStepExecution(jobCtx, runCtx, step, newResult(), markHardJobFailure(fmt.Errorf("action step %q has no normalized execution session", step.ID)))
+		}
+		invocation, err := normalizedActionInvocation(job, stepIndex, invocationID)
+		if err != nil {
+			return classifyStepExecution(jobCtx, runCtx, step, newResult(), markHardJobFailure(err))
+		}
+		session.adapter.eval = eval
+		_, explicitStepPATH := stepEnv["PATH"]
+		explicitPATH := r.explicitJobPATH || eval.Env["PATH"] != r.implicitJobPATH || explicitStepPATH
+		_, execution, machineErr := session.machine.Invoke(runCtx, invocation, actionFrame(eval, eval.Env, stepEnv, explicitPATH))
+		result := session.drain()
+		if outputs, outputErr := concreteExecutionOutputs(execution.Outputs); outputErr != nil {
+			machineErr = errors.Join(machineErr, markHardJobFailure(outputErr))
+		} else {
+			result.Outputs = outputs
+		}
+		if machineErr == nil {
+			machineErr = actionExecutionError(execution)
+		} else if runCtx.Err() == nil {
+			machineErr = markHardJobFailure(machineErr)
+		}
+		return classifyStepExecutionWithControls(jobCtx, runCtx, step, result, machineErr, eval)
+	}
 	result, err := r.runJobStep(runCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
 	return classifyStepExecutionWithControls(jobCtx, runCtx, step, result, err, eval)
 }

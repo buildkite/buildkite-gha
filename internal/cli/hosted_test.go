@@ -177,10 +177,10 @@ runs:
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Diagnostics) != 3 {
-		t.Fatalf("diagnostics = %#v, want three independent action failures", report.Diagnostics)
+	if len(report.Diagnostics) != 4 {
+		t.Fatalf("diagnostics = %#v, want four independent action failures", report.Diagnostics)
 	}
-	wantResults := map[int]string{1: compatibility.Passed, 2: compatibility.Failed}
+	wantResults := map[int]string{1: compatibility.Failed, 2: compatibility.Failed}
 	missingFailures := 0
 	for _, result := range report.Actions {
 		switch result.Job {

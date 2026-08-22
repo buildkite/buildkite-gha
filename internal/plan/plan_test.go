@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -31,6 +32,122 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 		t.Fatalf("decoded fixture lost trust bindings: %#v", job)
 	}
 	validateJobPlanSchema(t, source)
+}
+
+func TestNormalizedProgramsAreRequiredAtThePlanBoundary(t *testing.T) {
+	job := validJob()
+	job.Program = program.Program{}
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "normalized workflow program is required") {
+		t.Fatalf("missing workflow program error = %v", err)
+	}
+
+	job = validJob()
+	job.ActionPrograms = nil
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "action_programs must be a concrete object") {
+		t.Fatalf("missing action programs error = %v", err)
+	}
+
+	job = validJob()
+	job.ActionPrograms["a-0000000000000001"] = program.Action{Source: "workspace", Runtime: program.ActionRuntimeNative}
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "has no matching lock") {
+		t.Fatalf("unlocked action program error = %v", err)
+	}
+}
+
+func TestResolvedActionStepsMustMatchNormalizedInvocations(t *testing.T) {
+	const actionID = "a-0000000000000001"
+	digest := "sha256:" + strings.Repeat("4", 64)
+	job := validJob()
+	job.Steps = []Step{{ID: "step-1", Kind: "uses", Uses: "./action", Action: &ActionSelector{Lock: actionID}}}
+	job.Program.Job.Steps = []program.Step{resolvedProgramStep("step-1", "./action", actionID)}
+	job.Actions = []ActionLock{{ID: actionID, Source: "workspace", Path: "action", SourceDigest: digest}}
+	job.ActionPrograms = map[string]program.Action{actionID: {Source: "workspace", Runtime: program.ActionRuntimeComposite, Composite: &program.CompositeAction{}}}
+	if _, err := Encode(job); err != nil {
+		t.Fatalf("valid resolved action step: %v", err)
+	}
+
+	job.Program.Job.Steps[0].Invocation.Lock = ""
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "does not match its normalized invocation") {
+		t.Fatalf("missing normalized selector error = %v", err)
+	}
+
+	job.Program.Job.Steps[0].Invocation.Lock = actionID
+	job.Program.Job.Steps[0].Invocation.Uses.Source = "./other"
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "does not match its normalized invocation") {
+		t.Fatalf("mismatched normalized uses error = %v", err)
+	}
+}
+
+func TestNormalizedNativeRuntimeMustMatchActionIntegration(t *testing.T) {
+	const actionID = "a-0000000000000001"
+	digest := "sha256:" + strings.Repeat("4", 64)
+	for _, test := range []struct {
+		name   string
+		uses   string
+		lock   ActionLock
+		action program.Action
+	}{
+		{
+			name:   "ordinary action declared native",
+			uses:   "./action",
+			lock:   ActionLock{ID: actionID, Source: "workspace", Path: "action", SourceDigest: digest},
+			action: program.Action{Source: "workspace", Runtime: program.ActionRuntimeNative},
+		},
+		{
+			name:   "native adapter declared composite",
+			uses:   "actions/checkout@v4",
+			lock:   ActionLock{ID: actionID, Source: "github", Repository: "actions/checkout", RequestedRef: "v4", Commit: strings.Repeat("a", 40), SourceDigest: digest},
+			action: program.Action{Source: "github", Runtime: program.ActionRuntimeComposite, Composite: &program.CompositeAction{}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := validJob()
+			job.Steps = []Step{{ID: "step-1", Kind: "uses", Uses: test.uses, Action: &ActionSelector{Lock: actionID}}}
+			job.Program.Job.Steps = []program.Step{resolvedProgramStep("step-1", test.uses, actionID)}
+			job.Actions = []ActionLock{test.lock}
+			job.ActionPrograms[actionID] = test.action
+			if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "native runtime does not match") {
+				t.Fatalf("native integration mismatch error = %v", err)
+			}
+		})
+	}
+}
+
+func TestNormalizedCompositeChildrenMustMatchActionLocks(t *testing.T) {
+	const parentID = "a-0000000000000001"
+	const childID = "a-0000000000000002"
+	digest := "sha256:" + strings.Repeat("4", 64)
+	job := validJob()
+	job.Steps = []Step{{ID: "step-1", Kind: "uses", Uses: "./parent", Action: &ActionSelector{Lock: parentID}}}
+	job.Program.Job.Steps = []program.Step{{
+		ID: "step-1", Kind: "uses", Invocation: &program.Invocation{Uses: program.Site{Source: "./parent"}, Lock: parentID},
+	}}
+	job.Actions = []ActionLock{
+		{ID: parentID, Source: "workspace", Path: "parent", SourceDigest: digest, Children: map[string]ActionSelector{"./child": {Lock: childID}}},
+		{ID: childID, Source: "workspace", Path: "child", SourceDigest: digest},
+	}
+	job.ActionPrograms = map[string]program.Action{
+		parentID: {Source: "workspace", Runtime: program.ActionRuntimeComposite, Composite: &program.CompositeAction{Steps: []program.CompositeStep{{
+			Invocation: &program.Invocation{Uses: program.Site{Source: "./child"}, Lock: childID},
+		}}}},
+		childID: {Source: "workspace", Runtime: program.ActionRuntimeComposite, Composite: &program.CompositeAction{}},
+	}
+	if _, err := Encode(job); err != nil {
+		t.Fatalf("valid normalized composite children: %v", err)
+	}
+
+	delete(job.ActionPrograms, childID)
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "references missing action program") {
+		t.Fatalf("missing child program error = %v", err)
+	}
+
+	job.ActionPrograms[childID] = program.Action{Source: "workspace", Runtime: program.ActionRuntimeComposite, Composite: &program.CompositeAction{}}
+	job.ActionPrograms[parentID] = program.Action{Source: "workspace", Runtime: program.ActionRuntimeComposite, Composite: &program.CompositeAction{Steps: []program.CompositeStep{{
+		Invocation: &program.Invocation{Uses: program.Site{Source: "./other"}, Lock: childID},
+	}}}}
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "child selector does not match") {
+		t.Fatalf("mismatched child selector error = %v", err)
+	}
 }
 
 func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
@@ -479,10 +596,12 @@ func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 	job := validJob()
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Program.Job.Steps = []program.Step{resolvedProgramStep("local", "./actions/build", "a-0000000000000001")}
 	job.Actions = []ActionLock{{
 		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
 		SourceDigest: "sha256:" + strings.Repeat("a", 64), DockerImage: "busybox@sha256:" + strings.Repeat("b", 64),
 	}}
+	job.ActionPrograms["a-0000000000000001"] = program.Action{Source: "workspace", Runtime: program.ActionRuntimeComposite, Composite: &program.CompositeAction{}}
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -525,10 +644,12 @@ func TestRequiresMiseRoundTripAndSchema(t *testing.T) {
 	requiresMise := false
 	job := validJob()
 	job.Steps = []Step{{ID: "native", Kind: "uses", Uses: "actions/checkout@v4", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Program.Job.Steps = []program.Step{resolvedProgramStep("native", "actions/checkout@v4", "a-0000000000000001")}
 	job.Actions = []ActionLock{{
 		ID: "a-0000000000000001", Source: "github", Repository: "actions/checkout", RequestedRef: "v4",
 		Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
 	}}
+	job.ActionPrograms["a-0000000000000001"] = program.Action{Source: "github", Runtime: program.ActionRuntimeNative}
 	job.RequiresMise = &requiresMise
 	encoded, err := Encode(job)
 	if err != nil {
@@ -842,6 +963,10 @@ func leftPadHex(value int) string {
 }
 
 func validJob() Job {
+	location := program.Location{}
+	site := func(surface program.Surface, result program.ResultType) program.Site {
+		return program.Site{Surface: surface, Result: result, Provenance: program.ProvenanceWorkflow, Purpose: program.PurposeExpression, Location: location}
+	}
 	return Job{
 		Schema:               Schema,
 		Compiler:             Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
@@ -851,7 +976,29 @@ func validJob() Job {
 		Target:               Target{StepKey: "gha-test", Queue: "ubuntu-latest"},
 		RequiredCapabilities: []string{},
 		Steps:                []Step{{ID: "step-1", Kind: "run", Command: "true"}},
-		RequiresMise:         new(bool),
+		Program: program.Program{Job: program.Job{
+			Condition: site(program.SurfaceJobCondition, program.ResultBoolean),
+			Defaults: program.Defaults{
+				Shell: site(program.SurfaceJobDefault, program.ResultString), WorkingDirectory: site(program.SurfaceJobDefault, program.ResultString),
+			},
+			Steps: []program.Step{{ID: "step-1", Kind: "run", Condition: site(program.SurfaceStepCondition, program.ResultBoolean), Name: site(program.SurfaceStepTemplate, program.ResultString)}},
+		}},
+		ActionPrograms: map[string]program.Action{},
+		RequiresMise:   new(bool),
+	}
+}
+
+func resolvedProgramStep(id, uses, lock string) program.Step {
+	site := func(source string, surface program.Surface, result program.ResultType) program.Site {
+		return program.Site{Source: source, Surface: surface, Result: result, Provenance: program.ProvenanceWorkflow, Purpose: program.PurposeExpression}
+	}
+	return program.Step{
+		ID: id, Kind: "uses",
+		Condition: site("", program.SurfaceStepCondition, program.ResultBoolean),
+		Name:      site("", program.SurfaceStepTemplate, program.ResultString),
+		Invocation: &program.Invocation{
+			Uses: site(uses, program.SurfaceStepTemplate, program.ResultString), Lock: lock,
+		},
 	}
 }
 
@@ -903,7 +1050,9 @@ func TestContainerContract(t *testing.T) {
 	}}
 	job.ServiceOrder = []string{"database"}
 	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Program.Job.Steps = []program.Step{resolvedProgramStep("local", "./actions/build", "a-0000000000000001")}
 	job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "workspace", Path: "actions/build", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
+	job.ActionPrograms["a-0000000000000001"] = program.Action{Source: "workspace", Runtime: program.ActionRuntimeComposite, Composite: &program.CompositeAction{}}
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)

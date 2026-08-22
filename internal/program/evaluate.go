@@ -35,6 +35,14 @@ func EvaluateSite(site Site, context EvaluationContext) (any, error) {
 		value, err = expression.EvaluateStepControl(site.Source, context.Expression)
 	case SurfaceRuntimeTemplate, SurfaceServiceCredential:
 		value, err = expression.Evaluate(site.Source, context.Expression)
+	case SurfaceActionInputDefault:
+		value, err = expression.EvaluateActionInputDefault(site.Source, context.Expression)
+	case SurfaceActionLifecycle:
+		value, err = expression.EvaluateActionLifecycleCondition(site.Source, context.Condition)
+	case SurfaceCompositeTemplate:
+		value, err = expression.EvaluateStep(site.Source, context.Expression)
+	case SurfaceDockerArgument:
+		value, err = expression.EvaluateDockerActionArg(site.Source, context.Expression.Inputs)
 	case SurfaceServiceMap:
 		value, err = expression.EvaluateObject(site.Source, context.Expression)
 	default:

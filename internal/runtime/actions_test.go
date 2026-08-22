@@ -9,18 +9,22 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
 type fakeActionMaterializer struct {
@@ -66,6 +70,231 @@ func digestTree(t *testing.T, root string) string {
 	return d
 }
 
+// normalizeActionJob lowers the fixture manifests into the same immutable
+// action program consumed in production. Roots may be workspace paths or fake
+// materializers whose already-materialized repository contains remote actions.
+func normalizeActionJob(t *testing.T, job *plan.Job, roots ...any) {
+	t.Helper()
+	paths := make([]string, 0, len(roots))
+	for _, root := range roots {
+		switch root := root.(type) {
+		case string:
+			paths = append(paths, root)
+		case *fakeActionMaterializer:
+			paths = append(paths, root.result.RepositoryRoot)
+		}
+	}
+	if len(job.Actions) == 0 && len(paths) != 0 {
+		var addWorkspaceAction func(string) (string, error)
+		addWorkspaceAction = func(path string) (string, error) {
+			path = strings.TrimPrefix(path, "./")
+			for _, lock := range job.Actions {
+				if lock.Source == "workspace" && lock.Path == path {
+					return lock.ID, nil
+				}
+			}
+			m, err := metadata.Load(paths[0], path)
+			if err != nil {
+				return "", err
+			}
+			id := fmt.Sprintf("a-%016x", len(job.Actions)+1)
+			job.Actions = append(job.Actions, plan.ActionLock{ID: id, Source: "workspace", Path: path, SourceDigest: digestTree(t, filepath.Join(paths[0], filepath.FromSlash(path)))})
+			index := len(job.Actions) - 1
+			if actionRuntime, runtimeErr := m.Runtime(); runtimeErr == nil && actionRuntime == metadata.RuntimeComposite {
+				for _, step := range m.Runs.Steps {
+					if !strings.HasPrefix(step.Uses, "./") {
+						continue
+					}
+					child, childErr := addWorkspaceAction(step.Uses)
+					if childErr != nil {
+						return "", childErr
+					}
+					if job.Actions[index].Children == nil {
+						job.Actions[index].Children = map[string]plan.ActionSelector{}
+					}
+					job.Actions[index].Children[step.Uses] = plan.ActionSelector{Lock: child}
+				}
+			}
+			return id, nil
+		}
+		for i := range job.Steps {
+			step := &job.Steps[i]
+			if step.Kind != "uses" || !strings.HasPrefix(step.Uses, "./") {
+				continue
+			}
+			id, err := addWorkspaceAction(step.Uses)
+			if err != nil {
+				continue
+			}
+			if step.Action == nil {
+				step.Action = &plan.ActionSelector{Lock: id}
+			}
+		}
+	}
+	job.ActionPrograms = make(map[string]program.Action, len(job.Actions))
+	for _, lock := range job.Actions {
+		if actionintegration.UsesNativeAdapter(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}) {
+			job.ActionPrograms[lock.ID] = program.Action{Source: lock.Source, Runtime: program.ActionRuntimeNative}
+			continue
+		}
+		var m metadata.Metadata
+		var err = fmt.Errorf("no fixture root matches source digest %q", lock.SourceDigest)
+		for _, root := range paths {
+			if root == "" {
+				continue
+			}
+			for _, candidate := range []struct{ digestPath, metadataPath string }{
+				{digestPath: lock.Path, metadataPath: lock.Path},
+				{digestPath: "", metadataPath: lock.Path},
+				{digestPath: "", metadataPath: ""},
+			} {
+				tree := filepath.Join(root, filepath.FromSlash(candidate.digestPath))
+				digest, digestErr := source.DigestTree(tree)
+				if digestErr != nil || digest != lock.SourceDigest {
+					continue
+				}
+				m, err = metadata.Load(root, candidate.metadataPath)
+				if err == nil {
+					break
+				}
+			}
+			if err == nil {
+				break
+			}
+		}
+		if err != nil {
+			if len(paths) == 1 {
+				m, err = metadata.Load(paths[0], lock.Path)
+			}
+		}
+		if err != nil {
+			t.Fatalf("load action program %q: %v", lock.ID, err)
+		}
+		job.ActionPrograms[lock.ID] = lowerTestAction(m, lock)
+	}
+	orderedSteps := make([]program.Step, len(job.Steps))
+	for i, step := range job.Steps {
+		orderedSteps[i] = program.Step{ID: step.ID, Kind: step.Kind}
+		for _, normalized := range job.Program.Job.Steps {
+			if normalized.ID == step.ID {
+				orderedSteps[i] = normalized
+				break
+			}
+		}
+	}
+	job.Program.Job.Steps = orderedSteps
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		if step.Action == nil {
+			for _, lock := range job.Actions {
+				local := lock.Source == "workspace" && strings.TrimPrefix(step.Uses, "./") == strings.TrimPrefix(lock.Path, "./")
+				remote := lock.Source == "github" && (step.Uses == lock.Repository+"@"+lock.RequestedRef || strings.HasPrefix(step.Uses, lock.Repository+"/"))
+				if local || remote {
+					step.Action = &plan.ActionSelector{Lock: lock.ID}
+					break
+				}
+			}
+		}
+		if step.Action == nil {
+			continue
+		}
+		invocation := &program.Invocation{
+			Uses: testActionSite(step.Uses, program.SurfaceRuntimeTemplate, program.ProvenanceWorkflow, program.PurposeExpression, program.Location{}, ""),
+			With: testActionBindings(step.With, program.SurfaceStepTemplate, program.ProvenanceWorkflow, program.PurposeActionInput, program.Location{}, ""),
+			Lock: step.Action.Lock,
+		}
+		normalized := &job.Program.Job.Steps[i]
+		normalized.Condition = testActionSite(step.Condition, program.SurfaceStepCondition, program.ProvenanceWorkflow, program.PurposeExpression, program.Location{}, "")
+		normalized.Env = testActionBindings(step.Env, program.SurfaceStepTemplate, program.ProvenanceWorkflow, program.PurposeExpression, program.Location{}, "")
+		normalized.Invocation = invocation
+	}
+}
+
+func lowerTestAction(m metadata.Metadata, lock plan.ActionLock) program.Action {
+	location := program.Location{File: m.SourcePath, Field: "action"}
+	action := program.Action{Name: m.Name, Source: lock.Source, Location: location}
+	for _, name := range sortedTestKeys(m.Inputs) {
+		definition := m.Inputs[name]
+		input := program.ActionInput{Name: name, Required: definition.Required}
+		if definition.Default != nil {
+			site := testActionSite(*definition.Default, program.SurfaceActionInputDefault, program.ProvenanceAction, program.PurposeExpression, location, "action.inputs."+name+".default")
+			input.Default = &site
+		}
+		action.Inputs = append(action.Inputs, input)
+	}
+	runtime, err := m.Runtime()
+	if err != nil {
+		return action
+	}
+	switch runtime {
+	case metadata.RuntimeNode16, metadata.RuntimeNode24:
+		action.Runtime = program.ActionRuntimeJavaScript
+		major := 24
+		if m.Runs.Using == string(metadata.RuntimeNode16) {
+			major = 16
+		}
+		action.JavaScript = &program.JavaScriptAction{NodeMajor: major, Pre: m.Runs.Pre, Main: m.Runs.Main, Post: m.Runs.Post,
+			PreCondition:  testActionSite(m.Runs.PreIf, program.SurfaceActionLifecycle, program.ProvenanceAction, program.PurposeExpression, location, "action.runs.pre-if"),
+			PostCondition: testActionSite(m.Runs.PostIf, program.SurfaceActionLifecycle, program.ProvenanceAction, program.PurposeExpression, location, "action.runs.post-if")}
+	case metadata.RuntimeComposite:
+		action.Runtime = program.ActionRuntimeComposite
+		action.Composite = &program.CompositeAction{}
+		for i, step := range m.Runs.Steps {
+			field := fmt.Sprintf("action.runs.steps[%d]", i)
+			lowered := program.CompositeStep{ID: step.ID, ContinueOnError: step.ContinueOnError,
+				Name:      testActionSite(step.Name, program.SurfaceCompositeTemplate, program.ProvenanceAction, program.PurposeExpression, location, field+".name"),
+				Condition: testActionSite(step.If, program.SurfaceStepCondition, program.ProvenanceAction, program.PurposeExpression, location, field+".if"),
+				Env:       testActionBindings(step.Env, program.SurfaceCompositeTemplate, program.ProvenanceAction, program.PurposeExpression, location, field+".env")}
+			if step.Run != "" {
+				lowered.Run = &program.Run{Command: testActionSite(step.Run, program.SurfaceCompositeTemplate, program.ProvenanceAction, program.PurposeExpression, location, field+".run"), Shell: testActionSite(step.Shell, program.SurfaceCompositeTemplate, program.ProvenanceAction, program.PurposeExpression, location, field+".shell"), WorkingDirectory: testActionSite(step.WorkingDirectory, program.SurfaceCompositeTemplate, program.ProvenanceAction, program.PurposeExpression, location, field+".working-directory")}
+			}
+			if step.Uses != "" {
+				lowered.Invocation = &program.Invocation{Uses: testActionSite(step.Uses, program.SurfaceRuntimeTemplate, program.ProvenanceAction, program.PurposeExpression, location, field+".uses"), With: testActionBindings(step.With, program.SurfaceCompositeTemplate, program.ProvenanceAction, program.PurposeExpression, location, field+".with")}
+				if child, ok := lock.Children[step.Uses]; ok {
+					lowered.Invocation.Lock = child.Lock
+				}
+			}
+			action.Composite.Steps = append(action.Composite.Steps, lowered)
+		}
+		for _, name := range sortedTestKeys(m.Outputs) {
+			action.Outputs = append(action.Outputs, program.Binding{Name: name, Value: testActionSite(m.Outputs[name].Value, program.SurfaceCompositeTemplate, program.ProvenanceAction, program.PurposeExpression, location, "action.outputs."+name)})
+		}
+	case metadata.RuntimeDocker:
+		action.Runtime = program.ActionRuntimeDocker
+		action.Docker = &program.DockerAction{Env: testActionBindings(m.Runs.Env, program.SurfaceRuntimeTemplate, program.ProvenanceAction, program.PurposeExpression, location, "action.runs.env")}
+		for i, arg := range m.Runs.Args {
+			action.Docker.Arguments = append(action.Docker.Arguments, testActionSite(arg, program.SurfaceDockerArgument, program.ProvenanceAction, program.PurposeExpression, location, fmt.Sprintf("action.runs.args[%d]", i)))
+		}
+	}
+	return action
+}
+
+func testActionBindings(values map[string]string, surface program.Surface, provenance program.Provenance, purpose program.Purpose, location program.Location, field string) []program.Binding {
+	bindings := make([]program.Binding, 0, len(values))
+	for _, name := range sortedTestKeys(values) {
+		bindings = append(bindings, program.Binding{Name: name, Value: testActionSite(values[name], surface, provenance, purpose, location, field+"."+name)})
+	}
+	return bindings
+}
+
+func testActionSite(source string, surface program.Surface, provenance program.Provenance, purpose program.Purpose, location program.Location, field string) program.Site {
+	location.Field = field
+	result := program.ResultString
+	if surface == program.SurfaceStepCondition || surface == program.SurfaceActionLifecycle {
+		result = program.ResultBoolean
+	}
+	return program.Site{Source: source, Surface: surface, Result: result, Provenance: provenance, Purpose: purpose, Location: location}
+}
+
+func sortedTestKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
 func workflowJob(t *testing.T, workspace string) plan.Job {
 	t.Helper()
 	p := filepath.Join(workspace, ".github", "workflows", "test.yml")
@@ -78,6 +307,45 @@ func workflowJob(t *testing.T, workspace string) plan.Job {
 	}
 	h := sha256.Sum256(b)
 	return plan.Job{Workflow: plan.Workflow{Path: ".github/workflows/test.yml", Digest: "sha256:" + hex.EncodeToString(h[:])}}
+}
+
+func TestActionLockResolverUsesNormalizedProgramWithoutParsingMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	job := workflowJob(t, workspace)
+	actionPath := filepath.Join(workspace, "action")
+	if err := os.Mkdir(actionPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionPath, "action.yml"), []byte("not: [valid"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionPath, "index.js"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const lockID = "a-0000000000000001"
+	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "action", SourceDigest: digestTree(t, actionPath)}}
+	job.ActionPrograms = map[string]program.Action{lockID: {
+		Name: "compiled action", Source: "workspace", Runtime: program.ActionRuntimeJavaScript,
+		JavaScript: &program.JavaScriptAction{NodeMajor: 24, Main: "index.js"},
+	}}
+
+	action, _, err := newActionLockResolver(job, workspace, nil).resolve(t.Context(), plan.ActionSelector{Lock: lockID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action.Name != "compiled action" || action.Runs.Main != "index.js" {
+		t.Fatalf("resolved normalized action = %#v", action)
+	}
+}
+
+func TestActionMetadataRejectsMalformedNormalizedCompositeStep(t *testing.T) {
+	_, err := actionMetadata(program.Action{
+		Runtime:   program.ActionRuntimeComposite,
+		Composite: &program.CompositeAction{Steps: []program.CompositeStep{{}}},
+	}, t.TempDir(), t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "must have exactly one execution") {
+		t.Fatalf("malformed composite step error = %v", err)
+	}
 }
 
 func TestActionLockResolverGitHubExactSourceSingleFlightAndTampering(t *testing.T) {
@@ -390,6 +658,7 @@ runs:
 		RequiresMise: &requiresMise,
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
+	normalizeActionJob(t, &job, remote, localFixture)
 	result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, "")
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)

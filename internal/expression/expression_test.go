@@ -221,6 +221,14 @@ func TestRunnerDirectReferencesWorkAcrossRuntimeEvaluationSurfaces(t *testing.T)
 	}
 }
 
+func TestValidateStepConditionRejectsActionOnlyContexts(t *testing.T) {
+	for _, condition := range []string{"github.token != ''", "toJSON(inputs) != '{}'"} {
+		if err := ValidateCondition(condition, StepCondition); err == nil {
+			t.Errorf("ValidateCondition(%q) accepted an action-only context", condition)
+		}
+	}
+}
+
 func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *testing.T) {
 	for _, template := range []string{
 		"${{ github.server_url == 'https://github.com' && github.token || '' }}",
@@ -1208,6 +1216,7 @@ func TestValidateActionLifecycleCondition(t *testing.T) {
 		"steps.build.conclusion == 'success' && runner.os == 'Linux'",
 		"inputs.cache == true && hashFiles('Cargo.lock') != ''",
 		"inputs['cache'] == true",
+		"github.token != ''",
 	} {
 		if err := ValidateActionLifecycleCondition(condition); err != nil {
 			t.Errorf("ValidateActionLifecycleCondition(%q) error = %v", condition, err)

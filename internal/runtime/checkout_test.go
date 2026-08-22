@@ -113,6 +113,7 @@ esac
 		RequiresMise: &requiresMise,
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
+	normalizeActionJob(t, &job, workspace, materializer, localFixture)
 	result, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Env["CHECKOUT_CHAIN"] != "ok" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -147,6 +148,7 @@ esac
 	if err := os.Remove(gitLog); err != nil {
 		t.Fatal(err)
 	}
+	normalizeActionJob(t, &job, localFixture, materializer)
 	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, t.TempDir()); err == nil || !strings.Contains(err.Error(), "dynamic ref must resolve to the exact event SHA") {
 		t.Fatalf("dynamic checkout ref error = %v", err)
 	}
@@ -158,6 +160,7 @@ esac
 
 	job.Actions[0].Commit = strings.Repeat("0", 40)
 	unknownWorkspace := t.TempDir()
+	normalizeActionJob(t, &job, unknownWorkspace, materializer, localFixture)
 	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, unknownWorkspace); err == nil || !strings.Contains(err.Error(), "does not admit") {
 		t.Fatalf("unknown checkout commit error = %v", err)
 	}
@@ -166,8 +169,9 @@ esac
 	}
 
 	job.Actions[0].Commit = actionintegration.CheckoutV7Commit
-	job.Actions[0].SourceDigest = "sha256:" + strings.Repeat("0", 64)
 	secondWorkspace := t.TempDir()
+	normalizeActionJob(t, &job, secondWorkspace, materializer, localFixture)
+	job.Actions[0].SourceDigest = "sha256:" + strings.Repeat("0", 64)
 	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, secondWorkspace); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
 		t.Fatalf("tampered checkout lock error = %v", err)
 	}
@@ -1282,6 +1286,7 @@ fi
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: remoteDigest}}
 	var logs bytes.Buffer
 	credentials := &AgentRepositoryCredentials{JobID: testCacheJobID, JobToken: "job-secret"}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Node24: node, RepositoryCredentials: credentials, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
@@ -1399,6 +1404,7 @@ esac
 			}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
 			var logs bytes.Buffer
+			normalizeActionJob(t, &job, workspace, materializer)
 			result, err := (Runner{Git: git, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 			if err != nil || result.Conclusion != "success" {
 				t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
@@ -1436,6 +1442,7 @@ func TestContainerPreparationSkipsNativeCheckoutClassification(t *testing.T) {
 				},
 			}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
+			normalizeActionJob(t, &job, materializer)
 			actions := newActionLockResolver(job, t.TempDir(), materializer)
 			runner := newJobRun(Runner{})
 			if err := runner.verifyRemoteActionTree(t.Context(), actions, plan.ActionSelector{Lock: checkoutID}, nil); err != nil {
@@ -1515,6 +1522,7 @@ func TestCompositeCheckoutPreservesDynamicRefProvenance(t *testing.T) {
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
 
+	normalizeActionJob(t, &job, workspace, materializer)
 	if _, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "dynamic ref must resolve to the exact event SHA") {
 		t.Fatalf("nested dynamic checkout ref error = %v", err)
 	}

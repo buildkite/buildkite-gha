@@ -1274,6 +1274,7 @@ func TestDownloadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) 
 	job.Needs = map[string]plan.Need{"producer": {Result: "success", Artifacts: []plan.NeedArtifact{artifact}}}
 	store := &downloadStore{archive: archive}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: sourceDigest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Outputs["download_path"] != filepath.Join(workspace, "downloaded") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -1286,6 +1287,7 @@ func TestDownloadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) 
 	}
 
 	job.Actions[0].Commit = strings.Repeat("b", 40)
+	normalizeActionJob(t, &job, workspace, materializer)
 	if _, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), actionintegration.DownloadArtifactCommit) {
 		t.Fatalf("unsupported runtime commit error = %v", err)
 	}
@@ -1329,6 +1331,7 @@ func TestDownloadArtifactMatrixConsumersEvaluateNameAndNormalizeRootPath(t *test
 			}}
 			job.Needs = map[string]plan.Need{"producer": {Result: "success", Artifacts: []plan.NeedArtifact{artifact}}}
 
+			normalizeActionJob(t, &job, workspace, materializer)
 			result, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(t.Context(), job, workspace)
 			wantPath, absErr := filepath.Abs(workspace)
 			if absErr != nil {

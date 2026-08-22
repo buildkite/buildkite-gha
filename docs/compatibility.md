@@ -380,7 +380,9 @@ jobs:
 
 ### Permissions
 
-**🟡 Supported subset.** Permissions matter only when a job statically references `secrets.GITHUB_TOKEN` or `github.token`, or an effective action input default can reach `github.token` for the event provider.
+**🟡 Supported subset.** Permissions matter only when a job statically references
+`secrets.GITHUB_TOKEN` or `github.token`, or reachable action metadata can reach
+`github.token` for the event provider.
 
 A workflow-level permissions map can request repository access:
 
@@ -876,9 +878,9 @@ context listed below, including `token`, with sorted keys and two-space
 indentation.
 
 The compiler treats that call as a token reference, so normal permissions,
-admission, and redaction apply. Composite steps can consume an already
-authorized context, but composite metadata cannot grant token authority. A
-tokenless context is an error.
+admission, and redaction apply. A direct `github.token` reference in composite
+metadata can grant token authority. `toJSON(github)` in composite metadata can
+only consume an already authorized context; a tokenless context is an error.
 
 Job-level fields and action input defaults cannot call `toJSON(github)`. Bare,
 projected, or dynamically indexed `github`, and passing the whole context to
@@ -1020,8 +1022,8 @@ action's optional `runs.entrypoint` overrides the image `ENTRYPOINT`.
 Args may contain literals and direct `inputs.<name>` or `inputs['name']`
 interpolation. Operators, functions, whole or dynamic inputs, and every other
 context are rejected. Invocation inputs and metadata defaults resolve before
-args evaluation. Args remain in digest-bound action metadata and are not stored
-in job plans.
+args evaluation. Args remain in digest-bound action metadata and are also
+stored in the normalized action description in v2 job plans.
 
 Dockerfile actions cannot declare explicit entrypoints. Docker actions cannot
 declare pre/post lifecycle or request credentials, volumes, arbitrary options,
@@ -1211,8 +1213,9 @@ JavaScript and Docker actions with compatible bundled cache clients also receive
 event repository when it:
 
 - statically references `secrets.GITHUB_TOKEN` or `github.token`; or
-- uses an action whose effective input default can reach `github.token` for the
-  event provider.
+- uses an action whose reachable input defaults, lifecycle conditions,
+  composite steps, outputs, or Docker environment can reach `github.token` for
+  the event provider.
 
 A `github.server_url == 'https://github.com'` guard skips the token branch for
 an Origin repository. Native adapters ignore upstream input defaults, so
@@ -1267,8 +1270,8 @@ The server restricts pull requests, merge queues, and their descendants. For oth
 
 The token is not part of the initial job environment. Workflow-authored
 `github.token` references are step-only and use the same token as
-`secrets.GITHUB_TOKEN`. Effective action input defaults can also use it.
-Automatic ambient `GITHUB_TOKEN` is unsupported.
+`secrets.GITHUB_TOKEN`. Reachable action metadata can also use it. Automatic
+ambient `GITHUB_TOKEN` is unsupported.
 
 ### Other secrets and OIDC
 
