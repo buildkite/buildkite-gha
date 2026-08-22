@@ -256,6 +256,10 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			switch strings.ToLower(path[0]) {
 			case "actor", "base_ref", "event_name", "head_ref", "ref", "ref_name", "ref_type", "repository", "repository_owner", "sha":
 				return nil
+			case "token":
+				if scope == actionLifecycleCondition {
+					return nil
+				}
 			}
 		}
 		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are actor, base_ref, event_name, head_ref, ref, ref_name, ref_type, repository, repository_owner, and sha", reference)

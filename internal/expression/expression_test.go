@@ -1162,6 +1162,7 @@ func TestValidateActionLifecycleCondition(t *testing.T) {
 		"steps.build.conclusion == 'success' && runner.os == 'Linux'",
 		"inputs.cache == true && hashFiles('Cargo.lock') != ''",
 		"inputs['cache'] == true",
+		"github.token != ''",
 	} {
 		if err := ValidateActionLifecycleCondition(condition); err != nil {
 			t.Errorf("ValidateActionLifecycleCondition(%q) error = %v", condition, err)

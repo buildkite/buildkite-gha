@@ -81,6 +81,52 @@ func TestInventoryActionAuthorityIncludesRemotePreWhenMainIsSkipped(t *testing.T
 	}
 }
 
+func TestInventoryActionAuthorityIncludesInlineJavaScriptPre(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		actions map[string]Action
+	}{
+		{
+			name: "workspace action",
+			actions: map[string]Action{
+				"root": {Source: "workspace", Runtime: ActionRuntimeJavaScript, JavaScript: &JavaScriptAction{Pre: "pre.js", PreCondition: testActionSite("github.token != ''"), Main: "index.js"}},
+			},
+		},
+		{
+			name: "remote child of workspace composite",
+			actions: map[string]Action{
+				"root":  {Source: "workspace", Runtime: ActionRuntimeComposite, Composite: &CompositeAction{Steps: []CompositeStep{{Invocation: &Invocation{Lock: "child", Uses: testActionSite("owner/child@v1")}}}}},
+				"child": {Source: "github", Runtime: ActionRuntimeJavaScript, JavaScript: &JavaScriptAction{Pre: "pre.js", PreCondition: testActionSite("github.token != ''"), Main: "index.js"}},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			authority, err := InventoryActionAuthority(test.actions, ActionInvocation{Lock: "root"}, ActionAuthorityContext{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !authority.GitHubToken {
+				t.Fatal("inline JavaScript pre-if did not grant GitHub token authority")
+			}
+		})
+	}
+}
+
+func TestInventoryActionAuthorityRetainsConcreteMatrixAggregate(t *testing.T) {
+	actions := map[string]Action{
+		"root": {Source: "workspace", Runtime: ActionRuntimeComposite, Inputs: []ActionInput{{Name: "token"}}, Composite: &CompositeAction{}},
+	}
+	authority, err := InventoryActionAuthority(actions, ActionInvocation{
+		Lock: "root", Inputs: []Binding{{Name: "token", Value: testWorkflowSite(`${{ contains(toJSON(matrix), '"publish": true') && github.token || '' }}`)}},
+	}, ActionAuthorityContext{Matrix: map[string]any{"publish": false}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("known-false matrix aggregate retained GitHub token authority")
+	}
+}
+
 func TestInventoryActionAuthorityUsesWorkflowInputsForLifecycleConditions(t *testing.T) {
 	token := testActionSite("${{ github.token }}")
 	actions := map[string]Action{

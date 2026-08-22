@@ -114,11 +114,16 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 			return fmt.Errorf("action program %q has no JavaScript lifecycle", lock)
 		}
 		preReachable := false
-		if prepareAction && action.JavaScript.Pre != "" {
-			p.githubToken = p.githubToken || preparationEnvironmentToken
+		if action.JavaScript.Pre != "" && (prepareAction || mainReachable) {
+			known := mainScope
+			inputs := mainInputs
+			if prepareAction {
+				known = preparationScope
+				inputs = preparationInputs
+				p.githubToken = p.githubToken || preparationEnvironmentToken
+			}
 			// The current runtime evaluates lifecycle conditions with reusable-
 			// workflow inputs, not the action's resolved inputs.
-			known := preparationScope
 			analysis, err := expression.AnalyzeActionLifecycleCondition(action.JavaScript.PreCondition.Source, known)
 			if err != nil {
 				if validationErr := expression.ValidateActionLifecycleCondition(action.JavaScript.PreCondition.Source); validationErr != nil {
@@ -134,7 +139,7 @@ func (p *actionAuthorityPlanner) inspect(lock string, mainSupplied, preparationS
 				preReachable = !analysis.Value.Known || analysis.Value.Value == true
 				p.githubToken = p.githubToken || authorityEffectsRequireToken(analysis.Effects)
 			}
-			p.githubToken = p.githubToken || preReachable && preparationInputs.githubToken
+			p.githubToken = p.githubToken || preReachable && inputs.githubToken
 		}
 		if action.JavaScript.Post != "" && (mainReachable || preReachable) {
 			known := withoutKnownEnvironment(mainScope)
@@ -399,8 +404,14 @@ func workflowKnownReferences(context ActionAuthorityContext) (map[string]any, er
 	for name, value := range context.Environment {
 		known["env."+strings.ToLower(name)] = value
 	}
-	for name, value := range context.Matrix {
-		known["matrix."+strings.ToLower(name)] = value
+	if context.Matrix != nil {
+		matrix := make(map[string]any, len(context.Matrix))
+		for name, value := range context.Matrix {
+			name = strings.ToLower(name)
+			matrix[name] = value
+			known["matrix."+name] = value
+		}
+		known["matrix"] = matrix
 	}
 	for _, layer := range context.EnvironmentLayers {
 		values := make(map[string]expression.AbstractValue, len(layer))
