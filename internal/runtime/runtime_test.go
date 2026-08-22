@@ -273,6 +273,15 @@ if [[ "$1" == pull ]]; then
   exit 0
 fi
 
+if [[ "$1" == image && "$2" == inspect ]]; then
+  [[ $# == 5 && "$3" == --format && "$4" == '{{.Id}}' && "$5" == "$(cat "$state/image-name")" ]] || exit 51
+  [[ "$scenario" != inspect-image-fail ]] || exit 52
+  image_id='sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+  printf '%s' "$image_id" > "$state/image-name"
+  printf '%s\n' "$image_id"
+  exit 0
+fi
+
 if [[ "$1" == run ]]; then
 	printf '%s\0' "$@" > "$state/run-argv"
 	if [[ -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
@@ -651,9 +660,9 @@ func TestRunPrebuiltDockerUsesPulledImageEntrypointAndExactArgs(t *testing.T) {
 		t.Fatalf("prebuilt action invoked buildx: %#v", calls)
 	}
 	argv := fakeDockerRunArgv(t, fake)
-	imageIndex := slices.Index(argv, action.Image)
+	imageIndex := slices.Index(argv, "sha256:"+strings.Repeat("c", 64))
 	if imageIndex < 0 || !slices.Equal(argv[imageIndex+1:], action.Args) {
-		t.Fatalf("Docker run argv = %#v, want exact args after image", argv)
+		t.Fatalf("Docker run argv = %#v, want exact args after pulled image ID", argv)
 	}
 	entrypoint := slices.Index(argv[:imageIndex], "--entrypoint")
 	if entrypoint < 0 || entrypoint+1 >= imageIndex || argv[entrypoint+1] != action.Entrypoint {
@@ -705,9 +714,9 @@ runs:
 		t.Fatalf("pull and run did not share an empty private Docker config: %#v", calls)
 	}
 	argv := fakeDockerRunArgv(t, fake)
-	imageIndex := slices.Index(argv, image)
+	imageIndex := slices.Index(argv, "sha256:"+strings.Repeat("c", 64))
 	if imageIndex < 0 || !slices.Equal(argv[imageIndex+1:], []string{"from-default"}) {
-		t.Fatalf("Docker run argv = %#v, want evaluated default after image", argv)
+		t.Fatalf("Docker run argv = %#v, want evaluated default after pulled image ID", argv)
 	}
 	if _, err := os.Stat(calls[pull].config); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("job private Docker config remains: %v", err)
@@ -732,6 +741,17 @@ runs:
 	if calls := mismatchFake.calls(t); callIndex(calls, "pull", "alpine:3.20") < 0 || callIndex(calls, "pull", image) < 0 || callIndex(calls, "run") >= 0 {
 		t.Fatalf("mismatched plan Docker calls = %#v, want only planned image pulls", calls)
 	}
+
+	unplannedFake := newFakeDocker(t, "success")
+	unplanned := job
+	unplanned.Actions = append([]plan.ActionLock(nil), job.Actions...)
+	unplanned.Actions[0].DockerImage = ""
+	if _, err := (Runner{Docker: unplannedFake.path}).RunJob(t.Context(), unplanned, workspace); err == nil || !strings.Contains(err.Error(), "metadata image \""+image+"\" does not match planned image \"\"") {
+		t.Fatalf("RunJob() unplanned metadata image error = %v", err)
+	}
+	if _, err := os.Stat(unplannedFake.transcript); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unplanned metadata image Docker transcript exists: %v", err)
+	}
 }
 
 func TestRunPrebuiltDockerPullFailureCleansPrivateConfig(t *testing.T) {
@@ -747,6 +767,22 @@ func TestRunPrebuiltDockerPullFailureCleansPrivateConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(calls[0].config); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("private Docker config remains after pull failure: %v", err)
+	}
+}
+
+func TestRunPrebuiltDockerInspectFailureCleansPrivateConfig(t *testing.T) {
+	fake := newFakeDocker(t, "inspect-image-fail")
+	action := fakeDockerAction(t)
+	action.Image = "alpine:3.20"
+	if _, err := (Runner{Docker: fake.path}).runDockerAction(t.Context(), action); err == nil || !strings.Contains(err.Error(), "inspect prebuilt Docker action image") {
+		t.Fatalf("runDockerAction() error = %v, want image inspection failure", err)
+	}
+	calls := fake.calls(t)
+	if callIndex(calls, "pull", action.Image) < 0 || callIndex(calls, "image", "inspect") < 0 || callIndex(calls, "run") >= 0 {
+		t.Fatalf("Docker calls = %#v, want pull and failed inspection only", calls)
+	}
+	if _, err := os.Stat(calls[0].config); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("private Docker config remains after inspect failure: %v", err)
 	}
 }
 

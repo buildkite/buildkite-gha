@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -50,14 +51,14 @@ type prebuiltDockerBackend struct {
 	docker string
 	config string
 	env    map[string]string
-	images map[string]bool
+	images map[string]string
 }
 
 func (r *jobRun) preparePrebuiltDockerActions(ctx context.Context, processor *commandProcessor, actions *actionLockResolver) (_ *prebuiltDockerBackend, err error) {
-	images := map[string]bool{}
+	images := map[string]string{}
 	for _, lock := range actions.job.Actions {
 		if lock.DockerImage != "" {
-			images[lock.DockerImage] = true
+			images[lock.DockerImage] = ""
 		}
 	}
 	if len(images) == 0 {
@@ -82,8 +83,29 @@ func (r *jobRun) preparePrebuiltDockerActions(ctx context.Context, processor *co
 		if pullErr := r.pullContainerImage(ctx, processor, env, docker, image); pullErr != nil {
 			return nil, fmt.Errorf("pull prebuilt Docker action image %q: %w", image, pullErr)
 		}
+		imageID, inspectErr := inspectDockerImageID(ctx, env, docker, image)
+		if inspectErr != nil {
+			return nil, fmt.Errorf("inspect prebuilt Docker action image %q: %w", image, inspectErr)
+		}
+		images[image] = imageID
 	}
 	return backend, nil
+}
+
+func inspectDockerImageID(ctx context.Context, env map[string]string, docker, image string) (string, error) {
+	output, err := boundedDockerOutput(ctx, env, docker, "image", "inspect", "--format", "{{.Id}}", image)
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(output)
+	digest, ok := strings.CutPrefix(id, "sha256:")
+	if !ok || len(digest) != 64 {
+		return "", fmt.Errorf("docker returned invalid image ID %q", id)
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return "", fmt.Errorf("docker returned invalid image ID %q", id)
+	}
+	return id, nil
 }
 
 func (b *prebuiltDockerBackend) cleanup() error {

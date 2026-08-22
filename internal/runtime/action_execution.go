@@ -2095,7 +2095,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 		}
 		invocationEnv, explicitPATH := environment.docker(dockerEnv, inputs)
 		image, _ := metadata.DockerImageReference(action.Runs.Image)
-		if image != "" && actionLock != nil && actionLock.DockerImage != "" && image != actionLock.DockerImage {
+		if image != "" && actionLock != nil && image != actionLock.DockerImage {
 			return result, fmt.Errorf("docker action %q metadata image %q does not match planned image %q", step.Uses, image, actionLock.DockerImage)
 		}
 		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Image: image, Entrypoint: action.Runs.Entrypoint, Args: dockerArgs, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})

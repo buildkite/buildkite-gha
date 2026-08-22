@@ -301,10 +301,13 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandProcessor, act
 	if prebuilt && !metadata.ValidDockerImageReference(action.Image) {
 		return result, fmt.Errorf("docker action has invalid prebuilt image %q", action.Image)
 	}
+	runImage := action.Image
 	var docker, dockerConfig string
 	var dockerEnv map[string]string
 	if prebuilt && r.prebuiltDocker != nil {
-		if !r.prebuiltDocker.images[action.Image] {
+		var ok bool
+		runImage, ok = r.prebuiltDocker.images[action.Image]
+		if !ok || runImage == "" {
 			return result, fmt.Errorf("prebuilt Docker action image %q was not prepared at job start", action.Image)
 		}
 		docker, dockerConfig, dockerEnv = r.prebuiltDocker.docker, r.prebuiltDocker.config, r.prebuiltDocker.env
@@ -317,6 +320,10 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandProcessor, act
 		if prebuilt {
 			if err := r.pullContainerImage(ctx, processor, dockerEnv, docker, action.Image); err != nil {
 				return result, fmt.Errorf("pull prebuilt Docker action image %q: %w", action.Image, err)
+			}
+			runImage, err = inspectDockerImageID(ctx, dockerEnv, docker, action.Image)
+			if err != nil {
+				return result, fmt.Errorf("inspect prebuilt Docker action image %q: %w", action.Image, err)
 			}
 		}
 	}
@@ -356,7 +363,7 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandProcessor, act
 	}
 	id := hex.EncodeToString(nonce[:])
 	owner := "com.buildkite.gha.owner=" + id
-	image, container := action.Image, "buildkite-gha-container-"+id
+	image, container := runImage, "buildkite-gha-container-"+id
 	if !prebuilt {
 		image = "buildkite-gha-image-" + id
 	}
