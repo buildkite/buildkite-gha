@@ -190,7 +190,7 @@ bk build create --pipeline buildkite/buildkite-gha \
   --env SMOKE_PROBE=hosted --env SMOKE_COMMIT="$commit" --yes
 ```
 
-This suite covers shell jobs, concurrent steps, public and Dockerfile actions, container runtime behavior, summaries, annotations, artifact upload, and artifact roundtrip. Use `COMPATIBILITY_PROOF=<target>` with `COMPATIBILITY_PROOF_COMMIT=<commit>` only when diagnosing one target. The available target names are in [`.buildkite/pipeline.yml`](../.buildkite/pipeline.yml).
+This suite covers shell jobs, concurrent steps, public and Docker actions, container runtime behavior, summaries, annotations, artifact upload, and artifact roundtrip. Use `COMPATIBILITY_PROOF=<target>` with `COMPATIBILITY_PROOF_COMMIT=<commit>` only when diagnosing one target. The available target names are in [`.buildkite/pipeline.yml`](../.buildkite/pipeline.yml).
 
 Some Buildkite APIs are advisory, so a passing job does not prove that the result was persisted. Check those results independently after the build:
 

@@ -31,7 +31,6 @@ var logicalJobIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+
 var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var actionLockIDPattern = regexp.MustCompile(`^a-[0-9a-f]{16}$`)
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-var containerImagePattern = regexp.MustCompile(`^(?:(?:[a-z0-9]+(?:[._-][a-z0-9]+)*|\[[0-9a-f:]+\])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$`)
 var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
 var serviceNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,254}$`)
@@ -41,7 +40,7 @@ var githubWorkflowFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._
 // ValidContainerImageReference reports whether image is a supported literal
 // Docker image reference.
 func ValidContainerImageReference(image string) bool {
-	return containerImagePattern.MatchString(image)
+	return metadata.ValidDockerImageReference(image)
 }
 
 var githubTokenPermissionAccess = map[string]map[string]bool{
@@ -90,6 +89,7 @@ type ActionLock struct {
 	Commit       string                    `json:"commit,omitempty"`
 	Path         string                    `json:"path,omitempty"`
 	SourceDigest string                    `json:"source_digest"`
+	DockerImage  string                    `json:"docker_image,omitempty"`
 	Children     map[string]ActionSelector `json:"children,omitempty"`
 }
 
@@ -886,6 +886,17 @@ func (job Job) Validate() error {
 		}
 	}
 	if len(job.Actions) != 0 || hasStepActions(job.Steps) {
+		for _, lock := range job.Actions {
+			if lock.DockerImage == "" {
+				continue
+			}
+			if _, ok := capabilities["docker"]; !ok {
+				return fmt.Errorf("prebuilt Docker actions require docker capability")
+			}
+			if _, ok := capabilities["network"]; !ok {
+				return fmt.Errorf("prebuilt Docker actions require network capability")
+			}
+		}
 		if err := validateActionLocks(job); err != nil {
 			return err
 		}
@@ -1252,6 +1263,9 @@ func validateActionLocks(job Job) error {
 		}
 		if !digestPattern.MatchString(lock.SourceDigest) || len(lock.Children) > 1024 {
 			return fmt.Errorf("action lock %q has invalid digest or too many children", lock.ID)
+		}
+		if lock.DockerImage != "" && !ValidContainerImageReference(lock.DockerImage) {
+			return fmt.Errorf("action lock %q has invalid Docker image", lock.ID)
 		}
 		if err := validateLockIdentity(lock); err != nil {
 			return fmt.Errorf("action lock %q: %w", lock.ID, err)

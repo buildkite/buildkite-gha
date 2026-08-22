@@ -1804,6 +1804,49 @@ func TestCompilePlansDockerfileActionCapabilities(t *testing.T) {
 	}
 }
 
+func TestCompilePlansPrebuiltDockerActionCapabilitiesAndDeterminism(t *testing.T) {
+	remote := t.TempDir()
+	image := "busybox@sha256:" + strings.Repeat("a", 64)
+	writeAction(t, remote, "", `name: remote prebuilt Docker
+runs:
+  using: docker
+  image: docker://`+image+`
+  entrypoint: /bin/echo
+  args: [hello]
+`)
+	workflowPath := filepath.Join("..", "..", "testdata", "dockerfile-action", ".github", "workflows", "docker-action.yml")
+	options := Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	}
+	compile := func() []byte {
+		plans, err := compilePlansForTest(t.Context(), workflowPath, readFile(t, workflowPath+".tmpl"), pushEvent(t), "prebuilt-docker-test", testDistributionDigest, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"docker", "network"}) || len(plans[0].Actions) != 1 || plans[0].Actions[0].Source != "github" || plans[0].Actions[0].DockerImage != image {
+			t.Fatalf("prebuilt Docker action plans = %#v", plans)
+		}
+		encoded, err := plan.Encode(plans[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(encoded, []byte("/bin/echo")) {
+			t.Fatalf("job plan retained Docker action entrypoint: %s", encoded)
+		}
+		return encoded
+	}
+	first, second := compile(), compile()
+	if !bytes.Equal(first, second) {
+		t.Fatalf("prebuilt Docker action plans are not deterministic:\n%s\n%s", first, second)
+	}
+}
+
 func TestCompileDockerfileActionArgsAreValidatedButNotPlanned(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "docker", `name: Docker args

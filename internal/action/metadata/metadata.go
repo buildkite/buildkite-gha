@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -92,6 +93,8 @@ type CompositeStep struct {
 type Runtime string
 
 const runtimeNode20Declaration = "node20"
+
+var dockerImagePattern = regexp.MustCompile(`^(?:(?:[a-z0-9]+(?:[._-][a-z0-9]+)*|\[[0-9a-f:]+\])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$`)
 
 const (
 	// MaxNestedActionDepth bounds local action expansion in both compilation and execution.
@@ -385,6 +388,23 @@ func (metadata Metadata) Runtime() (Runtime, error) {
 	}
 }
 
+// DockerImageReference returns the image reference from a prebuilt Docker
+// action declaration. Dockerfile actions and invalid declarations return
+// false.
+func DockerImageReference(image string) (string, bool) {
+	reference, ok := strings.CutPrefix(image, "docker://")
+	if !ok || !ValidDockerImageReference(reference) {
+		return "", false
+	}
+	return reference, true
+}
+
+// ValidDockerImageReference reports whether image is a supported literal
+// Docker image reference.
+func ValidDockerImageReference(image string) bool {
+	return len(image) <= 512 && dockerImagePattern.MatchString(image)
+}
+
 // ValidateEntrypoints confines JavaScript lifecycle programs to the verified
 // source tree and requires each declared entry point to be a regular file.
 // Remote actions may share repository-level build output across action
@@ -392,13 +412,18 @@ func (metadata Metadata) Runtime() (Runtime, error) {
 // Callers should invoke this after Runtime.
 func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
 	if runtime == RuntimeDocker {
-		if metadata.Runs.Image != "Dockerfile" {
-			return fmt.Errorf("docker action requires exact runs.image %q", "Dockerfile")
-		}
-		if metadata.Runs.Main != "" || metadata.Runs.Entrypoint != "" ||
-			metadata.Runs.Pre != "" || metadata.Runs.PreIf != "" || metadata.Runs.PreEntrypoint != "" ||
+		if metadata.Runs.Main != "" || metadata.Runs.Pre != "" || metadata.Runs.PreIf != "" || metadata.Runs.PreEntrypoint != "" ||
 			metadata.Runs.Post != "" || metadata.Runs.PostIf != "" || metadata.Runs.PostEntrypoint != "" {
-			return fmt.Errorf("docker action may not declare entrypoint or pre/post lifecycle")
+			return fmt.Errorf("docker action may not declare pre/post lifecycle")
+		}
+		if metadata.Runs.Image != "Dockerfile" {
+			if _, ok := DockerImageReference(metadata.Runs.Image); !ok {
+				return fmt.Errorf("docker action requires runs.image %q or a valid docker:// image reference", "Dockerfile")
+			}
+			return nil
+		}
+		if metadata.Runs.Entrypoint != "" {
+			return fmt.Errorf("dockerfile action may not declare an entrypoint")
 		}
 		dockerfile := filepath.Join(metadata.Path, "Dockerfile")
 		info, err := os.Lstat(dockerfile)

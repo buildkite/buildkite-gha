@@ -109,7 +109,7 @@
       "properties": {
         "id": {"type": "string", "pattern": "^a-[0-9a-f]{16}$"}, "source": {"enum": ["workspace", "github"]},
         "repository": {"$ref": "#/$defs/repository"}, "requested_ref": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\x00-\\x1f\\x7f]+$"},
-        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "path": {"$ref": "#/$defs/path"}, "source_digest": {"$ref": "#/$defs/digest"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "path": {"$ref": "#/$defs/path"}, "source_digest": {"$ref": "#/$defs/digest"}, "docker_image": {"$ref": "#/$defs/image"},
         "children": {"type": "object", "maxProperties": 1024, "propertyNames": {"minLength": 1, "maxLength": 2048, "pattern": "^[^\\x00-\\x1f\\x7f]+$"}, "additionalProperties": {"$ref": "#/$defs/selector"}}
       },
       "allOf": [

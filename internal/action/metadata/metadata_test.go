@@ -66,7 +66,7 @@ func TestValidateDockerEntrypoints(t *testing.T) {
 		ok     bool
 	}{
 		{name: "exact Dockerfile", ok: true},
-		{name: "non Dockerfile image", mutate: func(m *Metadata) { m.Runs.Image = "docker://alpine" }},
+		{name: "invalid image", mutate: func(m *Metadata) { m.Runs.Image = "alpine" }},
 		{name: "entrypoint", mutate: func(m *Metadata) { m.Runs.Entrypoint = "main.sh" }},
 		{name: "args", mutate: func(m *Metadata) { m.Runs.Args = []string{"", " --flag "} }, ok: true},
 		{name: "main", mutate: func(m *Metadata) { m.Runs.Main = "main.sh" }},
@@ -106,6 +106,34 @@ func TestValidateDockerEntrypoints(t *testing.T) {
 			}
 			if (err == nil) != test.ok {
 				t.Fatalf("validation error = %v, want success %v", err, test.ok)
+			}
+		})
+	}
+}
+
+func TestValidatePrebuiltDockerImage(t *testing.T) {
+	tests := []struct {
+		name       string
+		image      string
+		entrypoint string
+		ok         bool
+	}{
+		{name: "tag", image: "docker://alpine:3.20", ok: true},
+		{name: "digest", image: "docker://busybox@sha256:" + strings.Repeat("a", 64), ok: true},
+		{name: "registry port", image: "docker://registry.example.test:5000/team/action:v1", entrypoint: "/entrypoint.sh", ok: true},
+		{name: "missing prefix", image: "alpine:3.20"},
+		{name: "empty reference", image: "docker://"},
+		{name: "tag expression", image: "docker://alpine:${{ inputs.tag }}"},
+		{name: "invalid digest", image: "docker://busybox@sha256:abc"},
+		{name: "uppercase repository", image: "docker://Owner/action:v1"},
+		{name: "too long", image: "docker://" + strings.Repeat("a", 513)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := Metadata{Runs: Runs{Using: "docker", Image: test.image, Entrypoint: test.entrypoint}}
+			err := m.ValidateEntrypoints(RuntimeDocker)
+			if (err == nil) != test.ok {
+				t.Fatalf("ValidateEntrypoints() error = %v, want success %v", err, test.ok)
 			}
 		})
 	}
