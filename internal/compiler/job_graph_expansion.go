@@ -157,7 +157,11 @@ func (e *jobGraphExpansion) expandMatrices() {
 			}
 			err = locatedJobError(sourced.path, job, line, column, err.Error())
 		} else {
-			matrices, err = expandMatrix(sourced.path, job, e.context)
+			matrixContext := e.context
+			matrixContext.Inputs = sourced.inputs.values
+			matrixContext.Matrix = nil
+			matrixContext.Strategy = nil
+			matrices, err = expandMatrix(sourced.path, job, matrixContext)
 		}
 		if err != nil {
 			line, column := matrixErrorPosition(job)

@@ -1092,6 +1092,12 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 		if job.Matrix.Expression != nil {
 			jobValues = append(jobValues, job.Matrix.Expression.Text)
 		}
+		if job.Matrix.IncludeExpression != nil {
+			jobValues = append(jobValues, job.Matrix.IncludeExpression.Text)
+		}
+		if job.Matrix.ExcludeExpression != nil {
+			jobValues = append(jobValues, job.Matrix.ExcludeExpression.Text)
+		}
 		for _, row := range job.Matrix.Rows {
 			if row.Expression != nil {
 				jobValues = append(jobValues, row.Expression.Text)
@@ -1214,9 +1220,7 @@ func cloneMatrixWithInputs(matrix *workflow.Matrix, inputs map[string]any) *work
 		out.Rows[i].Expression = cloneMatrixExpressionWithInputs(matrix.Rows[i].Expression, inputs)
 		out.Rows[i].Values = append([]workflow.Value(nil), out.Rows[i].Values...)
 		for j := range out.Rows[i].Values {
-			if text, ok := out.Rows[i].Values[j].Data.(string); ok {
-				out.Rows[i].Values[j].Data = replaceStaticInputs(text, inputs)
-			}
+			out.Rows[i].Values[j].Data = resolveAuthoredMatrixInputs(out.Rows[i].Values[j].Data, inputs)
 		}
 	}
 	out.Include = cloneMatrixCombinations(matrix.Include, inputs)
@@ -1241,13 +1245,46 @@ func cloneMatrixCombinations(combinations []workflow.MatrixCombination, inputs m
 		out[i] = combination
 		out[i].Values = make(map[string]workflow.Value, len(combination.Values))
 		for name, value := range combination.Values {
-			if text, ok := value.Data.(string); ok {
-				value.Data = replaceStaticInputs(text, inputs)
-			}
+			value.Data = resolveAuthoredMatrixInputs(value.Data, inputs)
 			out[i].Values[name] = value
 		}
 	}
 	return out
+}
+
+func resolveAuthoredMatrixInputs(value any, inputs map[string]any) any {
+	switch value := value.(type) {
+	case string:
+		resolved, err := expression.SubstituteCompileInputs(value, inputs)
+		if err != nil || resolved == value {
+			return value
+		}
+		if expr, err := expression.Parse(resolved, 1, 1); err == nil {
+			if evaluated, available, err := expression.EvaluateCompileAvailable(expr, expression.CompileContext{}); err == nil && available {
+				if text, ok := evaluated.(string); !ok || !strings.Contains(text, "${{") {
+					return evaluated
+				}
+			}
+		}
+		if evaluated, err := expression.EvaluateAvailableCompileTemplate(resolved, expression.CompileContext{}); err == nil {
+			return evaluated
+		}
+		return value
+	case []any:
+		resolved := make([]any, len(value))
+		for i, item := range value {
+			resolved[i] = resolveAuthoredMatrixInputs(item, inputs)
+		}
+		return resolved
+	case map[string]any:
+		resolved := make(map[string]any, len(value))
+		for _, key := range sortedKeys(value) {
+			resolved[key] = resolveAuthoredMatrixInputs(value[key], inputs)
+		}
+		return resolved
+	default:
+		return value
+	}
 }
 
 func replaceMapInputs(values map[string]string, inputs map[string]any) map[string]string {

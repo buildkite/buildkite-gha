@@ -2038,6 +2038,47 @@ jobs:
 	}
 }
 
+func TestCompilePreservesReusableInputsInNestedAuthoredMatrixValues(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      enabled: false
+      target: release
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      enabled: {type: boolean}
+      target: {type: string}
+jobs:
+  test:
+    strategy:
+      matrix:
+        config:
+          - enabled: ${{ inputs.enabled }}
+            targets:
+              - ${{ inputs.target }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ matrix.config.enabled }}:${{ matrix.config.targets[0] }}
+`)
+	result, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	wantMatrix := map[string]any{"config": map[string]any{"enabled": false, "targets": []any{"release"}}}
+	if len(ir.Jobs) != 1 || !reflect.DeepEqual(ir.Jobs[0].Matrix, wantMatrix) {
+		t.Fatalf("nested authored matrix inputs = %#v", ir.Jobs)
+	}
+}
+
 func TestCompileRejectsRuntimeExpressionsLaunderedThroughReusableInputs(t *testing.T) {
 	t.Run("unavailable static matrix value", func(t *testing.T) {
 		repository := t.TempDir()
@@ -2884,6 +2925,56 @@ jobs:
 	_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
 	if err == nil || !strings.Contains(err.Error(), `deferred reusable-workflow input "enabled" must be string`) {
 		t.Fatalf("Compile() error = %v", err)
+	}
+}
+
+func TestCompileRejectsDeferredReusableInputInMatrixInclude(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on:
+  workflow_dispatch:
+    inputs:
+      EXTRA:
+        type: string
+        default: '[{"name":"root"}]'
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      extra: ${{ steps.value.outputs.extra }}
+    steps:
+      - id: value
+        run: echo 'extra=[]' >> "$GITHUB_OUTPUT"
+  call:
+    needs: prepare
+    uses: ./.github/workflows/reusable.yml
+    with:
+      EXTRA: ${{ needs.prepare.outputs.extra }}
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      EXTRA: {type: string}
+jobs:
+  test:
+    strategy:
+      matrix:
+        include: ${{ fromJSON(inputs.EXTRA) }}
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	var event map[string]any
+	if err := json.Unmarshal(readFile(t, smokePath("events", "push.json")), &event); err != nil {
+		t.Fatal(err)
+	}
+	event["event"] = "workflow_dispatch"
+	event["payload"] = map[string]any{"inputs": map[string]any{"EXTRA": `[{"name":"dispatch"}]`}}
+	eventSource, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Compile(path, readFile(t, path), eventSource)
+	if err == nil || !strings.Contains(err.Error(), "reusable-workflow input expression is not statically resolvable") {
+		t.Fatalf("Compile() error = %v, want deferred matrix include rejection", err)
 	}
 }
 
