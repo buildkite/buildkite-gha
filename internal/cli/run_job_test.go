@@ -17,8 +17,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/action/integration"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -37,6 +39,7 @@ func TestRunJobPublishesFailureWhenExplicitRuntimeMiseIsInvalid(t *testing.T) {
 		ID: "local", Kind: "uses", Uses: "./actions/build",
 		Action: &plan.ActionSelector{Lock: "a-0000000000000001"},
 	}}
+	addCLIProgram(&job)
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
 	t.Setenv("BUILDKITE_GHA_MISE", filepath.Join(t.TempDir(), "missing-mise"))
@@ -98,6 +101,7 @@ func TestRunJobCallGuardSkipsActionJobBeforePreparingRuntimeMise(t *testing.T) {
 		ID: "local", Kind: "uses", Uses: "./actions/build",
 		Action: &plan.ActionSelector{Lock: "a-0000000000000001"},
 	}}
+	addCLIProgram(&job)
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
 	t.Setenv("BUILDKITE_GHA_MISE", filepath.Join(t.TempDir(), "missing-mise"))
@@ -133,6 +137,7 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 		Steps:        []plan.Step{{ID: "produce", Kind: "run", Command: `echo "result=cli-ok" >> "$GITHUB_OUTPUT"`}},
 		RequiresMise: &requiresMise,
 	}
+	addCLIProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -836,6 +841,7 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
 		RequiresMise:         &requiresMise,
 	}
+	addCLIProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -859,7 +865,7 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 
 func cliRunJobPlan() plan.Job {
 	requiresMise := false
-	return plan.Job{
+	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
 			Version:            "dev",
@@ -876,6 +882,38 @@ func cliRunJobPlan() plan.Job {
 		RequiredCapabilities: []string{},
 		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
 		RequiresMise:         &requiresMise,
+	}
+	addCLIProgram(&job)
+	return job
+}
+
+func addCLIProgram(job *plan.Job) {
+	site := func(surface program.Surface, result program.ResultType) program.Site {
+		return program.Site{Surface: surface, Result: result, Provenance: program.ProvenanceWorkflow, Purpose: program.PurposeExpression}
+	}
+	steps := make([]program.Step, len(job.Steps))
+	for i, step := range job.Steps {
+		steps[i] = program.Step{ID: step.ID, Kind: step.Kind, Condition: site(program.SurfaceStepCondition, program.ResultBoolean), Name: site(program.SurfaceStepTemplate, program.ResultString)}
+		if step.Kind == "uses" {
+			invocation := &program.Invocation{Uses: site(program.SurfaceStepTemplate, program.ResultString)}
+			invocation.Uses.Source = step.Uses
+			if step.Action != nil {
+				invocation.Lock = step.Action.Lock
+			}
+			steps[i].Invocation = invocation
+		}
+	}
+	job.Program = program.Program{Job: program.Job{Condition: site(program.SurfaceJobCondition, program.ResultBoolean), Defaults: program.Defaults{
+		Shell: site(program.SurfaceJobDefault, program.ResultString), WorkingDirectory: site(program.SurfaceJobDefault, program.ResultString),
+	}, Steps: steps}}
+	job.ActionPrograms = make(map[string]program.Action, len(job.Actions))
+	for _, action := range job.Actions {
+		normalized := program.Action{Source: action.Source, Runtime: program.ActionRuntimeComposite, Composite: &program.CompositeAction{}}
+		if integration.UsesNativeAdapter(integration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path}) {
+			normalized.Runtime = program.ActionRuntimeNative
+			normalized.Composite = nil
+		}
+		job.ActionPrograms[action.ID] = normalized
 	}
 }
 

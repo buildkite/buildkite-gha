@@ -20,6 +20,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
 type fakeActionSource struct {
@@ -445,6 +446,51 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsNormalizesResolvedActionManifest(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "javascript", `name: normalized JavaScript
+inputs:
+  required:
+    required: true
+  optional:
+    default: ${{ github.actor }}
+runs:
+  using: node24
+  pre: pre.js
+  pre-if: inputs.optional != ''
+  main: index.js
+  post: post.js
+  post-if: always()
+`)
+	for _, name := range []string{"pre.js", "index.js", "post.js"} {
+		if err := os.WriteFile(filepath.Join(workspace, "javascript", name), []byte(""), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./javascript"}, []map[string]string{{"required": "value"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compiled.selectors) != 1 || len(compiled.programs) != 1 {
+		t.Fatalf("normalized actions = %#v, selectors = %#v", compiled.programs, compiled.selectors)
+	}
+	action := compiled.programs[compiled.selectors[0].Lock]
+	if action.Name != "normalized JavaScript" || action.Source != "workspace" || action.Runtime != program.ActionRuntimeJavaScript || action.JavaScript == nil {
+		t.Fatalf("normalized action = %#v", action)
+	}
+	if action.JavaScript.NodeMajor != 24 || action.JavaScript.Pre != "pre.js" || action.JavaScript.Main != "index.js" || action.JavaScript.Post != "post.js" ||
+		action.JavaScript.PreCondition.Source != "inputs.optional != ''" || action.JavaScript.PostCondition.Source != "always()" {
+		t.Fatalf("normalized JavaScript lifecycle = %#v", action.JavaScript)
+	}
+	if len(action.Inputs) != 2 || action.Inputs[0].Name != "optional" || action.Inputs[0].Default == nil || action.Inputs[0].Default.Source != "${{ github.actor }}" ||
+		action.Inputs[1].Name != "required" || !action.Inputs[1].Required {
+		t.Fatalf("normalized inputs = %#v", action.Inputs)
+	}
+	if action.Location.File == "" || action.Inputs[0].Default.Provenance != program.ProvenanceAction {
+		t.Fatalf("normalized provenance = %#v, location = %#v", action.Inputs[0].Default, action.Location)
+	}
+}
+
 func TestCompileActionInvocationsScopesWorkflowAuthoredSecretsByInputContract(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "secrets", `name: secret inputs
@@ -525,7 +571,7 @@ runs:
 	}
 }
 
-func TestCompileActionInvocationsRejectsGitHubTokenAuthorityFromCompositeMetadata(t *testing.T) {
+func TestCompileActionInvocationsGrantsDirectGitHubTokenAuthorityFromCompositeMetadata(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "child", `name: child
 inputs:
@@ -544,9 +590,130 @@ runs:
         token: ${{ github.token }}-${{ toJSON(github) }}
 `)
 
-	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
-	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant github.token authority") {
-		t.Fatalf("composite metadata token error = %v", err)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("direct composite-authored github.token did not grant token authority")
+	}
+}
+
+func TestCompileActionProgramsForgetsEnvironmentAcrossWorkflowActionRoots(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "guarded", `name: guarded
+runs:
+  using: composite
+  steps:
+    - if: env.FLAG == 'true'
+      shell: sh
+      run: echo ${{ github.token }}
+`)
+	writeAction(t, workspace, "mutator", `name: mutator
+runs:
+  using: node24
+  main: index.js
+`)
+	compiled, err := compileActionPrograms(
+		t.Context(), workspace, nil, "https://github.com",
+		[]string{"./mutator", "./guarded"}, []map[string]string{{}, {}},
+		[]program.ActionInvocation{{}, {}},
+		[]program.ActionAuthorityContext{
+			{Environment: map[string]string{"FLAG": "false"}},
+			{Environment: map[string]string{"FLAG": "false"}, MainEnvironmentMutable: true},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("cross-root GITHUB_ENV mutation did not keep the guarded token path reachable")
+	}
+}
+
+func TestCompileActionProgramsRetainsEnvironmentForFirstRootWithoutPreparation(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "guarded", `name: guarded
+runs:
+  using: composite
+  steps:
+    - if: env.FLAG == 'true'
+      shell: sh
+      run: echo ${{ github.token }}
+`)
+	compiled, err := compileActionPrograms(
+		t.Context(), workspace, nil, "https://github.com",
+		[]string{"./guarded"}, []map[string]string{{}}, []program.ActionInvocation{{}},
+		[]program.ActionAuthorityContext{{Environment: map[string]string{"FLAG": "false"}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("single-root planning forgot an environment no earlier phase can mutate")
+	}
+}
+
+func TestCompileActionProgramsRetainsEnvironmentWhenDeclaredPreIsKnownSkipped(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	writeAction(t, workspace, "guarded", `name: guarded
+runs:
+  using: composite
+  steps:
+    - if: env.FLAG == 'true'
+      shell: sh
+      run: echo ${{ github.token }}
+`)
+	writeAction(t, remote, "", `name: skipped pre
+runs:
+  using: node24
+  pre: pre.js
+  pre-if: false
+  main: index.js
+`)
+	if err := os.WriteFile(filepath.Join(remote, "pre.js"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(remote, "index.js"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compileActionPrograms(
+		t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, "https://github.com",
+		[]string{"./guarded", "owner/action@v1"}, []map[string]string{{}, {}},
+		[]program.ActionInvocation{{}, {}},
+		[]program.ActionAuthorityContext{{Environment: map[string]string{"FLAG": "false"}}, {Environment: map[string]string{"FLAG": "false"}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("known-skipped remote pre phase made the environment mutable")
+	}
+}
+
+func TestCompileActionProgramsRetainsExplicitStepEnvironment(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "guarded", `name: guarded
+runs:
+  using: composite
+  steps:
+    - if: env.FLAG == 'true'
+      shell: sh
+      run: echo ${{ github.token }}
+`)
+	compiled, err := compileActionPrograms(
+		t.Context(), workspace, nil, "https://github.com",
+		[]string{"./guarded"}, []map[string]string{{}}, []program.ActionInvocation{{}},
+		[]program.ActionAuthorityContext{{EnvironmentLayers: [][]program.Binding{
+			{{Name: "FLAG", Value: program.Site{Source: "true"}}},
+			{{Name: "FLAG", Value: program.Site{Source: "false"}}},
+		}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("explicit step environment did not prune a known-false token branch")
 	}
 }
 
@@ -849,7 +1016,7 @@ jobs:
     steps:
       - uses: ./.github/actions/token
 `)
-	if err == nil || !strings.Contains(err.Error(), "action input default that references github.token") || !strings.Contains(err.Error(), "no effective permissions") {
+	if err == nil || !strings.Contains(err.Error(), "action that references github.token in its metadata") || !strings.Contains(err.Error(), "no effective permissions") {
 		t.Fatalf("compilePlansForTest() error = %v, want empty permission rejection", err)
 	}
 }
@@ -985,6 +1152,12 @@ func TestCompileActionLocksDoesNotValidateUnusedNativeLifecycle(t *testing.T) {
 	}
 	if _, _, _, _, err := compileActionLocks(t.Context(), workspace, source, []string{"actions/checkout@v4"}); err != nil {
 		t.Fatalf("compileActionLocks() validated replaced native lifecycle: %v", err)
+	}
+}
+
+func TestUsesNativeActionAdapterNormalizesReferenceCase(t *testing.T) {
+	if !usesNativeActionAdapter("Actions/Checkout@v4") {
+		t.Fatal("mixed-case checkout reference did not select the native adapter")
 	}
 }
 

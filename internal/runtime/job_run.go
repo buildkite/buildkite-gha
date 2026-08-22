@@ -25,6 +25,7 @@ type jobRun struct {
 	supervisor      *backgroundSupervisor
 	prepared        remotePreparations
 	preFailures     map[int]stepExecution
+	actionSessions  map[int]*actionSession
 	runErr          error
 	hardFailure     bool
 

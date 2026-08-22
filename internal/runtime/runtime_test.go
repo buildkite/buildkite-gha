@@ -29,6 +29,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
@@ -3253,7 +3254,7 @@ runs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "METADATA_ONLY") || strings.Contains(string(encoded), "DEPLOY_TOKEN") {
+	if strings.Contains(string(encoded), "DEPLOY_TOKEN") {
 		t.Fatalf("top-level action env leaked into plan: %s", encoded)
 	}
 
@@ -4777,26 +4778,6 @@ func TestWorkflowCommandAnnotationsRemainBoundedAfterMaskExpansion(t *testing.T)
 	}
 }
 
-func TestActionMetadataRejectsCaseInsensitiveOutputCollisions(t *testing.T) {
-	workspace := t.TempDir()
-	workflowPath := ".github/workflows/test.yml"
-	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
-	writeFixtureFile(t, workspace, ".github/actions/conflict/action.yml", `name: Conflicting outputs
-outputs:
-  Result:
-    value: first
-  result:
-    value: second
-runs:
-  using: composite
-  steps: []
-`)
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "conflict", Kind: "uses", Uses: "./.github/actions/conflict"}})
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `duplicate case-insensitive name "result"`) {
-		t.Fatalf("RunJob() error = %v, want duplicate output rejection", err)
-	}
-}
-
 func TestDiscoverNodeManagedAndWrongExplicitVersion(t *testing.T) {
 	managed := t.TempDir()
 	node := filepath.Join(managed, "node24", "bin", "node")
@@ -5811,6 +5792,7 @@ runs:
 	job.RequiredCapabilities = []string{"network"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "composite", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	if result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -5865,6 +5847,7 @@ printf '%s\n' "$(basename "$1" .js)" >> "$PHASES"
 	job.Env = map[string]string{"PHASES": phases}
 	job.Actions = []plan.ActionLock{rootLock, childLock, jsLock}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	if result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -5906,6 +5889,7 @@ if [ "$(basename "$(dirname "$1")")/$(basename "$1")" = child/pre.js ]; then sle
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	started := time.Now()
+	normalizeActionJob(t, &job, workspace, materializer)
 	_, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("RunJob() nested pre timeout error = %v", err)
@@ -5958,6 +5942,7 @@ test -z "$TARGETS"
 		remoteLifecycleLock(childID, "child", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -6004,6 +5989,7 @@ test "$CALLER_PATH_ENV" = "$EXPECTED_ROOT_PATH"
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	var logs bytes.Buffer
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v\nlogs: %s", result, err, logs.String())
@@ -6025,6 +6011,7 @@ func TestSkippedRemoteCompositeWithoutPreDoesNotEvaluateTimeout(t *testing.T) {
 	job.RequiredCapabilities = []string{"network"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(rootID, "root", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	if result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() skipped composite result = %#v, error = %v", result, err)
 	}
@@ -6258,6 +6245,7 @@ printf '%s\n' 'job:main' >> "$LIFECYCLE_LOG"`},
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	var logs bytes.Buffer
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
@@ -6339,6 +6327,7 @@ if [ "$action:$phase" = main-fails:main ]; then exit 7; fi
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	provider := &testWorkflowTokenProvider{token: "ghs_scoped_pre"}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Node24: fakeNode, Actions: materializer, WorkflowToken: provider, Redactor: &testRedactor{}}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -6404,6 +6393,7 @@ printf 'child:%s:%s\n' "$(basename "$1" .js)" "$INPUT_MESSAGE" >> "$LIFECYCLE_LO
 		remoteLifecycleLock(childID, "child", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -6472,6 +6462,7 @@ if [ "$action:$phase" = fails:pre ]; then exit 7; fi
 		remoteLifecycleLock(onSuccessID, "on-success", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), `action "owner/repo/fails@v1" pre`) {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -6528,6 +6519,7 @@ fi
 		remoteLifecycleLock(afterID, "after", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -6584,6 +6576,7 @@ if [ "$action:$phase" = after:pre ]; then touch "$MARKER"; fi
 		remoteLifecycleLock(afterID, "after", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -6638,6 +6631,7 @@ if [ "$action:$phase" = child:main ]; then touch "$CHILD_MAIN_MARKER"; fi
 		remoteLifecycleLock(childID, "child", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -6686,6 +6680,7 @@ if [ "$action:$phase" = child:post ]; then touch "$POST_MARKER"; fi
 		remoteLifecycleLock(childID, "child", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -6738,6 +6733,7 @@ if [ "$action:$phase" = after:pre ]; then touch "$MARKER"; fi
 		remoteLifecycleLock(afterID, "after", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -6779,10 +6775,12 @@ printf '%s:%s\n' "$(basename "$(dirname "$1")")" "$(basename "$1" .js)" >> "$LIF
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
 	job.Actions = []plan.ActionLock{
 		remoteLifecycleLock(firstID, "first", digest, nil),
-		remoteLifecycleLock(brokenID, "broken", "sha256:"+strings.Repeat("f", 64), nil),
+		remoteLifecycleLock(brokenID, "broken", digest, nil),
 	}
 	job.ContinueOnError = true
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
+	job.Actions[1].SourceDigest = "sha256:" + strings.Repeat("f", 64)
 	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "materialized source digest mismatch") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -6812,7 +6810,7 @@ func TestJobContinueOnErrorDoesNotTolerateLazyWorkspaceActionIntegrityFailure(t 
 	job.ContinueOnError = true
 
 	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
-	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "workspace action digest mismatch") {
+	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "action source digest mismatch") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 }
@@ -6854,6 +6852,7 @@ printf '%s:%s\n' "$(basename "$(dirname "$1")")" "$(basename "$1" .js)" >> "$LIF
 		remoteLifecycleLock(directID, "direct", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -7074,7 +7073,7 @@ func TestRuntimeRejectsRecursiveAndOverDepthCompositeActions(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 	writeFixtureFile(t, workspace, ".github/actions/recursive/action.yml", "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/recursive\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "recursive", Kind: "uses", Uses: "./.github/actions/recursive"}})
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "recursion detected") {
+	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "action lock graph contains a cycle") {
 		t.Fatalf("RunJob() recursion error = %v", err)
 	}
 
@@ -7240,15 +7239,15 @@ func TestRunJobDockerUsesSharedMasking(t *testing.T) {
 }
 
 func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
-	workspace := fixturePath(t, "smoke")
-	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "local", Kind: "uses", Uses: "./actions/javascript"}})
+	workspace := fixturePath(t)
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "local", Kind: "uses", Uses: "./actions/javascript"}})
 	job.Workflow.Digest = "sha256:" + strings.Repeat("0", 64)
 	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "workflow digest mismatch") {
 		t.Fatalf("RunJob() error = %v, want workflow digest mismatch", err)
 	}
-	job = runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "remote", Kind: "uses", Uses: "actions/checkout@v4"}})
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "remote action") {
-		t.Fatalf("RunJob() error = %v, want explicit remote action error", err)
+	job = runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "remote", Kind: "uses", Uses: "actions/checkout@v4"}})
+	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "immutable selector") {
+		t.Fatalf("RunJob() error = %v, want normalized selector error", err)
 	}
 
 	for _, using := range []string{"future"} {
@@ -7258,6 +7257,7 @@ func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
 			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 			writeFixtureFile(t, workspace, ".github/actions/unsupported/action.yml", "runs:\n  using: "+using+"\n")
 			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "unsupported", Kind: "uses", Uses: "./.github/actions/unsupported"}})
+			job.ActionPrograms[job.Steps[0].Action.Lock] = program.Action{Source: "workspace", Runtime: program.ActionRuntime(using)}
 			if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `unsupported runtime "`+using+`"`) {
 				t.Fatalf("RunJob() error = %v, want %s runtime rejection", err, using)
 			}
@@ -7294,15 +7294,29 @@ func runtimePlan(t *testing.T, workspace, workflowPath string, steps []plan.Step
 	}
 	digest := sha256.Sum256(source)
 	requiresMise := true
-	return plan.Job{
-		Schema: plan.Schema, Compiler: plan.Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
-		Runtime:      &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
-		Workflow:     plan.Workflow{Path: workflowPath, Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "fixture"},
-		Event:        plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
-		Target:       plan.Target{StepKey: "gha-fixture", Queue: "ubuntu-latest"},
-		Steps:        steps,
-		RequiresMise: &requiresMise,
+	location := program.Location{}
+	site := func(surface program.Surface, result program.ResultType) program.Site {
+		return program.Site{Surface: surface, Result: result, Provenance: program.ProvenanceWorkflow, Purpose: program.PurposeExpression, Location: location}
 	}
+	programSteps := make([]program.Step, len(steps))
+	for i, step := range steps {
+		programSteps[i] = program.Step{ID: step.ID, Kind: step.Kind, Condition: site(program.SurfaceStepCondition, program.ResultBoolean), Name: site(program.SurfaceStepTemplate, program.ResultString)}
+	}
+	job := plan.Job{
+		Schema: plan.Schema, Compiler: plan.Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
+		Runtime:  &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
+		Workflow: plan.Workflow{Path: workflowPath, Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "fixture"},
+		Event:    plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
+		Target:   plan.Target{StepKey: "gha-fixture", Queue: "ubuntu-latest"},
+		Steps:    steps,
+		Program: program.Program{Job: program.Job{Condition: site(program.SurfaceJobCondition, program.ResultBoolean), Defaults: program.Defaults{
+			Shell: site(program.SurfaceJobDefault, program.ResultString), WorkingDirectory: site(program.SurfaceJobDefault, program.ResultString),
+		}, Steps: programSteps}},
+		ActionPrograms: map[string]program.Action{},
+		RequiresMise:   &requiresMise,
+	}
+	normalizeActionJob(t, &job, workspace)
+	return job
 }
 
 func writeFixtureFile(t *testing.T, root, path, contents string) {

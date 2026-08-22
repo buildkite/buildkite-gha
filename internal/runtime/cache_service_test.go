@@ -328,6 +328,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	var logs bytes.Buffer
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token-must-not-leak")
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{
 		Node24: node, Actions: materializer, Cache: provider, Redactor: redactor,
 		Stdout: &logs, Stderr: &logs,
@@ -389,6 +390,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	}
 
 	job.Actions[0].Commit = strings.Repeat("b", 40)
+	normalizeActionJob(t, &job, workspace, materializer)
 	if _, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
 		t.Fatalf("unsupported runtime cache commit error = %v", err)
 	}
@@ -503,6 +505,7 @@ fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "\n");
 				Commit: strings.Repeat("a", 40), SourceDigest: digest,
 			}}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+			normalizeActionJob(t, &job, workspace, materializer)
 			result, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: &testRedactor{}}).RunJob(t.Context(), job, workspace)
 			if err != nil || result.Conclusion != "success" {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)

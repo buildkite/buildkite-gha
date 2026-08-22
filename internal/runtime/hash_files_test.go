@@ -497,6 +497,7 @@ func TestHashFilesRemotePreFailureUsesStepConclusion(t *testing.T) {
 	job.RequiredCapabilities = []string{"network"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "action", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -585,6 +586,7 @@ func TestHashFilesPrePhaseUsesStepTimeoutContext(t *testing.T) {
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "action", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	started := time.Now()
+	normalizeActionJob(t, &job, workspace, materializer)
 	_, err = (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("RunJob() pre timeout error = %v", err)

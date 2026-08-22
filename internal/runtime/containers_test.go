@@ -32,6 +32,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
 // fakeJobDocker deliberately goes through a shell and a fresh copy of this test
@@ -1728,6 +1729,7 @@ func TestRunJobContainerRejectsDeferredFeaturesBeforeDocker(t *testing.T) {
 			if feature == "action" {
 				j.Steps = []plan.Step{{Kind: "uses", Uses: "x"}}
 			}
+			normalizeActionJob(t, &j, w, m)
 			if _, e := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: m}).RunJob(t.Context(), j, w); e == nil {
 				t.Fatal("accepted")
 			}
@@ -1825,6 +1827,7 @@ func TestRunJobContainerNodeProbeFailureCleansOwnedResources(t *testing.T) {
 			lockID := remoteLifecycleLockID(1)
 			j.Steps = []plan.Step{{ID: "action", Kind: "uses", Uses: "./unused", Action: &plan.ActionSelector{Lock: lockID}}}
 			j.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "unused", SourceDigest: digestTree(t, filepath.Join(w, "unused"))}}
+			normalizeActionJob(t, &j, w)
 			_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: node}).RunJob(t.Context(), j, w)
 			if err == nil || (!strings.Contains(err.Error(), "exact major") && !strings.Contains(err.Error(), "incompatible")) {
 				t.Fatalf("error = %v", err)
@@ -1880,6 +1883,30 @@ func TestRunJobContainerDoesNotProbeConfiguredNodeForCompositeOnlyActions(t *tes
 	}
 }
 
+func TestActionContainerMountsUsesNormalizedWorkspaceRuntime(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "action/action.yml", "name: stale metadata\nruns:\n  using: composite\n  steps: []\n")
+	node := filepath.Join(t.TempDir(), "node24")
+	writeFixtureFile(t, filepath.Dir(node), filepath.Base(node), "#!/bin/sh\n")
+	if err := os.Chmod(node, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lockID := remoteLifecycleLockID(1)
+	job := jobContainerPlan(t, workspace, []plan.Step{{ID: "action", Kind: "uses", Uses: "./action", Action: &plan.ActionSelector{Lock: lockID}}})
+	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "action", SourceDigest: digestTree(t, filepath.Join(workspace, "action"))}}
+	job.ActionPrograms = map[string]program.Action{
+		lockID: {Source: "workspace", Runtime: program.ActionRuntimeJavaScript, JavaScript: &program.JavaScriptAction{NodeMajor: 24, Main: "index.js"}},
+	}
+	actions := newActionLockResolver(job, workspace, nil)
+	mounts, err := newJobRun(Runner{Node24: node}).actionContainerMounts(t.Context(), actions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(mounts, func(mount containerMount) bool { return mount.target == "/__buildkite-gha/node24" }) {
+		t.Fatalf("normalized Node 24 action mounts = %#v", mounts)
+	}
+}
+
 func TestActionContainerMountsNativeAdapterDoesNotResolveMise(t *testing.T) {
 	workspace := t.TempDir()
 	remote := t.TempDir()
@@ -1893,6 +1920,7 @@ func TestActionContainerMountsNativeAdapterDoesNotResolveMise(t *testing.T) {
 		Commit: actionintegration.CheckoutV4Commit, SourceDigest: digest,
 	}}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: digest}}
+	normalizeActionJob(t, &job, materializer)
 	actions := newActionLockResolver(job, workspace, materializer)
 	miseCalls := 0
 	runner := newJobRun(Runner{ResolveMise: func(context.Context) (string, error) {
@@ -1974,6 +2002,9 @@ esac
 		Container:    &plan.Container{Image: "debian:bookworm-slim"},
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
+	localFixtureRoot := t.TempDir()
+	writeFixtureFile(t, localFixtureRoot, ".github/actions/local/action.yml", string(localSource))
+	normalizeActionJob(t, &job, workspace, materializer, localFixtureRoot)
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Git: git, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Env["CHECKOUT_CHAIN"] != "ok" {
 		t.Fatalf("container checkout chain result = %#v, error = %v", result, err)
@@ -1996,6 +2027,7 @@ func TestRunJobContainerReadOnlyMountProbeFailureCleansOwnedResources(t *testing
 	j.Steps = []plan.Step{{ID: "action", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID}}}
 	j.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "selected"), SourceDigest: digest}}
+	normalizeActionJob(t, &j, w, materializer)
 	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).RunJob(t.Context(), j, w)
 	if err == nil || !strings.Contains(err.Error(), "not readable/traversable") {
 		t.Fatalf("read-only mount probe error = %v", err)
@@ -2026,6 +2058,7 @@ func TestRunJobContainerSkippedRemoteJavaScriptDoesNotRequireNode(t *testing.T) 
 	j.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "selected"), SourceDigest: digest}}
 	missingNode := filepath.Join(t.TempDir(), "missing-node")
+	normalizeActionJob(t, &j, w, materializer)
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: missingNode, Actions: materializer}).RunJob(t.Context(), j, w)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("skipped remote JavaScript result = %#v, error = %v", result, err)
@@ -2212,6 +2245,7 @@ func TestRunJobContainerRemoteActionsMountedReadOnly(t *testing.T) {
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", digest, nil)}
 	job.Outputs = map[string]string{"remote": "${{ steps.remote.outputs.remote }}"}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "selected"), SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: requireNode24(t), Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Outputs["remote"] != "yes" {
 		t.Fatalf("remote container action result = %#v, error = %v", result, err)
@@ -2258,7 +2292,11 @@ func TestRunJobContainerRemoteActionPreparationTimeoutIsCancelled(t *testing.T) 
 		<-ctx.Done()
 		return source.Materialized{}, ctx.Err()
 	}}
+	normalizedFixture := t.TempDir()
+	writeFixtureFile(t, normalizedFixture, "selected/action.yml", "name: timeout\nruns:\n  using: node24\n  main: main.js\n")
+	writeFixtureFile(t, normalizedFixture, "selected/main.js", "")
 
+	normalizeActionJob(t, &job, normalizedFixture)
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
@@ -2304,6 +2342,7 @@ echo NESTED_REMOTE=seen >> "$GITHUB_ENV"
 		remoteLifecycleLock(remoteID, "selected", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "selected"), SourceDigest: digest}}
+	normalizeActionJob(t, &job, workspace, materializer)
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: node, Actions: materializer}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Env["NESTED_REMOTE"] != "seen" {
 		t.Fatalf("nested remote container action result = %#v, error = %v", result, err)
@@ -2348,6 +2387,7 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: lazyDir, SourceDigest: digestTree(t, actionSource)}}
 	job.Outputs = map[string]string{"lazy": "${{ steps.lazy.outputs.lazy }}"}
+	job.ActionPrograms[lockID] = program.Action{Runtime: program.ActionRuntimeJavaScript, Source: "workspace", JavaScript: &program.JavaScriptAction{NodeMajor: 24, Main: "main.js"}}
 	node16 := filepath.Join(t.TempDir(), "node16")
 	writeNodeExecutable(t, node16, 16)
 	node20 := filepath.Join(t.TempDir(), "node20")
@@ -2363,8 +2403,8 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 		t.Fatalf("Docker create absent: %#v", calls)
 	}
 	createArgs := calls[createIndex].Args
-	if !slices.Contains(createArgs, "type=bind,source="+node16+",target=/__buildkite-gha/node16,readonly") || !slices.Contains(createArgs, "type=bind,source="+node24+",target=/__buildkite-gha/node24,readonly") || slices.Contains(createArgs, "type=bind,source="+node20+",target=/__buildkite-gha/node20,readonly") {
-		t.Fatalf("lazy node20 declaration mounts = %#v", createArgs)
+	if slices.Contains(createArgs, "type=bind,source="+node16+",target=/__buildkite-gha/node16,readonly") || slices.Contains(createArgs, "type=bind,source="+node20+",target=/__buildkite-gha/node20,readonly") || !slices.Contains(createArgs, "type=bind,source="+node24+",target=/__buildkite-gha/node24,readonly") {
+		t.Fatalf("normalized lazy action Node mounts = %#v", createArgs)
 	}
 	seenLifecycleExec := false
 	for _, call := range calls {
@@ -2374,7 +2414,7 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 		}
 		seenLifecycleExec = true
 		if !strings.Contains(joined, "/__buildkite-gha/node24") {
-			t.Fatalf("lazy node20 declaration did not execute with Node 24: %#v", call.Args)
+			t.Fatalf("normalized lazy action did not execute with Node 24: %#v", call.Args)
 		}
 	}
 	if !seenLifecycleExec {
@@ -2451,6 +2491,7 @@ func TestRunJobContainerRunsDockerActionsAsSiblings(t *testing.T) {
 		job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 		job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "docker", digest, nil)}
 		materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "docker"), SourceDigest: digest}}
+		normalizeActionJob(t, &job, workspace, materializer)
 		result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).RunJob(t.Context(), job, workspace)
 		if err != nil || result.Env["DOCKER_RUNTIME_SEEN"] != "true" {
 			t.Fatalf("remote Docker action result = %#v, error = %v", result, err)

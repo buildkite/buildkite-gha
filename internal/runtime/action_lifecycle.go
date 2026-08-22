@@ -120,9 +120,3 @@ func (r *postRegistry) register(post *registeredPost) {
 	r.posts = append(r.posts, *post)
 	r.mu.Unlock()
 }
-
-func (r *postRegistry) snapshot() []registeredPost {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]registeredPost(nil), r.posts...)
-}

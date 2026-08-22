@@ -275,6 +275,7 @@ if (process.env.no_proxy !== "lower.example,127.0.0.1") throw new Error("no_prox
 	}})
 	job.IDTokenPermission = "write"
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
+	normalizeActionJob(t, &job, workspace)
 	provider := &testOIDCTokenProvider{token: "header.payload.signature"}
 	redactor := &testRedactor{}
 	result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
@@ -312,6 +313,7 @@ const core = require("@actions/core");
 	}})
 	job.IDTokenPermission = "write"
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
+	normalizeActionJob(t, &job, workspace)
 	provider := &testOIDCTokenProvider{token: "header.payload.signature", requireLiveContext: true}
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
@@ -357,6 +359,7 @@ const core = require("@actions/core");
 		Action: &plan.ActionSelector{Lock: lockID},
 	}})
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
+	normalizeActionJob(t, &job, workspace)
 	result, err := (Runner{Node24: node}).RunJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() = %#v, %v", result, err)
