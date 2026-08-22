@@ -67,7 +67,10 @@ jobs:
     strategy:
       matrix:
         image: [node:24, node:25]
-    container: ${{ matrix.image }}
+    container:
+      image: ${{ matrix.image }}
+      volumes: [cache:/cache:ro, /anonymous, /srv/data:/data]
+      options: --privileged --label "description=two words"
     steps: [{run: true}]
 `)
 	event := readFile(t, smokePath("events", "push.json"))
@@ -83,7 +86,8 @@ jobs:
 		t.Fatalf("container bundle was not deterministic: %#v", first)
 	}
 	for i, image := range []string{"node:24", "node:25"} {
-		if first.Plans[i].Job.Container == nil || first.Plans[i].Job.Container.Image != image || bytes.Contains(first.Plans[i].Contents, []byte("${{")) {
+		container := first.Plans[i].Job.Container
+		if container == nil || container.Image != image || !slices.Equal(container.Volumes, []string{"cache:/cache:ro", "/anonymous", "/srv/data:/data"}) || container.Options != `--privileged --label "description=two words"` || bytes.Contains(first.Plans[i].Contents, []byte("${{")) {
 			t.Fatalf("plan %d container = %#v", i, first.Plans[i].Job.Container)
 		}
 	}

@@ -663,7 +663,10 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, runtimeDistributionDiges
 	}
 	job.RequiresMise = &actions.requiresMise
 	if instance.Container != nil {
-		job.Container = &plan.Container{Image: instance.Container.Image, Env: cloneMap(instance.Container.Env), Ports: append([]string(nil), instance.Container.Ports...)}
+		job.Container = &plan.Container{
+			Image: instance.Container.Image, Env: cloneMap(instance.Container.Env), Ports: append([]string(nil), instance.Container.Ports...),
+			Volumes: append([]string(nil), instance.Container.Volumes...), Options: instance.Container.Options,
+		}
 	}
 	if len(instance.Services) != 0 {
 		job.Services = make(map[string]plan.ServiceContainer, len(instance.Services))
