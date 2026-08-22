@@ -572,6 +572,27 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsRequiresPayloadForDynamicEventDefault(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "event", `name: event default
+inputs:
+  field:
+    default: action
+  value:
+    default: ${{ github.event[inputs.field] }}
+runs:
+  using: node24
+  main: index.js
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./event"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresEventPayload {
+		t.Fatal("dynamic action input default did not require the retained event payload")
+	}
+}
+
 func TestCompileActionInvocationsRequiresEventPayloadForLifecycleCondition(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "event", `name: event lifecycle

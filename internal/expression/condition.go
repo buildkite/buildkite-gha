@@ -428,6 +428,9 @@ func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 	if empty {
 		return !context.Unsuccessful && !context.Cancelled, nil
 	}
+	if err := validateConditionNode(node, StepCondition, nil, false); err != nil {
+		return false, err
+	}
 	if !containsStatusFunction(node) && (context.Unsuccessful || context.Cancelled) {
 		return false, nil
 	}
@@ -535,6 +538,15 @@ func resolveConditionRoot(root string, context ConditionContext) (any, error) {
 			steps[name] = map[string]any{"outputs": step.Outputs, "outcome": step.Outcome, "conclusion": step.Conclusion}
 		}
 		return steps, nil
+	case "github":
+		event, found, err := objectValue(context.GitHub, "event")
+		if err != nil {
+			return nil, err
+		}
+		if !found || event == nil {
+			return nil, fmt.Errorf("condition requires an event payload that is unavailable in this job plan")
+		}
+		return context.GitHub, nil
 	default:
 		return nil, fmt.Errorf("condition context %q is unsupported", root)
 	}

@@ -290,6 +290,9 @@ func nodeReferencesGitHubToken(expression actionlint.ExprNode, allowContextSeria
 		if !strings.EqualFold(referenceRoot(node), "github") {
 			return
 		}
+		if isGitHubEventAccess(node) {
+			return
+		}
 		if referenceHasArrayDeref(node) {
 			referenceErr = fmt.Errorf("github reference must name one static property")
 			return
@@ -430,6 +433,10 @@ func ConditionReferencesGitHubEventPayload(source string) (bool, error) {
 func TemplateReferencesGitHubEvent(template string) (bool, error) {
 	found := false
 	err := visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
+		if call, ok := node.(*actionlint.FuncCallNode); ok && isToJSONGitHubCall(call) {
+			found = true
+			return nil
+		}
 		found = found || nodeReferencesGitHubEventPayload(node)
 		return nil
 	})

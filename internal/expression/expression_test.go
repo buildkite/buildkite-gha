@@ -589,13 +589,15 @@ func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
 	for _, template := range []string{
 		"${{ github }}",
 		"${{ github.* }}",
-		"${{ github.event.*.token }}",
 		"${{ toJSON(github.*) }}",
 		"${{ format('{0}', github) }}",
 	} {
 		if _, err := ReferencesGitHubToken(template); err == nil || !strings.Contains(err.Error(), "must name one static property") {
 			t.Fatalf("ReferencesGitHubToken(%q) error = %v, want static-property rejection", template, err)
 		}
+	}
+	if got, err := ReferencesGitHubToken("${{ github.event.*.token }}"); err != nil || got {
+		t.Fatalf("ReferencesGitHubToken() event payload projection = %v, %v, want false", got, err)
 	}
 	if _, err := ReferencesStepGitHubToken("${{ toJSON(github[env.NAME]) }}"); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
 		t.Fatalf("ReferencesStepGitHubToken() serialized dynamic index error = %v", err)
@@ -1245,6 +1247,17 @@ func TestEvaluateActionLifecycleConditionUsesWorkflowInputsAndHashFiles(t *testi
 	}
 	if !reflect.DeepEqual(patterns, []string{"Cargo.lock"}) {
 		t.Fatalf("hashFiles patterns = %#v, want [Cargo.lock]", patterns)
+	}
+}
+
+func TestEvaluateActionLifecycleConditionSupportsDynamicEventAccess(t *testing.T) {
+	context := ConditionContext{
+		GitHub: map[string]any{"event": map[string]any{"action": "opened"}},
+		Env:    map[string]string{"EVENT_FIELD": "action"},
+	}
+	got, err := EvaluateActionLifecycleCondition("github.event[env.EVENT_FIELD] == 'opened'", context)
+	if err != nil || !got {
+		t.Fatalf("EvaluateActionLifecycleCondition() = %v, %v, want true", got, err)
 	}
 }
 

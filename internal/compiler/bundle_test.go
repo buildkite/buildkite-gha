@@ -1373,6 +1373,9 @@ jobs:
 	if job.GitHubToken == nil || !job.HasCapability("provider-token-write") {
 		t.Fatalf("toJSON(github) authority = %#v, capabilities %#v", job.GitHubToken, job.RequiredCapabilities)
 	}
+	if job.Event.Payload == nil {
+		t.Fatal("toJSON(github) did not retain the event payload")
+	}
 	if bundle.Plans[0].Authorization.GitHubTokenSecretReference {
 		t.Fatal("toJSON(github) was reported as a secrets.GITHUB_TOKEN reference")
 	}
