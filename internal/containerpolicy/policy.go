@@ -119,6 +119,7 @@ func ValidateJobVolumes(values []string) error {
 		return fmt.Errorf("more than %d volumes", MaxJobVolumes)
 	}
 	seen := map[string]bool{}
+	seenTargets := map[string]bool{}
 	for _, value := range values {
 		if seen[value] {
 			return fmt.Errorf("volume %q is repeated", value)
@@ -127,6 +128,11 @@ func ValidateJobVolumes(values []string) error {
 		if err := ValidateJobVolume(value); err != nil {
 			return fmt.Errorf("invalid volume %q: %w", value, err)
 		}
+		target := JobVolumeTarget(value)
+		if seenTargets[target] {
+			return fmt.Errorf("volume target %q is repeated", target)
+		}
+		seenTargets[target] = true
 	}
 	return nil
 }
@@ -135,6 +141,13 @@ func ValidateJobVolumes(values []string) error {
 func JobVolumeName(value string) string {
 	name, _, _ := strings.Cut(value, ":")
 	return name
+}
+
+// JobVolumeTarget returns the target path from a validated job volume.
+func JobVolumeTarget(value string) string {
+	_, remainder, _ := strings.Cut(value, ":")
+	target, _, _ := strings.Cut(remainder, ":")
+	return target
 }
 
 func hasASCIIControl(value string) bool {
