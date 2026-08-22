@@ -150,7 +150,10 @@ func (authorityAdapter) Execute(_ context.Context, state authorityMachineState, 
 	if operation.Phase == PhasePre {
 		state.preparationEnvironmentMutable = true
 	}
-	execution := successfulExecution()
+	execution := Execution{
+		Outcomes: OutcomeSuccess | OutcomeFailure | OutcomeCancelled,
+		Outputs:  ValueObject{Fields: map[string]expression.AbstractValue{}, Open: true},
+	}
 	if operation.Kind != LeafNative {
 		execution.Environment.Unknown = true
 	}
@@ -266,16 +269,47 @@ func authorityReferences(site Site, view FrameView) map[string]any {
 	steps := view.Steps()
 	if steps != nil {
 		stepValues := make(map[string]any, len(steps))
+		closed := true
 		for name, step := range steps {
 			value := map[string]any{}
 			if outputs, ok := concreteObject(step.Outputs); ok {
 				value["outputs"] = outputs
+				retainKnownReferences(known, "steps."+strings.ToLower(name)+".outputs", outputs)
+			} else {
+				closed = false
+			}
+			if outcome, ok := abstractOutcomeName(step.Outcome); ok {
+				value["outcome"] = outcome
+				known["steps."+strings.ToLower(name)+".outcome"] = outcome
+			} else {
+				closed = false
+			}
+			if conclusion, ok := abstractOutcomeName(step.Conclusion); ok {
+				value["conclusion"] = conclusion
+				known["steps."+strings.ToLower(name)+".conclusion"] = conclusion
+			} else {
+				closed = false
 			}
 			stepValues[strings.ToLower(name)] = value
 		}
-		known["steps"] = stepValues
+		if closed {
+			known["steps"] = stepValues
+		}
 	}
 	return known
+}
+
+func abstractOutcomeName(outcome OutcomeSet) (string, bool) {
+	switch outcome {
+	case OutcomeSuccess:
+		return "success", true
+	case OutcomeFailure:
+		return "failure", true
+	case OutcomeCancelled:
+		return "cancelled", true
+	default:
+		return "", false
+	}
 }
 
 func retainObjectReferences(known map[string]any, root string, object ValueObject) {
