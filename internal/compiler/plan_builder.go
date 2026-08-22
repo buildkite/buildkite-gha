@@ -125,18 +125,6 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	if err := addContainerCapabilities(instance, actionRefs, &actions); err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
-	needSources, err := buildPlanNeedSources(instance, b.planDigests)
-	if err != nil {
-		return plan.Job{}, PlanAuthorization{}, nil, err
-	}
-	deferredInputs, err := buildPlanDeferredInputs(instance.DeferredInputs, b.planDigests)
-	if err != nil {
-		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
-	}
-	callGuards, err := buildPlanCallGuards(instance, b.planDigests)
-	if err != nil {
-		return plan.Job{}, PlanAuthorization{}, nil, err
-	}
 	secrets, secretMappings, githubToken, err := b.authorizePlanSecrets(instance, &actions)
 	if err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
@@ -149,7 +137,10 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	if instance.Platform == PlatformDarwinARM64 && slices.Contains(actions.capabilities, "docker") {
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on darwin/arm64", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
 	}
-	job := b.lowerPlanJob(instance, runtimeDistributionDigest, steps, actions, needSources, buildPlanNeedOutputs(instance), deferredInputs, callGuards, secrets, secretMappings, githubToken)
+	job, err := b.lowerPlanJob(instance, runtimeDistributionDigest, steps, actions, secrets, secretMappings, githubToken)
+	if err != nil {
+		return plan.Job{}, PlanAuthorization{}, nil, err
+	}
 	if err := job.Validate(); err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -497,95 +488,6 @@ func addContainerCapabilities(instance JobInstance, actionRefs []string, built *
 	return nil
 }
 
-func buildPlanNeedSources(instance JobInstance, planDigests map[string]string) (map[string][]plan.NeedSource, error) {
-	needSources := make(map[string][]plan.NeedSource, len(instance.NeedGroups))
-	for _, logicalNeed := range sortedKeys(instance.NeedGroups) {
-		dependencies := instance.NeedGroups[logicalNeed]
-		if len(dependencies) > plan.MaxNeedProducers {
-			return nil, fmt.Errorf("build plan for job %q: prerequisite %q has %d producers, maximum is %d", instance.LogicalJobID, logicalNeed, len(dependencies), plan.MaxNeedProducers)
-		}
-		for _, dependency := range dependencies {
-			digest, ok := planDigests[dependency]
-			if !ok {
-				return nil, fmt.Errorf("build plan for job %q: prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
-			}
-			needSources[logicalNeed] = append(needSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
-		}
-	}
-	return needSources, nil
-}
-
-func buildPlanNeedOutputs(instance JobInstance) map[string][]plan.NeedOutput {
-	if len(instance.NeedOutputs) == 0 {
-		return nil
-	}
-	needOutputs := make(map[string][]plan.NeedOutput, len(instance.NeedOutputs))
-	for _, logicalNeed := range sortedKeys(instance.NeedOutputs) {
-		outputs := instance.NeedOutputs[logicalNeed]
-		needOutputs[logicalNeed] = make([]plan.NeedOutput, len(outputs))
-		for i, output := range outputs {
-			needOutputs[logicalNeed][i] = plan.NeedOutput{Name: output.Name, StepKey: output.StepKey, Output: output.Output}
-		}
-	}
-	return needOutputs
-}
-
-func buildPlanDeferredInputs(inputs map[string]DeferredInput, planDigests map[string]string) (map[string]plan.DeferredInput, error) {
-	if len(inputs) == 0 {
-		return nil, nil
-	}
-	resolved := make(map[string]plan.DeferredInput, len(inputs))
-	for _, name := range sortedKeys(inputs) {
-		input := inputs[name]
-		deferred := plan.DeferredInput{Outputs: make([]plan.NeedOutput, len(input.Outputs))}
-		for _, source := range input.Sources {
-			digest, ok := planDigests[source]
-			if !ok {
-				return nil, fmt.Errorf("deferred input %q source %q has no earlier plan digest", name, source)
-			}
-			deferred.Sources = append(deferred.Sources, plan.NeedSource{StepKey: source, PlanDigest: digest})
-		}
-		for i, output := range input.Outputs {
-			deferred.Outputs[i] = plan.NeedOutput{Name: output.Name, StepKey: output.StepKey, Output: output.Output}
-		}
-		resolved[name] = deferred
-	}
-	return resolved, nil
-}
-
-func buildPlanCallGuards(instance JobInstance, planDigests map[string]string) ([]plan.CallGuard, error) {
-	callGuards := make([]plan.CallGuard, len(instance.CallGuards))
-	for guardIndex, guard := range instance.CallGuards {
-		deferredInputs, err := buildPlanDeferredInputs(guard.DeferredInputs, planDigests)
-		if err != nil {
-			return nil, fmt.Errorf("build plan for job %q call guard %d: %w", instance.LogicalJobID, guardIndex+1, err)
-		}
-		planGuard := plan.CallGuard{Condition: guard.Condition, Inputs: cloneAnyMap(guard.Inputs), DeferredInputs: deferredInputs}
-		if len(guard.NeedGroups) != 0 {
-			planGuard.NeedSources = make(map[string][]plan.NeedSource, len(guard.NeedGroups))
-			for _, logicalNeed := range sortedKeys(guard.NeedGroups) {
-				for _, dependency := range guard.NeedGroups[logicalNeed] {
-					digest, ok := planDigests[dependency]
-					if !ok {
-						return nil, fmt.Errorf("build plan for job %q: call guard prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
-					}
-					planGuard.NeedSources[logicalNeed] = append(planGuard.NeedSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
-				}
-			}
-		}
-		if len(guard.NeedOutputs) != 0 {
-			planGuard.NeedOutputs = make(map[string][]plan.NeedOutput, len(guard.NeedOutputs))
-			for _, logicalNeed := range sortedKeys(guard.NeedOutputs) {
-				for _, output := range guard.NeedOutputs[logicalNeed] {
-					planGuard.NeedOutputs[logicalNeed] = append(planGuard.NeedOutputs[logicalNeed], plan.NeedOutput{Name: output.Name, StepKey: output.StepKey, Output: output.Output})
-				}
-			}
-		}
-		callGuards[guardIndex] = planGuard
-	}
-	return callGuards, nil
-}
-
 func (b planBuilder) authorizePlanSecrets(instance JobInstance, actions *builtPlanActions) ([]string, map[string]string, *plan.GitHubToken, error) {
 	secrets, mappings, tokenAliases, referencesGitHubToken, err := requiredSecrets(instance, actions.requiredSecrets, actions.inputsInspected)
 	if err != nil {
@@ -616,20 +518,13 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, actions *builtPl
 	return secrets, mappings, &plan.GitHubToken{Workflow: policyWorkflow, Permissions: cloneMap(b.ir.Workflow.WorkflowTokenPermissions), Aliases: tokenAliases}, nil
 }
 
-func (b planBuilder) lowerPlanJob(instance JobInstance, runtimeDistributionDigest string, steps []plan.Step, actions builtPlanActions, needSources map[string][]plan.NeedSource, needOutputs map[string][]plan.NeedOutput, deferredInputs map[string]plan.DeferredInput, callGuards []plan.CallGuard, secrets []string, secretMappings map[string]string, githubToken *plan.GitHubToken) plan.Job {
+func (b planBuilder) lowerPlanJob(instance JobInstance, runtimeDistributionDigest string, steps []plan.Step, actions builtPlanActions, secrets []string, secretMappings map[string]string, githubToken *plan.GitHubToken) (plan.Job, error) {
 	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
 			Version: b.compilerVersion, DistributionDigest: b.compilerDistributionDigest,
 		},
 		Runtime: &plan.Runtime{DistributionDigest: runtimeDistributionDigest},
-		Workflow: plan.Workflow{
-			Path:         instance.SourcePath,
-			Name:         b.workflowName,
-			Digest:       instance.SourceDigest,
-			LogicalJobID: instance.LogicalJobID,
-			Remote:       planRemoteWorkflowSource(instance.RemoteWorkflow),
-		},
 		Event: plan.Event{
 			Provider: b.ir.Event.Provider, Name: b.ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(b.eventDigest[:]),
 			Repository: b.ir.Event.Repository.Owner + "/" + b.ir.Event.Repository.Name,
@@ -643,13 +538,7 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, runtimeDistributionDiges
 		IDTokenPermission:       instance.Permissions["id-token"],
 		OIDC:                    cloneOIDCConfiguration(b.options.OIDC),
 		Matrix:                  instance.Matrix,
-		Inputs:                  cloneAnyMap(instance.Inputs),
-		DeferredInputs:          deferredInputs,
 		Vars:                    cloneMap(b.ir.Vars),
-		Dependencies:            append([]string(nil), instance.Needs...),
-		NeedSources:             needSources,
-		NeedOutputs:             needOutputs,
-		CallGuards:              callGuards,
 		Env:                     instance.Env,
 		Condition:               instance.If,
 		ContinueOnError:         instance.ContinueOnError,
@@ -681,7 +570,10 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, runtimeDistributionDiges
 		job.Services[service.Name] = container
 		job.ServiceOrder = append(job.ServiceOrder, service.Name)
 	}
-	return job
+	if err := instance.lowerReusablePlan(&job, b.planDigests, b.workflowName); err != nil {
+		return plan.Job{}, err
+	}
+	return job, nil
 }
 
 func cloneOIDCConfiguration(configuration *plan.OIDCConfiguration) *plan.OIDCConfiguration {
@@ -712,7 +604,7 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 			return err
 		}
 		for _, name := range names {
-			binding, ok := instance.secretAuthority.resolve(name)
+			binding, ok := instance.reusable.secrets.resolve(name)
 			if strings.EqualFold(name, "GITHUB_TOKEN") || ok && binding.token {
 				found[name] = name
 			}
@@ -860,7 +752,7 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 			tokenAliases = append(tokenAliases, alias)
 			continue
 		}
-		binding, ok := instance.secretAuthority.resolve(alias)
+		binding, ok := instance.reusable.secrets.resolve(alias)
 		if !ok {
 			continue
 		}
@@ -869,7 +761,7 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 			continue
 		}
 		sources[binding.source] = struct{}{}
-		if !instance.secretAuthority.unrestricted {
+		if !instance.reusable.secrets.unrestricted {
 			mappings[alias] = binding.source
 		}
 	}
