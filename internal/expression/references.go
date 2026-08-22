@@ -433,10 +433,12 @@ func ConditionReferencesGitHubEventPayload(source string) (bool, error) {
 func TemplateReferencesGitHubEvent(template string) (bool, error) {
 	found := false
 	err := visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
-		if call, ok := node.(*actionlint.FuncCallNode); ok && isToJSONGitHubCall(call) {
-			found = true
-			return nil
-		}
+		actionlint.VisitExprNode(node, func(candidate, _ actionlint.ExprNode, entering bool) {
+			if entering {
+				call, ok := candidate.(*actionlint.FuncCallNode)
+				found = found || ok && isToJSONGitHubCall(call)
+			}
+		})
 		found = found || nodeReferencesGitHubEventPayload(node)
 		return nil
 	})

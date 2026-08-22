@@ -1360,7 +1360,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: ${{ secrets.NAME_SECRET }}
-        run: echo '${{ ToJson(GitHub) }}'
+        run: echo '${{ contains(ToJson(GitHub), '"event"') }}'
 `)
 	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err != nil {
