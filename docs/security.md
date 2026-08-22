@@ -35,7 +35,7 @@ Steps in one job share:
 - the job's Buildkite identity
 
 A shell step can affect a later action, and an action can affect a later shell
-step. Dockerfile actions, job containers, and service containers add packaging;
+step. Docker actions, job containers, and service containers add packaging;
 they are not security boundaries.
 
 Run untrusted jobs on a queue with:
@@ -61,6 +61,13 @@ credentials the job can receive.
 
 Digests and immutable source locks detect changed code. They do not make code
 trusted or grant credentials.
+
+Prebuilt Docker action metadata can name a public `docker://` image. The action
+source lock protects the image declaration, but a mutable image tag can resolve
+to different content when each job starts. Use an image digest when content
+immutability matters. Image pulls use an empty private Docker configuration and
+never receive action secrets, registry credentials, or ambient Docker
+authority; private images are unsupported.
 
 ### Source and event checks
 

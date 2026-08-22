@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -43,6 +44,53 @@ type actionLockResolver struct {
 	workspace    string
 	materializer ActionMaterializer
 	locks        map[string]*actionLockEntry
+}
+
+type prebuiltDockerBackend struct {
+	docker string
+	config string
+	env    map[string]string
+	images map[string]bool
+}
+
+func (r *jobRun) preparePrebuiltDockerActions(ctx context.Context, processor *commandProcessor, actions *actionLockResolver) (_ *prebuiltDockerBackend, err error) {
+	images := map[string]bool{}
+	for _, lock := range actions.job.Actions {
+		if lock.DockerImage != "" {
+			images[lock.DockerImage] = true
+		}
+	}
+	if len(images) == 0 {
+		return nil, nil
+	}
+	docker, config, env, err := privateDocker(r.Runner)
+	if err != nil {
+		return nil, err
+	}
+	backend := &prebuiltDockerBackend{docker: docker, config: config, env: env, images: images}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, backend.cleanup())
+		}
+	}()
+	ordered := make([]string, 0, len(images))
+	for image := range images {
+		ordered = append(ordered, image)
+	}
+	sort.Strings(ordered)
+	for _, image := range ordered {
+		if pullErr := r.pullContainerImage(ctx, processor, env, docker, image); pullErr != nil {
+			return nil, fmt.Errorf("pull prebuilt Docker action image %q: %w", image, pullErr)
+		}
+	}
+	return backend, nil
+}
+
+func (b *prebuiltDockerBackend) cleanup() error {
+	if b == nil || b.config == "" {
+		return nil
+	}
+	return removeDockerConfig(b.config)
 }
 
 func newActionLockResolver(job plan.Job, workspace string, materializer ActionMaterializer) *actionLockResolver {

@@ -329,6 +329,7 @@ func TestCompileBundleRejectsDockerOnDarwin(t *testing.T) {
 	}
 	actionRoot := filepath.Join(workspace, ".github", "actions")
 	writeAction(t, actionRoot, "docker", "runs:\n  using: docker\n  image: Dockerfile\n")
+	writeAction(t, actionRoot, "prebuilt", "runs:\n  using: docker\n  image: docker://alpine:3.20\n")
 	writeAction(t, actionRoot, "composite", "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/docker\n")
 	options := Options{
 		EventTrust: EventUntrusted,
@@ -353,8 +354,10 @@ func TestCompileBundleRejectsDockerOnDarwin(t *testing.T) {
 		{name: "job container", runsOn: "macos-15", workload: "    container: node:24\n    steps:\n      - run: true\n", reject: true},
 		{name: "service container", runsOn: "macos-15", workload: "    services:\n      redis:\n        image: redis:7\n    steps:\n      - run: true\n", reject: true},
 		{name: "Dockerfile action", runsOn: "macos-15", workload: "    steps:\n      - uses: ./.github/actions/docker\n", reject: true},
+		{name: "prebuilt Docker action", runsOn: "macos-15", workload: "    steps:\n      - uses: ./.github/actions/prebuilt\n", reject: true},
 		{name: "transitive Dockerfile action", runsOn: "macos-15", workload: "    steps:\n      - uses: ./.github/actions/composite\n", reject: true},
 		{name: "Linux Dockerfile action", runsOn: "ubuntu-latest", workload: "    steps:\n      - uses: ./.github/actions/docker\n"},
+		{name: "Linux prebuilt Docker action", runsOn: "ubuntu-latest", workload: "    steps:\n      - uses: ./.github/actions/prebuilt\n"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
