@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -410,6 +411,61 @@ func TestPluginUploadsPluralWorkflowList(t *testing.T) {
 	}
 	if len(pipeline.Steps) != 2 {
 		t.Fatalf("workflow groups = %#v", pipeline.Steps)
+	}
+}
+
+func TestPluginSkipsMissingWorkflowFromPluralList(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"ci.yml": "name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	configuration, err := json.Marshal(map[string]any{
+		"workflows": []string{".github/workflows/ci.yml", ".github/workflows/deploy.yml"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	setCLIPluginBuildkiteEnvironment(t, "plugin-missing-workflow")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, want 0; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Uploaded 1 job") || !strings.Contains(stderr.String(), `warning: workflow path ".github/workflows/deploy.yml" is missing or untracked; skipping`) {
+		t.Fatalf("stdout/stderr = %q / %q", stdout.String(), stderr.String())
+	}
+	if len(runner.commands) == 0 {
+		t.Fatal("present workflow was not uploaded")
+	}
+}
+
+func TestPluginSucceedsWhenAllConfiguredWorkflowsWereRemoved(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"deploy.yml": "name: Deploy\non: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	if output, err := exec.Command("git", "-C", repository, "rm", "-f", ".github/workflows/deploy.yml").CombinedOutput(); err != nil {
+		t.Fatalf("remove tracked workflow: %v: %s", err, output)
+	}
+	configuration, err := json.Marshal(map[string]any{"workflow": ".github/workflows/deploy.yml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	setCLIPluginBuildkiteEnvironment(t, "plugin-removed-workflow")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, want 0; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), `warning: workflow path ".github/workflows/deploy.yml" is missing or untracked; skipping`) || !strings.Contains(stderr.String(), "all configured workflow paths are missing or untracked; there is nothing to upload") {
+		t.Fatalf("stdout/stderr = %q / %q", stdout.String(), stderr.String())
+	}
+	if len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+		t.Fatalf("all-missing selection reached Buildkite: commands %#v, uploads %#v", runner.commands, runner.uploaded)
 	}
 }
 

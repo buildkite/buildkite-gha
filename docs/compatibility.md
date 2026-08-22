@@ -80,15 +80,18 @@ Steps remain inside one job because they share a workspace, environment files, a
 ### Aggregate workflow upload
 
 The plugin accepts either one `workflow` path or a non-empty `workflows` array.
-Each path must be a regular, tracked `.yml` or `.yaml` file inside the
-repository. Directories, missing or untracked files, outside paths, symlinks,
-and globs fail. A custom importer may upload one explicit regular workflow from
-outside the repository.
+Missing or untracked paths warn and are skipped, so removing a workflow does not
+require a simultaneous pipeline configuration change. If every configured path
+is missing or untracked, the importer succeeds without uploading a pipeline.
+Every present path must be a regular, tracked `.yml` or `.yaml` file inside the
+repository. Directories, tracked files missing from the checkout, outside paths,
+symlinks, and globs fail. A custom importer may upload one explicit regular
+workflow from outside the repository.
 
 Before assigning workflow identities and job keys, upload canonicalizes, sorts,
 and deduplicates the paths.
 
-All runnable workflows use one artifact and pipeline transaction:
+All remaining runnable workflows use one artifact and pipeline transaction:
 
 - A compiled workflow becomes a group labeled `:github: workflow ·
   <workflow-name>`. An unnamed workflow uses its canonical path. A resolved,
@@ -120,9 +123,10 @@ with a failing top-level step. The step:
 - limits the check summary to 65,535 bytes
 - exits with status 1
 
-Other workflows continue compiling. Parse, event-input, admission, artifact,
-and upload failures still abort the complete transaction. Upload never publishes
-a partial pipeline.
+Other workflows continue compiling. Missing or untracked configured paths are
+omitted before the transaction. Invalid path states, parse, event-input,
+admission, artifact, and upload failures still abort the complete transaction.
+Upload never publishes a partial pipeline.
 
 If a workflow has both a compiler error and a skip reason, the compiler error
 takes precedence.
