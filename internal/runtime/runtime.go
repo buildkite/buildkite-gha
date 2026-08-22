@@ -63,6 +63,7 @@ type Runner struct {
 	Docker                string
 	RuntimeExecutable     string
 	Git                   string
+	GitLFS                string
 	CleanupTimeout        time.Duration
 	PostActionTimeout     time.Duration
 	InterruptGrace        time.Duration
