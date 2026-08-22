@@ -379,6 +379,10 @@ func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 	if err := os.WriteFile(untrackedPath, []byte(workflowSource), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	untrackedMetacharacterPath := filepath.Join(workflowDirectory, "untracked[1].yml")
+	if err := os.WriteFile(untrackedMetacharacterPath, []byte(workflowSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	outsidePath := filepath.Join(t.TempDir(), "outside.yml")
 	if err := os.WriteFile(outsidePath, []byte(workflowSource), 0o600); err != nil {
 		t.Fatal(err)
@@ -415,8 +419,8 @@ func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 	if err != nil || len(leadingDashSkipped) != 0 || len(leadingDash) != 2 || leadingDash[0].CanonicalPath != "-leading.yml" {
 		t.Fatalf("leading-dash explicit path = %#v, %v", leadingDash, err)
 	}
-	selected, skipped, err := expandExplicitWorkflowPaths([]string{filepath.Join(".github", "workflows", "missing.yml"), untrackedPath, aPath}, "")
-	if err != nil || len(selected) != 1 || selected[0].CanonicalPath != ".github/workflows/a.yml" || !reflect.DeepEqual(skipped, []string{filepath.Join(".github", "workflows", "missing.yml"), untrackedPath}) {
+	selected, skipped, err := expandExplicitWorkflowPaths([]string{filepath.Join(".github", "workflows", "missing.yml"), untrackedPath, untrackedMetacharacterPath, aPath}, "")
+	if err != nil || len(selected) != 1 || selected[0].CanonicalPath != ".github/workflows/a.yml" || !reflect.DeepEqual(skipped, []string{filepath.Join(".github", "workflows", "missing.yml"), untrackedPath, untrackedMetacharacterPath}) {
 		t.Fatalf("missing and untracked selection = %#v, skipped %#v, error %v", selected, skipped, err)
 	}
 

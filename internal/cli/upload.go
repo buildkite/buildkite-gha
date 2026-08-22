@@ -698,7 +698,7 @@ func expandExplicitWorkflowPaths(operands []string, checkoutPath string) ([]work
 		}
 		entries := bytes.Split(output, []byte{0})
 		tracked := len(entries) == 2 && string(entries[0]) == canonical && len(entries[1]) == 0
-		if !tracked && strings.ContainsAny(operand, "*?[") {
+		if !tracked && errors.Is(statErr, os.ErrNotExist) && strings.ContainsAny(operand, "*?[") {
 			return nil, nil, fmt.Errorf("workflow list entries must be explicit paths; glob pattern %q is not allowed", operand)
 		}
 		extension := filepath.Ext(canonical)
