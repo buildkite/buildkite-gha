@@ -957,7 +957,7 @@ Pre conditions use the status and action-scoped environment available when prepa
 
 Mutable refs work only while they resolve to the upstream `main` snapshot or a known release above. Every admitted commit uses the native adapter; the upstream JavaScript doesn't run. Each admitted release accepts only the inputs it declares, so earlier releases reject later inputs. Other pre-v3.7.0 commits and unknown commits are unsupported. Compilation emits `W_CHECKOUT_LEGACY_RELEASE` for v1.2.0 and v2.8.0 to nudge an upgrade to v4 or later. Maintainers can update the v4-and-later snapshot with `go generate ./internal/action/integration`; this doesn't widen release admission.
 
-The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean top-level directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to each fetch command and verified submodule fetch command and are never persisted.
+The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean nested directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to the Git commands that fetch repository, LFS, or submodule data and are never persisted.
 
 | Input | Supported values |
 | --- | --- |
@@ -968,15 +968,15 @@ The adapter checks out a detached commit or static branch from the event reposit
 | `ssh-strict` | v2.8.0 and later: omitted or `true`. v1.2.0: omitted. |
 | `ssh-user` | v4 and later: omitted or `git`. Earlier releases: omitted. |
 | `persist-credentials` | v2.8.0 and later: omitted or `false`. v1.2.0: omitted. |
-| `path` | Omitted, empty, or one clean non-`.git` top-level workspace directory. |
-| `clean` | Omitted or `true`; the root workspace or selected path must be empty or absent. |
-| `filter` | v4 and later: omitted or empty. Earlier releases: omitted. |
-| `sparse-checkout` | v3.7.0 and later: omitted or empty. Earlier releases: omitted. |
-| `sparse-checkout-cone-mode` | v3.7.0 and later: omitted or `true`. Earlier releases: omitted. |
+| `path` | Omitted, empty, or a clean relative directory without a `.git` path segment. The resolved path stays inside the workspace and can't traverse symbolic-link parents. |
+| `clean` | Omitted, `true`, or `false`; the root workspace must be empty, or the selected path must be absent. Existing-directory reuse is unsupported, so `false` differs only by matching workflows that select a fresh target. |
+| `filter` | v4 and later: omitted, empty, or one Git partial-clone filter without control characters. Earlier releases: omitted. |
+| `sparse-checkout` | v3.7.0 and later: omitted, empty, or up to 1,000 non-empty patterns totaling at most 1 MiB. Earlier releases: omitted. |
+| `sparse-checkout-cone-mode` | v3.7.0 and later: omitted, `true`, or `false`. Earlier releases: omitted. |
 | `fetch-depth` | Omitted or a nonnegative integer; `0` fetches full history. v1.2.0 fetches full history when omitted. |
 | `fetch-tags` | v3.7.0 and later: omitted, `true`, or `false`. Earlier releases: omitted. |
 | `show-progress` | v4 and later: omitted, `true`, or `false`. Earlier releases: omitted. |
-| `lfs` | Omitted or `false`. |
+| `lfs` | Omitted, `true`, or `false`. `true` requires Git LFS in the job image. |
 | `submodules` | Omitted, `false`, `true`, or `recursive`; whitespace is trimmed and casing is ignored. |
 | `set-safe-directory` | v2.8.0 and later: omitted or `true`. v1.2.0: omitted. |
 | `github-server-url` | v3.7.0 and later: omitted, empty, or `https://github.com`. Earlier releases: omitted. |
@@ -986,9 +986,36 @@ The `ref` and `commit` outputs are unavailable for v1.2.0, v2.8.0, and v3.7.0. U
 
 The `false` value and omission do not run submodule commands. The `true` value runs native Git for direct children, and `recursive` includes nested children. Relative URLs and `fetch-depth` follow native Git behavior. Public and private GitHub submodules are supported under the job's repository access; external HTTPS submodules are anonymous. `git@github.com:` URLs are rewritten to HTTPS. Other SSH and non-HTTPS transports are unsupported.
 
+Sparse checkout applies `blob:none` automatically unless `filter` is explicit. Cone mode treats each line as a directory. Non-cone mode uses Git ignore-style patterns. LFS installs repository-local hooks before fetch. A regular checkout fetches the selected revision's LFS objects before checkout; sparse checkout lets Git LFS download only materialized paths.
+
+```yaml
+- uses: actions/checkout@v7
+  with:
+    path: sources/application
+    filter: blob:limit=1m
+    fetch-depth: 20
+    show-progress: false
+
+- uses: actions/checkout@v7
+  with:
+    path: sources/docs
+    sparse-checkout: |
+      docs
+      schemas
+
+- uses: actions/checkout@v7
+  with:
+    lfs: true
+    sparse-checkout: |
+      /*.md
+      /assets/
+      !/assets/archive/
+    sparse-checkout-cone-mode: false
+```
+
 See the [security model](security.md#checkout-and-submodules) for credential, Git, and job-isolation boundaries.
 
-Alternate repositories, tags, non-event dynamic commits, LFS, sparse checkout, GitHub Enterprise Server, and credential persistence remain unsupported. Commit and branch checkouts remain detached and confined to the event repository.
+Alternate repositories, tags, non-event dynamic commits, GitHub Enterprise Server, credential persistence, and existing-directory reuse remain unsupported. Commit and branch checkouts remain detached and confined to the event repository.
 
 ### Upload artifact action
 
