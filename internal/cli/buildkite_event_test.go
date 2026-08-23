@@ -144,12 +144,8 @@ func TestBuildkiteEventSourceMappings(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			env := map[string]string{}
-			for key, value := range base {
-				env[key] = value
-			}
-			for key, value := range test.env {
-				env[key] = value
-			}
+			maps.Copy(env, base)
+			maps.Copy(env, test.env)
 			source, err := buildkiteEventSource(func(key string) string { return env[key] })
 			if err != nil {
 				t.Fatal(err)
@@ -215,9 +211,7 @@ func TestBuildkiteEventSourceFailsClosed(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			env := map[string]string{}
-			for key, value := range valid {
-				env[key] = value
-			}
+			maps.Copy(env, valid)
 			env[test.key] = test.value
 			if _, err := buildkiteEventSource(func(key string) string { return env[key] }); err == nil {
 				t.Fatal("unexpected success")
@@ -225,9 +219,7 @@ func TestBuildkiteEventSourceFailsClosed(t *testing.T) {
 		})
 	}
 	env := map[string]string{}
-	for key, value := range valid {
-		env[key] = value
-	}
+	maps.Copy(env, valid)
 	env["BUILDKITE_PULL_REQUEST"], env["BUILDKITE_TAG"] = "3", "v1"
 	if _, err := buildkiteEventSource(func(key string) string { return env[key] }); err == nil || !strings.Contains(err.Error(), "contradictory") {
 		t.Fatalf("error = %v", err)

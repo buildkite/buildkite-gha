@@ -3,6 +3,7 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"sort"
@@ -984,12 +985,8 @@ func mergeEnv(base, override map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(base)+len(override))
-	for name, value := range base {
-		out[name] = value
-	}
-	for name, value := range override {
-		out[name] = value
-	}
+	maps.Copy(out, base)
+	maps.Copy(out, override)
 	return out
 }
 

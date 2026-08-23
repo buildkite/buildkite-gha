@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -28,10 +29,8 @@ const (
 )
 
 func validateDownloadArtifactCommit(commit string) error {
-	for _, supported := range DownloadArtifactCommits() {
-		if commit == supported {
-			return nil
-		}
+	if slices.Contains(DownloadArtifactCommits(), commit) {
+		return nil
 	}
 	return versionError("actions/download-artifact", "native adapter", commit, DownloadArtifactCommits())
 }

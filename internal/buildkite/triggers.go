@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -306,10 +307,8 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 			}
 		case "release":
 			if snapshot.ReleaseAction != nil {
-				for _, action := range trigger.Types {
-					if action == *snapshot.ReleaseAction {
-						return "", nil
-					}
+				if slices.Contains(trigger.Types, *snapshot.ReleaseAction) {
+					return "", nil
 				}
 				return fmt.Sprintf("Release activity %q does not match this workflow's release activity filters.", *snapshot.ReleaseAction), nil
 			}

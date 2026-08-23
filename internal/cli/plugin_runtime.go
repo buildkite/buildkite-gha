@@ -176,7 +176,7 @@ func downloadPluginReleaseFile(ctx context.Context, client *http.Client, source,
 func pluginAssetChecksum(contents []byte, asset string) ([sha256.Size]byte, error) {
 	var result [sha256.Size]byte
 	matches := 0
-	for _, line := range strings.Split(string(contents), "\n") {
+	for line := range strings.SplitSeq(string(contents), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 || strings.TrimPrefix(fields[1], "*") != asset {
 			continue

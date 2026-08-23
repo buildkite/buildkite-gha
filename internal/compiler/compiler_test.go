@@ -3171,7 +3171,7 @@ jobs:
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			event := []byte(fmt.Sprintf(`{
+			event := fmt.Appendf(nil, `{
   "provider": "github",
   "event": %q,
   "repository": {"owner": "buildkite", "name": "kafka"},
@@ -3179,7 +3179,7 @@ jobs:
   "sha": "1111111111111111111111111111111111111111",
   "actor": "buildkite-gha",
   "payload": %s
-}`, test.event, test.payload))
+}`, test.event, test.payload)
 			result, err := Compile("ci.yml", workflow, event)
 			if err != nil {
 				t.Fatal(err)
@@ -3215,7 +3215,7 @@ jobs:
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			event := []byte(fmt.Sprintf(`{
+			event := fmt.Appendf(nil, `{
   "provider": "github",
   "event": %q,
   "repository": {"owner": "buildkite", "name": "kafka"},
@@ -3223,7 +3223,7 @@ jobs:
   "sha": "1111111111111111111111111111111111111111",
   "actor": "buildkite-gha",
   "payload": %s
-}`, test.event, test.ref, test.payload))
+}`, test.event, test.ref, test.payload)
 			plans, err := compileUntrustedPlans("ci.yml", workflow, event, "0.0.0-test", testDistributionDigest, "gha-untrusted")
 			if err != nil {
 				t.Fatal(err)

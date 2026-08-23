@@ -464,8 +464,8 @@ func annotationDiagnosticPresentation(diagnostic compatibility.Diagnostic) (head
 			fmt.Sprintf("Action %q is unsupported: ", diagnostic.Action),
 			fmt.Sprintf("Action %q could not be resolved: ", diagnostic.Action),
 		} {
-			if strings.HasPrefix(message, prefix) {
-				message = upperFirst(strings.TrimPrefix(message, prefix))
+			if after, ok := strings.CutPrefix(message, prefix); ok {
+				message = upperFirst(after)
 				break
 			}
 		}

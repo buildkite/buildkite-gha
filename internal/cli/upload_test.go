@@ -2291,7 +2291,7 @@ func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 	t.Setenv("BUILDKITE_BUILD_AUTHOR", "Build Author")
 	t.Setenv("BUILDKITE_GITHUB_EVENT", "pull_request")
 	rawSecret := "raw-webhook-value-must-not-be-retained"
-	runner := &cliCaptureRunner{webhook: []byte(fmt.Sprintf("{\"action\":\"opened\",\"marker\":\"latest\",\"private\":\"%s\",\"pull_request\":{\"base\":{\"ref\":\"main\"}},\"ref\":\"refs/heads/trigger\",\"after\":\"%s\",\"repository\":{\"full_name\":\"other/trigger\"},\"sender\":{\"login\":\"octocat\"}}", rawSecret, strings.Repeat("b", 40)))}
+	runner := &cliCaptureRunner{webhook: fmt.Appendf(nil, "{\"action\":\"opened\",\"marker\":\"latest\",\"private\":\"%s\",\"pull_request\":{\"base\":{\"ref\":\"main\"}},\"ref\":\"refs/heads/trigger\",\"after\":\"%s\",\"repository\":{\"full_name\":\"other/trigger\"},\"sender\":{\"login\":\"octocat\"}}", rawSecret, strings.Repeat("b", 40))}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"upload", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())

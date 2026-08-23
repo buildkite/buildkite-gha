@@ -8,6 +8,7 @@ import (
 	"io"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -1359,8 +1360,8 @@ func validateLockIdentity(lock ActionLock) error {
 }
 
 func validateTopLevelIdentity(uses string, lock ActionLock) error {
-	if strings.HasPrefix(uses, "./") {
-		path := strings.TrimPrefix(uses, "./")
+	if after, ok := strings.CutPrefix(uses, "./"); ok {
+		path := after
 		if lock.Source != "workspace" || path != "" && !cleanActionPath(path) || lock.Path != path {
 			return fmt.Errorf("local action reference does not match lock identity")
 		}
@@ -1374,8 +1375,8 @@ func validateTopLevelIdentity(uses string, lock ActionLock) error {
 }
 
 func validateChildIdentity(parent ActionLock, uses string, child ActionLock) error {
-	if strings.HasPrefix(uses, "./") {
-		path := strings.TrimPrefix(uses, "./")
+	if after, ok := strings.CutPrefix(uses, "./"); ok {
+		path := after
 		if path != "" && !cleanActionPath(path) || child.Source != "workspace" || child.Path != path {
 			return fmt.Errorf("local child does not match workspace action identity")
 		}
@@ -1392,7 +1393,7 @@ func cleanActionPath(value string) bool {
 	if value == "" || len(value) > 1024 || !utf8.ValidString(value) || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || hasControl(value) {
 		return false
 	}
-	for _, segment := range strings.Split(value, "/") {
+	for segment := range strings.SplitSeq(value, "/") {
 		if segment == "" || segment == "." || segment == ".." || len(segment) > 255 {
 			return false
 		}
@@ -1446,10 +1447,5 @@ func validateControlStep(step Step, backgroundIDs map[string]struct{}) error {
 }
 
 func (job Job) HasCapability(name string) bool {
-	for _, capability := range job.RequiredCapabilities {
-		if capability == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(job.RequiredCapabilities, name)
 }

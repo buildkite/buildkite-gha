@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -569,7 +571,7 @@ func validateDockerMountPath(path string) error {
 
 func dockerBuilderDriver(inspection string) string {
 	var driver string
-	for _, line := range strings.Split(inspection, "\n") {
+	for line := range strings.SplitSeq(inspection, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 || fields[0] != "Driver:" {
 			continue
@@ -1195,7 +1197,7 @@ func canonicalPathWithinRealRoot(root, target string) (string, string, error) {
 		return "", "", fmt.Errorf("path is outside root")
 	}
 	current := lexicalRoot
-	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+	for component := range strings.SplitSeq(relative, string(filepath.Separator)) {
 		current = filepath.Join(current, component)
 		info, statErr := os.Lstat(current)
 		if statErr != nil {
@@ -1362,9 +1364,7 @@ func processEnv(overrides map[string]string) []string {
 	if _, ok := values["TMPDIR"]; !ok {
 		values["TMPDIR"] = os.TempDir()
 	}
-	for name, value := range overrides {
-		values[name] = value
-	}
+	maps.Copy(values, overrides)
 	return mapEnv(values)
 }
 
@@ -1682,7 +1682,7 @@ func (p *commandProcessor) addMaskLocked(value string) {
 		return
 	}
 	p.addMaskValueLocked(value)
-	for _, line := range strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(value, "\r\n", "\n"), "\n") {
 		if line != "" && line != value {
 			p.addMaskValueLocked(line)
 		}
@@ -1696,10 +1696,8 @@ func (p *commandProcessor) addMaskLocked(value string) {
 }
 
 func (p *commandProcessor) addMaskValueLocked(value string) {
-	for _, mask := range p.masks {
-		if mask == value {
-			return
-		}
+	if slices.Contains(p.masks, value) {
+		return
 	}
 	p.masks = append(p.masks, value)
 }
@@ -1721,7 +1719,7 @@ func parseWorkflowCommand(line string) (parsedWorkflowCommand, bool) {
 	}
 	properties := map[string]string{}
 	if hasProperties {
-		for _, property := range strings.Split(strings.TrimSpace(propertyList), ",") {
+		for property := range strings.SplitSeq(strings.TrimSpace(propertyList), ",") {
 			name, value, ok := strings.Cut(property, "=")
 			if !ok || name == "" || value == "" {
 				continue

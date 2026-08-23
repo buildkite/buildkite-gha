@@ -898,13 +898,11 @@ func TestStoreConcurrentMaterialize(t *testing.T) {
 	results := make(chan Materialized, 2)
 	errs := make(chan error, 2)
 	for range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			got, err := store.Materialize(t.Context(), resolved)
 			results <- got
 			errs <- err
-		}()
+		})
 	}
 	wg.Wait()
 	close(results)
@@ -1042,9 +1040,7 @@ func TestStoreConcurrentBoundedEviction(t *testing.T) {
 	errs := make(chan error, 8)
 	var workers sync.WaitGroup
 	for i := range 8 {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			commit := fmt.Sprintf("%040x", i+1)
 			materialized, err := stores[i%len(stores)].Materialize(t.Context(), Resolved{Reference: ref, Commit: commit})
 			if err == nil {
@@ -1052,7 +1048,7 @@ func TestStoreConcurrentBoundedEviction(t *testing.T) {
 				materialized.Release()
 			}
 			errs <- err
-		}()
+		})
 	}
 	workers.Wait()
 	close(errs)
@@ -1394,15 +1390,13 @@ func TestActionResolutionSnapshotCoalescesConcurrentResolution(t *testing.T) {
 	errs := make(chan error, 8)
 	var workers sync.WaitGroup
 	for range 8 {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			resolved, err := resolver.Resolve(t.Context(), ref)
 			if err == nil && resolved.Commit != testSHA {
 				err = fmt.Errorf("commit = %s", resolved.Commit)
 			}
 			errs <- err
-		}()
+		})
 	}
 	workers.Wait()
 	close(errs)

@@ -240,7 +240,7 @@ type checkoutSubmoduleStatusWriter struct {
 }
 
 func (w *checkoutSubmoduleStatusWriter) Write(p []byte) (int, error) {
-	for _, line := range strings.Split(strings.TrimSuffix(string(p), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSuffix(string(p), "\n"), "\n") {
 		if line == "" {
 			continue
 		}
@@ -439,9 +439,7 @@ func (r Runner) runRepositoryProviderCheckoutFetch(ctx context.Context, processo
 	if credentials.NoHTTP2 != "" {
 		credentialEnv["BUILDKITE_NO_HTTP2"] = credentials.NoHTTP2
 	}
-	for name, value := range credentials.proxyEnvironment {
-		credentialEnv[name] = value
-	}
+	maps.Copy(credentialEnv, credentials.proxyEnvironment)
 	credentialArgs := repositoryProviderCheckoutCredentialArgs(base, credentials.Agent, credentialHost)
 	cmd := exec.Command(git, append(credentialArgs, fetchArgs...)...)
 	cmd.Dir = workspace

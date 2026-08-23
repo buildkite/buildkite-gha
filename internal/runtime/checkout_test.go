@@ -514,7 +514,7 @@ func TestCheckoutSubmodulesUsesNativePorcelain(t *testing.T) {
 			if test.recursive {
 				statusArgs = append(statusArgs, "--recursive")
 			}
-			for _, line := range strings.Split(strings.TrimSpace(runTestGit(t, workspace, statusArgs...)), "\n") {
+			for line := range strings.SplitSeq(strings.TrimSpace(runTestGit(t, workspace, statusArgs...)), "\n") {
 				if line == "" || line[0] == '-' {
 					t.Fatalf("uninitialized status %q", line)
 				}
@@ -1005,7 +1005,7 @@ printf '%s|%s\n' "$PWD" "$*" >> ` + shellTestQuote(gitLog) + `
 	if strings.Count(string(gitBytes), "git-credentials-helper") != 1 {
 		t.Fatalf("credential helper was not confined to one Git command: %q", gitBytes)
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(gitBytes)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(gitBytes)), "\n") {
 		if !strings.HasPrefix(line, checkoutDirectory+"|") {
 			t.Fatalf("Git command ran outside checkout path %q: %q", checkoutDirectory, line)
 		}

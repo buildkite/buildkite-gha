@@ -200,8 +200,8 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 }
 
 func validCheckoutBranch(value string) bool {
-	if strings.HasPrefix(value, "refs/heads/") {
-		value = strings.TrimPrefix(value, "refs/heads/")
+	if after, ok := strings.CutPrefix(value, "refs/heads/"); ok {
+		value = after
 	} else if strings.HasPrefix(value, "refs/") {
 		return false
 	}
@@ -217,7 +217,7 @@ func validCheckoutBranch(value string) bool {
 			return false
 		}
 	}
-	for _, segment := range strings.Split(value, "/") {
+	for segment := range strings.SplitSeq(value, "/") {
 		if segment == "" || segment == "." || segment == ".." || strings.HasPrefix(segment, ".") || strings.HasSuffix(strings.ToLower(segment), ".lock") {
 			return false
 		}
