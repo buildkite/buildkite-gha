@@ -765,7 +765,7 @@ func openDownloadDirectoryAt(root *os.Root, directory string, create bool) (*os.
 	if directory == "" || directory == "." {
 		return current, nil
 	}
-	for _, component := range strings.Split(directory, "/") {
+	for component := range strings.SplitSeq(directory, "/") {
 		if component == "" || component == "." || component == ".." {
 			_ = current.Close()
 			return nil, fmt.Errorf("invalid artifact directory component")

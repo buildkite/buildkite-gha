@@ -454,7 +454,7 @@ func uploadGlobMatches(pattern, relative string) (bool, error) {
 
 func rejectUploadSymlinkComponents(ctx context.Context, workspace, relative string) error {
 	current := workspace
-	for _, component := range strings.Split(filepath.FromSlash(relative), string(filepath.Separator)) {
+	for component := range strings.SplitSeq(filepath.FromSlash(relative), string(filepath.Separator)) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -474,7 +474,7 @@ func rejectUploadSymlinkComponents(ctx context.Context, workspace, relative stri
 }
 
 func hiddenPath(p string) bool {
-	for _, s := range strings.Split(filepath.ToSlash(p), "/") {
+	for s := range strings.SplitSeq(filepath.ToSlash(p), "/") {
 		if strings.HasPrefix(s, ".") && s != "." && s != ".." {
 			return true
 		}

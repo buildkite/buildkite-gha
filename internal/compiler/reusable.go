@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -505,9 +507,7 @@ func cloneSecretAuthority(authority secretAuthority) secretAuthority {
 	cloned := secretAuthority{unrestricted: authority.unrestricted}
 	if authority.bindings != nil {
 		cloned.bindings = make(map[string]secretBinding, len(authority.bindings))
-		for alias, binding := range authority.bindings {
-			cloned.bindings[alias] = binding
-		}
+		maps.Copy(cloned.bindings, authority.bindings)
 	}
 	return cloned
 }
@@ -554,9 +554,7 @@ func clonePermissions(in *workflow.Permissions) *workflow.Permissions {
 		return nil
 	}
 	out := &workflow.Permissions{Scopes: make(map[string]string, len(in.Scopes)), Span: in.Span}
-	for name, access := range in.Scopes {
-		out.Scopes[name] = access
-	}
+	maps.Copy(out.Scopes, in.Scopes)
 	return out
 }
 
@@ -900,10 +898,8 @@ func containsExpression(value any) bool {
 	case string:
 		return strings.Contains(value, "${{")
 	case []any:
-		for _, element := range value {
-			if containsExpression(element) {
-				return true
-			}
+		if slices.ContainsFunc(value, containsExpression) {
+			return true
 		}
 	case map[string]any:
 		for _, element := range value {
@@ -1152,10 +1148,8 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 			}
 		}
 	}
-	for _, value := range jobValues {
-		if hasInputExpression(value) {
-			return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
-		}
+	if slices.ContainsFunc(jobValues, hasInputExpression) {
+		return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
 	}
 	if hasUnresolvedConditionInput(job.If, deferredInputs) {
 		return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
@@ -1196,10 +1190,8 @@ func containsInputExpression(value any) bool {
 	case string:
 		return hasInputExpression(value)
 	case []any:
-		for _, element := range value {
-			if containsInputExpression(element) {
-				return true
-			}
+		if slices.ContainsFunc(value, containsInputExpression) {
+			return true
 		}
 	case map[string]any:
 		for _, element := range value {

@@ -403,7 +403,7 @@ func (r Runner) pullContainerImage(ctx context.Context, processor *commandProces
 
 func lineSet(output string) map[string]bool {
 	result := map[string]bool{}
-	for _, line := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			result[line] = true
 		}
@@ -518,7 +518,7 @@ func (b *jobContainerBackend) readServicePorts(ctx context.Context, id, name str
 		return nil, fmt.Errorf("query service %q ports: %w", id, err)
 	}
 	result := map[string]string{}
-	for _, line := range strings.Split(strings.TrimSuffix(strings.ReplaceAll(out, "\r\n", "\n"), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSuffix(strings.ReplaceAll(out, "\r\n", "\n"), "\n"), "\n") {
 		if line == "" && out == "" {
 			continue
 		}
@@ -595,7 +595,7 @@ func (b *jobContainerBackend) serviceLogOutput(ctx context.Context, name string)
 }
 
 func (b *jobContainerBackend) emitServiceLogOutput(processor *commandProcessor, output string) {
-	for _, line := range strings.Split(strings.TrimSuffix(strings.ReplaceAll(output, "\r\n", "\n"), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSuffix(strings.ReplaceAll(output, "\r\n", "\n"), "\n"), "\n") {
 		if line != "" {
 			processor.writeLiteral(processor.stderr, line)
 		}

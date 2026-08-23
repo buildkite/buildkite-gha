@@ -91,13 +91,11 @@ func TestActionLockResolverGitHubExactSourceSingleFlightAndTampering(t *testing.
 
 	var wg sync.WaitGroup
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if _, _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err != nil {
 				t.Errorf("resolve: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	fake.mu.Lock()

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/big"
 	"reflect"
 	"sort"
@@ -55,9 +56,7 @@ func expandMatrixDefinition(matrix *workflow.Matrix) ([]map[string]any, error) {
 		for _, current := range matrices {
 			for _, value := range row.Values {
 				combination := make(map[string]any, len(current)+1)
-				for key, existing := range current {
-					combination[key] = existing
-				}
+				maps.Copy(combination, current)
 				combination[row.Name] = value.Data
 				next = append(next, combination)
 				if len(next) > maxMatrixInstances {
@@ -86,9 +85,7 @@ func expandMatrixDefinition(matrix *workflow.Matrix) ([]map[string]any, error) {
 			if included[i].original == nil || !includeCompatible(included[i].original, values) {
 				continue
 			}
-			for key, value := range values {
-				included[i].values[key] = value
-			}
+			maps.Copy(included[i].values, values)
 			matched = true
 		}
 		if !matched {

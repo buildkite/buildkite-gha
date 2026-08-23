@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -699,13 +700,7 @@ func mergedCacheVolume(configured *CacheVolume, requiresMise bool, platform stri
 	}
 	if requiresMise {
 		misePath := platformMiseCachePath(platform)
-		found := false
-		for _, path := range cache.Paths {
-			if path == misePath {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(cache.Paths, misePath)
 		if !found {
 			cache.Paths = append(cache.Paths, misePath)
 		}

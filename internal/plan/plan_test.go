@@ -1097,9 +1097,7 @@ func TestGitHubWorkflowTokenContractAndSchema(t *testing.T) {
 			changed.RequiredCapabilities = append([]string(nil), job.RequiredCapabilities...)
 			changed.RequiredSecrets = append([]string(nil), job.RequiredSecrets...)
 			permissions := map[string]string{}
-			for name, access := range job.GitHubToken.Permissions {
-				permissions[name] = access
-			}
+			maps.Copy(permissions, job.GitHubToken.Permissions)
 			changed.GitHubToken = &GitHubToken{Workflow: job.GitHubToken.Workflow, Permissions: permissions, Aliases: append([]string(nil), job.GitHubToken.Aliases...)}
 			test.edit(&changed)
 			if err := changed.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {

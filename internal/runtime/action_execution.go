@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -126,13 +127,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		}
 		r.Secrets = resolved
 	}
-	cacheRequired := false
-	for _, lock := range job.Actions {
-		if usesCacheService(lock) {
-			cacheRequired = true
-			break
-		}
-	}
+	cacheRequired := slices.ContainsFunc(job.Actions, usesCacheService)
 	if providerTokenRequired || oidcTokenRequired || secretsRequired || r.Cache != nil {
 		if r.Redactor == nil {
 			if providerTokenRequired {
@@ -835,9 +830,7 @@ func mergeWorkflowInputs(inputs, deferred map[string]any) map[string]any {
 	if merged == nil && len(deferred) != 0 {
 		merged = make(map[string]any, len(deferred))
 	}
-	for name, value := range deferred {
-		merged[name] = value
-	}
+	maps.Copy(merged, deferred)
 	return merged
 }
 
@@ -1483,10 +1476,8 @@ func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockR
 	if err != nil {
 		return err
 	}
-	for _, ancestor := range stack {
-		if ancestor == lock.ID {
-			return fmt.Errorf("action recursion detected at lock %q", lock.ID)
-		}
+	if slices.Contains(stack, lock.ID) {
+		return fmt.Errorf("action recursion detected at lock %q", lock.ID)
 	}
 	if usesNativeAdapter(lock) {
 		return nil
@@ -1940,10 +1931,8 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 	if actionLock != nil {
 		actionIdentity = actionLock.ID
 	}
-	for _, ancestor := range actionStack {
-		if ancestor == actionIdentity {
-			return result, fmt.Errorf("action recursion detected at %q", step.Uses)
-		}
+	if slices.Contains(actionStack, actionIdentity) {
+		return result, fmt.Errorf("action recursion detected at %q", step.Uses)
 	}
 	if len(actionStack) >= metadata.MaxNestedActionDepth {
 		return result, fmt.Errorf("local action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, actionPath)
@@ -2645,9 +2634,7 @@ func cloneStrings(in map[string]string) map[string]string {
 }
 
 func mergeInto(target map[string]string, source map[string]string) {
-	for key, value := range source {
-		target[key] = value
-	}
+	maps.Copy(target, source)
 }
 
 func mergeStringMaps(values ...map[string]string) map[string]string {

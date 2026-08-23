@@ -359,8 +359,8 @@ func parseBuildkiteRepository(raw string) (provider, owner, name, cloneURL strin
 		return "", "", "", "", fmt.Errorf("is required")
 	}
 	path := ""
-	if strings.HasPrefix(raw, "git@github.com:") {
-		path = strings.TrimPrefix(raw, "git@github.com:")
+	if after, ok := strings.CutPrefix(raw, "git@github.com:"); ok {
+		path = after
 		provider = "github"
 	} else {
 		u, parseErr := url.Parse(raw)

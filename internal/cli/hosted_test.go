@@ -488,12 +488,10 @@ func TestActionSourceAuthenticationReusesOneTokenAcrossConcurrentWorkflowResolve
 	var wg sync.WaitGroup
 	errs := make(chan error, resolverCount)
 	for _, resolver := range resolvers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, err := resolver.Resolve(t.Context(), ref)
 			errs <- err
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)

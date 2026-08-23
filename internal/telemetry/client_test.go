@@ -287,10 +287,7 @@ func (b *countingBody) Read(p []byte) (int, error) {
 	if b.remaining == 0 {
 		return 0, io.EOF
 	}
-	n := int64(len(p))
-	if n > b.remaining {
-		n = b.remaining
-	}
+	n := min(int64(len(p)), b.remaining)
 	for i := range p[:n] {
 		p[i] = 'x'
 	}

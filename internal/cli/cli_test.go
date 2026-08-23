@@ -756,11 +756,11 @@ jobs:
 	}
 	for i, next := range []string{"deep-2.yml", "deep-3.yml", "shared.yml"} {
 		name := fmt.Sprintf("deep-%d.yml", i+1)
-		if err := os.WriteFile(filepath.Join(workflowDirectory, name), []byte(fmt.Sprintf(`on: workflow_call
+		if err := os.WriteFile(filepath.Join(workflowDirectory, name), fmt.Appendf(nil, `on: workflow_call
 jobs:
   delegated:
     uses: ./.github/workflows/%s
-`, next)), 0o600); err != nil {
+`, next), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -798,11 +798,11 @@ jobs:
 	}
 	for i, next := range []string{"depth-2.yml", "depth-3.yml", "depth-4.yml", "runtime-matrix.yml"} {
 		name := fmt.Sprintf("depth-%d.yml", i+1)
-		if err := os.WriteFile(filepath.Join(workflowDirectory, name), []byte(fmt.Sprintf(`on: workflow_call
+		if err := os.WriteFile(filepath.Join(workflowDirectory, name), fmt.Appendf(nil, `on: workflow_call
 jobs:
   delegated:
     uses: ./.github/workflows/%s
-`, next)), 0o600); err != nil {
+`, next), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

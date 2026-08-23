@@ -103,9 +103,7 @@ func validateBatch(args []string, stderr io.Writer, clientVersion string) int {
 	var resumed atomic.Int64
 	var workers sync.WaitGroup
 	for range options.jobs {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			for record := range work {
 				if ctx.Err() != nil {
 					return
@@ -135,7 +133,7 @@ func validateBatch(args []string, stderr io.Writer, clientVersion string) int {
 				}
 				completed.Add(1)
 			}
-		}()
+		})
 	}
 sendRecords:
 	for _, record := range records {
@@ -371,8 +369,8 @@ func localCompilationDependencyDigest(workflowPath string, contents []byte) (str
 				if strings.Contains(step.Uses, "${{") {
 					return false
 				}
-				if strings.HasPrefix(step.Uses, "./") {
-					path := strings.TrimPrefix(step.Uses, "./")
+				if after, ok := strings.CutPrefix(step.Uses, "./"); ok {
+					path := after
 					if path != "" && (filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))) != path || strings.Contains(path, "\\")) {
 						return false
 					}

@@ -401,7 +401,7 @@ func (fake fakeDocker) calls(t *testing.T) []fakeDockerCall {
 		t.Fatal(err)
 	}
 	var calls []fakeDockerCall
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		fields := strings.Split(line, "|")
 		metadata := fields[0]
 		config, ok := strings.CutPrefix(strings.SplitN(metadata, ";", 2)[0], "config=")
@@ -2096,12 +2096,10 @@ func TestBackgroundSupervisorCommitsCompletedTaskExactlyOnceUnderContention(t *t
 	results := make(chan []stepExecution, callers)
 	var group sync.WaitGroup
 	for range callers {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+		group.Go(func() {
 			<-start
 			results <- supervisor.commitCompleted([]*backgroundTask{task})
-		}()
+		})
 	}
 	close(start)
 	group.Wait()
@@ -5120,7 +5118,7 @@ func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testin
 	if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	nodeBytes := []byte(fmt.Sprintf("#!/bin/sh\nif [ \"${1:-}\" = --version ]; then printf 'v24.18.0\\n'; else printf '%%s|MISE_DATA_DIR=%%s\\n' \"$*\" \"${MISE_DATA_DIR-unset}\" >> %q; fi\n", log))
+	nodeBytes := fmt.Appendf(nil, "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then printf 'v24.18.0\\n'; else printf '%%s|MISE_DATA_DIR=%%s\\n' \"$*\" \"${MISE_DATA_DIR-unset}\" >> %q; fi\n", log)
 	if err := os.WriteFile(node, nodeBytes, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -7365,7 +7363,7 @@ func writeNodeExecutable(t *testing.T, path string, major int) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(fmt.Sprintf("#!/bin/sh\nprintf 'v%d.99.0\\n'\n", major)), 0o755); err != nil {
+	if err := os.WriteFile(path, fmt.Appendf(nil, "#!/bin/sh\nprintf 'v%d.99.0\\n'\n", major), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }

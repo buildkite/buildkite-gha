@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,12 +131,8 @@ func (files commandFiles) apply(result *Result, state map[string]string) (fileCo
 		result.pathBaseSet = true
 		result.Paths = result.Paths[:0]
 	}
-	for name, value := range outputs {
-		result.Outputs[name] = value
-	}
-	for name, value := range env {
-		result.Env[name] = value
-	}
+	maps.Copy(result.Outputs, outputs)
+	maps.Copy(result.Env, env)
 	for name, value := range states {
 		result.State[name] = value
 		if state != nil {
@@ -208,7 +205,7 @@ func parsePathContents(contents []byte, err error) ([]string, error) {
 		return nil, err
 	}
 	var paths []string
-	for _, line := range strings.Split(strings.ReplaceAll(string(contents), "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(string(contents), "\r\n", "\n"), "\n") {
 		if line == "" {
 			continue
 		}

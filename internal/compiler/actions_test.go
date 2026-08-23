@@ -645,12 +645,10 @@ func TestMemoizeActionSourceCoalescesConcurrentResolution(t *testing.T) {
 	var wait sync.WaitGroup
 	errs := make(chan error, workers)
 	for range workers {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
+		wait.Go(func() {
 			_, _, err := shared.Fetch(t.Context(), ref)
 			errs <- err
-		}()
+		})
 	}
 	<-fake.started
 	close(fake.release)

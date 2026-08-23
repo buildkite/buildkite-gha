@@ -393,13 +393,14 @@ func repoParts(r Reference, suffix ...string) []string {
 }
 func apiURL(base *url.URL, parts ...string) *url.URL {
 	u := *base
-	decoded := strings.TrimSuffix(base.Path, "/")
+	var decoded strings.Builder
+	decoded.WriteString(strings.TrimSuffix(base.Path, "/"))
 	escaped := strings.TrimSuffix(base.EscapedPath(), "/")
 	for _, part := range parts {
-		decoded += "/" + part
+		decoded.WriteString("/" + part)
 		escaped += "/" + url.PathEscape(part)
 	}
-	u.Path, u.RawPath = decoded, escaped
+	u.Path, u.RawPath = decoded.String(), escaped
 	return &u
 }
 func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
@@ -1045,7 +1046,7 @@ func omittedSymlinkTarget(name, linkname string, size int64, c config) (string, 
 	if target == "." || target == ".." || strings.HasPrefix(target, "../") {
 		return "", fmt.Errorf("archive symlink target escapes root")
 	}
-	for _, part := range strings.Split(target, "/") {
+	for part := range strings.SplitSeq(target, "/") {
 		if part == "" || part == "." || part == ".." || len(part) > c.maxSegment {
 			return "", fmt.Errorf("unsafe archive symlink target")
 		}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -158,9 +159,7 @@ func (a *actionSourceAuthentication) warnAnonymousFallback(reason string) {
 
 func hostedOptions(groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string) compiler.Options {
 	targets := hostedRunnerTargets()
-	for label, target := range configuredTargets {
-		targets[label] = target
-	}
+	maps.Copy(targets, configuredTargets)
 	options := compiler.Options{
 		EventTrust:           compiler.EventUntrusted,
 		GroupLabel:           groupLabel,
