@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
@@ -148,7 +149,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			}
 			for key := range runner {
 				switch key {
-				case "runs-on", "queue", "image":
+				case "runs-on", "queue", "image", "cache":
 				default:
 					return pluginConfiguration{}, fmt.Errorf("runner %d contains unknown field %q", index, key)
 				}
@@ -173,6 +174,13 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			if err != nil {
 				return pluginConfiguration{}, fmt.Errorf("runner %d: %w", index, err)
 			}
+			if cacheValue, configured := runner["cache"]; configured {
+				cache, err := parsePluginCacheVolume(cacheValue)
+				if err != nil {
+					return pluginConfiguration{}, fmt.Errorf("runner %d: %w", index, err)
+				}
+				target.Cache = cache
+			}
 			if _, duplicate := targets[label]; duplicate {
 				return pluginConfiguration{}, fmt.Errorf("runner label %q may only be configured once", label)
 			}
@@ -187,6 +195,46 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 		}
 	}
 	return pluginConfiguration{Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, OIDC: oidc, runnerTargets: targets}, nil
+}
+
+func parsePluginCacheVolume(value any) (*compiler.CacheVolume, error) {
+	cacheObject, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("cache must be a JSON object")
+	}
+	for key := range cacheObject {
+		switch key {
+		case "paths", "name", "size":
+		default:
+			return nil, fmt.Errorf("cache contains unknown field %q", key)
+		}
+	}
+	paths, configured := cacheObject["paths"]
+	if !configured {
+		return nil, fmt.Errorf("cache paths is required")
+	}
+	cache := &compiler.CacheVolume{}
+	var err error
+	cache.Paths, err = pluginNonEmptyStringList(paths, "cache paths")
+	if err != nil {
+		return nil, err
+	}
+	if name, configured := cacheObject["name"]; configured {
+		cache.Name, ok = name.(string)
+		if !ok || cache.Name == "" {
+			return nil, fmt.Errorf("cache name must be a non-empty string")
+		}
+	}
+	if size, configured := cacheObject["size"]; configured {
+		cache.Size, ok = size.(string)
+		if !ok || cache.Size == "" {
+			return nil, fmt.Errorf("cache size must be a non-empty string")
+		}
+	}
+	if err := buildkitepipeline.ValidateCacheVolume(*cache); err != nil {
+		return nil, err
+	}
+	return cache, nil
 }
 
 func parsePluginOIDCConfiguration(value any) (*plan.OIDCConfiguration, error) {

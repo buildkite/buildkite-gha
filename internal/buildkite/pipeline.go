@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -37,6 +38,52 @@ var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var runtimeImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
 var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var cacheNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$`)
+var cacheNameVariablePattern = regexp.MustCompile(`\$\{BUILDKITE_[A-Z0-9_]+\}`)
+var cacheSizePattern = regexp.MustCompile(`^[0-9]+g$`)
+
+// CacheVolume is one Buildkite Hosted cache volume attached to a generated job.
+type CacheVolume struct {
+	Paths []string
+	Name  string
+	Size  string
+}
+
+// ValidateCacheVolume validates Buildkite's map-form cache volume contract.
+func ValidateCacheVolume(cache CacheVolume) error {
+	if len(cache.Paths) == 0 {
+		return fmt.Errorf("cache paths must be a non-empty array of non-empty strings")
+	}
+	seen := make(map[string]struct{}, len(cache.Paths))
+	for i, path := range cache.Paths {
+		if strings.TrimSpace(path) == "" || strings.IndexFunc(path, unicode.IsControl) >= 0 {
+			return fmt.Errorf("cache paths entry %d must be a non-empty string", i)
+		}
+		if !filepath.IsAbs(path) {
+			return fmt.Errorf("cache path %q must be absolute", path)
+		}
+		if _, duplicate := seen[path]; duplicate {
+			return fmt.Errorf("cache path %q may only be configured once", path)
+		}
+		seen[path] = struct{}{}
+	}
+	if cache.Name != "" {
+		literalShape := cacheNameVariablePattern.ReplaceAllString(cache.Name, "a")
+		if len(cache.Name) > 100 || strings.Contains(literalShape, "$") || !cacheNamePattern.MatchString(literalShape) {
+			return fmt.Errorf("cache name must be at most 100 characters, use only letters, numbers, hyphens, and ${BUILDKITE_*} variables, and start and end with a letter, number, or variable")
+		}
+	}
+	if cache.Size != "" {
+		if !cacheSizePattern.MatchString(cache.Size) {
+			return fmt.Errorf("cache size must be at least 20 gigabytes in Ng format")
+		}
+		gigabytes := strings.TrimLeft(strings.TrimSuffix(cache.Size, "g"), "0")
+		if len(gigabytes) < 2 || (len(gigabytes) == 2 && gigabytes < "20") {
+			return fmt.Errorf("cache size must be at least 20 gigabytes in Ng format")
+		}
+	}
+	return nil
+}
 
 // Pipeline is the validated input required to emit generated compatibility jobs.
 type Pipeline struct {
@@ -113,6 +160,7 @@ type Job struct {
 	PlanDigest         string
 	Dependencies       []string
 	RequiresMise       bool
+	Cache              *CacheVolume
 	SoftFail           bool
 	ConcurrencyGroup   string
 	Concurrency        int
@@ -454,7 +502,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 				`if command -v sha256sum >/dev/null 2>&1; then actual_plan_digest="$(sha256sum "$plan" | awk '{print "sha256:" $1}')"; elif command -v shasum >/dev/null 2>&1; then actual_plan_digest="$(shasum -a 256 "$plan" | awk '{print "sha256:" $1}')"; else echo 'buildkite-gha: no SHA-256 tool available' >&2; exit 1; fi`,
 				"test \"$actual_plan_digest\" = "+shellQuote(job.PlanDigest),
 			)
-			commands = append(commands, experimentalRunnerUserBootstrap(job.RequiresMise, runtimeImage != "")...)
+			commands = append(commands, experimentalRunnerUserBootstrap(job.RequiresMise, runtimeImage != "", job.Cache)...)
 			runJob = "BUILDKITE_GHA_PLAN_DIGEST=" + shellQuote(job.PlanDigest) + ` "$distribution" run-job --plan "$plan"`
 		}
 		if runtimeImage != "" {
@@ -478,11 +526,19 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
 		}
 		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
-		if job.RequiresMise {
+		cache := mergedCacheVolume(job.Cache, job.RequiresMise, platform)
+		if cache != nil {
 			_, _ = fmt.Fprintf(out, "%scache:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s  paths:\n", attributeIndent)
-			_, _ = fmt.Fprintf(out, "%s    - %s\n", attributeIndent, yamlScalar(platformMiseCachePath(platform)))
-			_, _ = fmt.Fprintf(out, "%s  name: %s\n", attributeIndent, yamlScalar(runtimeCacheName+"-"+platformCacheKey(platform)))
+			for _, path := range cache.Paths {
+				_, _ = fmt.Fprintf(out, "%s    - %s\n", attributeIndent, yamlScalar(path))
+			}
+			if cache.Name != "" {
+				_, _ = fmt.Fprintf(out, "%s  name: %s\n", attributeIndent, yamlScalar(cache.Name))
+			}
+			if cache.Size != "" {
+				_, _ = fmt.Fprintf(out, "%s  size: %s\n", attributeIndent, yamlScalar(cache.Size))
+			}
 		}
 		if job.SoftFail {
 			_, _ = fmt.Fprintf(out, "%ssoft_fail:\n%s  - exit_status: %d\n", attributeIndent, attributeIndent, ContinueOnErrorExitStatus)
@@ -631,6 +687,35 @@ func platformMiseCachePath(platform string) string {
 	return root + "/mise/" + platformCacheKey(platform)
 }
 
+func mergedCacheVolume(configured *CacheVolume, requiresMise bool, platform string) *CacheVolume {
+	if configured == nil && !requiresMise {
+		return nil
+	}
+	cache := &CacheVolume{}
+	if configured != nil {
+		cache.Paths = append(cache.Paths, configured.Paths...)
+		cache.Name = configured.Name
+		cache.Size = configured.Size
+	}
+	if requiresMise {
+		misePath := platformMiseCachePath(platform)
+		found := false
+		for _, path := range cache.Paths {
+			if path == misePath {
+				found = true
+				break
+			}
+		}
+		if !found {
+			cache.Paths = append(cache.Paths, misePath)
+		}
+		if cache.Name == "" {
+			cache.Name = runtimeCacheName + "-" + platformCacheKey(platform)
+		}
+	}
+	return cache
+}
+
 type dependency struct {
 	Step         string
 	AllowFailure bool
@@ -765,6 +850,11 @@ func orderJobs(compilerStep string, input []Job) ([]Job, error) {
 func validateJob(compilerStep string, job Job) error {
 	if !validStepKey(job.Key) || job.Key == compilerStep {
 		return fmt.Errorf("invalid generated step key %q", job.Key)
+	}
+	if job.Cache != nil {
+		if err := ValidateCacheVolume(*job.Cache); err != nil {
+			return fmt.Errorf("job %q has invalid cache configuration: %w", job.Key, err)
+		}
 	}
 	if job.Label == "" {
 		return fmt.Errorf("job %q requires a label", job.Key)

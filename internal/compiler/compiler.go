@@ -80,6 +80,7 @@ type JobInstance struct {
 	Queue                   string                    `json:"queue"`
 	Platform                Platform                  `json:"-"`
 	RuntimeImage            string                    `json:"runtime_image,omitempty"`
+	Cache                   *CacheVolume              `json:"-"`
 	Matrix                  map[string]any            `json:"matrix,omitempty"`
 	Inputs                  map[string]any            `json:"inputs,omitempty"`
 	DeferredInputs          map[string]DeferredInput  `json:"deferred_inputs,omitempty"`

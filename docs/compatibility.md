@@ -571,6 +571,11 @@ platform, and immutable Linux image. The importer applies that target verbatim
 and publishes returned fallback warnings as annotations. The server rejects
 selectors that require an incompatible operating system or architecture.
 
+Explicit mappings can also attach one [Buildkite Hosted cache
+volume](cli.md#configure-generated-job-cache-volumes) to generated jobs. This
+configuration is outside the GitHub workflow and does not change workflow
+syntax or action inputs.
+
 `validate --profile hosted` has no job-scoped API and admits only the local
 `macos-latest` preset.
 
@@ -621,6 +626,9 @@ transport has no authoritative current-attempt and durable idempotency fence.
 ### Containers and services
 
 **🟡 Supported subset.** Linux jobs support job containers and GitHub-compatible services. A typical PostgreSQL service works without Buildkite-specific syntax:
+
+Runner-mapped Buildkite cache volumes are not supported for jobs that set
+`container`.
 
 ```yaml
 services:
