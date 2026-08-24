@@ -288,6 +288,9 @@ func (a *actionAdapter) Execute(ctx context.Context, state actionAdapterState, o
 		processErr = a.run.runShellProcess(ctx, processor, dir, environment, &result, shell, command)
 	case program.LeafDocker:
 		if facts.Action.Docker.Image == "" {
+			if facts.Action.Docker.Entrypoint != "" {
+				return state, program.Execution{}, fmt.Errorf("normalized Dockerfile action cannot override its entrypoint")
+			}
 			if _, entryErr := verifiedActionEntrypoint(facts, "Dockerfile"); entryErr != nil {
 				return state, program.Execution{}, entryErr
 			}

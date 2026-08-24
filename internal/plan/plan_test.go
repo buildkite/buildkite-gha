@@ -54,6 +54,38 @@ func TestNormalizedProgramsAreRequiredAtThePlanBoundary(t *testing.T) {
 	}
 }
 
+func TestNormalizedDockerfileActionCannotOverrideEntrypoint(t *testing.T) {
+	const actionID = "a-0000000000000001"
+	job := validJob()
+	job.Steps = []Step{{ID: "step-1", Kind: "uses", Uses: "./action", Action: &ActionSelector{Lock: actionID}}}
+	job.Program.Job.Steps = []program.Step{resolvedProgramStep("step-1", "./action", actionID)}
+	job.Actions = []ActionLock{{ID: actionID, Source: "workspace", Path: "action", SourceDigest: "sha256:" + strings.Repeat("4", 64)}}
+	job.ActionPrograms[actionID] = program.Action{
+		Source: "workspace", Runtime: program.ActionRuntimeDocker,
+		Docker: &program.DockerAction{Entrypoint: "/bin/sh"},
+	}
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "cannot override its entrypoint") {
+		t.Fatalf("Dockerfile entrypoint override error = %v", err)
+	}
+
+	job.ActionPrograms[actionID].Docker.Entrypoint = ""
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	actionPrograms := document["action_programs"].(map[string]any)
+	action := actionPrograms[actionID].(map[string]any)
+	docker := action["docker"].(map[string]any)
+	docker["entrypoint"] = "/bin/sh"
+	if err := compileJobPlanSchema(t).Validate(document); err == nil {
+		t.Fatal("schema accepted a Dockerfile entrypoint override")
+	}
+}
+
 func TestResolvedActionStepsMustMatchNormalizedInvocations(t *testing.T) {
 	const actionID = "a-0000000000000001"
 	digest := "sha256:" + strings.Repeat("4", 64)

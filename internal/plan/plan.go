@@ -604,6 +604,9 @@ func validateActionProgram(id string, action program.Action, locks map[string]Ac
 		if action.Docker.Image != locks[id].DockerImage {
 			return fmt.Errorf("normalized Docker action program %q image does not match its lock", id)
 		}
+		if action.Docker.Image == "" && action.Docker.Entrypoint != "" {
+			return fmt.Errorf("normalized Dockerfile action program %q cannot override its entrypoint", id)
+		}
 	default:
 		return fmt.Errorf("normalized action program %q has unsupported runtime %q", id, action.Runtime)
 	}
