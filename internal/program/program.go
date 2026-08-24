@@ -251,12 +251,14 @@ func visitContainer(container Container, visit func(Site) error) error {
 	if err := visitBindings(container.Env, visit); err != nil {
 		return err
 	}
-	for _, port := range container.Ports {
-		if err := visitSite(port, visit); err != nil {
-			return err
+	for _, sites := range [][]Site{container.Ports, container.Volumes} {
+		for _, site := range sites {
+			if err := visitSite(site, visit); err != nil {
+				return err
+			}
 		}
 	}
-	return nil
+	return visitSite(container.Options, visit)
 }
 
 func visitServiceContainer(container ServiceContainer, visit func(Site) error) error {
