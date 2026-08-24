@@ -690,7 +690,13 @@ A step can continue after failure and expose its outcome to a later condition:
 
 ### Commands and actions
 
-**🟡 Supported subset.** Commands run in `bash`, `sh`, `python`, or a custom shell template within the Linux or macOS workspace. Custom templates use `command [options] {0} [more-options]`; `{0}` receives a temporary script path. Arguments support shell-style single quotes, double quotes, and backslash escaping without shell expansion. The runner or job container must provide the selected command on `PATH`; R and Julia are not preinstalled by this support. PowerShell and Windows shells remain unsupported. Statically known unsupported shells fail workflow processing before a generated workflow job can be claimed by an agent. Shell expressions that need runtime values stay in the job plan and fail before the step starts if they resolve to an unsupported shell. Working directories cannot escape the workspace.
+**🟡 Supported subset.** Use `bash`, `sh`, `python`, or a custom shell template on Linux or macOS. Custom templates use `command [options] {0} [more-options]`. The `{0}` placeholder receives a temporary script path. Arguments can use single quotes, double quotes, and backslash escapes. They do not expand shell syntax.
+
+Install the custom command on the runner or in the job container, and add it to `PATH`. R and Julia are not installed automatically.
+
+PowerShell and Windows shells are not supported. A known unsupported shell fails workflow processing before an agent can claim the generated job. A shell expression that needs a runtime value is checked before its step starts. If it resolves to an unsupported shell, the step fails. Use `bash`, `sh`, `python`, or a valid custom template instead.
+
+Working directories must stay inside the workspace.
 
 A shell step can specify its shell and workspace-relative working directory:
 
