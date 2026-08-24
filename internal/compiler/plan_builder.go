@@ -304,13 +304,18 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 
 	if instance.Container != nil {
 		container := *instance.Container
-		if container.Image, err = reduceTemplate(container.Image); err != nil {
-			return JobInstance{}, err
+		for _, field := range []*string{&container.Image, &container.Options} {
+			if *field, err = reduceTemplate(*field); err != nil {
+				return JobInstance{}, err
+			}
 		}
 		if container.Env, err = reduceMap(container.Env); err != nil {
 			return JobInstance{}, err
 		}
 		if container.Ports, err = reduceSlice(container.Ports); err != nil {
+			return JobInstance{}, err
+		}
+		if container.Volumes, err = reduceSlice(container.Volumes); err != nil {
 			return JobInstance{}, err
 		}
 		instance.Container = &container

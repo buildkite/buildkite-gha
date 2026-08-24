@@ -88,9 +88,11 @@ type Defaults struct {
 }
 
 type Container struct {
-	Image Site
-	Env   []Binding
-	Ports []Site
+	Image   Site
+	Env     []Binding
+	Ports   []Site
+	Volumes []Site
+	Options Site
 }
 
 type ContainerCredentials struct {
