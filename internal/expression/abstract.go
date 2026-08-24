@@ -120,7 +120,18 @@ func newAbstractEvaluator(surface evaluationSurface) expressionEvaluator[Analysi
 
 func analyzeActionInputDefault(node actionlint.ExprNode, knownReferences map[string]any) (Analysis, error) {
 	evaluator := newAbstractEvaluator(actionInputDefaultSurface)
-	evaluator.resolve = func(root string, path []string) (Analysis, error) {
+	evaluator.resolve = abstractReferenceResolver(knownReferences)
+	evaluator.call = func(evaluator *expressionEvaluator[Analysis], node *actionlint.FuncCallNode) (Analysis, error) {
+		if value, recognized, err := evaluatePureFunction(evaluator, node); recognized {
+			return value, err
+		}
+		return Analysis{}, fmt.Errorf("action input default function %q is unsupported", node.Callee)
+	}
+	return evaluator.evaluate(node)
+}
+
+func abstractReferenceResolver(knownReferences map[string]any) func(string, []string) (Analysis, error) {
+	return func(root string, path []string) (Analysis, error) {
 		if strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "token") {
 			analysis := Analysis{Effects: Effects{GitHubToken: GitHubTokenDirect}}
 			if value, ok := knownReferences["github.token"]; ok {
@@ -133,11 +144,31 @@ func analyzeActionInputDefault(node actionlint.ExprNode, knownReferences map[str
 		}
 		return Analysis{}, nil
 	}
+}
+
+func analyzeStepTemplate(node actionlint.ExprNode, knownReferences map[string]any) (Analysis, error) {
+	evaluator := newAbstractEvaluator(stepRuntimeSurface)
+	evaluator.resolve = abstractReferenceResolver(knownReferences)
+	evaluator.resolveRoot = func(string) (Analysis, error) { return Analysis{}, nil }
 	evaluator.call = func(evaluator *expressionEvaluator[Analysis], node *actionlint.FuncCallNode) (Analysis, error) {
+		if isToJSONGitHubCall(node) {
+			return Analysis{Effects: Effects{GitHubToken: GitHubTokenCompositeContext}}, nil
+		}
 		if value, recognized, err := evaluatePureFunction(evaluator, node); recognized {
 			return value, err
 		}
-		return Analysis{}, fmt.Errorf("action input default function %q is unsupported", node.Callee)
+		if strings.EqualFold(node.Callee, "hashFiles") {
+			arguments := make([]Analysis, 0, len(node.Args))
+			for _, argument := range node.Args {
+				value, err := evaluator.evaluate(argument)
+				if err != nil {
+					return Analysis{}, err
+				}
+				arguments = append(arguments, value)
+			}
+			return unknownAnalysis(arguments...), nil
+		}
+		return Analysis{}, fmt.Errorf("step template function %q is unsupported", node.Callee)
 	}
 	return evaluator.evaluate(node)
 }

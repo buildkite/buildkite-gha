@@ -107,6 +107,49 @@ func TestActionInputDefaultAuthorityPreservesRuntimeErrorFallback(t *testing.T) 
 	}
 }
 
+func TestStepTemplateTokenEffectsNarrowWithKnownInputs(t *testing.T) {
+	template := "${{ inputs.fallback == 'cargo-binstall' && github.server_url == 'https://github.com' && github.token || '' }}"
+	for _, test := range []struct {
+		name  string
+		known map[string]any
+		want  bool
+	}{
+		{name: "unknown input", known: map[string]any{"github.server_url": "https://github.com"}, want: true},
+		{name: "matching input", known: map[string]any{"inputs.fallback": "cargo-binstall", "github.server_url": "https://github.com"}, want: true},
+		{name: "disabled input", known: map[string]any{"inputs.fallback": "none", "github.server_url": "https://github.com"}},
+		{name: "Origin provider", known: map[string]any{"inputs.fallback": "cargo-binstall", "github.server_url": "https://origin.cursor.com"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := StepTemplateRequiresGitHubToken(template, test.known)
+			if err != nil || got != test.want {
+				t.Fatalf("StepTemplateRequiresGitHubToken() = %v, %v, want %v", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestStepTemplateWholeGitHubContextDoesNotGrantTokenAuthority(t *testing.T) {
+	got, err := StepTemplateRequiresGitHubToken("${{ toJSON(github) }}", nil)
+	if err != nil || got {
+		t.Fatalf("StepTemplateRequiresGitHubToken() = %v, %v, want false", got, err)
+	}
+}
+
+func TestStepTemplateFunctionsPreserveTokenReachability(t *testing.T) {
+	for _, test := range []struct {
+		template string
+		want     bool
+	}{
+		{template: "${{ hashFiles(github.token) }}", want: true},
+		{template: "${{ format('constant', github.token) }}"},
+	} {
+		got, err := StepTemplateRequiresGitHubToken(test.template, nil)
+		if err != nil || got != test.want {
+			t.Fatalf("StepTemplateRequiresGitHubToken(%q) = %v, %v, want %v", test.template, got, err, test.want)
+		}
+	}
+}
+
 func TestAbstractActionInputDefaultIsSoundAsValuesBecomeKnown(t *testing.T) {
 	for _, source := range []string{
 		"matrix.enabled && github.token || ''",

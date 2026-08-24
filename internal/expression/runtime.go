@@ -198,6 +198,30 @@ func EvaluateStep(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateStepRuntimeNode)
 }
 
+// StepTemplateRequiresGitHubToken reports whether a composite-authored step
+// template can reach a direct github.token reference. knownReferences may
+// contain immutable planning values such as inputs.<name> and
+// github.server_url; every other runtime value remains unknown.
+func StepTemplateRequiresGitHubToken(template string, knownReferences map[string]any) (bool, error) {
+	referencesToken, err := ReferencesCompositeStepGitHubToken(template)
+	if err != nil || !referencesToken {
+		return referencesToken, err
+	}
+	requiresToken := false
+	err = visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
+		analysis, analysisErr := analyzeStepTemplate(node, knownReferences)
+		if analysisErr != nil {
+			// Runtime-dependent failures cannot prove the token branch
+			// unreachable, so preserve conservative authority.
+			requiresToken = true
+			return nil
+		}
+		requiresToken = requiresToken || analysis.Effects.GitHubToken&GitHubTokenDirect != 0
+		return nil
+	})
+	return requiresToken, err
+}
+
 // EvaluateStepControl evaluates one complete expression for a typed workflow
 // step control.
 func EvaluateStepControl(expression string, context Context) (any, error) {

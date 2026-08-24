@@ -439,7 +439,27 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	if n.runtime != metadata.RuntimeComposite {
 		return requirements, nil
 	}
+	knownReferences := n.knownInputReferences(supplied, serverURL)
 	for i, step := range n.metadata.Runs.Steps {
+		if step.Uses == "" {
+			mayRun := compositeStepMayRun(step.If, knownReferences)
+			for _, field := range []struct {
+				name  string
+				value string
+			}{
+				{name: "run", value: step.Run},
+				{name: "working-directory", value: step.WorkingDirectory},
+			} {
+				if err := inspectCompositeStepTemplate(fmt.Sprintf("step %d %s", i+1, field.name), field.value, knownReferences, mayRun, &requirements); err != nil {
+					return actionRequirements{}, err
+				}
+			}
+			for _, name := range sortedKeys(step.Env) {
+				if err := inspectCompositeStepTemplate(fmt.Sprintf("step %d environment %q", i+1, name), step.Env[name], knownReferences, mayRun, &requirements); err != nil {
+					return actionRequirements{}, err
+				}
+			}
+		}
 		if step.Uses == "" {
 			continue
 		}
@@ -463,6 +483,73 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		}
 	}
 	return requirements, nil
+}
+
+func (n *actionNode) knownInputReferences(supplied map[string]string, serverURL string) map[string]any {
+	known := map[string]any{"github.server_url": serverURL}
+	for _, name := range sortedKeys(n.metadata.Inputs) {
+		input := n.metadata.Inputs[name]
+		if input.Default == nil || hasActionInput(supplied, name) {
+			continue
+		}
+		if strings.Contains(*input.Default, "${{") {
+			continue
+		}
+		known["inputs."+strings.ToLower(name)] = *input.Default
+	}
+	for _, name := range sortedKeys(supplied) {
+		if strings.Contains(supplied[name], "${{") {
+			continue
+		}
+		known["inputs."+strings.ToLower(name)] = supplied[name]
+	}
+	return known
+}
+
+func compositeStepMayRun(condition string, knownReferences map[string]any) bool {
+	if referencesStatus, err := expression.ReferencesStatusFunction(condition); err != nil || referencesStatus {
+		return true
+	}
+	inputNames, err := expression.ConditionInputReferences(condition)
+	if err != nil {
+		return true
+	}
+	inputs := map[string]any{}
+	for _, name := range inputNames {
+		value, ok := knownReferences["inputs."+name]
+		if !ok {
+			return true
+		}
+		inputs[name] = value
+	}
+	run, err := expression.EvaluateCondition(condition, expression.ConditionContext{Inputs: inputs})
+	return err != nil || run
+}
+
+func inspectCompositeStepTemplate(field, template string, knownReferences map[string]any, reachable bool, requirements *actionRequirements) error {
+	if template == "" {
+		return nil
+	}
+	referencesEvent, err := expression.TemplateReferencesGitHubEvent(template)
+	if err != nil {
+		return fmt.Errorf("composite action %s: %w", field, err)
+	}
+	if referencesEvent {
+		return fmt.Errorf("composite action %s: github.event cannot be retained in a job plan", field)
+	}
+	names, err := expression.SecretReferences(template)
+	if err != nil {
+		return fmt.Errorf("composite action %s: %w", field, err)
+	}
+	if len(names) != 0 {
+		return fmt.Errorf("composite action %s: composite action metadata cannot grant secret authority", field)
+	}
+	referencesToken, err := expression.StepTemplateRequiresGitHubToken(template, knownReferences)
+	if err != nil {
+		return fmt.Errorf("composite action %s: %w", field, err)
+	}
+	requirements.githubToken = requirements.githubToken || reachable && referencesToken
+	return nil
 }
 
 func hasActionInput(inputs map[string]string, name string) bool {

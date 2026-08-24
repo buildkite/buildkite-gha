@@ -1,5 +1,5 @@
-// Package program defines the normalized workflow execution model shared by
-// compilation, authority planning, and, after the plan-schema cutover, runtime.
+// Package program defines the normalized workflow model shared by compilation,
+// authority planning, and plan projection.
 package program
 
 // Surface selects the expression semantics for one execution site.
@@ -28,8 +28,7 @@ const (
 	ResultObject  ResultType = "object"
 )
 
-// Provenance records who authored an expression. Action metadata gains its own
-// provenance when resolved actions are normalized in the next delivery slice.
+// Provenance records who authored an expression.
 type Provenance string
 
 const ProvenanceWorkflow Provenance = "workflow"

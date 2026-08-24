@@ -876,8 +876,10 @@ context listed below, including `token`, with sorted keys and two-space
 indentation.
 
 The compiler treats that call as a token reference, so normal permissions,
-admission, and redaction apply. Composite steps can consume an already
-authorized context, but composite metadata cannot grant token authority. A
+admission, and redaction apply. A reachable direct `github.token` reference in
+a composite shell step's `run`, `env`, or `working-directory` can request the
+token. Composite metadata can consume an already authorized serialized context,
+but serialization and nested action inputs cannot grant token authority. A
 tokenless context is an error.
 
 Job-level fields and action input defaults cannot call `toJSON(github)`. Bare,
@@ -1211,8 +1213,8 @@ JavaScript and Docker actions with compatible bundled cache clients also receive
 event repository when it:
 
 - statically references `secrets.GITHUB_TOKEN` or `github.token`; or
-- uses an action whose effective input default can reach `github.token` for the
-  event provider.
+- uses an action whose effective input default or reachable composite shell
+  step template can reach `github.token` for the event provider.
 
 A `github.server_url == 'https://github.com'` guard skips the token branch for
 an Origin repository. Native adapters ignore upstream input defaults, so

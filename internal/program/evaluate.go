@@ -14,9 +14,7 @@ type EvaluationContext struct {
 	Condition  expression.ConditionContext
 }
 
-// EvaluateSite applies the concrete runtime semantics selected by a site.
-// The normalized interpreter and the legacy runtime can therefore be tested
-// against the same expression inputs before the plan-schema cutover.
+// EvaluateSite applies the concrete expression semantics selected by a site.
 func EvaluateSite(site Site, context EvaluationContext) (any, error) {
 	var value any
 	var err error
