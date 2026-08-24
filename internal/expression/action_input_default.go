@@ -80,14 +80,11 @@ func EvaluateActionInputDefault(template string, context Context) (string, error
 }
 
 // EvaluateKnownActionInputDefault evaluates a metadata default when immutable
-// provider values are sufficient. Runtime-dependent defaults report unknown.
-func EvaluateKnownActionInputDefault(template, serverURL string) (string, bool, error) {
+// planning references are sufficient. Runtime-dependent defaults report unknown.
+func EvaluateKnownActionInputDefault(template string, knownReferences map[string]any) (string, bool, error) {
 	known := true
 	value, err := evaluateRuntimeTemplate(template, Context{}, func(node actionlint.ExprNode, _ Context) (any, error) {
-		analysis, err := analyzeActionInputDefault(node, map[string]any{
-			"github.server_url": serverURL,
-			"job.check_run_id":  "",
-		})
+		analysis, err := analyzeActionInputDefault(node, knownReferences)
 		if err != nil {
 			return nil, err
 		}

@@ -36,7 +36,7 @@ type expressionDomain[T any] interface {
 	truthiness(T, func(any) bool) (bool, bool)
 	unknown(...T) T
 	unknownWithTruthiness(bool, ...T) T
-	join(...T) T
+	join(func(any) bool, ...T) T
 }
 
 type concreteExpressionDomain struct{}
@@ -53,7 +53,7 @@ func (concreteExpressionDomain) unknown(...any) any {
 func (concreteExpressionDomain) unknownWithTruthiness(bool, ...any) any {
 	panic("concrete expression evaluation produced an unknown value")
 }
-func (concreteExpressionDomain) join(...any) any {
+func (concreteExpressionDomain) join(func(any) bool, ...any) any {
 	panic("concrete expression evaluation joined multiple paths")
 }
 

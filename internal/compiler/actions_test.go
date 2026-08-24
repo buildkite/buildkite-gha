@@ -549,20 +549,33 @@ func TestCompileActionInvocationsReducesProviderBackedCompositeInputDefault(t *t
 inputs:
   enabled:
     default: ${{ github.server_url == 'https://github.com' && 'true' || 'false' }}
+  forwarded:
+    default: ${{ inputs.enabled }}
 runs:
   using: composite
   steps:
     - shell: bash
       env:
-        TOKEN: ${{ inputs.enabled == 'true' && github.token || '' }}
+        TOKEN: ${{ inputs.forwarded == 'true' && github.token || '' }}
       run: echo token
 `)
-	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://origin.cursor.com", []string{"./token"}, []map[string]string{{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if compiled.requiresGitHubToken {
-		t.Fatal("Origin provider-backed default requested a GitHub token")
+	for _, test := range []struct {
+		name      string
+		serverURL string
+		supplied  map[string]string
+	}{
+		{name: "provider-backed default", serverURL: "https://origin.cursor.com", supplied: map[string]string{}},
+		{name: "supplied input forwarded by default", serverURL: "https://github.com", supplied: map[string]string{"enabled": "false"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			compiled, err := compileActionInvocations(t.Context(), workspace, nil, test.serverURL, []string{"./token"}, []map[string]string{test.supplied})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if compiled.requiresGitHubToken {
+				t.Fatal("known false forwarded input requested a GitHub token")
+			}
+		})
 	}
 }
 

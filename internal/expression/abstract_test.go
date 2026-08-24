@@ -154,6 +154,8 @@ func TestStepTemplateKnownRightGuardPrunesUnknownLeft(t *testing.T) {
 	for _, template := range []string{
 		"${{ env.RUNTIME == 'yes' && inputs.enabled == 'true' && github.token || '' }}",
 		"${{ true && (env.RUNTIME == 'yes' && inputs.enabled == 'true') && github.token || '' }}",
+		"${{ case(env.SELECT == 'yes', env.RUNTIME == 'yes' && false, false) && github.token || '' }}",
+		"${{ case(env.RUNTIME == 'yes' && inputs.enabled == 'true', github.token, '') }}",
 	} {
 		got, err := StepTemplateRequiresGitHubToken(template, map[string]any{"inputs.enabled": "false"})
 		if err != nil || got {
@@ -182,12 +184,12 @@ func TestConditionMayBeTrueUsesKnownReferencesAfterUnknownValues(t *testing.T) {
 func TestEvaluateKnownActionInputDefaultUsesProviderValues(t *testing.T) {
 	value, known, err := EvaluateKnownActionInputDefault(
 		"${{ github.server_url == 'https://github.com' && 'true' || 'false' }}",
-		"https://origin.cursor.com",
+		map[string]any{"github.server_url": "https://origin.cursor.com"},
 	)
 	if err != nil || !known || value != "false" {
 		t.Fatalf("EvaluateKnownActionInputDefault() = %q, %v, %v, want false, true", value, known, err)
 	}
-	_, known, err = EvaluateKnownActionInputDefault("${{ matrix.enabled }}", "https://github.com")
+	_, known, err = EvaluateKnownActionInputDefault("${{ matrix.enabled }}", map[string]any{"github.server_url": "https://github.com"})
 	if err != nil || known {
 		t.Fatalf("runtime-dependent EvaluateKnownActionInputDefault() known = %v, error = %v", known, err)
 	}

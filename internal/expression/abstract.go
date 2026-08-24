@@ -88,30 +88,36 @@ func (abstractExpressionDomain) unknown(values ...Analysis) Analysis {
 func (abstractExpressionDomain) unknownWithTruthiness(truthiness bool, values ...Analysis) Analysis {
 	return unknownAnalysisWithTruthiness(truthiness, values...)
 }
-func (abstractExpressionDomain) join(values ...Analysis) Analysis {
+func (domain abstractExpressionDomain) join(truthy func(any) bool, values ...Analysis) Analysis {
 	if len(values) == 0 {
 		return Analysis{}
 	}
 	result := unknownAnalysis(values...)
 	first := values[0].Value
-	if !first.Known {
-		if first.Truthy == nil {
-			return result
-		}
+	if first.Known {
+		identical := true
 		for _, value := range values[1:] {
-			if value.Value.Known || value.Value.Truthy == nil || *value.Value.Truthy != *first.Truthy {
-				return result
+			if !value.Value.Known || !abstractValuesIdentical(value.Value.Value, first.Value) {
+				identical = false
+				break
 			}
 		}
-		result.Value.Truthy = first.Truthy
+		if identical {
+			result.Value = first
+			return result
+		}
+	}
+	firstTruthy, known := domain.truthiness(values[0], truthy)
+	if !known {
 		return result
 	}
 	for _, value := range values[1:] {
-		if !value.Value.Known || !abstractValuesIdentical(value.Value.Value, first.Value) {
+		valueTruthy, known := domain.truthiness(value, truthy)
+		if !known || valueTruthy != firstTruthy {
 			return result
 		}
 	}
-	result.Value = first
+	result.Value.Truthy = &firstTruthy
 	return result
 }
 

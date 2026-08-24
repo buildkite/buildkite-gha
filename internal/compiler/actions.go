@@ -486,23 +486,26 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 }
 
 func (n *actionNode) knownInputReferences(supplied map[string]string, serverURL string) map[string]any {
-	known := map[string]any{"github.server_url": serverURL}
-	for _, name := range sortedKeys(n.metadata.Inputs) {
-		input := n.metadata.Inputs[name]
-		if input.Default == nil || hasActionInput(supplied, name) {
-			continue
-		}
-		value, resolved, err := expression.EvaluateKnownActionInputDefault(*input.Default, serverURL)
-		if err != nil || !resolved {
-			continue
-		}
-		known["inputs."+strings.ToLower(name)] = value
+	known := map[string]any{
+		"github.server_url": serverURL,
+		"job.check_run_id":  "",
 	}
 	for _, name := range sortedKeys(supplied) {
 		if strings.Contains(supplied[name], "${{") {
 			continue
 		}
 		known["inputs."+strings.ToLower(name)] = supplied[name]
+	}
+	for _, name := range sortedKeys(n.metadata.Inputs) {
+		input := n.metadata.Inputs[name]
+		if input.Default == nil || hasActionInput(supplied, name) {
+			continue
+		}
+		value, resolved, err := expression.EvaluateKnownActionInputDefault(*input.Default, known)
+		if err != nil || !resolved {
+			continue
+		}
+		known["inputs."+strings.ToLower(name)] = value
 	}
 	return known
 }
