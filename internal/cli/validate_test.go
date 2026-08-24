@@ -61,6 +61,55 @@ func TestValidateReportsIndependentWorkflowAndEventSyntaxFailures(t *testing.T) 
 	}
 }
 
+func TestValidateReportsActionableWorkflowSyntaxDiagnostics(t *testing.T) {
+	for _, test := range []struct {
+		name, source, headline, message, job string
+		column                               int
+	}{
+		{
+			name:     "GitHub environment",
+			source:   "on: push\njobs:\n  deploy:\n    environment: production\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			headline: "GitHub environments and environment secrets are unsupported.",
+			message:  `GitHub environments and environment secrets are unsupported. Remove the environment key from job "deploy". Approvals, deployment records, and protection rules are unavailable. Move environment secrets into Buildkite secrets and reference them by name. If you need GitHub environments, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`,
+			job:      "deploy",
+			column:   5,
+		},
+		{
+			name:     "job-level write-all",
+			source:   "on: push\njobs:\n  publish:\n    permissions: write-all\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			headline: "permissions: write-all is unsupported as job-level shorthand.",
+			message:  `permissions: write-all is unsupported as job-level shorthand. In job "publish", declare each needed permission explicitly, such as contents: write and pull-requests: write. Move permissions: write-all to the workflow top level only when that broader authority is intended for every job. If you need job-level permissions shorthand, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`,
+			job:      "publish",
+			column:   18,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workflowPath := filepath.Join(t.TempDir(), "workflow.yml")
+			if err := os.WriteFile(workflowPath, []byte(test.source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+				t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+			}
+			var report compatibility.ProcessingReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Diagnostics) != 1 {
+				t.Fatalf("diagnostics = %#v, want one", report.Diagnostics)
+			}
+			diagnostic := report.Diagnostics[0]
+			if diagnostic.Message != test.message || diagnostic.Job != test.job || diagnostic.Location == nil || diagnostic.Location.Path != workflowPath || diagnostic.Location.Line != 4 || diagnostic.Location.Column != test.column {
+				t.Fatalf("diagnostic = %#v, want message %q, job %q at %s:4:%d", diagnostic, test.message, test.job, workflowPath, test.column)
+			}
+			if headline, _ := annotationDiagnosticPresentation(diagnostic); headline != test.headline {
+				t.Fatalf("diagnostic headline = %q, want %q", headline, test.headline)
+			}
+		})
+	}
+}
+
 func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)

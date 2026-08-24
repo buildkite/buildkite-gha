@@ -394,11 +394,11 @@ Supported values are `read`, `write`, and `none`. Supported repository permissio
 
 An omitted map defaults to exactly `contents: read` when a token is needed. This deterministic default does not inherit GitHub repository or organization settings. Hosted token issuance uses only the top-level map. Job-level repository permission maps do not narrow or expand `GITHUB_TOKEN`; the separate `id-token` permission retains job-level behavior. Write access therefore requires an explicit top-level map.
 
-The top-level scalars `permissions: read-all` and `permissions: write-all` expand during compilation to explicit maps containing the 13 supported repository permissions listed above. Plans and workflow-token requests contain those maps, not the aliases. Both expansions exclude `id-token`, `models`, `repository-projects`, `code-quality`, `metadata`, and `vulnerability-alerts`.
+The top-level scalars `permissions: read-all` and `permissions: write-all` expand during compilation to explicit maps containing the 13 supported repository permissions listed above. Plans and workflow-token requests contain those maps, not the shorthands. Both expansions exclude `id-token`, `models`, `repository-projects`, `code-quality`, `metadata`, and `vulnerability-alerts`.
 
 Jobs expanded from reusable workflows use the top-level requesting workflow's repository permissions for `GITHUB_TOKEN`. Only this immutable top-level map is enforced server-side; permission maps in called workflows do not narrow `GITHUB_TOKEN`. The separate `id-token` permission retains called-workflow narrowing. Warnings identify job-level repository maps that differ from the applied top-level permissions and called-workflow maps that would have narrowed the token scope.
 
-Job-level aliases and noncanonical permission names are unsupported. An empty top-level map, or a top-level map containing only `none`, creates no token.
+Job-level `permissions: read-all` and `permissions: write-all` shorthands and noncanonical permission names are unsupported. An empty top-level map, or a top-level map containing only `none`, creates no token.
 
 ### Environment and defaults
 
