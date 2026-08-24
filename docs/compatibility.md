@@ -102,11 +102,11 @@ All remaining runnable workflows use one artifact and pipeline transaction:
 - GitHub events publish GitHub checks. Origin events publish Origin checks.
 - A workflow that does not declare the event becomes one top-level skipped step
   with no plan artifacts.
-- An importer annotation lists workflows skipped by event or filters, their
-  configured events, and each mismatch, then links to the generated step. For
-  manual builds, it explains the `workflow_dispatch` mapping and how to run the
-  workflows. It also states when every workflow was skipped. If publication
-  fails, upload warns but still succeeds.
+- An importer annotation links to each workflow skipped by event or filters. It
+  shows configured events for event mismatches and the specific reason for
+  filter mismatches. For manual builds, it explains the `workflow_dispatch`
+  mapping and how to run the workflows. It also states when every workflow was
+  skipped. If publication fails, upload warns but still succeeds.
 
 Workflow names, group keys, and provider-check names stay the same across
 events; only an appended run title can vary. Groups and replacement steps

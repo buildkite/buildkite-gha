@@ -247,21 +247,25 @@ func skippedWorkflowsAnnotation(event, buildSource string, allSkipped bool, work
 		}
 		out.WriteString("In GitHub Actions terms, this maps to a <code>workflow_dispatch</code> event, and these workflows don't accept it:\n\n")
 	} else {
-		_, _ = fmt.Fprintf(&out, "The current <code>%s</code> event does not match these workflows:\n\n", annotationHTML(event))
+		_, _ = fmt.Fprintf(&out, "The current <code>%s</code> event does not match the following workflows:\n\n", annotationHTML(event))
 	}
 	for _, workflow := range workflows {
 		annotationURL := fmt.Sprintf("%s/canvas?key=%s&open=false", strings.TrimRight(buildURL, "/"), url.QueryEscape(workflow.key))
 		label := annotationHTML(strings.Join(strings.Fields(workflow.label), " "))
 		label = strings.NewReplacer("\\", "\\\\", "[", "\\[", "]", "\\]").Replace(label)
-		events := ""
+		detail := annotationHTML(workflow.reason)
 		if len(workflow.events) > 0 {
-			escaped := make([]string, len(workflow.events))
-			for i, event := range workflow.events {
-				escaped[i] = annotationHTML(event)
+			eventMatched := false
+			configuredEvents := make([]string, len(workflow.events))
+			for i, configuredEvent := range workflow.events {
+				eventMatched = eventMatched || configuredEvent == event
+				configuredEvents[i] = annotationCode(configuredEvent)
 			}
-			events = " (" + strings.Join(escaped, ", ") + ")"
+			if !eventMatched {
+				detail = "This workflow is triggered on: " + strings.Join(configuredEvents, ", ")
+			}
 		}
-		_, _ = fmt.Fprintf(&out, "* [:github: %s](%s)%s — %s\n", label, annotationURL, events, annotationHTML(workflow.reason))
+		_, _ = fmt.Fprintf(&out, "* [:github: %s](%s) — %s\n", label, annotationURL, detail)
 	}
 	if event == "workflow_dispatch" && (buildSource == "ui" || buildSource == "api") {
 		out.WriteString("\nPush a commit or open a pull request to run workflows configured for those events. ")
