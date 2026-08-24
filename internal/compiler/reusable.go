@@ -404,10 +404,9 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				calleeConcurrencyGates = append(append([]WorkflowConcurrencyGate(nil), concurrencyGates...), WorkflowConcurrencyGate{ID: callNamespace, Group: group})
 				if cancelInProgress && !resolver.warnedCancellation[calleeCallPosition] {
 					resolver.warnedCancellation[calleeCallPosition] = true
-					resolver.warnings = append(resolver.warnings, Warning{
-						Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: calleeCallPosition.Line, Column: calleeCallPosition.Column,
-						Message: fmt.Sprintf("called workflow %q concurrency cancel-in-progress is not enforced; Buildkite has no concurrency-group cancellation contract", call.Uses),
-					})
+					warning := workflowCancellationWarning(calleeCallPosition)
+					warning.Job = job.ID
+					resolver.warnings = append(resolver.warnings, warning)
 				}
 			}
 			resolver.stack = append(resolver.stack, calleeSource.identity)

@@ -1358,7 +1358,7 @@ func TestCompileBundleLegacyCheckoutWarning(t *testing.T) {
 	}
 	compile := func(steps string) Bundle {
 		t.Helper()
-		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n" + steps)
+		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n" + steps)
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -1382,9 +1382,11 @@ func TestCompileBundleLegacyCheckoutWarning(t *testing.T) {
 		"        with:\n          path: again\n" +
 		"      - uses: actions/checkout@" + actionintegration.CheckoutV2Commit + "\n" +
 		"        with:\n          path: legacy\n")
-	if len(bundle.IR.Warnings) != 2 ||
-		bundle.IR.Warnings[0].Code != "W_CHECKOUT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[0].Message, "v1.2.0") || bundle.IR.Warnings[0].Line == 0 ||
-		bundle.IR.Warnings[1].Code != "W_CHECKOUT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[1].Message, "v2.8.0") {
+	if len(bundle.Plans) != 2 || len(bundle.IR.Warnings) != 2 ||
+		bundle.IR.Warnings[0].Code != "W_CHECKOUT_LEGACY_RELEASE" || bundle.IR.Warnings[0].Path != "./.github/workflows/checkout.yml" || bundle.IR.Warnings[0].Job != "checkout" || bundle.IR.Warnings[0].Step != 1 || bundle.IR.Warnings[0].Line == 0 ||
+		bundle.IR.Warnings[0].Message != "actions/checkout v1.2.0 behaves like v1. It does not set the ref and commit outputs, which actions/checkout added in v4.2.0. It also defaults to full history when fetch-depth is omitted. Upgrade to actions/checkout v4 or later if either difference matters." ||
+		bundle.IR.Warnings[1].Code != "W_CHECKOUT_LEGACY_RELEASE" || bundle.IR.Warnings[1].Path != "./.github/workflows/checkout.yml" || bundle.IR.Warnings[1].Job != "checkout" || bundle.IR.Warnings[1].Step != 3 ||
+		bundle.IR.Warnings[1].Message != "actions/checkout v2.8.0 behaves like v2. It does not set the ref and commit outputs, which actions/checkout added in v4.2.0. Upgrade to actions/checkout v4 or later if a later step reads either output." {
 		t.Fatalf("legacy checkout warnings = %#v", bundle.IR.Warnings)
 	}
 

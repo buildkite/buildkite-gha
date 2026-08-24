@@ -93,9 +93,14 @@ func InitialProcessingReport(path, profile string, eventEvaluated bool, report c
 // ApplyWarnings adds compiler warnings to the processing report.
 func (r *ProcessingReport) ApplyWarnings(path string, warnings []compiler.Warning) {
 	for _, warning := range warnings {
+		warningPath := warning.Path
+		if warningPath == "" {
+			warningPath = path
+		}
 		r.Diagnostics = append(r.Diagnostics, Diagnostic{
 			Level: "warning", Code: warning.Code, Category: "compatibility", Stage: stageExpressions,
-			Message: fmt.Sprintf("%s:%d:%d: %s", path, warning.Line, warning.Column, warning.Message), Location: sourceLocation(path, warning.Line, warning.Column),
+			Message:  fmt.Sprintf("%s:%d:%d: %s", warningPath, warning.Line, warning.Column, warning.Message),
+			Location: sourceLocation(warningPath, warning.Line, warning.Column), Job: warning.Job, Step: warning.Step,
 		})
 	}
 }
