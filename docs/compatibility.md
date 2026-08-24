@@ -1329,9 +1329,9 @@ Unsupported secret uses include:
 Action metadata cannot add secret authority to a plan. A secret used only by an
 optional action input becomes an empty value unless another field requires it.
 
-Jobs with `id-token: write` let host JavaScript actions call `getIDToken()`.
-This includes JavaScript actions called by composite actions. The call returns
-a Buildkite OIDC token for the requested audience.
+Jobs with `id-token: write` let JavaScript actions that run directly on the
+agent call `getIDToken()`. This includes JavaScript actions called by composite
+actions. The call returns a Buildkite OIDC token for the requested audience.
 
 Buildkite issues these tokens. It does not use or imitate GitHub's issuer.
 Buildkite's issuer is `https://agent.buildkite.com`; GitHub's is
@@ -1339,14 +1339,14 @@ Buildkite's issuer is `https://agent.buildkite.com`; GitHub's is
 trust policy to trust Buildkite's issuer and claims instead of GitHub's.
 See [Buildkite OIDC](https://buildkite.com/docs/pipelines/security/oidc).
 
-The job shows this migration warning after the first authorized request mints
-a token. Later token requests do not repeat it. The warning does not change HTTP
-status handling for failed mints. A failed mint does not say that Buildkite
-issued a token.
+The job shows this migration warning after the first successful token request.
+Later token requests do not repeat it. The warning does not change HTTP status
+handling for failed token requests. A failed token request does not say that
+Buildkite issued a token.
 
-The runtime cannot see whether the target service later rejects the token. An
-Agent API 401 or 403 means Buildkite denied the mint, not that the target
-service rejected the token.
+`buildkite-gha` cannot tell whether the target service later rejects the token.
+An Agent API 401 or 403 means Buildkite rejected the token request, not that the
+target service rejected the token.
 
 `id-token: read`, `id-token: none`, and omitted permissions do not expose the
 endpoint. Repository tests cover the wire contract; hosted runtime proof remains
