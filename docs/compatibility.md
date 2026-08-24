@@ -694,7 +694,7 @@ A step can continue after failure and expose its outcome to a later condition:
 
 Install the custom command on the runner or in the job container, and add it to `PATH`. R and Julia are not installed automatically.
 
-PowerShell and Windows shells are not supported. A known unsupported shell fails workflow processing before an agent can claim the generated job. A shell expression that needs a runtime value is checked before its step starts. If it resolves to an unsupported shell, the step fails. Use `bash`, `sh`, `python`, or a valid custom template instead.
+PowerShell and Windows shells are not supported. If the shell name is known before the job starts, the workflow fails before an agent starts the job. A shell expression that needs a runtime value is checked before its step starts. If it resolves to an unsupported shell, the step fails. Use `bash`, `sh`, `python`, or a valid custom template instead.
 
 Working directories must stay inside the workspace.
 
