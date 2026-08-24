@@ -783,16 +783,18 @@ func TestCheckoutFetchArgsApplyFilterAndSparsePrecedence(t *testing.T) {
 func TestConfigureSparseCheckoutModes(t *testing.T) {
 	t.Run("cone", func(t *testing.T) {
 		var commands [][]string
-		err := configureSparseCheckout(t.TempDir(), map[string]string{"sparse-checkout": " src \n\ndocs"}, func(args ...string) error {
+		var input string
+		err := configureSparseCheckout(t.TempDir(), map[string]string{"sparse-checkout": " src \n\ndocs"}, func(stdin string, args ...string) error {
+			input = stdin
 			commands = append(commands, append([]string(nil), args...))
 			return nil
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := [][]string{{"sparse-checkout", "set", "--", "src", "docs"}}
-		if !slices.EqualFunc(commands, want, slices.Equal) {
-			t.Fatalf("sparse checkout commands = %#v, want %#v", commands, want)
+		want := [][]string{{"sparse-checkout", "set", "--stdin"}}
+		if !slices.EqualFunc(commands, want, slices.Equal) || input != "src\ndocs\n" {
+			t.Fatalf("sparse checkout commands = %#v with input %q, want %#v with input %q", commands, input, want, "src\ndocs\n")
 		}
 	})
 
@@ -802,7 +804,7 @@ func TestConfigureSparseCheckoutModes(t *testing.T) {
 			t.Fatal(err)
 		}
 		var commands [][]string
-		err := configureSparseCheckout(workspace, map[string]string{"sparse-checkout": "*.go\n!vendor/", "sparse-checkout-cone-mode": "false"}, func(args ...string) error {
+		err := configureSparseCheckout(workspace, map[string]string{"sparse-checkout": "*.go\n!vendor/", "sparse-checkout-cone-mode": "false"}, func(_ string, args ...string) error {
 			commands = append(commands, append([]string(nil), args...))
 			return nil
 		})

@@ -171,8 +171,15 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 			return result, err
 		}
 	}
-	if err := configureSparseCheckout(checkoutDirectory, inputs, func(args ...string) error {
-		return run(env, false, args...)
+	if err := configureSparseCheckout(checkoutDirectory, inputs, func(input string, args ...string) error {
+		cmd := exec.Command(git, append(base, args...)...)
+		cmd.Dir = checkoutDirectory
+		cmd.Env = processEnv(env)
+		cmd.Stdin = strings.NewReader(input)
+		if err := r.runStreamingCommand(ctx, processor, cmd); err != nil {
+			return fmt.Errorf("%s git %s: %w", adapter, args[0], err)
+		}
+		return nil
 	}); err != nil {
 		return result, fmt.Errorf("%s sparse checkout: %w", adapter, err)
 	}
@@ -440,15 +447,15 @@ func checkoutSparsePatterns(inputs map[string]string) []string {
 	return patterns
 }
 
-func configureSparseCheckout(checkoutDirectory string, inputs map[string]string, run func(...string) error) error {
+func configureSparseCheckout(checkoutDirectory string, inputs map[string]string, run func(string, ...string) error) error {
 	patterns := checkoutSparsePatterns(inputs)
 	if len(patterns) == 0 {
 		return nil
 	}
 	if checkoutInputTrue(checkoutInput(inputs, "sparse-checkout-cone-mode")) || checkoutInput(inputs, "sparse-checkout-cone-mode") == "" {
-		return run(append([]string{"sparse-checkout", "set", "--"}, patterns...)...)
+		return run(strings.Join(patterns, "\n")+"\n", "sparse-checkout", "set", "--stdin")
 	}
-	if err := run("config", "core.sparseCheckout", "true"); err != nil {
+	if err := run("", "config", "core.sparseCheckout", "true"); err != nil {
 		return err
 	}
 	info := filepath.Join(checkoutDirectory, ".git", "info")
