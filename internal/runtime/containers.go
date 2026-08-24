@@ -241,10 +241,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 		b.services = append(b.services, serviceContainer{id: serviceID, name: name})
 		serviceArgs := []string{"create", "--name", name, "--label", "com.buildkite.gha=true", "--label", b.owner, "--network", b.network, "--network-alias", serviceID}
 		serviceArgs = appendPublishedPorts(serviceArgs, service.Ports)
-		options, optionErr := dockerArgumentList(service.Options)
-		if optionErr != nil {
-			return nil, fmt.Errorf("parse service %q options: %w", serviceID, optionErr)
-		}
+		options := containerpolicy.ArgumentList(service.Options)
 		if err = validateServiceOptions(options); err != nil {
 			return nil, fmt.Errorf("service %q options: %w", serviceID, err)
 		}
@@ -259,11 +256,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 			serviceArgs = append(serviceArgs, "--entrypoint", service.Entrypoint)
 		}
 		serviceArgs = append(serviceArgs, service.Image)
-		command, commandErr := dockerArgumentList(service.Command)
-		if commandErr != nil {
-			return nil, fmt.Errorf("parse service %q command: %w", serviceID, commandErr)
-		}
-		serviceArgs = append(serviceArgs, command...)
+		serviceArgs = append(serviceArgs, containerpolicy.ArgumentList(service.Command)...)
 		created, createErr := boundedDockerOutput(ctx, env, docker, serviceArgs...)
 		if reference := strings.TrimSpace(created); reference != "" {
 			b.services[len(b.services)-1].name = reference
@@ -338,25 +331,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 		}
 		if createErr != nil {
 			reconcileCtx, cancelReconcile := context.WithTimeout(context.WithoutCancel(ctx), r.cleanupTimeout())
-			if reference == "" {
-				reference, err = b.reconcileCreatedJob(reconcileCtx)
-				if err != nil {
-					createErr = errors.Join(createErr, err)
-				} else if reference != "" {
-					b.container = reference
-					b.containerCreated = true
-				}
-			}
-			if reference != "" {
-				if trackErr := b.trackContainerVolumes(reconcileCtx, "job container", b.container); trackErr != nil {
-					createErr = errors.Join(createErr, trackErr)
-				}
-			}
-			if trackErr := b.trackCreatedVolumes(reconcileCtx); trackErr != nil {
-				createErr = errors.Join(createErr, trackErr)
-			} else {
-				b.volumesTracked = true
-			}
+			createErr = errors.Join(createErr, b.reconcileFailedJobCreate(reconcileCtx))
 			cancelReconcile()
 			return nil, fmt.Errorf("create job container: %w", createErr)
 		}
@@ -512,6 +487,26 @@ func (b *jobContainerBackend) reconcileCreatedJob(ctx context.Context) (string, 
 	return "", nil
 }
 
+func (b *jobContainerBackend) reconcileFailedJobCreate(ctx context.Context) error {
+	var err error
+	if !b.containerCreated {
+		reference, reconcileErr := b.reconcileCreatedJob(ctx)
+		err = errors.Join(err, reconcileErr)
+		if reference != "" {
+			b.container = reference
+			b.containerCreated = true
+		}
+	}
+	if b.containerCreated {
+		err = errors.Join(err, b.trackContainerVolumes(ctx, "job container", b.container))
+	}
+	trackErr := b.trackCreatedVolumes(ctx)
+	if trackErr == nil {
+		b.volumesTracked = true
+	}
+	return errors.Join(err, trackErr)
+}
+
 func (b *jobContainerBackend) trackServiceVolumes(ctx context.Context, serviceID, reference string) error {
 	return b.trackContainerVolumes(ctx, fmt.Sprintf("service %q", serviceID), reference)
 }
@@ -566,13 +561,6 @@ func validateServiceOptions(options []string) error {
 		}
 	}
 	return nil
-}
-
-// dockerArgumentList matches the argument splitting used by the pinned
-// actions/runner ProcessStartInfo.Arguments path. Single quotes are ordinary
-// characters; double quotes group arguments; backslashes only escape quotes.
-func dockerArgumentList(value string) ([]string, error) {
-	return containerpolicy.ArgumentList(value), nil
 }
 
 var dockerPortLine = regexp.MustCompile(`^([0-9]+)/([A-Za-z0-9]+) -> (?:[^:]+|\[[^]]+\]):([0-9]+)$`)

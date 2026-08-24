@@ -1071,29 +1071,6 @@ func TestRunServiceContainerAutoRemoveBetweenQueryAndStop(t *testing.T) {
 	}
 }
 
-func TestDockerArgumentListMatchesRunnerQuoting(t *testing.T) {
-	t.Parallel()
-	for _, test := range []struct {
-		name, value string
-		want        []string
-	}{
-		{name: "empty", value: `--env ""`, want: []string{"--env", ""}},
-		{name: "double quotes", value: `--health-cmd "pg_isready -U postgres"`, want: []string{"--health-cmd", "pg_isready -U postgres"}},
-		{name: "single quotes literal", value: `--label 'two words'`, want: []string{"--label", "'two", "words'"}},
-		{name: "escaped quote", value: `one\"two`, want: []string{`one"two`}},
-		{name: "unmatched quote", value: `"two words`, want: []string{"two words"}},
-		{name: "newline literal", value: "one\ntwo", want: []string{"one\ntwo"}},
-		{name: "consecutive quotes", value: `"one""two"`, want: []string{`one"two`}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := dockerArgumentList(test.value)
-			if err != nil || !slices.Equal(got, test.want) {
-				t.Fatalf("dockerArgumentList(%q) = %#v, %v; want %#v", test.value, got, err, test.want)
-			}
-		})
-	}
-}
-
 func TestServiceOptionsRejectOnlyNetworkOverride(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {

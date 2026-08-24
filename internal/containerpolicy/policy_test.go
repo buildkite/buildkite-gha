@@ -39,6 +39,28 @@ func TestJobOptionsInputBounds(t *testing.T) {
 	}
 }
 
+func TestArgumentList(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, value string
+		want        []string
+	}{
+		{name: "empty argument", value: `--env ""`, want: []string{"--env", ""}},
+		{name: "double quotes", value: `--health-cmd "pg_isready -U postgres"`, want: []string{"--health-cmd", "pg_isready -U postgres"}},
+		{name: "single quotes are literal", value: `--label 'two words'`, want: []string{"--label", "'two", "words'"}},
+		{name: "escaped quote", value: `one\"two`, want: []string{`one"two`}},
+		{name: "unmatched quote", value: `"two words`, want: []string{"two words"}},
+		{name: "newline is literal", value: "one\ntwo", want: []string{"one\ntwo"}},
+		{name: "consecutive quotes", value: `"one""two"`, want: []string{`one"two`}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ArgumentList(test.value); !slices.Equal(got, test.want) {
+				t.Fatalf("ArgumentList(%q) = %#v; want %#v", test.value, got, test.want)
+			}
+		})
+	}
+}
+
 func TestValidateJobVolume(t *testing.T) {
 	for _, value := range []string{
 		"v:/data", "cache:/cache", "cache.v1:/var/cache:ro", "CACHE_1:/data:rw",
