@@ -117,7 +117,11 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 					continue
 				}
 				warnedLegacyCheckout[release] = true
-				bundle.IR.Warnings = append(bundle.IR.Warnings, legacyCheckoutWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release))
+				warning := legacyCheckoutWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release, actionintegration.CheckoutDefaultsToFullHistory(lock.Commit))
+				warning.Path = ir.Jobs[i].SourcePath
+				warning.Job = ir.Jobs[i].LogicalJobID
+				warning.Step = stepIndex + 1
+				bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
 			case actionintegration.AdapterUploadArtifactBuildkite:
 				release, legacy := actionintegration.LegacyUploadArtifactRelease(lock.Commit)
 				if !legacy || warnedLegacyUploadArtifact[release] {
@@ -140,10 +144,15 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		}
 		if (ir.Jobs[i].jobPermissionsIgnored || jobPermissionsIgnored(job.GitHubToken.Permissions, ir.Jobs[i].Permissions)) && !warnedJobPermissions {
 			position := ir.Jobs[i].Source.Start
+			path := ir.Jobs[i].SourcePath
 			if ir.Jobs[i].jobPermissionsIgnored && ir.Jobs[i].reusableCall.Line != 0 {
 				position = ir.Jobs[i].reusableCall
+				path = ir.Workflow.Path
 			}
-			bundle.IR.Warnings = append(bundle.IR.Warnings, jobWorkflowTokenWarning(position))
+			warning := jobWorkflowTokenWarning(position, job.GitHubToken.Permissions)
+			warning.Path = path
+			warning.Job = ir.Jobs[i].LogicalJobID
+			bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
 			warnedJobPermissions = true
 		}
 	}

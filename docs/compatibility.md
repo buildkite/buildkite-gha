@@ -483,7 +483,7 @@ Nested called workflows keep nested gates. Jobs within one called workflow remai
 
 Buildkite queues every waiting entry. It does not replace GitHub's existing pending entry. The `queue` key is unsupported.
 
-Workflow-level literal or expression-resolved `cancel-in-progress: true`, including in called workflows, emits a warning and does not cancel. Job-level cancellation remains unsupported. Buildkite's uploaded step contract has no concurrency-group cancellation field; `concurrency_method` controls admission order only. Buildkite **Cancel Intermediate Builds** and **Skip Intermediate Builds** settings can approximate same-branch cancellation.
+Workflow-level literal or expression-resolved `cancel-in-progress: true`, including in called workflows, emits a warning and does not cancel, so superseded builds keep running. Job-level cancellation remains unsupported. To cancel earlier running builds on the same branch, turn on [Cancel Intermediate Builds](https://buildkite.com/docs/pipelines/configure/canceling-builds#cancel-running-intermediate-builds) under pipeline **Settings > Builds**. This setting applies by branch, not by concurrency group.
 
 Cancel the whole Buildkite build rather than one job when a workflow-level concurrency gate is active.
 
@@ -1057,7 +1057,7 @@ Pre conditions use the status and action-scoped environment available when prepa
 | v7.0.0 corpus pin | [`9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`](https://github.com/actions/checkout/tree/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0) |
 | v7.0.1 | [`3d3c42e5aac5ba805825da76410c181273ba90b1`](https://github.com/actions/checkout/tree/3d3c42e5aac5ba805825da76410c181273ba90b1) |
 
-Mutable refs work only while they resolve to the upstream `main` snapshot or a known release above. Every admitted commit uses the native adapter; the upstream JavaScript doesn't run. Each admitted release accepts only the inputs it declares, so earlier releases reject later inputs. Other pre-v3.7.0 commits and unknown commits are unsupported. Compilation emits `W_CHECKOUT_LEGACY_RELEASE` for v1.2.0 and v2.8.0 to nudge an upgrade to v4 or later. Maintainers can update the v4-and-later snapshot with `go generate ./internal/action/integration`; this doesn't widen release admission.
+Mutable refs work only while they resolve to the upstream `main` snapshot or a known release above. Every admitted commit uses the native adapter; the upstream JavaScript doesn't run. Each admitted release accepts only the inputs it declares, so earlier releases reject later inputs. Other pre-v3.7.0 commits and unknown commits are unsupported. Compilation warns that v1.2.0 and v2.8.0 do not set the `ref` and `commit` outputs added in v4.2.0. It also warns that v1.2.0 defaults to full history when `fetch-depth` is omitted. Upgrade only if these differences matter. Maintainers can update the v4-and-later snapshot with `go generate ./internal/action/integration`; this doesn't widen release admission.
 
 The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean top-level directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to each fetch command and verified submodule fetch command and are never persisted.
 
