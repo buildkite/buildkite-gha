@@ -1,6 +1,4 @@
-import { compileDeclarativeMatchers, type DeepsecPlugin } from "deepsec/config";
-
-export const generatedMatchersPlugin: DeepsecPlugin = {
+export const generatedMatchersPlugin = {
   name: "deepsec-generated-matchers",
-  matchers: compileDeclarativeMatchers([]),
+  matchers: [],
 };
