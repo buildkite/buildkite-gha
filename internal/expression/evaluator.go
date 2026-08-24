@@ -9,20 +9,44 @@ import (
 	"github.com/rhysd/actionlint"
 )
 
-// semanticEvaluator owns expression-tree traversal while each fixed surface
-// supplies its existing reference, comparison, function, and error behavior.
-// Validation and authority analysis remain separate and run at their existing
-// call sites.
-type semanticEvaluator struct {
+// expressionEvaluator owns expression-tree traversal while each fixed surface
+// and value domain supplies its reference, comparison, function, and error
+// behavior. The concrete semanticEvaluator alias preserves the existing
+// runtime evaluators; abstract evaluation uses the same traversal with a value
+// that can represent unknown runtime data and authority effects.
+type expressionEvaluator[T any] struct {
 	policy          evaluationPolicy
-	resolve         func(string, []string) (any, error)
-	resolveRoot     func(string) (any, error)
+	resolve         func(string, []string) (T, error)
+	resolveRoot     func(string) (T, error)
+	domain          expressionDomain[T]
 	truthy          func(any) bool
 	validateCompare func(actionlint.CompareOpNodeKind) error
 	compare         func(actionlint.CompareOpNodeKind, any, any) (any, error)
-	call            func(*semanticEvaluator, *actionlint.FuncCallNode) (any, error)
+	call            func(*expressionEvaluator[T], *actionlint.FuncCallNode) (T, error)
 	unsupported     func(actionlint.ExprNode) error
 	logicalError    func(actionlint.LogicalOpNodeKind) error
+}
+
+type semanticEvaluator = expressionEvaluator[any]
+
+type expressionDomain[T any] interface {
+	known(any) T
+	derive(any, ...T) T
+	value(T) (any, bool)
+	unknown(...T) T
+	join(...T) T
+}
+
+type concreteExpressionDomain struct{}
+
+func (concreteExpressionDomain) known(value any) any            { return value }
+func (concreteExpressionDomain) derive(value any, _ ...any) any { return value }
+func (concreteExpressionDomain) value(value any) (any, bool)    { return value, true }
+func (concreteExpressionDomain) unknown(...any) any {
+	panic("concrete expression evaluation produced an unknown value")
+}
+func (concreteExpressionDomain) join(...any) any {
+	panic("concrete expression evaluation joined multiple paths")
 }
 
 type evaluationSurface uint8
@@ -58,7 +82,19 @@ func newSemanticEvaluator(surface evaluationSurface) semanticEvaluator {
 		policy = evaluationPolicy{allowLiterals: true, allowNot: true, allowLogical: true, allowCompare: true, allowFunction: true, resolveStaticIndexedReference: true}
 	case runtimeReferenceSurface:
 	}
-	return semanticEvaluator{policy: policy}
+	return semanticEvaluator{
+		policy: policy,
+		domain: concreteExpressionDomain{},
+	}
+}
+
+func (e *expressionEvaluator[T]) result(value T, inputs ...T) T {
+	concrete, known := e.domain.value(value)
+	inputs = append(inputs, value)
+	if !known {
+		return e.domain.unknown(inputs...)
+	}
+	return e.domain.derive(concrete, inputs...)
 }
 
 type semanticValidator struct {
@@ -144,27 +180,28 @@ func (v *semanticValidator) validate(node actionlint.ExprNode) error {
 	return v.unsupported(node)
 }
 
-func (e *semanticEvaluator) evaluate(node actionlint.ExprNode) (any, error) {
+func (e *expressionEvaluator[T]) evaluate(node actionlint.ExprNode) (T, error) {
+	var zero T
 	switch node := node.(type) {
 	case *actionlint.NullNode:
 		if e.policy.allowLiterals {
-			return nil, nil
+			return e.domain.known(nil), nil
 		}
 	case *actionlint.BoolNode:
 		if e.policy.allowLiterals {
-			return node.Value, nil
+			return e.domain.known(node.Value), nil
 		}
 	case *actionlint.IntNode:
 		if e.policy.allowLiterals {
-			return node.Value, nil
+			return e.domain.known(node.Value), nil
 		}
 	case *actionlint.FloatNode:
 		if e.policy.allowLiterals {
-			return node.Value, nil
+			return e.domain.known(node.Value), nil
 		}
 	case *actionlint.StringNode:
 		if e.policy.allowLiterals {
-			return node.Value, nil
+			return e.domain.known(node.Value), nil
 		}
 	case *actionlint.VariableNode, *actionlint.ObjectDerefNode:
 		root, path, err := referencePath(node)
@@ -180,7 +217,7 @@ func (e *semanticEvaluator) evaluate(node actionlint.ExprNode) (any, error) {
 		if e.resolveRoot != nil {
 			return e.evaluateAccess(node)
 		}
-		return nil, err
+		return zero, err
 	case *actionlint.IndexAccessNode:
 		root, path, err := referencePath(node)
 		// Mirror the validator: static bracket references to authority
@@ -194,79 +231,104 @@ func (e *semanticEvaluator) evaluate(node actionlint.ExprNode) (any, error) {
 			return e.evaluateAccess(node)
 		}
 		if err != nil {
-			return nil, err
+			return zero, err
 		}
 		return e.resolve(root, path)
 	case *actionlint.ArrayDerefNode:
 		if e.resolveRoot != nil {
 			return e.evaluateAccess(node)
 		}
-		return nil, e.unsupported(node)
+		return zero, e.unsupported(node)
 	case *actionlint.NotOpNode:
 		if e.policy.allowNot {
 			value, err := e.evaluate(node.Operand)
 			if err != nil {
-				return nil, err
+				return zero, err
 			}
-			return !e.truthy(value), nil
+			concrete, known := e.domain.value(value)
+			if !known {
+				return e.domain.unknown(value), nil
+			}
+			return e.domain.derive(!e.truthy(concrete), value), nil
 		}
 	case *actionlint.LogicalOpNode:
 		if e.policy.allowLogical {
 			left, err := e.evaluate(node.Left)
 			if err != nil {
-				return nil, err
+				return zero, err
 			}
-			leftTruthy := e.truthy(left)
+			leftValue, leftKnown := e.domain.value(left)
+			if !leftKnown {
+				right, err := e.evaluate(node.Right)
+				if err != nil {
+					return zero, err
+				}
+				return e.domain.unknown(left, right), nil
+			}
+			leftTruthy := e.truthy(leftValue)
 			switch node.Kind {
 			case actionlint.LogicalOpNodeKindAnd:
 				if !leftTruthy {
 					if e.policy.logicalBool {
-						return false, nil
+						return e.domain.derive(false, left), nil
 					}
 					return left, nil
 				}
 			case actionlint.LogicalOpNodeKindOr:
 				if leftTruthy {
 					if e.policy.logicalBool {
-						return true, nil
+						return e.domain.derive(true, left), nil
 					}
 					return left, nil
 				}
 			default:
-				return nil, e.logicalError(node.Kind)
+				return zero, e.logicalError(node.Kind)
 			}
 			right, err := e.evaluate(node.Right)
 			if err != nil {
-				return nil, err
+				return zero, err
 			}
 			if e.policy.logicalBool {
-				return e.truthy(right), nil
+				rightValue, rightKnown := e.domain.value(right)
+				if !rightKnown {
+					return e.domain.unknown(left, right), nil
+				}
+				return e.domain.derive(e.truthy(rightValue), left, right), nil
 			}
-			return right, nil
+			return e.result(right, left), nil
 		}
 	case *actionlint.CompareOpNode:
 		if e.policy.allowCompare {
 			if e.validateCompare != nil {
 				if err := e.validateCompare(node.Kind); err != nil {
-					return nil, err
+					return zero, err
 				}
 			}
 			left, err := e.evaluate(node.Left)
 			if err != nil {
-				return nil, err
+				return zero, err
 			}
 			right, err := e.evaluate(node.Right)
 			if err != nil {
-				return nil, err
+				return zero, err
 			}
-			return e.compare(node.Kind, left, right)
+			leftValue, leftKnown := e.domain.value(left)
+			rightValue, rightKnown := e.domain.value(right)
+			if !leftKnown || !rightKnown {
+				return e.domain.unknown(left, right), nil
+			}
+			compared, err := e.compare(node.Kind, leftValue, rightValue)
+			if err != nil {
+				return zero, err
+			}
+			return e.domain.derive(compared, left, right), nil
 		}
 	case *actionlint.FuncCallNode:
 		if e.policy.allowFunction {
 			return e.call(e, node)
 		}
 	}
-	return nil, e.unsupported(node)
+	return zero, e.unsupported(node)
 }
 
 func expressionReferenceUsesIndex(node actionlint.ExprNode) bool {
@@ -289,62 +351,80 @@ func newExpressionProjection(capacity int) expressionProjection {
 	return make(expressionProjection, 0, capacity)
 }
 
-func (e *semanticEvaluator) evaluateAccess(node actionlint.ExprNode) (any, error) {
+func (e *expressionEvaluator[T]) evaluateAccess(node actionlint.ExprNode) (T, error) {
+	var zero T
 	switch node := node.(type) {
 	case *actionlint.VariableNode:
 		return e.resolveRoot(node.Name)
 	case *actionlint.ObjectDerefNode:
 		receiver, err := e.evaluateAccess(node.Receiver)
 		if err != nil {
-			return nil, err
+			return zero, err
 		}
-		if projection, ok := receiver.(expressionProjection); ok {
+		receiverValue, known := e.domain.value(receiver)
+		if !known {
+			return e.domain.unknown(receiver), nil
+		}
+		if projection, ok := receiverValue.(expressionProjection); ok {
 			result := newExpressionProjection(len(projection))
 			for _, item := range projection {
 				value, found, err := objectValue(item, node.Property)
 				if err != nil {
-					return nil, err
+					return zero, err
 				}
 				if found {
 					result = append(result, value)
 				}
 			}
-			return result, nil
+			return e.domain.derive(result, receiver), nil
 		}
-		value, found, err := objectValue(receiver, node.Property)
+		value, found, err := objectValue(receiverValue, node.Property)
 		if err != nil || found {
-			return value, err
+			return e.domain.derive(value, receiver), err
 		}
-		return nil, nil
+		return e.domain.derive(nil, receiver), nil
 	case *actionlint.IndexAccessNode:
 		operand, err := e.evaluateAccess(node.Operand)
 		if err != nil {
-			return nil, err
+			return zero, err
 		}
 		index, err := e.evaluate(node.Index)
 		if err != nil {
-			return nil, err
+			return zero, err
 		}
-		return expressionIndex(operand, index)
+		operandValue, operandKnown := e.domain.value(operand)
+		indexValue, indexKnown := e.domain.value(index)
+		if !operandKnown || !indexKnown {
+			return e.domain.unknown(operand, index), nil
+		}
+		value, err := expressionIndex(operandValue, indexValue)
+		if err != nil {
+			return zero, err
+		}
+		return e.domain.derive(value, operand, index), nil
 	case *actionlint.ArrayDerefNode:
 		receiver, err := e.evaluateAccess(node.Receiver)
 		if err != nil {
-			return nil, err
+			return zero, err
 		}
-		if projection, ok := receiver.(expressionProjection); ok {
+		receiverValue, known := e.domain.value(receiver)
+		if !known {
+			return e.domain.unknown(receiver), nil
+		}
+		if projection, ok := receiverValue.(expressionProjection); ok {
 			result := newExpressionProjection(0)
 			for _, item := range projection {
 				if values, ok := expressionChildren(item); ok {
 					result = append(result, values...)
 				}
 			}
-			return result, nil
+			return e.domain.derive(result, receiver), nil
 		}
-		values, ok := expressionChildren(receiver)
+		values, ok := expressionChildren(receiverValue)
 		if !ok {
-			return newExpressionProjection(0), nil
+			return e.domain.derive(newExpressionProjection(0), receiver), nil
 		}
-		return append(newExpressionProjection(len(values)), values...), nil
+		return e.domain.derive(append(newExpressionProjection(len(values)), values...), receiver), nil
 	default:
 		return e.evaluate(node)
 	}
