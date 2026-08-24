@@ -433,6 +433,8 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 	sort.Strings(built.authorization.ProviderTokenReadCapabilitySources)
 	built.authorization.ProviderTokenReadCapabilitySources = slices.Compact(built.authorization.ProviderTokenReadCapabilitySources)
 	if slices.Contains(compiled.capabilities, "docker") {
+		// Keep the established authorization label for source-verified Docker
+		// action metadata, including prebuilt-image declarations.
 		built.authorization.DockerCapabilitySources = append(built.authorization.DockerCapabilitySources, "dockerfile-actions")
 	}
 	return built, nil

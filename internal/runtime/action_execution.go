@@ -347,6 +347,18 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		r.runnerTemp = runnerTemp
 	}
 	actions := newActionLockResolver(job, workspace, r.Actions)
+	prebuiltDocker, err := r.preparePrebuiltDockerActions(runCtx, processor, actions)
+	if err != nil {
+		return tolerateJobSetupFailure(runCtx, job, jobResult, err)
+	}
+	if prebuiltDocker != nil {
+		r.prebuiltDocker = prebuiltDocker
+		defer func() {
+			if err := prebuiltDocker.cleanup(); err != nil {
+				runJobErr = errors.Join(runJobErr, markHardJobFailure(err))
+			}
+		}()
+	}
 	var containerMounts []containerMount
 	if job.Container != nil {
 		// Remote children of workspace composites are already present in the
@@ -2049,11 +2061,8 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 		if !job.HasCapability("docker") {
 			return result, fmt.Errorf("docker action %q requires the plan's docker capability", step.Uses)
 		}
-		if action.Runs.Main != "" || action.Runs.Pre != "" || action.Runs.PreIf != "" || action.Runs.Post != "" || action.Runs.PostIf != "" || action.Runs.PreEntrypoint != "" || action.Runs.PostEntrypoint != "" || action.Runs.Entrypoint != "" {
-			return result, fmt.Errorf("docker action %q uses unsupported entrypoint or pre/post lifecycle", step.Uses)
-		}
-		if action.Runs.Image != "Dockerfile" {
-			return result, fmt.Errorf("docker action image %q is unsupported; the supported runtime subset requires a local Dockerfile", action.Runs.Image)
+		if err := action.ValidateEntrypoints(actionRuntime); err != nil {
+			return result, fmt.Errorf("docker action %q: %w", step.Uses, err)
 		}
 		dockerArgs := make([]string, len(action.Runs.Args))
 		for i, argument := range action.Runs.Args {
@@ -2074,7 +2083,11 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 			sourceDigest = actionLock.SourceDigest
 		}
 		invocationEnv, explicitPATH := environment.docker(dockerEnv, inputs)
-		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Args: dockerArgs, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})
+		image, _ := metadata.DockerImageReference(action.Runs.Image)
+		if image != "" && actionLock != nil && image != actionLock.DockerImage {
+			return result, fmt.Errorf("docker action %q metadata image %q does not match planned image %q", step.Uses, image, actionLock.DockerImage)
+		}
+		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Image: image, Entrypoint: action.Runs.Entrypoint, Args: dockerArgs, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})
 		return result, err
 	}
 	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)

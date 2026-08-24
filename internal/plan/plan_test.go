@@ -477,10 +477,11 @@ func TestSecretMappingsRoundTripAsNamesOnlyAndValidateAuthority(t *testing.T) {
 
 func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 	job := validJob()
+	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{{
 		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
-		SourceDigest: "sha256:" + strings.Repeat("a", 64),
+		SourceDigest: "sha256:" + strings.Repeat("a", 64), DockerImage: "busybox@sha256:" + strings.Repeat("b", 64),
 	}}
 	encoded, err := Encode(job)
 	if err != nil {
@@ -498,6 +499,26 @@ func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 		t.Fatalf("encoding is not deterministic\nfirst: %s\nsecond: %s", encoded, reencoded)
 	}
 	validateJobPlanSchema(t, encoded)
+
+	for _, test := range []struct {
+		name string
+		edit func(*Job)
+		want string
+	}{
+		{name: "invalid image", edit: func(j *Job) { j.Actions[0].DockerImage = "INVALID" }, want: "invalid Docker image"},
+		{name: "missing docker capability", edit: func(j *Job) { j.RequiredCapabilities = []string{"network"} }, want: "require docker capability"},
+		{name: "missing network capability", edit: func(j *Job) { j.RequiredCapabilities = []string{"docker"} }, want: "require network capability"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := job
+			changed.Actions = append([]ActionLock(nil), job.Actions...)
+			changed.RequiredCapabilities = append([]string(nil), job.RequiredCapabilities...)
+			test.edit(&changed)
+			if err := changed.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
 }
 
 func TestRequiresMiseRoundTripAndSchema(t *testing.T) {

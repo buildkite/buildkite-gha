@@ -1913,7 +1913,7 @@ func TestProcessingAnnotationLeadsWithTheActionableDiagnostic(t *testing.T) {
 		{
 			name: "Docker provenance",
 			diagnostic: compatibility.Diagnostic{Code: "E_PROFILE",
-				Message: `Job "test" requires Docker without matching compiler provenance. Hosted runs support only verified Dockerfile actions and bounded job or service containers.`},
+				Message: `Job "test" requires Docker without matching compiler provenance. Hosted runs support only verified Docker actions and bounded job or service containers.`},
 			want: `Job "test" requires Docker without matching compiler provenance.`,
 		},
 		{

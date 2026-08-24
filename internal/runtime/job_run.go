@@ -33,6 +33,7 @@ type jobRun struct {
 	explicitJobPATH  bool
 	jobContainer     *jobContainerBackend
 	jobDocker        *jobContainerBackend
+	prebuiltDocker   *prebuiltDockerBackend
 	nodeVerification *managedNodeVerification
 	artifactRegistry *artifactRegistry
 	node16Warnings   *node16DeprecationWarnings

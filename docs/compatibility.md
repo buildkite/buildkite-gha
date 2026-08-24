@@ -39,7 +39,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `python`, and custom shell templates. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local and literal public GitHub workflows with static inputs, deferred string inputs from direct needs outputs, and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. |
-| [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile actions on Linux only. |
+| [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile and public prebuilt-image actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Reusable-workflow jobs use the top-level workflow permissions. |
 | [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs and locally inherited or explicitly mapped reusable jobs resolve through the destination job's Buildkite secret authority. |
@@ -663,7 +663,7 @@ A service with a Docker health check must become healthy before steps run. A ser
 
 Cleanup removes the job container, emits masked and bounded service logs, then removes services in declaration order, the network, newly created volumes, and private Docker configuration. Remaining owned resources fail the job. Docker resources are not a security or resource-isolation boundary: the hosted queue must isolate the whole job and enforce host CPU, memory, disk, and network limits. See the [security model](security.md#isolate-the-whole-job).
 
-macOS jobs reject containers, services, Dockerfile actions, and Docker capability.
+macOS jobs reject containers, services, Docker actions, and Docker capability.
 
 ## Step syntax
 
@@ -714,7 +714,7 @@ Use an interpreter installed by an earlier step or included in the job image:
   run: conda info
 ```
 
-A `uses` step may call a supported local or public action. Action inputs under `with` may use supported direct interpolation. `docker://` actions and explicit Docker action entrypoints are rejected.
+A `uses` step may call a supported local or public action. Action inputs under `with` may use supported direct interpolation. Direct workflow `uses: docker://...` actions are rejected; prebuilt-image declarations belong in locked action metadata.
 
 Action steps can call public and local actions:
 
@@ -964,20 +964,56 @@ parts with values supported by their runtime surface.
 | Private action | ❌ Unsupported | No private action source access. |
 | JavaScript action | ✅ Supported | Declares `node16`, `node20`, or `node24`. |
 | Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; `bash`, `sh`, `python`, or a custom shell template for `run`; literal `continue-on-error`. |
-| Dockerfile action | 🟡 Supported subset | Verified local or public Dockerfile action on Linux with optional bounded `runs.args`. Rejected on macOS, including through a composite action. |
-| `docker://` action | ❌ Unsupported | Rejected during validation. |
+| Docker action | 🟡 Supported subset | Verified local or public Dockerfile or prebuilt-image action on Linux with optional bounded `runs.args`. Rejected on macOS, including through a composite action. |
+| Direct workflow `uses: docker://...` action | ❌ Unsupported | Rejected during validation. |
 | Top-level action metadata `env` | ➖ Accepted, no effect | Any valid YAML value is discarded. It is not evaluated, injected, retained in plans, or used to request secrets or tokens. |
 
 Mutable public refs are resolved during upload, then locked to a commit. The importer lazily requests one Buildkite action-source token and reuses it across all workflow roots and nested composite actions. This token authenticates only public metadata requests for repositories other than the credential repository; the credential repository and codeload requests remain anonymous. If token issuance is unavailable during rollout, resolution safely falls back to anonymous GitHub API access. Exact lowercase commit SHAs need no GitHub API lookup. Complete source trees are verified again at runtime.
 
 Nested calls from a repository-local composite must be local. Public composites may call local children or other public actions; every child is resolved and locked.
 
+Prebuilt-image actions declare `docker://` in action metadata, not in a
+workflow step:
+
+```yaml
+# action.yml
+name: Check formatting
+inputs:
+  path:
+    default: .
+runs:
+  using: docker
+  image: docker://ghcr.io/example/formatter@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  entrypoint: /usr/local/bin/formatter
+  args:
+    - ${{ inputs.path }}
+```
+
+```yaml
+# .github/workflows/check.yml
+steps:
+  - uses: example/formatter-action@v2
+    with:
+      path: .
+```
+
+The compiler locks the action source that declares the image. At job start,
+the runtime pulls each declared image anonymously through an empty private
+Docker configuration. Action metadata has no registry-credential field, so
+private images and ambient Docker credentials are unsupported. Digest
+references are supported. Mutable tags resolve when the job starts and can
+drift between jobs; use a digest when image immutability matters.
+
+Direct workflow syntax such as `uses: docker://alpine:3.20` remains
+unsupported. It does not have the locked action-source provenance used by
+metadata-declared images.
+
 Dockerfile actions require exact `runs.image: Dockerfile`. Optional `runs.args`
 must be an ordered YAML string array. Each item becomes one argument after the
-image name, without a shell or an entrypoint override. Empty strings,
-whitespace, and shell metacharacters remain literal. Omitted or empty args keep
-the image `CMD`; any non-empty array replaces `CMD` while preserving the image
-`ENTRYPOINT`.
+image name, without a shell. Empty strings, whitespace, and shell metacharacters
+remain literal. Omitted or empty args keep the image `CMD`; any non-empty array
+replaces `CMD` while preserving the image `ENTRYPOINT`. A prebuilt-image
+action's optional `runs.entrypoint` overrides the image `ENTRYPOINT`.
 
 Args may contain literals and direct `inputs.<name>` or `inputs['name']`
 interpolation. Operators, functions, whole or dynamic inputs, and every other
@@ -985,10 +1021,10 @@ context are rejected. Invocation inputs and metadata defaults resolve before
 args evaluation. Args remain in digest-bound action metadata and are not stored
 in job plans.
 
-Dockerfile actions cannot declare explicit entrypoints or pre/post lifecycle,
-or request credentials, volumes, arbitrary options, or privileged mode. An arg
-such as `--privileged` remains a container argument; it cannot become a Docker
-option.
+Dockerfile actions cannot declare explicit entrypoints. Docker actions cannot
+declare pre/post lifecycle or request credentials, volumes, arbitrary options,
+or privileged mode. An arg such as `--privileged` remains a container argument;
+it cannot become a Docker option.
 
 Action metadata parsing remains strict for every other unknown top-level field and for unknown nested fields. The inert top-level `env` exception does not replace workflow or action-step environments, populate `runs.env`, or add `GITHUB_TOKEN` authority.
 
