@@ -1858,6 +1858,54 @@ jobs:
 		}
 	})
 
+	t.Run("unsupported needs input form", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.value.outputs.target }}
+    steps:
+      - id: value
+        run: echo target=test >> "$GITHUB_OUTPUT"
+  call:
+    needs: prepare
+    uses: ./.github/workflows/reusable.yml
+    with:
+      target: prefix-${{ needs.prepare.outputs.target }}
+`)
+		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil {
+			t.Fatal("Compile() error = nil, want unsupported needs input finding")
+		}
+		var finding *ProcessingFinding
+		wantMessage := `Reusable workflow input "target" uses a needs expression in an unsupported form. Pass the whole value as exactly ${{ needs.<job>.outputs.<name> }}, with nothing around it. Only string inputs can take a needs value, and Buildkite resolves it before the called job runs, so the reference has to be the entire value rather than part of a larger expression. If you need a computed input from job outputs, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`
+		wantDetail := `Reusable-workflow input "target" is not statically resolvable: unsupported compile-time context "needs"`
+		if !errors.As(err, &finding) || finding.Message != wantMessage || finding.Detail != wantDetail || finding.Path != "./.github/workflows/caller.yml" || finding.Line != 14 || finding.Column != 15 || finding.Job != "call" {
+			t.Fatalf("Compile() finding = %#v", finding)
+		}
+	})
+
+	t.Run("value unavailable before jobs run", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      target: ${{ steps.prepare.outputs.target }}
+`)
+		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		var finding *ProcessingFinding
+		wantMessage := `Reusable workflow input "target" uses a value that is unavailable before jobs run. Replace it with a literal or an expression that does not depend on job results.`
+		if err == nil || !errors.As(err, &finding) || finding.Message != wantMessage {
+			t.Fatalf("Compile() finding = %#v", finding)
+		}
+	})
+
 	t.Run("call condition", func(t *testing.T) {
 		repository := t.TempDir()
 		path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    if: github.ref == 'refs/heads/main'\n    uses: ./.github/workflows/reusable.yml\n")

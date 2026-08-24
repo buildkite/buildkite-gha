@@ -308,10 +308,26 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		}
 		calleeSource, source, err := resolver.loadReusableWorkflow(ctx, current, call.Uses)
 		if err != nil {
+			var finding *ProcessingFinding
+			if errors.As(err, &finding) {
+				attributed := *finding
+				attributed.Path, attributed.Line, attributed.Column, attributed.Job = path, call.Span.Start.Line, call.Span.Start.Column, job.ID
+				attributed.Err = locatedJobWrappedError(path, job, call.Span.Start.Line, call.Span.Start.Column, "", finding.Err)
+				return reusableResolution{}, &attributed
+			}
 			return reusableResolution{}, locatedJobWrappedError(path, job, call.Span.Start.Line, call.Span.Start.Column, "", err)
 		}
 		if (call.InheritSecrets || len(call.Secrets) != 0) && calleeSource.identity.kind != "workspace" {
-			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "secret forwarding is supported only for repository-local reusable workflows")
+			message := fmt.Sprintf("A secrets: map cannot forward secrets to a workflow in another repository. Reusable workflow %q is outside this repository, so no secrets were forwarded. Reference each secret by name in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use a secrets: map with a ./ call. If you need explicit secret mappings across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.", calleeSource.displayPath)
+			if call.InheritSecrets {
+				message = fmt.Sprintf("secrets: inherit cannot forward secrets to a workflow in another repository. Reusable workflow %q is outside this repository, so no secrets were forwarded. Reference each secret by name in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use secrets: inherit with a ./ call. If you need secrets: inherit across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.", calleeSource.displayPath)
+			}
+			return reusableResolution{}, &ProcessingFinding{
+				Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
+				Path: path, Line: call.Span.Start.Line, Column: call.Span.Start.Column, Job: job.ID,
+				Message: message,
+				Err:     locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, message),
+			}
 		}
 		if cycle := resolver.cycle(calleeSource); cycle != "" {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow cycle detected: "+cycle)
@@ -750,7 +766,7 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 				if need, _, ok := deferredNeedReference(text); ok {
 					message = fmt.Sprintf("Reusable workflow input %q references job %q, but the call does not list it in needs. Add %q to the reusable-workflow call's needs.", name, need, need)
 				} else if strings.Contains(err.Error(), `unsupported compile-time context "needs"`) {
-					message = fmt.Sprintf("Reusable workflow input %q uses an unsupported needs expression. Use exactly needs.<job>.outputs.<name> for a string input.", name)
+					message = fmt.Sprintf("Reusable workflow input %q uses a needs expression in an unsupported form. Pass the whole value as exactly ${{ needs.<job>.outputs.<name> }}, with nothing around it. Only string inputs can take a needs value, and Buildkite resolves it before the called job runs, so the reference has to be the entire value rather than part of a larger expression. If you need a computed input from job outputs, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.", name)
 				}
 				return reusableInputs{}, &ProcessingFinding{
 					Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",

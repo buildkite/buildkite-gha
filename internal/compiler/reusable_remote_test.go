@@ -181,26 +181,30 @@ jobs:
 	}
 }
 
-func TestCompileRejectsSecretInheritanceIntoRemoteReusableWorkflows(t *testing.T) {
+func TestCompileRejectsSecretForwardingIntoRemoteReusableWorkflows(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		caller string
-		remote string
+		name        string
+		caller      string
+		remote      string
+		wantMessage string
 	}{
 		{
-			name:   "direct remote call",
-			caller: "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n    secrets: inherit\n",
-			remote: "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			name:        "inherited remote call",
+			caller:      "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n    secrets: inherit\n",
+			remote:      "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			wantMessage: `secrets: inherit cannot forward secrets to a workflow in another repository. Reusable workflow "owner/workflows/.github/workflows/ci.yml@v1" is outside this repository, so no secrets were forwarded. Reference each secret by name in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use secrets: inherit with a ./ call. If you need secrets: inherit across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
 		},
 		{
-			name:   "explicit remote call",
-			caller: "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n    secrets:\n      token: ${{ secrets.SOURCE }}\n",
-			remote: "on:\n  workflow_call:\n    secrets:\n      token:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			name:        "explicit remote call",
+			caller:      "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n    secrets:\n      token: ${{ secrets.SOURCE }}\n",
+			remote:      "on:\n  workflow_call:\n    secrets:\n      token:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			wantMessage: `A secrets: map cannot forward secrets to a workflow in another repository. Reusable workflow "owner/workflows/.github/workflows/ci.yml@v1" is outside this repository, so no secrets were forwarded. Reference each secret by name in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use a secrets: map with a ./ call. If you need explicit secret mappings across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
 		},
 		{
-			name:   "local path within remote repository",
-			caller: "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n",
-			remote: "on: workflow_call\njobs:\n  nested:\n    uses: ./.github/workflows/nested.yml\n    secrets: inherit\n",
+			name:        "local path within remote repository",
+			caller:      "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n",
+			remote:      "on: workflow_call\njobs:\n  nested:\n    uses: ./.github/workflows/nested.yml\n    secrets: inherit\n",
+			wantMessage: `secrets: inherit cannot forward secrets to a workflow in another repository. Reusable workflow "owner/workflows/.github/workflows/nested.yml@v1" is outside this repository, so no secrets were forwarded. Reference each secret by name in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use secrets: inherit with a ./ call. If you need secrets: inherit across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -212,8 +216,12 @@ func TestCompileRejectsSecretInheritanceIntoRemoteReusableWorkflows(t *testing.T
 			options := defaultOptions()
 			options.RepositorySource = MemoizeRepositorySource(newFakeReusableRepositorySource(t, map[string]string{"owner/workflows": remoteRoot}))
 			_, err := CompileWithOptions(callerPath, readFile(t, callerPath), pushEvent(t), options)
-			if err == nil || !strings.Contains(err.Error(), "secret forwarding is supported only for repository-local reusable workflows") {
-				t.Fatalf("CompileWithOptions() error = %v, want remote inheritance rejection", err)
+			var finding *ProcessingFinding
+			if err == nil || !errors.As(err, &finding) {
+				t.Fatalf("CompileWithOptions() error = %v, want remote forwarding finding", err)
+			}
+			if finding.Message != test.wantMessage || finding.Detail != "" || finding.Path != "./.github/workflows/caller.yml" || finding.Line != 4 || finding.Column != 11 || finding.Job != "call" {
+				t.Fatalf("CompileWithOptions() finding = %#v", finding)
 			}
 		})
 	}
@@ -446,11 +454,15 @@ func TestCompileRemoteReusableWorkflowLimitsAndDiagnostics(t *testing.T) {
 	})
 
 	for _, test := range []struct {
-		name string
-		uses string
-		want string
+		name        string
+		uses        string
+		want        string
+		wantMessage string
 	}{
-		{name: "dynamic", uses: "${{ inputs.workflow }}", want: "runtime-dependent"},
+		{
+			name: "dynamic", uses: "${{ inputs.workflow }}", want: "reusable workflow path cannot be an expression",
+			wantMessage: `Reusable workflow path cannot be an expression. "${{ inputs.workflow }}" is only known once the build is running, and the workflow file has to be read before that. Name the file directly, for example ./.github/workflows/ci.yml, or org/shared/.github/workflows/ci.yml@v1. If you need a computed workflow path, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
+		},
 		{name: "nested path", uses: "owner/repo/.github/workflows/nested/ci.yml@v1", want: "directly under .github/workflows"},
 		{name: "wrong directory", uses: "owner/repo/workflows/ci.yml@v1", want: "directly under .github/workflows"},
 		{name: "non YAML", uses: "owner/repo/.github/workflows/ci.json@v1", want: "must end in .yml or .yaml"},
@@ -465,6 +477,12 @@ func TestCompileRemoteReusableWorkflowLimitsAndDiagnostics(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), test.want) || len(fake.references()) != 0 {
 				t.Fatalf("CompileWithOptions() error/calls = %v / %#v, want %q before source access", err, fake.references(), test.want)
 			}
+			if test.wantMessage != "" {
+				var finding *ProcessingFinding
+				if !errors.As(err, &finding) || finding.Message != test.wantMessage || finding.Detail != "" || finding.Path != "./.github/workflows/dynamic.yml" || finding.Line != 4 || finding.Column != 11 || finding.Job != "call" {
+					t.Fatalf("CompileWithOptions() finding = %#v", finding)
+				}
+			}
 		})
 	}
 
@@ -475,8 +493,29 @@ func TestCompileRemoteReusableWorkflowLimitsAndDiagnostics(t *testing.T) {
 		options := defaultOptions()
 		options.RepositorySource = MemoizeRepositorySource(fake)
 		_, err := CompileWithOptions(callerPath, readFile(t, callerPath), event, options)
-		if err == nil || !strings.Contains(err.Error(), `public reusable workflow "owner/private/.github/workflows/ci.yml@v1" was not found or is not public`) {
+		if err == nil || !strings.Contains(err.Error(), `public reusable workflow "owner/private/.github/workflows/ci.yml@v1" could not be read`) {
 			t.Fatalf("CompileWithOptions() error = %v, want non-enumerating source error", err)
+		}
+		var finding *ProcessingFinding
+		wantMessage := `Reusable workflow could not be read. "owner/private/.github/workflows/ci.yml@v1" is either private or does not exist. Only public workflows can be called across repositories. Check the path, or copy the workflow into this repository's .github/workflows and call it with a ./ path. If you need private cross-repository calls, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`
+		if !errors.As(err, &finding) || finding.Message != wantMessage || finding.Detail != "" || finding.Path != "./.github/workflows/private.yml" || finding.Line != 4 || finding.Column != 11 || finding.Job != "call" {
+			t.Fatalf("CompileWithOptions() finding = %#v", finding)
+		}
+	})
+
+	t.Run("missing workflow in public repository", func(t *testing.T) {
+		callerPath := writeWorkflow(t, callerRoot, "missing.yml", "on: push\njobs:\n  call:\n    uses: owner/public/.github/workflows/absent.yml@v1\n")
+		publicRoot := t.TempDir()
+		options := defaultOptions()
+		options.RepositorySource = MemoizeRepositorySource(newFakeReusableRepositorySource(t, map[string]string{"owner/public": publicRoot}))
+		_, err := CompileWithOptions(callerPath, readFile(t, callerPath), event, options)
+		if err == nil || !strings.Contains(err.Error(), `public reusable workflow "owner/public/.github/workflows/absent.yml@v1" could not be read`) {
+			t.Fatalf("CompileWithOptions() error = %v, want non-enumerating missing workflow error", err)
+		}
+		var finding *ProcessingFinding
+		wantMessage := `Reusable workflow could not be read. "owner/public/.github/workflows/absent.yml@v1" is either private or does not exist. Only public workflows can be called across repositories. Check the path, or copy the workflow into this repository's .github/workflows and call it with a ./ path. If you need private cross-repository calls, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`
+		if !errors.As(err, &finding) || finding.Message != wantMessage || finding.Detail != "" || finding.Path != "./.github/workflows/missing.yml" || finding.Line != 4 || finding.Column != 11 || finding.Job != "call" {
+			t.Fatalf("CompileWithOptions() finding = %#v", finding)
 		}
 	})
 
