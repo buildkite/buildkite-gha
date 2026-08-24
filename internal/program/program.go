@@ -198,8 +198,10 @@ type JavaScriptAction struct {
 }
 
 type DockerAction struct {
-	Arguments []Site    `json:"arguments"`
-	Env       []Binding `json:"env"`
+	Image      string    `json:"image"`
+	Entrypoint string    `json:"entrypoint"`
+	Arguments  []Site    `json:"arguments"`
+	Env        []Binding `json:"env"`
 }
 
 type CompositeStep struct {

@@ -1522,6 +1522,12 @@ func (r Runner) verifyNormalizedRemoteActionTree(ctx context.Context, actions *a
 		}
 		return nil
 	case program.ActionRuntimeDocker:
+		if facts.Action.Docker.Image != "" {
+			if facts.Action.Docker.Image != facts.Lock.DockerImage {
+				return fmt.Errorf("normalized action image %q does not match planned image %q", facts.Action.Docker.Image, facts.Lock.DockerImage)
+			}
+			return nil
+		}
 		_, err := verifiedActionEntrypoint(facts, "Dockerfile")
 		return err
 	case program.ActionRuntimeComposite:

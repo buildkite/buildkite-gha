@@ -287,8 +287,12 @@ func (a *actionAdapter) Execute(ctx context.Context, state actionAdapterState, o
 		environment["GITHUB_ACTION_PATH"] = actionPath
 		processErr = a.run.runShellProcess(ctx, processor, dir, environment, &result, shell, command)
 	case program.LeafDocker:
-		if _, entryErr := verifiedActionEntrypoint(facts, "Dockerfile"); entryErr != nil {
-			return state, program.Execution{}, entryErr
+		if facts.Action.Docker.Image == "" {
+			if _, entryErr := verifiedActionEntrypoint(facts, "Dockerfile"); entryErr != nil {
+				return state, program.Execution{}, entryErr
+			}
+		} else if facts.Action.Docker.Image != facts.Lock.DockerImage {
+			return state, program.Execution{}, fmt.Errorf("normalized action image %q does not match planned image %q", facts.Action.Docker.Image, facts.Lock.DockerImage)
 		}
 		arguments, valueErr := concreteValues(operation.Arguments, "Docker arguments")
 		if valueErr != nil {
@@ -307,6 +311,7 @@ func (a *actionAdapter) Execute(ctx context.Context, state actionAdapterState, o
 		_, actionPATH := actionEnvironment["PATH"]
 		result, processErr = a.run.runDocker(ctx, processor, dockerAction{Name: facts.Action.Name, Path: facts.ActionPath,
 			SourceRoot: facts.RepositoryRoot, SourceDigest: facts.Lock.SourceDigest, Args: arguments,
+			Image: facts.Action.Docker.Image, Entrypoint: facts.Action.Docker.Entrypoint,
 			Workspace: a.run.workspace, Env: environment, explicitPATH: operation.ExplicitPATH || actionPATH})
 	case program.LeafNative:
 		descriptor, admitted, admitErr := actionintegration.Admit(actionintegration.Identity{Source: facts.Lock.Source, Repository: facts.Lock.Repository, Path: facts.Lock.Path}, facts.Lock.Commit)

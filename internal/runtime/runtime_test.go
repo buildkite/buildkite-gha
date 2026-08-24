@@ -723,35 +723,18 @@ runs:
 		t.Fatalf("job private Docker config remains: %v", err)
 	}
 
-	mismatchFake := newFakeDocker(t, "success")
 	mismatched := job
 	mismatched.Actions = append([]plan.ActionLock(nil), job.Actions...)
 	mismatched.Actions[0].DockerImage = "alpine:3.20"
-	secondActionPath := ".github/actions/prebuilt-second"
-	writeFixtureFile(t, workspace, secondActionPath+"/action.yml", `name: Second prebuilt Docker
-runs:
-  using: docker
-  image: docker://`+image+`
-`)
-	secondLockID := "a-0000000000000002"
-	mismatched.Steps = append(mismatched.Steps, plan.Step{ID: "prebuilt-second", Kind: "uses", Uses: "./" + secondActionPath, Action: &plan.ActionSelector{Lock: secondLockID}})
-	mismatched.Actions = append(mismatched.Actions, plan.ActionLock{ID: secondLockID, Source: "workspace", Path: secondActionPath, SourceDigest: digestTree(t, filepath.Join(workspace, secondActionPath)), DockerImage: image})
-	if _, err := (Runner{Docker: mismatchFake.path}).RunJob(t.Context(), mismatched, workspace); err == nil || !strings.Contains(err.Error(), "metadata image \""+image+"\" does not match planned image \"alpine:3.20\"") {
-		t.Fatalf("RunJob() mismatched planned image error = %v", err)
-	}
-	if calls := mismatchFake.calls(t); callIndex(calls, "pull", "alpine:3.20") < 0 || callIndex(calls, "pull", image) < 0 || callIndex(calls, "run") >= 0 {
-		t.Fatalf("mismatched plan Docker calls = %#v, want only planned image pulls", calls)
+	if _, err := plan.Encode(mismatched); err == nil || !strings.Contains(err.Error(), "normalized Docker action program \""+lockID+"\" image does not match its lock") {
+		t.Fatalf("Encode() mismatched planned image error = %v", err)
 	}
 
-	unplannedFake := newFakeDocker(t, "success")
 	unplanned := job
 	unplanned.Actions = append([]plan.ActionLock(nil), job.Actions...)
 	unplanned.Actions[0].DockerImage = ""
-	if _, err := (Runner{Docker: unplannedFake.path}).RunJob(t.Context(), unplanned, workspace); err == nil || !strings.Contains(err.Error(), "metadata image \""+image+"\" does not match planned image \"\"") {
-		t.Fatalf("RunJob() unplanned metadata image error = %v", err)
-	}
-	if _, err := os.Stat(unplannedFake.transcript); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unplanned metadata image Docker transcript exists: %v", err)
+	if _, err := plan.Encode(unplanned); err == nil || !strings.Contains(err.Error(), "normalized Docker action program \""+lockID+"\" image does not match its lock") {
+		t.Fatalf("Encode() unplanned normalized image error = %v", err)
 	}
 }
 

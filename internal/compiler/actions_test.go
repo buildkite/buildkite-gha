@@ -2025,12 +2025,13 @@ runs:
 		if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"docker", "network"}) || len(plans[0].Actions) != 1 || plans[0].Actions[0].Source != "github" || plans[0].Actions[0].DockerImage != image {
 			t.Fatalf("prebuilt Docker action plans = %#v", plans)
 		}
+		action := plans[0].ActionPrograms[plans[0].Actions[0].ID]
+		if action.Docker == nil || action.Docker.Image != image || action.Docker.Entrypoint != "/bin/echo" {
+			t.Fatalf("normalized prebuilt Docker action = %#v", action)
+		}
 		encoded, err := plan.Encode(plans[0])
 		if err != nil {
 			t.Fatal(err)
-		}
-		if bytes.Contains(encoded, []byte("/bin/echo")) {
-			t.Fatalf("job plan retained Docker action entrypoint: %s", encoded)
 		}
 		return encoded
 	}

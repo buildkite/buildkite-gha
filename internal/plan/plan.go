@@ -601,6 +601,9 @@ func validateActionProgram(id string, action program.Action, locks map[string]Ac
 		if shapes != 1 || action.Docker == nil {
 			return fmt.Errorf("normalized Docker action program %q has an invalid execution body", id)
 		}
+		if action.Docker.Image != locks[id].DockerImage {
+			return fmt.Errorf("normalized Docker action program %q image does not match its lock", id)
+		}
 	default:
 		return fmt.Errorf("normalized action program %q has unsupported runtime %q", id, action.Runtime)
 	}

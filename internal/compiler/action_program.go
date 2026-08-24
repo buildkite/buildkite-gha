@@ -78,9 +78,12 @@ func lowerActionProgram(node *actionNode) program.Action {
 		}
 	case metadata.RuntimeDocker:
 		action.Runtime = program.ActionRuntimeDocker
+		image, _ := metadata.DockerImageReference(node.metadata.Runs.Image)
 		action.Docker = &program.DockerAction{
-			Arguments: make([]program.Site, len(node.metadata.Runs.Args)),
-			Env:       actionBindings(node.metadata.Runs.Env, program.SurfaceRuntimeTemplate, location, "action.runs.env"),
+			Image:      image,
+			Entrypoint: node.metadata.Runs.Entrypoint,
+			Arguments:  make([]program.Site, len(node.metadata.Runs.Args)),
+			Env:        actionBindings(node.metadata.Runs.Env, program.SurfaceRuntimeTemplate, location, "action.runs.env"),
 		}
 		for i, argument := range node.metadata.Runs.Args {
 			action.Docker.Arguments[i] = actionSite(argument, program.SurfaceDockerArgument, location, fmt.Sprintf("action.runs.args[%d]", i))

@@ -545,7 +545,10 @@ func actionMetadata(action program.Action, actionPath, sourceRoot string) (metad
 		if action.Docker == nil {
 			return metadata.Metadata{}, fmt.Errorf("normalized Docker action has no execution body")
 		}
-		m.Runs.Using, m.Runs.Image = string(metadata.RuntimeDocker), "Dockerfile"
+		m.Runs.Using, m.Runs.Image, m.Runs.Entrypoint = string(metadata.RuntimeDocker), "Dockerfile", action.Docker.Entrypoint
+		if action.Docker.Image != "" {
+			m.Runs.Image = "docker://" + action.Docker.Image
+		}
 		m.Runs.Args = make([]string, len(action.Docker.Arguments))
 		for i, argument := range action.Docker.Arguments {
 			m.Runs.Args[i] = argument.Source

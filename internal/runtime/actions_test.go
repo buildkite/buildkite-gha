@@ -261,7 +261,11 @@ func lowerTestAction(m metadata.Metadata, lock plan.ActionLock) program.Action {
 		}
 	case metadata.RuntimeDocker:
 		action.Runtime = program.ActionRuntimeDocker
-		action.Docker = &program.DockerAction{Env: testActionBindings(m.Runs.Env, program.SurfaceRuntimeTemplate, program.ProvenanceAction, program.PurposeExpression, location, "action.runs.env")}
+		image, _ := metadata.DockerImageReference(m.Runs.Image)
+		action.Docker = &program.DockerAction{
+			Image: image, Entrypoint: m.Runs.Entrypoint,
+			Env: testActionBindings(m.Runs.Env, program.SurfaceRuntimeTemplate, program.ProvenanceAction, program.PurposeExpression, location, "action.runs.env"),
+		}
 		for i, arg := range m.Runs.Args {
 			action.Docker.Arguments = append(action.Docker.Arguments, testActionSite(arg, program.SurfaceDockerArgument, program.ProvenanceAction, program.PurposeExpression, location, fmt.Sprintf("action.runs.args[%d]", i)))
 		}

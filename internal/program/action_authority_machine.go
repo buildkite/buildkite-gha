@@ -258,6 +258,9 @@ func conservativeAuthorityAnalysis(site Site, known map[string]any) (expression.
 
 func authorityReferences(site Site, view FrameView) map[string]any {
 	known := map[string]any{}
+	if site.Surface == SurfaceActionInputDefault {
+		known["job.check_run_id"] = ""
+	}
 	inputs := view.WorkflowInputs()
 	if site.Provenance == ProvenanceAction && site.Surface != SurfaceActionLifecycle {
 		inputs = view.ActionInputs()
