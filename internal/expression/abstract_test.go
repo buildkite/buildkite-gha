@@ -170,6 +170,7 @@ func TestConditionMayBeTrueUsesKnownReferencesAfterUnknownValues(t *testing.T) {
 	for _, condition := range []string{
 		"env.RUNTIME == 'yes' && inputs.enabled == 'true'",
 		"env.RUNTIME == 'yes' && github.server_url == 'https://github.com'",
+		"success() && inputs.enabled == 'true'",
 	} {
 		mayRun, err := ConditionMayBeTrue(condition, known)
 		if err != nil || mayRun {

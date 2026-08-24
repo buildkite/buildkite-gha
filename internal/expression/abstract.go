@@ -210,6 +210,26 @@ func analyzeCondition(node actionlint.ExprNode, knownReferences map[string]any) 
 		if value, recognized, err := evaluatePureFunction(evaluator, node); recognized {
 			return value, err
 		}
+		switch strings.ToLower(node.Callee) {
+		case "always":
+			if len(node.Args) == 0 {
+				return knownAnalysis(true), nil
+			}
+		case "success", "failure", "cancelled":
+			if len(node.Args) == 0 {
+				return Analysis{}, nil
+			}
+		case "hashfiles":
+			arguments := make([]Analysis, 0, len(node.Args))
+			for _, argument := range node.Args {
+				value, err := evaluator.evaluate(argument)
+				if err != nil {
+					return Analysis{}, err
+				}
+				arguments = append(arguments, value)
+			}
+			return unknownAnalysis(arguments...), nil
+		}
 		return Analysis{}, fmt.Errorf("condition function %q is unavailable during planning", node.Callee)
 	}
 	return evaluator.evaluate(node)

@@ -508,9 +508,6 @@ func (n *actionNode) knownInputReferences(supplied map[string]string, serverURL 
 }
 
 func compositeStepMayRun(condition string, knownReferences map[string]any) bool {
-	if referencesStatus, err := expression.ReferencesStatusFunction(condition); err != nil || referencesStatus {
-		return true
-	}
 	run, err := expression.ConditionMayBeTrue(condition, knownReferences)
 	return err != nil || run
 }
