@@ -24,6 +24,7 @@ import (
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	shellcompat "github.com/buildkite/buildkite-gha/internal/shell"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
@@ -2384,6 +2385,9 @@ func shellCommand(shell, script string) ([]string, error) {
 	case "sh":
 		return []string{"sh", "-e", "-c", script}, nil
 	default:
+		if err := shellcompat.ValidateCompatibility(shell); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("shell %q is unsupported in the supported runtime subset", shell)
 	}
 }
@@ -2401,7 +2405,7 @@ func (r *jobRun) runShellProcess(ctx context.Context, processor *commandProcesso
 	args := []string{"python", "{0}"}
 	if shell != "python" {
 		var err error
-		args, err = parseShellTemplate(shell)
+		args, err = shellcompat.ParseTemplate(shell)
 		if err != nil {
 			return err
 		}
@@ -2442,82 +2446,6 @@ func (r *jobRun) runShellProcess(ctx context.Context, processor *commandProcesso
 		args[0] = command
 	}
 	return r.runProcess(ctx, processor, dir, env, result, nil, args[0], args[1:]...)
-}
-
-func parseShellTemplate(shell string) ([]string, error) {
-	args, err := splitShellTemplate(shell)
-	if err != nil {
-		return nil, fmt.Errorf("parse shell template %q: %w", shell, err)
-	}
-	if len(args) == 0 || args[0] == "" {
-		return nil, fmt.Errorf("shell template %q must contain a command", shell)
-	}
-	command := strings.ToLower(filepath.Base(args[0]))
-	switch command {
-	case "pwsh", "pwsh.exe", "cmd", "cmd.exe", "powershell", "powershell.exe", "msys2", "msys2.cmd", "msys2.exe":
-		return nil, fmt.Errorf("shell %q is unsupported in the supported runtime subset", shell)
-	}
-	hasPlaceholder := false
-	for _, arg := range args[1:] {
-		hasPlaceholder = hasPlaceholder || strings.Contains(arg, "{0}")
-	}
-	if !hasPlaceholder {
-		return nil, fmt.Errorf("shell template %q must contain {0} in its arguments", shell)
-	}
-	return args, nil
-}
-
-func splitShellTemplate(shell string) ([]string, error) {
-	var args []string
-	var arg strings.Builder
-	var quote rune
-	escaped := false
-	inArg := false
-	flush := func() {
-		if inArg {
-			args = append(args, arg.String())
-			arg.Reset()
-			inArg = false
-		}
-	}
-	for _, char := range shell {
-		if escaped {
-			arg.WriteRune(char)
-			escaped = false
-			inArg = true
-			continue
-		}
-		if quote != 0 {
-			switch {
-			case char == quote:
-				quote = 0
-			case char == '\\' && quote == '"':
-				escaped = true
-			default:
-				arg.WriteRune(char)
-			}
-			inArg = true
-			continue
-		}
-		switch char {
-		case '\\':
-			escaped = true
-			inArg = true
-		case '\'', '"':
-			quote = char
-			inArg = true
-		case ' ', '\t', '\r', '\n':
-			flush()
-		default:
-			arg.WriteRune(char)
-			inArg = true
-		}
-	}
-	if escaped || quote != 0 {
-		return nil, errors.New("unclosed quote or escape")
-	}
-	flush()
-	return args, nil
 }
 
 func shellScriptExtension(command string) string {

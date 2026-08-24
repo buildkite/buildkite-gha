@@ -16,6 +16,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/program"
+	shellcompat "github.com/buildkite/buildkite-gha/internal/shell"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
@@ -119,6 +120,9 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
 	}
 	workflowProgram := lowerWorkflowProgram(instance)
+	if err := b.validateShellCompatibility(instance, workflowProgram); err != nil {
+		return plan.Job{}, PlanAuthorization{}, nil, err
+	}
 	steps := projectPlanSteps(workflowProgram.Job.Steps)
 	actionIndexes, actionRefs, actionInputs := programActionInvocations(workflowProgram.Job.Steps)
 	actions, err := b.buildActions(instance, steps, actionIndexes, actionRefs, actionInputs)
@@ -163,6 +167,41 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("encode plan for job %q: %w", instance.LogicalJobID, err)
 	}
 	return job, actions.authorization, encoded, nil
+}
+
+func (b planBuilder) validateShellCompatibility(instance JobInstance, workflowProgram program.Program) error {
+	context := compileContext(b.ir.Event, b.ir.Vars, instance.SourcePath, b.workflowName)
+	context.Inputs = instance.Inputs
+	context.Matrix = instance.Matrix
+	var diagnostics []error
+	validate := func(site program.Site, step int) {
+		if site.Source == "" {
+			return
+		}
+		resolved, err := expression.EvaluateAvailableCompileTemplate(site.Source, context)
+		if err != nil || strings.Contains(resolved, "${{") {
+			return
+		}
+		if err := shellcompat.ValidateCompatibility(resolved); err != nil {
+			owner := fmt.Sprintf("job %q", instance.LogicalJobID)
+			if step != 0 {
+				owner += fmt.Sprintf(" step %d", step)
+			}
+			diagnostics = append(diagnostics, &ProcessingFinding{
+				Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility",
+				Path: site.Location.File, Line: site.Location.Start.Line, Column: site.Location.Start.Column,
+				Job: instance.LogicalJobID, Instance: instance.Key, Step: step, Message: err.Error(),
+				Err: fmt.Errorf("%s:%d:%d: %s: %w", site.Location.File, site.Location.Start.Line, site.Location.Start.Column, owner, err),
+			})
+		}
+	}
+	validate(workflowProgram.Job.Defaults.Shell, 0)
+	for i, step := range workflowProgram.Job.Steps {
+		if step.Run != nil {
+			validate(step.Run.Shell, i+1)
+		}
+	}
+	return errors.Join(diagnostics...)
 }
 
 func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (JobInstance, error) {
@@ -673,11 +712,11 @@ func cloneOIDCConfiguration(configuration *plan.OIDCConfiguration) *plan.OIDCCon
 }
 
 func planConstructionFinding(instance JobInstance, err error) error {
-	return &ProcessingFinding{
-		Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility",
-		Path: instance.SourcePath, Line: instance.Source.Start.Line, Column: instance.Source.Start.Column,
-		Job: instance.LogicalJobID, Instance: instance.Key, Err: err,
-	}
+	return attributedProcessingFinding(
+		StagePlans, CodePlanConstruction, "compatibility",
+		instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column,
+		instance.LogicalJobID, instance.Key, "", 0, err,
+	)
 }
 
 func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, actionRequired []string, actionInputsInspected bool) ([]string, map[string]string, []string, bool, error) {
