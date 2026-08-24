@@ -1331,8 +1331,18 @@ optional action input becomes an empty value unless another field requires it.
 
 Jobs with `id-token: write` expose the GitHub Actions `getIDToken()` contract to
 host JavaScript actions, including those called by composite actions. The
-endpoint mints a Buildkite OIDC token for the requested audience. Cloud identity
-providers must trust Buildkite's issuer and claims, not GitHub's.
+endpoint mints a Buildkite OIDC token for the requested audience. This is
+Buildkite-native issuer behavior, not GitHub issuer parity or impersonation.
+The token issuer is `https://agent.buildkite.com`, not GitHub's
+`https://token.actions.githubusercontent.com`. Update the target service's OIDC
+trust policy from GitHub's issuer and claims to Buildkite's issuer and claims.
+See [Buildkite OIDC](https://buildkite.com/docs/pipelines/security/oidc).
+
+After the first authorized request successfully mints a token, the job emits
+this migration guidance once, even when actions request more tokens. Failed
+mint requests retain their HTTP status behavior and do not claim that
+Buildkite issued a token. The runtime cannot observe a later target-service
+trust-policy rejection, so an Agent API 401 or 403 reports only a mint denial.
 
 `id-token: read`, `id-token: none`, and omitted permissions do not expose the
 endpoint. Repository tests cover the wire contract; hosted runtime proof remains
