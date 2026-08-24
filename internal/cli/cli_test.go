@@ -53,7 +53,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 			{name: "mixed branch filters", trigger: "push:\n    branches: [main]\n    branches-ignore: [release]", want: "include and ignore filters cannot be combined"},
 			{name: "pull request tag filter", trigger: "pull_request:\n    tags: [v1]", want: "pull_request tag filters are unsupported"},
 			{name: "pull request activity", trigger: "pull_request:\n    types: [auto_merge_enabled, submitted]", want: `activity type "submitted" cannot be mapped exactly`},
-			{name: "bare release", trigger: "release", want: "release requires explicit types"},
+			{name: "bare release", trigger: "release", want: "on: release needs a types list"},
 			{name: "unsupported release activity", trigger: "release:\n    types: [edited]", want: `release activity type "edited" cannot be mapped exactly`},
 			{name: "release branch filter", trigger: "release:\n    types: [published]\n    branches: [main]", want: "release has unsupported filters"},
 		}
