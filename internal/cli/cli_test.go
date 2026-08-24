@@ -1867,7 +1867,16 @@ func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
 }
 
 func TestProcessingAnnotationRendersJobPermissionWarningGuidance(t *testing.T) {
-	report := compatibility.NewProcessingReport(".github/workflows/ci.yml", "hosted")
+	repository := t.TempDir()
+	workflowPath := filepath.Join(repository, ".github", "workflows", "ci.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("on: push\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	report := compatibility.NewProcessingReport(workflowPath, "hosted")
 	report.ApplyWarnings(report.Workflow, []compiler.Warning{{
 		Code: "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS", Path: report.Workflow, Line: 5, Column: 3, Job: "build",
 		Message: "Job-level permissions are ignored for GITHUB_TOKEN. The top-level workflow permissions apply instead. This job's token has contents: read. Move this job's permissions block to the workflow top level. If you need per-job permissions, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
