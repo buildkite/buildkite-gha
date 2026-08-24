@@ -79,6 +79,27 @@ func EvaluateActionInputDefault(template string, context Context) (string, error
 	return evaluateRuntimeTemplate(template, context, evaluateActionInputDefaultNode)
 }
 
+// EvaluateKnownActionInputDefault evaluates a metadata default when immutable
+// provider values are sufficient. Runtime-dependent defaults report unknown.
+func EvaluateKnownActionInputDefault(template, serverURL string) (string, bool, error) {
+	known := true
+	value, err := evaluateRuntimeTemplate(template, Context{}, func(node actionlint.ExprNode, _ Context) (any, error) {
+		analysis, err := analyzeActionInputDefault(node, map[string]any{
+			"github.server_url": serverURL,
+			"job.check_run_id":  "",
+		})
+		if err != nil {
+			return nil, err
+		}
+		if !analysis.Value.Known {
+			known = false
+			return "", nil
+		}
+		return analysis.Value.Value, nil
+	})
+	return value, known, err
+}
+
 func isDirectRunnerDebug(node actionlint.ExprNode, root string, path []string) bool {
 	_, direct := node.(*actionlint.ObjectDerefNode)
 	return direct && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug")

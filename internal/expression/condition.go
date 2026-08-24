@@ -425,6 +425,21 @@ func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 	return result, nil
 }
 
+// ConditionMayBeTrue reports whether a condition can run when only immutable
+// planning references are known. Runtime-dependent values remain unknown.
+func ConditionMayBeTrue(source string, knownReferences map[string]any) (bool, error) {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return true, err
+	}
+	analysis, err := analyzeCondition(node, knownReferences)
+	if err != nil {
+		return true, nil
+	}
+	truthy, known := (abstractExpressionDomain{}).truthiness(analysis, githubTruthy)
+	return !known || truthy, nil
+}
+
 func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (any, error) {
 	evaluator := newSemanticEvaluator(conditionSurface)
 	rootValues := make(map[string]any)

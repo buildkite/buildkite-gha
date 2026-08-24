@@ -112,33 +112,6 @@ func ConditionSecretReferences(source string) ([]string, error) {
 	return sortedReferenceNames(found), nil
 }
 
-// ConditionInputReferences returns direct input names from one condition.
-func ConditionInputReferences(source string) ([]string, error) {
-	node, empty, err := parseCondition(source)
-	if err != nil || empty {
-		return nil, err
-	}
-	found := map[string]struct{}{}
-	var referenceErr error
-	actionlint.VisitExprNode(node, func(node, _ actionlint.ExprNode, entering bool) {
-		if !entering || referenceErr != nil || !strings.EqualFold(referenceRoot(node), "inputs") {
-			return
-		}
-		root, path, err := referencePath(node)
-		if err != nil {
-			referenceErr = err
-			return
-		}
-		if strings.EqualFold(root, "inputs") && len(path) == 1 {
-			found[strings.ToLower(path[0])] = struct{}{}
-		}
-	})
-	if referenceErr != nil {
-		return nil, referenceErr
-	}
-	return sortedReferenceNames(found), nil
-}
-
 func collectSecretReferences(expression actionlint.ExprNode, found map[string]struct{}) error {
 	var referenceErr error
 	actionlint.VisitExprNode(expression, func(node, parent actionlint.ExprNode, entering bool) {

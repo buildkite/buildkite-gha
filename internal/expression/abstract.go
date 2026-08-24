@@ -9,10 +9,12 @@ import (
 )
 
 // AbstractValue is either one concrete expression value or an unknown runtime
-// value. Unknown is distinct from a known null value.
+// value. Unknown is distinct from a known null value and may still have known
+// truthiness for logical short-circuiting.
 type AbstractValue struct {
-	Known bool
-	Value any
+	Known  bool
+	Value  any
+	Truthy *bool
 }
 
 // GitHubTokenEffect records why evaluation can require github.token.
@@ -48,6 +50,12 @@ func unknownAnalysis(values ...Analysis) Analysis {
 	return Analysis{Effects: effects}
 }
 
+func unknownAnalysisWithTruthiness(truthiness bool, values ...Analysis) Analysis {
+	analysis := unknownAnalysis(values...)
+	analysis.Value.Truthy = &truthiness
+	return analysis
+}
+
 func derivedAnalysis(value any, inputs ...Analysis) Analysis {
 	analysis := knownAnalysis(value)
 	for _, input := range inputs {
@@ -65,8 +73,20 @@ func (abstractExpressionDomain) derive(value any, inputs ...Analysis) Analysis {
 func (abstractExpressionDomain) value(analysis Analysis) (any, bool) {
 	return analysis.Value.Value, analysis.Value.Known
 }
+func (abstractExpressionDomain) truthiness(analysis Analysis, truthy func(any) bool) (bool, bool) {
+	if analysis.Value.Known {
+		return truthy(analysis.Value.Value), true
+	}
+	if analysis.Value.Truthy != nil {
+		return *analysis.Value.Truthy, true
+	}
+	return false, false
+}
 func (abstractExpressionDomain) unknown(values ...Analysis) Analysis {
 	return unknownAnalysis(values...)
+}
+func (abstractExpressionDomain) unknownWithTruthiness(truthiness bool, values ...Analysis) Analysis {
+	return unknownAnalysisWithTruthiness(truthiness, values...)
 }
 func (abstractExpressionDomain) join(values ...Analysis) Analysis {
 	if len(values) == 0 {
@@ -75,6 +95,15 @@ func (abstractExpressionDomain) join(values ...Analysis) Analysis {
 	result := unknownAnalysis(values...)
 	first := values[0].Value
 	if !first.Known {
+		if first.Truthy == nil {
+			return result
+		}
+		for _, value := range values[1:] {
+			if value.Value.Known || value.Value.Truthy == nil || *value.Value.Truthy != *first.Truthy {
+				return result
+			}
+		}
+		result.Value.Truthy = first.Truthy
 		return result
 	}
 	for _, value := range values[1:] {
@@ -169,6 +198,19 @@ func analyzeStepTemplate(node actionlint.ExprNode, knownReferences map[string]an
 			return unknownAnalysis(arguments...), nil
 		}
 		return Analysis{}, fmt.Errorf("step template function %q is unsupported", node.Callee)
+	}
+	return evaluator.evaluate(node)
+}
+
+func analyzeCondition(node actionlint.ExprNode, knownReferences map[string]any) (Analysis, error) {
+	evaluator := newAbstractEvaluator(conditionSurface)
+	evaluator.resolve = abstractReferenceResolver(knownReferences)
+	evaluator.resolveRoot = func(string) (Analysis, error) { return Analysis{}, nil }
+	evaluator.call = func(evaluator *expressionEvaluator[Analysis], node *actionlint.FuncCallNode) (Analysis, error) {
+		if value, recognized, err := evaluatePureFunction(evaluator, node); recognized {
+			return value, err
+		}
+		return Analysis{}, fmt.Errorf("condition function %q is unavailable during planning", node.Callee)
 	}
 	return evaluator.evaluate(node)
 }

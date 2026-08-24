@@ -543,6 +543,29 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsReducesProviderBackedCompositeInputDefault(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "token", `name: provider-conditional token
+inputs:
+  enabled:
+    default: ${{ github.server_url == 'https://github.com' && 'true' || 'false' }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ inputs.enabled == 'true' && github.token || '' }}
+      run: echo token
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://origin.cursor.com", []string{"./token"}, []map[string]string{{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("Origin provider-backed default requested a GitHub token")
+	}
+}
+
 func TestCompileActionInvocationsRejectsAuthorityFromCompositeShellMetadata(t *testing.T) {
 	workspace := t.TempDir()
 	for _, test := range []struct {
@@ -993,7 +1016,7 @@ jobs:
     steps:
       - uses: ./.github/actions/token
 `)
-	if err == nil || !strings.Contains(err.Error(), "action input default that references github.token") || !strings.Contains(err.Error(), "no effective permissions") {
+	if err == nil || !strings.Contains(err.Error(), "resolved action metadata that references github.token") || !strings.Contains(err.Error(), "no effective permissions") {
 		t.Fatalf("compilePlansForTest() error = %v, want empty permission rejection", err)
 	}
 }

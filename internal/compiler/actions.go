@@ -492,10 +492,11 @@ func (n *actionNode) knownInputReferences(supplied map[string]string, serverURL 
 		if input.Default == nil || hasActionInput(supplied, name) {
 			continue
 		}
-		if strings.Contains(*input.Default, "${{") {
+		value, resolved, err := expression.EvaluateKnownActionInputDefault(*input.Default, serverURL)
+		if err != nil || !resolved {
 			continue
 		}
-		known["inputs."+strings.ToLower(name)] = *input.Default
+		known["inputs."+strings.ToLower(name)] = value
 	}
 	for _, name := range sortedKeys(supplied) {
 		if strings.Contains(supplied[name], "${{") {
@@ -510,19 +511,7 @@ func compositeStepMayRun(condition string, knownReferences map[string]any) bool 
 	if referencesStatus, err := expression.ReferencesStatusFunction(condition); err != nil || referencesStatus {
 		return true
 	}
-	inputNames, err := expression.ConditionInputReferences(condition)
-	if err != nil {
-		return true
-	}
-	inputs := map[string]any{}
-	for _, name := range inputNames {
-		value, ok := knownReferences["inputs."+name]
-		if !ok {
-			return true
-		}
-		inputs[name] = value
-	}
-	run, err := expression.EvaluateCondition(condition, expression.ConditionContext{Inputs: inputs})
+	run, err := expression.ConditionMayBeTrue(condition, knownReferences)
 	return err != nil || run
 }
 
