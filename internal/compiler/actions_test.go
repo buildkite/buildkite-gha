@@ -445,6 +445,28 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsAcceptsUnavailableCheckRunIDDefaultWithoutAuthority(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "check-run", `name: check run
+inputs:
+  check-run-id:
+    default: ${{ job.check_run_id }}
+  token:
+    default: ${{ job.check_run_id && github.token || '' }}
+runs:
+  using: node24
+  main: index.js
+`)
+
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./check-run"}, []map[string]string{{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken || len(compiled.requiredSecrets) != 0 {
+		t.Fatalf("check-run default authority = token %t, secrets %#v; want none", compiled.requiresGitHubToken, compiled.requiredSecrets)
+	}
+}
+
 func TestCompileActionInvocationsScopesWorkflowAuthoredSecretsByInputContract(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "secrets", `name: secret inputs

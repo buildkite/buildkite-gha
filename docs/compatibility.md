@@ -890,7 +890,9 @@ After runner setup, step runtime fields and job outputs can also use
 `RUNNER_TEMP`. Other runner fields and compile-time positions that require
 runner identity are unsupported. Action metadata input defaults may also use
 direct `runner.debug`, which resolves to the string `false` because Buildkite
-has no equivalent step-debug mode.
+has no equivalent step-debug mode. `job.check_run_id` defaults, including the
+static indexed spelling, resolve to an empty string because Buildkite does not
+create a GitHub check run. Other `job` identity fields remain unsupported.
 
 A runtime interpolation can read a verified upstream output directly:
 

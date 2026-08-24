@@ -32,6 +32,9 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 		if isJobStatusReference(root, path) {
 			return nil
 		}
+		if isJobCheckRunIDReference(root, path) {
+			return nil
+		}
 		if isRunnerTempReference(root, path) {
 			return fmt.Errorf("action input defaults cannot reference runner.temp")
 		}
@@ -81,14 +84,18 @@ func isDirectRunnerDebug(node actionlint.ExprNode, root string, path []string) b
 	return direct && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug")
 }
 
+func isJobCheckRunIDReference(root string, path []string) bool {
+	return strings.EqualFold(root, "job") && len(path) == 1 && strings.EqualFold(path[0], "check_run_id")
+}
+
 func isRunnerTempReference(root string, path []string) bool {
 	return strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "temp")
 }
 
 // ActionInputDefaultRequiresGitHubToken reports whether a metadata default can
-// reach github.token for the event provider. Defaults involving any other
-// runtime value require the token because those values are not known during
-// compilation.
+// reach github.token for the event provider. A token branch guarded by an
+// unknown runtime value requires the token because that value is not known
+// during compilation.
 func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, error) {
 	referencesToken, err := ReferencesGitHubToken(template)
 	if err != nil || !referencesToken {
@@ -122,8 +129,9 @@ func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, er
 					}
 				}
 			}
-			onlyKnownReferences = strings.EqualFold(root, "github") && len(path) == 1 &&
-				(strings.EqualFold(path[0], "server_url") || strings.EqualFold(path[0], "token"))
+			onlyKnownReferences = isJobCheckRunIDReference(root, path) ||
+				strings.EqualFold(root, "github") && len(path) == 1 &&
+					(strings.EqualFold(path[0], "server_url") || strings.EqualFold(path[0], "token"))
 		})
 		return nil
 	})
@@ -149,6 +157,12 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 				return nil, fmt.Errorf("expression references unavailable job.status")
 			}
 			return context.JobStatus, nil
+		}
+		if isJobCheckRunIDReference(root, path) {
+			// Buildkite creates no GitHub check run. GitHub documents this
+			// property as unavailable on GitHub Enterprise Server; unavailable
+			// properties interpolate as an empty string.
+			return "", nil
 		}
 		if isRunnerTempReference(root, path) {
 			return nil, fmt.Errorf("action input defaults cannot reference runner.temp")
