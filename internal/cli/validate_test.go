@@ -128,6 +128,76 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 	})
 }
 
+func TestValidatePublishesActionableTriggerDiagnostics(t *testing.T) {
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+
+	tests := []struct {
+		name           string
+		workflow       string
+		wantMessage    string
+		wantAnnotation []string
+	}{
+		{
+			name: "unsupported merge group type",
+			workflow: "on:\n  merge_group:\n    types: [destroyed]\n" +
+				"jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+			wantMessage: `merge_group type "destroyed" is unsupported. checks_requested is the only merge queue activity currently mapped. Set types: [checks_requested]. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
+			wantAnnotation: []string{
+				`<p><strong>merge_group type &#34;destroyed&#34; is unsupported.</strong></p>`,
+				`checks_requested is the only merge queue activity currently mapped.`,
+				`Set types: [checks_requested].`,
+			},
+		},
+		{
+			name:        "bare release",
+			workflow:    "on: release\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+			wantMessage: `on: release needs a types list. A bare release covers every release event, while the currently supported types are exactly published, created, and released. Use on: {release: {types: [published]}}. If you need another release type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
+			wantAnnotation: []string{
+				`<p><strong>on: release needs a types list.</strong></p>`,
+				`A bare release covers every release event, while the currently supported types are exactly published, created, and released.`,
+				`Use on: {release: {types: [published]}}.`,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workflowPath := filepath.Join(t.TempDir(), "workflow.yml")
+			if err := os.WriteFile(workflowPath, []byte(test.workflow), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev", runner); code != 1 {
+				t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+			}
+			var report compatibility.ProcessingReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Diagnostics) != 1 || report.Diagnostics[0].Message != test.wantMessage {
+				t.Fatalf("diagnostics = %#v, want message %q", report.Diagnostics, test.wantMessage)
+			}
+			location := report.Diagnostics[0].Location
+			if location == nil || location.Path != workflowPath || location.Line != 1 || location.Column != 1 {
+				t.Fatalf("diagnostic location = %#v, want %s:1:1", location, workflowPath)
+			}
+			if len(runner.commands) != 1 || runner.commands[0].args[8] != "error" {
+				t.Fatalf("commands = %#v, want one error annotation", runner.commands)
+			}
+			annotation := string(runner.commands[0].stdin)
+			for _, want := range append(test.wantAnnotation,
+				`<code>`+workflowPath+`:1:1</code>`,
+				`open an issue in <a href="https://github.com/buildkite/buildkite-gha" target="_blank">buildkite/buildkite-gha</a> so we can prioritize it`,
+			) {
+				if !strings.Contains(annotation, want) {
+					t.Fatalf("annotation = %q, want %q", annotation, want)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateActionCacheRequiresHostedProfile(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := Run([]string{"validate", "--action-cache-dir", t.TempDir(), "workflow.yml"}, &stdout, &stderr, "dev"); code != 2 || !strings.Contains(stderr.String(), "requires --profile hosted") {

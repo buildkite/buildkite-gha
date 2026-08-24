@@ -74,9 +74,9 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 		{name: "mixed include ignore", triggers: []workflow.Trigger{{Event: "push", Branches: []string{"main"}, BranchesIgnore: []string{"release"}}}, want: "cannot be combined"},
 		{name: "leading negative", triggers: []workflow.Trigger{{Event: "push", Branches: []string{"!release/**"}}}, want: "must follow a positive"},
 		{name: "unsupported PR type", triggers: []workflow.Trigger{{Event: "pull_request", Types: []string{"not-real"}}}, want: "cannot be mapped exactly"},
-		{name: "unsupported merge group type", triggers: []workflow.Trigger{{Event: "merge_group", Types: []string{"destroyed"}}}, want: "cannot be mapped exactly"},
+		{name: "unsupported merge group type", triggers: []workflow.Trigger{{Event: "merge_group", Types: []string{"destroyed"}}}, want: `merge_group type "destroyed" is unsupported`},
 		{name: "merge group paths", triggers: []workflow.Trigger{{Event: "merge_group", Paths: []string{"src/**"}}}, want: "path filters are unsupported"},
-		{name: "bare release", triggers: []workflow.Trigger{{Event: "release"}}, want: "requires explicit types"},
+		{name: "bare release", triggers: []workflow.Trigger{{Event: "release"}}, want: "on: release needs a types list"},
 		{name: "release unpublished", triggers: []workflow.Trigger{{Event: "release", Types: []string{"unpublished"}}}, want: "cannot be mapped exactly"},
 		{name: "release edited", triggers: []workflow.Trigger{{Event: "release", Types: []string{"edited"}}}, want: "cannot be mapped exactly"},
 		{name: "release deleted", triggers: []workflow.Trigger{{Event: "release", Types: []string{"deleted"}}}, want: "cannot be mapped exactly"},
@@ -89,6 +89,33 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 			_, err := TranslateTriggerCondition(test.triggers)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Errorf("TranslateTriggerCondition(%v) error = %v, want %q", test.triggers, err, test.want)
+			}
+		})
+	}
+}
+
+func TestTranslateTriggerConditionReportsActionableTriggerErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		trigger workflow.Trigger
+		want    string
+	}{
+		{
+			name:    "unsupported merge group type",
+			trigger: workflow.Trigger{Event: "merge_group", Types: []string{"destroyed"}},
+			want:    `merge_group type "destroyed" is unsupported. checks_requested is the only merge queue activity currently mapped. Set types: [checks_requested]. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
+		},
+		{
+			name:    "bare release",
+			trigger: workflow.Trigger{Event: "release"},
+			want:    `on: release needs a types list. A bare release covers every release event, while the currently supported types are exactly published, created, and released. Use on: {release: {types: [published]}}. If you need another release type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := TranslateTriggerCondition([]workflow.Trigger{test.trigger})
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("TranslateTriggerCondition() error = %q, want %q", err, test.want)
 			}
 		})
 	}
