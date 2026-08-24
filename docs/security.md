@@ -192,7 +192,15 @@ repository from the same provider when Buildkite authorizes it.
 - External HTTPS submodules are anonymous.
 - SSH and other non-HTTPS transports are disabled.
 - The credential helper is offered only to the event provider's host, uses
-  HTTP-path matching, and is not persisted.
+  HTTP-path matching, and is scoped to repository, LFS, and submodule commands.
+  It is never written to Git configuration or persisted for later steps.
+  Git, Git LFS, and the Buildkite Agent helper are resolved before action hooks;
+  LFS filters use the resolved executable instead of searching the workflow's
+  `PATH` while credentials are available.
+
+Checkout paths are relative to the workspace. Traversal, `.git` path segments,
+and symbolic-link parents are rejected before Git runs. Existing checkout
+directories are not reused, even with `clean: false`.
 
 Git owns submodule parsing and recursion, so keep it current and prefer a pinned
 job image.

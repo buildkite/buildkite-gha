@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +59,7 @@ set -eu
 test "$GIT_CONFIG_NOSYSTEM" = 1
 test "$GIT_CONFIG_GLOBAL" = ` + shellTestQuote(os.DevNull) + `
 test "$GIT_TERMINAL_PROMPT" = 0
+test "$GIT_LFS_SKIP_SMUDGE" = 1
 test -z "$GIT_ASKPASS"
 test -z "${GH_TOKEN:-}"
 case "$HOME" in */.no-home) test ! -e "$HOME" ;; *) exit 21 ;; esac
@@ -414,6 +416,56 @@ func TestCheckoutSubmoduleInputMode(t *testing.T) {
 	}
 }
 
+func TestCheckoutLFSFiltersPinExecutable(t *testing.T) {
+	gitLFS := "/opt/pinned lfs/git-lfs'quoted"
+	filterArgs := strings.Join(checkoutGitLFSFilterArgs(checkoutGitBaseArgs(), gitLFS), "\n")
+	if !strings.Contains(filterArgs, "core.hooksPath=/dev/null") || !strings.Contains(filterArgs, `'/opt/pinned lfs/git-lfs'\''quoted' filter-process`) || strings.Contains(filterArgs, "filter.lfs.process=git-lfs") {
+		t.Fatalf("checkout LFS filter arguments = %q", filterArgs)
+	}
+}
+
+func TestCheckoutLFSSubmodulesPinExecutable(t *testing.T) {
+	workspace := canonicalTempDir(t)
+	gitLog := filepath.Join(t.TempDir(), "git.log")
+	sha := strings.Repeat("a", 40)
+	git := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
+case "$*" in
+  *" init --template= .") mkdir -p .git ;;
+  *" checkout --detach "*) printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD ;;
+esac
+`
+	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitLFS := filepath.Join(t.TempDir(), "git-lfs")
+	if err := os.WriteFile(gitLFS, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "buildkite/buildkite-gha", SHA: sha}}
+	if _, err := (Runner{Git: git, GitLFS: gitLFS}).runCheckout(t.Context(), newCommandProcessor(io.Discard, io.Discard), workspace, job, actionintegration.CheckoutV7Commit, map[string]string{"lfs": "true", "submodules": "true"}); err != nil {
+		t.Fatal(err)
+	}
+	commands, err := os.ReadFile(gitLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(commands)), "\n") {
+		if strings.Contains(line, "submodule ") && !strings.Contains(line, "filter.lfs.process="+checkoutGitLFSExecutable(gitLFS)+" filter-process") {
+			t.Fatalf("submodule command did not pin Git LFS: %q", line)
+		}
+	}
+}
+
+func TestCheckoutGitConfigEnvironment(t *testing.T) {
+	env := checkoutGitConfigEnvironment(map[string]string{"EXISTING": "value"}, []string{"--literal-pathspecs", "-c", "credential.helper=", "-c", "http.followRedirects=false"})
+	if env["EXISTING"] != "value" || env["GIT_CONFIG_COUNT"] != "2" || env["GIT_CONFIG_KEY_0"] != "credential.helper" || env["GIT_CONFIG_VALUE_0"] != "" || env["GIT_CONFIG_KEY_1"] != "http.followRedirects" || env["GIT_CONFIG_VALUE_1"] != "false" {
+		t.Fatalf("Git config environment = %#v", env)
+	}
+}
+
 func TestCheckoutSubmoduleNativeCommandSequenceAndFlags(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "git.log")
 	git := filepath.Join(t.TempDir(), "git")
@@ -422,7 +474,7 @@ func TestCheckoutSubmoduleNativeCommandSequenceAndFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
-	if err := runner.runCheckoutSubmodules(t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), true, true, false, ""); err != nil {
+	if err := runner.runCheckoutSubmodules(t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "7", true, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	contents, err := os.ReadFile(logPath)
@@ -430,7 +482,7 @@ func TestCheckoutSubmoduleNativeCommandSequenceAndFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(contents)), "\n")
-	if len(lines) != 3 || !strings.Contains(lines[0], "submodule sync --recursive") || !strings.Contains(lines[1], "submodule update --init --force --depth=1 --recursive") || !strings.Contains(lines[2], "submodule status --recursive") {
+	if len(lines) != 3 || !strings.Contains(lines[0], "submodule sync --recursive") || !strings.Contains(lines[1], "submodule update --init --force --depth=7 --recursive") || !strings.Contains(lines[2], "submodule status --recursive") {
 		t.Fatalf("native submodule command sequence = %q", lines)
 	}
 	for _, line := range lines {
@@ -461,7 +513,7 @@ exit 0
 			if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			err := (Runner{Stdout: io.Discard, Stderr: io.Discard}).runCheckoutSubmodules(t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false, "")
+			err := (Runner{Stdout: io.Discard, Stderr: io.Discard}).runCheckoutSubmodules(t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "0", false, false, "")
 			if err == nil || !strings.Contains(err.Error(), "invalid state") {
 				t.Fatalf("status prefix %q error = %v", prefix, err)
 			}
@@ -489,7 +541,11 @@ func TestCheckoutSubmodulesUsesNativePorcelain(t *testing.T) {
 			runTestGit(t, workspace, "checkout", "--detach", parentOID)
 			base := append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always")
 			runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
-			if err := runner.runCheckoutSubmodules(t.Context(), newCommandProcessor(io.Discard, io.Discard), workspace, "git", map[string]string{"HOME": filepath.Join(workspace, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull}, base, test.depthOne, test.recursive, false, ""); err != nil {
+			depth := "0"
+			if test.depthOne {
+				depth = "1"
+			}
+			if err := runner.runCheckoutSubmodules(t.Context(), newCommandProcessor(io.Discard, io.Discard), workspace, "git", map[string]string{"HOME": filepath.Join(workspace, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull}, base, depth, test.recursive, false, ""); err != nil {
 				t.Fatal(err)
 			}
 			childPath := filepath.Join(workspace, "deps", "child")
@@ -554,7 +610,7 @@ func TestSubmoduleResolvedCredentialsWithoutCapabilityDoNotInvokeHelper(t *testi
 		t.Fatal(err)
 	}
 	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "secret"}, Stdout: io.Discard, Stderr: io.Discard}
-	if err := runner.runCheckoutSubmodules(t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false, ""); err != nil {
+	if err := runner.runCheckoutSubmodules(t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "0", false, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -595,7 +651,7 @@ echo job-secret
 	}
 	var logs bytes.Buffer
 	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "job-secret"}, Stdout: &logs, Stderr: &logs}
-	if err := runner.runRepositoryProviderCheckoutFetch(t.Context(), newCommandProcessor(&logs, &logs), workspace, map[string]string{}, git, checkoutGitBaseArgs(), []string{"submodule", "update"}, "github.com"); err != nil {
+	if err := runner.runRepositoryProviderCheckoutGit(t.Context(), newCommandProcessor(&logs, &logs), workspace, map[string]string{}, git, checkoutGitBaseArgs(), []string{"submodule", "update"}, "github.com"); err != nil {
 		t.Fatal(err)
 	}
 	input, err := os.ReadFile(inputLog)
@@ -679,20 +735,91 @@ func TestCheckoutFetchArgsAgainstRealRepository(t *testing.T) {
 
 func TestPrepareCheckoutDirectory(t *testing.T) {
 	workspace := t.TempDir()
-	root, err := prepareCheckoutDirectory(workspace, map[string]string{"path": "test-catalog"})
+	root, err := prepareCheckoutDirectory(workspace, map[string]string{"path": "sources/test-catalog", "clean": "false"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(workspace, "test-catalog")
+	want := filepath.Join(workspace, "sources", "test-catalog")
 	if root != want {
 		t.Fatalf("checkout directory = %q, want %q", root, want)
 	}
 	if info, err := os.Lstat(root); err != nil || !info.IsDir() {
 		t.Fatalf("checkout directory state = %#v, %v", info, err)
 	}
-	if _, err := prepareCheckoutDirectory(workspace, map[string]string{"path": "test-catalog"}); err == nil || !strings.Contains(err.Error(), "already exists") {
+	if _, err := prepareCheckoutDirectory(workspace, map[string]string{"path": "sources/test-catalog", "clean": "false"}); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("second checkout path error = %v", err)
 	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(workspace, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareCheckoutDirectory(workspace, map[string]string{"path": "linked/repository"}); err == nil || !strings.Contains(err.Error(), "symbolic-link parent") {
+		t.Fatalf("symbolic-link parent error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "repository")); !os.IsNotExist(err) {
+		t.Fatalf("checkout escaped through symbolic-link parent: %v", err)
+	}
+}
+
+func TestCheckoutFetchArgsApplyFilterAndSparsePrecedence(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	for _, test := range []struct {
+		name   string
+		inputs map[string]string
+		want   string
+	}{
+		{name: "explicit filter", inputs: map[string]string{"filter": "tree:0", "show-progress": "false"}, want: "fetch --no-tags --no-recurse-submodules --filter=tree:0 --depth=1 origin " + sha},
+		{name: "sparse default filter", inputs: map[string]string{"sparse-checkout": "src\ndocs", "show-progress": "false"}, want: "fetch --no-tags --no-recurse-submodules --filter=blob:none --depth=1 origin " + sha},
+		{name: "explicit filter overrides sparse default", inputs: map[string]string{"filter": "blob:limit=1m", "sparse-checkout": "src"}, want: "fetch --no-tags --no-recurse-submodules --progress --filter=blob:limit=1m --depth=1 origin " + sha},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := strings.Join(checkoutFetchArgs(test.inputs, sha), " "); got != test.want {
+				t.Fatalf("checkoutFetchArgs() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestConfigureSparseCheckoutModes(t *testing.T) {
+	t.Run("cone", func(t *testing.T) {
+		var commands [][]string
+		var input string
+		err := configureSparseCheckout(t.TempDir(), map[string]string{"sparse-checkout": " src \n\ndocs"}, func(stdin string, args ...string) error {
+			input = stdin
+			commands = append(commands, append([]string(nil), args...))
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := [][]string{{"sparse-checkout", "set", "--stdin"}}
+		if !slices.EqualFunc(commands, want, slices.Equal) || input != "src\ndocs\n" {
+			t.Fatalf("sparse checkout commands = %#v with input %q, want %#v with input %q", commands, input, want, "src\ndocs\n")
+		}
+	})
+
+	t.Run("non-cone", func(t *testing.T) {
+		workspace := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(workspace, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		var commands [][]string
+		err := configureSparseCheckout(workspace, map[string]string{"sparse-checkout": "*.go\n!vendor/", "sparse-checkout-cone-mode": "false"}, func(_ string, args ...string) error {
+			commands = append(commands, append([]string(nil), args...))
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := [][]string{{"config", "core.sparseCheckout", "true"}}
+		if !slices.EqualFunc(commands, want, slices.Equal) {
+			t.Fatalf("sparse checkout commands = %#v, want %#v", commands, want)
+		}
+		patterns, err := os.ReadFile(filepath.Join(workspace, ".git", "info", "sparse-checkout"))
+		if err != nil || string(patterns) != "\n*.go\n!vendor/\n" {
+			t.Fatalf("non-cone patterns = %q, %v", patterns, err)
+		}
+	})
 }
 
 func runTestGit(t *testing.T, directory string, args ...string) string {
@@ -760,7 +887,7 @@ exec ` + shellTestQuote(realGit) + ` "$@"
 	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.runCheckoutSubmodules(ctx, newCommandProcessor(io.Discard, io.Discard), workspace, wrapper, map[string]string{}, append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always"), true, false, false, "")
+		done <- runner.runCheckoutSubmodules(ctx, newCommandProcessor(io.Discard, io.Discard), workspace, wrapper, map[string]string{}, append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always"), "1", false, false, "")
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -808,7 +935,7 @@ exit 0
 	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.runCheckoutSubmodules(ctx, newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, true, false, "")
+		done <- runner.runCheckoutSubmodules(ctx, newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), "0", true, false, "")
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -841,6 +968,18 @@ func TestCheckoutRejectsInvalidRepositoryBeforeInspectingWorkspace(t *testing.T)
 	processor := newCommandProcessor(io.Discard, io.Discard)
 	if _, err := (Runner{}).runCheckout(t.Context(), processor, workspace, job, actionintegration.CheckoutV7Commit, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Origin event repository") {
 		t.Fatalf("checkout repository validation error = %v", err)
+	}
+}
+
+func TestCheckoutRejectsUnavailableLFSBeforeCreatingPath(t *testing.T) {
+	workspace := t.TempDir()
+	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "buildkite/buildkite-gha", SHA: strings.Repeat("a", 40)}}
+	inputs := map[string]string{"lfs": "true", "path": "sources/application"}
+	if _, err := (Runner{}).runCheckout(t.Context(), newCommandProcessor(io.Discard, io.Discard), workspace, job, actionintegration.CheckoutV7Commit, inputs); err == nil || !strings.Contains(err.Error(), "requires Git LFS to be resolved") {
+		t.Fatalf("unavailable Git LFS error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "sources")); !os.IsNotExist(err) {
+		t.Fatalf("unavailable Git LFS created checkout path: %v", err)
 	}
 }
 
@@ -896,6 +1035,7 @@ printf 'username=token\npassword=%s\n' ` + shellTestQuote(repositoryToken) + `
 	script := `#!/bin/sh
 set -eu
 test "$GIT_CONFIG_GLOBAL" = ` + shellTestQuote(os.DevNull) + `
+test -z "${GIT_LFS_SKIP_SMUDGE+x}"
 assert_no_proxy_environment() {
   test -z "${HTTP_PROXY+x}"
   test -z "${HTTPS_PROXY+x}"
@@ -910,6 +1050,7 @@ operation=
 for argument in "$@"; do
   case "$argument" in init|remote|fetch|checkout) operation="$argument"; break ;; esac
 done
+test -z "${GIT_EXEC_PATH+x}"
 case "$operation" in
   init)
     test -z "$GIT_ASKPASS"
@@ -957,16 +1098,61 @@ case "$operation" in
     ;;
   checkout)
     test -z "$GIT_ASKPASS"
-    test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}"
-    test -z "${BUILDKITE_JOB_ID+x}"
-    test -z "${BUILDKITE_NO_HTTP2+x}"
-    assert_no_proxy_environment
+    test "$BUILDKITE_AGENT_ACCESS_TOKEN" = job-secret
+    test "$BUILDKITE_JOB_ID" = 11111111-1111-4111-8111-111111111111
+    helper=
+    filter=
+    for argument in "$@"; do
+      case "$argument" in
+        credential.https://github.com.helper=!*) helper=true ;;
+        filter.lfs.process=*) filter=true ;;
+      esac
+    done
+    test "$helper" = true
+    test "$filter" = true
     printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD
     ;;
 esac
 printf '%s|%s\n' "$PWD" "$*" >> ` + shellTestQuote(gitLog) + `
 `
 	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitLFS := filepath.Join(filepath.Dir(git), "git-lfs")
+	lfsScript := `#!/bin/sh
+set -eu
+helper=
+hooks=
+i=0
+while [ "$i" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
+  eval "key=\${GIT_CONFIG_KEY_$i}"
+  eval "value=\${GIT_CONFIG_VALUE_$i}"
+  case "$key" in
+    credential.https://github.com.helper) helper="${value#!}" ;;
+    core.hooksPath) hooks="$value" ;;
+  esac
+  i=$((i + 1))
+done
+test "$hooks" = /dev/null
+case "$1" in
+  install)
+    test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}"
+    test -z "$helper"
+    ;;
+  fetch)
+    test "$BUILDKITE_AGENT_ACCESS_TOKEN" = job-secret
+    test "$BUILDKITE_JOB_ID" = 11111111-1111-4111-8111-111111111111
+    test -n "$helper"
+    credentials="$(printf 'protocol=https\nhost=github.com\npath=buildkite/buildkite-gha.git\n\n' | sh -c "$helper get")"
+    case "$credentials" in
+      *"username=token"*"password=` + repositoryToken + `"*) ;;
+      *) exit 41 ;;
+    esac
+    ;;
+esac
+printf '%s|git-lfs %s|%s core.hooksPath=%s\n' "$PWD" "$*" "$helper" "$hooks" >> ` + shellTestQuote(gitLog) + `
+`
+	if err := os.WriteFile(gitLFS, []byte(lfsScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
@@ -985,7 +1171,7 @@ printf '%s|%s\n' "$PWD" "$*" >> ` + shellTestQuote(gitLog) + `
 	for name := range proxyEnvironment {
 		t.Setenv(name, "http://late-workflow-value.invalid")
 	}
-	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(t.Context(), processor, workspace, job, actionintegration.CheckoutV7Commit, map[string]string{"path": "test-catalog"})
+	result, err := (Runner{Git: git, GitLFS: gitLFS, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(t.Context(), processor, workspace, job, actionintegration.CheckoutV7Commit, map[string]string{"path": "test-catalog", "lfs": "true", "filter": "blob:none"})
 	if err != nil {
 		t.Fatalf("runCheckout() error = %v, logs = %q", err, logs.String())
 	}
@@ -1002,12 +1188,25 @@ printf '%s|%s\n' "$PWD" "$*" >> ` + shellTestQuote(gitLog) + `
 	if strings.Contains(string(gitBytes), repositoryToken) || strings.Contains(logs.String(), repositoryToken) {
 		t.Fatalf("checkout exposed repository token in Git arguments or logs: %q / %q", gitBytes, logs.String())
 	}
-	if strings.Count(string(gitBytes), "git-credentials-helper") != 1 {
-		t.Fatalf("credential helper was not confined to one Git command: %q", gitBytes)
+	for _, command := range []string{
+		"git-lfs install --local --skip-repo",
+		"fetch --no-tags --no-recurse-submodules --progress --filter=blob:none --depth=1 origin " + sha,
+		"git-lfs fetch origin " + sha,
+		"checkout --detach " + sha,
+	} {
+		if !strings.Contains(string(gitBytes), command) {
+			t.Fatalf("checkout command log lacks %q: %q", command, gitBytes)
+		}
+	}
+	if strings.Count(string(gitBytes), "git-credentials-helper") != 3 {
+		t.Fatalf("credential helper was not confined to fetch, LFS fetch, and filtered checkout commands: %q", gitBytes)
 	}
 	for line := range strings.SplitSeq(strings.TrimSpace(string(gitBytes)), "\n") {
 		if !strings.HasPrefix(line, checkoutDirectory+"|") {
 			t.Fatalf("Git command ran outside checkout path %q: %q", checkoutDirectory, line)
+		}
+		if !strings.Contains(line, "core.hooksPath=/dev/null") {
+			t.Fatalf("Git command lacks hook isolation: %q", line)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(workspace, ".git")); !os.IsNotExist(err) {
@@ -1153,6 +1352,7 @@ func TestRepositoryProviderCheckoutPinsGitAndAgentBeforeActionPreHooks(t *testin
 	trustedLog := filepath.Join(t.TempDir(), "trusted-git.log")
 	trustedDir := t.TempDir()
 	trustedGit := filepath.Join(trustedDir, "git")
+	trustedGitLFS := filepath.Join(trustedDir, "git-lfs")
 	trustedScript := `#!/bin/sh
 set -eu
 operation=
@@ -1181,6 +1381,10 @@ printf '%s\n' "$*" >> ` + shellTestQuote(trustedLog) + `
 	if err := os.WriteFile(trustedGit, []byte(trustedScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	trustedLFSScript := "#!/bin/sh\ngit --version\nprintf 'git-lfs %s\\n' \"$*\" >> " + shellTestQuote(trustedLog) + "\n"
+	if err := os.WriteFile(trustedGitLFS, []byte(trustedLFSScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	trustedAgentMarker := filepath.Join(t.TempDir(), "trusted-agent-ran")
 	trustedAgent := filepath.Join(trustedDir, "buildkite-agent")
 	trustedAgentScript := `#!/bin/sh
@@ -1207,10 +1411,19 @@ printf 'username=token\npassword=%s\n' ` + shellTestQuote(repositoryToken) + `
 	if err := os.Symlink(trustedAgent, lookupAgent); err != nil {
 		t.Fatal(err)
 	}
+	lookupGitLFS := filepath.Join(lookupDir, "git-lfs")
+	if err := os.Symlink(trustedGitLFS, lookupGitLFS); err != nil {
+		t.Fatal(err)
+	}
 	poisonDir := canonicalTempDir(t)
 	poisonGitMarker := filepath.Join(t.TempDir(), "poison-git-ran")
 	poisonGit := filepath.Join(poisonDir, "git")
 	if err := os.WriteFile(poisonGit, []byte("#!/bin/sh\ntouch "+shellTestQuote(poisonGitMarker)+"\nexit 97\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	poisonGitLFSMarker := filepath.Join(t.TempDir(), "poison-git-lfs-ran")
+	poisonGitLFS := filepath.Join(poisonDir, "git-lfs")
+	if err := os.WriteFile(poisonGitLFS, []byte("#!/bin/sh\ntouch "+shellTestQuote(poisonGitLFSMarker)+"\nexit 98\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	poisonAgentMarker := filepath.Join(t.TempDir(), "poison-agent-ran")
@@ -1238,6 +1451,8 @@ fi
 if [ "${1##*/}" = pre.js ]; then
   rm -f "$LOOKUP_GIT"
   ln -s "$POISON_GIT" "$LOOKUP_GIT"
+  rm -f "$LOOKUP_GIT_LFS"
+  ln -s "$POISON_GIT_LFS" "$LOOKUP_GIT_LFS"
   rm -f "$LOOKUP_AGENT"
   ln -s "$POISON_AGENT" "$LOOKUP_AGENT"
 fi
@@ -1264,14 +1479,16 @@ fi
 		Target:               plan.Target{StepKey: "gha-checkout", Queue: "trusted"},
 		RequiredCapabilities: []string{"network", "provider-token-read"},
 		Env: map[string]string{
-			"LOOKUP_AGENT": lookupAgent,
-			"LOOKUP_GIT":   lookupGit,
-			"POISON_AGENT": poisonAgent,
-			"POISON_GIT":   poisonGit,
+			"LOOKUP_AGENT":   lookupAgent,
+			"LOOKUP_GIT":     lookupGit,
+			"LOOKUP_GIT_LFS": lookupGitLFS,
+			"POISON_AGENT":   poisonAgent,
+			"POISON_GIT":     poisonGit,
+			"POISON_GIT_LFS": poisonGitLFS,
 		},
 		Steps: []plan.Step{
 			{ID: "poison", Kind: "uses", Uses: "owner/repo/poison@v1", Action: &plan.ActionSelector{Lock: poisonID}},
-			{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &plan.ActionSelector{Lock: checkoutID}},
+			{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", With: map[string]string{"filter": "blob:none", "lfs": "true"}, Action: &plan.ActionSelector{Lock: checkoutID}},
 		},
 		Actions: []plan.ActionLock{
 			{ID: poisonID, Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: strings.Repeat("b", 40), Path: "poison", SourceDigest: remoteDigest},
@@ -1295,16 +1512,24 @@ fi
 	if target, err := filepath.EvalSymlinks(lookupAgent); err != nil || target != poisonAgent {
 		t.Fatalf("pre-hook Agent replacement = %q, %v; want %q", target, err, poisonAgent)
 	}
+	if target, err := filepath.EvalSymlinks(lookupGitLFS); err != nil || target != poisonGitLFS {
+		t.Fatalf("pre-hook Git LFS replacement = %q, %v; want %q", target, err, poisonGitLFS)
+	}
 	if _, err := os.Stat(trustedAgentMarker); err != nil {
 		t.Fatalf("trusted Agent credential helper did not run: %v", err)
 	}
-	for name, marker := range map[string]string{"Git selected through poisoned PATH": poisonGitMarker, "Agent helper selected through poisoned PATH": poisonAgentMarker} {
+	for name, marker := range map[string]string{"Git selected through poisoned PATH": poisonGitMarker, "Git LFS selected through poisoned PATH": poisonGitLFSMarker, "Agent helper selected through poisoned PATH": poisonAgentMarker} {
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
 	if strings.Contains(logs.String(), repositoryToken) {
 		t.Fatalf("checkout exposed repository token in logs: %q", logs.String())
+	}
+	gitLog, err := os.ReadFile(trustedLog)
+	resolvedTrustedGitLFS, resolveErr := filepath.EvalSymlinks(trustedGitLFS)
+	if err != nil || resolveErr != nil || !strings.Contains(string(gitLog), "git-lfs install --local --skip-repo") || !strings.Contains(string(gitLog), "filter.lfs.process='"+resolvedTrustedGitLFS+"' filter-process") {
+		t.Fatalf("checkout did not pin Git LFS in filter command: %q, %v", gitLog, err)
 	}
 }
 

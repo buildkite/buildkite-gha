@@ -40,23 +40,49 @@ var checkoutCommits = map[string]string{
 	CheckoutV7Commit:        "v7.0.1",
 }
 
-// checkoutInputIntroduced records the earliest admitted release generation
-// declaring each version-gated input. Inputs absent from this map are declared
-// by every admitted release.
-var checkoutInputIntroduced = map[string]int{
-	"ssh-key":                   2,
-	"ssh-known-hosts":           2,
-	"ssh-strict":                2,
-	"persist-credentials":       2,
-	"set-safe-directory":        2,
-	"allow-unsafe-pr-checkout":  2,
-	"fetch-tags":                3,
-	"sparse-checkout":           3,
-	"sparse-checkout-cone-mode": 3,
-	"github-server-url":         3,
-	"filter":                    4,
-	"show-progress":             4,
-	"ssh-user":                  4,
+type checkoutInputRule struct {
+	generation int
+	valid      func(value, repository string) bool
+}
+
+// checkoutInputRules owns the supported input routing, release contract, and
+// value validation for the bounded native adapter.
+var checkoutInputRules = map[string]checkoutInputRule{
+	"repository": {1, strings.EqualFold},
+	"ref": {1, func(value, _ string) bool {
+		return value == "" || ValidCheckoutSHA(value) || validCheckoutBranch(value)
+	}},
+	"fetch-depth": {1, func(value, _ string) bool {
+		depth, err := strconv.ParseUint(value, 10, 31)
+		return err == nil && depth <= 1<<31-1
+	}},
+	"clean": {1, func(value, _ string) bool { return actionBoolean(value) }},
+	"lfs":   {1, func(value, _ string) bool { return actionBoolean(value) }},
+	"submodules": {1, func(value, _ string) bool {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "", "false", "true", "recursive":
+			return true
+		}
+		return false
+	}},
+	"path": {1, func(value, _ string) bool {
+		return value == "" || validCheckoutPath(value)
+	}},
+	"ssh-key":                   {2, func(value, _ string) bool { return value == "" }},
+	"ssh-known-hosts":           {2, func(value, _ string) bool { return value == "" }},
+	"ssh-strict":                {2, func(value, _ string) bool { return actionTrue(value) }},
+	"persist-credentials":       {2, func(value, _ string) bool { return actionFalse(value) }},
+	"set-safe-directory":        {2, func(value, _ string) bool { return actionTrue(value) }},
+	"allow-unsafe-pr-checkout":  {2, func(value, _ string) bool { return actionFalse(value) }},
+	"fetch-tags":                {3, func(value, _ string) bool { return actionBoolean(value) }},
+	"sparse-checkout":           {3, func(value, _ string) bool { return validSparseCheckout(value) }},
+	"sparse-checkout-cone-mode": {3, func(value, _ string) bool { return actionBoolean(value) }},
+	"github-server-url": {3, func(value, _ string) bool {
+		return value == "" || value == "https://github.com"
+	}},
+	"filter":        {4, func(value, _ string) bool { return validCheckoutFilter(value) }},
+	"show-progress": {4, func(value, _ string) bool { return actionBoolean(value) }},
+	"ssh-user":      {4, func(value, _ string) bool { return value == "git" }},
 }
 
 func checkoutGeneration(commit string) int {
@@ -128,73 +154,16 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 			return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
 		}
 		seen[normalized] = true
-		if checkoutInputIntroduced[normalized] > generation {
+		rule, ok := checkoutInputRules[normalized]
+		if !ok {
+			return fmt.Errorf("explicit input %q value is unsupported", name)
+		}
+		if rule.generation > generation {
 			return fmt.Errorf("explicit input %q is unsupported by this actions/checkout release", name)
 		}
-		switch normalized {
-		case "repository":
-			if strings.EqualFold(value, repository) {
-				continue
-			}
-		case "ref":
-			if value == "" || ValidCheckoutSHA(value) || validCheckoutBranch(value) {
-				continue
-			}
-		case "persist-credentials":
-			if actionFalse(value) {
-				continue
-			}
-		case "fetch-depth":
-			if depth, err := strconv.ParseUint(value, 10, 31); err == nil && depth <= 1<<31-1 {
-				continue
-			}
-		case "clean", "set-safe-directory":
-			if actionTrue(value) {
-				continue
-			}
-		case "lfs", "allow-unsafe-pr-checkout":
-			if actionFalse(value) {
-				continue
-			}
-		case "submodules":
-			switch strings.ToLower(strings.TrimSpace(value)) {
-			case "", "false", "true", "recursive":
-				continue
-			}
-		case "fetch-tags":
-			if actionBoolean(value) {
-				continue
-			}
-		case "show-progress":
-			if actionBoolean(value) {
-				continue
-			}
-		case "path":
-			if value == "" || validCheckoutPath(value) {
-				continue
-			}
-		case "ssh-key", "ssh-known-hosts", "sparse-checkout":
-			if value == "" {
-				continue
-			}
-		case "filter":
-			if value == "" {
-				continue
-			}
-		case "ssh-strict", "sparse-checkout-cone-mode":
-			if actionTrue(value) {
-				continue
-			}
-		case "ssh-user":
-			if value == "git" {
-				continue
-			}
-		case "github-server-url":
-			if value == "" || value == "https://github.com" {
-				continue
-			}
+		if !rule.valid(value, repository) {
+			return fmt.Errorf("explicit input %q value is unsupported", name)
 		}
-		return fmt.Errorf("explicit input %q value is unsupported", name)
 	}
 	return nil
 }
@@ -244,5 +213,33 @@ func ValidCheckoutSHA(value string) bool {
 }
 
 func validCheckoutPath(value string) bool {
-	return len(value) <= 255 && value != "." && value != ".." && !strings.EqualFold(value, ".git") && !strings.Contains(value, "/") && !strings.Contains(value, "\\") && !strings.ContainsAny(value, "\r\n\x00") && filepath.IsLocal(value)
+	if len(value) > 1024 || value == "." || value == ".." || strings.Contains(value, "\\") || strings.ContainsAny(value, "\r\n\x00") || !filepath.IsLocal(value) {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." || strings.EqualFold(part, ".git") {
+			return false
+		}
+	}
+	return true
+}
+
+func validCheckoutFilter(value string) bool {
+	return value == "" || len(value) <= 1024 && !strings.ContainsAny(value, "\r\n\x00")
+}
+
+func validSparseCheckout(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) > 1<<20 || strings.ContainsRune(value, '\x00') {
+		return false
+	}
+	lines := 0
+	for _, line := range strings.Split(value, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines++
+		}
+	}
+	return lines > 0 && lines <= 1000
 }

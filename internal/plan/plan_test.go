@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"bytes"
 	"encoding/json"
 	"maps"
 	"os"
@@ -31,6 +32,39 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 		t.Fatalf("decoded fixture lost trust bindings: %#v", job)
 	}
 	validateJobPlanSchema(t, source)
+}
+
+func TestCheckoutInputsRoundTripDeterministically(t *testing.T) {
+	job := validJob()
+	lockID := "a-0000000000000001"
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"network", "provider-token-read"}
+	job.Steps = []Step{{
+		ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &ActionSelector{Lock: lockID},
+		With: map[string]string{
+			"filter": "blob:none", "lfs": "true", "path": "sources/application",
+			"sparse-checkout": "src\ndocs\n", "sparse-checkout-cone-mode": "false",
+		},
+	}}
+	job.Actions = []ActionLock{{
+		ID: lockID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7",
+		Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
+	}}
+	first, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("checkout plan encoding is nondeterministic")
+	}
+	decoded, err := Decode(first)
+	if err != nil || !maps.Equal(decoded.Steps[0].With, job.Steps[0].With) || decoded.Event.Repository != job.Event.Repository {
+		t.Fatalf("decoded checkout plan = %#v, %v", decoded, err)
+	}
 }
 
 func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
