@@ -527,7 +527,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
 		}
 		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
-		cache := mergedCacheVolume(job.Cache, job.RequiresMise, platform)
+		cache := mergedCacheVolume(job.Cache, job.RequiresMise, platform, experimentalRunnerUser)
 		if cache != nil {
 			_, _ = fmt.Fprintf(out, "%scache:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s  paths:\n", attributeIndent)
@@ -688,7 +688,11 @@ func platformMiseCachePath(platform string) string {
 	return root + "/mise/" + platformCacheKey(platform)
 }
 
-func mergedCacheVolume(configured *CacheVolume, requiresMise bool, platform string) *CacheVolume {
+func platformCacheValidationPath(platform string) string {
+	return runtimeCacheRoot + "/validation/" + platformCacheKey(platform)
+}
+
+func mergedCacheVolume(configured *CacheVolume, requiresMise bool, platform string, runnerUser bool) *CacheVolume {
 	if configured == nil && !requiresMise {
 		return nil
 	}
@@ -706,6 +710,11 @@ func mergedCacheVolume(configured *CacheVolume, requiresMise bool, platform stri
 		}
 		if cache.Name == "" {
 			cache.Name = runtimeCacheName + "-" + platformCacheKey(platform)
+		}
+	} else if runnerUser {
+		validationPath := platformCacheValidationPath(platform)
+		if !slices.Contains(cache.Paths, validationPath) {
+			cache.Paths = append(cache.Paths, validationPath)
 		}
 	}
 	return cache
