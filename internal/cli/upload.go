@@ -736,7 +736,7 @@ func requireRegularWorkflowFile(path, displayPath string) error {
 		return fmt.Errorf("inspect workflow path %q: %w", displayPath, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("workflow path %q is not a regular tracked file. Check that the file exists at this path and is not a symlink. Symlinks, untracked files, directories, and globs are not supported.", displayPath)
+		return fmt.Errorf("workflow path %q is not a regular tracked file. Check that the file exists at this path and is not a symlink. Symlinks, untracked files, directories, and globs are not supported", displayPath)
 	}
 	if info.IsDir() {
 		return fmt.Errorf("workflow path %q is a directory; workflow paths must be regular tracked files", displayPath)

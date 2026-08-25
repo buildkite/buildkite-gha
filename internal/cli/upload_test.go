@@ -339,7 +339,7 @@ func TestRunUploadRejectsExplicitTrackedSymlinks(t *testing.T) {
 			t.Setenv("BUILDKITE_STEP_KEY", "symlink-importer")
 			runner := &cliCaptureRunner{}
 			var stdout, stderr bytes.Buffer
-			want := `workflow path ".github/workflows/linked.yml" is not a regular tracked file. Check that the file exists at this path and is not a symlink. Symlinks, untracked files, directories, and globs are not supported.`
+			want := `workflow path ".github/workflows/linked.yml" is not a regular tracked file. Check that the file exists at this path and is not a symlink. Symlinks, untracked files, directories, and globs are not supported`
 			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/linked.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), want) {
 				t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 			}
