@@ -185,6 +185,7 @@ func analyzeStepTemplate(node actionlint.ExprNode, knownReferences map[string]an
 	evaluator := newAbstractEvaluator(stepRuntimeSurface)
 	evaluator.resolve = abstractReferenceResolver(knownReferences)
 	evaluator.resolveRoot = func(string) (Analysis, error) { return Analysis{}, nil }
+	evaluator.resolveComputedIndex = true
 	evaluator.call = func(evaluator *expressionEvaluator[Analysis], node *actionlint.FuncCallNode) (Analysis, error) {
 		if isToJSONGitHubCall(node) {
 			return Analysis{Effects: Effects{GitHubToken: GitHubTokenCompositeContext}}, nil
@@ -212,6 +213,7 @@ func analyzeCondition(node actionlint.ExprNode, knownReferences map[string]any) 
 	evaluator := newAbstractEvaluator(conditionSurface)
 	evaluator.resolve = abstractReferenceResolver(knownReferences)
 	evaluator.resolveRoot = func(string) (Analysis, error) { return Analysis{}, nil }
+	evaluator.resolveComputedIndex = true
 	evaluator.call = func(evaluator *expressionEvaluator[Analysis], node *actionlint.FuncCallNode) (Analysis, error) {
 		if value, recognized, err := evaluatePureFunction(evaluator, node); recognized {
 			return value, err

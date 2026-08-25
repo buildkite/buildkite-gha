@@ -15,16 +15,17 @@ import (
 // runtime evaluators; abstract evaluation uses the same traversal with a value
 // that can represent unknown runtime data and authority effects.
 type expressionEvaluator[T any] struct {
-	policy          evaluationPolicy
-	resolve         func(string, []string) (T, error)
-	resolveRoot     func(string) (T, error)
-	domain          expressionDomain[T]
-	truthy          func(any) bool
-	validateCompare func(actionlint.CompareOpNodeKind) error
-	compare         func(actionlint.CompareOpNodeKind, any, any) (any, error)
-	call            func(*expressionEvaluator[T], *actionlint.FuncCallNode) (T, error)
-	unsupported     func(actionlint.ExprNode) error
-	logicalError    func(actionlint.LogicalOpNodeKind) error
+	policy               evaluationPolicy
+	resolve              func(string, []string) (T, error)
+	resolveRoot          func(string) (T, error)
+	resolveComputedIndex bool
+	domain               expressionDomain[T]
+	truthy               func(any) bool
+	validateCompare      func(actionlint.CompareOpNodeKind) error
+	compare              func(actionlint.CompareOpNodeKind, any, any) (any, error)
+	call                 func(*expressionEvaluator[T], *actionlint.FuncCallNode) (T, error)
+	unsupported          func(actionlint.ExprNode) error
+	logicalError         func(actionlint.LogicalOpNodeKind) error
 }
 
 type semanticEvaluator = expressionEvaluator[any]
@@ -409,6 +410,25 @@ func (e *expressionEvaluator[T]) evaluateAccess(node actionlint.ExprNode) (T, er
 		}
 		return e.domain.derive(nil, receiver), nil
 	case *actionlint.IndexAccessNode:
+		if root, ok := node.Operand.(*actionlint.VariableNode); ok && e.resolveComputedIndex {
+			index, err := e.evaluate(node.Index)
+			if err != nil {
+				return zero, err
+			}
+			indexValue, known := e.domain.value(index)
+			if !known {
+				return e.domain.unknown(index), nil
+			}
+			name, ok := indexValue.(string)
+			if !ok {
+				return e.domain.unknown(index), nil
+			}
+			value, err := e.resolve(root.Name, []string{name})
+			if err != nil {
+				return zero, err
+			}
+			return e.result(value, index), nil
+		}
 		operand, err := e.evaluateAccess(node.Operand)
 		if err != nil {
 			return zero, err

@@ -565,6 +565,7 @@ runs:
 		supplied  map[string]string
 	}{
 		{name: "provider-backed default", serverURL: "https://origin.cursor.com", supplied: map[string]string{}},
+		{name: "provider-backed supplied input", serverURL: "https://origin.cursor.com", supplied: map[string]string{"enabled": "${{ github.server_url == 'https://github.com' && 'true' || 'false' }}"}},
 		{name: "supplied input forwarded by default", serverURL: "https://github.com", supplied: map[string]string{"enabled": "false"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -576,6 +577,85 @@ runs:
 				t.Fatal("known false forwarded input requested a GitHub token")
 			}
 		})
+	}
+}
+
+func TestCompileActionInvocationsReducesComputedCompositeInputIndexes(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "token", `name: computed input token
+inputs:
+  enabled:
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - if: inputs[format('{0}', 'enabled')] == 'true'
+      shell: bash
+      env:
+        TOKEN: ${{ inputs[format('{0}', 'enabled')] == 'true' && github.token || '' }}
+      run: echo token
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./token"}, []map[string]string{{"enabled": "false"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("known false computed input requested a GitHub token")
+	}
+}
+
+func TestCompileActionInvocationsConstrainsCompositeShellTokenByInvocationReachability(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child token
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ github.token }}
+      run: echo token
+`)
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - if: false
+      uses: ./child
+`)
+
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("unreachable nested shell requested a GitHub token")
+	}
+
+	compiled, err = compileReachableActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./child"}, []map[string]string{{}}, []bool{false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("unreachable workflow invocation shell requested a GitHub token")
+	}
+}
+
+func TestCompileActionInvocationsPreservesDefaultsForUnreachableInvocation(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "token", `name: default token
+inputs:
+  token:
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps: []
+`)
+	compiled, err := compileReachableActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./token"}, []map[string]string{{}}, []bool{false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("unreachable invocation dropped input-default token requirement")
 	}
 }
 
@@ -1067,6 +1147,23 @@ jobs:
 	}
 	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.GitHubToken == nil || !bundle.Plans[0].Job.HasCapability("provider-token-write") || !reflect.DeepEqual(bundle.Plans[0].Authorization.GitHubTokenActions, []string{"./.github/actions/token"}) {
 		t.Fatalf("composite metadata token plan = %#v", bundle.Plans)
+	}
+
+	unreachableWorkflow := `on: push
+permissions: {}
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - if: false
+        uses: ./.github/actions/token
+`
+	bundle, err = CompileBundleWithOptions(workflowPath, []byte(unreachableWorkflow), pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.GitHubToken != nil || len(bundle.Plans[0].Authorization.GitHubTokenActions) != 0 {
+		t.Fatalf("unreachable composite metadata token plan = %#v", bundle.Plans)
 	}
 }
 

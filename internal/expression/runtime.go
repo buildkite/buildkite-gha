@@ -198,6 +198,24 @@ func EvaluateStep(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateStepRuntimeNode)
 }
 
+// EvaluateKnownStepTemplate evaluates a step template when immutable planning
+// references are sufficient. Runtime-dependent templates report unknown.
+func EvaluateKnownStepTemplate(template string, knownReferences map[string]any) (string, bool, error) {
+	known := true
+	value, err := evaluateRuntimeTemplate(template, Context{}, func(node actionlint.ExprNode, _ Context) (any, error) {
+		analysis, err := analyzeStepTemplate(node, knownReferences)
+		if err != nil {
+			return nil, err
+		}
+		if !analysis.Value.Known {
+			known = false
+			return "", nil
+		}
+		return analysis.Value.Value, nil
+	})
+	return value, known, err
+}
+
 // StepTemplateRequiresGitHubToken reports whether a composite-authored step
 // template can reach a direct github.token reference. knownReferences may
 // contain immutable planning values such as inputs.<name> and
