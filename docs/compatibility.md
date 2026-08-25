@@ -5,6 +5,8 @@
 This page is the production contract for the `hosted` profile used by `upload`
 and the Buildkite plugin. If a feature is not listed, treat it as unsupported.
 
+buildkite-gha requires Buildkite agent v3.129 or newer.
+
 The released plugin supports Linux x86-64 and native macOS arm64 importers and
 jobs. It sets the matching `runner.os` and `runner.arch` values. Runner labels
 select a platform; they do not promise GitHub image, toolchain, or Xcode parity.
@@ -772,7 +774,7 @@ Outputs, environment changes, and failures become visible at the covering wait. 
 | Debug and matcher commands | ➖ Accepted, no effect | Consumed without presentation behavior. |
 | `notice`, command echo control, other legacy commands | ❌ Unsupported | Not implemented. |
 
-Job-scoped annotations, including step summaries and generated workflow failure diagnostics, require Buildkite agent v3.112 or newer. The total job summary is limited to 1 MiB.
+The total job summary is limited to 1 MiB.
 
 ## Expressions and contexts
 

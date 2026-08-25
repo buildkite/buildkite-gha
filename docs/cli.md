@@ -295,7 +295,7 @@ buildkite-gha compile \
 buildkite-gha upload .github/workflows/ci.yml
 ```
 
-The importer must run on Linux/amd64 or Darwin/arm64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
+The importer must run on Linux/amd64 or Darwin/arm64 with Buildkite agent v3.129 or newer, `BUILDKITE=true`, and `BUILDKITE_STEP_KEY`.
 
 The hidden, zero-argument `buildkite-gha plugin` entry point reads plugin
 configuration from `BUILDKITE_PLUGIN_CONFIGURATION`. It accepts:
@@ -450,7 +450,7 @@ but cannot grant admission. Malformed event data stops the import.
 Buildkite owns schedule identity, so every `on.schedule` workflow is eligible
 for every Buildkite scheduled build.
 
-After all applicable workflows have been attempted, the command uploads the exact executable, content-addressed plans, and synthetic failure steps before running one:
+After all applicable workflows have been attempted, the command uploads the exact executable, content-addressed plans, and synthetic failure steps in one artifact batch with a concurrency limit of 8. It then runs one:
 
 ```sh
 buildkite-agent pipeline upload --no-interpolation --reject-secrets
