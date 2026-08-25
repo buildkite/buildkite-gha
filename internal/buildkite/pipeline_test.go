@@ -946,7 +946,7 @@ func TestEmitMergesConfiguredAndManagedCacheVolume(t *testing.T) {
 			t.Fatalf("runner-home cache path %q is not made writable by runner:\n%s", path, step.Command)
 		}
 	}
-	if !strings.Contains(step.Command, `case "$cache_target" in /cache/bkcache/*)`) || !strings.Contains(step.Command, `chown -R runner:"$runner_group" "$cache_target"`) {
+	if !strings.Contains(step.Command, `mountpoint -q -- "$cache_root"`) || !strings.Contains(step.Command, `stat -c '%d' -- "$cache_target"`) || !strings.Contains(step.Command, `mountpoint -q -- "$cache_target"`) || !strings.Contains(step.Command, `chown -R runner:"$runner_group" "$cache_target"`) {
 		t.Fatalf("cache ownership is not constrained to the Buildkite volume:\n%s", step.Command)
 	}
 }
