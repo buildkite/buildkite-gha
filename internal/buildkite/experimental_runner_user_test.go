@@ -1,6 +1,9 @@
 package buildkite
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -76,4 +79,110 @@ func TestEmitRunnerUserIsDefaultForLinuxOnly(t *testing.T) {
 	if strings.Contains(string(output), "useradd") || strings.Contains(string(output), "sudo -n") {
 		t.Fatalf("opt-out pipeline selected runner user:\n%s", output)
 	}
+}
+
+func TestExperimentalRunnerCacheOwnershipAcceptsHostedVolumePaths(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "bkcache")
+	descendant := filepath.Join(root, "buildkite-gha", "mise")
+	directMount := filepath.Join(t.TempDir(), "runner", ".gradle", "caches")
+	for _, path := range []string{descendant, directMount} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	output, err := runExperimentalRunnerCacheOwnership(t, root, []string{directMount, descendant}, root+"\n"+directMount, root+"\n"+directMount+"\n"+descendant)
+	if err != nil {
+		t.Fatalf("cache validation failed: %v: %s", err, output)
+	}
+}
+
+func TestExperimentalRunnerCacheOwnershipRejectsUnsafePaths(t *testing.T) {
+	tests := []struct {
+		name        string
+		path        func(root string) string
+		createPath  bool
+		mountpoints func(root, path string) string
+		cachePaths  func(root, path string) string
+		want        string
+	}{
+		{
+			name:        "ordinary directory on cache filesystem",
+			path:        func(string) string { return filepath.Join(t.TempDir(), "ordinary") },
+			createPath:  true,
+			mountpoints: func(root, _ string) string { return root },
+			cachePaths:  func(root, path string) string { return root + "\n" + path },
+			want:        "configured cache path is not a Buildkite cache volume mount",
+		},
+		{
+			name:        "mount on another filesystem",
+			path:        func(string) string { return filepath.Join(t.TempDir(), "other-volume") },
+			createPath:  true,
+			mountpoints: func(root, path string) string { return root + "\n" + path },
+			cachePaths:  func(root, _ string) string { return root },
+			want:        "configured cache path does not target the Buildkite cache volume",
+		},
+		{
+			name:        "entire cache root",
+			path:        func(root string) string { return root },
+			createPath:  true,
+			mountpoints: func(root, _ string) string { return root },
+			cachePaths:  func(root, _ string) string { return root },
+			want:        "configured cache path is unsafe",
+		},
+		{
+			name:        "unavailable path",
+			path:        func(string) string { return filepath.Join(t.TempDir(), "missing", "cache") },
+			mountpoints: func(root, _ string) string { return root },
+			cachePaths:  func(root, _ string) string { return root },
+			want:        "configured cache path is unavailable",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "bkcache")
+			path := test.path(root)
+			dirs := []string{root}
+			if test.createPath {
+				dirs = append(dirs, path)
+			}
+			for _, dir := range dirs {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			output, err := runExperimentalRunnerCacheOwnership(t, root, []string{path}, test.mountpoints(root, path), test.cachePaths(root, path))
+			if err == nil {
+				t.Fatalf("cache validation unexpectedly succeeded: %s", output)
+			}
+			if !strings.Contains(output, test.want) {
+				t.Fatalf("cache validation output = %q, want %q", output, test.want)
+			}
+		})
+	}
+}
+
+func runExperimentalRunnerCacheOwnership(t *testing.T, root string, paths []string, mountpoints, cachePaths string) (string, error) {
+	t.Helper()
+	bin := t.TempDir()
+	writeExecutable := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExecutable("mountpoint", `for argument do target="$argument"; done
+printf '%s\n' "$TEST_MOUNTPOINTS" | grep -Fx -- "$target" >/dev/null`)
+	writeExecutable("stat", `for argument do target="$argument"; done
+if printf '%s\n' "$TEST_CACHE_PATHS" | grep -Fx -- "$target" >/dev/null; then printf '2049\n'; else printf '1\n'; fi`)
+	writeExecutable("readlink", `for argument do target="$argument"; done
+test -d "$target" && printf '%s\n' "$target"`)
+	writeExecutable("chown", "exit 0\n")
+	writeExecutable("chmod", "exit 0\n")
+
+	command := exec.Command("bash", "-c", "set -euo pipefail\nrunner_group=runner\n"+strings.Join(experimentalRunnerCacheOwnershipCommands(root, paths), "\n"))
+	command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "TEST_MOUNTPOINTS="+mountpoints, "TEST_CACHE_PATHS="+cachePaths)
+	output, err := command.CombinedOutput()
+	return string(output), err
 }
