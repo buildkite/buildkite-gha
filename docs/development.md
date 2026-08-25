@@ -165,6 +165,8 @@ action execution. In particular:
 
 - Generated release validation uses one stable `published` event. It does not
   prove every supported release activity.
+- Generated issues validation uses `opened`. It does not prove every supported
+  issue activity.
 - Bare and broader release triggers remain incompatible.
 - The action-resolution snapshot pins action revisions only.
 

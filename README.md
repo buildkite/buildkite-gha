@@ -87,7 +87,7 @@ and [compatibility guide](docs/compatibility.md#job-configuration).
 
 The imported workflows are a dynamic part of the Buildkite pipeline. The plugin creates one aggregate group per successfully compiled, explicitly listed workflow in a single transaction. Workflows that do not declare the selected event become top-level skipped steps. Groups and replacement steps depend on the importer. Each runnable job publishes a provider check named `<workflow> / <job> (<event>)`: a GitHub check for GitHub events or an Origin check for Origin events. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
 
-Buildkite owns build creation and schedule configuration. Within that build, `buildkite-gha` maps push, pull request, merge queue, release, manual/API, and scheduled builds to `push`, `pull_request`, `merge_group`, `release`, `workflow_dispatch`, and `schedule`, then applies the matching `on:` branch, tag, base-branch, activity, and safely evidenced path filters. Cross-event workflows are excluded before event-dependent compilation and retained as top-level skipped steps.
+Buildkite owns build creation and schedule configuration. Within that build, `buildkite-gha` maps push, pull request, merge queue, release, issue, manual/API, and scheduled builds to `push`, `pull_request`, `merge_group`, `release`, `issues`, `workflow_dispatch`, and `schedule`, then applies the matching `on:` branch, tag, base-branch, activity, and safely evidenced path filters. Cross-event workflows are excluded before event-dependent compilation and retained as top-level skipped steps.
 
 ## Check workflow compatibility
 
@@ -192,7 +192,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--event` also supports `pull_request`, `merge_group`, `release`, `workflow_dispatch`, and `schedule`. Generated release validation uses one stable `published` snapshot; it is representative static validation, not proof of every release activity. Generated snapshots are not equivalent to real payloads; use `--event-path` when exact payload data matters.
+`--event` also supports `pull_request`, `merge_group`, `release`, `issues`, `workflow_dispatch`, and `schedule`. Generated release validation uses one stable `published` snapshot, and generated issues validation uses `opened`. These are representative static validations, not proof of every activity. Generated snapshots are not equivalent to real payloads; use `--event-path` when exact payload data matters.
 
 Use `--all-events` to evaluate every declared supported event separately:
 

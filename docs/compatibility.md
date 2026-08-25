@@ -206,12 +206,13 @@ The fallback preserves `push`, `pull_request`, `workflow_dispatch`, and
 
 An explicit snapshot does not consult contradictory live event fields. Linked
 merge-group data must match the queue refs and commits. Linked release data must
-match the Buildkite event, action, branch, and tag.
+match the Buildkite event, action, branch, and tag. Linked issues data provides
+the issue activity and payload.
 
 With the GitHub Code Access App, Buildkite resolves a release tag to its peeled
 commit before creating the build. Without it, the plugin resolves Buildkite's
 symbolic `HEAD` from the checkout as a compatibility fallback. The fallback
-cannot infer a merge group or release without linked-webhook data.
+cannot infer a merge group, release, or issues event without linked-webhook data.
 
 The selected event then controls applicability, event-dependent compilation,
 the group condition, and the provider-check suffix.
@@ -222,6 +223,7 @@ the group condition, and the provider-check suffix.
 | `pull_request` | `branches` and `branches-ignore` match the base branch. Omitted `types` defaults to `opened`, `synchronize`, and `reopened`; explicitly listed activity types must map exactly to a supported Buildkite source action. Matching `paths` and `paths-ignore` can be admitted when the bounded local-diff requirements below are met. |
 | `merge_group` | Native Buildkite merge queue builds only. Enable merge queue builds and Merge groups webhook delivery in the pipeline's GitHub settings. `branches` and `branches-ignore` match the target branch. The only supported activity is `checks_requested`; other types and path, tag, and workflow filters are rejected. The merge group ref and SHA identify the speculative queue commit. |
 | `release` | Native Buildkite release builds only. In the pipeline's GitHub settings, enable **Additional Webhooks** > **Releases** and use **Code** trigger mode. Connect the GitHub Code Access App for immutable server provenance and hosted release `GITHUB_TOKEN` issuance. `types` is required and may contain only `published`, `created`, and `released`; bare `release`, all other activity types, and branch, tag, path, and workflow filters are rejected. Draft `created` deliveries are rejected. The ref is `refs/tags/<tag_name>`. The SHA is the server-resolved peeled commit, or the checked-out commit for the compatibility fallback. |
+| `issues` | Native Buildkite GitHub issue builds only. A bare trigger accepts every GitHub Actions issue activity. Explicit `types` may contain `opened`, `edited`, `deleted`, `transferred`, `pinned`, `unpinned`, `closed`, `reopened`, `assigned`, `unassigned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `milestoned`, `demilestoned`, `typed`, and `untyped`. Empty or unknown types and branch, tag, path, or workflow filters are rejected. |
 | `workflow_dispatch` | Selected for Buildkite UI and API builds. Webhook-style branch, tag, type, and workflow filters are unsupported. |
 | `schedule` | Selected for Buildkite scheduled builds. Buildkite owns cron configuration and does not expose which schedule started a build, so every `on.schedule` workflow is eligible for every Buildkite scheduled build. |
 | `workflow_call` | Defines a reusable-workflow interface. A reusable-only local file is available to callers but does not become a top-level group. |
@@ -1439,7 +1441,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-Use `--event push`, `--event pull_request`, `--event merge_group`, `--event release`, `--event workflow_dispatch`, or `--event schedule` instead of `--event-path` to evaluate the hosted profile with a generated minimal snapshot. The generated release event is a stable `published` event. Generated snapshots are representative compatibility test inputs, not proof of every activity or equivalents to real payloads. The options are mutually exclusive.
+Use `--event push`, `--event pull_request`, `--event merge_group`, `--event release`, `--event issues`, `--event workflow_dispatch`, or `--event schedule` instead of `--event-path` to evaluate the hosted profile with a generated minimal snapshot. The generated release event is a stable `published` event, and the generated issues event is `opened`. Generated snapshots are representative compatibility test inputs, not proof of every activity or equivalents to real payloads. The options are mutually exclusive.
 
 Use `--all-events` to evaluate every declared supported event separately. Its `processing-report/v3` output preserves the event-independent result and each generated event's v2 report. Aggregate admission means every generated snapshot was admitted; it does not cover other payload shapes. A `context-required` result means compilation and hosted-policy checks passed, but generated inputs cannot measure a supported admission path, such as push or pull-request path filters without linked webhook and local diff evidence. It does not claim admission.
 

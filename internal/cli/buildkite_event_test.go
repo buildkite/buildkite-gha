@@ -201,6 +201,25 @@ func TestGeneratedReleaseEventIsCanonicalPublishedStableRelease(t *testing.T) {
 	}
 }
 
+func TestGeneratedIssuesEventIsCanonicalOpenedIssue(t *testing.T) {
+	source, err := generatedEventSnapshot("issues")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot struct {
+		Event   string         `json:"event"`
+		Ref     string         `json:"ref"`
+		Payload map[string]any `json:"payload"`
+	}
+	if err := json.Unmarshal(source, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	issue := snapshot.Payload["issue"].(map[string]any)
+	if snapshot.Event != "issues" || snapshot.Ref != "refs/heads/main" || snapshot.Payload["action"] != "opened" || issue["number"] != float64(1) {
+		t.Fatalf("generated issues event = %#v", snapshot)
+	}
+}
+
 func TestBuildkiteEventSourceFailsClosed(t *testing.T) {
 	valid := map[string]string{"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step", "BUILDKITE_REPO": "https://github.com/a/b", "BUILDKITE_COMMIT": strings.Repeat("a", 40), "BUILDKITE_BRANCH": "main"}
 	for _, test := range []struct{ name, key, value string }{

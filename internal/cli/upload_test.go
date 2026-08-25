@@ -768,7 +768,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "multi-trigger.yml")
-	workflowSource := "name: Active event\non:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
+	workflowSource := "name: Active event\non:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  issues:\n    types: [opened, typed]\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
 	if err := os.WriteFile(workflowPath, []byte(workflowSource), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -788,6 +788,7 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 		{name: "pull request webhook metadata", source: "webhook", githubEvent: "pull_request", webhook: []byte(`{"action":"opened","pull_request":{"base":{"ref":"main"}}}`), wantEvent: "pull_request", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "pull_request"`},
 		{name: "merge group webhook metadata", source: "webhook", githubEvent: "merge_group", webhook: []byte(`{"action":"checks_requested","merge_group":{"head_ref":"refs/heads/gh-readonly-queue/main/pr-1-deadbeef","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_ref":"refs/heads/main","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`), wantEvent: "merge_group", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "merge_group"`},
 		{name: "release webhook metadata", source: "webhook", githubEvent: "release", webhook: []byte(`{"action":"published","release":{"tag_name":"v1.2.3","draft":false,"prerelease":false}}`), wantEvent: "release", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "release"`},
+		{name: "issues webhook metadata", source: "webhook", githubEvent: "issues", webhook: []byte(`{"action":"typed","issue":{"number":1}}`), wantEvent: "issues", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "issues"`},
 		{name: "UI fallback", source: "ui", wantEvent: "workflow_dispatch", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "workflow_dispatch"`, wantFallback: `build.source == "ui"`},
 		{name: "API fallback", source: "api", wantEvent: "workflow_dispatch", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "workflow_dispatch"`, wantFallback: `build.source == "api"`},
 		{name: "schedule fallback", source: "schedule", wantEvent: "schedule", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "schedule"`, wantFallback: `build.source == "schedule"`},
@@ -1410,7 +1411,7 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 func TestRunUploadWarnsAboutUnsupportedTriggersOnSkippedWorkflows(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "cross-event.yml")
-	if err := os.WriteFile(workflowPath, []byte("on: [pull_request, issues]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+	if err := os.WriteFile(workflowPath, []byte("on: [pull_request, issue_comment]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -1424,7 +1425,7 @@ func TestRunUploadWarnsAboutUnsupportedTriggersOnSkippedWorkflows(t *testing.T) 
 	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "W_TRIGGER_EVENT_UNSUPPORTED") || !strings.Contains(stderr.String(), "on.issues") {
+	if !strings.Contains(stderr.String(), "W_TRIGGER_EVENT_UNSUPPORTED") || !strings.Contains(stderr.String(), "on.issue_comment") {
 		t.Fatalf("skipped workflow upload stderr missing unsupported-trigger warning: %q", stderr.String())
 	}
 }
