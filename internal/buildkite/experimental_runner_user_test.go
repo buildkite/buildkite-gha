@@ -176,6 +176,8 @@ func runExperimentalRunnerCacheOwnership(t *testing.T, root string, paths []stri
 printf '%s\n' "$TEST_MOUNTPOINTS" | grep -Fx -- "$target" >/dev/null`)
 	writeExecutable("stat", `for argument do target="$argument"; done
 if printf '%s\n' "$TEST_CACHE_PATHS" | grep -Fx -- "$target" >/dev/null; then printf '2049\n'; else printf '1\n'; fi`)
+	writeExecutable("readlink", `for argument do target="$argument"; done
+test -d "$target" && printf '%s\n' "$target"`)
 	writeExecutable("chown", "exit 0\n")
 	writeExecutable("chmod", "exit 0\n")
 
