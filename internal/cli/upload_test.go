@@ -114,19 +114,22 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	if !strings.Contains(stdout.String(), "Uploaded 3 jobs") || stderr.Len() != 0 {
 		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
 	}
-	if len(runner.commands) != 5 {
-		t.Fatalf("commands = %#v, want distribution, three plans, and pipeline", runner.commands)
+	if len(runner.commands) != 2 {
+		t.Fatalf("commands = %#v, want one artifact batch and pipeline", runner.commands)
 	}
 	root := runner.commands[0].dir
-	for i, command := range runner.commands[:4] {
-		if command.dir != root || command.name != "buildkite-agent" || len(command.args) != 3 || command.args[0] != "artifact" || command.args[1] != "upload" {
-			t.Fatalf("artifact command %d = %#v", i, command)
-		}
+	artifactCommand := runner.commands[0]
+	wantArtifactArgs := []string{"artifact", "upload", ".buildkite-gha/**/*", "--concurrency", "8"}
+	if artifactCommand.name != "buildkite-agent" || !slices.Equal(artifactCommand.args, wantArtifactArgs) {
+		t.Fatalf("artifact command = %#v, want cwd %q and args %#v", artifactCommand, root, wantArtifactArgs)
+	}
+	if len(runner.uploaded) != 4 {
+		t.Fatalf("uploaded artifacts = %#v, want distribution and three plans", runner.uploaded)
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatalf("temporary artifact root still exists: %v", err)
 	}
-	pipelineCommand := runner.commands[4]
+	pipelineCommand := runner.commands[1]
 	wantPipelineArgs := []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}
 	if strings.Join(pipelineCommand.args, " ") != strings.Join(wantPipelineArgs, " ") {
 		t.Fatalf("pipeline args = %#v, want %#v", pipelineCommand.args, wantPipelineArgs)
@@ -565,7 +568,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 	if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Uploaded 14 jobs from 6 workflows") || stderr.Len() != 0 || len(runner.commands) != 16 {
+	if !strings.Contains(stdout.String(), "Uploaded 14 jobs from 6 workflows") || stderr.Len() != 0 || len(runner.commands) != 2 {
 		t.Fatalf("stdout/stderr/commands = %q / %q / %d", stdout.String(), stderr.String(), len(runner.commands))
 	}
 	pipelineCommand := runner.commands[len(runner.commands)-1]
@@ -1911,7 +1914,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Uploaded 1 jobs from 2 workflows") || len(runner.commands) != 3 {
+	if !strings.Contains(stdout.String(), "Uploaded 1 jobs from 2 workflows") || len(runner.commands) != 2 {
 		t.Fatalf("stdout/commands = %q / %d", stdout.String(), len(runner.commands))
 	}
 	var pipeline struct {
@@ -2399,8 +2402,8 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Uploaded 2 jobs") || stderr.Len() != 0 {
 		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
 	}
-	if len(runner.commands) != 4 {
-		t.Fatalf("commands = %#v, want distribution, two plans, and pipeline", runner.commands)
+	if len(runner.commands) != 2 {
+		t.Fatalf("commands = %#v, want one artifact batch and pipeline", runner.commands)
 	}
 
 	var pipeline struct {
@@ -2416,7 +2419,7 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 			} `yaml:"steps"`
 		} `yaml:"steps"`
 	}
-	if err := yaml.Unmarshal(runner.commands[3].stdin, &pipeline); err != nil {
+	if err := yaml.Unmarshal(runner.commands[1].stdin, &pipeline); err != nil {
 		t.Fatalf("uploaded pipeline YAML: %v", err)
 	}
 	if len(pipeline.Steps) != 1 || pipeline.Steps[0].DependsOn != "concurrent-steps-importer" || len(pipeline.Steps[0].Steps) != 2 {
@@ -2460,8 +2463,8 @@ func TestRunUploadJavaScriptActionRequiresRuntimeMiseWithoutTransport(t *testing
 	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if len(runner.commands) != 3 {
-		t.Fatalf("commands = %d, want distribution, plan, and pipeline", len(runner.commands))
+	if len(runner.commands) != 2 {
+		t.Fatalf("commands = %d, want one artifact batch and pipeline", len(runner.commands))
 	}
 	for path := range runner.uploaded {
 		if strings.Contains(path, "/runtimes/") || strings.Contains(path, "/tools/mise/") {
@@ -2480,7 +2483,7 @@ func TestRunUploadJavaScriptActionRequiresRuntimeMiseWithoutTransport(t *testing
 			} `yaml:"steps"`
 		} `yaml:"steps"`
 	}
-	if err := yaml.Unmarshal(runner.commands[2].stdin, &pipeline); err != nil {
+	if err := yaml.Unmarshal(runner.commands[1].stdin, &pipeline); err != nil {
 		t.Fatalf("parse uploaded pipeline: %v", err)
 	}
 	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Steps) != 1 {
@@ -2550,12 +2553,12 @@ func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "shell-upload-importer")
-	runner := &cliCaptureRunner{failAt: 2}
+	runner := &cliCaptureRunner{failAt: 1}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"upload", workflowPath, "--event-path", eventPath, "--runtime-queue", "hosted"}, &stdout, &stderr, "dev", runner); code != 1 {
 		t.Fatalf("run() code = %d, want 1", code)
 	}
-	if len(runner.commands) != 2 || !strings.Contains(stderr.String(), "upload artifact") {
+	if len(runner.commands) != 1 || !strings.Contains(stderr.String(), "upload artifacts") {
 		t.Fatalf("commands = %#v, stderr = %q", runner.commands, stderr.String())
 	}
 }

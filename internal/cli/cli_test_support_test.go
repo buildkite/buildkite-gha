@@ -184,14 +184,35 @@ func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []str
 		return nil, os.WriteFile(path, contents, 0o600)
 	}
 	if len(args) >= 3 && args[0] == "artifact" && args[1] == "upload" {
-		contents, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(args[2])))
-		if err != nil {
-			return nil, err
-		}
 		if r.uploaded == nil {
 			r.uploaded = map[string][]byte{}
 		}
-		r.uploaded[args[2]] = contents
+		if args[2] == ".buildkite-gha/**/*" {
+			err := filepath.WalkDir(filepath.Join(dir, ".buildkite-gha"), func(path string, entry os.DirEntry, err error) error {
+				if err != nil || entry.IsDir() {
+					return err
+				}
+				relative, err := filepath.Rel(dir, path)
+				if err != nil {
+					return err
+				}
+				contents, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				r.uploaded[filepath.ToSlash(relative)] = contents
+				return nil
+			})
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			contents, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(args[2])))
+			if err != nil {
+				return nil, err
+			}
+			r.uploaded[args[2]] = contents
+		}
 	}
 	if r.failMetadata && len(args) >= 2 && args[0] == "meta-data" && args[1] == "set" {
 		return nil, errors.New("metadata unavailable")
