@@ -339,7 +339,8 @@ func TestRunUploadRejectsExplicitTrackedSymlinks(t *testing.T) {
 			t.Setenv("BUILDKITE_STEP_KEY", "symlink-importer")
 			runner := &cliCaptureRunner{}
 			var stdout, stderr bytes.Buffer
-			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/linked.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "symbolic link") {
+			want := `workflow path ".github/workflows/linked.yml" is not a regular tracked file. Check that the file exists at this path and is not a symlink. Symlinks, untracked files, directories, and globs are not supported.`
+			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/linked.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), want) {
 				t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 			}
 			if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
@@ -434,7 +435,7 @@ func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 		{name: "directory", operands: []string{workflowDirectory, aPath}, want: "directory"},
 		{name: "outside repository", operands: []string{outsidePath, aPath}, want: "outside the checked-out git repository"},
 		{name: "non-workflow extension", operands: []string{notePath, aPath}, want: "must end in .yml or .yaml"},
-		{name: "symlink", operands: []string{symlinkPath, aPath}, want: "symbolic link"},
+		{name: "symlink", operands: []string{symlinkPath, aPath}, want: "is not a regular tracked file"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, _, err := expandExplicitWorkflowPaths(test.operands, ""); err == nil || !strings.Contains(err.Error(), test.want) {
