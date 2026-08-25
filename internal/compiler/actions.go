@@ -264,7 +264,7 @@ func compileReachableActionInvocations(ctx context.Context, workspace string, ac
 	if suppliedInputs != nil {
 		for i, root := range roots {
 			mayRun := reachable == nil || reachable[i]
-			requirements, err := root.inspectInvocation(suppliedInputs[i], true, serverURL, mayRun)
+			requirements, err := root.inspectInvocation(suppliedInputs[i], true, serverURL, mayRun, nil)
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
@@ -381,7 +381,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	return n, nil
 }
 
-func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string, reachable bool) (actionRequirements, error) {
+func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string, reachable bool, callerReferences map[string]any) (actionRequirements, error) {
 	requirements := actionRequirements{requiredSecrets: map[string]bool{}}
 	for _, suppliedName := range sortedKeys(supplied) {
 		value := supplied[suppliedName]
@@ -447,7 +447,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	if n.runtime != metadata.RuntimeComposite {
 		return requirements, nil
 	}
-	knownReferences := n.knownInputReferences(supplied, serverURL)
+	knownReferences := n.knownInputReferences(supplied, serverURL, callerReferences)
 	for i, step := range n.metadata.Runs.Steps {
 		if step.Uses == "" {
 			mayRun := reachable && compositeStepMayRun(step.If, knownReferences)
@@ -481,7 +481,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
 			}
 		}
-		childRequirements, err := child.inspectInvocation(step.With, false, serverURL, reachable && compositeStepMayRun(step.If, knownReferences))
+		childRequirements, err := child.inspectInvocation(step.With, false, serverURL, reachable && compositeStepMayRun(step.If, knownReferences), knownReferences)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 		}
@@ -493,13 +493,16 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	return requirements, nil
 }
 
-func (n *actionNode) knownInputReferences(supplied map[string]string, serverURL string) map[string]any {
+func (n *actionNode) knownInputReferences(supplied map[string]string, serverURL string, callerReferences map[string]any) map[string]any {
 	known := map[string]any{
 		"github.server_url": serverURL,
 		"job.check_run_id":  "",
 	}
+	if callerReferences == nil {
+		callerReferences = known
+	}
 	for _, name := range sortedKeys(supplied) {
-		value, resolved, err := expression.EvaluateKnownStepTemplate(supplied[name], known)
+		value, resolved, err := expression.EvaluateKnownStepTemplate(supplied[name], callerReferences)
 		if err != nil || !resolved {
 			continue
 		}

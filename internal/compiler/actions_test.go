@@ -659,6 +659,41 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsEvaluatesNestedInputsAgainstCaller(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  a: {}
+  b: {}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOKEN: ${{ inputs.b == 'true' && github.token || '' }}
+      run: echo token
+`)
+	writeAction(t, workspace, "parent", `name: parent
+inputs:
+  a:
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        a: "false"
+        b: ${{ inputs.a }}
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("nested input evaluated against child values and omitted a required GitHub token")
+	}
+}
+
 func TestCompileActionInvocationsRejectsAuthorityFromCompositeShellMetadata(t *testing.T) {
 	workspace := t.TempDir()
 	for _, test := range []struct {
@@ -1164,6 +1199,26 @@ jobs:
 	}
 	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.GitHubToken != nil || len(bundle.Plans[0].Authorization.GitHubTokenActions) != 0 {
 		t.Fatalf("unreachable composite metadata token plan = %#v", bundle.Plans)
+	}
+
+	matrixWorkflow := `on: push
+permissions: {}
+jobs:
+  token:
+    strategy:
+      matrix:
+        enabled: [false]
+    runs-on: ubuntu-latest
+    steps:
+      - if: matrix.enabled
+        uses: ./.github/actions/token
+`
+	bundle, err = CompileBundleWithOptions(workflowPath, []byte(matrixWorkflow), pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.GitHubToken != nil || len(bundle.Plans[0].Authorization.GitHubTokenActions) != 0 {
+		t.Fatalf("matrix-disabled composite metadata token plan = %#v", bundle.Plans)
 	}
 }
 

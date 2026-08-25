@@ -368,8 +368,12 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 		return built, nil
 	}
 	reachable := make([]bool, len(actionIndexes))
+	knownReferences := make(map[string]any, len(instance.Matrix))
+	for name, value := range instance.Matrix {
+		knownReferences["matrix."+strings.ToLower(name)] = value
+	}
 	for i, stepIndex := range actionIndexes {
-		reachable[i] = compositeStepMayRun(steps[stepIndex].Condition, nil)
+		reachable[i] = compositeStepMayRun(steps[stepIndex].Condition, knownReferences)
 	}
 	compiled, err := compileReachableActionInvocations(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs, reachable)
 	if err != nil {
