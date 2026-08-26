@@ -238,6 +238,22 @@ func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
 	}
 }
 
+func TestParseRejectsInvalidPermissionScalars(t *testing.T) {
+	for _, test := range []struct {
+		name, source, want string
+	}{
+		{name: "workflow", source: "on: push\npermissions: write\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n", want: `permissions.yml:2:14: workflow permissions: invalid permissions scalar "write"; use read-all, write-all, or a permissions map`},
+		{name: "job", source: "on: push\njobs:\n  test:\n    permissions: write\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n", want: `permissions.yml:4:18: job "test": invalid permissions scalar "write"; declare each needed permission in a map`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Parse("permissions.yml", []byte(test.source))
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("Parse() error = %q, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestParseRejectsJobPermissionShorthand(t *testing.T) {
 	for _, shorthand := range []string{"read-all", "write-all"} {
 		t.Run(shorthand, func(t *testing.T) {

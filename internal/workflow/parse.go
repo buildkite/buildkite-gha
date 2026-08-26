@@ -860,7 +860,14 @@ func adaptPermissions(path string, in *actionlint.Permissions, jobID string) (*P
 		return locatedError(path, pos, jobID, message)
 	}
 	if in.All != nil {
-		if jobID == "" && (in.All.Value == "read-all" || in.All.Value == "write-all") {
+		if in.All.Value != "read-all" && in.All.Value != "write-all" {
+			message := fmt.Sprintf("invalid permissions scalar %q; declare each needed permission in a map", in.All.Value)
+			if jobID == "" {
+				message = fmt.Sprintf("invalid permissions scalar %q; use read-all, write-all, or a permissions map", in.All.Value)
+			}
+			return nil, permissionError(in.All.Pos, message)
+		}
+		if jobID == "" {
 			access := strings.TrimSuffix(in.All.Value, "-all")
 			scopes := make(map[string]string, len(topLevelAllPermissionNames))
 			for _, name := range topLevelAllPermissionNames {
