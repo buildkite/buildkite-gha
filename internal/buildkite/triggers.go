@@ -68,6 +68,7 @@ var supportedTriggerEvents = map[string]bool{
 
 var supportedIssuesAction = map[string]bool{
 	"opened": true, "edited": true, "deleted": true, "transferred": true,
+	"field_added": true, "field_removed": true,
 	"pinned": true, "unpinned": true, "closed": true, "reopened": true,
 	"assigned": true, "unassigned": true, "labeled": true, "unlabeled": true,
 	"locked": true, "unlocked": true, "milestoned": true, "demilestoned": true,

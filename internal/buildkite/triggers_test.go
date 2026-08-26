@@ -90,7 +90,7 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 		{name: "release branch filter", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Branches: []string{"main"}}}, want: "unsupported filters"},
 		{name: "release paths", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Paths: []string{"src/**"}}}, want: "path filters are unsupported"},
 		{name: "empty issues types", triggers: []workflow.Trigger{{Event: "issues", Types: []string{}}}, want: "issues types is explicitly empty"},
-		{name: "unknown issues type", triggers: []workflow.Trigger{{Event: "issues", Types: []string{"field_added"}}}, want: `issues activity type "field_added" cannot be mapped exactly`},
+		{name: "unknown issues type", triggers: []workflow.Trigger{{Event: "issues", Types: []string{"not-real"}}}, want: `issues activity type "not-real" cannot be mapped exactly`},
 		{name: "issues branches", triggers: []workflow.Trigger{{Event: "issues", Branches: []string{"main"}}}, want: "issues has unsupported filters"},
 		{name: "issues tags", triggers: []workflow.Trigger{{Event: "issues", Tags: []string{"v*"}}}, want: "issues has unsupported filters"},
 		{name: "issues paths", triggers: []workflow.Trigger{{Event: "issues", Paths: []string{"src/**"}}}, want: "issues path filters are unsupported"},
@@ -216,6 +216,7 @@ func TestTranslateTriggerConditionAcceptsDocumentedIssuesActivityTypes(t *testin
 		"opened", "edited", "deleted", "transferred", "pinned", "unpinned",
 		"closed", "reopened", "assigned", "unassigned", "labeled", "unlabeled",
 		"locked", "unlocked", "milestoned", "demilestoned", "typed", "untyped",
+		"field_added", "field_removed",
 	}
 	condition, err := TranslateTriggerCondition([]workflow.Trigger{{Event: "issues", Types: types}})
 	if err != nil {

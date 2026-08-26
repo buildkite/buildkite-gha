@@ -56,7 +56,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 			{name: "bare release", trigger: "release", want: "on: release needs a types list"},
 			{name: "unsupported release activity", trigger: "release:\n    types: [edited]", want: `release activity type "edited" cannot be mapped exactly`},
 			{name: "release branch filter", trigger: "release:\n    types: [published]\n    branches: [main]", want: "release has unsupported filters"},
-			{name: "unknown issues activity", trigger: "issues:\n    types: [field_added]", want: `issues activity type "field_added" cannot be mapped exactly`},
+			{name: "unknown issues activity", trigger: "issues:\n    types: [not-real]", want: `issues activity type "not-real" cannot be mapped exactly`},
 			{name: "issues branch filter", trigger: "issues:\n    branches: [main]", want: "issues has unsupported filters"},
 		}
 		for _, test := range tests {
@@ -193,7 +193,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile with generated events", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  issues:\n    types: [opened, typed]\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  issues:\n    types: [opened, field_added, field_removed, typed]\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		for _, event := range []string{"push", "pull_request", "merge_group", "release", "issues", "workflow_dispatch", "schedule"} {
