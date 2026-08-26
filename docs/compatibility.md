@@ -1098,7 +1098,7 @@ An explicit input is accepted only when the exact snapshotted contract declares 
 | `github-server-url` | When declared by the commit: omitted, empty, or `https://github.com`. Otherwise omitted. |
 | `allow-unsafe-pr-checkout` | When declared by the commit: omitted or `false`. Otherwise omitted. |
 
-The `ref` and `commit` outputs are available only for commits whose action manifest declares them. Upstream added both outputs in v4.2.0.
+The `ref` and `commit` outputs are available when the selected exact or fallback contract declares them. Exact contracts follow each commit's action manifest; the v7.0.1 fallback exposes both outputs. Upstream added both outputs in v4.2.0.
 
 The `false` value and omission do not run submodule commands. The `true` value runs native Git for direct children, and `recursive` includes nested children. Relative URLs and `fetch-depth` follow native Git behavior. Public and private GitHub submodules are supported under the job's repository access; external HTTPS submodules are anonymous. `git@github.com:` URLs are rewritten to HTTPS. Other SSH and non-HTTPS transports are unsupported.
 
