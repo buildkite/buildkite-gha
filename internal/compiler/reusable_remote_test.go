@@ -192,19 +192,19 @@ func TestCompileRejectsSecretForwardingIntoRemoteReusableWorkflows(t *testing.T)
 			name:        "inherited remote call",
 			caller:      "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n    secrets: inherit\n",
 			remote:      "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
-			wantMessage: `secrets: inherit cannot forward secrets to a workflow in another repository. Reusable workflow "owner/workflows/.github/workflows/ci.yml@v1" is outside this repository, so no secrets were forwarded. Reference each secret by name in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use secrets: inherit with a ./ call. If you need secrets: inherit across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
+			wantMessage: `secrets: inherit cannot forward secrets to a workflow in another repository. Reusable workflow "owner/workflows/.github/workflows/ci.yml@v1" is outside this repository, so no secrets were forwarded. Retrieve each secret by name with buildkite-agent secret get NAME in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use secrets: inherit with a ./ call. If you need secrets: inherit across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
 		},
 		{
 			name:        "explicit remote call",
 			caller:      "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n    secrets:\n      token: ${{ secrets.SOURCE }}\n",
 			remote:      "on:\n  workflow_call:\n    secrets:\n      token:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
-			wantMessage: `A secrets: map cannot forward secrets to a workflow in another repository. Reusable workflow "owner/workflows/.github/workflows/ci.yml@v1" is outside this repository, so no secrets were forwarded. Reference each secret by name in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use a secrets: map with a ./ call. If you need explicit secret mappings across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
+			wantMessage: `A secrets: map cannot forward secrets to a workflow in another repository. Reusable workflow "owner/workflows/.github/workflows/ci.yml@v1" is outside this repository, so no secrets were forwarded. Retrieve each secret by name with buildkite-agent secret get NAME in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use a secrets: map with a ./ call. If you need explicit secret mappings across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
 		},
 		{
 			name:        "local path within remote repository",
 			caller:      "on: push\njobs:\n  call:\n    uses: owner/workflows/.github/workflows/ci.yml@v1\n",
 			remote:      "on: workflow_call\njobs:\n  nested:\n    uses: ./.github/workflows/nested.yml\n    secrets: inherit\n",
-			wantMessage: `secrets: inherit cannot forward secrets to a workflow in another repository. Reusable workflow "owner/workflows/.github/workflows/nested.yml@v1" is outside this repository, so no secrets were forwarded. Reference each secret by name in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use secrets: inherit with a ./ call. If you need secrets: inherit across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
+			wantMessage: `secrets: inherit cannot forward secrets to a workflow in another repository. Reusable workflow "owner/workflows/.github/workflows/nested.yml@v1" is outside this repository, so no secrets were forwarded. Retrieve each secret by name with buildkite-agent secret get NAME in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use secrets: inherit with a ./ call. If you need secrets: inherit across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
