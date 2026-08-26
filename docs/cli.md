@@ -523,6 +523,12 @@ For an unsuccessful command, they also contain the final 1,024 bytes of
 normalized user-visible error output. `error_message_truncated` says whether
 earlier output was omitted.
 
+Failed runs also carry a failure phase and a code from a fixed set. The code
+separates workflow-authored process exits (`E_STEP_PROCESS_EXIT`) from
+unsupported-feature rejections (`E_UNSUPPORTED_FEATURE`) and runtime integrity
+failures (`E_RUNTIME_INTEGRITY`), so a failing test suite is not counted as a
+compatibility gap.
+
 Buildkite adds organization, pipeline, build, and job identifiers on the
 server. The client does not send workflow or event content, environment
 variables, command text, or secrets as separate properties.

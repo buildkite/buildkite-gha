@@ -113,6 +113,8 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	if err := gharuntime.ValidateHost(job, runtime.GOOS, runtime.GOARCH); err != nil {
+		details.setFailurePhase(telemetry.FailurePhaseExecution)
+		details.setFailureCode(runtimeFailureCode(err))
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
@@ -292,6 +294,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		failureVisible = result.FailureVisible()
 		if runErr != nil {
 			details.setFailurePhase(telemetry.FailurePhaseExecution)
+			details.setFailureCode(runtimeFailureCode(runErr))
 		}
 	}
 	if result.Conclusion == "" {
@@ -345,6 +348,22 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	return 0
+}
+
+// runtimeFailureCode attributes a RunJob error so ordinary workflow failures,
+// such as a test command exiting nonzero, are not counted as compatibility
+// gaps. Unattributed errors return "" and keep the unknown failure code.
+func runtimeFailureCode(err error) telemetry.FailureCode {
+	switch gharuntime.ClassifyFailure(err) {
+	case gharuntime.FailureClassStepProcessExit:
+		return telemetry.FailureCodeStepProcessExit
+	case gharuntime.FailureClassUnsupportedFeature:
+		return telemetry.FailureCodeUnsupportedFeature
+	case gharuntime.FailureClassIntegrity:
+		return telemetry.FailureCodeRuntimeIntegrity
+	default:
+		return ""
+	}
 }
 
 func hasGitHubActionLocks(locks []plan.ActionLock) bool {

@@ -732,11 +732,42 @@ func TestRunJobTelemetryClassifiesExecutionFailure(t *testing.T) {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 	event := <-events
-	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeUnknown {
+	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeStepProcessExit {
 		t.Fatalf("telemetry = %#v", event)
 	}
 	if !strings.Contains(event.ErrorMessage, "exit status 7") {
 		t.Fatalf("telemetry error message = %q", event.ErrorMessage)
+	}
+}
+
+func TestRunJobTelemetryClassifiesUnsupportedShell(t *testing.T) {
+	job := cliRunJobPlan()
+	job.Steps[0].Shell = "pwsh"
+	job.Steps[0].Command = "Get-Location"
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	events := captureCommandTelemetry(t)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	event := <-events
+	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeUnsupportedFeature {
+		t.Fatalf("telemetry = %#v", event)
+	}
+	if !strings.Contains(event.ErrorMessage, "unsupported in the supported runtime subset") {
+		t.Fatalf("telemetry error message = %q", event.ErrorMessage)
+	}
+}
+
+func TestRunJobValidateHostErrorsClassifyAsUnsupported(t *testing.T) {
+	job := plan.Job{RequiredCapabilities: []string{"docker"}}
+	err := gharuntime.ValidateHost(job, "darwin", "arm64")
+	if err == nil {
+		t.Fatal("ValidateHost() = nil, want macOS docker rejection")
+	}
+	if got := runtimeFailureCode(err); got != telemetry.FailureCodeUnsupportedFeature {
+		t.Fatalf("runtimeFailureCode() = %q, want %q for %v", got, telemetry.FailureCodeUnsupportedFeature, err)
 	}
 }
 
