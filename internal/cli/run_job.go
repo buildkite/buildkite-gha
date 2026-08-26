@@ -113,6 +113,8 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	if err := gharuntime.ValidateHost(job, runtime.GOOS, runtime.GOARCH); err != nil {
+		details.setFailurePhase(telemetry.FailurePhaseExecution)
+		details.setFailureCode(runtimeFailureCode(err))
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}

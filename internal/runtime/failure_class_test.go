@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
@@ -26,6 +27,7 @@ func TestClassifyFailurePrecedence(t *testing.T) {
 		{"wrapped step exit", fmt.Errorf("run-job: %w", stepExit), FailureClassStepProcessExit},
 		{"tolerated step exit", &toleratedJobFailure{err: stepExit}, FailureClassStepProcessExit},
 		{"unsupported", unsupported, FailureClassUnsupportedFeature},
+		{"unsupported runtime", fmt.Errorf("action %q: %w", "./action", &metadata.UnsupportedRuntimeError{Runtime: "future"}), FailureClassUnsupportedFeature},
 		{"integrity", hard, FailureClassIntegrity},
 		{"integrity outranks step exit", errors.Join(stepExit, hard), FailureClassIntegrity},
 		{"unsupported outranks integrity", errors.Join(hard, unsupported), FailureClassUnsupportedFeature},
@@ -79,6 +81,22 @@ func TestRunJobClassifiesUnsupportedShell(t *testing.T) {
 	workflowPath := ".github/workflows/shell.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: shell\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "shell", Kind: "run", Shell: "pwsh", Command: "Get-Location"}})
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	if err == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if got := ClassifyFailure(err); got != FailureClassUnsupportedFeature {
+		t.Fatalf("ClassifyFailure() = %q, want %q for %v", got, FailureClassUnsupportedFeature, err)
+	}
+}
+
+func TestRunJobClassifiesUnsupportedActionRuntime(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/action.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: action\n")
+	writeFixtureFile(t, workspace, "action/action.yml", "name: future\nruns:\n  using: future\n  main: main.js\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "future", Kind: "uses", Uses: "./action"}})
 	var logs bytes.Buffer
 	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {

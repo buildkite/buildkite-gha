@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 )
 
 // FailureClass attributes a RunJob error for telemetry so ordinary workflow
@@ -31,6 +33,13 @@ const (
 func ClassifyFailure(err error) FailureClass {
 	var unsupported *unsupportedFeatureError
 	if errors.As(err, &unsupported) {
+		return FailureClassUnsupportedFeature
+	}
+	// metadata.Runtime() rejects unsupported runs.using values with its own
+	// typed error; recognize it so those rejections classify without wrapping
+	// at every call site.
+	var unsupportedRuntime *metadata.UnsupportedRuntimeError
+	if errors.As(err, &unsupportedRuntime) {
 		return FailureClassUnsupportedFeature
 	}
 	if isHardJobFailure(err) {

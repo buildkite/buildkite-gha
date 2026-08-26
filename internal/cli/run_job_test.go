@@ -760,6 +760,17 @@ func TestRunJobTelemetryClassifiesUnsupportedShell(t *testing.T) {
 	}
 }
 
+func TestRunJobValidateHostErrorsClassifyAsUnsupported(t *testing.T) {
+	job := plan.Job{RequiredCapabilities: []string{"docker"}}
+	err := gharuntime.ValidateHost(job, "darwin", "arm64")
+	if err == nil {
+		t.Fatal("ValidateHost() = nil, want macOS docker rejection")
+	}
+	if got := runtimeFailureCode(err); got != telemetry.FailureCodeUnsupportedFeature {
+		t.Fatalf("runtimeFailureCode() = %q, want %q for %v", got, telemetry.FailureCodeUnsupportedFeature, err)
+	}
+}
+
 func TestRunJobPublishesBoundedFailureForUnrepresentableOutputs(t *testing.T) {
 	job := cliRunJobPlan()
 	job.Steps[0].Command = `printf 'summary from malformed result\n' >> "$GITHUB_STEP_SUMMARY"`
