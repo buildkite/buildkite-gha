@@ -22,9 +22,16 @@ func TestCheckoutCommitAdmission(t *testing.T) {
 	if err := validateCheckoutCommit("de0fac2e4500dabe0009e67214ff5f5447ce83dd"); err != nil {
 		t.Fatalf("upstream main commit rejected: %v", err)
 	}
-	for _, commit := range []string{strings.Repeat("0", 40)} {
+	unknown := strings.Repeat("0", 40)
+	if err := validateCheckoutCommit(unknown); err != nil || !CheckoutUsesFallbackContract(unknown) {
+		t.Fatalf("unknown immutable checkout commit fallback = %v, %t", err, CheckoutUsesFallbackContract(unknown))
+	}
+	if CheckoutUsesFallbackContract(CheckoutV7Commit) {
+		t.Fatal("snapshotted checkout commit uses fallback contract")
+	}
+	for _, commit := range []string{"v8", strings.Repeat("A", 40), strings.Repeat("z", 40)} {
 		if err := validateCheckoutCommit(commit); err == nil || !strings.Contains(err.Error(), "does not admit") || !strings.Contains(err.Error(), CheckoutV7Commit) || !strings.Contains(err.Error(), checkoutMainSnapshotCommit) {
-			t.Fatalf("unrecognized checkout commit %s error = %v", commit, err)
+			t.Fatalf("non-immutable checkout commit %s error = %v", commit, err)
 		}
 	}
 }
@@ -193,6 +200,31 @@ func TestValidateCheckoutInputsUsesPerCommitContract(t *testing.T) {
 			}
 			if !test.wantAccepted && (err == nil || !strings.Contains(err.Error(), "unsupported by this actions/checkout release")) {
 				t.Fatalf("ValidateCheckoutInputs() = %v, want contract rejection", err)
+			}
+		})
+	}
+}
+
+func TestValidateCheckoutInputsUsesBoundedFallbackContract(t *testing.T) {
+	unknown := strings.Repeat("0", 40)
+	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
+	if err := ValidateCheckoutInputs(unknown, map[string]string{
+		"repository": "buildkite/buildkite-gha",
+		"ref":        sha,
+		"path":       "sources/app",
+		"filter":     "blob:none",
+	}, repository, sha); err != nil {
+		t.Fatalf("fallback contract rejected bounded current inputs: %v", err)
+	}
+	for name, inputs := range map[string]map[string]string{
+		"token":               {"token": ""},
+		"foreign repository":  {"repository": "other/repository"},
+		"unsafe path":         {"path": "../outside"},
+		"persist credentials": {"persist-credentials": "true"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateCheckoutInputs(unknown, inputs, repository, sha); err == nil || !strings.Contains(err.Error(), "unsupported") {
+				t.Fatalf("fallback contract accepted %#v: %v", inputs, err)
 			}
 		})
 	}

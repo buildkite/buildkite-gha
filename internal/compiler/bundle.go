@@ -98,6 +98,7 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("compiler produced %d plans and %d authorizations for %d job instances", len(plans), len(authorizations), len(ir.Jobs)))
 	}
 	warnedLegacyCheckout := map[string]bool{}
+	warnedUnknownCheckout := map[string]bool{}
 	warnedLegacyUploadArtifact := map[string]bool{}
 	for i, job := range plans {
 		locks := make(map[string]plan.ActionLock, len(job.Actions))
@@ -112,6 +113,18 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 			descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
 			switch descriptor.Adapter {
 			case actionintegration.AdapterCheckoutExactEventSHA:
+				if actionintegration.CheckoutUsesFallbackContract(lock.Commit) {
+					if warnedUnknownCheckout[lock.Commit] {
+						continue
+					}
+					warnedUnknownCheckout[lock.Commit] = true
+					warning := unknownCheckoutCommitWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, lock.Commit)
+					warning.Path = ir.Jobs[i].SourcePath
+					warning.Job = ir.Jobs[i].LogicalJobID
+					warning.Step = stepIndex + 1
+					bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
+					continue
+				}
 				release, legacy := actionintegration.LegacyCheckoutRelease(lock.Commit)
 				if !legacy || warnedLegacyCheckout[release] {
 					continue

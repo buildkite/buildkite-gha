@@ -1265,6 +1265,14 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 	if _, err := compile(actionintegration.CheckoutV1Commit, "        with:\n          persist-credentials: false\n"); err == nil || !strings.Contains(err.Error(), "explicit input \"persist-credentials\" is unsupported by this actions/checkout release") {
 		t.Fatalf("v1.2.0 later-contract input error = %v", err)
 	}
+
+	unknown := strings.Repeat("0", 40)
+	if _, err := compile(unknown, "        with:\n          path: sources/app\n          filter: blob:none\n"); err != nil {
+		t.Fatalf("unknown checkout fallback inputs: %v", err)
+	}
+	if _, err := compile(unknown, "        with:\n          path: ../outside\n"); err == nil || !strings.Contains(err.Error(), "checkout adapter") {
+		t.Fatalf("unknown checkout fallback path error = %v", err)
+	}
 }
 
 func TestCheckoutAdapterCommitBoundary(t *testing.T) {
@@ -1298,8 +1306,8 @@ func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 	unknown := strings.Repeat("0", 40)
 	writeAction(t, remote, "", checkoutTestManifest(unknown))
 	actionSource := &fakeActionSource{root: remote, commit: unknown, calls: map[string]int{}}
-	if _, _, _, _, err := compileActionLocks(t.Context(), workspace, actionSource, []string{"actions/checkout@v7"}); err == nil || !strings.Contains(err.Error(), "does not admit") {
-		t.Fatalf("unknown checkout commit error = %v", err)
+	if _, locks, _, _, err := compileActionLocks(t.Context(), workspace, actionSource, []string{"actions/checkout@v7"}); err != nil || len(locks) != 1 || locks[0].Commit != unknown {
+		t.Fatalf("unknown checkout fallback locks = %#v, error = %v", locks, err)
 	}
 }
 
@@ -1398,6 +1406,47 @@ func TestCompileBundleLegacyCheckoutWarning(t *testing.T) {
 	bundle = compile("      - uses: actions/checkout@" + actionintegration.CheckoutV4Commit + "\n")
 	if len(bundle.IR.Warnings) != 0 {
 		t.Fatalf("warnings = %#v, want none", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleUnknownCheckoutCommitWarningIsDeduplicated(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unknown := strings.Repeat("0", 40)
+	otherUnknown := strings.Repeat("1", 40)
+	root := t.TempDir()
+	writeAction(t, root, "", checkoutTestManifest(unknown))
+	otherRoot := t.TempDir()
+	writeAction(t, otherRoot, "", checkoutTestManifest(otherUnknown))
+	workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n      - uses: actions/checkout@" + unknown + "\n      - uses: actions/checkout@" + unknown + "\n        with:\n          path: again\n      - uses: actions/checkout@" + otherUnknown + "\n        with:\n          path: other\n")
+	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   commitActionSource{roots: map[string]string{unknown: root, otherUnknown: otherRoot}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 || len(bundle.IR.Warnings) != 2 {
+		t.Fatalf("plans = %d, warnings = %#v, want one warning per distinct commit across matrix and repeated steps", len(bundle.Plans), bundle.IR.Warnings)
+	}
+	warning := bundle.IR.Warnings[0]
+	if warning.Code != "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK" || warning.Path != "./.github/workflows/checkout.yml" || warning.Job != "checkout" || warning.Step != 1 || warning.Line == 0 ||
+		!strings.Contains(warning.Message, unknown) || !strings.Contains(warning.Message, actionintegration.CheckoutFallbackContractRelease) || !strings.Contains(warning.Message, "does not run the upstream action JavaScript") {
+		t.Fatalf("unknown checkout fallback warning = %#v", warning)
+	}
+	if bundle.IR.Warnings[1].Code != "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[1].Step != 3 || !strings.Contains(bundle.IR.Warnings[1].Message, otherUnknown) {
+		t.Fatalf("second unknown checkout fallback warning = %#v", bundle.IR.Warnings[1])
 	}
 }
 

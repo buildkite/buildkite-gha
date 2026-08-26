@@ -6,7 +6,7 @@ import (
 )
 
 func TestUnsupportedActionVersionsSeparateGuidanceFromAdmissionDetail(t *testing.T) {
-	commit := strings.Repeat("0", 40)
+	commit := strings.Repeat("z", 40)
 	tests := []struct {
 		name      string
 		reference string
