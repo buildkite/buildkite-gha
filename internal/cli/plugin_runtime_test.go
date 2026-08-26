@@ -129,7 +129,7 @@ func TestPluginDarwinRejectsChecksumArchiveAndBinaryFailures(t *testing.T) {
 	validBinary := []byte{0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 	archive := pluginTestArchive(t, validBinary, false)
 	digest := sha256.Sum256(archive)
-	if _, err := pluginAssetChecksum([]byte(fmt.Sprintf("%x  %s\n%x  %s\n", digest, pluginDarwinAsset, digest, pluginDarwinAsset)), pluginDarwinAsset); err == nil || !strings.Contains(err.Error(), "exactly one") {
+	if _, err := pluginAssetChecksum(fmt.Appendf(nil, "%x  %s\n%x  %s\n", digest, pluginDarwinAsset, digest, pluginDarwinAsset), pluginDarwinAsset); err == nil || !strings.Contains(err.Error(), "exactly one") {
 		t.Fatalf("duplicate checksum error = %v", err)
 	}
 	if _, err := extractPluginRuntime(pluginTestArchive(t, validBinary, true), compiler.PlatformDarwinARM64); err == nil || !strings.Contains(err.Error(), "unexpected member") {

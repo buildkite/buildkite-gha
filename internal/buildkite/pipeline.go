@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -37,6 +39,52 @@ var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var runtimeImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
 var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var cacheNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$`)
+var cacheNameVariablePattern = regexp.MustCompile(`\$\{BUILDKITE_[A-Z0-9_]+\}`)
+var cacheSizePattern = regexp.MustCompile(`^[0-9]+g$`)
+
+// CacheVolume is one Buildkite Hosted cache volume attached to a generated job.
+type CacheVolume struct {
+	Paths []string
+	Name  string
+	Size  string
+}
+
+// ValidateCacheVolume validates Buildkite's map-form cache volume contract.
+func ValidateCacheVolume(cache CacheVolume) error {
+	if len(cache.Paths) == 0 {
+		return fmt.Errorf("cache paths must be a non-empty array of non-empty strings")
+	}
+	seen := make(map[string]struct{}, len(cache.Paths))
+	for i, path := range cache.Paths {
+		if strings.TrimSpace(path) == "" || strings.IndexFunc(path, unicode.IsControl) >= 0 {
+			return fmt.Errorf("cache paths entry %d must be a non-empty string", i)
+		}
+		if !filepath.IsAbs(path) {
+			return fmt.Errorf("cache path %q must be absolute", path)
+		}
+		if _, duplicate := seen[path]; duplicate {
+			return fmt.Errorf("cache path %q may only be configured once", path)
+		}
+		seen[path] = struct{}{}
+	}
+	if cache.Name != "" {
+		literalShape := cacheNameVariablePattern.ReplaceAllString(cache.Name, "a")
+		if len(cache.Name) > 100 || strings.Contains(literalShape, "$") || !cacheNamePattern.MatchString(literalShape) {
+			return fmt.Errorf("cache name must be at most 100 characters, use only letters, numbers, hyphens, and ${BUILDKITE_*} variables, and start and end with a letter, number, or variable")
+		}
+	}
+	if cache.Size != "" {
+		if !cacheSizePattern.MatchString(cache.Size) {
+			return fmt.Errorf("cache size must be at least 20 gigabytes in Ng format")
+		}
+		gigabytes := strings.TrimLeft(strings.TrimSuffix(cache.Size, "g"), "0")
+		if len(gigabytes) < 2 || (len(gigabytes) == 2 && gigabytes < "20") {
+			return fmt.Errorf("cache size must be at least 20 gigabytes in Ng format")
+		}
+	}
+	return nil
+}
 
 // Pipeline is the validated input required to emit generated compatibility jobs.
 type Pipeline struct {
@@ -75,9 +123,10 @@ type Failure struct {
 	Summary        string
 }
 
-// ConcurrencyGate serializes an entire generated workflow while allowing the
-// jobs between its opening and closing steps to run in parallel.
+// ConcurrencyGate serializes one workflow scope while allowing its jobs to run
+// in parallel. ID identifies called-workflow scopes; the root scope leaves it empty.
 type ConcurrencyGate struct {
+	ID    string
 	Group string
 	Queue string
 }
@@ -114,9 +163,11 @@ type Job struct {
 	EventPayload       bool
 	Dependencies       []string
 	RequiresMise       bool
+	Cache              *CacheVolume
 	SoftFail           bool
 	ConcurrencyGroup   string
 	Concurrency        int
+	ConcurrencyGates   []ConcurrencyGate
 }
 
 // PlanPath returns the fixed local path for a content-addressed job plan.
@@ -237,6 +288,13 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			}
 			usedDigests[job.PlanDigest] = job.Key
 		}
+		if workflow.ConcurrencyGate != nil {
+			for _, job := range jobs {
+				if job.Concurrency > 0 && job.ConcurrencyGroup == workflow.ConcurrencyGate.Group {
+					return nil, fmt.Errorf("workflow concurrency gate shares group with member job %q", job.Key)
+				}
+			}
+		}
 		prepared[i] = preparedWorkflow{Workflow: workflow, Jobs: jobs, Grouped: aggregate || workflow.GroupLabel != "", Aggregate: aggregate}
 		if workflow.ConcurrencyGate != nil {
 			gateNamespace := pipeline.CompilerStep
@@ -251,6 +309,32 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				usedKeys[gateKey] = "workflow concurrency gate"
 			}
 		}
+		gates, err := prepareReusableConcurrencyGates(jobs)
+		if err != nil {
+			return nil, err
+		}
+		if workflow.ConcurrencyGate != nil {
+			for _, gate := range gates {
+				if gate.Group == workflow.ConcurrencyGate.Group {
+					return nil, fmt.Errorf("reusable-workflow concurrency gate %q shares group with enclosing workflow gate", gate.ID)
+				}
+			}
+		}
+		for gateIndex := range gates {
+			gate := &gates[gateIndex]
+			gateNamespace := pipeline.CompilerStep + "\x00" + gate.ID
+			if aggregate {
+				gateNamespace += "\x00" + workflow.GroupKey
+			}
+			gate.OpenKey, gate.CloseKey = concurrencyGateKeys(gateNamespace, gate.Group, jobs)
+			for _, gateKey := range []string{gate.OpenKey, gate.CloseKey} {
+				if owner, exists := usedKeys[gateKey]; exists {
+					return nil, fmt.Errorf("reusable-workflow concurrency key %q collides with %s", gateKey, owner)
+				}
+				usedKeys[gateKey] = "reusable-workflow concurrency gate"
+			}
+		}
+		prepared[i].ReusableConcurrencyGates = gates
 	}
 	var out bytes.Buffer
 	out.WriteString("steps:\n")
@@ -268,6 +352,13 @@ type preparedWorkflow struct {
 	Grouped                   bool
 	Aggregate                 bool
 	GateOpenKey, GateCloseKey string
+	ReusableConcurrencyGates  []preparedConcurrencyGate
+}
+
+type preparedConcurrencyGate struct {
+	ConcurrencyGate
+	ParentID, OpenKey, CloseKey string
+	Members                     []string
 }
 
 func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflow) error {
@@ -339,11 +430,43 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 	}
 	attributeIndent := stepIndent + "  "
 	if workflow.ConcurrencyGate != nil {
+		// Keep each opening marker immediately before its dependency-blocked
+		// closing marker. Their ordered queue positions hold the group before a
+		// later build or sibling scope can enter it.
 		dependencies := []dependency{{Step: pipeline.CompilerStep}}
 		if workflow.Aggregate {
 			dependencies = nil
 		}
 		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start workflow concurrency", workflow.GateOpenKey, workflow.ConcurrencyGate, dependencies)
+		dependencies = make([]dependency, 0, len(workflow.Jobs)+len(workflow.ReusableConcurrencyGates)+1)
+		if !workflow.Aggregate {
+			dependencies = append(dependencies, dependency{Step: pipeline.CompilerStep})
+		}
+		for _, job := range workflow.Jobs {
+			dependencies = append(dependencies, dependency{Step: job.Key, AllowFailure: true})
+		}
+		for _, gate := range workflow.ReusableConcurrencyGates {
+			if gate.ParentID == "" {
+				dependencies = append(dependencies, dependency{Step: gate.CloseKey, AllowFailure: true})
+			}
+		}
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", workflow.GateCloseKey, workflow.ConcurrencyGate, dependencies)
+	}
+	gateOpenKeys := make(map[string]string, len(workflow.ReusableConcurrencyGates))
+	for _, gate := range workflow.ReusableConcurrencyGates {
+		dependencies := reusableGateOpenDependencies(workflow, gate, gateOpenKeys, pipeline.CompilerStep)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start reusable-workflow concurrency", gate.OpenKey, &gate.ConcurrencyGate, dependencies)
+		gateOpenKeys[gate.ID] = gate.OpenKey
+		dependencies = make([]dependency, 0, len(gate.Members)+len(workflow.ReusableConcurrencyGates))
+		for _, member := range gate.Members {
+			dependencies = append(dependencies, dependency{Step: member, AllowFailure: true})
+		}
+		for _, child := range workflow.ReusableConcurrencyGates {
+			if child.ParentID == gate.ID {
+				dependencies = append(dependencies, dependency{Step: child.CloseKey, AllowFailure: true})
+			}
+		}
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish reusable-workflow concurrency", gate.CloseKey, &gate.ConcurrencyGate, dependencies)
 	}
 	for _, job := range workflow.Jobs {
 		platform := job.Platform
@@ -404,7 +527,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 				`if command -v sha256sum >/dev/null 2>&1; then actual_plan_digest="$(sha256sum "$plan" | awk '{print "sha256:" $1}')"; elif command -v shasum >/dev/null 2>&1; then actual_plan_digest="$(shasum -a 256 "$plan" | awk '{print "sha256:" $1}')"; else echo 'buildkite-gha: no SHA-256 tool available' >&2; exit 1; fi`,
 				"test \"$actual_plan_digest\" = "+shellQuote(job.PlanDigest),
 			)
-			commands = append(commands, experimentalRunnerUserBootstrap(job.RequiresMise, runtimeImage != "")...)
+			commands = append(commands, experimentalRunnerUserBootstrap(job.RequiresMise, runtimeImage != "", job.Cache)...)
 			runJob = "BUILDKITE_GHA_PLAN_DIGEST=" + shellQuote(job.PlanDigest) + ` "$distribution" run-job --plan "$plan"`
 			if job.EventPayload {
 				runJob += " --artifact-producer " + shellQuote(artifactProducer)
@@ -431,11 +554,19 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
 		}
 		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
-		if job.RequiresMise {
+		cache := mergedCacheVolume(job.Cache, job.RequiresMise, platform, experimentalRunnerUser)
+		if cache != nil {
 			_, _ = fmt.Fprintf(out, "%scache:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s  paths:\n", attributeIndent)
-			_, _ = fmt.Fprintf(out, "%s    - %s\n", attributeIndent, yamlScalar(platformMiseCachePath(platform)))
-			_, _ = fmt.Fprintf(out, "%s  name: %s\n", attributeIndent, yamlScalar(runtimeCacheName+"-"+platformCacheKey(platform)))
+			for _, path := range cache.Paths {
+				_, _ = fmt.Fprintf(out, "%s    - %s\n", attributeIndent, yamlScalar(path))
+			}
+			if cache.Name != "" {
+				_, _ = fmt.Fprintf(out, "%s  name: %s\n", attributeIndent, yamlScalar(cache.Name))
+			}
+			if cache.Size != "" {
+				_, _ = fmt.Fprintf(out, "%s  size: %s\n", attributeIndent, yamlScalar(cache.Size))
+			}
 		}
 		if job.SoftFail {
 			_, _ = fmt.Fprintf(out, "%ssoft_fail:\n%s  - exit_status: %d\n", attributeIndent, attributeIndent, ContinueOnErrorExitStatus)
@@ -451,7 +582,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if !workflow.Aggregate {
 			_, _ = fmt.Fprintf(out, "%sdepends_on:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(pipeline.CompilerStep), attributeIndent)
-		} else if workflow.GateOpenKey != "" || len(job.Dependencies) != 0 {
+		} else if workflow.GateOpenKey != "" || len(job.Dependencies) != 0 || len(job.ConcurrencyGates) != 0 {
 			_, _ = fmt.Fprintf(out, "%sdepends_on:\n", attributeIndent)
 		}
 		if workflow.GateOpenKey != "" {
@@ -460,18 +591,91 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		for _, dependency := range job.Dependencies {
 			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: true\n", attributeIndent, yamlScalar(dependency), attributeIndent)
 		}
-	}
-	if workflow.ConcurrencyGate != nil {
-		dependencies := make([]dependency, 0, len(workflow.Jobs)+1)
-		if !workflow.Aggregate {
-			dependencies = append(dependencies, dependency{Step: pipeline.CompilerStep})
+		for _, gate := range job.ConcurrencyGates {
+			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(gateOpenKeys[gate.ID]), attributeIndent)
 		}
-		for _, job := range workflow.Jobs {
-			dependencies = append(dependencies, dependency{Step: job.Key, AllowFailure: true})
-		}
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", workflow.GateCloseKey, workflow.ConcurrencyGate, dependencies)
 	}
 	return nil
+}
+
+func prepareReusableConcurrencyGates(jobs []Job) ([]preparedConcurrencyGate, error) {
+	var gates []preparedConcurrencyGate
+	indexes := make(map[string]int)
+	jobsByKey := make(map[string]Job, len(jobs))
+	for _, job := range jobs {
+		jobsByKey[job.Key] = job
+		parentID := ""
+		seen := make(map[string]bool, len(job.ConcurrencyGates))
+		for _, declared := range job.ConcurrencyGates {
+			if declared.ID == "" || declared.Group == "" || len(declared.Group) > maxConcurrencyGroupLength {
+				return nil, fmt.Errorf("job %q has invalid reusable-workflow concurrency gate", job.Key)
+			}
+			if seen[declared.ID] {
+				return nil, fmt.Errorf("job %q repeats reusable-workflow concurrency gate %q", job.Key, declared.ID)
+			}
+			seen[declared.ID] = true
+			index, exists := indexes[declared.ID]
+			if !exists {
+				index = len(gates)
+				indexes[declared.ID] = index
+				gates = append(gates, preparedConcurrencyGate{
+					ConcurrencyGate: ConcurrencyGate{ID: declared.ID, Group: declared.Group, Queue: job.Queue},
+					ParentID:        parentID,
+				})
+			} else if gates[index].Group != declared.Group || gates[index].ParentID != parentID {
+				return nil, fmt.Errorf("reusable-workflow concurrency gate %q has inconsistent membership", declared.ID)
+			}
+			gates[index].Members = append(gates[index].Members, job.Key)
+			parentID = declared.ID
+		}
+	}
+	for _, gate := range gates {
+		for parentID := gate.ParentID; parentID != ""; {
+			parent := gates[indexes[parentID]]
+			if parent.Group == gate.Group {
+				return nil, fmt.Errorf("reusable-workflow concurrency gate %q shares group with enclosing gate %q", gate.ID, parent.ID)
+			}
+			parentID = parent.ParentID
+		}
+	}
+	for _, gate := range gates {
+		members := make(map[string]bool, len(gate.Members))
+		for _, key := range gate.Members {
+			job := jobsByKey[key]
+			if job.Concurrency > 0 && job.ConcurrencyGroup == gate.Group {
+				return nil, fmt.Errorf("reusable-workflow concurrency gate %q shares group with member job %q", gate.ID, key)
+			}
+			members[key] = true
+		}
+		for _, key := range gate.Members {
+			for _, dependency := range jobsByKey[key].Dependencies {
+				if !members[dependency] {
+					return nil, fmt.Errorf("reusable-workflow concurrency gate %q has an external prerequisite", gate.ID)
+				}
+			}
+		}
+	}
+	return gates, nil
+}
+
+func reusableGateOpenDependencies(workflow preparedWorkflow, gate preparedConcurrencyGate, openKeys map[string]string, compilerStep string) []dependency {
+	seen := make(map[string]bool)
+	var dependencies []dependency
+	add := func(step string, allowFailure bool) {
+		if step != "" && !seen[step] {
+			seen[step] = true
+			dependencies = append(dependencies, dependency{Step: step, AllowFailure: allowFailure})
+		}
+	}
+	switch {
+	case gate.ParentID != "":
+		add(openKeys[gate.ParentID], false)
+	case workflow.GateOpenKey != "":
+		add(workflow.GateOpenKey, false)
+	case !workflow.Aggregate:
+		add(compilerStep, false)
+	}
+	return dependencies
 }
 
 func emitWorkflowCheck(out *bytes.Buffer, indent, provider string, workflow preparedWorkflow, checkKey, jobLabel, title, summary string) {
@@ -509,6 +713,38 @@ func platformMiseCachePath(platform string) string {
 		root = darwinRuntimeCacheRoot
 	}
 	return root + "/mise/" + platformCacheKey(platform)
+}
+
+func platformCacheValidationPath(platform string) string {
+	return runtimeCacheRoot + "/validation/" + platformCacheKey(platform)
+}
+
+func mergedCacheVolume(configured *CacheVolume, requiresMise bool, platform string, runnerUser bool) *CacheVolume {
+	if configured == nil && !requiresMise {
+		return nil
+	}
+	cache := &CacheVolume{}
+	if configured != nil {
+		cache.Paths = append(cache.Paths, configured.Paths...)
+		cache.Name = configured.Name
+		cache.Size = configured.Size
+	}
+	if requiresMise {
+		misePath := platformMiseCachePath(platform)
+		found := slices.Contains(cache.Paths, misePath)
+		if !found {
+			cache.Paths = append(cache.Paths, misePath)
+		}
+		if cache.Name == "" {
+			cache.Name = runtimeCacheName + "-" + platformCacheKey(platform)
+		}
+	} else if runnerUser {
+		validationPath := platformCacheValidationPath(platform)
+		if !slices.Contains(cache.Paths, validationPath) {
+			cache.Paths = append(cache.Paths, validationPath)
+		}
+	}
+	return cache
 }
 
 type dependency struct {
@@ -645,6 +881,11 @@ func orderJobs(compilerStep string, input []Job) ([]Job, error) {
 func validateJob(compilerStep string, job Job) error {
 	if !validStepKey(job.Key) || job.Key == compilerStep {
 		return fmt.Errorf("invalid generated step key %q", job.Key)
+	}
+	if job.Cache != nil {
+		if err := ValidateCacheVolume(*job.Cache); err != nil {
+			return fmt.Errorf("job %q has invalid cache configuration: %w", job.Key, err)
+		}
 	}
 	if job.Label == "" {
 		return fmt.Errorf("job %q requires a label", job.Key)

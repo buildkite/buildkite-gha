@@ -100,7 +100,7 @@ func runnerSelectorIsConfigured(labels []string, configuredTargets map[string]co
 	var target compiler.RunnerTarget
 	for i, label := range labels {
 		configured, ok := configuredTargets[strings.ToLower(strings.TrimSpace(label))]
-		if !ok || (i != 0 && configured != target) {
+		if !ok || (i != 0 && !compiler.RunnerTargetsEqual(configured, target)) {
 			return false
 		}
 		target = configured

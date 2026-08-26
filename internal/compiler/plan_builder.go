@@ -15,6 +15,7 @@ import (
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
@@ -118,11 +119,15 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	if runtimeDistributionDigest == "" {
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
 	}
-	steps, actionIndexes, actionRefs, actionInputs := lowerPlanSteps(instance.Steps)
+	workflowProgram := lowerWorkflowProgram(instance)
+	steps := projectPlanSteps(workflowProgram.Job.Steps)
+	actionIndexes, actionRefs, actionInputs := programActionInvocations(workflowProgram.Job.Steps)
 	actions, err := b.buildActions(instance, steps, actionIndexes, actionRefs, actionInputs)
 	if err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
+	bindProgramActionSelectors(&workflowProgram, steps)
+	steps = projectPlanSteps(workflowProgram.Job.Steps)
 	if err := addContainerCapabilities(instance, actionRefs, &actions); err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
@@ -138,7 +143,7 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	if err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
-	secrets, secretMappings, githubToken, err := b.authorizePlanSecrets(instance, &actions)
+	secrets, secretMappings, githubToken, err := b.authorizePlanSecrets(instance, workflowProgram, &actions)
 	if err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
@@ -150,7 +155,7 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	if instance.Platform == PlatformDarwinARM64 && slices.Contains(actions.capabilities, "docker") {
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on darwin/arm64", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
 	}
-	job := b.lowerPlanJob(instance, runtimeDistributionDigest, steps, actions, needSources, buildPlanNeedOutputs(instance), deferredInputs, callGuards, secrets, secretMappings, githubToken)
+	job := b.lowerPlanJob(instance, workflowProgram, runtimeDistributionDigest, steps, actions, needSources, buildPlanNeedOutputs(instance), deferredInputs, callGuards, secrets, secretMappings, githubToken)
 	if err := job.Validate(); err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -354,46 +359,6 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 	return instance, nil
 }
 
-func lowerPlanSteps(source []workflow.Step) ([]plan.Step, []int, []string, []map[string]string) {
-	steps := make([]plan.Step, len(source))
-	var actionIndexes []int
-	var actionRefs []string
-	var actionInputs []map[string]string
-	usedIDs := make(map[string]struct{}, len(source))
-	for _, step := range source {
-		if step.ID != "" {
-			usedIDs[strings.ToLower(step.ID)] = struct{}{}
-		}
-	}
-	for i, step := range source {
-		id := step.ID
-		if id == "" {
-			id = fmt.Sprintf("step-%d", i+1)
-			for suffix := 2; ; suffix++ {
-				if _, exists := usedIDs[strings.ToLower(id)]; !exists {
-					break
-				}
-				id = fmt.Sprintf("step-%d-%d", i+1, suffix)
-			}
-			usedIDs[strings.ToLower(id)] = struct{}{}
-		}
-		span := planSpan(step.Span)
-		steps[i] = plan.Step{
-			ID: id, Name: step.Name, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Command: step.Run, Uses: step.Uses,
-			Shell: step.Shell, WorkingDirectory: step.WorkingDirectory,
-			Env: cloneMap(step.Env), With: cloneMap(step.With), Condition: step.If,
-			ContinueOnError: step.ContinueOnError, ContinueOnErrorExpression: step.ContinueOnErrorExpression,
-			TimeoutMinutes: step.TimeoutMinutes, TimeoutMinutesExpression: step.TimeoutMinutesExpression, Source: &span,
-		}
-		if step.Kind == "uses" {
-			actionIndexes = append(actionIndexes, i)
-			actionRefs = append(actionRefs, step.Uses)
-			actionInputs = append(actionInputs, step.With)
-		}
-	}
-	return steps, actionIndexes, actionRefs, actionInputs
-}
-
 func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actionIndexes []int, actionRefs []string, actionInputs []map[string]string) (builtPlanActions, error) {
 	built := builtPlanActions{requiresMise: len(actionRefs) != 0, resolved: b.options.ResolveActions}
 	if len(actionRefs) != 0 && !built.resolved {
@@ -445,6 +410,8 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 	sort.Strings(built.authorization.ProviderTokenReadCapabilitySources)
 	built.authorization.ProviderTokenReadCapabilitySources = slices.Compact(built.authorization.ProviderTokenReadCapabilitySources)
 	if slices.Contains(compiled.capabilities, "docker") {
+		// Keep the established authorization label for source-verified Docker
+		// action metadata, including prebuilt-image declarations.
 		built.authorization.DockerCapabilitySources = append(built.authorization.DockerCapabilitySources, "dockerfile-actions")
 	}
 	return built, nil
@@ -598,8 +565,8 @@ func buildPlanCallGuards(instance JobInstance, planDigests map[string]string) ([
 	return callGuards, nil
 }
 
-func (b planBuilder) authorizePlanSecrets(instance JobInstance, actions *builtPlanActions) ([]string, map[string]string, *plan.GitHubToken, error) {
-	secrets, mappings, tokenAliases, referencesGitHubToken, err := requiredSecrets(instance, actions.requiredSecrets, actions.inputsInspected)
+func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram program.Program, actions *builtPlanActions) ([]string, map[string]string, *plan.GitHubToken, error) {
+	secrets, mappings, tokenAliases, referencesGitHubToken, err := requiredSecrets(workflowProgram, instance.secretAuthority, actions.requiredSecrets, actions.inputsInspected)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -628,7 +595,8 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, actions *builtPl
 	return secrets, mappings, &plan.GitHubToken{Workflow: policyWorkflow, Permissions: cloneMap(b.ir.Workflow.WorkflowTokenPermissions), Aliases: tokenAliases}, nil
 }
 
-func (b planBuilder) lowerPlanJob(instance JobInstance, runtimeDistributionDigest string, steps []plan.Step, actions builtPlanActions, needSources map[string][]plan.NeedSource, needOutputs map[string][]plan.NeedOutput, deferredInputs map[string]plan.DeferredInput, callGuards []plan.CallGuard, secrets []string, secretMappings map[string]string, githubToken *plan.GitHubToken) plan.Job {
+func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.Program, runtimeDistributionDigest string, steps []plan.Step, actions builtPlanActions, needSources map[string][]plan.NeedSource, needOutputs map[string][]plan.NeedOutput, deferredInputs map[string]plan.DeferredInput, callGuards []plan.CallGuard, secrets []string, secretMappings map[string]string, githubToken *plan.GitHubToken) plan.Job {
+	programJob := workflowProgram.Job
 	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
@@ -662,34 +630,43 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, runtimeDistributionDiges
 		NeedSources:             needSources,
 		NeedOutputs:             needOutputs,
 		CallGuards:              callGuards,
-		Env:                     instance.Env,
-		Condition:               instance.If,
-		ContinueOnError:         instance.ContinueOnError,
-		TimeoutMinutes:          instance.TimeoutMinutes,
-		DefaultShell:            instance.DefaultShell,
-		DefaultWorkingDirectory: instance.DefaultWorkingDirectory,
-		Outputs:                 instance.Outputs,
+		Env:                     programBindingMap(programJob.Env),
+		Condition:               programJob.Condition.Source,
+		ContinueOnError:         programJob.ContinueOnError,
+		TimeoutMinutes:          programJob.TimeoutMinutes,
+		DefaultShell:            programJob.Defaults.Shell.Source,
+		DefaultWorkingDirectory: programJob.Defaults.WorkingDirectory.Source,
+		Outputs:                 programBindingMap(programJob.Outputs),
 		Steps:                   steps,
 		Actions:                 actions.locks,
-		ServicesExpression:      instance.ServicesExpression,
 	}
 	job.Event.PayloadArtifact = instance.RetainEventPayload || actions.requiresEventPayload
 	job.RequiresMise = &actions.requiresMise
-	if instance.Container != nil {
-		job.Container = &plan.Container{Image: instance.Container.Image, Env: cloneMap(instance.Container.Env), Ports: append([]string(nil), instance.Container.Ports...)}
+	if programJob.Container != nil {
+		job.Container = &plan.Container{
+			Image: programJob.Container.Image.Source,
+			Env:   programBindingMap(programJob.Container.Env),
+			Ports: programSiteSources(programJob.Container.Ports),
+		}
 	}
-	if len(instance.Services) != 0 {
-		job.Services = make(map[string]plan.ServiceContainer, len(instance.Services))
-		job.ServiceOrder = make([]string, 0, len(instance.Services))
+	if programJob.Services.Dynamic != nil {
+		job.ServicesExpression = programJob.Services.Dynamic.Source
 	}
-	for _, service := range instance.Services {
+	if len(programJob.Services.Static) != 0 {
+		job.Services = make(map[string]plan.ServiceContainer, len(programJob.Services.Static))
+		job.ServiceOrder = make([]string, 0, len(programJob.Services.Static))
+	}
+	for _, service := range programJob.Services.Static {
 		container := plan.ServiceContainer{
-			Image: service.Container.Image, Env: cloneMap(service.Container.Env), Ports: append([]string(nil), service.Container.Ports...),
-			Volumes: append([]string(nil), service.Container.Volumes...), Options: service.Container.Options,
-			Command: service.Container.Command, Entrypoint: service.Container.Entrypoint,
+			Image: service.Container.Image.Source, Env: programBindingMap(service.Container.Env), Ports: programSiteSources(service.Container.Ports),
+			Volumes: programSiteSources(service.Container.Volumes), Options: service.Container.Options.Source,
+			Command: service.Container.Command.Source, Entrypoint: service.Container.Entrypoint.Source,
 		}
 		if service.Container.Credentials != nil {
-			container.Credentials = &plan.ContainerCredentials{Username: service.Container.Credentials.Username, Password: service.Container.Credentials.Password}
+			container.Credentials = &plan.ContainerCredentials{
+				Username: service.Container.Credentials.Username.Source,
+				Password: service.Container.Credentials.Password.Source,
+			}
 		}
 		job.Services[service.Name] = container
 		job.ServiceOrder = append(job.ServiceOrder, service.Name)
@@ -716,136 +693,34 @@ func planConstructionFinding(instance JobInstance, err error) error {
 	}
 }
 
-func requiredSecrets(instance JobInstance, actionRequired []string, actionInputsInspected bool) ([]string, map[string]string, []string, bool, error) {
-	found := map[string]string{}
-	referencesGitHubToken := false
-	collectTokenSecretAliases := func(value string) error {
-		names, err := expression.SecretReferences(value)
-		if err != nil {
-			return err
-		}
-		for _, name := range names {
-			binding, ok := instance.secretAuthority.resolve(name)
-			if strings.EqualFold(name, "GITHUB_TOKEN") || ok && binding.token {
-				found[name] = name
-			}
-		}
-		return nil
-	}
-	collect := func(value string, stepRuntime bool) error {
-		names, err := expression.SecretReferences(value)
-		if err != nil {
-			return err
-		}
-		for _, name := range names {
-			found[name] = name
-		}
-		var referencesToken bool
-		if stepRuntime {
-			referencesToken, err = expression.ReferencesStepGitHubToken(value)
-		} else {
-			referencesToken, err = expression.ReferencesGitHubToken(value)
-		}
-		if err != nil {
-			return err
-		}
-		if referencesToken {
-			referencesGitHubToken = true
-		}
-		return nil
-	}
-	checkCondition := func(value string) error {
-		names, err := expression.ConditionSecretReferences(value)
-		if err != nil {
-			return err
-		}
-		for _, name := range names {
-			found[name] = name
-		}
-		referencesToken, err := expression.ConditionReferencesGitHubToken(value)
-		if err != nil {
-			return err
-		}
-		if referencesToken {
-			referencesGitHubToken = true
-		}
-		return nil
-	}
-	if err := checkCondition(instance.If); err != nil {
+func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, actionRequired []string, actionInputsInspected bool) ([]string, map[string]string, []string, bool, error) {
+	authority, err := program.InventoryAuthority(workflowProgram, program.AuthorityOptions{ActionInputsInspected: actionInputsInspected})
+	if err != nil {
 		return nil, nil, nil, false, err
 	}
-	for _, value := range []string{instance.DefaultShell, instance.DefaultWorkingDirectory} {
-		if err := collect(value, false); err != nil {
-			return nil, nil, nil, false, err
-		}
+	found := make(map[string]string, len(authority.Secrets)+len(actionRequired))
+	for _, name := range authority.Secrets {
+		found[name] = name
 	}
-	for _, values := range []map[string]string{instance.Env, instance.Outputs} {
-		for _, name := range sortedValueKeys(values) {
-			if err := collect(values[name], false); err != nil {
-				return nil, nil, nil, false, err
+	if actionInputsInspected {
+		err = workflowProgram.VisitSites(func(site program.Site) error {
+			if site.Purpose != program.PurposeActionInput {
+				return nil
 			}
-		}
-	}
-	for _, step := range instance.Steps {
-		if err := checkCondition(step.If); err != nil {
-			return nil, nil, nil, false, err
-		}
-		for _, value := range []string{step.Name, step.Run, step.Shell, step.WorkingDirectory, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression} {
-			if err := collect(value, true); err != nil {
-				return nil, nil, nil, false, err
+			names, err := expression.SecretReferences(site.Source)
+			if err != nil {
+				return err
 			}
-		}
-		if err := collect(step.Uses, false); err != nil {
-			return nil, nil, nil, false, err
-		}
-		valuesToInspect := []map[string]string{step.Env}
-		if step.Kind != "uses" || !actionInputsInspected {
-			valuesToInspect = append(valuesToInspect, step.With)
-		} else {
-			for _, name := range sortedValueKeys(step.With) {
-				if err := collectTokenSecretAliases(step.With[name]); err != nil {
-					return nil, nil, nil, false, err
+			for _, name := range names {
+				binding, ok := bindings.resolve(name)
+				if strings.EqualFold(name, "GITHUB_TOKEN") || ok && binding.token {
+					found[name] = name
 				}
 			}
-		}
-		for _, values := range valuesToInspect {
-			for _, name := range sortedValueKeys(values) {
-				if err := collect(values[name], true); err != nil {
-					return nil, nil, nil, false, err
-				}
-			}
-		}
-	}
-	if instance.Container != nil {
-		for _, value := range append([]string{instance.Container.Image}, instance.Container.Ports...) {
-			if err := collect(value, false); err != nil {
-				return nil, nil, nil, false, err
-			}
-		}
-		for _, name := range sortedValueKeys(instance.Container.Env) {
-			if err := collect(instance.Container.Env[name], false); err != nil {
-				return nil, nil, nil, false, err
-			}
-		}
-	}
-	for _, service := range instance.Services {
-		for _, value := range append([]string{service.Container.Image}, service.Container.Ports...) {
-			if err := collect(value, false); err != nil {
-				return nil, nil, nil, false, err
-			}
-		}
-		for _, name := range sortedValueKeys(service.Container.Env) {
-			if err := collect(service.Container.Env[name], false); err != nil {
-				return nil, nil, nil, false, err
-			}
-		}
-		if service.Container.Credentials != nil {
-			if err := collect(service.Container.Credentials.Username, false); err != nil {
-				return nil, nil, nil, false, err
-			}
-			if err := collect(service.Container.Credentials.Password, false); err != nil {
-				return nil, nil, nil, false, err
-			}
+			return nil
+		})
+		if err != nil {
+			return nil, nil, nil, false, err
 		}
 	}
 	for _, name := range actionRequired {
@@ -859,7 +734,7 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 			tokenAliases = append(tokenAliases, alias)
 			continue
 		}
-		binding, ok := instance.secretAuthority.resolve(alias)
+		binding, ok := bindings.resolve(alias)
 		if !ok {
 			continue
 		}
@@ -868,7 +743,7 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 			continue
 		}
 		sources[binding.source] = struct{}{}
-		if !instance.secretAuthority.unrestricted {
+		if !bindings.unrestricted {
 			mappings[alias] = binding.source
 		}
 	}
@@ -877,14 +752,7 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 	if len(mappings) == 0 {
 		mappings = nil
 	}
-	return names, mappings, tokenAliases, referencesGitHubToken, nil
-}
-
-func planSpan(span workflow.Span) plan.Span {
-	return plan.Span{
-		Start: plan.Position{Line: span.Start.Line, Column: span.Start.Column},
-		End:   plan.Position{Line: span.End.Line, Column: span.End.Column},
-	}
+	return names, mappings, tokenAliases, authority.GitHubToken, nil
 }
 
 func planRemoteWorkflowSource(source *RemoteWorkflowSource) *plan.RemoteWorkflowSource {

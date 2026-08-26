@@ -3,6 +3,7 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"sort"
@@ -984,12 +985,8 @@ func mergeEnv(base, override map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(base)+len(override))
-	for name, value := range base {
-		out[name] = value
-	}
-	for name, value := range override {
-		out[name] = value
-	}
+	maps.Copy(out, base)
+	maps.Copy(out, override)
 	return out
 }
 
@@ -1049,9 +1046,18 @@ func adaptMatrix(path, jobID string, in *actionlint.Matrix, scalars map[Position
 			return nil, err
 		}
 	}
-	out.Exclude, err = adaptMatrixCombinations(path, jobID, "exclude", in.Exclude, scalars)
-	if err != nil {
-		return nil, err
+	if in.Exclude != nil && in.Exclude.Expression != nil {
+		expr, expressionErr := adaptExpression(in.Exclude.Expression)
+		if expressionErr != nil {
+			return nil, locatedError(path, in.Exclude.Expression.Pos, jobID, expressionErr.Error())
+		}
+		out.ExcludeExpression = &expr
+		out.Span.End = Position{Line: expr.Span.End.Line, Column: expr.Span.End.Column}
+	} else {
+		out.Exclude, err = adaptMatrixCombinations(path, jobID, "exclude", in.Exclude, scalars)
+		if err != nil {
+			return nil, err
+		}
 	}
 	for _, combinations := range [][]MatrixCombination{out.Include, out.Exclude} {
 		for _, combination := range combinations {

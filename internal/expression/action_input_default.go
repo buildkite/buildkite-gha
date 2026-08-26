@@ -32,6 +32,9 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 		if isJobStatusReference(root, path) {
 			return nil
 		}
+		if isJobCheckRunIDReference(root, path) {
+			return nil
+		}
 		if isRunnerTempReference(root, path) {
 			return fmt.Errorf("action input defaults cannot reference runner.temp")
 		}
@@ -52,10 +55,11 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 	}
 	validator.validateAccess = func(access actionlint.ExprNode) error {
 		if !isGitHubEventAccess(access) {
-			if _, _, err := referencePath(access); err != nil {
+			root, path, err := referencePath(access)
+			if err != nil {
 				return validator.referenceError(err)
 			}
-			return fmt.Errorf("dynamic or whole action input default access is unsupported")
+			return validator.validateReference(access, root, path)
 		}
 		switch access := access.(type) {
 		case *actionlint.ObjectDerefNode:
@@ -102,60 +106,40 @@ func isDirectRunnerDebug(node actionlint.ExprNode, root string, path []string) b
 	return direct && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug")
 }
 
+func isJobCheckRunIDReference(root string, path []string) bool {
+	return strings.EqualFold(root, "job") && len(path) == 1 && strings.EqualFold(path[0], "check_run_id")
+}
+
 func isRunnerTempReference(root string, path []string) bool {
 	return strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "temp")
 }
 
 // ActionInputDefaultRequiresGitHubToken reports whether a metadata default can
-// reach github.token for the event provider. Defaults involving any other
-// runtime value require the token because those values are not known during
-// compilation.
+// reach github.token for the event provider. A token branch guarded by an
+// unknown runtime value requires the token because that value is not known
+// during compilation.
 func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, error) {
 	referencesToken, err := ReferencesGitHubToken(template)
 	if err != nil || !referencesToken {
 		return referencesToken, err
 	}
-	onlyKnownReferences := true
+	requiresToken := false
 	err = visitTemplateExpressions(template, func(expression actionlint.ExprNode) error {
-		actionlint.VisitExprNode(expression, func(node, parent actionlint.ExprNode, entering bool) {
-			if !entering || !onlyKnownReferences {
-				return
-			}
-			switch node.(type) {
-			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-			default:
-				return
-			}
-			root, path, referenceErr := referencePath(node)
-			if referenceErr != nil {
-				onlyKnownReferences = false
-				return
-			}
-			if len(path) == 0 {
-				switch parent := parent.(type) {
-				case *actionlint.ObjectDerefNode:
-					if parent.Receiver == node {
-						return
-					}
-				case *actionlint.IndexAccessNode:
-					if parent.Operand == node {
-						return
-					}
-				}
-			}
-			onlyKnownReferences = strings.EqualFold(root, "github") && len(path) == 1 &&
-				(strings.EqualFold(path[0], "server_url") || strings.EqualFold(path[0], "token"))
+		analysis, analysisErr := analyzeActionInputDefault(expression, map[string]any{
+			"github.server_url": serverURL,
+			"job.check_run_id":  "",
 		})
+		if analysisErr != nil {
+			// Runtime-dependent evaluation failures previously fell back to
+			// conservative authority. Preserve that behavior while the
+			// exhaustive reference pass above continues to own validation.
+			requiresToken = true
+			return nil
+		}
+		requiresToken = requiresToken || analysis.Effects.GitHubToken != 0
 		return nil
 	})
-	if err != nil {
-		return false, err
-	}
-	if !onlyKnownReferences {
-		return true, nil
-	}
-	_, err = EvaluateActionInputDefault(template, Context{GitHub: map[string]any{"server_url": serverURL}})
-	return err != nil, nil
+	return requiresToken, err
 }
 
 func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (any, error) {
@@ -173,6 +157,12 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 				return nil, fmt.Errorf("expression references unavailable job.status")
 			}
 			return context.JobStatus, nil
+		}
+		if isJobCheckRunIDReference(root, path) {
+			// Buildkite creates no GitHub check run. GitHub documents this
+			// property as unavailable on GitHub Enterprise Server; unavailable
+			// properties interpolate as an empty string.
+			return "", nil
 		}
 		if isRunnerTempReference(root, path) {
 			return nil, fmt.Errorf("action input defaults cannot reference runner.temp")

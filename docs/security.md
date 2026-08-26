@@ -35,7 +35,7 @@ Steps in one job share:
 - the job's Buildkite identity
 
 A shell step can affect a later action, and an action can affect a later shell
-step. Dockerfile actions, job containers, and service containers add packaging;
+step. Docker actions, job containers, and service containers add packaging;
 they are not security boundaries.
 
 Run untrusted jobs on a queue with:
@@ -61,6 +61,13 @@ credentials the job can receive.
 
 Digests and immutable source locks detect changed code. They do not make code
 trusted or grant credentials.
+
+Prebuilt Docker action metadata can name a public `docker://` image. The action
+source lock protects the image declaration, but a mutable image tag can resolve
+to different content when each job starts. Use an image digest when content
+immutability matters. Image pulls use an empty private Docker configuration and
+never receive action secrets, registry credentials, or ambient Docker
+authority; private images are unsupported.
 
 ### Source and event checks
 
@@ -200,7 +207,15 @@ repository from the same provider when Buildkite authorizes it.
 - External HTTPS submodules are anonymous.
 - SSH and other non-HTTPS transports are disabled.
 - The credential helper is offered only to the event provider's host, uses
-  HTTP-path matching, and is not persisted.
+  HTTP-path matching, and is scoped to repository, LFS, and submodule commands.
+  It is never written to Git configuration or persisted for later steps.
+  Git, Git LFS, and the Buildkite Agent helper are resolved before action hooks;
+  LFS filters use the resolved executable instead of searching the workflow's
+  `PATH` while credentials are available.
+
+Checkout paths are relative to the workspace. Traversal, `.git` path segments,
+and symbolic-link parents are rejected before Git runs. Existing checkout
+directories are not reused, even with `clean: false`.
 
 Git owns submodule parsing and recursion, so keep it current and prefer a pinned
 job image.

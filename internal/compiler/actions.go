@@ -147,7 +147,7 @@ func actionResolutionMessage(reference string, err error) (message, detail, acti
 	var runtimeErr *metadata.UnsupportedRuntimeError
 	if errors.As(err, &runtimeErr) {
 		runtime := fmt.Sprintf("runtime %q", runtimeErr.Runtime)
-		if version := strings.TrimPrefix(runtimeErr.Runtime, "node"); version != runtimeErr.Runtime {
+		if version, ok := strings.CutPrefix(runtimeErr.Runtime, "node"); ok {
 			runtime = "Node.js " + version
 		}
 		if strings.HasPrefix(action, "./") {
@@ -184,7 +184,7 @@ func unsupportedMetadataFields(reason string) string {
 		return ""
 	}
 	linesByField := map[string][]string{}
-	for _, line := range strings.Split(reason, "\n") {
+	for line := range strings.SplitSeq(reason, "\n") {
 		if strings.Contains(line, "yaml: unmarshal errors:") || strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -342,6 +342,9 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	n.runtime = runtime
 	if err := m.ValidateEntrypoints(runtime); err != nil {
 		return nil, err
+	}
+	if image, ok := metadata.DockerImageReference(m.Runs.Image); ok {
+		n.lock.DockerImage = image
 	}
 	if runtime == metadata.RuntimeNode16 || runtime == metadata.RuntimeNode24 {
 		if err := expression.ValidateActionLifecycleCondition(m.Runs.PreIf); err != nil {
@@ -531,8 +534,8 @@ func hasActionInput(inputs map[string]string, name string) bool {
 }
 
 func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, plan.ActionLock, string, string, error) {
-	if strings.HasPrefix(raw, "./") {
-		p := strings.TrimPrefix(raw, "./")
+	if after, ok := strings.CutPrefix(raw, "./"); ok {
+		p := after
 		if p == "." || p != "" && (path.Clean(p) != p || strings.Contains(p, "\\") || strings.HasPrefix(p, "/")) {
 			return "", plan.ActionLock{}, "", "", fmt.Errorf("invalid local action path")
 		}

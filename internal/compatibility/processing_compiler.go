@@ -93,9 +93,14 @@ func InitialProcessingReport(path, profile string, eventEvaluated bool, report c
 // ApplyWarnings adds compiler warnings to the processing report.
 func (r *ProcessingReport) ApplyWarnings(path string, warnings []compiler.Warning) {
 	for _, warning := range warnings {
+		warningPath := warning.Path
+		if warningPath == "" {
+			warningPath = path
+		}
 		r.Diagnostics = append(r.Diagnostics, Diagnostic{
 			Level: "warning", Code: warning.Code, Category: "compatibility", Stage: stageExpressions,
-			Message: fmt.Sprintf("%s:%d:%d: %s", path, warning.Line, warning.Column, warning.Message), Location: sourceLocation(path, warning.Line, warning.Column),
+			Message:  fmt.Sprintf("%s:%d:%d: %s", warningPath, warning.Line, warning.Column, warning.Message),
+			Location: sourceLocation(warningPath, warning.Line, warning.Column), Job: warning.Job, Step: warning.Step,
 		})
 	}
 }
@@ -318,18 +323,18 @@ func diagnosticFromError(defaultPath, stage, code, category string, err error) D
 		diagnostic.Location = sourceLocation(defaultPath, 1, 1)
 	}
 	if diagnostic.Job == "" {
-		if start := strings.Index(message, `job "`); start >= 0 {
-			rest := message[start+len(`job "`):]
-			if end := strings.Index(rest, `"`); end >= 0 {
-				diagnostic.Job = rest[:end]
+		if _, after, ok := strings.Cut(message, `job "`); ok {
+			rest := after
+			if before, _, ok := strings.Cut(rest, `"`); ok {
+				diagnostic.Job = before
 			}
 		}
 	}
 	if diagnostic.Action == "" {
-		if start := strings.Index(message, `action "`); start >= 0 {
-			rest := message[start+len(`action "`):]
-			if end := strings.Index(rest, `"`); end >= 0 {
-				diagnostic.Action = rest[:end]
+		if _, after, ok := strings.Cut(message, `action "`); ok {
+			rest := after
+			if before, _, ok := strings.Cut(rest, `"`); ok {
+				diagnostic.Action = before
 			}
 		}
 	}

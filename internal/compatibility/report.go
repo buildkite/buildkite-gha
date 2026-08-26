@@ -75,8 +75,8 @@ type ProcessingReport struct {
 	Status      string            `json:"status"`
 	LogicalJobs int               `json:"logical_jobs"`
 	Instances   int               `json:"instances"`
-	Compile     Stage             `json:"compile,omitempty"`
-	Admission   Stage             `json:"admission,omitempty"`
+	Compile     Stage             `json:"compile"`
+	Admission   Stage             `json:"admission"`
 	Stages      []ProcessingStage `json:"stages"`
 	Jobs        []JobResult       `json:"jobs"`
 	Actions     []ActionResult    `json:"actions"`

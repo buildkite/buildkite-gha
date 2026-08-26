@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -306,10 +307,8 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 			}
 		case "release":
 			if snapshot.ReleaseAction != nil {
-				for _, action := range trigger.Types {
-					if action == *snapshot.ReleaseAction {
-						return "", nil
-					}
+				if slices.Contains(trigger.Types, *snapshot.ReleaseAction) {
+					return "", nil
 				}
 				return fmt.Sprintf("Release activity %q does not match this workflow's release activity filters.", *snapshot.ReleaseAction), nil
 			}
@@ -539,7 +538,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 			}
 			for _, activity := range t.Types {
 				if activity != "checks_requested" {
-					return "", false, fmt.Errorf("merge_group activity type %q cannot be mapped exactly", activity)
+					return "", false, fmt.Errorf("merge_group type %q is unsupported. checks_requested is the only merge queue activity currently mapped. Set types: [checks_requested]. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it", activity)
 				}
 			}
 		}
@@ -555,7 +554,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 			return "", false, fmt.Errorf("release event snapshot requires payload.action")
 		}
 		if t.Types == nil {
-			return "", false, fmt.Errorf("release requires explicit types because bare release includes unsupported GitHub activities")
+			return "", false, fmt.Errorf("on: release needs a types list. A bare release covers every release event, while the currently supported types are exactly published, created, and released. Use on: {release: {types: [published]}}. If you need another release type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it")
 		}
 		if len(t.Types) == 0 {
 			return "", false, fmt.Errorf("release types is explicitly empty")

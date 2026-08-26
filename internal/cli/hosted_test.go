@@ -488,12 +488,10 @@ func TestActionSourceAuthenticationReusesOneTokenAcrossConcurrentWorkflowResolve
 	var wg sync.WaitGroup
 	errs := make(chan error, resolverCount)
 	for _, resolver := range resolvers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, err := resolver.Resolve(t.Context(), ref)
 			errs <- err
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)
@@ -800,7 +798,7 @@ func TestUnprivilegedUploadRejectsDockerWithoutCompilerProvenance(t *testing.T) 
 	}}}}
 	err := validateUnprivilegedBundle(bundle)
 	var finding *compiler.ProcessingFinding
-	want := `Job "unproven-docker" requires Docker without matching compiler provenance. Hosted runs support only verified Dockerfile actions and bounded job or service containers.`
+	want := `Job "unproven-docker" requires Docker without matching compiler provenance. Hosted runs support only verified Docker actions and bounded job or service containers.`
 	if err == nil || !errors.As(err, &finding) || finding.Message != want || finding.Detail != "" {
 		t.Fatalf("validateUnprivilegedBundle() error = %v, want Docker provenance rejection", err)
 	}

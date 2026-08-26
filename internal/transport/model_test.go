@@ -184,17 +184,33 @@ type capturedCommand struct {
 
 type captureRunner struct {
 	commands []capturedCommand
+	uploaded map[string][]byte
 	failAt   int
-	afterRun func(int)
 }
 
-func (r *captureRunner) Run(_ context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
+func (r *captureRunner) Run(ctx context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
 	r.commands = append(r.commands, capturedCommand{dir: dir, name: name, args: append([]string(nil), args...), stdin: string(stdin)})
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if r.failAt != 0 && len(r.commands) == r.failAt {
 		return nil, errors.New("injected failure")
 	}
-	if r.afterRun != nil {
-		r.afterRun(len(r.commands))
+	if reflect.DeepEqual(args, []string{"artifact", "upload", ".buildkite-gha/**/*", "--concurrency", "8"}) {
+		r.uploaded = map[string][]byte{}
+		if err := filepath.WalkDir(filepath.Join(dir, ".buildkite-gha"), func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			relative, err := filepath.Rel(dir, path)
+			if err != nil {
+				return err
+			}
+			r.uploaded[filepath.ToSlash(relative)], err = os.ReadFile(path)
+			return err
+		}); err != nil {
+			return nil, err
+		}
 	}
 	return nil, nil
 }
@@ -265,26 +281,59 @@ func TestUploadArtifactsMaterializesContentBeforePipeline(t *testing.T) {
 	if err := UploadArtifacts(t.Context(), Agent{Runner: runner}, root, []Artifact{plan, distribution}, []byte("steps: []\n")); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.commands) != 3 {
-		t.Fatalf("commands = %#v, want two artifacts then pipeline", runner.commands)
+	if len(runner.commands) != 2 {
+		t.Fatalf("commands = %#v, want one artifact batch then pipeline", runner.commands)
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []capturedCommand{
-		{dir: resolvedRoot, name: "buildkite-agent", args: []string{"artifact", "upload", distribution.Path}},
-		{dir: resolvedRoot, name: "buildkite-agent", args: []string{"artifact", "upload", plan.Path}},
+		{dir: resolvedRoot, name: "buildkite-agent", args: []string{"artifact", "upload", ".buildkite-gha/**/*", "--concurrency", "8"}},
 		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}, stdin: "steps: []\n"},
 	}
 	if !reflect.DeepEqual(runner.commands, want) {
 		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+	wantUploaded := map[string][]byte{plan.Path: plan.Contents, distribution.Path: distribution.Contents}
+	if !reflect.DeepEqual(runner.uploaded, wantUploaded) {
+		t.Fatalf("uploaded bytes = %#v, want %#v", runner.uploaded, wantUploaded)
 	}
 	for _, artifact := range []Artifact{plan, distribution} {
 		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(artifact.Path)))
 		if err != nil || !bytes.Equal(contents, artifact.Contents) {
 			t.Fatalf("materialized %q = %q, %v", artifact.Path, contents, err)
 		}
+	}
+}
+
+func TestUploadArtifactsCancellationDoesNotUploadPipeline(t *testing.T) {
+	artifact := Artifact{Path: ".buildkite-gha/plans/plan.json", Contents: []byte("plan")}
+	artifact.Digest = Digest(artifact.Contents)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	runner := &captureRunner{}
+	err := UploadArtifacts(ctx, Agent{Runner: runner}, t.TempDir(), []Artifact{artifact}, []byte("steps: []\n"))
+	if !errors.Is(err, context.Canceled) || len(runner.commands) != 1 || runner.commands[0].args[0] != "artifact" {
+		t.Fatalf("UploadArtifacts() error = %v, commands = %#v", err, runner.commands)
+	}
+}
+
+func TestUploadMaterializedArtifactsIntegrityFailureDoesNotInvokeAgent(t *testing.T) {
+	root := t.TempDir()
+	artifact := Artifact{Path: ".buildkite-gha/plans/plan.json", Contents: []byte("plan")}
+	artifact.Digest = Digest(artifact.Contents)
+	path := filepath.Join(root, filepath.FromSlash(artifact.Path))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &captureRunner{}
+	err := uploadMaterializedArtifacts(t.Context(), Agent{Runner: runner}, root, []Artifact{artifact})
+	if err == nil || !strings.Contains(err.Error(), "verify artifact") || len(runner.commands) != 0 {
+		t.Fatalf("uploadMaterializedArtifacts() error = %v, commands = %#v", err, runner.commands)
 	}
 }
 

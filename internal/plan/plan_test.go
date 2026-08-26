@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -33,6 +34,39 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 		t.Fatalf("decoded fixture lost trust bindings: %#v", job)
 	}
 	validateJobPlanSchema(t, source)
+}
+
+func TestCheckoutInputsRoundTripDeterministically(t *testing.T) {
+	job := validJob()
+	lockID := "a-0000000000000001"
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"network", "provider-token-read"}
+	job.Steps = []Step{{
+		ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &ActionSelector{Lock: lockID},
+		With: map[string]string{
+			"filter": "blob:none", "lfs": "true", "path": "sources/application",
+			"sparse-checkout": "src\ndocs\n", "sparse-checkout-cone-mode": "false",
+		},
+	}}
+	job.Actions = []ActionLock{{
+		ID: lockID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7",
+		Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
+	}}
+	first, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("checkout plan encoding is nondeterministic")
+	}
+	decoded, err := Decode(first)
+	if err != nil || !maps.Equal(decoded.Steps[0].With, job.Steps[0].With) || decoded.Event.Repository != job.Event.Repository {
+		t.Fatalf("decoded checkout plan = %#v, %v", decoded, err)
+	}
 }
 
 func TestEventPayloadArtifactRoundTripAndValidation(t *testing.T) {
@@ -511,10 +545,11 @@ func TestSecretMappingsRoundTripAsNamesOnlyAndValidateAuthority(t *testing.T) {
 
 func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 	job := validJob()
+	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{{
 		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
-		SourceDigest: "sha256:" + strings.Repeat("a", 64),
+		SourceDigest: "sha256:" + strings.Repeat("a", 64), DockerImage: "busybox@sha256:" + strings.Repeat("b", 64),
 	}}
 	encoded, err := Encode(job)
 	if err != nil {
@@ -532,6 +567,26 @@ func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 		t.Fatalf("encoding is not deterministic\nfirst: %s\nsecond: %s", encoded, reencoded)
 	}
 	validateJobPlanSchema(t, encoded)
+
+	for _, test := range []struct {
+		name string
+		edit func(*Job)
+		want string
+	}{
+		{name: "invalid image", edit: func(j *Job) { j.Actions[0].DockerImage = "INVALID" }, want: "invalid Docker image"},
+		{name: "missing docker capability", edit: func(j *Job) { j.RequiredCapabilities = []string{"network"} }, want: "require docker capability"},
+		{name: "missing network capability", edit: func(j *Job) { j.RequiredCapabilities = []string{"docker"} }, want: "require network capability"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := job
+			changed.Actions = append([]ActionLock(nil), job.Actions...)
+			changed.RequiredCapabilities = append([]string(nil), job.RequiredCapabilities...)
+			test.edit(&changed)
+			if err := changed.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
 }
 
 func TestRequiresMiseRoundTripAndSchema(t *testing.T) {
@@ -1131,9 +1186,7 @@ func TestGitHubWorkflowTokenContractAndSchema(t *testing.T) {
 			changed.RequiredCapabilities = append([]string(nil), job.RequiredCapabilities...)
 			changed.RequiredSecrets = append([]string(nil), job.RequiredSecrets...)
 			permissions := map[string]string{}
-			for name, access := range job.GitHubToken.Permissions {
-				permissions[name] = access
-			}
+			maps.Copy(permissions, job.GitHubToken.Permissions)
 			changed.GitHubToken = &GitHubToken{Workflow: job.GitHubToken.Workflow, Permissions: permissions, Aliases: append([]string(nil), job.GitHubToken.Aliases...)}
 			test.edit(&changed)
 			if err := changed.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {

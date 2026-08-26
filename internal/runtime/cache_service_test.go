@@ -344,7 +344,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 		"ordinary-pre": false, "ordinary-main": false, "ordinary-post": false,
 	}
 	seenTokens := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(string(contents)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(contents)), "\n") {
 		fields := strings.Split(line, "|")
 		if len(fields) != 4 || fields[2] != "https://cache.example/" || fields[3] != "true" {
 			t.Fatalf("invalid lifecycle record %q in %q", line, contents)

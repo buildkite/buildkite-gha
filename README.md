@@ -68,6 +68,12 @@ plugins:
       runners:
         - runs-on: ubuntu-latest
           queue: hosted
+          cache:
+            paths:
+              - /home/runner/.gradle/caches
+              - /home/runner/.gradle/wrapper
+            name: gradle-dependencies
+            size: 40g
         - runs-on: macos-14
           queue: macos-sonoma-arm64
 ```
@@ -76,7 +82,8 @@ Hosted runner labels are case-insensitive. Linux labels use the matching Noble
 or Jammy hosted-toolchains image, with or without a configured queue.
 During upload, the Agent API returns complete targets for selectors without an
 explicit mapping. The importer annotates heuristic fallback warnings. See the
-[compatibility guide](docs/compatibility.md#job-configuration).
+[cache-volume configuration](docs/cli.md#configure-generated-job-cache-volumes)
+and [compatibility guide](docs/compatibility.md#job-configuration).
 
 The imported workflows are a dynamic part of the Buildkite pipeline. The plugin creates one aggregate group per successfully compiled, explicitly listed workflow in a single transaction. Workflows that do not declare the selected event become top-level skipped steps. Groups and replacement steps depend on the importer. Each runnable job publishes a provider check named `<workflow> / <job> (<event>)`: a GitHub check for GitHub events or an Origin check for Origin events. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
 
@@ -89,7 +96,7 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 | Good fit | Not currently supported |
 | --- | --- |
 | Linux x86-64 and native macOS arm64 jobs using `bash`, `sh`, `python`, or an installed custom shell | Windows, Linux arm64, or macOS x86-64 |
-| Local and public JavaScript and composite actions; verified Dockerfile actions on Linux | Private actions or private reusable workflows, and Dockerfile actions on macOS |
+| Local and public JavaScript and composite actions; verified Dockerfile and public prebuilt-image actions on Linux | Private actions, private reusable workflows, private container images, and Docker actions on macOS |
 | Static matrices, `needs`, outputs, and local or literal public reusable workflows | Dynamic reusable calls, matrices, and expressions outside the documented subset |
 | Exact-commit checkout, including managed private repository access | GitHub environment secrets, GitHub-issued OIDC claims, or protected queues |
 | Static Buildkite job-accessible secrets, including declared aliases in local reusable workflows | Dynamic secret access or remote reusable-workflow secret forwarding |

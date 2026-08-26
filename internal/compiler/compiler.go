@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,11 +34,21 @@ type IR struct {
 	Jobs      []JobInstance     `json:"jobs"`
 }
 
+// WorkflowConcurrencyGate is one statically resolved called-workflow
+// concurrency scope inherited by a flattened job.
+type WorkflowConcurrencyGate struct {
+	ID    string `json:"id"`
+	Group string `json:"group"`
+}
+
 // Warning is one source-located, non-fatal compatibility diagnostic.
 type Warning struct {
 	Code    string `json:"code"`
+	Path    string `json:"path,omitempty"`
 	Line    int    `json:"line"`
 	Column  int    `json:"column"`
+	Job     string `json:"job,omitempty"`
+	Step    int    `json:"step,omitempty"`
 	Message string `json:"message"`
 }
 
@@ -62,41 +73,43 @@ type WorkflowSource struct {
 
 // JobInstance is one statically expanded job in the owned IR.
 type JobInstance struct {
-	Key                     string                   `json:"key"`
-	LogicalJobID            string                   `json:"logical_job_id"`
-	Label                   string                   `json:"label"`
-	Needs                   []string                 `json:"needs,omitempty"`
-	NeedGroups              map[string][]string      `json:"need_groups,omitempty"`
-	NeedOutputs             map[string][]NeedOutput  `json:"need_outputs,omitempty"`
-	CallGuards              []CallGuard              `json:"call_guards,omitempty"`
-	RunsOn                  []string                 `json:"runs_on"`
-	Queue                   string                   `json:"queue"`
-	Platform                Platform                 `json:"-"`
-	RuntimeImage            string                   `json:"runtime_image,omitempty"`
-	Matrix                  map[string]any           `json:"matrix,omitempty"`
-	Inputs                  map[string]any           `json:"inputs,omitempty"`
-	DeferredInputs          map[string]DeferredInput `json:"deferred_inputs,omitempty"`
-	FailFast                *bool                    `json:"fail_fast,omitempty"`
-	MaxParallel             *int                     `json:"max_parallel,omitempty"`
-	ConcurrencyGroup        string                   `json:"concurrency_group,omitempty"`
-	Steps                   []workflow.Step          `json:"steps"`
-	Env                     map[string]string        `json:"env,omitempty"`
-	Permissions             map[string]string        `json:"permissions,omitempty"`
-	If                      string                   `json:"if,omitempty"`
-	ContinueOnError         bool                     `json:"continue_on_error,omitempty"`
-	TimeoutMinutes          float64                  `json:"timeout_minutes,omitempty"`
-	DefaultShell            string                   `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string                   `json:"default_working_directory,omitempty"`
-	Outputs                 map[string]string        `json:"outputs,omitempty"`
-	Container               *workflow.Container      `json:"container,omitempty"`
-	Services                []workflow.Service       `json:"services,omitempty"`
-	ServicesExpression      string                   `json:"services_expression,omitempty"`
-	SourcePath              string                   `json:"source_path"`
-	SourceDigest            string                   `json:"source_digest"`
-	RemoteWorkflow          *RemoteWorkflowSource    `json:"remote_workflow,omitempty"`
-	RepositoryRoot          string                   `json:"-"`
-	Source                  workflow.Span            `json:"source"`
-	RetainEventPayload      bool                     `json:"-"`
+	Key                     string                    `json:"key"`
+	LogicalJobID            string                    `json:"logical_job_id"`
+	Label                   string                    `json:"label"`
+	Needs                   []string                  `json:"needs,omitempty"`
+	NeedGroups              map[string][]string       `json:"need_groups,omitempty"`
+	NeedOutputs             map[string][]NeedOutput   `json:"need_outputs,omitempty"`
+	CallGuards              []CallGuard               `json:"call_guards,omitempty"`
+	RunsOn                  []string                  `json:"runs_on"`
+	Queue                   string                    `json:"queue"`
+	Platform                Platform                  `json:"-"`
+	RuntimeImage            string                    `json:"runtime_image,omitempty"`
+	Cache                   *CacheVolume              `json:"-"`
+	Matrix                  map[string]any            `json:"matrix,omitempty"`
+	Inputs                  map[string]any            `json:"inputs,omitempty"`
+	DeferredInputs          map[string]DeferredInput  `json:"deferred_inputs,omitempty"`
+	FailFast                *bool                     `json:"fail_fast,omitempty"`
+	MaxParallel             *int                      `json:"max_parallel,omitempty"`
+	ConcurrencyGroup        string                    `json:"concurrency_group,omitempty"`
+	ConcurrencyGates        []WorkflowConcurrencyGate `json:"workflow_concurrency_gates,omitempty"`
+	Steps                   []workflow.Step           `json:"steps"`
+	Env                     map[string]string         `json:"env,omitempty"`
+	Permissions             map[string]string         `json:"permissions,omitempty"`
+	If                      string                    `json:"if,omitempty"`
+	ContinueOnError         bool                      `json:"continue_on_error,omitempty"`
+	TimeoutMinutes          float64                   `json:"timeout_minutes,omitempty"`
+	DefaultShell            string                    `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory string                    `json:"default_working_directory,omitempty"`
+	Outputs                 map[string]string         `json:"outputs,omitempty"`
+	Container               *workflow.Container       `json:"container,omitempty"`
+	Services                []workflow.Service        `json:"services,omitempty"`
+	ServicesExpression      string                    `json:"services_expression,omitempty"`
+	SourcePath              string                    `json:"source_path"`
+	SourceDigest            string                    `json:"source_digest"`
+	RemoteWorkflow          *RemoteWorkflowSource     `json:"remote_workflow,omitempty"`
+	RepositoryRoot          string                    `json:"-"`
+	Source                  workflow.Span             `json:"source"`
+	RetainEventPayload      bool                      `json:"-"`
 	secretAuthority         secretAuthority
 	tokenPolicyNarrowed     bool
 	jobPermissionsIgnored   bool
@@ -325,7 +338,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 		},
 		Event:    event,
 		Vars:     vars,
-		Warnings: compilerWarnings(parsed, cancelInProgress),
+		Warnings: append(compilerWarnings(parsed, cancelInProgress), expanded.warnings...),
 		Execution: ExecutionBoundary{
 			Supported: true,
 			Reason:    "run-job rejects unsupported shells and local actions",
@@ -401,35 +414,67 @@ func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string
 
 func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warning {
 	var warnings []Warning
+	supported := make(map[string]bool, len(parsed.Triggers))
+	for _, trigger := range parsed.Triggers {
+		if buildkitepipeline.SupportedTriggerEvent(trigger.Event) {
+			supported[trigger.Event] = true
+		}
+	}
+	supportedNames := make([]string, 0, len(supported))
+	for event := range supported {
+		supportedNames = append(supportedNames, event)
+	}
+	sort.Strings(supportedNames)
 	for _, trigger := range parsed.Triggers {
 		if buildkitepipeline.SupportedTriggerEvent(trigger.Event) {
 			continue
 		}
+		message := fmt.Sprintf("on.%s is ignored, so nothing in this workflow runs from it.", trigger.Event)
+		if len(supportedNames) == 0 {
+			message += " This workflow declares no supported triggers that still run."
+		} else {
+			message += " The supported triggers declared in this workflow still run: " + strings.Join(supportedNames, ", ") + "."
+			message += " Move the jobs this trigger guards to one of those triggers if you need them."
+		}
+		message += fmt.Sprintf(" If you need %s, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.", trigger.Event)
 		warnings = append(warnings, Warning{
 			Code:    "W_TRIGGER_EVENT_UNSUPPORTED",
 			Line:    trigger.Position.Line,
 			Column:  trigger.Position.Column,
-			Message: fmt.Sprintf("on.%s has no Buildkite build source; this trigger is ignored and never starts a build", trigger.Event),
+			Message: message,
 		})
 	}
 	if parsed.Concurrency != nil && cancelInProgress {
-		position := parsed.Concurrency.CancelInProgressPosition
-		warnings = append(warnings, Warning{
-			Code:    "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED",
-			Line:    position.Line,
-			Column:  position.Column,
-			Message: "workflow concurrency cancel-in-progress is not enforced; Buildkite pipeline settings can approximate it for same-branch builds",
-		})
+		warnings = append(warnings, workflowCancellationWarning(parsed.Concurrency.CancelInProgressPosition))
 	}
 	return warnings
 }
 
-func legacyCheckoutWarning(position workflow.Position, release string) Warning {
+func workflowCancellationWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+	}
+}
+
+func legacyCheckoutWarning(position workflow.Position, release string, defaultsToFullHistory bool) Warning {
+	generation := "v2"
+	if defaultsToFullHistory {
+		generation = "v1"
+	}
+	message := fmt.Sprintf("actions/checkout %s behaves like %s. It does not set the ref and commit outputs, which actions/checkout added in v4.2.0.", release, generation)
+	if defaultsToFullHistory {
+		message += " It also defaults to full history when fetch-depth is omitted. Upgrade to actions/checkout v4 or later if either difference matters."
+	} else {
+		message += " Upgrade to actions/checkout v4 or later if a later step reads either output."
+	}
 	return Warning{
 		Code:    "W_CHECKOUT_LEGACY_RELEASE",
 		Line:    position.Line,
 		Column:  position.Column,
-		Message: fmt.Sprintf("actions/checkout %s is emulated by the native adapter with its release contract; upgrade to v4 or later", release),
+		Message: message,
 	}
 }
 
@@ -451,12 +496,21 @@ func reusableWorkflowTokenWarning(position workflow.Position) Warning {
 	}
 }
 
-func jobWorkflowTokenWarning(position workflow.Position) Warning {
+func jobWorkflowTokenWarning(position workflow.Position, permissions map[string]string) Warning {
+	names := make([]string, 0, len(permissions))
+	for name := range permissions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	effective := make([]string, 0, len(names))
+	for _, name := range names {
+		effective = append(effective, strings.ReplaceAll(name, "_", "-")+": "+permissions[name])
+	}
 	return Warning{
 		Code:    "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS",
 		Line:    position.Line,
 		Column:  position.Column,
-		Message: "job-level repository permissions are ignored for hosted GITHUB_TOKEN; the top-level requesting workflow permissions apply",
+		Message: "Job-level permissions are ignored for GITHUB_TOKEN. The top-level workflow permissions apply instead. This job's token has " + strings.Join(effective, ", ") + ". Move this job's permissions block to the workflow top level. If you need per-job permissions, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
 	}
 }
 
@@ -725,9 +779,7 @@ func cloneMap(in map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -742,9 +794,7 @@ func sortedKeys[V any](values map[string]V) []string {
 
 func cloneAnyMap(in map[string]any) map[string]any {
 	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
+	maps.Copy(out, in)
 	return out
 }
 

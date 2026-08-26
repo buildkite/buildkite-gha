@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +25,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
@@ -63,6 +66,7 @@ type Runner struct {
 	Docker                string
 	RuntimeExecutable     string
 	Git                   string
+	GitLFS                string
 	CleanupTimeout        time.Duration
 	PostActionTimeout     time.Duration
 	InterruptGrace        time.Duration
@@ -155,6 +159,8 @@ type dockerAction struct {
 	SourceRoot   string
 	SourceDigest string
 	Dockerfile   string
+	Image        string
+	Entrypoint   string
 	Args         []string
 	Workspace    string
 	Env          map[string]string
@@ -291,52 +297,68 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandProcessor, act
 	if r.jobContainer != nil && (action.Workspace != r.jobContainer.workspace || action.runnerTemp != r.jobContainer.temp) {
 		return result, errors.New("docker action workspace and runner temp must match the job container's owned host paths")
 	}
-	docker := r.Docker
-	if docker == "" {
-		docker, err = exec.LookPath("docker")
-		if err != nil {
-			return result, fmt.Errorf("discover Docker: %w", err)
-		}
-	}
 	if action.Dockerfile != "" && action.Dockerfile != "Dockerfile" {
 		return result, fmt.Errorf("docker action requires fixed Dockerfile")
 	}
-	sourceRoot := action.SourceRoot
-	if sourceRoot == "" {
-		sourceRoot = action.Path
+	prebuilt := action.Image != ""
+	if prebuilt && !metadata.ValidDockerImageReference(action.Image) {
+		return result, fmt.Errorf("docker action has invalid prebuilt image %q", action.Image)
 	}
-	expected := action.SourceDigest
-	if expected == "" {
-		expected, err = source.DigestTree(sourceRoot)
+	runImage := action.Image
+	var docker, dockerConfig string
+	var dockerEnv map[string]string
+	if prebuilt && r.prebuiltDocker != nil {
+		var ok bool
+		runImage, ok = r.prebuiltDocker.images[action.Image]
+		if !ok || runImage == "" {
+			return result, fmt.Errorf("prebuilt Docker action image %q was not prepared at job start", action.Image)
+		}
+		docker, dockerConfig, dockerEnv = r.prebuiltDocker.docker, r.prebuiltDocker.config, r.prebuiltDocker.env
+	} else {
+		docker, dockerConfig, dockerEnv, err = privateDocker(r.Runner)
 		if err != nil {
-			return result, fmt.Errorf("digest Docker action source: %w", err)
+			return result, err
+		}
+		defer func() { err = errors.Join(err, removeDockerConfig(dockerConfig)) }()
+		if prebuilt {
+			if err := r.pullContainerImage(ctx, processor, dockerEnv, docker, action.Image); err != nil {
+				return result, fmt.Errorf("pull prebuilt Docker action image %q: %w", action.Image, err)
+			}
+			runImage, err = inspectDockerImageID(ctx, dockerEnv, docker, action.Image)
+			if err != nil {
+				return result, fmt.Errorf("inspect prebuilt Docker action image %q: %w", action.Image, err)
+			}
 		}
 	}
-	stage, err := stageDockerSource(sourceRoot, action.Path, expected)
-	if err != nil {
-		return result, err
-	}
-	defer func() { _ = os.RemoveAll(stage.root) }()
-	dockerConfig, err := os.MkdirTemp("", "buildkite-gha-docker-config-")
-	if err != nil {
-		return result, fmt.Errorf("create private Docker configuration: %w", err)
-	}
-	if err := os.Chmod(dockerConfig, 0o700); err != nil {
-		_ = os.RemoveAll(dockerConfig)
-		return result, err
-	}
-	defer func() { _ = os.RemoveAll(dockerConfig) }()
-	dockerEnv := map[string]string{"DOCKER_CONFIG": dockerConfig}
-	inspection, inspectErr := boundedDockerOutput(ctx, dockerEnv, docker, "buildx", "inspect", "default")
-	driver := dockerBuilderDriver(inspection)
-	if inspectErr != nil || driver != "docker" {
-		if inspectErr != nil {
-			return result, fmt.Errorf("inspect default Docker builder: %w", inspectErr)
+	var stage stagedDockerSource
+	if !prebuilt {
+		sourceRoot := action.SourceRoot
+		if sourceRoot == "" {
+			sourceRoot = action.Path
 		}
-		if driver == "" {
-			return result, fmt.Errorf("could not determine default Docker builder driver from inspect output")
+		expected := action.SourceDigest
+		if expected == "" {
+			expected, err = source.DigestTree(sourceRoot)
+			if err != nil {
+				return result, fmt.Errorf("digest Docker action source: %w", err)
+			}
 		}
-		return result, fmt.Errorf("default Docker builder has non-local driver %q", driver)
+		stage, err = stageDockerSource(sourceRoot, action.Path, expected)
+		if err != nil {
+			return result, err
+		}
+		defer func() { _ = os.RemoveAll(stage.root) }()
+		inspection, inspectErr := boundedDockerOutput(ctx, dockerEnv, docker, "buildx", "inspect", "default")
+		driver := dockerBuilderDriver(inspection)
+		if inspectErr != nil || driver != "docker" {
+			if inspectErr != nil {
+				return result, fmt.Errorf("inspect default Docker builder: %w", inspectErr)
+			}
+			if driver == "" {
+				return result, fmt.Errorf("could not determine default Docker builder driver from inspect output")
+			}
+			return result, fmt.Errorf("default Docker builder has non-local driver %q", driver)
+		}
 	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -344,7 +366,10 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandProcessor, act
 	}
 	id := hex.EncodeToString(nonce[:])
 	owner := "com.buildkite.gha.owner=" + id
-	image, container := "buildkite-gha-image-"+id, "buildkite-gha-container-"+id
+	image, container := runImage, "buildkite-gha-container-"+id
+	if !prebuilt {
+		image = "buildkite-gha-image-" + id
+	}
 	built, ran := false, false
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.cleanupTimeout())
@@ -389,10 +414,12 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandProcessor, act
 		}
 		err = errors.Join(err, markHardJobFailure(cleanupErr))
 	}()
-	buildArgs := []string{"buildx", "build", "--builder", "default", "--load", "--tag", image, "--label", owner, "--file", filepath.Join(stage.action, "Dockerfile"), stage.action}
-	built = true // A failed build may still have created the tagged image.
-	if err := r.runStreaming(ctx, processor, "", dockerEnv, docker, buildArgs...); err != nil {
-		return result, fmt.Errorf("build Docker action %q: %w", action.Name, err)
+	if !prebuilt {
+		buildArgs := []string{"buildx", "build", "--builder", "default", "--load", "--tag", image, "--label", owner, "--file", filepath.Join(stage.action, "Dockerfile"), stage.action}
+		built = true // A failed build may still have created the tagged image.
+		if err := r.runStreaming(ctx, processor, "", dockerEnv, docker, buildArgs...); err != nil {
+			return result, fmt.Errorf("build Docker action %q: %w", action.Name, err)
+		}
 	}
 
 	files, err := newCommandFiles()
@@ -423,6 +450,9 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandProcessor, act
 		cacheToken = cacheEnv["ACTIONS_RUNTIME_TOKEN"]
 	}
 	args := []string{"run", "--name", container, "--label", owner, "--mount", "type=bind,source=" + files.dir + ",target=/github/file_commands"}
+	if action.Entrypoint != "" {
+		args = append(args, "--entrypoint", action.Entrypoint)
+	}
 	if r.jobDocker != nil {
 		args = append(args, "--network", r.jobDocker.network)
 	}
@@ -473,7 +503,7 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandProcessor, act
 	ran = true
 	runErr := r.runStreaming(ctx, processor, "", dockerRunEnv, docker, args...)
 	if runErr != nil {
-		runErr = fmt.Errorf("run Docker action %q: %w", action.Name, runErr)
+		runErr = markStepProcessExit(fmt.Errorf("run Docker action %q: %w", action.Name, runErr))
 	}
 	effects, fileErr := files.apply(&result, nil)
 	effects.reportSummaryUploadFailure(processor)
@@ -569,7 +599,7 @@ func validateDockerMountPath(path string) error {
 
 func dockerBuilderDriver(inspection string) string {
 	var driver string
-	for _, line := range strings.Split(inspection, "\n") {
+	for line := range strings.SplitSeq(inspection, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 || fields[0] != "Driver:" {
 			continue
@@ -780,6 +810,7 @@ func (r *jobRun) runProcess(ctx context.Context, processor *commandProcessor, di
 	} else {
 		runErr = r.runStreaming(ctx, processor, dir, env, name, args...)
 	}
+	runErr = markStepProcessExit(runErr)
 	effects, fileErr := files.apply(result, state)
 	effects.reportSummaryUploadFailure(processor)
 	if fileErr == nil && (effects.pathSet || len(effects.paths) > 0) {
@@ -1005,7 +1036,7 @@ func (r *jobRun) discoverNode(ctx context.Context, major int, explicit string) (
 	}
 	tool := nodeTool(major)
 	if tool == "" {
-		return "", fmt.Errorf("unsupported Node runtime major %d", major)
+		return "", errUnsupportedf("unsupported Node runtime major %d", major)
 	}
 	if r.Mise == "" {
 		return "", fmt.Errorf("mise is required to run JavaScript actions; no pinned runtime path was configured")
@@ -1195,7 +1226,7 @@ func canonicalPathWithinRealRoot(root, target string) (string, string, error) {
 		return "", "", fmt.Errorf("path is outside root")
 	}
 	current := lexicalRoot
-	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+	for component := range strings.SplitSeq(relative, string(filepath.Separator)) {
 		current = filepath.Join(current, component)
 		info, statErr := os.Lstat(current)
 		if statErr != nil {
@@ -1222,7 +1253,7 @@ func pathWithinDirectory(relative string) bool {
 
 func verifyManagedNodeExecutable(ctx context.Context, major int, path, want string) error {
 	if want == "" {
-		return fmt.Errorf("unsupported Node runtime major %d", major)
+		return errUnsupportedf("unsupported Node runtime major %d", major)
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -1362,9 +1393,7 @@ func processEnv(overrides map[string]string) []string {
 	if _, ok := values["TMPDIR"]; !ok {
 		values["TMPDIR"] = os.TempDir()
 	}
-	for name, value := range overrides {
-		values[name] = value
-	}
+	maps.Copy(values, overrides)
 	return mapEnv(values)
 }
 
@@ -1682,7 +1711,7 @@ func (p *commandProcessor) addMaskLocked(value string) {
 		return
 	}
 	p.addMaskValueLocked(value)
-	for _, line := range strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(value, "\r\n", "\n"), "\n") {
 		if line != "" && line != value {
 			p.addMaskValueLocked(line)
 		}
@@ -1696,10 +1725,8 @@ func (p *commandProcessor) addMaskLocked(value string) {
 }
 
 func (p *commandProcessor) addMaskValueLocked(value string) {
-	for _, mask := range p.masks {
-		if mask == value {
-			return
-		}
+	if slices.Contains(p.masks, value) {
+		return
 	}
 	p.masks = append(p.masks, value)
 }
@@ -1721,7 +1748,7 @@ func parseWorkflowCommand(line string) (parsedWorkflowCommand, bool) {
 	}
 	properties := map[string]string{}
 	if hasProperties {
-		for _, property := range strings.Split(strings.TrimSpace(propertyList), ",") {
+		for property := range strings.SplitSeq(strings.TrimSpace(propertyList), ",") {
 			name, value, ok := strings.Cut(property, "=")
 			if !ok || name == "" || value == "" {
 				continue

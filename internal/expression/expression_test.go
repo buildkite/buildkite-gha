@@ -227,6 +227,9 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 		"${{ runner.debug }}",
 		"${{ runner.debug == '1' }}",
 		"${{ job.status }}",
+		"${{ job.check_run_id }}",
+		"${{ job['check_run_id'] }}",
+		"${{ job.check_run_id || 'unavailable' }}",
 		"${{ toJSON(matrix) }}",
 		"${{ github.event[inputs.field] || 'fallback' }}",
 		"${{ toJSON(github.event.*.name) }}",
@@ -237,7 +240,7 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ github.event[secrets.FIELD] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
+	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ github.event[secrets.FIELD] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job[env.NAME] }}", "${{ job.check_run_id.extra }}", "${{ job.name }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
@@ -336,6 +339,8 @@ func TestActionInputDefaultRequiresGitHubTokenUsesProviderServerURL(t *testing.T
 		{name: "Origin skips GitHub.com token", template: "${{ github.server_url == 'https://github.com' && github.token || '' }}", serverURL: "https://origin.cursor.com"},
 		{name: "Origin reaches reverse guard", template: "${{ github.server_url != 'https://github.com' && github.token || '' }}", serverURL: "https://origin.cursor.com", want: true},
 		{name: "literal false skips token", template: "${{ false && github.token || '' }}", serverURL: "https://origin.cursor.com"},
+		{name: "unavailable check run skips token", template: "${{ job.check_run_id && github.token || '' }}", serverURL: "https://github.com"},
+		{name: "indexed unavailable check run skips token", template: "${{ job['check_run_id'] && github.token || '' }}", serverURL: "https://github.com"},
 		{name: "unknown guard requires token", template: "${{ inputs.use_token && github.token || '' }}", serverURL: "https://origin.cursor.com", want: true},
 		{name: "no token reference", template: "${{ github.server_url }}", serverURL: "https://origin.cursor.com"},
 	} {
@@ -367,6 +372,29 @@ func TestEvaluateActionInputDefaultSupportsJobStatus(t *testing.T) {
 	}
 	if _, err := Evaluate("${{ job.status }}", Context{JobStatus: "success"}); err == nil {
 		t.Fatal("Evaluate() accepted action-default-only job.status")
+	}
+}
+
+func TestEvaluateActionInputDefaultTreatsJobCheckRunIDAsUnavailable(t *testing.T) {
+	for _, test := range []struct {
+		template string
+		want     string
+	}{
+		{template: "${{ job.check_run_id }}", want: ""},
+		{template: "${{ job['check_run_id'] }}", want: ""},
+		{template: "${{ JOB.CHECK_RUN_ID || 'unavailable' }}", want: "unavailable"},
+		{template: "id-${{ job.check_run_id }}", want: "id-"},
+	} {
+		got, err := EvaluateActionInputDefault(test.template, Context{})
+		if err != nil || got != test.want {
+			t.Errorf("EvaluateActionInputDefault(%q) = %q, %v; want %q", test.template, got, err, test.want)
+		}
+	}
+	if err := ValidateRuntimeTemplate("${{ job.check_run_id }}"); err == nil {
+		t.Fatal("ValidateRuntimeTemplate() accepted action-default-only job.check_run_id")
+	}
+	if _, err := Evaluate("${{ job.check_run_id }}", Context{}); err == nil {
+		t.Fatal("Evaluate() accepted action-default-only job.check_run_id")
 	}
 }
 
@@ -1433,6 +1461,19 @@ func TestNestedMatrixReferencesAreSupported(t *testing.T) {
 	}
 }
 
+func TestEvaluateCompileTemplateResolvesReusableWorkflowConcurrencyInputs(t *testing.T) {
+	context := CompileContext{Inputs: map[string]any{"target": "production"}}
+	got, err := EvaluateCompileTemplate("deploy-${{ inputs.target }}", context)
+	if err != nil || got != "deploy-production" {
+		t.Fatalf("EvaluateCompileTemplate() = %q, %v", got, err)
+	}
+	for _, template := range []string{"${{ needs.prepare.result }}", "${{ strategy.job-index }}"} {
+		if _, err := EvaluateCompileTemplate(template, context); err == nil {
+			t.Errorf("EvaluateCompileTemplate(%q) accepted a runtime-only concurrency value", template)
+		}
+	}
+}
+
 func TestEvaluateConditionSupportsBracketFormGitHubReferences(t *testing.T) {
 	for condition, want := range map[string]bool{
 		"github['event_name'] == 'push'":       true,
@@ -1572,6 +1613,7 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		},
 		Event:  map[string]any{"action": "opened"},
 		Vars:   map[string]string{"RUNNERS": `["ubuntu-24.04","ubuntu-22.04"]`},
+		Inputs: map[string]any{"TARGETS": `["linux","darwin"]`},
 		Matrix: map[string]any{"os": "ubuntu-24.04"},
 	}
 	tests := []struct {
@@ -1584,6 +1626,7 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ github.base_ref }}", want: "main"},
 		{expression: "${{ github.event.action }}", want: "opened"},
 		{expression: "${{ event.action }}", want: "opened"},
+		{expression: "${{ fromJSON(inputs.TARGETS) }}", want: []any{"linux", "darwin"}},
 		{expression: "${{ matrix.os }}", want: "ubuntu-24.04"},
 		{expression: "${{ vars.MISSING }}", want: nil},
 		{expression: "${{ github.event.number || github.ref }}", want: "refs/pull/42/merge"},
@@ -1622,7 +1665,7 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		if err != nil {
 			t.Fatalf("EvaluateCompile(%q) error = %v", test.expression, err)
 		}
-		if got != test.want {
+		if !reflect.DeepEqual(got, test.want) {
 			t.Fatalf("EvaluateCompile(%q) = %#v, want %#v", test.expression, got, test.want)
 		}
 	}

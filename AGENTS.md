@@ -14,6 +14,30 @@ Follow the Buildkite [writing style guide](https://github.com/buildkite/docs/blo
 - Prefer examples covered by tests. Check links and examples when changing nearby documentation.
 - Review compatibility guidance and plans regularly for stale, duplicated, or removable content.
 
+## Pull requests
+
+Write pull request titles and descriptions for reviewers who understand the
+product but not the subsystem.
+
+- Name the task that now works or the problem that no longer occurs. Avoid
+  internal package, protocol, planning, or implementation terms unless they are
+  the subject of the change.
+- Use a short `Why` followed by `What`. In `Why`, show the smallest useful
+  example of the current failure. In `What`, show the new result or a compact
+  before-and-after comparison.
+- Prefer configuration, commands, errors, API payloads, or output over another
+  explanatory paragraph. Introduce unavoidable domain terms through the
+  example.
+- Do not force an example for a behavior-preserving refactor. Explain the
+  practical engineering outcome plainly instead.
+- Include implementation details and boundaries only when they help review.
+  Omit routine test plans, validation output, checklists, and file inventories.
+
+| Avoid | Prefer |
+| --- | --- |
+| `Support unavailable action check run IDs` | `Allow actions when no GitHub check run ID exists` |
+| `Improve provider-token authority planning` | `Avoid requesting a GitHub token for branches that cannot run` |
+
 ## Cursor Cloud specific instructions
 
 This is a single Go CLI product (`buildkite-gha`). There are **no long-running

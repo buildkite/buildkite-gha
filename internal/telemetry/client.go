@@ -78,6 +78,9 @@ const (
 	FailureCodePipelineGeneration FailureCode = "E_PIPELINE_GENERATION"
 	FailureCodeEnvironment        FailureCode = "E_ENVIRONMENT"
 	FailureCodeProfile            FailureCode = "E_PROFILE"
+	FailureCodeStepProcessExit    FailureCode = "E_STEP_PROCESS_EXIT"
+	FailureCodeUnsupportedFeature FailureCode = "E_UNSUPPORTED_FEATURE"
+	FailureCodeRuntimeIntegrity   FailureCode = "E_RUNTIME_INTEGRITY"
 )
 
 type Severity string
@@ -253,7 +256,8 @@ func validFailureCode(code FailureCode) bool {
 	case FailureCodeUnknown, FailureCodeWorkflowSyntax, FailureCodeEventInvalid, FailureCodeGraphInvalid,
 		FailureCodeMatrixInvalid, FailureCodeExpressionInvalid, FailureCodeActionDiscovery,
 		FailureCodeActionResolution, FailureCodePlanConstruction, FailureCodePipelineGeneration,
-		FailureCodeEnvironment, FailureCodeProfile:
+		FailureCodeEnvironment, FailureCodeProfile, FailureCodeStepProcessExit,
+		FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity:
 		return true
 	default:
 		return false

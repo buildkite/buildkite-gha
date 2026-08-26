@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -106,6 +107,11 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			return JobResult{}, err
 		}
 		r.Git = git
+		if gitLFS, lfsErr := resolveHostExecutableBeforeWorkflow(r.GitLFS, "git-lfs", "native checkout Git LFS"); lfsErr == nil {
+			r.GitLFS = gitLFS
+		} else {
+			r.GitLFS = ""
+		}
 	}
 	if job.HasCapability("provider-token-write") && r.WorkflowToken == nil {
 		return JobResult{}, fmt.Errorf("provider-token-write capability requires the GitHub workflow token provider")
@@ -126,13 +132,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		}
 		r.Secrets = resolved
 	}
-	cacheRequired := false
-	for _, lock := range job.Actions {
-		if usesCacheService(lock) {
-			cacheRequired = true
-			break
-		}
-	}
+	cacheRequired := slices.ContainsFunc(job.Actions, usesCacheService)
 	if providerTokenRequired || oidcTokenRequired || secretsRequired || r.Cache != nil {
 		if r.Redactor == nil {
 			if providerTokenRequired {
@@ -352,6 +352,18 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		r.runnerTemp = runnerTemp
 	}
 	actions := newActionLockResolver(job, workspace, r.Actions)
+	prebuiltDocker, err := r.preparePrebuiltDockerActions(runCtx, processor, actions)
+	if err != nil {
+		return tolerateJobSetupFailure(runCtx, job, jobResult, err)
+	}
+	if prebuiltDocker != nil {
+		r.prebuiltDocker = prebuiltDocker
+		defer func() {
+			if err := prebuiltDocker.cleanup(); err != nil {
+				runJobErr = errors.Join(runJobErr, markHardJobFailure(err))
+			}
+		}()
+	}
 	var containerMounts []containerMount
 	if job.Container != nil {
 		// Remote children of workspace composites are already present in the
@@ -835,9 +847,7 @@ func mergeWorkflowInputs(inputs, deferred map[string]any) map[string]any {
 	if merged == nil && len(deferred) != 0 {
 		merged = make(map[string]any, len(deferred))
 	}
-	for name, value := range deferred {
-		merged[name] = value
-	}
+	maps.Copy(merged, deferred)
 	return merged
 }
 
@@ -1343,7 +1353,7 @@ func canonicalRunnerContext(goos, goarch string) (map[string]string, error) {
 	case goos == "darwin" && goarch == "arm64":
 		return map[string]string{"os": "macOS", "arch": "ARM64"}, nil
 	default:
-		return nil, fmt.Errorf("unsupported runner platform %s/%s", goos, goarch)
+		return nil, errUnsupportedf("unsupported runner platform %s/%s", goos, goarch)
 	}
 }
 
@@ -1355,11 +1365,11 @@ func ValidateHost(job plan.Job, goos, goarch string) error {
 	if goos == "darwin" {
 		switch {
 		case job.HasCapability("docker"):
-			return fmt.Errorf("docker capability is unsupported on macOS runners")
+			return errUnsupportedf("docker capability is unsupported on macOS runners")
 		case job.Container != nil:
-			return fmt.Errorf("job containers are unsupported on macOS runners")
+			return errUnsupportedf("job containers are unsupported on macOS runners")
 		case len(job.Services) != 0:
-			return fmt.Errorf("services are unsupported on macOS runners")
+			return errUnsupportedf("services are unsupported on macOS runners")
 		}
 	}
 	return nil
@@ -1488,10 +1498,8 @@ func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockR
 	if err != nil {
 		return err
 	}
-	for _, ancestor := range stack {
-		if ancestor == lock.ID {
-			return fmt.Errorf("action recursion detected at lock %q", lock.ID)
-		}
+	if slices.Contains(stack, lock.ID) {
+		return fmt.Errorf("action recursion detected at lock %q", lock.ID)
 	}
 	if usesNativeAdapter(lock) {
 		return nil
@@ -1922,7 +1930,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 		}
 	} else {
 		if !strings.HasPrefix(step.Uses, "./") {
-			return result, fmt.Errorf("remote action %q is unsupported in the supported runtime subset", step.Uses)
+			return result, errUnsupportedf("remote action %q is unsupported in the supported runtime subset", step.Uses)
 		}
 		if err := verifyWorkflow(job, workspace); err != nil {
 			return result, err
@@ -1945,10 +1953,8 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 	if actionLock != nil {
 		actionIdentity = actionLock.ID
 	}
-	for _, ancestor := range actionStack {
-		if ancestor == actionIdentity {
-			return result, fmt.Errorf("action recursion detected at %q", step.Uses)
-		}
+	if slices.Contains(actionStack, actionIdentity) {
+		return result, fmt.Errorf("action recursion detected at %q", step.Uses)
 	}
 	if len(actionStack) >= metadata.MaxNestedActionDepth {
 		return result, fmt.Errorf("local action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, actionPath)
@@ -2060,16 +2066,13 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 		return composite, err
 	case metadata.RuntimeDocker:
 		if goruntime.GOOS == "darwin" {
-			return result, fmt.Errorf("docker action %q is unsupported on macOS runners", step.Uses)
+			return result, errUnsupportedf("docker action %q is unsupported on macOS runners", step.Uses)
 		}
 		if !job.HasCapability("docker") {
 			return result, fmt.Errorf("docker action %q requires the plan's docker capability", step.Uses)
 		}
-		if action.Runs.Main != "" || action.Runs.Pre != "" || action.Runs.PreIf != "" || action.Runs.Post != "" || action.Runs.PostIf != "" || action.Runs.PreEntrypoint != "" || action.Runs.PostEntrypoint != "" || action.Runs.Entrypoint != "" {
-			return result, fmt.Errorf("docker action %q uses unsupported entrypoint or pre/post lifecycle", step.Uses)
-		}
-		if action.Runs.Image != "Dockerfile" {
-			return result, fmt.Errorf("docker action image %q is unsupported; the supported runtime subset requires a local Dockerfile", action.Runs.Image)
+		if err := action.ValidateEntrypoints(actionRuntime); err != nil {
+			return result, fmt.Errorf("docker action %q: %w", step.Uses, err)
 		}
 		dockerArgs := make([]string, len(action.Runs.Args))
 		for i, argument := range action.Runs.Args {
@@ -2090,10 +2093,14 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 			sourceDigest = actionLock.SourceDigest
 		}
 		invocationEnv, explicitPATH := environment.docker(dockerEnv, inputs)
-		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Args: dockerArgs, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})
+		image, _ := metadata.DockerImageReference(action.Runs.Image)
+		if image != "" && actionLock != nil && image != actionLock.DockerImage {
+			return result, fmt.Errorf("docker action %q metadata image %q does not match planned image %q", step.Uses, image, actionLock.DockerImage)
+		}
+		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Image: image, Entrypoint: action.Runs.Entrypoint, Args: dockerArgs, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})
 		return result, err
 	}
-	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
+	return result, errUnsupportedf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
 }
 
 func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionLock *plan.ActionLock, actionStack []string) (Result, error) {
@@ -2382,7 +2389,7 @@ func shellCommand(shell, script string) ([]string, error) {
 	case "sh":
 		return []string{"sh", "-e", "-c", script}, nil
 	default:
-		return nil, fmt.Errorf("shell %q is unsupported in the supported runtime subset", shell)
+		return nil, errUnsupportedf("shell %q is unsupported in the supported runtime subset", shell)
 	}
 }
 
@@ -2453,7 +2460,7 @@ func parseShellTemplate(shell string) ([]string, error) {
 	command := strings.ToLower(filepath.Base(args[0]))
 	switch command {
 	case "pwsh", "pwsh.exe", "cmd", "cmd.exe", "powershell", "powershell.exe", "msys2", "msys2.cmd", "msys2.exe":
-		return nil, fmt.Errorf("shell %q is unsupported in the supported runtime subset", shell)
+		return nil, errUnsupportedf("shell %q is unsupported in the supported runtime subset", shell)
 	}
 	hasPlaceholder := false
 	for _, arg := range args[1:] {
@@ -2650,9 +2657,7 @@ func cloneStrings(in map[string]string) map[string]string {
 }
 
 func mergeInto(target map[string]string, source map[string]string) {
-	for key, value := range source {
-		target[key] = value
-	}
+	maps.Copy(target, source)
 }
 
 func mergeStringMaps(values ...map[string]string) map[string]string {

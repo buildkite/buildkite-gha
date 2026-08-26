@@ -53,7 +53,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 			{name: "mixed branch filters", trigger: "push:\n    branches: [main]\n    branches-ignore: [release]", want: "include and ignore filters cannot be combined"},
 			{name: "pull request tag filter", trigger: "pull_request:\n    tags: [v1]", want: "pull_request tag filters are unsupported"},
 			{name: "pull request activity", trigger: "pull_request:\n    types: [auto_merge_enabled, submitted]", want: `activity type "submitted" cannot be mapped exactly`},
-			{name: "bare release", trigger: "release", want: "release requires explicit types"},
+			{name: "bare release", trigger: "release", want: "on: release needs a types list"},
 			{name: "unsupported release activity", trigger: "release:\n    types: [edited]", want: `release activity type "edited" cannot be mapped exactly`},
 			{name: "release branch filter", trigger: "release:\n    types: [published]\n    branches: [main]", want: "release has unsupported filters"},
 		}
@@ -408,15 +408,22 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if report.Result != "admitted" {
 			t.Fatalf("mixed trigger report = %#v", report)
 		}
-		warned := false
+		messages := map[string]string{}
 		for _, diagnostic := range report.Diagnostics {
 			if diagnostic.Level == "error" {
 				t.Fatalf("unexpected error diagnostic %#v", diagnostic)
 			}
-			warned = warned || diagnostic.Code == "W_TRIGGER_EVENT_UNSUPPORTED"
+			if diagnostic.Code == "W_TRIGGER_EVENT_UNSUPPORTED" {
+				message := annotationDiagnosticMessage(diagnostic)
+				event := strings.TrimPrefix(strings.Fields(message)[0], "on.")
+				messages[event] = message
+			}
 		}
-		if !warned {
-			t.Fatalf("mixed trigger report missing unsupported-trigger warning: %#v", report)
+		for _, event := range []string{"issues", "pull_request_target"} {
+			want := "on." + event + " is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: push. Move the jobs this trigger guards to one of those triggers if you need them. If you need " + event + ", log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it."
+			if messages[event] != want {
+				t.Fatalf("unsupported-trigger message for %s = %q, want %q; report = %#v", event, messages[event], want, report)
+			}
 		}
 	})
 
@@ -756,11 +763,11 @@ jobs:
 	}
 	for i, next := range []string{"deep-2.yml", "deep-3.yml", "shared.yml"} {
 		name := fmt.Sprintf("deep-%d.yml", i+1)
-		if err := os.WriteFile(filepath.Join(workflowDirectory, name), []byte(fmt.Sprintf(`on: workflow_call
+		if err := os.WriteFile(filepath.Join(workflowDirectory, name), fmt.Appendf(nil, `on: workflow_call
 jobs:
   delegated:
     uses: ./.github/workflows/%s
-`, next)), 0o600); err != nil {
+`, next), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -798,11 +805,11 @@ jobs:
 	}
 	for i, next := range []string{"depth-2.yml", "depth-3.yml", "depth-4.yml", "runtime-matrix.yml"} {
 		name := fmt.Sprintf("depth-%d.yml", i+1)
-		if err := os.WriteFile(filepath.Join(workflowDirectory, name), []byte(fmt.Sprintf(`on: workflow_call
+		if err := os.WriteFile(filepath.Join(workflowDirectory, name), fmt.Appendf(nil, `on: workflow_call
 jobs:
   delegated:
     uses: ./.github/workflows/%s
-`, next)), 0o600); err != nil {
+`, next), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1351,14 +1358,14 @@ jobs:
 		t.Fatal(err)
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	wantMessage := "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group."
 	assertWarning := func(t *testing.T, command, output string) {
 		t.Helper()
 		for _, want := range []string{
 			"buildkite-gha: " + command + ": warning:",
 			workflowPath + ":4:23:",
 			"[W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED]",
-			"cancel-in-progress is not enforced",
-			"Buildkite pipeline settings",
+			wantMessage,
 		} {
 			if !strings.Contains(output, want) {
 				t.Fatalf("stderr = %q, want %q", output, want)
@@ -1377,7 +1384,7 @@ jobs:
 		for _, want := range []string{
 			"! [W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED]",
 			workflowPath + ":4:23:",
-			"cancel-in-progress is not enforced",
+			wantMessage,
 		} {
 			if !strings.Contains(stdout.String(), want) {
 				t.Fatalf("stdout = %q, want %q", stdout.String(), want)
@@ -1397,7 +1404,7 @@ jobs:
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "warning" || report.Diagnostics[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || !strings.Contains(report.Diagnostics[0].Message, workflowPath+":4:23:") {
+		if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "warning" || report.Diagnostics[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || report.Diagnostics[0].Message != workflowPath+":4:23: "+wantMessage {
 			t.Fatalf("report diagnostics = %#v", report.Diagnostics)
 		}
 	})
@@ -1414,7 +1421,7 @@ jobs:
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "warning" || report.Diagnostics[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || !strings.Contains(report.Diagnostics[0].Message, workflowPath+":4:23:") {
+		if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "warning" || report.Diagnostics[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || report.Diagnostics[0].Message != workflowPath+":4:23: "+wantMessage {
 			t.Fatalf("profile report diagnostics = %#v", report.Diagnostics)
 		}
 	})
@@ -1490,7 +1497,7 @@ func TestProcessingAnnotationsUseActiveBoundedContext(t *testing.T) {
 		{
 			name: "skipped workflow",
 			publish: func(ctx context.Context, out processingOutput) {
-				out.annotateSkippedWorkflows(ctx, "push", []skippedWorkflow{{label: "CI", key: "ci", reason: "not applicable"}})
+				out.annotateSkippedWorkflows(ctx, "push", "", true, []skippedWorkflow{{label: "CI", key: "ci", reason: "not applicable"}})
 			},
 		},
 	} {
@@ -1859,6 +1866,36 @@ func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
 	}
 }
 
+func TestProcessingAnnotationRendersJobPermissionWarningGuidance(t *testing.T) {
+	repository := t.TempDir()
+	workflowPath := filepath.Join(repository, ".github", "workflows", "ci.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("on: push\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	report := compatibility.NewProcessingReport(workflowPath, "hosted")
+	report.ApplyWarnings(report.Workflow, []compiler.Warning{{
+		Code: "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS", Path: report.Workflow, Line: 5, Column: 3, Job: "build",
+		Message: "Job-level permissions are ignored for GITHUB_TOKEN. The top-level workflow permissions apply instead. This job's token has contents: read. Move this job's permissions block to the workflow top level. If you need per-job permissions, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
+	}})
+	_, body := processingAnnotation(report, sourceLinkContext{})
+	want := `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>
+<p><code>.github/workflows/ci.yml</code></p>
+<p><strong>Job-level permissions are ignored for GITHUB_TOKEN.</strong></p>
+<p><code>.github/workflows/ci.yml:5:3</code> · Job <code>build</code></p>
+<p>The top-level workflow permissions apply instead.</p>
+<p>This job&#39;s token has contents: read.</p>
+<p>Move this job&#39;s permissions block to the workflow top level.</p>
+<p>If you need per-job permissions, log an issue on <a href="https://github.com/buildkite/buildkite-gha" target="_blank">buildkite/buildkite-gha</a> so we can prioritise it.</p>
+`
+	if body != want {
+		t.Fatalf("annotation = %q, want %q", body, want)
+	}
+}
+
 func TestAnnotationCodeEscapesHTML(t *testing.T) {
 	if got, want := annotationCode("action` **not bold** & <tag> ``tail"), "<code>action` **not bold** &amp; &lt;tag&gt; ``tail</code>"; got != want {
 		t.Fatalf("annotationCode() = %q, want %q", got, want)
@@ -1913,7 +1950,7 @@ func TestProcessingAnnotationLeadsWithTheActionableDiagnostic(t *testing.T) {
 		{
 			name: "Docker provenance",
 			diagnostic: compatibility.Diagnostic{Code: "E_PROFILE",
-				Message: `Job "test" requires Docker without matching compiler provenance. Hosted runs support only verified Dockerfile actions and bounded job or service containers.`},
+				Message: `Job "test" requires Docker without matching compiler provenance. Hosted runs support only verified Docker actions and bounded job or service containers.`},
 			want: `Job "test" requires Docker without matching compiler provenance.`,
 		},
 		{

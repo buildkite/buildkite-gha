@@ -266,6 +266,22 @@ if [[ "$1" == buildx && "$2" == build ]]; then
   exit 0
 fi
 
+if [[ "$1" == pull ]]; then
+  [[ $# == 2 ]] || exit 49
+  printf '%s' "$2" > "$state/image-name"
+  [[ "$scenario" != pull-fail ]] || exit 50
+  exit 0
+fi
+
+if [[ "$1" == image && "$2" == inspect ]]; then
+  [[ $# == 5 && "$3" == --format && "$4" == '{{.Id}}' && "$5" == "$(cat "$state/image-name")" ]] || exit 51
+  [[ "$scenario" != inspect-image-fail ]] || exit 52
+  image_id='sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+  printf '%s' "$image_id" > "$state/image-name"
+  printf '%s\n' "$image_id"
+  exit 0
+fi
+
 if [[ "$1" == run ]]; then
 	printf '%s\0' "$@" > "$state/run-argv"
 	if [[ -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
@@ -304,9 +320,11 @@ if [[ "$1" == run ]]; then
       --workdir) workdir="${args[$((i + 1))]}" ;;
     esac
   done
+  printf '%s' "$name" > "$state/container-name"
+  printf '%s' "$owner" > "$state/owner"
   [[ -n "$files" && -n "$workspace" && -n "$runner_temp" && "$workdir" == /github/workspace ]] || exit 33
   [[ -d "$workspace" && -d "$runner_temp" ]] || exit 41
-  [[ "$name" == "$(cat "$state/image-name" | sed 's/-image-/-container-/')" ]] || exit 33
+	[[ "$name" == "$(cat "$state/container-name")" ]] || exit 33
   [[ "$owner" == "$(cat "$state/owner")" && $image_index -gt 0 ]] || exit 39
   printf '%s' "$files" > "$state/command-files-path"
   touch "$state/container"
@@ -401,7 +419,7 @@ func (fake fakeDocker) calls(t *testing.T) []fakeDockerCall {
 		t.Fatal(err)
 	}
 	var calls []fakeDockerCall
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		fields := strings.Split(line, "|")
 		metadata := fields[0]
 		config, ok := strings.CutPrefix(strings.SplitN(metadata, ";", 2)[0], "config=")
@@ -616,6 +634,178 @@ func TestRunDockerAppendsExactArgsAfterImage(t *testing.T) {
 	}
 	if slices.Contains(argv[:imageIndex], "--entrypoint") || slices.Contains(argv[:imageIndex], "--privileged") {
 		t.Fatalf("action args became Docker options: %#v", argv)
+	}
+}
+
+func TestRunPrebuiltDockerUsesPulledImageEntrypointAndExactArgs(t *testing.T) {
+	fake := newFakeDocker(t, "success")
+	t.Setenv("DOCKER_CONFIG", filepath.Join(t.TempDir(), "ambient-config"))
+	t.Setenv("DOCKER_HOST", "tcp://ambient.invalid:2375")
+	t.Setenv("DOCKER_CONTEXT", "ambient-context")
+	t.Setenv("BUILDX_BUILDER", "ambient-builder")
+	t.Setenv("BUILDKIT_HOST", "tcp://ambient.invalid:1234")
+	action := fakeDockerAction(t)
+	action.Path, action.SourceRoot, action.SourceDigest = "", "", ""
+	action.Image = "busybox@sha256:" + strings.Repeat("a", 64)
+	action.Entrypoint = "/bin/echo"
+	action.Args = []string{"", "  ", "--privileged", `$(echo no-shell)`}
+	if _, err := (Runner{Docker: fake.path}).runDockerAction(t.Context(), action); err != nil {
+		t.Fatal(err)
+	}
+	calls := fake.calls(t)
+	if len(calls) == 0 || !slices.Equal(calls[0].args, []string{"pull", action.Image}) {
+		t.Fatalf("first Docker call = %#v, want anonymous pull", calls)
+	}
+	if callIndex(calls, "buildx") >= 0 {
+		t.Fatalf("prebuilt action invoked buildx: %#v", calls)
+	}
+	argv := fakeDockerRunArgv(t, fake)
+	imageIndex := slices.Index(argv, "sha256:"+strings.Repeat("c", 64))
+	if imageIndex < 0 || !slices.Equal(argv[imageIndex+1:], action.Args) {
+		t.Fatalf("Docker run argv = %#v, want exact args after pulled image ID", argv)
+	}
+	entrypoint := slices.Index(argv[:imageIndex], "--entrypoint")
+	if entrypoint < 0 || entrypoint+1 >= imageIndex || argv[entrypoint+1] != action.Entrypoint {
+		t.Fatalf("Docker run argv = %#v, want metadata entrypoint", argv)
+	}
+	for _, call := range calls {
+		if call.config != calls[0].config || !strings.Contains(call.metadata, ";mode=700;entries=0;host=unset;context=unset;builder=unset;buildkit=unset") {
+			t.Fatalf("Docker call did not use one empty private config: %#v", call)
+		}
+	}
+	if _, err := os.Stat(calls[0].config); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("private Docker config remains: %v", err)
+	}
+}
+
+func TestRunJobPullsPrebuiltDockerImageBeforeSteps(t *testing.T) {
+	requireLinuxAMD64(t)
+	fake := newFakeDocker(t, "success")
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/prebuilt.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: prebuilt\n")
+	actionPath := ".github/actions/prebuilt"
+	image := "busybox@sha256:" + strings.Repeat("b", 64)
+	writeFixtureFile(t, workspace, actionPath+"/action.yml", `name: Prebuilt Docker
+inputs:
+  message:
+    default: from-default
+runs:
+  using: docker
+  image: docker://`+image+`
+  entrypoint: /bin/echo
+  args:
+    - ${{ inputs.message }}
+`)
+	lockID := "a-0000000000000001"
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "prebuilt", Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID}}})
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath)), DockerImage: image}}
+	result, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	calls := fake.calls(t)
+	pull, run := callIndex(calls, "pull", image), callIndex(calls, "run")
+	if pull < 0 || run < pull {
+		t.Fatalf("prebuilt image was not pulled before execution: %#v", calls)
+	}
+	if calls[pull].config != calls[run].config || !strings.Contains(calls[pull].metadata, ";entries=0;") {
+		t.Fatalf("pull and run did not share an empty private Docker config: %#v", calls)
+	}
+	argv := fakeDockerRunArgv(t, fake)
+	imageIndex := slices.Index(argv, "sha256:"+strings.Repeat("c", 64))
+	if imageIndex < 0 || !slices.Equal(argv[imageIndex+1:], []string{"from-default"}) {
+		t.Fatalf("Docker run argv = %#v, want evaluated default after pulled image ID", argv)
+	}
+	if _, err := os.Stat(calls[pull].config); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("job private Docker config remains: %v", err)
+	}
+
+	mismatchFake := newFakeDocker(t, "success")
+	mismatched := job
+	mismatched.Actions = append([]plan.ActionLock(nil), job.Actions...)
+	mismatched.Actions[0].DockerImage = "alpine:3.20"
+	secondActionPath := ".github/actions/prebuilt-second"
+	writeFixtureFile(t, workspace, secondActionPath+"/action.yml", `name: Second prebuilt Docker
+runs:
+  using: docker
+  image: docker://`+image+`
+`)
+	secondLockID := "a-0000000000000002"
+	mismatched.Steps = append(mismatched.Steps, plan.Step{ID: "prebuilt-second", Kind: "uses", Uses: "./" + secondActionPath, Action: &plan.ActionSelector{Lock: secondLockID}})
+	mismatched.Actions = append(mismatched.Actions, plan.ActionLock{ID: secondLockID, Source: "workspace", Path: secondActionPath, SourceDigest: digestTree(t, filepath.Join(workspace, secondActionPath)), DockerImage: image})
+	if _, err := (Runner{Docker: mismatchFake.path}).RunJob(t.Context(), mismatched, workspace); err == nil || !strings.Contains(err.Error(), "metadata image \""+image+"\" does not match planned image \"alpine:3.20\"") {
+		t.Fatalf("RunJob() mismatched planned image error = %v", err)
+	}
+	if calls := mismatchFake.calls(t); callIndex(calls, "pull", "alpine:3.20") < 0 || callIndex(calls, "pull", image) < 0 || callIndex(calls, "run") >= 0 {
+		t.Fatalf("mismatched plan Docker calls = %#v, want only planned image pulls", calls)
+	}
+
+	unplannedFake := newFakeDocker(t, "success")
+	unplanned := job
+	unplanned.Actions = append([]plan.ActionLock(nil), job.Actions...)
+	unplanned.Actions[0].DockerImage = ""
+	if _, err := (Runner{Docker: unplannedFake.path}).RunJob(t.Context(), unplanned, workspace); err == nil || !strings.Contains(err.Error(), "metadata image \""+image+"\" does not match planned image \"\"") {
+		t.Fatalf("RunJob() unplanned metadata image error = %v", err)
+	}
+	if _, err := os.Stat(unplannedFake.transcript); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unplanned metadata image Docker transcript exists: %v", err)
+	}
+}
+
+func TestRunPrebuiltDockerPullFailureCleansPrivateConfig(t *testing.T) {
+	fake := newFakeDocker(t, "pull-fail")
+	action := fakeDockerAction(t)
+	action.Image = "alpine:3.20"
+	if _, err := (Runner{Docker: fake.path}).runDockerAction(t.Context(), action); err == nil || !strings.Contains(err.Error(), "pull prebuilt Docker action image") {
+		t.Fatalf("runDockerAction() error = %v, want pull failure", err)
+	}
+	calls := fake.calls(t)
+	if len(calls) != 3 {
+		t.Fatalf("Docker pull calls = %#v, want three bounded retries", calls)
+	}
+	if _, err := os.Stat(calls[0].config); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("private Docker config remains after pull failure: %v", err)
+	}
+}
+
+func TestRunPrebuiltDockerInspectFailureCleansPrivateConfig(t *testing.T) {
+	fake := newFakeDocker(t, "inspect-image-fail")
+	action := fakeDockerAction(t)
+	action.Image = "alpine:3.20"
+	if _, err := (Runner{Docker: fake.path}).runDockerAction(t.Context(), action); err == nil || !strings.Contains(err.Error(), "inspect prebuilt Docker action image") {
+		t.Fatalf("runDockerAction() error = %v, want image inspection failure", err)
+	}
+	calls := fake.calls(t)
+	if callIndex(calls, "pull", action.Image) < 0 || callIndex(calls, "image", "inspect") < 0 || callIndex(calls, "run") >= 0 {
+		t.Fatalf("Docker calls = %#v, want pull and failed inspection only", calls)
+	}
+	if _, err := os.Stat(calls[0].config); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("private Docker config remains after inspect failure: %v", err)
+	}
+}
+
+func TestRunPrebuiltDockerFailureCleansOwnedContainer(t *testing.T) {
+	fake := newFakeDocker(t, "run-fail")
+	action := fakeDockerAction(t)
+	action.Image = "alpine:3.20"
+	result, err := (Runner{Docker: fake.path}).runDockerAction(t.Context(), action)
+	if err == nil || !strings.Contains(err.Error(), `run Docker action "fake Docker"`) {
+		t.Fatalf("runDockerAction() error = %v, want run failure", err)
+	}
+	if result.Outputs["container"] != "ran" {
+		t.Fatalf("prebuilt Docker failure effects = %#v", result)
+	}
+	calls := fake.calls(t)
+	if callIndex(calls, "stop", "--time", "2") < 0 || callIndex(calls, "rm", "--force") < 0 {
+		t.Fatalf("prebuilt Docker container cleanup was skipped: %#v", calls)
+	}
+	if callIndex(calls, "image", "rm") >= 0 {
+		t.Fatalf("prebuilt Docker cleanup removed a shared pulled image: %#v", calls)
+	}
+	if _, err := os.Stat(calls[0].config); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("private Docker config remains after run failure: %v", err)
 	}
 }
 
@@ -2096,12 +2286,10 @@ func TestBackgroundSupervisorCommitsCompletedTaskExactlyOnceUnderContention(t *t
 	results := make(chan []stepExecution, callers)
 	var group sync.WaitGroup
 	for range callers {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+		group.Go(func() {
 			<-start
 			results <- supervisor.commitCompleted([]*backgroundTask{task})
-		}()
+		})
 	}
 	close(start)
 	group.Wait()
@@ -3043,6 +3231,20 @@ func TestResolveActionInputsUsesRunnerDebugDefaultUnlessExplicitlySupplied(t *te
 	inputs, err = resolveActionInputs(action, map[string]string{"DEBUG": "true"}, expression.Context{})
 	if err != nil || inputs["debug"] != "true" {
 		t.Fatalf("explicit debug input = %#v, %v; want true", inputs, err)
+	}
+}
+
+func TestResolveActionInputsUsesEmptyCheckRunIDDefaultUnlessExplicitlySupplied(t *testing.T) {
+	checkRunIDDefault := "${{ job.check_run_id }}"
+	action := metadata.Metadata{Inputs: map[string]metadata.Input{"check-run-id": {Default: &checkRunIDDefault}}}
+
+	inputs, err := resolveActionInputs(action, nil, expression.Context{})
+	if err != nil || inputs["check-run-id"] != "" {
+		t.Fatalf("check-run-id default = %#v, %v; want empty", inputs, err)
+	}
+	inputs, err = resolveActionInputs(action, map[string]string{"CHECK-RUN-ID": "1234"}, expression.Context{})
+	if err != nil || inputs["check-run-id"] != "1234" {
+		t.Fatalf("explicit check-run-id input = %#v, %v; want 1234", inputs, err)
 	}
 }
 
@@ -5120,7 +5322,7 @@ func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testin
 	if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	nodeBytes := []byte(fmt.Sprintf("#!/bin/sh\nif [ \"${1:-}\" = --version ]; then printf 'v24.18.0\\n'; else printf '%%s|MISE_DATA_DIR=%%s\\n' \"$*\" \"${MISE_DATA_DIR-unset}\" >> %q; fi\n", log))
+	nodeBytes := fmt.Appendf(nil, "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then printf 'v24.18.0\\n'; else printf '%%s|MISE_DATA_DIR=%%s\\n' \"$*\" \"${MISE_DATA_DIR-unset}\" >> %q; fi\n", log)
 	if err := os.WriteFile(node, nodeBytes, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -5207,6 +5409,29 @@ func TestDockerAction(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "masked docker probe: ***") {
 		t.Errorf("Docker logs = %q, want masked probe", logs.String())
+	}
+}
+
+func TestPrebuiltDockerAction(t *testing.T) {
+	docker := requireDocker(t)
+	var logs bytes.Buffer
+	result, err := (Runner{Docker: docker, Stdout: &logs, Stderr: &logs}).runDockerAction(t.Context(), dockerAction{
+		Name:       "prebuilt Docker",
+		Image:      "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028",
+		Entrypoint: "/bin/sh",
+		Args: []string{"-c", `printf 'prebuilt=ran\n' >> "$GITHUB_OUTPUT"
+printf '%s\n' '::add-mask::prebuilt-secret'
+printf '%s\n' 'masked prebuilt probe: prebuilt-secret'`},
+		Workspace: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("runDockerAction() error = %v", err)
+	}
+	if result.Outputs["prebuilt"] != "ran" {
+		t.Fatalf("prebuilt Docker result = %#v", result)
+	}
+	if strings.Contains(logs.String(), "prebuilt-secret") || !strings.Contains(logs.String(), "masked prebuilt probe: ***") {
+		t.Fatalf("prebuilt Docker logs were not masked: %q", logs.String())
 	}
 }
 
@@ -7365,7 +7590,7 @@ func writeNodeExecutable(t *testing.T, path string, major int) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(fmt.Sprintf("#!/bin/sh\nprintf 'v%d.99.0\\n'\n", major)), 0o755); err != nil {
+	if err := os.WriteFile(path, fmt.Appendf(nil, "#!/bin/sh\nprintf 'v%d.99.0\\n'\n", major), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }

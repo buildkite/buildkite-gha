@@ -296,7 +296,7 @@ buildkite-gha compile \
 buildkite-gha upload .github/workflows/ci.yml
 ```
 
-The importer must run on Linux/amd64 or Darwin/arm64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
+The importer must run on Linux/amd64 or Darwin/arm64 with Buildkite agent v3.129 or newer, `BUILDKITE=true`, and `BUILDKITE_STEP_KEY`.
 
 The hidden, zero-argument `buildkite-gha plugin` entry point reads plugin
 configuration from `BUILDKITE_PLUGIN_CONFIGURATION`. It accepts:
@@ -306,10 +306,13 @@ configuration from `BUILDKITE_PLUGIN_CONFIGURATION`. It accepts:
 - plugin-owned `version`, `source-ref`, and `minimum-release-age` fields
 - the Boolean `experimental-runner-user` field
 
-Each workflow path must be a regular, tracked `.yml` or `.yaml` file inside the
-repository. Directories and globs are rejected. The optional `oidc` object
-accepts non-empty `claims`, `aws-session-tags`, and `subject-claim` values.
-Unknown fields and invalid values fail before upload.
+Missing or untracked workflow paths warn and are skipped. If every configured
+path is missing or untracked, the plugin succeeds without uploading a pipeline.
+Every present path must be a regular, tracked `.yml` or `.yaml` file inside the
+repository. Directories, tracked files missing from the checkout, symlinks, and
+globs are rejected. The optional `oidc` object accepts non-empty `claims`,
+`aws-session-tags`, and `subject-claim` values. Unknown fields and invalid values
+fail before upload.
 
 The plugin resolves relative workflow paths from `BUILDKITE_BUILD_CHECKOUT_PATH`,
 not the command hook's working directory.
@@ -317,6 +320,54 @@ not the command hook's working directory.
 The importer reuses its verified executable for jobs on the same platform. It
 downloads the other platform's distribution from the same release only when a
 workflow needs it. Runner mappings apply to generated jobs, not the importer.
+
+### Configure generated-job cache volumes
+
+An explicit runner mapping can attach one Buildkite Hosted cache volume to each
+generated job using that mapping:
+
+```yaml
+plugins:
+  - github-actions#latest:
+      workflow: .github/workflows/ci.yml
+      runners:
+        - runs-on: ubuntu-latest
+          queue: hosted
+          cache:
+            paths:
+              - /home/runner/.gradle/caches
+              - /home/runner/.gradle/wrapper
+            name: gradle-dependencies
+            size: 40g
+```
+
+`cache.paths` is a required, non-empty list of unique absolute paths. `name`
+and `size` are optional. Names follow Buildkite's 100-character
+letters-numbers-hyphens format and may contain `${BUILDKITE_*}` variables.
+Sizes use `Ng` and must be at least `20g`. Without a name or size, Buildkite
+uses its pipeline-scoped name and 20 GB defaults.
+
+Each Buildkite step supports one cache volume. When a job also needs the
+internally managed mise cache, `buildkite-gha` adds the mise path to the same
+volume. A configured name and size apply to that combined volume; otherwise,
+the managed mise name and Buildkite's default size remain unchanged. Jobs with
+neither configuration emit no `cache` attribute.
+
+Runner cache volumes are not supported for workflow jobs that set `container`.
+
+Generated Linux jobs run as `runner`. Configured cache paths are made writable
+by that user after the bootstrap verifies that they target the Buildkite cache
+volume. Prefer narrowly scoped paths.
+For example, caching an entire Gradle User Home also persists `init.d` scripts
+and other executable configuration, increasing the impact of cache poisoning.
+Caching only `caches` and `wrapper` reduces that exposure, but a cache-volume
+miss does not provide setup-gradle's archive-cache fallback once the mounted
+`caches` directory exists.
+
+Cache volumes are best-effort accelerators, scoped to the Buildkite pipeline
+and cluster. They commit after successful jobs and are abandoned after failed
+jobs. Do not use them as durable or trusted storage. See [Buildkite cache
+volumes](https://buildkite.com/docs/agent/buildkite-hosted/cache-volumes).
 
 ### Select workflows
 
@@ -403,7 +454,7 @@ but cannot grant admission. Malformed event data stops the import.
 Buildkite owns schedule identity, so every `on.schedule` workflow is eligible
 for every Buildkite scheduled build.
 
-After all applicable workflows have been attempted, the command uploads the exact executable, content-addressed plans, and synthetic failure steps before running one:
+After all applicable workflows have been attempted, the command uploads the exact executable, content-addressed plans, and synthetic failure steps in one artifact batch with a concurrency limit of 8. It then runs one:
 
 ```sh
 buildkite-agent pipeline upload --no-interpolation --reject-secrets
@@ -475,6 +526,12 @@ outcome, client version, duration, and bounded diagnostic codes and severities.
 For an unsuccessful command, they also contain the final 1,024 bytes of
 normalized user-visible error output. `error_message_truncated` says whether
 earlier output was omitted.
+
+Failed runs also carry a failure phase and a code from a fixed set. The code
+separates workflow-authored process exits (`E_STEP_PROCESS_EXIT`) from
+unsupported-feature rejections (`E_UNSUPPORTED_FEATURE`) and runtime integrity
+failures (`E_RUNTIME_INTEGRITY`), so a failing test suite is not counted as a
+compatibility gap.
 
 Buildkite adds organization, pipeline, build, and job identifiers on the
 server. The client does not send workflow or event content, environment

@@ -5,6 +5,8 @@
 This page is the production contract for the `hosted` profile used by `upload`
 and the Buildkite plugin. If a feature is not listed, treat it as unsupported.
 
+buildkite-gha requires Buildkite agent v3.129 or newer.
+
 The released plugin supports Linux x86-64 and native macOS arm64 importers and
 jobs. It sets the matching `runner.os` and `runner.arch` values. Runner labels
 select a platform; they do not promise GitHub image, toolchain, or Xcode parity.
@@ -39,7 +41,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `python`, and custom shell templates. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local and literal public GitHub workflows with static inputs, deferred string inputs from direct needs outputs, and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. |
-| [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile actions on Linux only. |
+| [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile and public prebuilt-image actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Reusable-workflow jobs use the top-level workflow permissions. |
 | [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs and locally inherited or explicitly mapped reusable jobs resolve through the destination job's Buildkite secret authority. |
@@ -80,15 +82,18 @@ Steps remain inside one job because they share a workspace, environment files, a
 ### Aggregate workflow upload
 
 The plugin accepts either one `workflow` path or a non-empty `workflows` array.
-Each path must be a regular, tracked `.yml` or `.yaml` file inside the
-repository. Directories, missing or untracked files, outside paths, symlinks,
-and globs fail. A custom importer may upload one explicit regular workflow from
-outside the repository.
+Missing or untracked paths warn and are skipped, so removing a workflow does not
+require a simultaneous pipeline configuration change. If every configured path
+is missing or untracked, the importer succeeds without uploading a pipeline.
+Every present path must be a regular, tracked `.yml` or `.yaml` file inside the
+repository. Directories, tracked files missing from the checkout, outside paths,
+symlinks, and globs fail. A custom importer may upload one explicit regular
+workflow from outside the repository.
 
 Before assigning workflow identities and job keys, upload canonicalizes, sorts,
 and deduplicates the paths.
 
-All runnable workflows use one artifact and pipeline transaction:
+All remaining runnable workflows use one artifact and pipeline transaction:
 
 - A compiled workflow becomes a group labeled `:github: workflow ·
   <workflow-name>`. An unnamed workflow uses its canonical path. A resolved,
@@ -99,9 +104,11 @@ All runnable workflows use one artifact and pipeline transaction:
 - GitHub events publish GitHub checks. Origin events publish Origin checks.
 - A workflow that does not declare the event becomes one top-level skipped step
   with no plan artifacts.
-- An importer annotation lists workflows skipped by event or filters, explains
-  each mismatch, and links to the generated step. If publication fails, upload
-  warns but still succeeds.
+- An importer annotation links to each workflow skipped by event or filters. It
+  shows configured events for event mismatches and the specific reason for
+  filter mismatches. For manual builds, it explains the `workflow_dispatch`
+  mapping and how to run the workflows. It also states when every workflow was
+  skipped. If publication fails, upload warns but still succeeds.
 
 Workflow names, group keys, and provider-check names stay the same across
 events; only an appended run title can vary. Groups and replacement steps
@@ -120,9 +127,10 @@ with a failing top-level step. The step:
 - limits the check summary to 65,535 bytes
 - exits with status 1
 
-Other workflows continue compiling. Parse, event-input, admission, artifact,
-and upload failures still abort the complete transaction. Upload never publishes
-a partial pipeline.
+Other workflows continue compiling. Missing or untracked configured paths are
+omitted before the transaction. Invalid path states, parse, event-input,
+admission, artifact, and upload failures still abort the complete transaction.
+Upload never publishes a partial pipeline.
 
 If a workflow has both a compiler error and a skip reason, the compiler error
 takes precedence.
@@ -309,6 +317,7 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Caller-visible aggregate results.
 - Outputs mapped directly from `jobs.<job>.outputs.<name>`.
 - Call-level `if` over caller `github`, `vars`, `inputs`, direct `needs`, and status functions.
+- Workflow-level concurrency in local and public called workflows. Groups may use the called workflow's static inputs. Each static call-matrix instance gets its own workflow gate.
 
 **❌ Unsupported:**
 
@@ -318,7 +327,6 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Compound `needs`-dependent inputs or dynamic matrices.
 - Input defaults that reference `inputs`.
 - Literal or compound output expressions.
-- Top-level concurrency in the called workflow.
 
 Job-level `uses`, `with`, and `secrets` follow these boundaries.
 
@@ -441,9 +449,47 @@ jobs:
     concurrency: deploy-${{ matrix.target }}
 ```
 
+Called workflows keep workflow-level concurrency around all flattened jobs. Inputs can derive the group from a caller matrix:
+
+```yaml
+# .github/workflows/deploy.yml
+on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        required: true
+
+concurrency: deploy-${{ inputs.target }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps: [{run: ./plan}]
+  apply:
+    needs: plan
+    runs-on: ubuntu-latest
+    steps: [{run: ./apply}]
+```
+
+```yaml
+jobs:
+  deploy:
+    strategy:
+      matrix:
+        target: [staging, production]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      target: ${{ matrix.target }}
+```
+
+Nested called workflows keep nested gates. Jobs within one called workflow remain parallel except for their declared `needs` and job-level concurrency. Calls with `if` or `needs`, and jobs or nested called workflows that reuse an enclosing workflow group, are unsupported because Buildkite cannot preserve GitHub's admission order for those cases.
+
 Buildkite queues every waiting entry. It does not replace GitHub's existing pending entry. The `queue` key is unsupported.
 
-Workflow-level literal or expression-resolved `cancel-in-progress: true` emits a warning and does not cancel. Job-level cancellation remains unsupported. Buildkite **Cancel Intermediate Builds** and **Skip Intermediate Builds** settings can approximate same-branch cancellation.
+When workflow-level `cancel-in-progress` is `true`, Buildkite warns and leaves superseded builds running. The same behavior applies when an expression resolves to `true` and when a called workflow sets it. Job-level `cancel-in-progress` is unsupported.
+
+To cancel earlier running builds on the same branch, turn on [Cancel Intermediate Builds](https://buildkite.com/docs/pipelines/configure/canceling-builds#cancel-running-intermediate-builds) under pipeline **Settings > Builds**. This setting works by branch, not by concurrency group.
 
 Cancel the whole Buildkite build rather than one job when a workflow-level concurrency gate is active.
 
@@ -531,6 +577,11 @@ platform, and immutable Linux image. The importer applies that target verbatim
 and publishes returned fallback warnings as annotations. The server rejects
 selectors that require an incompatible operating system or architecture.
 
+Explicit mappings can also attach one [Buildkite Hosted cache
+volume](cli.md#configure-generated-job-cache-volumes) to generated jobs. This
+configuration is outside the GitHub workflow and does not change workflow
+syntax or action inputs.
+
 `validate --profile hosted` has no job-scoped API and admits only the local
 `macos-latest` preset.
 
@@ -538,9 +589,9 @@ selectors that require an incompatible operating system or architecture.
 
 | Key | Status | Behavior |
 | --- | --- | --- |
-| `matrix` | 🟡 Supported subset | Literal rows or compile-time `github`, `event`, `vars`, and `fromJSON` values. |
-| `include`, `exclude` | 🟡 Supported subset | Static combinations. |
-| `max-parallel` | 🟡 Supported subset | Literal value. |
+| `matrix` | 🟡 Supported subset | Literal rows. Authored values and expression-valued definitions can use compile-time `github`, `event`, `vars`, reusable-workflow `inputs`, and `fromJSON` values. |
+| `include`, `exclude` | 🟡 Supported subset | Literal combinations or expressions that resolve to arrays of objects during compilation. |
+| `max-parallel` | 🟡 Supported subset | Literal value on ordinary job matrices. Reusable-workflow call matrices with more than one instance are rejected because flattening cannot preserve invocation-level parallelism. |
 | `fail-fast` | ➖ Accepted, no effect | A failed matrix entry does not cancel its siblings. |
 
 A strategy can combine parallelism, static matrix values, and exclusions:
@@ -556,11 +607,34 @@ strategy:
         os: ubuntu-24.04
 ```
 
-A job may expand to at most 256 instances. Matrices derived from `needs` or `steps` are unsupported.
+Whole matrices, dimensions, and `include` or `exclude` lists can use static JSON:
+
+```yaml
+strategy:
+  matrix:
+    os: ${{ fromJSON(vars.OPERATING_SYSTEMS) }}
+    include: ${{ fromJSON(inputs.EXTRA_JOBS) }}
+    exclude: ${{ fromJSON(github.event.matrix_exclusions) }}
+```
+
+Static matrices on reusable-workflow calls compose with static matrices in
+called workflows, including nested calls. Each call instance receives its
+concrete `matrix` values and each called workflow receives its declared
+`inputs` before its matrix expands.
+
+A job may expand to at most 256 instances. All matrix values must be available
+before Buildkite pipeline generation. Expressions derived from `needs` outputs
+or `steps` require jobs to run before the final graph can be generated, so they
+remain unsupported. The compiler validates a narrow `needs.<job>.outputs.<name>`
+runtime-matrix shape, but does not upload a continuation pipeline because the
+transport has no authoritative current-attempt and durable idempotency fence.
 
 ### Containers and services
 
 **🟡 Supported subset.** Linux jobs support job containers and GitHub-compatible services. A typical PostgreSQL service works without Buildkite-specific syntax:
+
+Runner-mapped Buildkite cache volumes are not supported for jobs that set
+`container`.
 
 ```yaml
 services:
@@ -595,7 +669,7 @@ A service with a Docker health check must become healthy before steps run. A ser
 
 Cleanup removes the job container, emits masked and bounded service logs, then removes services in declaration order, the network, newly created volumes, and private Docker configuration. Remaining owned resources fail the job. Docker resources are not a security or resource-isolation boundary: the hosted queue must isolate the whole job and enforce host CPU, memory, disk, and network limits. See the [security model](security.md#isolate-the-whole-job).
 
-macOS jobs reject containers, services, Dockerfile actions, and Docker capability.
+macOS jobs reject containers, services, Docker actions, and Docker capability.
 
 ## Step syntax
 
@@ -646,7 +720,7 @@ Use an interpreter installed by an earlier step or included in the job image:
   run: conda info
 ```
 
-A `uses` step may call a supported local or public action. Action inputs under `with` may use supported direct interpolation. `docker://` actions and explicit Docker action entrypoints are rejected.
+A `uses` step may call a supported local or public action. Action inputs under `with` may use supported direct interpolation. Direct workflow `uses: docker://...` actions are rejected; prebuilt-image declarations belong in locked action metadata.
 
 Action steps can call public and local actions:
 
@@ -700,7 +774,7 @@ Outputs, environment changes, and failures become visible at the covering wait. 
 | Debug and matcher commands | ➖ Accepted, no effect | Consumed without presentation behavior. |
 | `notice`, command echo control, other legacy commands | ❌ Unsupported | Not implemented. |
 
-Job-scoped annotations, including step summaries and generated workflow failure diagnostics, require Buildkite agent v3.112 or newer. The total job summary is limited to 1 MiB.
+The total job summary is limited to 1 MiB.
 
 ## Expressions and contexts
 
@@ -827,7 +901,9 @@ After runner setup, step runtime fields and job outputs can also use
 `RUNNER_TEMP`. Other runner fields and compile-time positions that require
 runner identity are unsupported. Action metadata input defaults may also use
 direct `runner.debug`, which resolves to the string `false` because Buildkite
-has no equivalent step-debug mode.
+has no equivalent step-debug mode. `job.check_run_id` defaults, including the
+static indexed spelling, resolve to an empty string because Buildkite does not
+create a GitHub check run. Other `job` identity fields remain unsupported.
 
 A runtime interpolation can read a verified upstream output directly:
 
@@ -902,20 +978,56 @@ parts with values supported by their runtime surface. Action references in
 | Private action | ❌ Unsupported | No private action source access. |
 | JavaScript action | ✅ Supported | Declares `node16`, `node20`, or `node24`. |
 | Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; `bash`, `sh`, `python`, or a custom shell template for `run`; literal `continue-on-error`. |
-| Dockerfile action | 🟡 Supported subset | Verified local or public Dockerfile action on Linux with optional bounded `runs.args`. Rejected on macOS, including through a composite action. |
-| `docker://` action | ❌ Unsupported | Rejected during validation. |
+| Docker action | 🟡 Supported subset | Verified local or public Dockerfile or prebuilt-image action on Linux with optional bounded `runs.args`. Rejected on macOS, including through a composite action. |
+| Direct workflow `uses: docker://...` action | ❌ Unsupported | Rejected during validation. |
 | Top-level action metadata `env` | ➖ Accepted, no effect | Any valid YAML value is discarded. It is not evaluated, injected, retained in plans, or used to request secrets or tokens. |
 
 Mutable public refs are resolved during upload, then locked to a commit. The importer lazily requests one Buildkite action-source token and reuses it across all workflow roots and nested composite actions. This token authenticates only public metadata requests for repositories other than the credential repository; the credential repository and codeload requests remain anonymous. If token issuance is unavailable during rollout, resolution safely falls back to anonymous GitHub API access. Exact lowercase commit SHAs need no GitHub API lookup. Complete source trees are verified again at runtime.
 
 Nested calls from a repository-local composite must be local. Public composites may call local children or other public actions; every child is resolved and locked.
 
+Prebuilt-image actions declare `docker://` in action metadata, not in a
+workflow step:
+
+```yaml
+# action.yml
+name: Check formatting
+inputs:
+  path:
+    default: .
+runs:
+  using: docker
+  image: docker://ghcr.io/example/formatter@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  entrypoint: /usr/local/bin/formatter
+  args:
+    - ${{ inputs.path }}
+```
+
+```yaml
+# .github/workflows/check.yml
+steps:
+  - uses: example/formatter-action@v2
+    with:
+      path: .
+```
+
+The compiler locks the action source that declares the image. At job start,
+the runtime pulls each declared image anonymously through an empty private
+Docker configuration. Action metadata has no registry-credential field, so
+private images and ambient Docker credentials are unsupported. Digest
+references are supported. Mutable tags resolve when the job starts and can
+drift between jobs; use a digest when image immutability matters.
+
+Direct workflow syntax such as `uses: docker://alpine:3.20` remains
+unsupported. It does not have the locked action-source provenance used by
+metadata-declared images.
+
 Dockerfile actions require exact `runs.image: Dockerfile`. Optional `runs.args`
 must be an ordered YAML string array. Each item becomes one argument after the
-image name, without a shell or an entrypoint override. Empty strings,
-whitespace, and shell metacharacters remain literal. Omitted or empty args keep
-the image `CMD`; any non-empty array replaces `CMD` while preserving the image
-`ENTRYPOINT`.
+image name, without a shell. Empty strings, whitespace, and shell metacharacters
+remain literal. Omitted or empty args keep the image `CMD`; any non-empty array
+replaces `CMD` while preserving the image `ENTRYPOINT`. A prebuilt-image
+action's optional `runs.entrypoint` overrides the image `ENTRYPOINT`.
 
 Args may contain literals and direct `inputs.<name>` or `inputs['name']`
 interpolation. Operators, functions, whole or dynamic inputs, and every other
@@ -923,10 +1035,10 @@ context are rejected. Invocation inputs and metadata defaults resolve before
 args evaluation. Args remain in digest-bound action metadata and are not stored
 in job plans.
 
-Dockerfile actions cannot declare explicit entrypoints or pre/post lifecycle,
-or request credentials, volumes, arbitrary options, or privileged mode. An arg
-such as `--privileged` remains a container argument; it cannot become a Docker
-option.
+Dockerfile actions cannot declare explicit entrypoints. Docker actions cannot
+declare pre/post lifecycle or request credentials, volumes, arbitrary options,
+or privileged mode. An arg such as `--privileged` remains a container argument;
+it cannot become a Docker option.
 
 Action metadata parsing remains strict for every other unknown top-level field and for unknown nested fields. The inert top-level `env` exception does not replace workflow or action-step environments, populate `runs.env`, or add `GITHUB_TOKEN` authority.
 
@@ -944,7 +1056,7 @@ Pre conditions use the status and action-scoped environment available when prepa
 
 ### Checkout action
 
-**🟡 Supported subset.** The final v1.2.0, v2.8.0, and v3.7.0 release commits are admitted exactly. Resolved commits in the v4-and-later range of the static [`actions/checkout` upstream `main` snapshot](https://github.com/actions/checkout/tree/f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a) are also admitted. The following known releases remain admitted even when their commits aren't reachable from that snapshot:
+**🟡 Supported subset.** Immutable commits captured from frozen upstream tags, `main`, `master`, and `releases/v1` through `releases/v6` snapshots are admitted. The snapshot includes historical development and release commits across v1 through v7. These known releases identify the principal contracts:
 
 | Release | Commit |
 | --- | --- |
@@ -957,40 +1069,73 @@ Pre conditions use the status and action-scoped environment available when prepa
 | v7.0.0 corpus pin | [`9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`](https://github.com/actions/checkout/tree/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0) |
 | v7.0.1 | [`3d3c42e5aac5ba805825da76410c181273ba90b1`](https://github.com/actions/checkout/tree/3d3c42e5aac5ba805825da76410c181273ba90b1) |
 
-Mutable refs work only while they resolve to the upstream `main` snapshot or a known release above. Every admitted commit uses the native adapter; the upstream JavaScript doesn't run. Each admitted release accepts only the inputs it declares, so earlier releases reject later inputs. Other pre-v3.7.0 commits and unknown commits are unsupported. Compilation emits `W_CHECKOUT_LEGACY_RELEASE` for v1.2.0 and v2.8.0 to nudge an upgrade to v4 or later. Maintainers can update the v4-and-later snapshot with `go generate ./internal/action/integration`; this doesn't widen release admission.
+Mutable refs work only while they resolve to a commit in the frozen snapshots. Every admitted commit uses the native adapter; the upstream JavaScript doesn't run. Each commit retains the inputs, full-history default, and outputs declared by its upstream contract. For example, early v2 commits reject later v2 inputs, and v4.0 and v4.1 commits don't expose the `ref` and `commit` outputs. Commits absent from the snapshots and manifests with unsupported output contracts remain unsupported. Compilation emits `W_CHECKOUT_LEGACY_RELEASE` for v1.2.0 and v2.8.0 to nudge an upgrade to v4 or later.
 
-The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean top-level directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to each fetch command and verified submodule fetch command and are never persisted.
+Maintainers can refresh the frozen refs and per-commit profiles with `go generate ./internal/action/integration`. Regeneration admits only commits reachable from the selected upstream tags and branches at that time; it doesn't blanket-admit future commits.
+
+Buildkite runs v1.2.0 like v1 and v2.8.0 like v2, and warns about their differences from v4 and later. Neither release sets the `ref` or `commit` outputs added in v4.2.0. v1.2.0 also fetches full history by default when `fetch-depth` is omitted. Upgrade only if your workflow needs those outputs or different v1 history behavior. Otherwise, keep the current version.
+
+The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean nested directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to the Git commands that fetch repository, LFS, or submodule data and are never persisted.
+
+An explicit input is accepted only when the snapshotted manifest for that commit declares it. The following value restrictions then apply:
 
 | Input | Supported values |
 | --- | --- |
 | `repository` | Omitted, or the event `owner/repo`. |
 | `ref` | Omitted, empty, a lowercase 40-hex commit, or a static branch in the event repository. A direct `github.sha` or `needs.<job>.outputs.<name>` expression must resolve at runtime to the exact event SHA. |
 | `token` | Omitted only. |
-| `ssh-key`, `ssh-known-hosts` | v2.8.0 and later: omitted or empty. v1.2.0: omitted. |
-| `ssh-strict` | v2.8.0 and later: omitted or `true`. v1.2.0: omitted. |
-| `ssh-user` | v4 and later: omitted or `git`. Earlier releases: omitted. |
-| `persist-credentials` | v2.8.0 and later: omitted or `false`. v1.2.0: omitted. |
-| `path` | Omitted, empty, or one clean non-`.git` top-level workspace directory. |
-| `clean` | Omitted or `true`; the root workspace or selected path must be empty or absent. |
-| `filter` | v4 and later: omitted or empty. Earlier releases: omitted. |
-| `sparse-checkout` | v3.7.0 and later: omitted or empty. Earlier releases: omitted. |
-| `sparse-checkout-cone-mode` | v3.7.0 and later: omitted or `true`. Earlier releases: omitted. |
-| `fetch-depth` | Omitted or a nonnegative integer; `0` fetches full history. v1.2.0 fetches full history when omitted. |
-| `fetch-tags` | v3.7.0 and later: omitted, `true`, or `false`. Earlier releases: omitted. |
-| `show-progress` | v4 and later: omitted, `true`, or `false`. Earlier releases: omitted. |
-| `lfs` | Omitted or `false`. |
+| `ssh-key`, `ssh-known-hosts` | When declared by the commit: omitted or empty. Otherwise omitted. |
+| `ssh-strict` | When declared by the commit: omitted or `true`. Otherwise omitted. |
+| `ssh-user` | When declared by the commit: omitted or `git`. Otherwise omitted. |
+| `persist-credentials` | When declared by the commit: omitted or `false`. Otherwise omitted. |
+| `path` | Omitted, empty, or a clean relative directory without a `.git` path segment. The resolved path stays inside the workspace and can't traverse symbolic-link parents. |
+| `clean` | Omitted, `true`, or `false`; the root workspace must be empty, or the selected path must be absent. Existing-directory reuse is unsupported, so `false` differs only by matching workflows that select a fresh target. |
+| `filter` | When declared by the commit: omitted, empty, or one Git partial-clone filter without control characters. Otherwise omitted. |
+| `sparse-checkout` | When declared by the commit: omitted, empty, or up to 1,000 non-empty patterns totaling at most 1 MiB. Otherwise omitted. |
+| `sparse-checkout-cone-mode` | When declared by the commit: omitted, `true`, or `false`. Otherwise omitted. |
+| `fetch-depth` | Omitted or a nonnegative integer; `0` fetches full history. Historical runner-plugin commits fetch full history when omitted. |
+| `fetch-tags` | When declared by the commit: omitted, `true`, or `false`. Otherwise omitted. |
+| `show-progress` | When declared by the commit: omitted, `true`, or `false`. Otherwise omitted. |
+| `lfs` | Omitted, `true`, or `false`. `true` requires Git LFS in the job image. |
 | `submodules` | Omitted, `false`, `true`, or `recursive`; whitespace is trimmed and casing is ignored. |
-| `set-safe-directory` | v2.8.0 and later: omitted or `true`. v1.2.0: omitted. |
-| `github-server-url` | v3.7.0 and later: omitted, empty, or `https://github.com`. Earlier releases: omitted. |
-| `allow-unsafe-pr-checkout` | v2.8.0 and later: omitted or `false`. v1.2.0: omitted. |
+| `set-safe-directory` | When declared by the commit: omitted or `true`. Otherwise omitted. |
+| `github-server-url` | When declared by the commit: omitted, empty, or `https://github.com`. Otherwise omitted. |
+| `allow-unsafe-pr-checkout` | When declared by the commit: omitted or `false`. Otherwise omitted. |
 
-The `ref` and `commit` outputs are unavailable for v1.2.0, v2.8.0, and v3.7.0. Upstream added them in v4.2.0.
+The `ref` and `commit` outputs are available only for commits whose action manifest declares them. Upstream added both outputs in v4.2.0.
 
 The `false` value and omission do not run submodule commands. The `true` value runs native Git for direct children, and `recursive` includes nested children. Relative URLs and `fetch-depth` follow native Git behavior. Public and private GitHub submodules are supported under the job's repository access; external HTTPS submodules are anonymous. `git@github.com:` URLs are rewritten to HTTPS. Other SSH and non-HTTPS transports are unsupported.
 
+Sparse checkout applies `blob:none` automatically unless `filter` is explicit. Cone mode treats each line as a directory. Non-cone mode uses Git ignore-style patterns. LFS configures repository-local filters before fetch without installing push or locking hooks. A regular checkout fetches the selected revision's LFS objects before checkout; sparse checkout lets Git LFS download only materialized paths.
+
+```yaml
+- uses: actions/checkout@v7
+  with:
+    path: sources/application
+    filter: blob:limit=1m
+    fetch-depth: 20
+    show-progress: false
+
+- uses: actions/checkout@v7
+  with:
+    path: sources/docs
+    sparse-checkout: |
+      docs
+      schemas
+
+- uses: actions/checkout@v7
+  with:
+    lfs: true
+    sparse-checkout: |
+      /*.md
+      /assets/
+      !/assets/archive/
+    sparse-checkout-cone-mode: false
+```
+
 See the [security model](security.md#checkout-and-submodules) for credential, Git, and job-isolation boundaries.
 
-Alternate repositories, tags, non-event dynamic commits, LFS, sparse checkout, GitHub Enterprise Server, and credential persistence remain unsupported. Commit and branch checkouts remain detached and confined to the event repository.
+Alternate repositories, tags, non-event dynamic commits, GitHub Enterprise Server, credential persistence, and existing-directory reuse remain unsupported. Commit and branch checkouts remain detached and confined to the event repository.
 
 ### Upload artifact action
 

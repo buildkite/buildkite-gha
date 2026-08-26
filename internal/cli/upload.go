@@ -92,15 +92,27 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 	}
 	var workflows []workflowInput
+	var skippedWorkflowPaths []string
 	var err error
 	if uploadArguments.explicitWorkflowPaths {
-		workflows, err = expandExplicitWorkflowPaths(workflowOperands, uploadArguments.checkoutPath)
+		workflows, skippedWorkflowPaths, err = expandExplicitWorkflowPaths(workflowOperands, uploadArguments.checkoutPath)
 	} else {
-		workflows, err = resolveWorkflowOperands(workflowOperands)
+		workflows, skippedWorkflowPaths, err = resolveWorkflowOperands(workflowOperands)
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
+	}
+	if !uploadArguments.explicitWorkflowPaths && len(skippedWorkflowPaths) != 0 {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: workflow path %q is not tracked by git\n", skippedWorkflowPaths[0])
+		return 1
+	}
+	for _, path := range skippedWorkflowPaths {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: warning: workflow path %q is missing or untracked; skipping\n", path)
+	}
+	if len(workflows) == 0 {
+		_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: warning: all configured workflow paths are missing or untracked; there is nothing to upload")
+		return 0
 	}
 	runnableWorkflowCount := 0
 	for i := range workflows {
@@ -359,6 +371,10 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 				checkName = input.CanonicalPath
 			}
 			label := workflowGroupLabel(checkName, input.RunName)
+			events := make([]string, len(input.Triggers))
+			for i, trigger := range input.Triggers {
+				events[i] = trigger.Event
+			}
 			groupKey := "gha-workflow-" + input.Identity
 			generatedWorkflows = append(generatedWorkflows, buildkitepipeline.Workflow{
 				GroupLabel: label,
@@ -367,7 +383,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 				Event:      effectiveEvent.Event.Event,
 				SkipReason: input.SkipReason,
 			})
-			skippedWorkflows = append(skippedWorkflows, skippedWorkflow{label: label, key: groupKey, reason: input.AnnotationReason})
+			skippedWorkflows = append(skippedWorkflows, skippedWorkflow{label: label, key: groupKey, reason: input.AnnotationReason, events: events})
 			parsed, _ := compiler.ParseWorkflow(input.Path, input.Source)
 			writeCompilerWarnings(stderr, "upload", input.CanonicalPath, parsed.Warnings)
 			if uploadArguments.telemetry != nil {
@@ -409,7 +425,11 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		generated.Condition = input.TriggerCondition
 		generatedWorkflows = append(generatedWorkflows, generated)
 		if input.AnnotationReason != "" {
-			skippedWorkflows = append(skippedWorkflows, skippedWorkflow{label: label, key: generated.GroupKey, reason: input.AnnotationReason})
+			events := make([]string, len(input.Triggers))
+			for i, trigger := range input.Triggers {
+				events[i] = trigger.Event
+			}
+			skippedWorkflows = append(skippedWorkflows, skippedWorkflow{label: label, key: generated.GroupKey, reason: input.AnnotationReason, events: events})
 		}
 		planArtifacts = append(planArtifacts, bundle.Plans...)
 		if bundle.EventArtifact != nil {
@@ -498,6 +518,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		artifactPaths[jobPlan.Path] = struct{}{}
 		artifacts = append(artifacts, transport.Artifact{Path: jobPlan.Path, Digest: jobPlan.Digest, Contents: jobPlan.Contents})
 	}
+	allSkipped := len(generatedWorkflows) > 0 && len(skippedWorkflows) == len(generatedWorkflows)
 	if len(artifacts) == 0 {
 		if err := agent.UploadPipeline(ctx, aggregatePipeline); err != nil {
 			if uploadArguments.telemetry != nil {
@@ -506,7 +527,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: upload pipeline: %v\n", err)
 			return 1
 		}
-		out.annotateSkippedWorkflows(ctx, effectiveEvent.Event.Event, skippedWorkflows)
+		out.annotateSkippedWorkflows(ctx, effectiveEvent.Event.Event, effectiveEvent.BuildSource, allSkipped, skippedWorkflows)
 		_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %d workflows using %s with importer %s.\n", jobCount, len(generatedWorkflows), executablePath, importerStep)
 		return 0
 	}
@@ -528,7 +549,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	out.annotateSkippedWorkflows(ctx, effectiveEvent.Event.Event, skippedWorkflows)
+	out.annotateSkippedWorkflows(ctx, effectiveEvent.Event.Event, effectiveEvent.BuildSource, allSkipped, skippedWorkflows)
 	_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %d workflows using %s with importer %s.\n", jobCount, len(generatedWorkflows), executablePath, importerStep)
 	return 0
 }
@@ -637,20 +658,20 @@ type workflowInput struct {
 	ReusableOnly, Applicable                        bool
 }
 
-func resolveWorkflowOperands(operands []string) ([]workflowInput, error) {
+func resolveWorkflowOperands(operands []string) ([]workflowInput, []string, error) {
 	if len(operands) != 1 {
 		return expandExplicitWorkflowPaths(operands, "")
 	}
 	path, err := filepath.Abs(operands[0])
 	if err != nil {
-		return nil, fmt.Errorf("resolve workflow path %q: %w", operands[0], err)
+		return nil, nil, fmt.Errorf("resolve workflow path %q: %w", operands[0], err)
 	}
 	if err := requireRegularWorkflowFile(path, operands[0]); err != nil {
 		return expandExplicitWorkflowPaths(operands, "")
 	}
 	extension := filepath.Ext(path)
 	if extension != ".yml" && extension != ".yaml" {
-		return nil, fmt.Errorf("workflow path %q must end in .yml or .yaml", operands[0])
+		return nil, nil, fmt.Errorf("workflow path %q must end in .yml or .yaml", operands[0])
 	}
 	canonical := filepath.ToSlash(filepath.Clean(operands[0]))
 	if rootBytes, rootErr := exec.Command("git", "rev-parse", "--show-toplevel").Output(); rootErr == nil {
@@ -659,22 +680,24 @@ func resolveWorkflowOperands(operands []string) ([]workflowInput, error) {
 			canonical = filepath.ToSlash(filepath.Clean(relative))
 		}
 	}
-	return workflowInputs([]workflowInput{{Path: path, CanonicalPath: canonical}}, false)
+	inputs, err := workflowInputs([]workflowInput{{Path: path, CanonicalPath: canonical}}, false)
+	return inputs, nil, err
 }
 
-func expandExplicitWorkflowPaths(operands []string, checkoutPath string) ([]workflowInput, error) {
+func expandExplicitWorkflowPaths(operands []string, checkoutPath string) ([]workflowInput, []string, error) {
 	if len(operands) == 0 {
-		return nil, fmt.Errorf("workflow path is required")
+		return nil, nil, fmt.Errorf("workflow path is required")
 	}
 	rootBytes, err := gitRootCommand(checkoutPath).Output()
 	if err != nil {
 		if checkoutPath != "" {
-			return nil, fmt.Errorf("locate git repository from BUILDKITE_BUILD_CHECKOUT_PATH %q: %w", checkoutPath, err)
+			return nil, nil, fmt.Errorf("locate git repository from BUILDKITE_BUILD_CHECKOUT_PATH %q: %w", checkoutPath, err)
 		}
-		return nil, fmt.Errorf("locate checked-out git repository: %w", err)
+		return nil, nil, fmt.Errorf("locate checked-out git repository: %w", err)
 	}
 	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
 	matches := make([]workflowInput, 0, len(operands))
+	skipped := make([]string, 0)
 	for _, operand := range operands {
 		inputPath := operand
 		if checkoutPath != "" && !filepath.IsAbs(inputPath) {
@@ -682,36 +705,44 @@ func expandExplicitWorkflowPaths(operands []string, checkoutPath string) ([]work
 		}
 		absolute, err := filepath.Abs(inputPath)
 		if err != nil {
-			return nil, fmt.Errorf("resolve workflow path %q: %w", operand, err)
+			return nil, nil, fmt.Errorf("resolve workflow path %q: %w", operand, err)
 		}
 		relative, err := filepath.Rel(root, absolute)
 		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return nil, fmt.Errorf("workflow path %q is outside the checked-out git repository", operand)
+			return nil, nil, fmt.Errorf("workflow path %q is outside the checked-out git repository", operand)
 		}
 		canonical := filepath.ToSlash(filepath.Clean(relative))
 		info, statErr := os.Lstat(absolute)
 		if statErr == nil && !info.Mode().IsRegular() {
-			return nil, requireRegularWorkflowFile(absolute, operand)
+			return nil, nil, requireRegularWorkflowFile(absolute, operand)
+		}
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return nil, nil, requireRegularWorkflowFile(absolute, operand)
 		}
 		output, gitErr := exec.Command("git", "-C", root, "ls-files", "-z", "--", ":(top,literal)"+canonical).Output()
+		if gitErr != nil {
+			return nil, nil, fmt.Errorf("inspect workflow path %q in git index: %w", operand, gitErr)
+		}
 		entries := bytes.Split(output, []byte{0})
-		tracked := gitErr == nil && len(entries) == 2 && string(entries[0]) == canonical && len(entries[1]) == 0
-		if !tracked && strings.ContainsAny(operand, "*?[") {
-			return nil, fmt.Errorf("workflow list entries must be explicit paths; glob pattern %q is not allowed", operand)
+		tracked := len(entries) == 2 && string(entries[0]) == canonical && len(entries[1]) == 0
+		if !tracked && errors.Is(statErr, os.ErrNotExist) && strings.ContainsAny(operand, "*?[") {
+			return nil, nil, fmt.Errorf("workflow list entries must be explicit paths; glob pattern %q is not allowed", operand)
 		}
 		extension := filepath.Ext(canonical)
 		if extension != ".yml" && extension != ".yaml" {
-			return nil, fmt.Errorf("workflow path %q must end in .yml or .yaml", operand)
+			return nil, nil, fmt.Errorf("workflow path %q must end in .yml or .yaml", operand)
 		}
 		if !tracked {
-			return nil, fmt.Errorf("workflow path %q is not tracked by git", operand)
+			skipped = append(skipped, operand)
+			continue
 		}
 		if err := requireRegularWorkflowFile(absolute, operand); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		matches = append(matches, workflowInput{Path: filepath.Join(root, filepath.FromSlash(canonical)), CanonicalPath: canonical})
 	}
-	return workflowInputs(matches, true)
+	inputs, err := workflowInputs(matches, true)
+	return inputs, skipped, err
 }
 
 func requireRegularWorkflowFile(path, displayPath string) error {
@@ -723,7 +754,7 @@ func requireRegularWorkflowFile(path, displayPath string) error {
 		return fmt.Errorf("inspect workflow path %q: %w", displayPath, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("workflow path %q is a symbolic link; workflow paths must be regular tracked files", displayPath)
+		return fmt.Errorf("workflow path %q is not a regular tracked file. Check that the file exists at this path and is not a symlink. Symlinks, untracked files, directories, and globs are not supported", displayPath)
 	}
 	if info.IsDir() {
 		return fmt.Errorf("workflow path %q is a directory; workflow paths must be regular tracked files", displayPath)

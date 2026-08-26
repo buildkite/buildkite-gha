@@ -210,7 +210,7 @@ func UploadArtifactPaths(value string) ([]string, error) {
 		return nil, fmt.Errorf("input %q must contain literal paths, not expressions", "path")
 	}
 	var roots []string
-	for _, line := range strings.Split(value, "\n") {
+	for line := range strings.SplitSeq(value, "\n") {
 		root := strings.TrimSpace(line)
 		if root == "" {
 			continue

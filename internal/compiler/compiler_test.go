@@ -557,24 +557,64 @@ jobs:
 	}
 }
 
-func TestCompileRejectsRuntimeDependentMatrixInclude(t *testing.T) {
+func TestCompileResolvesStaticMatrixIncludeAndExcludeExpressions(t *testing.T) {
 	source := []byte(`on: push
 jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-latest]
+        exclude: ${{ fromJSON(vars.EXCLUDE) }}
         include: ${{ fromJSON(vars.INCLUDE) }}
     steps:
       - run: true
 `)
-	_, err := Compile("dynamic-include.yml", source, readFile(t, smokePath("events", "push.json")))
-	if err == nil || !strings.Contains(err.Error(), "runtime-dependent matrix include expressions are unsupported") {
-		t.Fatalf("Compile() error = %v, want explicit include expression error", err)
+	options := defaultOptions()
+	options.Vars.Bridge = map[string]string{
+		"EXCLUDE": `[{"os":"macos-latest"}]`,
+		"INCLUDE": `[{"os":"ubuntu-latest","version":24},{"os":"macos-14","version":14}]`,
 	}
-	if !strings.Contains(err.Error(), "dynamic-include.yml:8:18") {
-		t.Fatalf("Compile() error = %v, want source location", err)
+	compiled, err := CompileWithOptions("static-sections.yml", source, readFile(t, smokePath("events", "push.json")), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	want := []map[string]any{
+		{"os": "ubuntu-latest", "version": float64(24)},
+		{"os": "macos-14", "version": float64(14)},
+	}
+	if len(ir.Jobs) != len(want) {
+		t.Fatalf("jobs = %d, want %d", len(ir.Jobs), len(want))
+	}
+	for i := range want {
+		if !reflect.DeepEqual(ir.Jobs[i].Matrix, want[i]) {
+			t.Fatalf("matrix instance %d = %#v, want %#v", i, ir.Jobs[i].Matrix, want[i])
+		}
+	}
+}
+
+func TestCompileBoundsStaticExpressionMatrixExpansion(t *testing.T) {
+	values := make([]string, maxMatrixInstances+1)
+	for i := range values {
+		values[i] = fmt.Sprintf("%q", fmt.Sprint(i))
+	}
+	source := []byte(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(vars.MATRIX) }}
+    steps: [{run: true}]
+`)
+	options := defaultOptions()
+	options.Vars.Bridge = map[string]string{"MATRIX": `{"value":[` + strings.Join(values, ",") + `]}`}
+	_, err := CompileWithOptions("bounded-matrix.yml", source, readFile(t, smokePath("events", "push.json")), options)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("matrix expands beyond %d instances", maxMatrixInstances)) {
+		t.Fatalf("Compile() error = %v, want static matrix instance limit", err)
 	}
 }
 
@@ -1189,6 +1229,28 @@ jobs:
 	}
 	if len(plans[2].NeedSources["delegated"]) != 2 || !reflect.DeepEqual(plans[2].NeedOutputs, map[string][]plan.NeedOutput{"delegated": {}}) {
 		t.Fatalf("matrix reusable plan projection = %#v / %#v", plans[2].NeedSources, plans[2].NeedOutputs)
+	}
+}
+
+func TestCompileRejectsMaxParallelOnReusableWorkflowMatrix(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    strategy:
+      max-parallel: 1
+      matrix: ${{ fromJSON('{"target":["one","two"]}') }}
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	_, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err == nil || !strings.Contains(err.Error(), "strategy.max-parallel on a reusable-workflow matrix cannot be preserved") {
+		t.Fatalf("Compile() error = %v, want reusable max-parallel rejection", err)
 	}
 }
 
@@ -1930,18 +1992,144 @@ jobs:
 	}
 }
 
+func TestCompileResolvesStaticExpressionsInNestedReusableMatrices(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    strategy:
+      matrix: ${{ fromJSON(vars.CALLS) }}
+    uses: ./.github/workflows/middle.yml
+    with:
+      target: ${{ matrix.target }}
+      arches: '["amd64","arm64"]'
+  finish:
+    needs: call
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+      arches: {type: string, required: true}
+jobs:
+  leaf:
+    strategy:
+      matrix:
+        arch: ${{ fromJSON(inputs.arches) }}
+        include: ${{ fromJSON('[{"arch":"amd64","native":true}]') }}
+    uses: ./.github/workflows/leaf.yml
+    with:
+      target: ${{ format('{0}-{1}', inputs.target, matrix.arch) }}
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ inputs.target }}
+`)
+	options := defaultOptions()
+	options.Vars.Bridge = map[string]string{"CALLS": `{"target":["linux","darwin"]}`}
+	result, err := CompileWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 5 {
+		t.Fatalf("jobs = %d, want four composed instances and one fan-in", len(ir.Jobs))
+	}
+	runs := make([]string, 0, 4)
+	for _, job := range ir.Jobs[:4] {
+		runs = append(runs, job.Steps[0].Run)
+	}
+	sort.Strings(runs)
+	wantRuns := []string{"echo darwin-amd64", "echo darwin-arm64", "echo linux-amd64", "echo linux-arm64"}
+	if !reflect.DeepEqual(runs, wantRuns) {
+		t.Fatalf("nested matrix runs = %#v, want %#v", runs, wantRuns)
+	}
+	if got := len(ir.Jobs[4].Needs); got != 4 {
+		t.Fatalf("fan-in dependencies = %d, want 4", got)
+	}
+}
+
+func TestCompilePreservesReusableInputsInNestedAuthoredMatrixValues(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      enabled: false
+      target: release
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      enabled: {type: boolean}
+      target: {type: string}
+jobs:
+  test:
+    strategy:
+      matrix:
+        config:
+          - enabled: ${{ inputs.enabled }}
+            targets:
+              - ${{ inputs.target }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ matrix.config.enabled }}:${{ matrix.config.targets[0] }}
+`)
+	result, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	wantMatrix := map[string]any{"config": map[string]any{"enabled": false, "targets": []any{"release"}}}
+	if len(ir.Jobs) != 1 || !reflect.DeepEqual(ir.Jobs[0].Matrix, wantMatrix) {
+		t.Fatalf("nested authored matrix inputs = %#v", ir.Jobs)
+	}
+}
+
 func TestCompileRejectsRuntimeExpressionsLaunderedThroughReusableInputs(t *testing.T) {
-	t.Run("matrix expression", func(t *testing.T) {
+	t.Run("unavailable static matrix value", func(t *testing.T) {
 		repository := t.TempDir()
 		path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    strategy:\n      matrix: ${{ fromJSON(vars.MATRIX) }}\n    uses: ./.github/workflows/reusable.yml\n")
 		writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-		if err == nil || !strings.Contains(err.Error(), "expression-valued reusable-workflow matrices are unsupported") {
-			t.Fatalf("Compile() error = %v, want explicit call-matrix rejection", err)
+		if err == nil || !strings.Contains(err.Error(), `compile-time expression references unavailable value "vars.matrix"`) {
+			t.Fatalf("Compile() error = %v, want unavailable static value rejection", err)
 		}
 	})
 
-	t.Run("matrix value", func(t *testing.T) {
+	t.Run("unavailable github value", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    strategy:
+      matrix:
+        target: ["${{ github.run_id }}"]
+    uses: ./.github/workflows/reusable.yml
+`)
+		writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), `compile-time expression references unavailable value "github.run_id"`) {
+			t.Fatalf("Compile() error = %v, want unavailable GitHub value rejection", err)
+		}
+	})
+
+	t.Run("static matrix value", func(t *testing.T) {
 		repository := t.TempDir()
 		path := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -1954,9 +2142,16 @@ jobs:
       target: ${{ matrix.target }}
 `)
 		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ${{ inputs.target }}\n")
-		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-		if err == nil || !strings.Contains(err.Error(), "runtime-dependent reusable-workflow matrix value is unsupported") {
-			t.Fatalf("Compile() error = %v, want matrix expression rejection", err)
+		result, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ir IR
+		if err := json.Unmarshal(result, &ir); err != nil {
+			t.Fatal(err)
+		}
+		if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo main" {
+			t.Fatalf("resolved reusable matrix value = %#v", ir.Jobs)
 		}
 	})
 
@@ -1988,7 +2183,7 @@ jobs:
 	})
 }
 
-func TestExpandMatrixPreservesRegressedStaticExpressionValues(t *testing.T) {
+func TestExpandMatrixRejectsRuntimeExpressionsInAuthoredValues(t *testing.T) {
 	tests := []struct {
 		name   string
 		source string
@@ -2096,24 +2291,75 @@ jobs:
 			if err != nil {
 				t.Fatal(err)
 			}
-			matrixJobs := 0
+			rejected := false
 			for _, job := range parsed.Jobs {
 				if job.Matrix == nil {
 					continue
 				}
-				matrixJobs++
-				matrices, err := expandMatrix(test.name, job, expression.CompileContext{})
-				if err != nil {
-					t.Fatalf("expandMatrix(%q): %v", job.ID, err)
-				}
-				if len(matrices) == 0 {
-					t.Fatalf("expandMatrix(%q) returned no combinations", job.ID)
+				_, err := expandMatrix(test.name, job, expression.CompileContext{})
+				if err != nil && strings.Contains(err.Error(), "runtime-dependent matrix expressions are unsupported") {
+					rejected = true
 				}
 			}
-			if matrixJobs == 0 {
-				t.Fatal("fixture has no matrix jobs")
+			if !rejected {
+				t.Fatal("runtime-dependent authored matrix value was not rejected")
 			}
 		})
+	}
+}
+
+func TestValidateLocatesFailingMatrixSectionExpression(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [linux]
+        include: ${{ fromJSON('[{"os":"linux"}]') }}
+        exclude: ${{ fromJSON('invalid') }}
+    steps: [{run: true}]
+`)
+	_, err := Validate("matrix.yml", source)
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) || finding.Line != 9 || !strings.Contains(err.Error(), "matrix exclude") {
+		t.Fatalf("Validate() finding = %#v, error = %v; want exclude expression at line 9", finding, err)
+	}
+}
+
+func TestValidateRejectsNullMatrixSectionExpression(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [linux]
+        exclude: ${{ github.event.matrix_exclusions }}
+    steps: [{run: true}]
+`)
+	_, err := Validate("matrix.yml", source)
+	if err == nil || !strings.Contains(err.Error(), "matrix exclude resolved to <nil>, want array") {
+		t.Fatalf("Validate() error = %v, want null exclude rejection", err)
+	}
+}
+
+func TestValidateLocatesFailingAuthoredMatrixValue(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - ${{ github.run_id }}
+        include: ${{ fromJSON('[{"target":"linux"}]') }}
+    steps: [{run: true}]
+`)
+	_, err := Validate("matrix.yml", source)
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) || finding.Line != 8 || !strings.Contains(err.Error(), "github.run_id") {
+		t.Fatalf("Validate() finding = %#v, error = %v; want authored value at line 8", finding, err)
 	}
 }
 
@@ -2759,6 +3005,56 @@ jobs:
 	}
 }
 
+func TestCompileRejectsDeferredReusableInputInMatrixInclude(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on:
+  workflow_dispatch:
+    inputs:
+      EXTRA:
+        type: string
+        default: '[{"name":"root"}]'
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      extra: ${{ steps.value.outputs.extra }}
+    steps:
+      - id: value
+        run: echo 'extra=[]' >> "$GITHUB_OUTPUT"
+  call:
+    needs: prepare
+    uses: ./.github/workflows/reusable.yml
+    with:
+      EXTRA: ${{ needs.prepare.outputs.extra }}
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      EXTRA: {type: string}
+jobs:
+  test:
+    strategy:
+      matrix:
+        include: ${{ fromJSON(inputs.EXTRA) }}
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	var event map[string]any
+	if err := json.Unmarshal(readFile(t, smokePath("events", "push.json")), &event); err != nil {
+		t.Fatal(err)
+	}
+	event["event"] = "workflow_dispatch"
+	event["payload"] = map[string]any{"inputs": map[string]any{"EXTRA": `[{"name":"dispatch"}]`}}
+	eventSource, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Compile(path, readFile(t, path), eventSource)
+	if err == nil || !strings.Contains(err.Error(), "reusable-workflow input expression is not statically resolvable") {
+		t.Fatalf("Compile() error = %v, want deferred matrix include rejection", err)
+	}
+}
+
 func TestValidateRejectsInvalidReusableInputDefaultWithoutCall(t *testing.T) {
 	source := []byte(`on:
   push:
@@ -2875,7 +3171,7 @@ jobs:
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			event := []byte(fmt.Sprintf(`{
+			event := fmt.Appendf(nil, `{
   "provider": "github",
   "event": %q,
   "repository": {"owner": "buildkite", "name": "kafka"},
@@ -2883,7 +3179,7 @@ jobs:
   "sha": "1111111111111111111111111111111111111111",
   "actor": "buildkite-gha",
   "payload": %s
-}`, test.event, test.payload))
+}`, test.event, test.payload)
 			result, err := Compile("ci.yml", workflow, event)
 			if err != nil {
 				t.Fatal(err)
@@ -2919,7 +3215,7 @@ jobs:
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			event := []byte(fmt.Sprintf(`{
+			event := fmt.Appendf(nil, `{
   "provider": "github",
   "event": %q,
   "repository": {"owner": "buildkite", "name": "kafka"},
@@ -2927,7 +3223,7 @@ jobs:
   "sha": "1111111111111111111111111111111111111111",
   "actor": "buildkite-gha",
   "payload": %s
-}`, test.event, test.ref, test.payload))
+}`, test.event, test.ref, test.payload)
 			plans, err := compileUntrustedPlans("ci.yml", workflow, event, "0.0.0-test", testDistributionDigest, "gha-untrusted")
 			if err != nil {
 				t.Fatal(err)
@@ -4230,5 +4526,37 @@ jobs:
 	_, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
 	if err == nil || !strings.Contains(err.Error(), "service runtime expression must directly reference needs") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestCompilerWarningsNameOnlyDeclaredSupportedTriggers(t *testing.T) {
+	parsed := &workflow.Workflow{Triggers: []workflow.Trigger{
+		{Event: "workflow_dispatch"},
+		{Event: "issues", Position: workflow.Position{Line: 4, Column: 3}},
+		{Event: "release"},
+		{Event: "push"},
+		{Event: "merge_group"},
+		{Event: "schedule"},
+		{Event: "pull_request"},
+		{Event: "workflow_call"},
+		{Event: "push"},
+	}}
+	warnings := compilerWarnings(parsed, false)
+	want := Warning{
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Line: 4, Column: 3,
+		Message: "on.issues is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: merge_group, pull_request, push, release, schedule, workflow_call, workflow_dispatch. Move the jobs this trigger guards to one of those triggers if you need them. If you need issues, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
+	}
+	if !reflect.DeepEqual(warnings, []Warning{want}) {
+		t.Fatalf("warnings = %#v, want %#v", warnings, []Warning{want})
+	}
+
+	parsed.Triggers = []workflow.Trigger{{Event: "issues", Position: workflow.Position{Line: 1, Column: 5}}}
+	warnings = compilerWarnings(parsed, false)
+	want = Warning{
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Line: 1, Column: 5,
+		Message: "on.issues is ignored, so nothing in this workflow runs from it. This workflow declares no supported triggers that still run. If you need issues, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
+	}
+	if !reflect.DeepEqual(warnings, []Warning{want}) {
+		t.Fatalf("warnings without supported triggers = %#v, want %#v", warnings, []Warning{want})
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -158,9 +159,7 @@ func (a *actionSourceAuthentication) warnAnonymousFallback(reason string) {
 
 func hostedOptions(groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string) compiler.Options {
 	targets := hostedRunnerTargets()
-	for label, target := range configuredTargets {
-		targets[label] = target
-	}
+	maps.Copy(targets, configuredTargets)
 	options := compiler.Options{
 		EventTrust:           compiler.EventUntrusted,
 		GroupLabel:           groupLabel,
@@ -320,7 +319,7 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 				continue
 			}
 			if capability == "docker" && !admittedDockerProvenance(artifact.Job, artifact.Authorization.DockerCapabilitySources) {
-				message := fmt.Sprintf("Job %q requires Docker without matching compiler provenance. Hosted runs support only verified Dockerfile actions and bounded job or service containers.", artifact.Job.Workflow.LogicalJobID)
+				message := fmt.Sprintf("Job %q requires Docker without matching compiler provenance. Hosted runs support only verified Docker actions and bounded job or service containers.", artifact.Job.Workflow.LogicalJobID)
 				addFailure(artifact, message, "", errors.New("unsupported Docker access"))
 				continue
 			}
