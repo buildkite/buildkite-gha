@@ -541,7 +541,9 @@ func ReduceAvailableCompileTemplate(template string, context CompileContext) (st
 			continue
 		}
 		if referencesWholeEvent(node) {
-			return "", fmt.Errorf("whole github.event access is unsupported")
+			reduced.WriteString(complete)
+			remaining = source[consumed:]
+			continue
 		}
 		value, available, err := evaluateCompileNodeAvailable(node, context)
 		if err != nil {

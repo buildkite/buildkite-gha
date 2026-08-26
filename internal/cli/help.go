@@ -24,7 +24,7 @@ var commandUsage = map[string]string{
 	"validate-batch": "Usage: buildkite-gha validate-batch --manifest <path> --output-dir <path> --corpus-id <id> --action-resolution-snapshot <path> [--refresh-action-resolution-snapshot] [--action-cache-dir <path> --action-cache-max-bytes <bytes>] [--github-token-env <name>] [--jobs <count>]\n",
 	"compile":        "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
 	"upload":         "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--experimental-runner-user=<boolean>] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
-	"run-job":        "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
+	"run-job":        "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--artifact-producer <job>] [--result <path>] [--hosted-tool-cache]\n",
 }
 
 func writeCommandHelp(stdout io.Writer, command string) {

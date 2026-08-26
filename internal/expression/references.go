@@ -247,6 +247,24 @@ func referencesGitHubToken(template string, allowContextSerialization, contextSe
 	return found, err
 }
 
+func isGitHubEventAccess(node actionlint.ExprNode) bool {
+	for {
+		if root, path, err := referencePath(node); err == nil {
+			return strings.EqualFold(root, "github") && len(path) >= 1 && strings.EqualFold(path[0], "event")
+		}
+		switch access := node.(type) {
+		case *actionlint.ObjectDerefNode:
+			node = access.Receiver
+		case *actionlint.IndexAccessNode:
+			node = access.Operand
+		case *actionlint.ArrayDerefNode:
+			node = access.Receiver
+		default:
+			return false
+		}
+	}
+}
+
 // ConditionReferencesGitHubToken reports direct token references in one
 // condition without interpreting string literal contents as templates.
 func ConditionReferencesGitHubToken(source string) (bool, error) {
@@ -270,6 +288,9 @@ func nodeReferencesGitHubToken(expression actionlint.ExprNode, allowContextSeria
 			return
 		}
 		if !strings.EqualFold(referenceRoot(node), "github") {
+			return
+		}
+		if isGitHubEventAccess(node) {
 			return
 		}
 		if referenceHasArrayDeref(node) {
@@ -397,11 +418,27 @@ func ReferencesGitHubEvent(source string) (bool, error) {
 	return nodeReferencesCompileGitHubEvent(node), nil
 }
 
+// ConditionReferencesGitHubEventPayload reports whether a condition reads the
+// event payload, excluding event-derived identity fields folded by the compiler.
+func ConditionReferencesGitHubEventPayload(source string) (bool, error) {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return false, err
+	}
+	return nodeReferencesGitHubEventPayload(node), nil
+}
+
 // TemplateReferencesGitHubEvent reports whether an interpolated template
 // retains the compile-time-only event payload.
 func TemplateReferencesGitHubEvent(template string) (bool, error) {
 	found := false
 	err := visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
+		actionlint.VisitExprNode(node, func(candidate, _ actionlint.ExprNode, entering bool) {
+			if entering {
+				call, ok := candidate.(*actionlint.FuncCallNode)
+				found = found || ok && isToJSONGitHubCall(call)
+			}
+		})
 		found = found || nodeReferencesGitHubEventPayload(node)
 		return nil
 	})

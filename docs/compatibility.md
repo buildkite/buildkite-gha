@@ -813,7 +813,8 @@ Conditions support computed object indexes, numeric array indexes, whole
 - Projections omit missing children.
 - A later wildcard flattens one collection level.
 - The equivalent `[*]` spelling is unsupported by the parser.
-- Whole or dynamic `github`, whole `inputs`, and `strategy` remain unsupported.
+- Whole or dynamic `github`, except event-rooted access, and whole `inputs` and
+  `strategy` remain unsupported.
 
 | Context | Job `if` | Step `if` |
 | --- | --- | --- |
@@ -826,16 +827,16 @@ Conditions support computed object indexes, numeric array indexes, whole
 | `steps.<id>.outcome`, `steps.<id>.conclusion`, `steps.<id>.outputs.<name>` | ❌ No | ✅ Yes |
 | `env.<name>` | ❌ No | ✅ Yes |
 | `job.services.<service>.ports[<port>]` | ❌ No | ✅ Yes |
-| `github.event.*`, including `github.event.pull_request.*` | 🟡 Compile time only | 🟡 Compile time only |
+| `github.event`, including direct, projected, and dynamically indexed properties | ✅ Yes | ✅ Yes |
 | `secrets` and other contexts | ❌ No | ❌ No |
 
 Before runtime validation, the compiler reduces event-backed conditions from the
-immutable snapshot. Resolvable `github.event` expressions become literals;
-supported runtime expressions remain for the job or step.
+immutable snapshot. Resolvable `github.event` expressions become literals.
+For whole or runtime-selected event access, the plan retains a marker and
+digest for the build's shared event payload artifact.
 
 Every branch is validated first, so short-circuiting cannot hide an unsupported
-function, context, or matrix type. No remaining condition can carry
-`github.event` into runtime.
+function, context, or matrix type.
 
 Reusable-workflow call conditions use the same operators and status functions but only the caller contexts listed in [Reusable workflows](#reusable-workflows). The runtime evaluates their ordered guards before the called job's own condition.
 
@@ -856,9 +857,12 @@ Before creating a job plan, the compiler resolves scalar `github.event.*`
 values and event-dependent parts of otherwise runtime expressions.
 
 Missing event members become null; template interpolation renders null as an
-empty string. Event values cannot introduce new `${{ ... }}` regions. Whole
-events and unresolved event references are unsupported because plans keep only
-event identity and a payload digest.
+empty string. Event values cannot introduce new `${{ ... }}` regions. A job
+that still needs whole, projected, or dynamically indexed `github.event`
+access loads the digest-verified event artifact uploaded by the exact importer
+job. This preserves the original event for runtime use and retries without
+duplicating it across immutable plans. Other jobs keep only event identity and
+a payload digest.
 
 Job-level expressions support the same operators and pure functions with these field-specific contexts:
 
@@ -890,7 +894,8 @@ tokenless context is an error.
 
 Job-level fields and action input defaults cannot call `toJSON(github)`. Bare,
 projected, or dynamically indexed `github`, and passing the whole context to
-another function, remain unsupported.
+another function, remain unsupported. These limits do not apply to access
+rooted at `github.event`.
 
 `runner.os` and `runner.arch` resolve to `Linux`/`X64` or `macOS`/`ARM64`.
 After runner setup, step runtime fields and job outputs can also use
@@ -923,9 +928,9 @@ The runtime retains this bounded `github` context:
 | `action_path` | Composite action directory inside composite steps; empty elsewhere. |
 | `action_repository`, `action_ref` | Remote composite repository and requested ref; empty for local composites and outside composite steps. |
 | `token` | Available only in an authorized step expression. |
+| `event` | The immutable, digest-verified event payload, loaded only for jobs that need runtime event access. |
 
-This is not the full GitHub context. `github.event` and the event payload are
-not available at runtime.
+This is not the full GitHub context.
 
 `hashFiles()` evaluates when its step field is consumed, so it sees files from
 earlier steps such as checkout. A JavaScript action's `with` and `env` can be
@@ -959,9 +964,10 @@ Compile-time `github` fields are `actor`, `base_ref`, `event_name`, `head_ref`,
 `workflow`. Expressions can use computed indexes, numeric array indexes, and
 `.*` projections when the complete result resolves during compilation.
 
-Whole or dynamic `github` access and whole-event serialization remain
-unsupported. Event-backed runtime expressions can combine reducible event
-parts with values supported by their runtime surface.
+Whole or dynamic `github` access remains unsupported unless it is rooted at
+`github.event`. Event-backed runtime expressions can combine reducible event
+parts with values supported by their runtime surface. Action references in
+`uses` must remain static and cannot use `github.event`.
 
 ## Actions
 
@@ -1046,7 +1052,7 @@ Action metadata parsing remains strict for every other unknown top-level field a
 
 Pre, main, and post phases; inputs; outputs; state; and LIFO post ordering are supported. Other Node declarations are rejected.
 
-JavaScript action `pre-if` and `post-if` metadata uses the condition operators, status functions, pure functions, and `hashFiles()` described in [Conditions](#conditions). Lifecycle conditions can read direct properties from workflow `inputs`, `env`, `github`, `job.services`, `matrix`, `runner`, and `steps`. Other contexts and dynamic or whole-context access return an error. An empty lifecycle condition always runs and does not receive an implicit `success()` guard.
+JavaScript action `pre-if` and `post-if` metadata uses the condition operators, status functions, pure functions, and `hashFiles()` described in [Conditions](#conditions). Lifecycle conditions can read direct properties from workflow `inputs`, `env`, `github`, `job.services`, `matrix`, `runner`, and `steps`, and direct or dynamic `github.event` properties. Other contexts and dynamic or whole-context access return an error. An empty lifecycle condition always runs and does not receive an implicit `success()` guard.
 
 Pre conditions use the status and action-scoped environment available when preparation reaches the action. Post conditions run during job teardown and use the final job status and environment, including `GITHUB_ENV` changes from main. Root action posts also see final workflow step state. Nested composite actions retain their isolated step context. Cancellation remains distinct from failure, and posts keep LIFO order.
 

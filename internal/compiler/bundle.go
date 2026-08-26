@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"strings"
@@ -39,6 +40,7 @@ type PlanAuthorization struct {
 type Bundle struct {
 	IR                IR
 	Plans             []PlanArtifact
+	EventArtifact     *transport.Artifact
 	Pipeline          []byte
 	GeneratedWorkflow buildkitepipeline.Workflow
 	Processing        ProcessingEvidence
@@ -181,6 +183,28 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		artifacts[i] = PlanArtifact{Job: job, Digest: digest, Path: planPath, Contents: contents, Authorization: authorizations[i]}
 	}
 	bundle.Plans = artifacts
+	for _, job := range plans {
+		if !job.Event.PayloadArtifact {
+			continue
+		}
+		contents, err := json.Marshal(ir.Event.Payload)
+		if err != nil {
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("encode event payload artifact: %w", err))
+		}
+		if len(contents) > plan.MaxEventPayloadBytes {
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("event payload artifact exceeds the %d-byte limit", plan.MaxEventPayloadBytes))
+		}
+		digest := transport.Digest(contents)
+		if digest != job.Event.PayloadDigest {
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("event payload artifact does not match the plan digest"))
+		}
+		path, err := buildkitepipeline.EventPath(digest)
+		if err != nil {
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", err)
+		}
+		bundle.EventArtifact = &transport.Artifact{Path: path, Digest: digest, Contents: contents}
+		break
+	}
 	bundle.Processing.PlansConstructed = true
 	return bundle, nil
 }
@@ -213,6 +237,7 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 			Platform:           ir.Jobs[i].Platform.String(),
 			DistributionDigest: job.RuntimeDistributionDigest(),
 			PlanDigest:         artifact.Digest,
+			EventPayload:       job.Event.PayloadArtifact,
 			Dependencies:       append([]string(nil), ir.Jobs[i].Needs...),
 			RequiresMise:       job.NeedsMise(),
 			Cache:              ir.Jobs[i].Cache,

@@ -1632,7 +1632,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: ${{ secrets.NAME_SECRET }}
-        run: echo '${{ ToJson(GitHub) }}'
+        run: echo '${{ contains(ToJson(GitHub), '"event"') }}'
 `)
 	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err != nil {
@@ -1644,6 +1644,9 @@ jobs:
 	}
 	if job.GitHubToken == nil || !job.HasCapability("provider-token-write") {
 		t.Fatalf("toJSON(github) authority = %#v, capabilities %#v", job.GitHubToken, job.RequiredCapabilities)
+	}
+	if !job.Event.PayloadArtifact || bundle.EventArtifact == nil {
+		t.Fatal("toJSON(github) did not retain the event payload")
 	}
 	if bundle.Plans[0].Authorization.GitHubTokenSecretReference {
 		t.Fatal("toJSON(github) was reported as a secrets.GITHUB_TOKEN reference")
@@ -1768,8 +1771,53 @@ jobs:
   "payload": {"action_ref": "owner/action@1111111111111111111111111111111111111111"}
 }`)
 	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained") {
+	if err == nil || !strings.Contains(err.Error(), "github.event cannot select an action reference") {
 		t.Fatalf("CompileBundle() error = %v, want static action reference rejection", err)
+	}
+}
+
+func TestCompileBundleRetainsEventPayloadOnlyForJobsThatNeedIt(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  whole-event:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ toJSON(github.event) }}'
+  scalar-event:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ github.event.action }}'
+`)
+	event := []byte(`{
+  "provider": "github", "event": "push",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"action": "opened", "commits": [{"id": "2222222222222222222222222222222222222222"}]}
+}`)
+	bundle, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d, want 2", len(bundle.Plans))
+	}
+	jobs := map[string]plan.Job{}
+	for _, artifact := range bundle.Plans {
+		jobs[artifact.Job.Workflow.LogicalJobID] = artifact.Job
+	}
+	if !jobs["whole-event"].Event.PayloadArtifact || bundle.EventArtifact == nil || !strings.Contains(jobs["whole-event"].Steps[0].Command, "github.event") {
+		t.Fatalf("whole-event plan did not retain its runtime payload: %#v", jobs["whole-event"])
+	}
+	if jobs["scalar-event"].Event.PayloadArtifact || jobs["scalar-event"].Steps[0].Command != "echo 'opened'" {
+		t.Fatalf("scalar-event plan retained an unnecessary payload: %#v", jobs["scalar-event"])
+	}
+	if bundle.EventArtifact.Path != ".buildkite-gha/events/"+strings.TrimPrefix(bundle.EventArtifact.Digest, "sha256:")+".json" || !bytes.Contains(bundle.EventArtifact.Contents, []byte(`"commits"`)) {
+		t.Fatalf("event artifact = %#v", bundle.EventArtifact)
+	}
+	for _, artifact := range bundle.Plans {
+		if bytes.Contains(artifact.Contents, []byte(`"commits"`)) {
+			t.Fatalf("plan %q embedded the event payload", artifact.Path)
+		}
 	}
 }
 

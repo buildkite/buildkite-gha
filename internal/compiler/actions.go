@@ -79,17 +79,19 @@ type actionNode struct {
 }
 
 type actionCompilation struct {
-	selectors           []plan.ActionSelector
-	locks               []plan.ActionLock
-	capabilities        []string
-	requiredSecrets     []string
-	githubTokenActions  []string
-	requiresMise        bool
-	requiresGitHubToken bool
+	selectors            []plan.ActionSelector
+	locks                []plan.ActionLock
+	capabilities         []string
+	requiredSecrets      []string
+	githubTokenActions   []string
+	requiresMise         bool
+	requiresGitHubToken  bool
+	requiresEventPayload bool
 }
 
 type actionRequirements struct {
 	githubToken     bool
+	eventPayload    bool
 	requiredSecrets map[string]bool
 }
 
@@ -252,6 +254,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	}
 	sort.Strings(caps)
 	requiresGitHubToken := false
+	requiresEventPayload := false
 	requiredSecrets := map[string]bool{}
 	var githubTokenActions []string
 	if suppliedInputs != nil {
@@ -261,6 +264,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
 			requiresGitHubToken = requiresGitHubToken || requirements.githubToken
+			requiresEventPayload = requiresEventPayload || requirements.eventPayload
 			if requirements.githubToken {
 				githubTokenActions = append(githubTokenActions, refs[i])
 			}
@@ -271,13 +275,14 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	}
 	secretNames := sortedKeys(requiredSecrets)
 	return actionCompilation{
-		selectors:           selectors,
-		locks:               locks,
-		capabilities:        caps,
-		requiredSecrets:     secretNames,
-		githubTokenActions:  githubTokenActions,
-		requiresMise:        b.requiresMise,
-		requiresGitHubToken: requiresGitHubToken,
+		selectors:            selectors,
+		locks:                locks,
+		capabilities:         caps,
+		requiredSecrets:      secretNames,
+		githubTokenActions:   githubTokenActions,
+		requiresMise:         b.requiresMise,
+		requiresGitHubToken:  requiresGitHubToken,
+		requiresEventPayload: requiresEventPayload,
 	}, nil
 }
 
@@ -375,6 +380,54 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 
 func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string) (actionRequirements, error) {
 	requirements := actionRequirements{requiredSecrets: map[string]bool{}}
+	for _, condition := range []string{n.metadata.Runs.PreIf, n.metadata.Runs.PostIf} {
+		referencesEvent, err := expression.ConditionReferencesGitHubEventPayload(condition)
+		if err != nil {
+			return actionRequirements{}, err
+		}
+		requirements.eventPayload = requirements.eventPayload || referencesEvent
+	}
+	inspectTemplate := func(value string) error {
+		referencesEvent, err := expression.TemplateReferencesGitHubEvent(value)
+		if err != nil {
+			return err
+		}
+		requirements.eventPayload = requirements.eventPayload || referencesEvent
+		return nil
+	}
+	if n.runtime == metadata.RuntimeDocker {
+		for _, name := range sortedKeys(n.metadata.Runs.Env) {
+			if err := inspectTemplate(n.metadata.Runs.Env[name]); err != nil {
+				return actionRequirements{}, err
+			}
+		}
+	}
+	if n.runtime == metadata.RuntimeComposite {
+		for _, name := range sortedKeys(n.metadata.Outputs) {
+			if err := inspectTemplate(n.metadata.Outputs[name].Value); err != nil {
+				return actionRequirements{}, err
+			}
+		}
+		for _, step := range n.metadata.Runs.Steps {
+			referencesEvent, err := expression.ConditionReferencesGitHubEventPayload(step.If)
+			if err != nil {
+				return actionRequirements{}, err
+			}
+			requirements.eventPayload = requirements.eventPayload || referencesEvent
+			for _, value := range []string{step.Run, step.WorkingDirectory} {
+				if err := inspectTemplate(value); err != nil {
+					return actionRequirements{}, err
+				}
+			}
+			for _, values := range []map[string]string{step.Env, step.With} {
+				for _, name := range sortedKeys(values) {
+					if err := inspectTemplate(values[name]); err != nil {
+						return actionRequirements{}, err
+					}
+				}
+			}
+		}
+	}
 	for _, suppliedName := range sortedKeys(supplied) {
 		value := supplied[suppliedName]
 		referencesEvent, err := expression.TemplateReferencesGitHubEvent(value)
@@ -382,7 +435,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			return actionRequirements{}, fmt.Errorf("action input %q: %w", suppliedName, err)
 		}
 		if referencesEvent {
-			return actionRequirements{}, fmt.Errorf("action input %q: github.event cannot be retained in a job plan", suppliedName)
+			requirements.eventPayload = true
 		}
 		names, err := expression.SecretReferences(value)
 		if err != nil {
@@ -423,6 +476,11 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		if err := expression.ValidateActionInputDefault(*input.Default); err != nil {
 			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
 		}
+		referencesEvent, err := expression.TemplateReferencesGitHubEvent(*input.Default)
+		if err != nil {
+			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
+		}
+		requirements.eventPayload = requirements.eventPayload || referencesEvent
 		referencesToken, err := expression.ActionInputDefaultRequiresGitHubToken(*input.Default, serverURL)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
@@ -458,6 +516,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 		}
 		requirements.githubToken = requirements.githubToken || childRequirements.githubToken
+		requirements.eventPayload = requirements.eventPayload || childRequirements.eventPayload
 		for name := range childRequirements.requiredSecrets {
 			requirements.requiredSecrets[name] = true
 		}

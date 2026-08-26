@@ -53,6 +53,28 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 	validator.referenceError = func(err error) error {
 		return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
 	}
+	validator.validateAccess = func(access actionlint.ExprNode) error {
+		if !isGitHubEventAccess(access) {
+			root, path, err := referencePath(access)
+			if err != nil {
+				return validator.referenceError(err)
+			}
+			return validator.validateReference(access, root, path)
+		}
+		switch access := access.(type) {
+		case *actionlint.ObjectDerefNode:
+			return validator.validate(access.Receiver)
+		case *actionlint.IndexAccessNode:
+			if err := validator.validate(access.Operand); err != nil {
+				return err
+			}
+			return validator.validate(access.Index)
+		case *actionlint.ArrayDerefNode:
+			return validator.validate(access.Receiver)
+		default:
+			return nil
+		}
+	}
 	validator.validateCompare = func(kind actionlint.CompareOpNodeKind) error {
 		return nil
 	}
@@ -121,6 +143,9 @@ func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, er
 }
 
 func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (any, error) {
+	if err := validateActionInputDefaultNode(node); err != nil {
+		return nil, err
+	}
 	root, path, err := referencePath(node)
 	if err == nil && strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "debug") && !isDirectRunnerDebug(node, root, path) {
 		return nil, fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
@@ -147,6 +172,7 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 		}
 		return resolveRuntimeReferenceWithMissingMembers(root, path, context)
 	}
+	evaluator.resolveRoot = func(root string) (any, error) { return resolveStepRuntimeRoot(root, context) }
 	evaluator.truthy = githubTruthy
 	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
 		return githubCompare(kind, left, right)

@@ -3,6 +3,8 @@ package plan
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +26,7 @@ const MaxNeedProducers = 1024
 const MaxNeedOutputs = 64
 const MaxCallGuards = 4
 const maxStepTargets = 256
+const MaxEventPayloadBytes = 25 << 20
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var compilerVersionPattern = regexp.MustCompile(`^[ -~]{1,256}$`)
@@ -105,15 +108,17 @@ type Runtime struct {
 }
 
 type Event struct {
-	Provider      string `json:"provider"`
-	Name          string `json:"name"`
-	PayloadDigest string `json:"payload_digest"`
-	Repository    string `json:"repository,omitempty"`
-	Ref           string `json:"ref,omitempty"`
-	HeadRef       string `json:"head_ref,omitempty"`
-	BaseRef       string `json:"base_ref,omitempty"`
-	SHA           string `json:"sha,omitempty"`
-	Actor         string `json:"actor,omitempty"`
+	Provider        string          `json:"provider"`
+	Name            string          `json:"name"`
+	PayloadDigest   string          `json:"payload_digest"`
+	PayloadArtifact bool            `json:"payload_artifact,omitempty"`
+	Payload         *map[string]any `json:"-"`
+	Repository      string          `json:"repository,omitempty"`
+	Ref             string          `json:"ref,omitempty"`
+	HeadRef         string          `json:"head_ref,omitempty"`
+	BaseRef         string          `json:"base_ref,omitempty"`
+	SHA             string          `json:"sha,omitempty"`
+	Actor           string          `json:"actor,omitempty"`
 }
 
 // EventRepositoryOwner returns the owner component of an event repository.
@@ -491,6 +496,36 @@ func Encode(job Job) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// DecodeEventPayload verifies and decodes one immutable event artifact.
+func DecodeEventPayload(source []byte, expectedDigest string) (map[string]any, error) {
+	if len(source) > MaxEventPayloadBytes {
+		return nil, fmt.Errorf("event payload artifact exceeds the %d-byte limit", MaxEventPayloadBytes)
+	}
+	digest := sha256.Sum256(source)
+	if "sha256:"+hex.EncodeToString(digest[:]) != expectedDigest {
+		return nil, fmt.Errorf("event payload artifact does not match its digest")
+	}
+	if err := rejectDuplicateKeys(source); err != nil {
+		return nil, fmt.Errorf("decode event payload artifact: %w", err)
+	}
+	var payload map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(source))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode event payload artifact: %w", err)
+	}
+	if payload == nil {
+		return nil, fmt.Errorf("event payload artifact must contain a JSON object")
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("decode event payload artifact: multiple JSON values")
+		}
+		return nil, fmt.Errorf("decode event payload artifact: %w", err)
+	}
+	return payload, nil
+}
+
 func (job Job) Validate() error {
 	if job.Schema != Schema {
 		return fmt.Errorf("unsupported job plan schema %q", job.Schema)
@@ -516,6 +551,19 @@ func (job Job) Validate() error {
 	}
 	if len(job.Event.Repository) > 512 || len(job.Event.Ref) > 1024 || len(job.Event.HeadRef) > 1024 || len(job.Event.BaseRef) > 1024 || len(job.Event.SHA) > 128 || len(job.Event.Actor) > 256 {
 		return fmt.Errorf("job plan event identity exceeds its size limit")
+	}
+	if job.Event.Payload != nil {
+		payload, err := json.Marshal(job.Event.Payload)
+		if err != nil {
+			return fmt.Errorf("encode job plan event payload: %w", err)
+		}
+		if len(payload) > MaxEventPayloadBytes {
+			return fmt.Errorf("job plan event payload exceeds the %d-byte limit", MaxEventPayloadBytes)
+		}
+		digest := sha256.Sum256(payload)
+		if "sha256:"+hex.EncodeToString(digest[:]) != job.Event.PayloadDigest {
+			return fmt.Errorf("job plan event payload does not match its digest")
+		}
 	}
 	if job.Workflow.Path == "" || len(job.Workflow.Path) > 1024 || !utf8.ValidString(job.Workflow.Path) || hasControl(job.Workflow.Path) || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {
 		return fmt.Errorf("job plan requires a workflow path, sha256 digest, and logical job id")

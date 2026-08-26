@@ -112,6 +112,13 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
+	if options.artifactProducer == "" {
+		options.artifactProducer = options.planProducer
+	}
+	if err := hydrateEventPayload(ctx, agent, &job, options.artifactProducer); err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: hydrate event payload: %v\n", err)
+		return 1
+	}
 	if err := gharuntime.ValidateHost(job, runtime.GOOS, runtime.GOARCH); err != nil {
 		details.setFailurePhase(telemetry.FailurePhaseExecution)
 		details.setFailureCode(runtimeFailureCode(err))
@@ -426,6 +433,42 @@ func callGuardsHaveNeedSources(guards []plan.CallGuard) bool {
 	return false
 }
 
+func hydrateEventPayload(ctx context.Context, agent transport.Agent, job *plan.Job, producer string) error {
+	if !job.Event.PayloadArtifact {
+		return nil
+	}
+	if producer == "" {
+		return fmt.Errorf("event payload artifact requires an importer job producer")
+	}
+	path, err := buildkitepipeline.EventPath(job.Event.PayloadDigest)
+	if err != nil {
+		return err
+	}
+	root, err := os.MkdirTemp("", "buildkite-gha-event-")
+	if err != nil {
+		return fmt.Errorf("create event payload directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(root) }()
+	if err := agent.DownloadArtifact(ctx, path, root, producer); err != nil {
+		return fmt.Errorf("download event payload artifact: %w", err)
+	}
+	file, err := os.Open(filepath.Join(root, filepath.FromSlash(path)))
+	if err != nil {
+		return fmt.Errorf("open event payload artifact: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	source, err := io.ReadAll(io.LimitReader(file, int64(plan.MaxEventPayloadBytes)+1))
+	if err != nil {
+		return fmt.Errorf("read event payload artifact: %w", err)
+	}
+	payload, err := plan.DecodeEventPayload(source, job.Event.PayloadDigest)
+	if err != nil {
+		return err
+	}
+	job.Event.Payload = &payload
+	return nil
+}
+
 func writeJobResult(path string, result gharuntime.JobResult) error {
 	encoded, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
@@ -472,11 +515,12 @@ This job could not retrieve the Buildkite secret %s.
 }
 
 type runJobOptions struct {
-	planPath        string
-	planDigest      string
-	planProducer    string
-	resultPath      string
-	hostedToolCache bool
+	planPath         string
+	planDigest       string
+	planProducer     string
+	artifactProducer string
+	resultPath       string
+	hostedToolCache  bool
 }
 
 func runJobArgs(args []string) (runJobOptions, error) {
@@ -490,7 +534,7 @@ func runJobArgs(args []string) (runJobOptions, error) {
 			}
 			seen[args[i]] = true
 			options.hostedToolCache = true
-		case "--plan", "--plan-digest", "--plan-producer", "--result":
+		case "--plan", "--plan-digest", "--plan-producer", "--artifact-producer", "--result":
 			option := args[i]
 			if seen[option] {
 				return runJobOptions{}, fmt.Errorf("%s may only be specified once", option)
@@ -507,6 +551,8 @@ func runJobArgs(args []string) (runJobOptions, error) {
 				options.planDigest = args[i]
 			case "--plan-producer":
 				options.planProducer = args[i]
+			case "--artifact-producer":
+				options.artifactProducer = args[i]
 			case "--result":
 				options.resultPath = args[i]
 			}

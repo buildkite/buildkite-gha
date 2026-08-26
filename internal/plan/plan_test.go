@@ -2,7 +2,9 @@ package plan
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -64,6 +66,38 @@ func TestCheckoutInputsRoundTripDeterministically(t *testing.T) {
 	decoded, err := Decode(first)
 	if err != nil || !maps.Equal(decoded.Steps[0].With, job.Steps[0].With) || decoded.Event.Repository != job.Event.Repository {
 		t.Fatalf("decoded checkout plan = %#v, %v", decoded, err)
+	}
+}
+
+func TestEventPayloadArtifactRoundTripAndValidation(t *testing.T) {
+	job := validJob()
+	job.Event.PayloadArtifact = true
+	payload := []byte(`{"action":"opened","pull_request":{"number":42}}`)
+	job.Event.PayloadDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(payload))
+
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJobPlanSchema(t, encoded)
+	decoded, err := Decode(encoded)
+	if err != nil || !decoded.Event.PayloadArtifact || decoded.Event.Payload != nil {
+		t.Fatalf("Decode() payload artifact = %#v, %v", decoded.Event, err)
+	}
+	decodedPayload, err := DecodeEventPayload(payload, job.Event.PayloadDigest)
+	if err != nil || decodedPayload["action"] != "opened" {
+		t.Fatalf("DecodeEventPayload() = %#v, %v", decodedPayload, err)
+	}
+	if _, err := DecodeEventPayload([]byte(`{"action":"closed"}`), job.Event.PayloadDigest); err == nil || !strings.Contains(err.Error(), "does not match its digest") {
+		t.Fatalf("DecodeEventPayload() tampered error = %v", err)
+	}
+	oversized := []byte(`{"body":"` + strings.Repeat("x", MaxEventPayloadBytes) + `"}`)
+	if _, err := DecodeEventPayload(oversized, fmt.Sprintf("sha256:%x", sha256.Sum256(oversized))); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("DecodeEventPayload() oversized error = %v", err)
+	}
+	empty, err := DecodeEventPayload([]byte(`{}`), fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(`{}`))))
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("DecodeEventPayload() empty = %#v, %v", empty, err)
 	}
 }
 

@@ -109,6 +109,7 @@ type JobInstance struct {
 	RemoteWorkflow          *RemoteWorkflowSource     `json:"remote_workflow,omitempty"`
 	RepositoryRoot          string                    `json:"-"`
 	Source                  workflow.Span             `json:"source"`
+	RetainEventPayload      bool                      `json:"-"`
 	secretAuthority         secretAuthority
 	tokenPolicyNarrowed     bool
 	jobPermissionsIgnored   bool
