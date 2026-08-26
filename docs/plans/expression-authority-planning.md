@@ -83,7 +83,9 @@ action compilation:
    authorized context but cannot add authority. Only direct `github.token`
    sets the summary bit.
 4. Propagate the bit through the already resolved, depth-bounded action DAG.
-   Attribute authority to the selected root action in plan authorization.
+   Attribute authority to the selected root action in plan authorization, and
+   update diagnostics to describe resolved action metadata rather than claiming
+   every attributed action defaults an input to `github.token`.
 5. Apply the summary only when the event provider is GitHub. Origin remains
    tokenless: provider-guarded references evaluate to empty, while an
    unguarded reference fails at runtime instead of receiving the wrong
@@ -141,6 +143,7 @@ Exceeding this ceiling should stop implementation and trigger design review.
    silently losing the marker.
 8. Hosted validation requires immutable action resolution before claiming this
    compatibility. Existing plan validation, redaction, and backend provenance
-   tests remain green.
+   tests remain green. Compiler and admission diagnostics identify token-bearing
+   resolved action metadata without misreporting it as an input default.
 
 Run targeted compiler and runtime tests, then `mise run check`.
