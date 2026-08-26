@@ -126,9 +126,9 @@ Exceeding this ceiling should stop implementation and trigger design review.
    `DEFAULT_GITHUB_TOKEN` successfully.
 2. Explicit `fallback: cargo-install` and `if: false` still grant. Tests name
    these as intentional conservative over-authorization.
-3. The same action on Origin compiles without token authority. Its provider-
-   guarded token expression evaluates to empty; an unguarded expression fails
-   without calling a token provider.
+3. The same unguarded action fixture on Origin compiles without token authority
+   and fails at runtime without calling a token provider. A separate fixture
+   guarded by `github.server_url == 'https://github.com'` evaluates to empty.
 4. Existing effective input-default cases remain exact: an explicit input
    suppresses its default, ordered defaults work, and the GitHub provider guard
    stays tokenless on Origin.
