@@ -260,7 +260,7 @@ func TestParseRejectsJobPermissionShorthand(t *testing.T) {
 			source := []byte("on: push\njobs:\n  publish:\n    permissions: " + shorthand + "\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 			_, err := Parse("permissions.yml", source)
 			access := strings.TrimSuffix(shorthand, "-all")
-			want := `permissions.yml:4:18: permissions: ` + shorthand + ` is unsupported as job-level shorthand. In job "publish", declare each needed permission explicitly, such as contents: ` + access + ` and pull-requests: ` + access + `. Move permissions: ` + shorthand + ` to the workflow top level only when that broader authority is intended for every job. If you need job-level permissions shorthand, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`
+			want := `permissions.yml:4:18: permissions: ` + shorthand + ` is unsupported as job-level shorthand. In job "publish", you cannot set separate repository permissions. At the workflow top level, declare each needed repository permission, such as contents: ` + access + ` and pull-requests: ` + access + `. These permissions apply to every job that receives GITHUB_TOKEN. Use permissions: ` + shorthand + ` at the workflow top level only when every supported repository permission should have ` + access + ` access. If you need different repository permissions for individual jobs, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`
 			if err == nil || err.Error() != want {
 				t.Fatalf("Parse() error = %q, want %q", err, want)
 			}

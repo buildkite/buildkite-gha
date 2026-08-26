@@ -876,7 +876,7 @@ func adaptPermissions(path string, in *actionlint.Permissions, jobID string) (*P
 			return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
 		}
 		access := strings.TrimSuffix(in.All.Value, "-all")
-		return nil, fmt.Errorf("%s:%d:%d: permissions: %s is unsupported as job-level shorthand. In job %q, declare each needed permission explicitly, such as contents: %s and pull-requests: %s. Move permissions: %s to the workflow top level only when that broader authority is intended for every job. If you need job-level permissions shorthand, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support", path, in.All.Pos.Line, in.All.Pos.Col, in.All.Value, jobID, access, access, in.All.Value)
+		return nil, fmt.Errorf("%s:%d:%d: permissions: %s is unsupported as job-level shorthand. In job %q, you cannot set separate repository permissions. At the workflow top level, declare each needed repository permission, such as contents: %s and pull-requests: %s. These permissions apply to every job that receives GITHUB_TOKEN. Use permissions: %s at the workflow top level only when every supported repository permission should have %s access. If you need different repository permissions for individual jobs, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support", path, in.All.Pos.Line, in.All.Pos.Col, in.All.Value, jobID, access, access, in.All.Value, access)
 	}
 	scopes := make(map[string]string, len(in.Scopes))
 	names := make([]string, 0, len(in.Scopes))

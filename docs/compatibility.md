@@ -398,7 +398,7 @@ Put `permissions: read-all` or `permissions: write-all` at the top level to appl
 
 Jobs expanded from reusable workflows use the top-level requesting workflow's repository permissions for `GITHUB_TOKEN`. Only this immutable top-level map is enforced server-side; permission maps in called workflows do not narrow `GITHUB_TOKEN`. The separate `id-token` permission retains called-workflow narrowing. Warnings identify job-level repository maps that differ from the applied top-level permissions and called-workflow maps that would have narrowed the token scope.
 
-At job level, list each permission you need instead of using `permissions: read-all` or `permissions: write-all`. Move a shorthand to the top level only when every job should get that access. An empty top-level permissions map, or one that contains only `none`, creates no token. Use GitHub's exact permission names.
+To grant repository access, list each required permission at the top level, such as `contents: write`. Every job that receives `GITHUB_TOKEN` gets that access. You cannot give different repository permissions to individual jobs. Use top-level `read-all` or `write-all` only when every job should get read or write access for every supported repository permission. An empty top-level permissions map, or one that contains only `none`, creates no token. Use GitHub's exact permission names.
 
 ### Environment and defaults
 

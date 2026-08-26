@@ -78,7 +78,7 @@ func TestValidateReportsActionableWorkflowSyntaxDiagnostics(t *testing.T) {
 			name:     "job-level write-all",
 			source:   "on: push\njobs:\n  publish:\n    permissions: write-all\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 			headline: "permissions: write-all is unsupported as job-level shorthand.",
-			message:  `permissions: write-all is unsupported as job-level shorthand. In job "publish", declare each needed permission explicitly, such as contents: write and pull-requests: write. Move permissions: write-all to the workflow top level only when that broader authority is intended for every job. If you need job-level permissions shorthand, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`,
+			message:  `permissions: write-all is unsupported as job-level shorthand. In job "publish", you cannot set separate repository permissions. At the workflow top level, declare each needed repository permission, such as contents: write and pull-requests: write. These permissions apply to every job that receives GITHUB_TOKEN. Use permissions: write-all at the workflow top level only when every supported repository permission should have write access. If you need different repository permissions for individual jobs, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`,
 			job:      "publish",
 			column:   18,
 		},
