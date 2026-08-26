@@ -1050,7 +1050,7 @@ Pre conditions use the status and action-scoped environment available when prepa
 
 ### Checkout action
 
-**🟡 Supported subset.** The final v1.2.0, v2.8.0, and v3.7.0 release commits are admitted exactly. Resolved commits in the v4-and-later range of the static [`actions/checkout` upstream `main` snapshot](https://github.com/actions/checkout/tree/f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a) are also admitted. The following known releases remain admitted even when their commits aren't reachable from that snapshot:
+**🟡 Supported subset.** Immutable commits captured from frozen upstream tags, `main`, `master`, and `releases/v1` through `releases/v6` snapshots are admitted. The snapshot includes historical development and release commits across v1 through v7. These known releases identify the principal contracts:
 
 | Release | Commit |
 | --- | --- |
@@ -1063,38 +1063,40 @@ Pre conditions use the status and action-scoped environment available when prepa
 | v7.0.0 corpus pin | [`9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`](https://github.com/actions/checkout/tree/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0) |
 | v7.0.1 | [`3d3c42e5aac5ba805825da76410c181273ba90b1`](https://github.com/actions/checkout/tree/3d3c42e5aac5ba805825da76410c181273ba90b1) |
 
-References such as `main` and `master` work only when they resolve to a supported release or commit from upstream `main`. Buildkite checks out the repository without running the action's JavaScript. Each release accepts only the inputs available in that release. Earlier releases reject later inputs. Other commits before v3.7.0 and unknown commits are unsupported.
+Mutable refs work only while they resolve to a commit in the frozen snapshots. Every admitted commit uses the native adapter; the upstream JavaScript doesn't run. Each commit retains the inputs, full-history default, and outputs declared by its upstream contract. For example, early v2 commits reject later v2 inputs, and v4.0 and v4.1 commits don't expose the `ref` and `commit` outputs. Commits absent from the snapshots and manifests with unsupported output contracts remain unsupported. Compilation emits `W_CHECKOUT_LEGACY_RELEASE` for v1.2.0 and v2.8.0 to nudge an upgrade to v4 or later.
+
+Maintainers can refresh the frozen refs and per-commit profiles with `go generate ./internal/action/integration`. Regeneration admits only commits reachable from the selected upstream tags and branches at that time; it doesn't blanket-admit future commits.
 
 Buildkite runs v1.2.0 like v1 and v2.8.0 like v2, and warns about their differences from v4 and later. Neither release sets the `ref` or `commit` outputs added in v4.2.0. v1.2.0 also fetches full history by default when `fetch-depth` is omitted. Upgrade only if your workflow needs those outputs or different v1 history behavior. Otherwise, keep the current version.
 
-Maintainers can update supported v4-and-later commits with `go generate ./internal/action/integration`. This does not add support for more numbered releases.
-
 The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean nested directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to the Git commands that fetch repository, LFS, or submodule data and are never persisted.
+
+An explicit input is accepted only when the snapshotted manifest for that commit declares it. The following value restrictions then apply:
 
 | Input | Supported values |
 | --- | --- |
 | `repository` | Omitted, or the event `owner/repo`. |
 | `ref` | Omitted, empty, a lowercase 40-hex commit, or a static branch in the event repository. A direct `github.sha` or `needs.<job>.outputs.<name>` expression must resolve at runtime to the exact event SHA. |
 | `token` | Omitted only. |
-| `ssh-key`, `ssh-known-hosts` | v2.8.0 and later: omitted or empty. v1.2.0: omitted. |
-| `ssh-strict` | v2.8.0 and later: omitted or `true`. v1.2.0: omitted. |
-| `ssh-user` | v4 and later: omitted or `git`. Earlier releases: omitted. |
-| `persist-credentials` | v2.8.0 and later: omitted or `false`. v1.2.0: omitted. |
+| `ssh-key`, `ssh-known-hosts` | When declared by the commit: omitted or empty. Otherwise omitted. |
+| `ssh-strict` | When declared by the commit: omitted or `true`. Otherwise omitted. |
+| `ssh-user` | When declared by the commit: omitted or `git`. Otherwise omitted. |
+| `persist-credentials` | When declared by the commit: omitted or `false`. Otherwise omitted. |
 | `path` | Omitted, empty, or a clean relative directory without a `.git` path segment. The resolved path stays inside the workspace and can't traverse symbolic-link parents. |
 | `clean` | Omitted, `true`, or `false`; the root workspace must be empty, or the selected path must be absent. Existing-directory reuse is unsupported, so `false` differs only by matching workflows that select a fresh target. |
-| `filter` | v4 and later: omitted, empty, or one Git partial-clone filter without control characters. Earlier releases: omitted. |
-| `sparse-checkout` | v3.7.0 and later: omitted, empty, or up to 1,000 non-empty patterns totaling at most 1 MiB. Earlier releases: omitted. |
-| `sparse-checkout-cone-mode` | v3.7.0 and later: omitted, `true`, or `false`. Earlier releases: omitted. |
-| `fetch-depth` | Omitted or a nonnegative integer; `0` fetches full history. v1.2.0 fetches full history when omitted. |
-| `fetch-tags` | v3.7.0 and later: omitted, `true`, or `false`. Earlier releases: omitted. |
-| `show-progress` | v4 and later: omitted, `true`, or `false`. Earlier releases: omitted. |
+| `filter` | When declared by the commit: omitted, empty, or one Git partial-clone filter without control characters. Otherwise omitted. |
+| `sparse-checkout` | When declared by the commit: omitted, empty, or up to 1,000 non-empty patterns totaling at most 1 MiB. Otherwise omitted. |
+| `sparse-checkout-cone-mode` | When declared by the commit: omitted, `true`, or `false`. Otherwise omitted. |
+| `fetch-depth` | Omitted or a nonnegative integer; `0` fetches full history. Historical runner-plugin commits fetch full history when omitted. |
+| `fetch-tags` | When declared by the commit: omitted, `true`, or `false`. Otherwise omitted. |
+| `show-progress` | When declared by the commit: omitted, `true`, or `false`. Otherwise omitted. |
 | `lfs` | Omitted, `true`, or `false`. `true` requires Git LFS in the job image. |
 | `submodules` | Omitted, `false`, `true`, or `recursive`; whitespace is trimmed and casing is ignored. |
-| `set-safe-directory` | v2.8.0 and later: omitted or `true`. v1.2.0: omitted. |
-| `github-server-url` | v3.7.0 and later: omitted, empty, or `https://github.com`. Earlier releases: omitted. |
-| `allow-unsafe-pr-checkout` | v2.8.0 and later: omitted or `false`. v1.2.0: omitted. |
+| `set-safe-directory` | When declared by the commit: omitted or `true`. Otherwise omitted. |
+| `github-server-url` | When declared by the commit: omitted, empty, or `https://github.com`. Otherwise omitted. |
+| `allow-unsafe-pr-checkout` | When declared by the commit: omitted or `false`. Otherwise omitted. |
 
-The `ref` and `commit` outputs are unavailable for v1.2.0, v2.8.0, and v3.7.0. Upstream added them in v4.2.0.
+The `ref` and `commit` outputs are available only for commits whose action manifest declares them. Upstream added both outputs in v4.2.0.
 
 The `false` value and omission do not run submodule commands. The `true` value runs native Git for direct children, and `recursive` includes nested children. Relative URLs and `fetch-depth` follow native Git behavior. Public and private GitHub submodules are supported under the job's repository access; external HTTPS submodules are anonymous. `git@github.com:` URLs are rewritten to HTTPS. Other SSH and non-HTTPS transports are unsupported.
 
