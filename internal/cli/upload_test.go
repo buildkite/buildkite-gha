@@ -114,19 +114,22 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	if !strings.Contains(stdout.String(), "Uploaded 3 jobs") || stderr.Len() != 0 {
 		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
 	}
-	if len(runner.commands) != 5 {
-		t.Fatalf("commands = %#v, want distribution, three plans, and pipeline", runner.commands)
+	if len(runner.commands) != 2 {
+		t.Fatalf("commands = %#v, want one artifact batch and pipeline", runner.commands)
 	}
 	root := runner.commands[0].dir
-	for i, command := range runner.commands[:4] {
-		if command.dir != root || command.name != "buildkite-agent" || len(command.args) != 3 || command.args[0] != "artifact" || command.args[1] != "upload" {
-			t.Fatalf("artifact command %d = %#v", i, command)
-		}
+	artifactCommand := runner.commands[0]
+	wantArtifactArgs := []string{"artifact", "upload", ".buildkite-gha/**/*", "--concurrency", "8"}
+	if artifactCommand.name != "buildkite-agent" || !slices.Equal(artifactCommand.args, wantArtifactArgs) {
+		t.Fatalf("artifact command = %#v, want cwd %q and args %#v", artifactCommand, root, wantArtifactArgs)
+	}
+	if len(runner.uploaded) != 4 {
+		t.Fatalf("uploaded artifacts = %#v, want distribution and three plans", runner.uploaded)
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatalf("temporary artifact root still exists: %v", err)
 	}
-	pipelineCommand := runner.commands[4]
+	pipelineCommand := runner.commands[1]
 	wantPipelineArgs := []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}
 	if strings.Join(pipelineCommand.args, " ") != strings.Join(wantPipelineArgs, " ") {
 		t.Fatalf("pipeline args = %#v, want %#v", pipelineCommand.args, wantPipelineArgs)
@@ -339,7 +342,8 @@ func TestRunUploadRejectsExplicitTrackedSymlinks(t *testing.T) {
 			t.Setenv("BUILDKITE_STEP_KEY", "symlink-importer")
 			runner := &cliCaptureRunner{}
 			var stdout, stderr bytes.Buffer
-			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/linked.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "symbolic link") {
+			want := `workflow path ".github/workflows/linked.yml" is not a regular tracked file. Check that the file exists at this path and is not a symlink. Symlinks, untracked files, directories, and globs are not supported`
+			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/linked.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), want) {
 				t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 			}
 			if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
@@ -434,7 +438,7 @@ func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 		{name: "directory", operands: []string{workflowDirectory, aPath}, want: "directory"},
 		{name: "outside repository", operands: []string{outsidePath, aPath}, want: "outside the checked-out git repository"},
 		{name: "non-workflow extension", operands: []string{notePath, aPath}, want: "must end in .yml or .yaml"},
-		{name: "symlink", operands: []string{symlinkPath, aPath}, want: "symbolic link"},
+		{name: "symlink", operands: []string{symlinkPath, aPath}, want: "is not a regular tracked file"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, _, err := expandExplicitWorkflowPaths(test.operands, ""); err == nil || !strings.Contains(err.Error(), test.want) {
@@ -564,7 +568,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 	if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Uploaded 14 jobs from 6 workflows") || stderr.Len() != 0 || len(runner.commands) != 16 {
+	if !strings.Contains(stdout.String(), "Uploaded 14 jobs from 6 workflows") || stderr.Len() != 0 || len(runner.commands) != 2 {
 		t.Fatalf("stdout/stderr/commands = %q / %q / %d", stdout.String(), stderr.String(), len(runner.commands))
 	}
 	pipelineCommand := runner.commands[len(runner.commands)-1]
@@ -764,7 +768,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "multi-trigger.yml")
-	workflowSource := "name: Active event\non:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
+	workflowSource := "name: Active event\non:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  issues:\n    types: [opened, typed]\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
 	if err := os.WriteFile(workflowPath, []byte(workflowSource), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -784,6 +788,7 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 		{name: "pull request webhook metadata", source: "webhook", githubEvent: "pull_request", webhook: []byte(`{"action":"opened","pull_request":{"base":{"ref":"main"}}}`), wantEvent: "pull_request", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "pull_request"`},
 		{name: "merge group webhook metadata", source: "webhook", githubEvent: "merge_group", webhook: []byte(`{"action":"checks_requested","merge_group":{"head_ref":"refs/heads/gh-readonly-queue/main/pr-1-deadbeef","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_ref":"refs/heads/main","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`), wantEvent: "merge_group", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "merge_group"`},
 		{name: "release webhook metadata", source: "webhook", githubEvent: "release", webhook: []byte(`{"action":"published","release":{"tag_name":"v1.2.3","draft":false,"prerelease":false}}`), wantEvent: "release", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "release"`},
+		{name: "issues webhook metadata", source: "webhook", githubEvent: "issues", webhook: []byte(`{"action":"typed","issue":{"number":1}}`), wantEvent: "issues", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "issues"`},
 		{name: "UI fallback", source: "ui", wantEvent: "workflow_dispatch", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "workflow_dispatch"`, wantFallback: `build.source == "ui"`},
 		{name: "API fallback", source: "api", wantEvent: "workflow_dispatch", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "workflow_dispatch"`, wantFallback: `build.source == "api"`},
 		{name: "schedule fallback", source: "schedule", wantEvent: "schedule", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "schedule"`, wantFallback: `build.source == "schedule"`},
@@ -1406,7 +1411,7 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 func TestRunUploadWarnsAboutUnsupportedTriggersOnSkippedWorkflows(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "cross-event.yml")
-	if err := os.WriteFile(workflowPath, []byte("on: [pull_request, issues]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+	if err := os.WriteFile(workflowPath, []byte("on: [pull_request, issue_comment]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -1420,7 +1425,7 @@ func TestRunUploadWarnsAboutUnsupportedTriggersOnSkippedWorkflows(t *testing.T) 
 	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "W_TRIGGER_EVENT_UNSUPPORTED") || !strings.Contains(stderr.String(), "on.issues") {
+	if !strings.Contains(stderr.String(), "W_TRIGGER_EVENT_UNSUPPORTED") || !strings.Contains(stderr.String(), "on.issue_comment") {
 		t.Fatalf("skipped workflow upload stderr missing unsupported-trigger warning: %q", stderr.String())
 	}
 }
@@ -1475,8 +1480,8 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 		t.Fatalf("ignored-only pipeline = %#v", pipeline.Steps)
 	}
 	wantAnnotationArgs := []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", skippedWorkflowsContext, "--style", "info"}
-	wantWorkflows := []skippedWorkflow{{label: wantLabel, key: pipeline.Steps[0].Key, reason: "This workflow is not triggered by a `push` event"}}
-	if annotation == nil || !slices.Equal(annotation.args, wantAnnotationArgs) || string(annotation.stdin) != skippedWorkflowsAnnotation("push", wantWorkflows, "https://buildkite.com/acme/widgets/builds/42") {
+	wantWorkflows := []skippedWorkflow{{label: wantLabel, key: pipeline.Steps[0].Key, reason: "This workflow is not triggered by a `push` event", events: []string{"pull_request"}}}
+	if annotation == nil || !slices.Equal(annotation.args, wantAnnotationArgs) || string(annotation.stdin) != skippedWorkflowsAnnotation("push", "", true, wantWorkflows, "https://buildkite.com/acme/widgets/builds/42") {
 		t.Fatalf("skipped workflow annotation = %#v", annotation)
 	}
 	for path := range runner.uploaded {
@@ -1517,32 +1522,52 @@ func TestRunUploadExplainsWhenWorkflowTriggerFiltersDoNotMatch(t *testing.T) {
 
 func TestSkippedWorkflowsAnnotation(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		workflows []skippedWorkflow
-		want      string
+		name        string
+		event       string
+		buildSource string
+		allSkipped  bool
+		workflows   []skippedWorkflow
+		want        string
 	}{
 		{
 			name:      "singular",
-			workflows: []skippedWorkflow{{label: "CI", key: "gha-workflow-ci", reason: "This workflow is not triggered by a `push` event"}},
+			event:     "push",
+			workflows: []skippedWorkflow{{label: "CI", key: "gha-workflow-ci", reason: "This workflow is not triggered by a `push` event", events: []string{"workflow_dispatch", "pull_request"}}},
 			want: "#### 1 workflow was skipped\n\n" +
-				"The current <code>push</code> event does not match these workflows:\n\n" +
-				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) — This workflow is not triggered by a `push` event\n",
+				"The current <code>push</code> event does not match the following workflows:\n\n" +
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) — This workflow is triggered on: <code>workflow_dispatch</code>, <code>pull_request</code>\n",
 		},
 		{
-			name: "plural",
+			name:  "event and filter mismatches",
+			event: "push",
 			workflows: []skippedWorkflow{
-				{label: "CI", key: "gha-workflow-ci", reason: "Only runs on `main` or `development`."},
-				{label: "Release [production]", key: "gha-workflow-release?production", reason: "This workflow is not triggered by a `push` event"},
+				{label: "CI", key: "gha-workflow-ci", reason: "Only runs on `main` or `development`.", events: []string{"push", "pull_request"}},
+				{label: "Release [production]", key: "gha-workflow-release?production", reason: "This workflow is not triggered by a `push` event", events: []string{"release"}},
 			},
 			want: "#### 2 workflows were skipped\n\n" +
-				"The current <code>push</code> event does not match these workflows:\n\n" +
+				"The current <code>push</code> event does not match the following workflows:\n\n" +
 				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) — Only runs on `main` or `development`.\n" +
-				"* [:github: Release \\[production\\]](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-release%3Fproduction&open=false) — This workflow is not triggered by a `push` event\n",
+				"* [:github: Release \\[production\\]](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-release%3Fproduction&open=false) — This workflow is triggered on: <code>release</code>\n",
+		},
+		{
+			name:        "manual build with no matching workflows",
+			event:       "workflow_dispatch",
+			buildSource: "ui",
+			allSkipped:  true,
+			workflows: []skippedWorkflow{
+				{label: "CI", key: "gha-workflow-ci", reason: "This workflow is not triggered by a `workflow_dispatch` event", events: []string{"push", "pull_request"}},
+			},
+			want: "#### 1 workflow was skipped, so this build ran nothing\n\n" +
+				"You started this build from the Buildkite UI, which is a manual run. In GitHub Actions terms, this maps to a <code>workflow_dispatch</code> event, and these workflows don't accept it:\n\n" +
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) — This workflow is triggered on: <code>push</code>, <code>pull_request</code>\n\n" +
+				"Push a commit or open a pull request to run workflows configured for those events. Or add <code>workflow_dispatch:</code> to the <code>on:</code> block to make a workflow runnable from here. [Learn about event mapping →](https://github.com/buildkite/buildkite-gha/blob/main/docs/cli.md#select-the-effective-event)\n",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			body := skippedWorkflowsAnnotation(
-				"push",
+				test.event,
+				test.buildSource,
+				test.allSkipped,
 				test.workflows,
 				"https://buildkite.com/acme/widgets/builds/42",
 			)
@@ -1890,7 +1915,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Uploaded 1 jobs from 2 workflows") || len(runner.commands) != 3 {
+	if !strings.Contains(stdout.String(), "Uploaded 1 jobs from 2 workflows") || len(runner.commands) != 2 {
 		t.Fatalf("stdout/commands = %q / %d", stdout.String(), len(runner.commands))
 	}
 	var pipeline struct {
@@ -2329,6 +2354,60 @@ func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 	}
 }
 
+func TestRunUploadStoresRuntimeEventOnceForExactImporterJob(t *testing.T) {
+	requireImporterHost(t)
+	workflowPath := filepath.Join(t.TempDir(), "runtime-event.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        part: [one, two]\n    steps:\n      - run: echo '${{ toJSON(github.event) }}'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sha := strings.Repeat("a", 40)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "runtime-event-importer")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
+	t.Setenv("BUILDKITE_COMMIT", sha)
+	t.Setenv("BUILDKITE_BRANCH", "main")
+	t.Setenv("BUILDKITE_TAG", "")
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "push")
+	rawValue := "retained-once"
+	runner := &cliCaptureRunner{webhook: []byte(fmt.Sprintf(`{"ref":"refs/heads/main","after":%q,"private":%q,"repository":{"full_name":"buildkite/buildkite-gha"},"sender":{"login":"octocat"}}`, sha, rawValue))}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	eventArtifacts, plans := 0, 0
+	for path, contents := range runner.uploaded {
+		switch {
+		case strings.HasPrefix(path, ".buildkite-gha/events/"):
+			eventArtifacts++
+			if !bytes.Contains(contents, []byte(rawValue)) {
+				t.Fatalf("event artifact %q omitted payload", path)
+			}
+		case strings.HasPrefix(path, ".buildkite-gha/plans/"):
+			plans++
+			if bytes.Contains(contents, []byte(rawValue)) {
+				t.Fatalf("plan %q embedded the event payload", path)
+			}
+			job, err := plan.Decode(contents)
+			if err != nil || !job.Event.PayloadArtifact {
+				t.Fatalf("plan event artifact marker = %#v, %v", job.Event, err)
+			}
+		}
+	}
+	if eventArtifacts != 1 || plans != 2 {
+		t.Fatalf("uploaded event artifacts = %d, plans = %d", eventArtifacts, plans)
+	}
+	var pipeline []byte
+	for _, command := range runner.commands {
+		if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}) {
+			pipeline = command.stdin
+		}
+	}
+	if !bytes.Contains(pipeline, []byte("--artifact-producer '"+cliTestJobID+"'")) || !bytes.Contains(pipeline, []byte("--step '"+cliTestJobID+"'")) {
+		t.Fatalf("pipeline does not bind exact importer job %q:\n%s", cliTestJobID, pipeline)
+	}
+}
+
 func TestRunUploadRejectsInvalidWebhookMetadata(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
@@ -2378,8 +2457,8 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Uploaded 2 jobs") || stderr.Len() != 0 {
 		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
 	}
-	if len(runner.commands) != 4 {
-		t.Fatalf("commands = %#v, want distribution, two plans, and pipeline", runner.commands)
+	if len(runner.commands) != 2 {
+		t.Fatalf("commands = %#v, want one artifact batch and pipeline", runner.commands)
 	}
 
 	var pipeline struct {
@@ -2395,7 +2474,7 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 			} `yaml:"steps"`
 		} `yaml:"steps"`
 	}
-	if err := yaml.Unmarshal(runner.commands[3].stdin, &pipeline); err != nil {
+	if err := yaml.Unmarshal(runner.commands[1].stdin, &pipeline); err != nil {
 		t.Fatalf("uploaded pipeline YAML: %v", err)
 	}
 	if len(pipeline.Steps) != 1 || pipeline.Steps[0].DependsOn != "concurrent-steps-importer" || len(pipeline.Steps[0].Steps) != 2 {
@@ -2439,8 +2518,8 @@ func TestRunUploadJavaScriptActionRequiresRuntimeMiseWithoutTransport(t *testing
 	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if len(runner.commands) != 3 {
-		t.Fatalf("commands = %d, want distribution, plan, and pipeline", len(runner.commands))
+	if len(runner.commands) != 2 {
+		t.Fatalf("commands = %d, want one artifact batch and pipeline", len(runner.commands))
 	}
 	for path := range runner.uploaded {
 		if strings.Contains(path, "/runtimes/") || strings.Contains(path, "/tools/mise/") {
@@ -2459,7 +2538,7 @@ func TestRunUploadJavaScriptActionRequiresRuntimeMiseWithoutTransport(t *testing
 			} `yaml:"steps"`
 		} `yaml:"steps"`
 	}
-	if err := yaml.Unmarshal(runner.commands[2].stdin, &pipeline); err != nil {
+	if err := yaml.Unmarshal(runner.commands[1].stdin, &pipeline); err != nil {
 		t.Fatalf("parse uploaded pipeline: %v", err)
 	}
 	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Steps) != 1 {
@@ -2529,12 +2608,12 @@ func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "shell-upload-importer")
-	runner := &cliCaptureRunner{failAt: 2}
+	runner := &cliCaptureRunner{failAt: 1}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"upload", workflowPath, "--event-path", eventPath, "--runtime-queue", "hosted"}, &stdout, &stderr, "dev", runner); code != 1 {
 		t.Fatalf("run() code = %d, want 1", code)
 	}
-	if len(runner.commands) != 2 || !strings.Contains(stderr.String(), "upload artifact") {
+	if len(runner.commands) != 1 || !strings.Contains(stderr.String(), "upload artifacts") {
 		t.Fatalf("commands = %#v, stderr = %q", runner.commands, stderr.String())
 	}
 }

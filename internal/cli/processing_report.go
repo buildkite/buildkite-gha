@@ -26,6 +26,7 @@ const (
 	processingAnnotationContext   = "buildkite-gha-processing"
 	skippedWorkflowsContext       = "buildkite-gha-skipped-workflows"
 	runnerResolutionContext       = "buildkite-gha-runner-resolution"
+	eventMappingDocumentationURL  = "https://github.com/buildkite/buildkite-gha/blob/main/docs/cli.md#select-the-effective-event"
 	processingAnnotationBodyLimit = 1024 * 1024
 	processingAnnotationNotice    = "\n_Additional diagnostics omitted at the Buildkite annotation size limit._\n"
 	processingAnnotationTimeout   = 5 * time.Second
@@ -193,10 +194,11 @@ type skippedWorkflow struct {
 	label  string
 	key    string
 	reason string
+	events []string
 }
 
-func (o processingOutput) annotateSkippedWorkflows(parent context.Context, event string, workflows []skippedWorkflow) {
-	body := skippedWorkflowsAnnotation(event, workflows, o.buildURL)
+func (o processingOutput) annotateSkippedWorkflows(parent context.Context, event, buildSource string, allSkipped bool, workflows []skippedWorkflow) {
+	body := skippedWorkflowsAnnotation(event, buildSource, allSkipped, workflows, o.buildURL)
 	if o.annotationJob == "" || body == "" {
 		return
 	}
@@ -223,22 +225,52 @@ func (o processingOutput) annotateRunnerResolutionWarnings(parent context.Contex
 	}
 }
 
-func skippedWorkflowsAnnotation(event string, workflows []skippedWorkflow, buildURL string) string {
+func skippedWorkflowsAnnotation(event, buildSource string, allSkipped bool, workflows []skippedWorkflow, buildURL string) string {
 	if len(workflows) == 0 || buildURL == "" {
 		return ""
 	}
 	var out strings.Builder
 	if len(workflows) == 1 {
-		out.WriteString("#### 1 workflow was skipped\n\n")
+		out.WriteString("#### 1 workflow was skipped")
 	} else {
-		_, _ = fmt.Fprintf(&out, "#### %d workflows were skipped\n\n", len(workflows))
+		_, _ = fmt.Fprintf(&out, "#### %d workflows were skipped", len(workflows))
 	}
-	_, _ = fmt.Fprintf(&out, "The current <code>%s</code> event does not match these workflows:\n\n", annotationHTML(event))
+	if allSkipped {
+		out.WriteString(", so this build ran nothing")
+	}
+	out.WriteString("\n\n")
+	if event == "workflow_dispatch" && (buildSource == "ui" || buildSource == "api") {
+		if buildSource == "ui" {
+			out.WriteString("You started this build from the Buildkite UI, which is a manual run. ")
+		} else {
+			out.WriteString("This build started through the Buildkite API. ")
+		}
+		out.WriteString("In GitHub Actions terms, this maps to a <code>workflow_dispatch</code> event, and these workflows don't accept it:\n\n")
+	} else {
+		_, _ = fmt.Fprintf(&out, "The current <code>%s</code> event does not match the following workflows:\n\n", annotationHTML(event))
+	}
 	for _, workflow := range workflows {
 		annotationURL := fmt.Sprintf("%s/canvas?key=%s&open=false", strings.TrimRight(buildURL, "/"), url.QueryEscape(workflow.key))
 		label := annotationHTML(strings.Join(strings.Fields(workflow.label), " "))
 		label = strings.NewReplacer("\\", "\\\\", "[", "\\[", "]", "\\]").Replace(label)
-		_, _ = fmt.Fprintf(&out, "* [:github: %s](%s) — %s\n", label, annotationURL, annotationHTML(workflow.reason))
+		detail := annotationHTML(workflow.reason)
+		if len(workflow.events) > 0 {
+			eventMatched := false
+			configuredEvents := make([]string, len(workflow.events))
+			for i, configuredEvent := range workflow.events {
+				eventMatched = eventMatched || configuredEvent == event
+				configuredEvents[i] = annotationCode(configuredEvent)
+			}
+			if !eventMatched {
+				detail = "This workflow is triggered on: " + strings.Join(configuredEvents, ", ")
+			}
+		}
+		_, _ = fmt.Fprintf(&out, "* [:github: %s](%s) — %s\n", label, annotationURL, detail)
+	}
+	if event == "workflow_dispatch" && (buildSource == "ui" || buildSource == "api") {
+		out.WriteString("\nPush a commit or open a pull request to run workflows configured for those events. ")
+		out.WriteString("Or add <code>workflow_dispatch:</code> to the <code>on:</code> block to make a workflow runnable from here. ")
+		_, _ = fmt.Fprintf(&out, "[Learn about event mapping →](%s)\n", eventMappingDocumentationURL)
 	}
 	return out.String()
 }

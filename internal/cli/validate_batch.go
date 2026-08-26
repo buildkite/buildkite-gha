@@ -472,7 +472,7 @@ func loadBatchValidationResult(path, workflow string) (compatibility.ProcessingR
 	seen := make(map[string]bool, len(report.Evaluations))
 	for _, evaluation := range report.Evaluations {
 		if seen[evaluation.Event] || evaluation.Source != "generated" || evaluation.Report.Schema != compatibility.ProcessingSchema ||
-			(evaluation.Event != "push" && evaluation.Event != "pull_request" && evaluation.Event != "merge_group" && evaluation.Event != "release" && evaluation.Event != "workflow_dispatch" && evaluation.Event != "schedule") {
+			(evaluation.Event != "push" && evaluation.Event != "pull_request" && evaluation.Event != "merge_group" && evaluation.Event != "release" && evaluation.Event != "issues" && evaluation.Event != "workflow_dispatch" && evaluation.Event != "schedule") {
 			return compatibility.ProcessingReportV3{}, false
 		}
 		seen[evaluation.Event] = true

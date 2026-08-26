@@ -84,6 +84,12 @@ func (d *commandTelemetryDetails) setFailurePhase(phase telemetry.FailurePhase) 
 	}
 }
 
+func (d *commandTelemetryDetails) setFailureCode(code telemetry.FailureCode) {
+	if d.failureCode == "" && code != "" {
+		d.failureCode = code
+	}
+}
+
 // addReportDiagnostics records a report's diagnostics. Errors a command
 // handles, such as workflows emitted as failing pipeline steps, belong here so
 // they never attribute an unrelated later failure.

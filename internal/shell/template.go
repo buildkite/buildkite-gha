@@ -9,23 +9,30 @@ import (
 )
 
 // ValidateCompatibility rejects shell commands that the runtime cannot run.
-// Malformed templates remain ParseTemplate's responsibility.
+// It reports only the normalized executable because template arguments may
+// contain event-derived values. Malformed templates remain ParseTemplate's
+// responsibility.
 func ValidateCompatibility(shell string) error {
 	args, err := splitTemplate(shell)
 	if err != nil || len(args) == 0 || args[0] == "" {
 		return nil
 	}
-	return compatibilityError(shell, args[0])
+	command := normalizeCommand(args[0])
+	return compatibilityError(command, command)
 }
 
 func compatibilityError(shell, command string) error {
-	command = strings.ToLower(path.Base(strings.ReplaceAll(command, `\`, "/")))
+	command = normalizeCommand(command)
 	switch command {
 	case "pwsh", "pwsh.exe", "cmd", "cmd.exe", "powershell", "powershell.exe", "msys2", "msys2.cmd", "msys2.exe":
 		return fmt.Errorf("shell %q is unsupported. PowerShell and Windows shells cannot run in buildkite-gha. Use bash, sh, python, or a valid custom shell template whose command is available on PATH, or file a compatibility issue at https://github.com/buildkite/buildkite-gha", shell)
 	default:
 		return nil
 	}
+}
+
+func normalizeCommand(command string) string {
+	return strings.ToLower(path.Base(strings.ReplaceAll(command, `\`, "/")))
 }
 
 // ParseTemplate splits and validates a custom shell template without invoking

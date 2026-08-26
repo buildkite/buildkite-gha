@@ -87,6 +87,21 @@ authority; private images are unsupported.
 Explicit and generated event snapshots provide compatibility context. They do
 not authorize path-filter admission, queues, secrets, or tokens.
 
+The compiler resolves ordinary scalar `github.event.*` references before it
+creates a plan. If a job needs the whole event or a property selected at
+runtime, the importer uploads one content-addressed event payload artifact for
+the build. Plans retain only its digest and whether the job needs it. Runtime
+jobs download the artifact from the exact importer job and verify its digest.
+This keeps matrix plans small and lets retries use the original event.
+
+The artifact is limited to 25 MiB and follows the Buildkite build's artifact
+access and retention settings. It is not redacted or a secret store: anyone
+who can download the artifact can read user-provided values in the event.
+
+The snapshot remains untrusted input. The compiler does not add issued tokens,
+resolved secrets, registry credentials, OIDC tokens, or internal admission
+metadata to it. Those values stay on their separate credential boundaries.
+
 ### Reusable-workflow guards
 
 Reusable-workflow call conditions become immutable plan guards. They run in the
@@ -139,8 +154,8 @@ runtime registers the token with both Buildkite Agent redaction and local
 redaction.
 
 The serialized context contains only the fields listed in the
-[compatibility reference](compatibility.md#runtime-interpolation). It does not
-contain `github.event` or the full event payload.
+[compatibility reference](compatibility.md#runtime-interpolation). A runtime
+job also loads the verified event artifact when it requires `github.event`.
 
 For non-pull-request builds, a user who can create a build at any commit may
 choose code that requests the workflow's allowed permissions. Enable write

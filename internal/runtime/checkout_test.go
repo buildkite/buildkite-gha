@@ -378,7 +378,10 @@ func TestCheckoutOutputsMatchReleaseContract(t *testing.T) {
 		{name: "v1.2.0", commit: actionintegration.CheckoutV1Commit, want: map[string]string{}},
 		{name: "v2.8.0", commit: actionintegration.CheckoutV2Commit, want: map[string]string{}},
 		{name: "v3.7.0", commit: actionintegration.CheckoutV3Commit, want: map[string]string{}},
-		{name: "v4 and later", commit: actionintegration.CheckoutV4Commit, want: map[string]string{"ref": "refs/heads/main", "commit": strings.Repeat("a", 40)}},
+		{name: "v4.0.0 before outputs", commit: "1e31de5234b9f8995739874a8ce0492dc87873e2", want: map[string]string{}},
+		{name: "v4.1.7 before outputs", commit: "692973e3d937129bcbf40652eb9f2f61becf3332", want: map[string]string{}},
+		{name: "v4.2.0 with outputs", commit: "d632683dd7b4114ad314bca15554477dd762a938", want: map[string]string{"ref": "refs/heads/main", "commit": strings.Repeat("a", 40)}},
+		{name: "current v4", commit: actionintegration.CheckoutV4Commit, want: map[string]string{"ref": "refs/heads/main", "commit": strings.Repeat("a", 40)}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			outputs := map[string]string{}
@@ -397,6 +400,8 @@ func TestCheckoutInputsWithReleaseDefaults(t *testing.T) {
 		inputs map[string]string
 		want   map[string]string
 	}{
+		{name: "v1.0 defaults to full history", commit: "af513c7a016048ae468971c52ed77d9562c7c819", inputs: nil, want: map[string]string{"fetch-depth": "0"}},
+		{name: "v1.1 defaults to full history", commit: "0b496e91ec7ae4428c3ed2eeb4c3a40df431f2cc", inputs: nil, want: map[string]string{"fetch-depth": "0"}},
 		{name: "v1 defaults to full history", commit: actionintegration.CheckoutV1Commit, inputs: nil, want: map[string]string{"fetch-depth": "0"}},
 		{name: "v1 keeps explicit depth", commit: actionintegration.CheckoutV1Commit, inputs: map[string]string{"Fetch-Depth": "5"}, want: map[string]string{"Fetch-Depth": "5"}},
 		{name: "v2 keeps shallow default", commit: actionintegration.CheckoutV2Commit, inputs: nil, want: nil},

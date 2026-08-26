@@ -74,13 +74,14 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--event` supports `push`, `pull_request`, `merge_group`, `release`,
+`--event` supports `push`, `pull_request`, `merge_group`, `release`, `issues`,
 `workflow_dispatch`, and `schedule`. It requires `--profile hosted` and cannot be
 combined with `--event-path`.
 
 The generated snapshot contains an example repository and the minimum event
 fields. It is useful for a quick check, but it is not a real payload. The
-release snapshot represents one stable, non-prerelease `published` event. Use
+release snapshot represents one stable, non-prerelease `published` event. The
+issues snapshot represents `opened`. Use
 `--event-path` when exact refs, activity, repository identity, or payload fields
 matter.
 
@@ -261,8 +262,9 @@ when it runs inside a Buildkite job.
 ```
 
 The snapshot supplies compile-time context. Plans retain the event name,
-repository, refs, SHA, actor, and a payload digest. They do not retain the
-payload itself, so runtime expressions cannot use `github.event`.
+repository, refs, SHA, actor, and a payload digest. If a job needs whole or
+runtime-selected `github.event` access, upload stores one content-addressed
+payload artifact for the build and marks the plan to load it at runtime.
 
 The snapshot is compatibility data, not authorization.
 
@@ -295,7 +297,7 @@ buildkite-gha compile \
 buildkite-gha upload .github/workflows/ci.yml
 ```
 
-The importer must run on Linux/amd64 or Darwin/arm64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
+The importer must run on Linux/amd64 or Darwin/arm64 with Buildkite agent v3.129 or newer, `BUILDKITE=true`, and `BUILDKITE_STEP_KEY`.
 
 The hidden, zero-argument `buildkite-gha plugin` entry point reads plugin
 configuration from `BUILDKITE_PLUGIN_CONFIGURATION`. It accepts:
@@ -420,17 +422,20 @@ valid JSON object no larger than 25 MiB. Malformed, unreadable, or oversized
 data stops upload instead of falling back. Buildkite's repository mapping,
 commit, and ref remain authoritative.
 
-Raw webhook data is not retained in generated plans or pipeline YAML and cannot grant queues, secrets, or tokens.
+Raw webhook data is not retained in generated plans or pipeline YAML. When a
+job needs whole or runtime-selected `github.event` access, upload retains one
+content-addressed event artifact so that the job and its retries can evaluate
+the expression. Event data cannot grant queues, secrets, or tokens.
 
 The selected snapshot establishes one event for applicability, compilation,
 group conditions, provider-check names, and explicit run-name evaluation. An
 explicit event is never replaced with live Buildkite fields.
 
-Linked webhook data can provide `merge_group` and `release`. Those events need
-matching Buildkite refs, commits, and activity. Release also needs a valid
-payload and a tag matching `BUILDKITE_TAG` and `BUILDKITE_BRANCH`. The GitHub
-Code Access App provides immutable server provenance and is required for hosted
-release `GITHUB_TOKEN` issuance.
+Linked webhook data can provide `merge_group`, `release`, and `issues`. Merge
+groups and releases need matching Buildkite refs, commits, and activity. Release
+also needs a valid payload and a tag matching `BUILDKITE_TAG` and
+`BUILDKITE_BRANCH`. The GitHub Code Access App provides immutable server
+provenance and is required for hosted release `GITHUB_TOKEN` issuance.
 
 See [Names and triggers](compatibility.md#names-and-triggers) for exact matching
 rules and the environment fallback.
@@ -450,7 +455,7 @@ but cannot grant admission. Malformed event data stops the import.
 Buildkite owns schedule identity, so every `on.schedule` workflow is eligible
 for every Buildkite scheduled build.
 
-After all applicable workflows have been attempted, the command uploads the exact executable, content-addressed plans, and synthetic failure steps before running one:
+After all applicable workflows have been attempted, the command uploads the exact executable, content-addressed plans, and synthetic failure steps in one artifact batch with a concurrency limit of 8. It then runs one:
 
 ```sh
 buildkite-agent pipeline upload --no-interpolation --reject-secrets
@@ -522,6 +527,12 @@ outcome, client version, duration, and bounded diagnostic codes and severities.
 For an unsuccessful command, they also contain the final 1,024 bytes of
 normalized user-visible error output. `error_message_truncated` says whether
 earlier output was omitted.
+
+Failed runs also carry a failure phase and a code from a fixed set. The code
+separates workflow-authored process exits (`E_STEP_PROCESS_EXIT`) from
+unsupported-feature rejections (`E_UNSUPPORTED_FEATURE`) and runtime integrity
+failures (`E_RUNTIME_INTEGRITY`), so a failing test suite is not counted as a
+compatibility gap.
 
 Buildkite adds organization, pipeline, build, and job identifiers on the
 server. The client does not send workflow or event content, environment

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -117,6 +118,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 	report.Evaluations = append(report.Evaluations,
 		EventEvaluation{Event: "push", Source: "generated", Report: push},
 		EventEvaluation{Event: "pull_request", Source: "generated", Report: pullRequest},
+		EventEvaluation{Event: "issues", Source: "generated", Report: push},
 	)
 
 	var encoded bytes.Buffer
@@ -127,7 +129,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Schema != ProcessingSchemaV3 || decoded.Result != "incompatible" || decoded.Status != Failed || len(decoded.Evaluations) != 2 || decoded.Evaluations[0].Report.Result != "admitted" || decoded.Evaluations[1].Report.Result != "incompatible" {
+	if decoded.Schema != ProcessingSchemaV3 || decoded.Result != "incompatible" || decoded.Status != Failed || len(decoded.Evaluations) != 3 || decoded.Evaluations[0].Report.Result != "admitted" || decoded.Evaluations[1].Report.Result != "incompatible" {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
 	v2Source, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v2.schema.json"))
@@ -168,7 +170,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 	if err := WriteProcessingV3(&rendered, "text", report); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"processing-report/v3", "Event-independent validation:", "Generated event push:", "Generated event pull_request:", "Result: incompatible"} {
+	for _, want := range []string{"processing-report/v3", "Event-independent validation:", "Generated event push:", "Generated event pull_request:", "Generated event issues:", "Result: incompatible"} {
 		if !strings.Contains(rendered.String(), want) {
 			t.Fatalf("text report = %q, want %q", rendered.String(), want)
 		}
@@ -265,5 +267,22 @@ func TestProcessingReportAggregatesIdenticalMatrixDiagnostics(t *testing.T) {
 	report.Finalize()
 	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Instance != "" || report.Diagnostics[0].Job != "test" {
 		t.Fatalf("aggregated diagnostics = %#v", report.Diagnostics)
+	}
+}
+
+func TestApplyWarningsPreservesCompilerAttribution(t *testing.T) {
+	report := NewProcessingReport(".github/workflows/caller.yml", "hosted")
+	report.ApplyWarnings(report.Workflow, []compiler.Warning{{
+		Code: "W_CHECKOUT_LEGACY_RELEASE", Path: ".github/workflows/reusable.yml", Line: 12, Column: 9,
+		Job: "call.build", Step: 2, Message: "actions/checkout v2.8.0 behaves like v2.",
+	}})
+	want := Diagnostic{
+		Level: "warning", Code: "W_CHECKOUT_LEGACY_RELEASE", Category: "compatibility", Stage: "expression-validation",
+		Message:  ".github/workflows/reusable.yml:12:9: actions/checkout v2.8.0 behaves like v2.",
+		Location: &SourceLocation{Path: ".github/workflows/reusable.yml", Line: 12, Column: 9},
+		Job:      "call.build", Step: 2,
+	}
+	if len(report.Diagnostics) != 1 || !sameDiagnostic(report.Diagnostics[0], want) {
+		t.Fatalf("diagnostics = %#v, want %#v", report.Diagnostics, []Diagnostic{want})
 	}
 }

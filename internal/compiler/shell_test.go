@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"bytes"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -9,11 +10,11 @@ import (
 
 func TestCompilePlansRejectStaticallyUnsupportedShellsWithAttribution(t *testing.T) {
 	tests := []struct {
-		name      string
-		workflow  string
-		wantShell string
-		wantLine  int
-		wantStep  int
+		name                string
+		workflow            string
+		wantReportedCommand string
+		wantLine            int
+		wantStep            int
 	}{
 		{
 			name: "step template executable path",
@@ -26,9 +27,9 @@ jobs:
         shell: /opt/microsoft/powershell/7/pwsh -File {0}
         run: Write-Output test
 `,
-			wantShell: "/opt/microsoft/powershell/7/pwsh -File {0}",
-			wantLine:  6,
-			wantStep:  1,
+			wantReportedCommand: "pwsh",
+			wantLine:            6,
+			wantStep:            1,
 		},
 		{
 			name: "job default",
@@ -42,8 +43,8 @@ jobs:
     steps:
       - run: echo test
 `,
-			wantShell: "cmd",
-			wantLine:  3,
+			wantReportedCommand: "cmd",
+			wantLine:            3,
 		},
 		{
 			name: "resolved matrix expression",
@@ -58,9 +59,9 @@ jobs:
       - shell: ${{ matrix.shell }}
         run: Write-Output test
 `,
-			wantShell: "powershell",
-			wantLine:  9,
-			wantStep:  1,
+			wantReportedCommand: "powershell",
+			wantLine:            9,
+			wantStep:            1,
 		},
 	}
 	for _, test := range tests {
@@ -80,7 +81,7 @@ jobs:
 				t.Fatalf("finding ownership = %#v", finding)
 			}
 			for _, want := range []string{
-				`shell "` + test.wantShell + `" is unsupported`,
+				`shell "` + test.wantReportedCommand + `" is unsupported`,
 				"Use bash, sh, python, or a valid custom shell template whose command is available on PATH",
 				"https://github.com/buildkite/buildkite-gha",
 			} {
@@ -89,6 +90,37 @@ jobs:
 				}
 			}
 		})
+	}
+}
+
+func TestCompilePlansDoNotReportEventDerivedShellArguments(t *testing.T) {
+	const sentinel = "EVENT-DERIVED-SHELL-SENTINEL"
+	workflow := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: pwsh -File {0} ${{ github.event.shell_suffix }}
+        run: Write-Output test
+`)
+	eventSource := pushEvent(t)
+	event := bytes.Replace(eventSource, []byte(`"payload": {`), []byte(`"payload": {"shell_suffix": "`+sentinel+`",`), 1)
+	if bytes.Equal(event, eventSource) {
+		t.Fatal("event payload was not updated")
+	}
+	_, err := compileUntrustedPlans(".github/workflows/shells.yml", workflow, event, "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err == nil {
+		t.Fatal("compileUntrustedPlans() succeeded")
+	}
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) {
+		t.Fatalf("compileUntrustedPlans() error = %T %v, want ProcessingFinding", err, err)
+	}
+	if strings.Contains(finding.Message, sentinel) || strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("event-derived shell argument reached diagnostic: message %q, error %v", finding.Message, err)
+	}
+	if !strings.Contains(finding.Message, `shell "pwsh" is unsupported`) {
+		t.Fatalf("finding message = %q", finding.Message)
 	}
 }
 

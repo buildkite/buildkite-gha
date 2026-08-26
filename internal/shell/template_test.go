@@ -41,17 +41,20 @@ func TestParseTemplate(t *testing.T) {
 }
 
 func TestValidateCompatibilityClassifiesUnsupportedCommands(t *testing.T) {
-	for _, value := range []string{
-		"pwsh",
-		"PowerShell.exe",
-		"cmd /C {0}",
-		"msys2.cmd {0}",
-		"/opt/microsoft/powershell/7/pwsh -File {0}",
-		`'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -File {0}`,
+	for _, test := range []struct {
+		value   string
+		command string
+	}{
+		{value: "pwsh", command: "pwsh"},
+		{value: "PowerShell.exe", command: "powershell.exe"},
+		{value: "cmd /C {0}", command: "cmd"},
+		{value: "msys2.cmd {0}", command: "msys2.cmd"},
+		{value: "/opt/microsoft/powershell/7/pwsh -File {0}", command: "pwsh"},
+		{value: `'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -File {0}`, command: "powershell.exe"},
 	} {
-		t.Run(value, func(t *testing.T) {
-			if err := ValidateCompatibility(value); err == nil || !strings.Contains(err.Error(), "shell "+strconv.Quote(value)+" is unsupported") {
-				t.Fatalf("ValidateCompatibility(%q) error = %v", value, err)
+		t.Run(test.value, func(t *testing.T) {
+			if err := ValidateCompatibility(test.value); err == nil || !strings.Contains(err.Error(), "shell "+strconv.Quote(test.command)+" is unsupported") {
+				t.Fatalf("ValidateCompatibility(%q) error = %v", test.value, err)
 			}
 		})
 	}

@@ -88,7 +88,8 @@ func ValidateCacheVolume(cache CacheVolume) error {
 
 // Pipeline is the validated input required to emit generated compatibility jobs.
 type Pipeline struct {
-	CompilerStep string
+	CompilerStep     string
+	ArtifactProducer string
 	// DistributionDigest and RuntimeImage retain the single-platform emitter
 	// contract for direct callers. Mixed-platform bundles set these per Job.
 	DistributionDigest string
@@ -159,6 +160,7 @@ type Job struct {
 	DistributionDigest string
 	RuntimeImage       string
 	PlanDigest         string
+	EventPayload       bool
 	Dependencies       []string
 	RequiresMise       bool
 	Cache              *CacheVolume
@@ -176,10 +178,25 @@ func PlanPath(digest string) (string, error) {
 	return planDirectory + "/" + strings.TrimPrefix(digest, "sha256:") + ".json", nil
 }
 
+// EventPath returns the fixed path for one content-addressed event payload.
+func EventPath(digest string) (string, error) {
+	if !digestPattern.MatchString(digest) {
+		return "", fmt.Errorf("invalid event payload digest %q", digest)
+	}
+	return ".buildkite-gha/events/" + strings.TrimPrefix(digest, "sha256:") + ".json", nil
+}
+
 // Emit validates and emits stable YAML terminated by a newline.
 func Emit(pipeline Pipeline) ([]byte, error) {
 	if !validStepKey(pipeline.CompilerStep) {
 		return nil, fmt.Errorf("invalid compiler step key %q", pipeline.CompilerStep)
+	}
+	artifactProducer := pipeline.ArtifactProducer
+	if artifactProducer == "" {
+		artifactProducer = pipeline.CompilerStep
+	}
+	if !identifierPattern.MatchString(artifactProducer) {
+		return nil, fmt.Errorf("invalid artifact producer %q", artifactProducer)
 	}
 	aggregate := len(pipeline.Workflows) != 0
 	workflows := pipeline.Workflows
@@ -345,6 +362,10 @@ type preparedConcurrencyGate struct {
 }
 
 func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflow) error {
+	artifactProducer := pipeline.ArtifactProducer
+	if artifactProducer == "" {
+		artifactProducer = pipeline.CompilerStep
+	}
 	if failure := workflow.Failure; failure != nil {
 		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(":github: workflow · "+workflow.GroupLabel))
 		_, _ = fmt.Fprintf(out, "    key: %s\n", yamlScalar(workflow.GroupKey))
@@ -484,27 +505,33 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			`bootstrap_exit() { bootstrap_status=$?; if [ "$bootstrap_status" -ne 0 ]; then echo "^^^ +++"; fi; if [ -n "${bootstrap_dir:-}" ]; then rm -rf -- "$bootstrap_dir" || true; fi; exit "$bootstrap_status"; }`,
 			"trap bootstrap_exit EXIT",
 			`bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`,
-			"buildkite-agent artifact download " + shellQuote(distributionPath) + ` "$bootstrap_dir" --step ` + shellQuote(pipeline.CompilerStep),
+			"buildkite-agent artifact download " + shellQuote(distributionPath) + ` "$bootstrap_dir" --step ` + shellQuote(artifactProducer),
 			"distribution=\"$bootstrap_dir/" + distributionPath + `"`,
 			`if command -v sha256sum >/dev/null 2>&1; then actual_distribution_digest="$(sha256sum "$distribution" | awk '{print "sha256:" $1}')"; elif command -v shasum >/dev/null 2>&1; then actual_distribution_digest="$(shasum -a 256 "$distribution" | awk '{print "sha256:" $1}')"; else echo 'buildkite-gha: no SHA-256 tool available' >&2; exit 1; fi`,
 			"test \"$actual_distribution_digest\" = " + shellQuote(distributionDigest),
 			`chmod 0500 "$distribution"`,
 		}
 		experimentalRunnerUser := !pipeline.DisableRunnerUser && platform == "linux/amd64"
-		runJob := `"$distribution" run-job --plan-digest ` + shellQuote(job.PlanDigest) + " --plan-producer " + shellQuote(pipeline.CompilerStep)
+		runJob := `"$distribution" run-job --plan-digest ` + shellQuote(job.PlanDigest) + " --plan-producer " + shellQuote(artifactProducer)
+		if job.EventPayload {
+			runJob += " --artifact-producer " + shellQuote(artifactProducer)
+		}
 		if experimentalRunnerUser {
 			planPath, err := PlanPath(job.PlanDigest)
 			if err != nil {
 				return fmt.Errorf("job %q: %w", job.Key, err)
 			}
 			commands = append(commands,
-				"buildkite-agent artifact download "+shellQuote(planPath)+` "$bootstrap_dir" --step `+shellQuote(pipeline.CompilerStep),
+				"buildkite-agent artifact download "+shellQuote(planPath)+` "$bootstrap_dir" --step `+shellQuote(artifactProducer),
 				`plan="$bootstrap_dir/`+planPath+`"`,
 				`if command -v sha256sum >/dev/null 2>&1; then actual_plan_digest="$(sha256sum "$plan" | awk '{print "sha256:" $1}')"; elif command -v shasum >/dev/null 2>&1; then actual_plan_digest="$(shasum -a 256 "$plan" | awk '{print "sha256:" $1}')"; else echo 'buildkite-gha: no SHA-256 tool available' >&2; exit 1; fi`,
 				"test \"$actual_plan_digest\" = "+shellQuote(job.PlanDigest),
 			)
 			commands = append(commands, experimentalRunnerUserBootstrap(job.RequiresMise, runtimeImage != "", job.Cache)...)
 			runJob = "BUILDKITE_GHA_PLAN_DIGEST=" + shellQuote(job.PlanDigest) + ` "$distribution" run-job --plan "$plan"`
+			if job.EventPayload {
+				runJob += " --artifact-producer " + shellQuote(artifactProducer)
+			}
 		}
 		if runtimeImage != "" {
 			runJob += " --hosted-tool-cache"
@@ -527,7 +554,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
 		}
 		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
-		cache := mergedCacheVolume(job.Cache, job.RequiresMise, platform)
+		cache := mergedCacheVolume(job.Cache, job.RequiresMise, platform, experimentalRunnerUser)
 		if cache != nil {
 			_, _ = fmt.Fprintf(out, "%scache:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s  paths:\n", attributeIndent)
@@ -688,7 +715,11 @@ func platformMiseCachePath(platform string) string {
 	return root + "/mise/" + platformCacheKey(platform)
 }
 
-func mergedCacheVolume(configured *CacheVolume, requiresMise bool, platform string) *CacheVolume {
+func platformCacheValidationPath(platform string) string {
+	return runtimeCacheRoot + "/validation/" + platformCacheKey(platform)
+}
+
+func mergedCacheVolume(configured *CacheVolume, requiresMise bool, platform string, runnerUser bool) *CacheVolume {
 	if configured == nil && !requiresMise {
 		return nil
 	}
@@ -706,6 +737,11 @@ func mergedCacheVolume(configured *CacheVolume, requiresMise bool, platform stri
 		}
 		if cache.Name == "" {
 			cache.Name = runtimeCacheName + "-" + platformCacheKey(platform)
+		}
+	} else if runnerUser {
+		validationPath := platformCacheValidationPath(platform)
+		if !slices.Contains(cache.Paths, validationPath) {
+			cache.Paths = append(cache.Paths, validationPath)
 		}
 	}
 	return cache

@@ -35,14 +35,15 @@ type planBuilder struct {
 }
 
 type builtPlanActions struct {
-	locks               []plan.ActionLock
-	capabilities        []string
-	authorization       PlanAuthorization
-	requiredSecrets     []string
-	inputsInspected     bool
-	requiresGitHubToken bool
-	requiresMise        bool
-	resolved            bool
+	locks                []plan.ActionLock
+	capabilities         []string
+	authorization        PlanAuthorization
+	requiredSecrets      []string
+	inputsInspected      bool
+	requiresGitHubToken  bool
+	requiresEventPayload bool
+	requiresMise         bool
+	resolved             bool
 }
 
 func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, []PlanAuthorization, []JobEvaluation, error) {
@@ -208,6 +209,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 	context := compileContext(b.ir.Event, b.ir.Vars, instance.SourcePath, b.workflowName)
 	context.Inputs = instance.Inputs
 	context.Matrix = instance.Matrix
+	retainsEventPayload := false
 
 	reduceTemplate := func(value string) (string, error) {
 		if value == "" {
@@ -225,9 +227,10 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		if err != nil {
 			return "", err
 		}
-		if referencesEvent || referencesEventAlias {
-			return "", fmt.Errorf("github.event cannot be retained in a job plan")
+		if referencesEventAlias {
+			return "", fmt.Errorf("event context access must resolve during compilation; use github.event for whole or runtime-selected event access")
 		}
+		retainsEventPayload = retainsEventPayload || referencesEvent
 		return reduced, nil
 	}
 	reduceCondition := func(value string) (string, error) {
@@ -250,7 +253,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 			return "", err
 		}
 		if referencesEvent {
-			return "", fmt.Errorf("github.event cannot be retained in a job plan")
+			retainsEventPayload = true
 		}
 		return reduced, nil
 	}
@@ -320,6 +323,13 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 	instance.Steps = append([]workflow.Step(nil), instance.Steps...)
 	for i := range instance.Steps {
 		step := &instance.Steps[i]
+		referencesEvent, referencesErr := expression.TemplateReferencesGitHubEvent(step.Uses)
+		if referencesErr != nil {
+			return JobInstance{}, referencesErr
+		}
+		if referencesEvent {
+			return JobInstance{}, fmt.Errorf("github.event cannot select an action reference")
+		}
 		if step.If, err = reduceCondition(step.If); err != nil {
 			return JobInstance{}, err
 		}
@@ -384,6 +394,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		}
 		instance.Services[i].Container = container
 	}
+	instance.RetainEventPayload = retainsEventPayload
 	return instance, nil
 }
 
@@ -412,6 +423,7 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 	}
 	built.requiresMise = compiled.requiresMise
 	built.requiresGitHubToken = compiled.requiresGitHubToken
+	built.requiresEventPayload = compiled.requiresEventPayload
 	built.requiredSecrets = compiled.requiredSecrets
 	built.authorization.GitHubTokenActions = append([]string(nil), compiled.githubTokenActions...)
 	built.inputsInspected = true
@@ -667,6 +679,7 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		Steps:                   steps,
 		Actions:                 actions.locks,
 	}
+	job.Event.PayloadArtifact = instance.RetainEventPayload || actions.requiresEventPayload
 	job.RequiresMise = &actions.requiresMise
 	if programJob.Container != nil {
 		job.Container = &plan.Container{

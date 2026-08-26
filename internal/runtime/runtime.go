@@ -503,7 +503,7 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandProcessor, act
 	ran = true
 	runErr := r.runStreaming(ctx, processor, "", dockerRunEnv, docker, args...)
 	if runErr != nil {
-		runErr = fmt.Errorf("run Docker action %q: %w", action.Name, runErr)
+		runErr = markStepProcessExit(fmt.Errorf("run Docker action %q: %w", action.Name, runErr))
 	}
 	effects, fileErr := files.apply(&result, nil)
 	effects.reportSummaryUploadFailure(processor)
@@ -810,6 +810,7 @@ func (r *jobRun) runProcess(ctx context.Context, processor *commandProcessor, di
 	} else {
 		runErr = r.runStreaming(ctx, processor, dir, env, name, args...)
 	}
+	runErr = markStepProcessExit(runErr)
 	effects, fileErr := files.apply(result, state)
 	effects.reportSummaryUploadFailure(processor)
 	if fileErr == nil && (effects.pathSet || len(effects.paths) > 0) {
@@ -1035,7 +1036,7 @@ func (r *jobRun) discoverNode(ctx context.Context, major int, explicit string) (
 	}
 	tool := nodeTool(major)
 	if tool == "" {
-		return "", fmt.Errorf("unsupported Node runtime major %d", major)
+		return "", errUnsupportedf("unsupported Node runtime major %d", major)
 	}
 	if r.Mise == "" {
 		return "", fmt.Errorf("mise is required to run JavaScript actions; no pinned runtime path was configured")
@@ -1252,7 +1253,7 @@ func pathWithinDirectory(relative string) bool {
 
 func verifyManagedNodeExecutable(ctx context.Context, major int, path, want string) error {
 	if want == "" {
-		return fmt.Errorf("unsupported Node runtime major %d", major)
+		return errUnsupportedf("unsupported Node runtime major %d", major)
 	}
 	file, err := os.Open(path)
 	if err != nil {

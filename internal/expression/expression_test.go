@@ -231,6 +231,8 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 		"${{ job['check_run_id'] }}",
 		"${{ job.check_run_id || 'unavailable' }}",
 		"${{ toJSON(matrix) }}",
+		"${{ github.event[inputs.field] || 'fallback' }}",
+		"${{ toJSON(github.event.*.name) }}",
 		"${{ true && 'quoted }} braces' || '' }}",
 		"${{ 1 > 0 }}",
 	} {
@@ -238,13 +240,24 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job[env.NAME] }}", "${{ job.check_run_id.extra }}", "${{ job.name }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
+	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ github.event[secrets.FIELD] }}", "${{ runner['debug'] }}", "${{ runner[env.NAME] }}", "${{ runner }}", "${{ runner.debug.extra }}", "${{ runner.name }}", "${{ runner.temp }}", "${{ job[env.NAME] }}", "${{ job.check_run_id.extra }}", "${{ job.name }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
 	}
 	if _, err := EvaluateActionInputDefault("${{ runner.temp || '' }}", Context{Runner: map[string]string{"temp": "/runner/temp"}}); err == nil {
 		t.Fatal("EvaluateActionInputDefault() accepted runner.temp")
+	}
+}
+
+func TestEvaluateActionInputDefaultSupportsDynamicEventAccess(t *testing.T) {
+	context := Context{
+		GitHub: map[string]any{"event": map[string]any{"action": "opened"}},
+		Inputs: map[string]string{"field": "action"},
+	}
+	got, err := EvaluateActionInputDefault("${{ github.event[inputs.field] }}", context)
+	if err != nil || got != "opened" {
+		t.Fatalf("EvaluateActionInputDefault() = %q, %v, want opened", got, err)
 	}
 }
 
@@ -604,13 +617,15 @@ func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
 	for _, template := range []string{
 		"${{ github }}",
 		"${{ github.* }}",
-		"${{ github.event.*.token }}",
 		"${{ toJSON(github.*) }}",
 		"${{ format('{0}', github) }}",
 	} {
 		if _, err := ReferencesGitHubToken(template); err == nil || !strings.Contains(err.Error(), "must name one static property") {
 			t.Fatalf("ReferencesGitHubToken(%q) error = %v, want static-property rejection", template, err)
 		}
+	}
+	if got, err := ReferencesGitHubToken("${{ github.event.*.token }}"); err != nil || got {
+		t.Fatalf("ReferencesGitHubToken() event payload projection = %v, %v, want false", got, err)
 	}
 	if _, err := ReferencesStepGitHubToken("${{ toJSON(github[env.NAME]) }}"); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
 		t.Fatalf("ReferencesStepGitHubToken() serialized dynamic index error = %v", err)
@@ -711,7 +726,6 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 		{name: "hashFiles needs a pattern", source: "hashFiles()", scope: StepCondition, want: `condition function "hashFiles" requires 1 to 255 arguments`},
 		{name: "hashFiles unavailable in jobs", source: "hashFiles('go.sum')", scope: JobCondition, want: `condition function "hashFiles" is unavailable in job conditions`},
 		{name: "function arguments", source: "always(true)", scope: StepCondition, want: `condition function "always" arguments are unsupported`},
-		{name: "runtime event payload", source: "github.event.pull_request.draft", scope: JobCondition, want: `condition reference "github.event.pull_request.draft" is unavailable at runtime`},
 		{name: "unsupported github property", source: "github.run_id", scope: StepCondition, want: `condition reference "github.run_id" is unavailable at runtime`},
 		{name: "step context in job", source: "steps.build.outcome", scope: JobCondition, want: `condition context "steps" is unavailable in job conditions`},
 		{name: "environment in job", source: "env.ENABLED", scope: JobCondition, want: `condition context "env" is unavailable in job conditions`},
@@ -826,6 +840,7 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 		"repository_owner":  "buildkite",
 		"token":             "ghs_scoped_token",
 		"workflow":          "CI",
+		"event":             map[string]any{"action": "opened", "pull_request": map[string]any{"draft": true}},
 	}}
 	for template, want := range map[string]string{
 		"${{ github.action_path }}/script.sh":                      "/workspace/actions/composite/script.sh",
@@ -846,6 +861,12 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 		"  \"action_ref\": \"v2\",\n" +
 		"  \"action_repository\": \"owner/action\",\n" +
 		"  \"base_ref\": \"main\",\n" +
+		"  \"event\": {\n" +
+		"    \"action\": \"opened\",\n" +
+		"    \"pull_request\": {\n" +
+		"      \"draft\": true\n" +
+		"    }\n" +
+		"  },\n" +
 		"  \"job\": \"build\",\n" +
 		"  \"ref_name\": \"feature\",\n" +
 		"  \"ref_type\": \"branch\",\n" +
@@ -867,11 +888,20 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 	if _, err := EvaluateStep("${{ github.run_id }}", context); err == nil {
 		t.Fatal("EvaluateStep() accepted github.run_id")
 	}
+	if got, err := EvaluateStep("${{ toJSON(github.event) }}", context); err != nil || got != "{\n  \"action\": \"opened\",\n  \"pull_request\": {\n    \"draft\": true\n  }\n}" {
+		t.Fatalf("EvaluateStep() event payload = %q, %v", got, err)
+	}
+	context.Vars = map[string]string{"EVENT_FIELD": "action"}
+	if got, err := EvaluateStep("${{ github.event[vars.EVENT_FIELD] }}", context); err != nil || got != "opened" {
+		t.Fatalf("EvaluateStep() dynamic event member = %q, %v", got, err)
+	}
+	if _, err := EvaluateStep("${{ github.event.action }}", Context{GitHub: map[string]any{}}); err == nil || !strings.Contains(err.Error(), "event payload") {
+		t.Fatalf("EvaluateStep() missing event payload error = %v", err)
+	}
 	for _, template := range []string{
 		"${{ github }}",
 		"${{ github[env.KEY] }}",
 		"${{ github.* }}",
-		"${{ toJSON(github.event) }}",
 		"${{ toJSON(github.*) }}",
 		"${{ toJSON(secrets) }}",
 		"${{ format('{0}', github) }}",
@@ -1208,6 +1238,7 @@ func TestValidateActionLifecycleCondition(t *testing.T) {
 		"steps.build.conclusion == 'success' && runner.os == 'Linux'",
 		"inputs.cache == true && hashFiles('Cargo.lock') != ''",
 		"inputs['cache'] == true",
+		"github.event[env.EVENT_FIELD] == 'opened'",
 	} {
 		if err := ValidateActionLifecycleCondition(condition); err != nil {
 			t.Errorf("ValidateActionLifecycleCondition(%q) error = %v", condition, err)
@@ -1220,6 +1251,7 @@ func TestValidateActionLifecycleCondition(t *testing.T) {
 		"vars[env.FLAG] == 'true'",
 		"steps[env.STEP].conclusion == 'success'",
 		"inputs[env.INPUT] == true",
+		"github.event[secrets.FIELD] == 'opened'",
 		"unknown()",
 	} {
 		if err := ValidateActionLifecycleCondition(condition); err == nil {
@@ -1243,6 +1275,17 @@ func TestEvaluateActionLifecycleConditionUsesWorkflowInputsAndHashFiles(t *testi
 	}
 	if !reflect.DeepEqual(patterns, []string{"Cargo.lock"}) {
 		t.Fatalf("hashFiles patterns = %#v, want [Cargo.lock]", patterns)
+	}
+}
+
+func TestEvaluateActionLifecycleConditionSupportsDynamicEventAccess(t *testing.T) {
+	context := ConditionContext{
+		GitHub: map[string]any{"event": map[string]any{"action": "opened"}},
+		Env:    map[string]string{"EVENT_FIELD": "action"},
+	}
+	got, err := EvaluateActionLifecycleCondition("github.event[env.EVENT_FIELD] == 'opened'", context)
+	if err != nil || !got {
+		t.Fatalf("EvaluateActionLifecycleCondition() = %v, %v, want true", got, err)
 	}
 }
 
@@ -1837,7 +1880,7 @@ func TestCompileConditionValidationSupportsStringPredicates(t *testing.T) {
 	if resolved, err := EvaluateCompileCondition(source, context); err != nil || !resolved {
 		t.Fatalf("EvaluateCompileCondition() = %v, %v, want true", resolved, err)
 	}
-	if err := ValidateCompileConditionWithMatrix("contains(toJSON(github.event), needs.build.outputs.marker)", JobCondition, context, nil); err == nil || !strings.Contains(err.Error(), "whole github.event access is unsupported") {
+	if err := ValidateCompileConditionWithMatrix("contains(toJSON(github.event), needs.build.outputs.marker)", JobCondition, context, nil); err != nil {
 		t.Fatalf("ValidateCompileConditionWithMatrix() whole event error = %v", err)
 	}
 }
@@ -1960,7 +2003,7 @@ func TestReduceAvailableCompileTemplateRejectsIntroducedExpressionSyntax(t *test
 	}
 }
 
-func TestReduceAvailableCompileTemplateRejectsWholeEventAccess(t *testing.T) {
+func TestReduceAvailableCompileTemplatePreservesWholeEventAccess(t *testing.T) {
 	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"action": "opened"}}}
 	context.Event = context.GitHub["event"].(map[string]any)
 	for _, template := range []string{
@@ -1968,9 +2011,9 @@ func TestReduceAvailableCompileTemplateRejectsWholeEventAccess(t *testing.T) {
 		"${{ toJSON(github.event.*) }}",
 		"${{ toJSON(event.*) }}",
 	} {
-		_, err := ReduceAvailableCompileTemplate(template, context)
-		if err == nil || !strings.Contains(err.Error(), "whole github.event access is unsupported") {
-			t.Errorf("ReduceAvailableCompileTemplate(%q) error = %v", template, err)
+		got, err := ReduceAvailableCompileTemplate(template, context)
+		if err != nil || got != template {
+			t.Errorf("ReduceAvailableCompileTemplate(%q) = %q, %v", template, got, err)
 		}
 	}
 }

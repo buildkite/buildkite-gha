@@ -732,11 +732,42 @@ func TestRunJobTelemetryClassifiesExecutionFailure(t *testing.T) {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 	event := <-events
-	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeUnknown {
+	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeStepProcessExit {
 		t.Fatalf("telemetry = %#v", event)
 	}
 	if !strings.Contains(event.ErrorMessage, "exit status 7") {
 		t.Fatalf("telemetry error message = %q", event.ErrorMessage)
+	}
+}
+
+func TestRunJobTelemetryClassifiesUnsupportedShell(t *testing.T) {
+	job := cliRunJobPlan()
+	job.Steps[0].Shell = "pwsh"
+	job.Steps[0].Command = "Get-Location"
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	events := captureCommandTelemetry(t)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	event := <-events
+	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeUnsupportedFeature {
+		t.Fatalf("telemetry = %#v", event)
+	}
+	if !strings.Contains(event.ErrorMessage, `shell "pwsh" is unsupported`) {
+		t.Fatalf("telemetry error message = %q", event.ErrorMessage)
+	}
+}
+
+func TestRunJobValidateHostErrorsClassifyAsUnsupported(t *testing.T) {
+	job := plan.Job{RequiredCapabilities: []string{"docker"}}
+	err := gharuntime.ValidateHost(job, "darwin", "arm64")
+	if err == nil {
+		t.Fatal("ValidateHost() = nil, want macOS docker rejection")
+	}
+	if got := runtimeFailureCode(err); got != telemetry.FailureCodeUnsupportedFeature {
+		t.Fatalf("runtimeFailureCode() = %q, want %q for %v", got, telemetry.FailureCodeUnsupportedFeature, err)
 	}
 }
 
@@ -854,6 +885,37 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 	result, err := os.ReadFile(resultPath)
 	if err != nil || !bytes.Contains(result, []byte(`"conclusion": "success"`)) {
 		t.Fatalf("result = %q, error = %v", result, err)
+	}
+}
+
+func TestHydrateEventPayloadDownloadsFromExactImporterJob(t *testing.T) {
+	payload := []byte(`{"action":"opened","number":42}`)
+	digest := transport.Digest(payload)
+	path, err := buildkitepipeline.EventPath(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := cliRunJobPlan()
+	job.Event.PayloadDigest = digest
+	job.Event.PayloadArtifact = true
+	runner := &cliCaptureRunner{dataByPath: map[string][]byte{path: payload}}
+	if err := hydrateEventPayload(t.Context(), transport.Agent{Runner: runner}, &job, cliTestJobID); err != nil {
+		t.Fatal(err)
+	}
+	if job.Event.Payload == nil || (*job.Event.Payload)["action"] != "opened" {
+		t.Fatalf("hydrated event = %#v", job.Event.Payload)
+	}
+	if len(runner.commands) != 1 || len(runner.commands[0].args) != 6 ||
+		!slices.Equal(runner.commands[0].args[:3], []string{"artifact", "download", path}) ||
+		runner.commands[0].args[3] == "" ||
+		!slices.Equal(runner.commands[0].args[4:], []string{"--step", cliTestJobID}) {
+		t.Fatalf("artifact commands = %#v", runner.commands)
+	}
+
+	tampered := &cliCaptureRunner{dataByPath: map[string][]byte{path: []byte(`{"action":"closed"}`)}}
+	job.Event.Payload = nil
+	if err := hydrateEventPayload(t.Context(), transport.Agent{Runner: tampered}, &job, cliTestJobID); err == nil || !strings.Contains(err.Error(), "does not match its digest") {
+		t.Fatalf("tampered event error = %v", err)
 	}
 }
 

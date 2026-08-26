@@ -235,6 +235,17 @@ func TestErrorMessageIsNormalizedAndUTF8Bounded(t *testing.T) {
 	}
 }
 
+func TestRuntimeClassificationCodesAreFailureCodesOnly(t *testing.T) {
+	for _, code := range []FailureCode{FailureCodeStepProcessExit, FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity} {
+		if !validFailureCode(code) {
+			t.Errorf("validFailureCode(%q) = false", code)
+		}
+		if _, ok := diagnosticSeverity(string(code)); ok {
+			t.Errorf("diagnosticSeverity(%q) accepted a failure-only code as a diagnostic", code)
+		}
+	}
+}
+
 func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 	errorCodes := []string{
 		string(FailureCodeWorkflowSyntax), string(FailureCodeEventInvalid), string(FailureCodeGraphInvalid),

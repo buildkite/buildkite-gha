@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"strings"
@@ -39,6 +40,7 @@ type PlanAuthorization struct {
 type Bundle struct {
 	IR                IR
 	Plans             []PlanArtifact
+	EventArtifact     *transport.Artifact
 	Pipeline          []byte
 	GeneratedWorkflow buildkitepipeline.Workflow
 	Processing        ProcessingEvidence
@@ -117,7 +119,11 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 					continue
 				}
 				warnedLegacyCheckout[release] = true
-				bundle.IR.Warnings = append(bundle.IR.Warnings, legacyCheckoutWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release))
+				warning := legacyCheckoutWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release, actionintegration.CheckoutDefaultsToFullHistory(lock.Commit))
+				warning.Path = ir.Jobs[i].SourcePath
+				warning.Job = ir.Jobs[i].LogicalJobID
+				warning.Step = stepIndex + 1
+				bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
 			case actionintegration.AdapterUploadArtifactBuildkite:
 				release, legacy := actionintegration.LegacyUploadArtifactRelease(lock.Commit)
 				if !legacy || warnedLegacyUploadArtifact[release] {
@@ -140,10 +146,15 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		}
 		if (ir.Jobs[i].jobPermissionsIgnored || jobPermissionsIgnored(job.GitHubToken.Permissions, ir.Jobs[i].Permissions)) && !warnedJobPermissions {
 			position := ir.Jobs[i].Source.Start
+			path := ir.Jobs[i].SourcePath
 			if ir.Jobs[i].jobPermissionsIgnored && ir.Jobs[i].reusableCall.Line != 0 {
 				position = ir.Jobs[i].reusableCall
+				path = ir.Workflow.Path
 			}
-			bundle.IR.Warnings = append(bundle.IR.Warnings, jobWorkflowTokenWarning(position))
+			warning := jobWorkflowTokenWarning(position, job.GitHubToken.Permissions)
+			warning.Path = path
+			warning.Job = ir.Jobs[i].LogicalJobID
+			bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
 			warnedJobPermissions = true
 		}
 	}
@@ -172,6 +183,28 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		artifacts[i] = PlanArtifact{Job: job, Digest: digest, Path: planPath, Contents: contents, Authorization: authorizations[i]}
 	}
 	bundle.Plans = artifacts
+	for _, job := range plans {
+		if !job.Event.PayloadArtifact {
+			continue
+		}
+		contents, err := json.Marshal(ir.Event.Payload)
+		if err != nil {
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("encode event payload artifact: %w", err))
+		}
+		if len(contents) > plan.MaxEventPayloadBytes {
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("event payload artifact exceeds the %d-byte limit", plan.MaxEventPayloadBytes))
+		}
+		digest := transport.Digest(contents)
+		if digest != job.Event.PayloadDigest {
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("event payload artifact does not match the plan digest"))
+		}
+		path, err := buildkitepipeline.EventPath(digest)
+		if err != nil {
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", err)
+		}
+		bundle.EventArtifact = &transport.Artifact{Path: path, Digest: digest, Contents: contents}
+		break
+	}
 	bundle.Processing.PlansConstructed = true
 	return bundle, nil
 }
@@ -204,6 +237,7 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 			Platform:           ir.Jobs[i].Platform.String(),
 			DistributionDigest: job.RuntimeDistributionDigest(),
 			PlanDigest:         artifact.Digest,
+			EventPayload:       job.Event.PayloadArtifact,
 			Dependencies:       append([]string(nil), ir.Jobs[i].Needs...),
 			RequiresMise:       job.NeedsMise(),
 			Cache:              ir.Jobs[i].Cache,

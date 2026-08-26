@@ -44,8 +44,11 @@ type WorkflowConcurrencyGate struct {
 // Warning is one source-located, non-fatal compatibility diagnostic.
 type Warning struct {
 	Code    string `json:"code"`
+	Path    string `json:"path,omitempty"`
 	Line    int    `json:"line"`
 	Column  int    `json:"column"`
+	Job     string `json:"job,omitempty"`
+	Step    int    `json:"step,omitempty"`
 	Message string `json:"message"`
 }
 
@@ -106,6 +109,7 @@ type JobInstance struct {
 	RemoteWorkflow          *RemoteWorkflowSource     `json:"remote_workflow,omitempty"`
 	RepositoryRoot          string                    `json:"-"`
 	Source                  workflow.Span             `json:"source"`
+	RetainEventPayload      bool                      `json:"-"`
 	secretAuthority         secretAuthority
 	tokenPolicyNarrowed     bool
 	jobPermissionsIgnored   bool
@@ -410,35 +414,67 @@ func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string
 
 func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warning {
 	var warnings []Warning
+	supported := make(map[string]bool, len(parsed.Triggers))
+	for _, trigger := range parsed.Triggers {
+		if buildkitepipeline.SupportedTriggerEvent(trigger.Event) {
+			supported[trigger.Event] = true
+		}
+	}
+	supportedNames := make([]string, 0, len(supported))
+	for event := range supported {
+		supportedNames = append(supportedNames, event)
+	}
+	sort.Strings(supportedNames)
 	for _, trigger := range parsed.Triggers {
 		if buildkitepipeline.SupportedTriggerEvent(trigger.Event) {
 			continue
 		}
+		message := fmt.Sprintf("on.%s is ignored, so nothing in this workflow runs from it.", trigger.Event)
+		if len(supportedNames) == 0 {
+			message += " This workflow declares no supported triggers that still run."
+		} else {
+			message += " The supported triggers declared in this workflow still run: " + strings.Join(supportedNames, ", ") + "."
+			message += " Move the jobs this trigger guards to one of those triggers if you need them."
+		}
+		message += fmt.Sprintf(" If you need %s, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.", trigger.Event)
 		warnings = append(warnings, Warning{
 			Code:    "W_TRIGGER_EVENT_UNSUPPORTED",
 			Line:    trigger.Position.Line,
 			Column:  trigger.Position.Column,
-			Message: fmt.Sprintf("on.%s has no Buildkite build source; this trigger is ignored and never starts a build", trigger.Event),
+			Message: message,
 		})
 	}
 	if parsed.Concurrency != nil && cancelInProgress {
-		position := parsed.Concurrency.CancelInProgressPosition
-		warnings = append(warnings, Warning{
-			Code:    "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED",
-			Line:    position.Line,
-			Column:  position.Column,
-			Message: "workflow concurrency cancel-in-progress is not enforced; Buildkite pipeline settings can approximate it for same-branch builds",
-		})
+		warnings = append(warnings, workflowCancellationWarning(parsed.Concurrency.CancelInProgressPosition))
 	}
 	return warnings
 }
 
-func legacyCheckoutWarning(position workflow.Position, release string) Warning {
+func workflowCancellationWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+	}
+}
+
+func legacyCheckoutWarning(position workflow.Position, release string, defaultsToFullHistory bool) Warning {
+	generation := "v2"
+	if defaultsToFullHistory {
+		generation = "v1"
+	}
+	message := fmt.Sprintf("actions/checkout %s behaves like %s. It does not set the ref and commit outputs, which actions/checkout added in v4.2.0.", release, generation)
+	if defaultsToFullHistory {
+		message += " It also defaults to full history when fetch-depth is omitted. Upgrade to actions/checkout v4 or later if either difference matters."
+	} else {
+		message += " Upgrade to actions/checkout v4 or later if a later step reads either output."
+	}
 	return Warning{
 		Code:    "W_CHECKOUT_LEGACY_RELEASE",
 		Line:    position.Line,
 		Column:  position.Column,
-		Message: fmt.Sprintf("actions/checkout %s is emulated by the native adapter with its release contract; upgrade to v4 or later", release),
+		Message: message,
 	}
 }
 
@@ -460,12 +496,21 @@ func reusableWorkflowTokenWarning(position workflow.Position) Warning {
 	}
 }
 
-func jobWorkflowTokenWarning(position workflow.Position) Warning {
+func jobWorkflowTokenWarning(position workflow.Position, permissions map[string]string) Warning {
+	names := make([]string, 0, len(permissions))
+	for name := range permissions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	effective := make([]string, 0, len(names))
+	for _, name := range names {
+		effective = append(effective, strings.ReplaceAll(name, "_", "-")+": "+permissions[name])
+	}
 	return Warning{
 		Code:    "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS",
 		Line:    position.Line,
 		Column:  position.Column,
-		Message: "job-level repository permissions are ignored for hosted GITHUB_TOKEN; the top-level requesting workflow permissions apply",
+		Message: "Job-level permissions are ignored for GITHUB_TOKEN. The top-level workflow permissions apply instead. This job's token has " + strings.Join(effective, ", ") + ". Move this job's permissions block to the workflow top level. If you need per-job permissions, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
 	}
 }
 

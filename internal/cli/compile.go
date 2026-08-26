@@ -90,7 +90,11 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 
 func writeCompilerWarnings(stderr io.Writer, command, path string, warnings []compiler.Warning) {
 	for _, warning := range warnings {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: %s: warning: %s:%d:%d: [%s] %s\n", command, path, warning.Line, warning.Column, warning.Code, warning.Message)
+		warningPath := warning.Path
+		if warningPath == "" {
+			warningPath = path
+		}
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: %s: warning: %s:%d:%d: [%s] %s\n", command, warningPath, warning.Line, warning.Column, warning.Code, warning.Message)
 	}
 }
 

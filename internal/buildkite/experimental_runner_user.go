@@ -28,16 +28,11 @@ func experimentalRunnerUserBootstrap(requiresMise, hostedToolCache bool, cache *
 		`sudo -n --user runner -- test -r "$plan" && ! sudo -n --user runner -- test -w "$plan" || { echo 'buildkite-gha: runner plan permissions are unsafe' >&2; exit 1; }`,
 	}
 	if cache != nil {
-		commands = append(commands, `command -v readlink >/dev/null 2>&1 || { echo 'buildkite-gha: configured cache paths require readlink' >&2; exit 1; }`)
-		for _, path := range cache.Paths {
-			commands = append(commands,
-				"cache_target=\"$(readlink -f -- "+shellQuote(path)+`)" || { echo 'buildkite-gha: configured cache path is unavailable' >&2; exit 1; }`,
-				`case "$cache_target" in /cache/bkcache/*) ;; *) echo 'buildkite-gha: configured cache path does not target the Buildkite cache volume' >&2; exit 1;; esac`,
-				`test -d "$cache_target" || { echo 'buildkite-gha: configured cache path is not a directory' >&2; exit 1; }`,
-				`chown -R runner:"$runner_group" "$cache_target"`,
-				`chmod -R u+rwX "$cache_target"`,
-			)
+		cacheAnchor := platformCacheValidationPath("linux/amd64")
+		if requiresMise {
+			cacheAnchor = platformMiseCachePath("linux/amd64")
 		}
+		commands = append(commands, experimentalRunnerCacheOwnershipCommands("/cache/bkcache", cacheAnchor, cache.Paths)...)
 	}
 	if requiresMise {
 		commands = append(commands,
@@ -59,6 +54,32 @@ func experimentalRunnerUserBootstrap(requiresMise, hostedToolCache bool, cache *
 		`sudo -n --user runner -- env HOME='/home/runner' TMPDIR='/tmp/buildkite-gha-runner' sh -c 'test "$(id -un)" = runner; test "$(id -u)" -ne 0; test "$HOME" = /home/runner; test -w "$TMPDIR"; sudo -n true'`,
 		`if [ -S /var/run/docker.sock ]; then sudo -n --user runner -- test -w /var/run/docker.sock || { echo 'buildkite-gha: runner cannot access the Docker socket' >&2; exit 1; }; fi`,
 	)
+}
+
+// experimentalRunnerCacheOwnershipCommands uses a compiler-owned cache path as
+// the filesystem anchor, then accepts direct mounts or documented root links.
+func experimentalRunnerCacheOwnershipCommands(cacheRoot, anchor string, paths []string) []string {
+	commands := []string{
+		`for command in mountpoint readlink stat; do command -v "$command" >/dev/null 2>&1 || { echo "buildkite-gha: configured cache paths require $command" >&2; exit 1; }; done`,
+		"cache_root=" + shellQuote(cacheRoot),
+		"cache_anchor=\"$(readlink -f -- " + shellQuote(anchor) + `)" || { echo 'buildkite-gha: Buildkite cache volume anchor is unavailable' >&2; exit 1; }`,
+		`test -d "$cache_anchor" || { echo 'buildkite-gha: Buildkite cache volume anchor is unavailable' >&2; exit 1; }`,
+		`cache_root_mounted=false; if test -d "$cache_root" && mountpoint -q -- "$cache_root"; then cache_root_mounted=true; fi`,
+		`if ! mountpoint -q -- "$cache_anchor"; then test "$cache_root_mounted" = true || { echo 'buildkite-gha: Buildkite cache volume anchor is not mounted' >&2; exit 1; }; case "$cache_anchor" in "$cache_root"/*) ;; *) echo 'buildkite-gha: Buildkite cache volume anchor is unsafe' >&2; exit 1;; esac; fi`,
+		`cache_device="$(stat -c '%d' -- "$cache_anchor")" || { echo 'buildkite-gha: Buildkite cache volume anchor is unavailable' >&2; exit 1; }`,
+	}
+	for _, path := range paths {
+		commands = append(commands,
+			"cache_target=\"$(readlink -f -- "+shellQuote(path)+`)" || { echo 'buildkite-gha: configured cache path is unavailable' >&2; exit 1; }`,
+			`test -d "$cache_target" || { echo 'buildkite-gha: configured cache path is not a directory' >&2; exit 1; }`,
+			`test "$cache_target" != "$cache_root" || { echo 'buildkite-gha: configured cache path is unsafe' >&2; exit 1; }`,
+			`test "$(stat -c '%d' -- "$cache_target")" = "$cache_device" || { echo 'buildkite-gha: configured cache path does not target the Buildkite cache volume' >&2; exit 1; }`,
+			`if ! mountpoint -q -- "$cache_target"; then test "$cache_root_mounted" = true || { echo 'buildkite-gha: configured cache path is not a Buildkite cache volume mount' >&2; exit 1; }; case "$cache_target" in "$cache_root"/*) ;; *) echo 'buildkite-gha: configured cache path is not a Buildkite cache volume mount' >&2; exit 1;; esac; fi`,
+			`chown -R runner:"$runner_group" "$cache_target"`,
+			`chmod -R u+rwX "$cache_target"`,
+		)
+	}
+	return commands
 }
 
 func experimentalRunnerUserCommand(runJob string) string {

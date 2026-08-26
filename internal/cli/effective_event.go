@@ -30,6 +30,7 @@ type effectiveEventSelection struct {
 	Source             []byte
 	Event              compiler.Event
 	Origin             effectiveEventOrigin
+	BuildSource        string
 	TriggerExpressions buildkitepipeline.TriggerConditionExpressions
 	TriggerSnapshot    buildkitepipeline.TriggerEventSnapshot
 }
@@ -71,6 +72,9 @@ func newEffectiveEvent(source []byte, origin effectiveEventOrigin) (effectiveEve
 		return effective, nil
 	}
 	effective.TriggerExpressions.EventPredicate = buildkitepipeline.LiveEventPredicate(event.Event)
+	if origin == effectiveEventFromBuild {
+		effective.BuildSource = strings.TrimSpace(os.Getenv("BUILDKITE_SOURCE"))
+	}
 	return effective, nil
 }
 
@@ -84,6 +88,7 @@ func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerCondit
 		MergeGroupBaseBranch:  "null",
 		MergeGroupAction:      "null",
 		ReleaseAction:         "null",
+		IssuesAction:          "null",
 	}
 	snapshot := buildkitepipeline.TriggerEventSnapshot{}
 	if branch, ok := strings.CutPrefix(event.Ref, "refs/heads/"); ok {
@@ -101,6 +106,8 @@ func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerCondit
 		snapshot.MergeGroupAction = &action
 		expressions.ReleaseAction = triggerConditionLiteral(action)
 		snapshot.ReleaseAction = &action
+		expressions.IssuesAction = triggerConditionLiteral(action)
+		snapshot.IssuesAction = &action
 	}
 	if pullRequest, ok := event.Payload["pull_request"].(map[string]any); ok {
 		if base, ok := pullRequest["base"].(map[string]any); ok {

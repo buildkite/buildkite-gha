@@ -4528,3 +4528,36 @@ jobs:
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestCompilerWarningsNameOnlyDeclaredSupportedTriggers(t *testing.T) {
+	parsed := &workflow.Workflow{Triggers: []workflow.Trigger{
+		{Event: "workflow_dispatch"},
+		{Event: "issue_comment", Position: workflow.Position{Line: 4, Column: 3}},
+		{Event: "issues"},
+		{Event: "release"},
+		{Event: "push"},
+		{Event: "merge_group"},
+		{Event: "schedule"},
+		{Event: "pull_request"},
+		{Event: "workflow_call"},
+		{Event: "push"},
+	}}
+	warnings := compilerWarnings(parsed, false)
+	want := Warning{
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Line: 4, Column: 3,
+		Message: "on.issue_comment is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: issues, merge_group, pull_request, push, release, schedule, workflow_call, workflow_dispatch. Move the jobs this trigger guards to one of those triggers if you need them. If you need issue_comment, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
+	}
+	if !reflect.DeepEqual(warnings, []Warning{want}) {
+		t.Fatalf("warnings = %#v, want %#v", warnings, []Warning{want})
+	}
+
+	parsed.Triggers = []workflow.Trigger{{Event: "issue_comment", Position: workflow.Position{Line: 1, Column: 5}}}
+	warnings = compilerWarnings(parsed, false)
+	want = Warning{
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Line: 1, Column: 5,
+		Message: "on.issue_comment is ignored, so nothing in this workflow runs from it. This workflow declares no supported triggers that still run. If you need issue_comment, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
+	}
+	if !reflect.DeepEqual(warnings, []Warning{want}) {
+		t.Fatalf("warnings without supported triggers = %#v, want %#v", warnings, []Warning{want})
+	}
+}

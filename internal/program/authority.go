@@ -1,7 +1,6 @@
 package program
 
 import (
-	"fmt"
 	"sort"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -29,13 +28,6 @@ func InventoryAuthority(workflow Program, options AuthorityOptions) (Authority, 
 		}
 		if site.Surface == SurfaceJobCondition || site.Surface == SurfaceStepCondition {
 			return inventoryConditionAuthority(site.Source, found, &authority)
-		}
-		referencesEvent, err := expression.TemplateReferencesGitHubEvent(site.Source)
-		if err != nil {
-			return err
-		}
-		if referencesEvent {
-			return fmt.Errorf("github.event cannot be retained in a job plan")
 		}
 		names, err := expression.SecretReferences(site.Source)
 		if err != nil {
@@ -68,13 +60,6 @@ func InventoryAuthority(workflow Program, options AuthorityOptions) (Authority, 
 }
 
 func inventoryConditionAuthority(source string, found map[string]struct{}, authority *Authority) error {
-	referencesEvent, err := expression.ReferencesGitHubEvent(source)
-	if err != nil {
-		return err
-	}
-	if referencesEvent {
-		return fmt.Errorf("github.event cannot be retained in a job plan")
-	}
 	names, err := expression.ConditionSecretReferences(source)
 	if err != nil {
 		return err

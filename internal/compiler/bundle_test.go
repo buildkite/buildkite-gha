@@ -725,7 +725,10 @@ jobs:
 	if bundle.IR.Workflow.ConcurrencyGroup != "Deployment-refs/heads/main" || len(bundle.IR.Jobs) != 4 {
 		t.Fatalf("concurrency IR = workflow %q jobs %#v", bundle.IR.Workflow.ConcurrencyGroup, bundle.IR.Jobs)
 	}
-	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || bundle.IR.Warnings[0].Line != 5 || bundle.IR.Warnings[0].Column != 23 {
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0] != (Warning{
+		Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: 5, Column: 23,
+		Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+	}) {
 		t.Fatalf("concurrency warnings = %#v", bundle.IR.Warnings)
 	}
 	repository := bundle.IR.Event.Repository
@@ -1067,7 +1070,10 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || !strings.Contains(bundle.IR.Warnings[0].Message, "no concurrency-group cancellation contract") {
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0] != (Warning{
+		Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: 4, Column: 11, Job: "call",
+		Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+	}) {
 		t.Fatalf("called workflow warnings = %#v", bundle.IR.Warnings)
 	}
 }
@@ -1491,9 +1497,13 @@ func TestCompileBundleGitHubTokenIgnoresJobPermissions(t *testing.T) {
 			source := []byte(`on: push
 permissions:
   contents: write
+  issues: read
 jobs:
   token:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [1, 2]
 ` + test.jobPermissions + `    env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps: [{run: true}]
@@ -1503,13 +1513,15 @@ jobs:
 				t.Fatal(err)
 			}
 			job := bundle.Plans[0].Job
-			if job.GitHubToken == nil || !reflect.DeepEqual(job.GitHubToken.Permissions, map[string]string{"contents": "write"}) {
+			if len(bundle.Plans) != 2 || job.GitHubToken == nil || !reflect.DeepEqual(job.GitHubToken.Permissions, map[string]string{"contents": "write", "issues": "read"}) {
 				t.Fatalf("GITHUB_TOKEN = %#v, want workflow permissions", job.GitHubToken)
 			}
 			if job.IDTokenPermission != test.idToken {
 				t.Fatalf("ID token permission = %q, want %q", job.IDTokenPermission, test.idToken)
 			}
-			if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" {
+			if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS" ||
+				bundle.IR.Warnings[0].Path != "./.github/workflows/workflow.yml" || bundle.IR.Warnings[0].Job != "token" ||
+				bundle.IR.Warnings[0].Message != "Job-level permissions are ignored for GITHUB_TOKEN. The top-level workflow permissions apply instead. This job's token has contents: write, issues: read. Move this job's permissions block to the workflow top level. If you need per-job permissions, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it." {
 				t.Fatalf("warnings = %#v, want ignored job permissions warning", bundle.IR.Warnings)
 			}
 		})
@@ -1620,7 +1632,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: ${{ secrets.NAME_SECRET }}
-        run: echo '${{ ToJson(GitHub) }}'
+        run: echo '${{ contains(ToJson(GitHub), '"event"') }}'
 `)
 	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err != nil {
@@ -1632,6 +1644,9 @@ jobs:
 	}
 	if job.GitHubToken == nil || !job.HasCapability("provider-token-write") {
 		t.Fatalf("toJSON(github) authority = %#v, capabilities %#v", job.GitHubToken, job.RequiredCapabilities)
+	}
+	if !job.Event.PayloadArtifact || bundle.EventArtifact == nil {
+		t.Fatal("toJSON(github) did not retain the event payload")
 	}
 	if bundle.Plans[0].Authorization.GitHubTokenSecretReference {
 		t.Fatal("toJSON(github) was reported as a secrets.GITHUB_TOKEN reference")
@@ -1756,8 +1771,53 @@ jobs:
   "payload": {"action_ref": "owner/action@1111111111111111111111111111111111111111"}
 }`)
 	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained") {
+	if err == nil || !strings.Contains(err.Error(), "github.event cannot select an action reference") {
 		t.Fatalf("CompileBundle() error = %v, want static action reference rejection", err)
+	}
+}
+
+func TestCompileBundleRetainsEventPayloadOnlyForJobsThatNeedIt(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  whole-event:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ toJSON(github.event) }}'
+  scalar-event:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ github.event.action }}'
+`)
+	event := []byte(`{
+  "provider": "github", "event": "push",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"action": "opened", "commits": [{"id": "2222222222222222222222222222222222222222"}]}
+}`)
+	bundle, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d, want 2", len(bundle.Plans))
+	}
+	jobs := map[string]plan.Job{}
+	for _, artifact := range bundle.Plans {
+		jobs[artifact.Job.Workflow.LogicalJobID] = artifact.Job
+	}
+	if !jobs["whole-event"].Event.PayloadArtifact || bundle.EventArtifact == nil || !strings.Contains(jobs["whole-event"].Steps[0].Command, "github.event") {
+		t.Fatalf("whole-event plan did not retain its runtime payload: %#v", jobs["whole-event"])
+	}
+	if jobs["scalar-event"].Event.PayloadArtifact || jobs["scalar-event"].Steps[0].Command != "echo 'opened'" {
+		t.Fatalf("scalar-event plan retained an unnecessary payload: %#v", jobs["scalar-event"])
+	}
+	if bundle.EventArtifact.Path != ".buildkite-gha/events/"+strings.TrimPrefix(bundle.EventArtifact.Digest, "sha256:")+".json" || !bytes.Contains(bundle.EventArtifact.Contents, []byte(`"commits"`)) {
+		t.Fatalf("event artifact = %#v", bundle.EventArtifact)
+	}
+	for _, artifact := range bundle.Plans {
+		if bytes.Contains(artifact.Contents, []byte(`"commits"`)) {
+			t.Fatalf("plan %q embedded the event payload", artifact.Path)
+		}
 	}
 }
 

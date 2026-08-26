@@ -1289,6 +1289,10 @@ func applyPaths(env map[string]string, paths []string) {
 }
 
 func githubContext(job plan.Job) map[string]any {
+	var event map[string]any
+	if job.Event.Payload != nil {
+		event = *job.Event.Payload
+	}
 	return map[string]any{
 		"action_path":       "",
 		"action_ref":        "",
@@ -1303,6 +1307,7 @@ func githubContext(job plan.Job) map[string]any {
 		"sha":               job.Event.SHA,
 		"actor":             job.Event.Actor,
 		"event_name":        job.Event.Name,
+		"event":             event,
 		"server_url":        plan.EventServerURL(job.Event.Provider),
 		"workflow":          workflowDisplayName(job),
 		"job":               job.Workflow.LogicalJobID,
@@ -1349,7 +1354,7 @@ func canonicalRunnerContext(goos, goarch string) (map[string]string, error) {
 	case goos == "darwin" && goarch == "arm64":
 		return map[string]string{"os": "macOS", "arch": "ARM64"}, nil
 	default:
-		return nil, fmt.Errorf("unsupported runner platform %s/%s", goos, goarch)
+		return nil, errUnsupportedf("unsupported runner platform %s/%s", goos, goarch)
 	}
 }
 
@@ -1361,11 +1366,11 @@ func ValidateHost(job plan.Job, goos, goarch string) error {
 	if goos == "darwin" {
 		switch {
 		case job.HasCapability("docker"):
-			return fmt.Errorf("docker capability is unsupported on macOS runners")
+			return errUnsupportedf("docker capability is unsupported on macOS runners")
 		case job.Container != nil:
-			return fmt.Errorf("job containers are unsupported on macOS runners")
+			return errUnsupportedf("job containers are unsupported on macOS runners")
 		case len(job.Services) != 0:
-			return fmt.Errorf("services are unsupported on macOS runners")
+			return errUnsupportedf("services are unsupported on macOS runners")
 		}
 	}
 	return nil
@@ -1926,7 +1931,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 		}
 	} else {
 		if !strings.HasPrefix(step.Uses, "./") {
-			return result, fmt.Errorf("remote action %q is unsupported in the supported runtime subset", step.Uses)
+			return result, errUnsupportedf("remote action %q is unsupported in the supported runtime subset", step.Uses)
 		}
 		if err := verifyWorkflow(job, workspace); err != nil {
 			return result, err
@@ -2062,7 +2067,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 		return composite, err
 	case metadata.RuntimeDocker:
 		if goruntime.GOOS == "darwin" {
-			return result, fmt.Errorf("docker action %q is unsupported on macOS runners", step.Uses)
+			return result, errUnsupportedf("docker action %q is unsupported on macOS runners", step.Uses)
 		}
 		if !job.HasCapability("docker") {
 			return result, fmt.Errorf("docker action %q requires the plan's docker capability", step.Uses)
@@ -2096,7 +2101,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Image: image, Entrypoint: action.Runs.Entrypoint, Args: dockerArgs, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})
 		return result, err
 	}
-	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
+	return result, errUnsupportedf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
 }
 
 func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionLock *plan.ActionLock, actionStack []string) (Result, error) {
@@ -2386,9 +2391,9 @@ func shellCommand(shell, script string) ([]string, error) {
 		return []string{"sh", "-e", "-c", script}, nil
 	default:
 		if err := shellcompat.ValidateCompatibility(shell); err != nil {
-			return nil, err
+			return nil, errUnsupportedf("%s", err)
 		}
-		return nil, fmt.Errorf("shell %q is unsupported in the supported runtime subset", shell)
+		return nil, errUnsupportedf("shell %q is unsupported in the supported runtime subset", shell)
 	}
 }
 
@@ -2404,6 +2409,9 @@ func (r *jobRun) runShellProcess(ctx context.Context, processor *commandProcesso
 
 	args := []string{"python", "{0}"}
 	if shell != "python" {
+		if err := shellcompat.ValidateCompatibility(shell); err != nil {
+			return errUnsupportedf("%s", err)
+		}
 		var err error
 		args, err = shellcompat.ParseTemplate(shell)
 		if err != nil {

@@ -1346,6 +1346,9 @@ jobs:
 	if err == nil {
 		t.Fatal("RunJob() succeeded")
 	}
+	if got := ClassifyFailure(err); got != FailureClassUnsupportedFeature {
+		t.Fatalf("ClassifyFailure() = %q, want %q", got, FailureClassUnsupportedFeature)
+	}
 	for _, want := range []string{
 		`shell "pwsh" is unsupported`,
 		"Use bash, sh, python, or a valid custom shell template whose command is available on PATH",
