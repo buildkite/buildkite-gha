@@ -4560,3 +4560,21 @@ func TestCompilerWarningsNameOnlyDeclaredSupportedTriggers(t *testing.T) {
 		t.Fatalf("warnings without supported triggers = %#v, want %#v", warnings, []Warning{want})
 	}
 }
+
+func TestCompilerWarningsFlagIgnoredMergeGroupPathFilters(t *testing.T) {
+	parsed := &workflow.Workflow{Triggers: []workflow.Trigger{
+		{Event: "merge_group", Paths: []string{"src/**"}, Position: workflow.Position{Line: 3, Column: 3}},
+	}}
+	want := Warning{
+		Code: "W_MERGE_GROUP_PATH_FILTERS_IGNORED", Line: 3, Column: 3,
+		Message: "on.merge_group paths and paths-ignore are ignored, matching GitHub, which does not evaluate path filters for merge_group events. Every merge_group delivery runs this workflow. Move the filtering into a job or step condition if you need it.",
+	}
+	if warnings := compilerWarnings(parsed, false); !reflect.DeepEqual(warnings, []Warning{want}) {
+		t.Fatalf("warnings = %#v, want %#v", warnings, []Warning{want})
+	}
+
+	parsed.Triggers = []workflow.Trigger{{Event: "merge_group", Types: []string{"checks_requested"}}}
+	if warnings := compilerWarnings(parsed, false); warnings != nil {
+		t.Fatalf("warnings without path filters = %#v, want none", warnings)
+	}
+}
