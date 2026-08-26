@@ -109,39 +109,40 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 			if step.Action == nil || stepIndex >= len(ir.Jobs[i].Steps) {
 				continue
 			}
-			lock := locks[step.Action.Lock]
-			descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-			switch descriptor.Adapter {
-			case actionintegration.AdapterCheckoutExactEventSHA:
-				if actionintegration.CheckoutUsesFallbackContract(lock.Commit) {
-					if warnedUnknownCheckout[lock.Commit] {
+			for _, lock := range reachableActionLocks(locks, step.Action.Lock) {
+				descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+				switch descriptor.Adapter {
+				case actionintegration.AdapterCheckoutExactEventSHA:
+					if actionintegration.CheckoutUsesFallbackContract(lock.Commit) {
+						if warnedUnknownCheckout[lock.Commit] {
+							continue
+						}
+						warnedUnknownCheckout[lock.Commit] = true
+						warning := unknownCheckoutCommitWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, lock.Commit)
+						warning.Path = ir.Jobs[i].SourcePath
+						warning.Job = ir.Jobs[i].LogicalJobID
+						warning.Step = stepIndex + 1
+						bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
 						continue
 					}
-					warnedUnknownCheckout[lock.Commit] = true
-					warning := unknownCheckoutCommitWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, lock.Commit)
+					release, legacy := actionintegration.LegacyCheckoutRelease(lock.Commit)
+					if !legacy || warnedLegacyCheckout[release] {
+						continue
+					}
+					warnedLegacyCheckout[release] = true
+					warning := legacyCheckoutWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release, actionintegration.CheckoutDefaultsToFullHistory(lock.Commit))
 					warning.Path = ir.Jobs[i].SourcePath
 					warning.Job = ir.Jobs[i].LogicalJobID
 					warning.Step = stepIndex + 1
 					bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
-					continue
+				case actionintegration.AdapterUploadArtifactBuildkite:
+					release, legacy := actionintegration.LegacyUploadArtifactRelease(lock.Commit)
+					if !legacy || warnedLegacyUploadArtifact[release] {
+						continue
+					}
+					warnedLegacyUploadArtifact[release] = true
+					bundle.IR.Warnings = append(bundle.IR.Warnings, legacyUploadArtifactWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release))
 				}
-				release, legacy := actionintegration.LegacyCheckoutRelease(lock.Commit)
-				if !legacy || warnedLegacyCheckout[release] {
-					continue
-				}
-				warnedLegacyCheckout[release] = true
-				warning := legacyCheckoutWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release, actionintegration.CheckoutDefaultsToFullHistory(lock.Commit))
-				warning.Path = ir.Jobs[i].SourcePath
-				warning.Job = ir.Jobs[i].LogicalJobID
-				warning.Step = stepIndex + 1
-				bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
-			case actionintegration.AdapterUploadArtifactBuildkite:
-				release, legacy := actionintegration.LegacyUploadArtifactRelease(lock.Commit)
-				if !legacy || warnedLegacyUploadArtifact[release] {
-					continue
-				}
-				warnedLegacyUploadArtifact[release] = true
-				bundle.IR.Warnings = append(bundle.IR.Warnings, legacyUploadArtifactWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release))
 			}
 		}
 	}
@@ -196,6 +197,28 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	bundle.Plans = artifacts
 	bundle.Processing.PlansConstructed = true
 	return bundle, nil
+}
+
+func reachableActionLocks(locks map[string]plan.ActionLock, root string) []plan.ActionLock {
+	var reachable []plan.ActionLock
+	visited := map[string]bool{}
+	var visit func(string)
+	visit = func(id string) {
+		if visited[id] {
+			return
+		}
+		visited[id] = true
+		lock, ok := locks[id]
+		if !ok {
+			return
+		}
+		reachable = append(reachable, lock)
+		for _, uses := range sortedKeys(lock.Children) {
+			visit(lock.Children[uses].Lock)
+		}
+	}
+	visit(root)
+	return reachable
 }
 
 func jobPermissionsIgnored(workflowPermissions, effectivePermissions map[string]string) bool {

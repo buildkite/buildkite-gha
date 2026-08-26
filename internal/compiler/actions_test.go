@@ -1448,6 +1448,27 @@ func TestCompileBundleUnknownCheckoutCommitWarningIsDeduplicated(t *testing.T) {
 	if bundle.IR.Warnings[1].Code != "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[1].Step != 3 || !strings.Contains(bundle.IR.Warnings[1].Message, otherUnknown) {
 		t.Fatalf("second unknown checkout fallback warning = %#v", bundle.IR.Warnings[1])
 	}
+
+	writeAction(t, workspace, ".github/actions/wrapper", "runs:\n  using: composite\n  steps:\n    - uses: actions/checkout@"+unknown+"\n")
+	workflow = []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n")
+	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err = CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   commitActionSource{roots: map[string]string{unknown: root}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[0].Step != 1 || !strings.Contains(bundle.IR.Warnings[0].Message, unknown) {
+		t.Fatalf("nested unknown checkout fallback warnings = %#v", bundle.IR.Warnings)
+	}
 }
 
 func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
