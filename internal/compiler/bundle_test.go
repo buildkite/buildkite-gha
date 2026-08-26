@@ -1373,7 +1373,7 @@ jobs:
 	if job.GitHubToken == nil || !job.HasCapability("provider-token-write") {
 		t.Fatalf("toJSON(github) authority = %#v, capabilities %#v", job.GitHubToken, job.RequiredCapabilities)
 	}
-	if job.Event.Payload == nil {
+	if !job.Event.PayloadArtifact || bundle.EventArtifact == nil {
 		t.Fatal("toJSON(github) did not retain the event payload")
 	}
 	if bundle.Plans[0].Authorization.GitHubTokenSecretReference {
@@ -1533,11 +1533,19 @@ jobs:
 	for _, artifact := range bundle.Plans {
 		jobs[artifact.Job.Workflow.LogicalJobID] = artifact.Job
 	}
-	if jobs["whole-event"].Event.Payload == nil || !strings.Contains(jobs["whole-event"].Steps[0].Command, "github.event") {
+	if !jobs["whole-event"].Event.PayloadArtifact || bundle.EventArtifact == nil || !strings.Contains(jobs["whole-event"].Steps[0].Command, "github.event") {
 		t.Fatalf("whole-event plan did not retain its runtime payload: %#v", jobs["whole-event"])
 	}
-	if jobs["scalar-event"].Event.Payload != nil || jobs["scalar-event"].Steps[0].Command != "echo 'opened'" {
+	if jobs["scalar-event"].Event.PayloadArtifact || jobs["scalar-event"].Steps[0].Command != "echo 'opened'" {
 		t.Fatalf("scalar-event plan retained an unnecessary payload: %#v", jobs["scalar-event"])
+	}
+	if bundle.EventArtifact.Path != ".buildkite-gha/events/"+strings.TrimPrefix(bundle.EventArtifact.Digest, "sha256:")+".json" || !bytes.Contains(bundle.EventArtifact.Contents, []byte(`"commits"`)) {
+		t.Fatalf("event artifact = %#v", bundle.EventArtifact)
+	}
+	for _, artifact := range bundle.Plans {
+		if bytes.Contains(artifact.Contents, []byte(`"commits"`)) {
+			t.Fatalf("plan %q embedded the event payload", artifact.Path)
+		}
 	}
 }
 

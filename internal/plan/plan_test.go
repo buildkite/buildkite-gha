@@ -35,14 +35,10 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 	validateJobPlanSchema(t, source)
 }
 
-func TestRetainedEventPayloadRoundTripAndValidation(t *testing.T) {
+func TestEventPayloadArtifactRoundTripAndValidation(t *testing.T) {
 	job := validJob()
-	payloadMap := map[string]any{"action": "opened", "pull_request": map[string]any{"number": json.Number("42")}}
-	job.Event.Payload = &payloadMap
-	payload, err := json.Marshal(job.Event.Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
+	job.Event.PayloadArtifact = true
+	payload := []byte(`{"action":"opened","pull_request":{"number":42}}`)
 	job.Event.PayloadDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(payload))
 
 	encoded, err := Encode(job)
@@ -51,34 +47,23 @@ func TestRetainedEventPayloadRoundTripAndValidation(t *testing.T) {
 	}
 	validateJobPlanSchema(t, encoded)
 	decoded, err := Decode(encoded)
-	if err != nil || !reflect.DeepEqual(decoded.Event.Payload, job.Event.Payload) {
-		t.Fatalf("Decode() retained payload = %#v, %v", decoded.Event.Payload, err)
+	if err != nil || !decoded.Event.PayloadArtifact || decoded.Event.Payload != nil {
+		t.Fatalf("Decode() payload artifact = %#v, %v", decoded.Event, err)
 	}
-
-	tampered := decoded
-	(*tampered.Event.Payload)["action"] = "closed"
-	if err := tampered.Validate(); err == nil || !strings.Contains(err.Error(), "does not match its digest") {
-		t.Fatalf("Validate() tampered payload error = %v", err)
+	decodedPayload, err := DecodeEventPayload(payload, job.Event.PayloadDigest)
+	if err != nil || decodedPayload["action"] != "opened" {
+		t.Fatalf("DecodeEventPayload() = %#v, %v", decodedPayload, err)
 	}
-
-	oversized := validJob()
-	oversizedPayload := map[string]any{"body": strings.Repeat("x", MaxEventPayloadBytes)}
-	oversized.Event.Payload = &oversizedPayload
-	if err := oversized.Validate(); err == nil || !strings.Contains(err.Error(), "event payload exceeds") {
-		t.Fatalf("Validate() oversized payload error = %v", err)
+	if _, err := DecodeEventPayload([]byte(`{"action":"closed"}`), job.Event.PayloadDigest); err == nil || !strings.Contains(err.Error(), "does not match its digest") {
+		t.Fatalf("DecodeEventPayload() tampered error = %v", err)
 	}
-
-	empty := validJob()
-	emptyPayload := map[string]any{}
-	empty.Event.Payload = &emptyPayload
-	empty.Event.PayloadDigest = fmt.Sprintf("sha256:%x", sha256.Sum256([]byte("{}")))
-	encoded, err = Encode(empty)
-	if err != nil {
-		t.Fatal(err)
+	oversized := []byte(`{"body":"` + strings.Repeat("x", MaxEventPayloadBytes) + `"}`)
+	if _, err := DecodeEventPayload(oversized, fmt.Sprintf("sha256:%x", sha256.Sum256(oversized))); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("DecodeEventPayload() oversized error = %v", err)
 	}
-	decoded, err = Decode(encoded)
-	if err != nil || decoded.Event.Payload == nil || len(*decoded.Event.Payload) != 0 {
-		t.Fatalf("Decode() empty retained payload = %#v, %v", decoded.Event.Payload, err)
+	empty, err := DecodeEventPayload([]byte(`{}`), fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(`{}`))))
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("DecodeEventPayload() empty = %#v, %v", empty, err)
 	}
 }
 

@@ -2316,6 +2316,60 @@ func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 	}
 }
 
+func TestRunUploadStoresRuntimeEventOnceForExactImporterJob(t *testing.T) {
+	requireImporterHost(t)
+	workflowPath := filepath.Join(t.TempDir(), "runtime-event.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        part: [one, two]\n    steps:\n      - run: echo '${{ toJSON(github.event) }}'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sha := strings.Repeat("a", 40)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "runtime-event-importer")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
+	t.Setenv("BUILDKITE_COMMIT", sha)
+	t.Setenv("BUILDKITE_BRANCH", "main")
+	t.Setenv("BUILDKITE_TAG", "")
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "push")
+	rawValue := "retained-once"
+	runner := &cliCaptureRunner{webhook: []byte(fmt.Sprintf(`{"ref":"refs/heads/main","after":%q,"private":%q,"repository":{"full_name":"buildkite/buildkite-gha"},"sender":{"login":"octocat"}}`, sha, rawValue))}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	eventArtifacts, plans := 0, 0
+	for path, contents := range runner.uploaded {
+		switch {
+		case strings.HasPrefix(path, ".buildkite-gha/events/"):
+			eventArtifacts++
+			if !bytes.Contains(contents, []byte(rawValue)) {
+				t.Fatalf("event artifact %q omitted payload", path)
+			}
+		case strings.HasPrefix(path, ".buildkite-gha/plans/"):
+			plans++
+			if bytes.Contains(contents, []byte(rawValue)) {
+				t.Fatalf("plan %q embedded the event payload", path)
+			}
+			job, err := plan.Decode(contents)
+			if err != nil || !job.Event.PayloadArtifact {
+				t.Fatalf("plan event artifact marker = %#v, %v", job.Event, err)
+			}
+		}
+	}
+	if eventArtifacts != 1 || plans != 2 {
+		t.Fatalf("uploaded event artifacts = %d, plans = %d", eventArtifacts, plans)
+	}
+	var pipeline []byte
+	for _, command := range runner.commands {
+		if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}) {
+			pipeline = command.stdin
+		}
+	}
+	if !bytes.Contains(pipeline, []byte("--artifact-producer '"+cliTestJobID+"'")) || !bytes.Contains(pipeline, []byte("--step '"+cliTestJobID+"'")) {
+		t.Fatalf("pipeline does not bind exact importer job %q:\n%s", cliTestJobID, pipeline)
+	}
+}
+
 func TestRunUploadRejectsInvalidWebhookMetadata(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")

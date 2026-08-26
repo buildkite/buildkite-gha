@@ -673,10 +673,7 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, runtimeDistributionDiges
 		Actions:                 actions.locks,
 		ServicesExpression:      instance.ServicesExpression,
 	}
-	if instance.RetainEventPayload || actions.requiresEventPayload {
-		payload := cloneAnyMap(b.ir.Event.Payload)
-		job.Event.Payload = &payload
-	}
+	job.Event.PayloadArtifact = instance.RetainEventPayload || actions.requiresEventPayload
 	job.RequiresMise = &actions.requiresMise
 	if instance.Container != nil {
 		job.Container = &plan.Container{Image: instance.Container.Image, Env: cloneMap(instance.Container.Env), Ports: append([]string(nil), instance.Container.Ports...)}

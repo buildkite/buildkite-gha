@@ -756,7 +756,8 @@ Conditions support computed object indexes, numeric array indexes, whole
 
 Before runtime validation, the compiler reduces event-backed conditions from the
 immutable snapshot. Resolvable `github.event` expressions become literals.
-Whole or runtime-selected event access remains in the plan with the payload.
+For whole or runtime-selected event access, the plan retains a marker and
+digest for the build's shared event payload artifact.
 
 Every branch is validated first, so short-circuiting cannot hide an unsupported
 function, context, or matrix type.
@@ -782,8 +783,10 @@ values and event-dependent parts of otherwise runtime expressions.
 Missing event members become null; template interpolation renders null as an
 empty string. Event values cannot introduce new `${{ ... }}` regions. A job
 that still needs whole, projected, or dynamically indexed `github.event`
-access retains the payload in its immutable plan for runtime use and retries.
-Other jobs keep only event identity and a payload digest.
+access loads the digest-verified event artifact uploaded by the exact importer
+job. This preserves the original event for runtime use and retries without
+duplicating it across immutable plans. Other jobs keep only event identity and
+a payload digest.
 
 Job-level expressions support the same operators and pure functions with these field-specific contexts:
 
@@ -847,7 +850,7 @@ The runtime retains this bounded `github` context:
 | `action_path` | Composite action directory inside composite steps; empty elsewhere. |
 | `action_repository`, `action_ref` | Remote composite repository and requested ref; empty for local composites and outside composite steps. |
 | `token` | Available only in an authorized step expression. |
-| `event` | The immutable event payload, only in plans that need runtime event access. |
+| `event` | The immutable, digest-verified event payload, loaded only for jobs that need runtime event access. |
 
 This is not the full GitHub context.
 
