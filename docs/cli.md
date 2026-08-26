@@ -74,13 +74,14 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--event` supports `push`, `pull_request`, `merge_group`, `release`,
+`--event` supports `push`, `pull_request`, `merge_group`, `release`, `issues`,
 `workflow_dispatch`, and `schedule`. It requires `--profile hosted` and cannot be
 combined with `--event-path`.
 
 The generated snapshot contains an example repository and the minimum event
 fields. It is useful for a quick check, but it is not a real payload. The
-release snapshot represents one stable, non-prerelease `published` event. Use
+release snapshot represents one stable, non-prerelease `published` event. The
+issues snapshot represents `opened`. Use
 `--event-path` when exact refs, activity, repository identity, or payload fields
 matter.
 
@@ -426,11 +427,11 @@ The selected snapshot establishes one event for applicability, compilation,
 group conditions, provider-check names, and explicit run-name evaluation. An
 explicit event is never replaced with live Buildkite fields.
 
-Linked webhook data can provide `merge_group` and `release`. Those events need
-matching Buildkite refs, commits, and activity. Release also needs a valid
-payload and a tag matching `BUILDKITE_TAG` and `BUILDKITE_BRANCH`. The GitHub
-Code Access App provides immutable server provenance and is required for hosted
-release `GITHUB_TOKEN` issuance.
+Linked webhook data can provide `merge_group`, `release`, and `issues`. Merge
+groups and releases need matching Buildkite refs, commits, and activity. Release
+also needs a valid payload and a tag matching `BUILDKITE_TAG` and
+`BUILDKITE_BRANCH`. The GitHub Code Access App provides immutable server
+provenance and is required for hosted release `GITHUB_TOKEN` issuance.
 
 See [Names and triggers](compatibility.md#names-and-triggers) for exact matching
 rules and the environment fallback.

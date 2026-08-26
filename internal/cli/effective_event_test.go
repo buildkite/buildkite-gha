@@ -27,6 +27,7 @@ func TestNewEffectiveEventSeparatesExpressionsAndSnapshot(t *testing.T) {
 		MergeGroupBaseBranch:  "null",
 		MergeGroupAction:      "null",
 		ReleaseAction:         "null",
+		IssuesAction:          "null",
 	}
 	branch := "main"
 	wantSnapshot := buildkitepipeline.TriggerEventSnapshot{Branch: &branch}

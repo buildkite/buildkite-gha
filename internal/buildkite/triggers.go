@@ -25,6 +25,7 @@ type TriggerConditionExpressions struct {
 	MergeGroupBaseBranch  string
 	MergeGroupAction      string
 	ReleaseAction         string
+	IssuesAction          string
 }
 
 // ChangedPathEvaluation records either the available changed paths or why
@@ -48,6 +49,7 @@ type TriggerEventSnapshot struct {
 	MergeGroupBaseBranch  *string
 	MergeGroupAction      *string
 	ReleaseAction         *string
+	IssuesAction          *string
 	ChangedPaths          ChangedPathEvaluation
 }
 
@@ -61,6 +63,16 @@ var supportedTriggerEvents = map[string]bool{
 	"pull_request":      true,
 	"merge_group":       true,
 	"release":           true,
+	"issues":            true,
+}
+
+var supportedIssuesAction = map[string]bool{
+	"opened": true, "edited": true, "deleted": true, "transferred": true,
+	"field_added": true, "field_removed": true,
+	"pinned": true, "unpinned": true, "closed": true, "reopened": true,
+	"assigned": true, "unassigned": true, "labeled": true, "unlabeled": true,
+	"locked": true, "unlocked": true, "milestoned": true, "demilestoned": true,
+	"typed": true, "untyped": true,
 }
 
 // SupportedTriggerEvent reports whether the GitHub trigger event maps to a
@@ -111,6 +123,7 @@ func LiveTriggerConditionExpressions(eventPredicate string) TriggerConditionExpr
 		MergeGroupBaseBranch:  "build.merge_queue.base_branch",
 		MergeGroupAction:      "build.source_action",
 		ReleaseAction:         "build.source_action",
+		IssuesAction:          "build.source_action",
 	}
 }
 
@@ -312,6 +325,10 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 				}
 				return fmt.Sprintf("Release activity %q does not match this workflow's release activity filters.", *snapshot.ReleaseAction), nil
 			}
+		case "issues":
+			if snapshot.IssuesAction != nil && trigger.Types != nil && !slices.Contains(trigger.Types, *snapshot.IssuesAction) {
+				return fmt.Sprintf("Issue activity %q does not match this workflow's issues activity filters.", *snapshot.IssuesAction), nil
+			}
 		}
 		return "", nil
 	}
@@ -352,7 +369,7 @@ func LiveEventPredicate(event string) string {
 		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && (build.source == "ui" || build.source == "api")))`
 	case "schedule":
 		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source == "schedule"))`
-	case "merge_group", "release":
+	case "merge_group", "release", "issues":
 		return predicate
 	default:
 		return ""
@@ -565,6 +582,30 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 				return "", false, fmt.Errorf("release activity type %q cannot be mapped exactly", action)
 			}
 			actions = append(actions, expressions.ReleaseAction+` == `+yamlScalar(action))
+		}
+		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
+	case "issues":
+		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+			return "", false, fmt.Errorf("issues has unsupported filters")
+		}
+		if expressions.EventPredicate == "" || expressions.IssuesAction == "" {
+			return "", false, fmt.Errorf("issues requires effective event and action expressions")
+		}
+		if expressions.IssuesAction == "null" {
+			return "", false, fmt.Errorf("issues event snapshot requires payload.action")
+		}
+		if t.Types == nil {
+			return expressions.EventPredicate, true, nil
+		}
+		if len(t.Types) == 0 {
+			return "", false, fmt.Errorf("issues types is explicitly empty")
+		}
+		actions := make([]string, 0, len(t.Types))
+		for _, action := range t.Types {
+			if !supportedIssuesAction[action] {
+				return "", false, fmt.Errorf("issues activity type %q cannot be mapped exactly", action)
+			}
+			actions = append(actions, expressions.IssuesAction+` == `+yamlScalar(action))
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	default:

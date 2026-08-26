@@ -118,6 +118,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 	report.Evaluations = append(report.Evaluations,
 		EventEvaluation{Event: "push", Source: "generated", Report: push},
 		EventEvaluation{Event: "pull_request", Source: "generated", Report: pullRequest},
+		EventEvaluation{Event: "issues", Source: "generated", Report: push},
 	)
 
 	var encoded bytes.Buffer
@@ -128,7 +129,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Schema != ProcessingSchemaV3 || decoded.Result != "incompatible" || decoded.Status != Failed || len(decoded.Evaluations) != 2 || decoded.Evaluations[0].Report.Result != "admitted" || decoded.Evaluations[1].Report.Result != "incompatible" {
+	if decoded.Schema != ProcessingSchemaV3 || decoded.Result != "incompatible" || decoded.Status != Failed || len(decoded.Evaluations) != 3 || decoded.Evaluations[0].Report.Result != "admitted" || decoded.Evaluations[1].Report.Result != "incompatible" {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
 	v2Source, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v2.schema.json"))
@@ -169,7 +170,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 	if err := WriteProcessingV3(&rendered, "text", report); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"processing-report/v3", "Event-independent validation:", "Generated event push:", "Generated event pull_request:", "Result: incompatible"} {
+	for _, want := range []string{"processing-report/v3", "Event-independent validation:", "Generated event push:", "Generated event pull_request:", "Generated event issues:", "Result: incompatible"} {
 		if !strings.Contains(rendered.String(), want) {
 			t.Fatalf("text report = %q, want %q", rendered.String(), want)
 		}
