@@ -81,19 +81,48 @@ func TestEmitRunnerUserIsDefaultForLinuxOnly(t *testing.T) {
 	}
 }
 
-func TestExperimentalRunnerCacheOwnershipAcceptsHostedVolumePaths(t *testing.T) {
+func TestExperimentalRunnerCacheOwnershipAcceptsDirectHostedVolumePathsWithoutRootMount(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "bkcache")
-	descendant := filepath.Join(root, "buildkite-gha", "mise")
-	directMount := filepath.Join(t.TempDir(), "runner", ".gradle", "caches")
-	for _, path := range []string{descendant, directMount} {
+	anchor := filepath.Join(root, "buildkite-gha", "mise", "linux-amd64")
+	runnerHome := filepath.Join(t.TempDir(), "runner")
+	gradleCaches := filepath.Join(runnerHome, ".gradle", "caches")
+	gradleWrapper := filepath.Join(runnerHome, ".gradle", "wrapper")
+	for _, path := range []string{anchor, gradleCaches, gradleWrapper} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	output, err := runExperimentalRunnerCacheOwnership(t, root, []string{directMount, descendant}, root+"\n"+directMount, root+"\n"+directMount+"\n"+descendant)
+	volumePaths := strings.Join([]string{anchor, gradleCaches, gradleWrapper}, "\n")
+	output, err := runExperimentalRunnerCacheOwnership(t, root, anchor, []string{gradleCaches, gradleWrapper}, volumePaths, volumePaths)
 	if err != nil {
 		t.Fatalf("cache validation failed: %v: %s", err, output)
+	}
+}
+
+func TestExperimentalRunnerCacheOwnershipAcceptsDocumentedRootMount(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "bkcache")
+	anchor := filepath.Join(root, "buildkite-gha", "validation", "linux-amd64")
+	if err := os.MkdirAll(anchor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := runExperimentalRunnerCacheOwnership(t, root, anchor, []string{anchor}, root, root+"\n"+anchor)
+	if err != nil {
+		t.Fatalf("cache validation failed: %v: %s", err, output)
+	}
+}
+
+func TestExperimentalRunnerCacheOwnershipRejectsOrdinaryAnchor(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "bkcache")
+	anchor := filepath.Join(root, "buildkite-gha", "validation", "linux-amd64")
+	if err := os.MkdirAll(anchor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := runExperimentalRunnerCacheOwnership(t, root, anchor, []string{anchor}, "", anchor)
+	if err == nil || !strings.Contains(output, "Buildkite cache volume anchor is not mounted") {
+		t.Fatalf("ordinary anchor validation = %v, %q", err, output)
 	}
 }
 
@@ -142,8 +171,9 @@ func TestExperimentalRunnerCacheOwnershipRejectsUnsafePaths(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "bkcache")
+			anchor := filepath.Join(root, "buildkite-gha", "validation", "linux-amd64")
 			path := test.path(root)
-			dirs := []string{root}
+			dirs := []string{root, anchor}
 			if test.createPath {
 				dirs = append(dirs, path)
 			}
@@ -152,7 +182,9 @@ func TestExperimentalRunnerCacheOwnershipRejectsUnsafePaths(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			output, err := runExperimentalRunnerCacheOwnership(t, root, []string{path}, test.mountpoints(root, path), test.cachePaths(root, path))
+			mountpoints := anchor + "\n" + test.mountpoints(root, path)
+			cachePaths := anchor + "\n" + test.cachePaths(root, path)
+			output, err := runExperimentalRunnerCacheOwnership(t, root, anchor, []string{path}, mountpoints, cachePaths)
 			if err == nil {
 				t.Fatalf("cache validation unexpectedly succeeded: %s", output)
 			}
@@ -163,7 +195,7 @@ func TestExperimentalRunnerCacheOwnershipRejectsUnsafePaths(t *testing.T) {
 	}
 }
 
-func runExperimentalRunnerCacheOwnership(t *testing.T, root string, paths []string, mountpoints, cachePaths string) (string, error) {
+func runExperimentalRunnerCacheOwnership(t *testing.T, root, anchor string, paths []string, mountpoints, cachePaths string) (string, error) {
 	t.Helper()
 	bin := t.TempDir()
 	writeExecutable := func(name, body string) {
@@ -181,7 +213,7 @@ test -d "$target" && printf '%s\n' "$target"`)
 	writeExecutable("chown", "exit 0\n")
 	writeExecutable("chmod", "exit 0\n")
 
-	command := exec.Command("bash", "-c", "set -euo pipefail\nrunner_group=runner\n"+strings.Join(experimentalRunnerCacheOwnershipCommands(root, paths), "\n"))
+	command := exec.Command("bash", "-c", "set -euo pipefail\nrunner_group=runner\n"+strings.Join(experimentalRunnerCacheOwnershipCommands(root, anchor, paths), "\n"))
 	command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "TEST_MOUNTPOINTS="+mountpoints, "TEST_CACHE_PATHS="+cachePaths)
 	output, err := command.CombinedOutput()
 	return string(output), err

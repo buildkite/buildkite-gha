@@ -307,8 +307,9 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 	if len(pipeline.Steps) != 1 {
 		t.Fatalf("workflow groups = %#v", pipeline.Steps)
 	}
+	wantCachePaths := []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper", "/cache/bkcache/buildkite-gha/validation/linux-amd64"}
 	for _, step := range pipeline.Steps[0].Steps {
-		if step.Agents["queue"] != "hosted" || step.Image != defaultNobleRunnerImage || !slices.Equal(step.Cache.Paths, []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper"}) || step.Cache.Name != "gradle-cache" || step.Cache.Size != "40g" || !strings.Contains(step.Command, "--hosted-tool-cache") || !strings.Contains(step.Command, "useradd --create-home") || !strings.Contains(step.Command, "chown -R runner") || !strings.Contains(step.Command, "sudo -n --preserve-env --user runner") {
+		if step.Agents["queue"] != "hosted" || step.Image != defaultNobleRunnerImage || !slices.Equal(step.Cache.Paths, wantCachePaths) || step.Cache.Name != "gradle-cache" || step.Cache.Size != "40g" || !strings.Contains(step.Command, "--hosted-tool-cache") || !strings.Contains(step.Command, "useradd --create-home") || !strings.Contains(step.Command, "chown -R runner") || !strings.Contains(step.Command, "sudo -n --preserve-env --user runner") {
 			t.Fatalf("plugin profile was not applied: %#v", step)
 		}
 	}
