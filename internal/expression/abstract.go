@@ -26,7 +26,8 @@ const (
 
 // Effects are the authority effects reachable while evaluating an expression.
 type Effects struct {
-	GitHubToken GitHubTokenEffect
+	GitHubToken  GitHubTokenEffect
+	EventPayload bool
 }
 
 // Analysis contains an abstract expression result and its reachable authority
@@ -44,6 +45,7 @@ func unknownAnalysis(values ...Analysis) Analysis {
 	var effects Effects
 	for _, value := range values {
 		effects.GitHubToken |= value.Effects.GitHubToken
+		effects.EventPayload = effects.EventPayload || value.Effects.EventPayload
 	}
 	return Analysis{Effects: effects}
 }
@@ -52,6 +54,7 @@ func derivedAnalysis(value any, inputs ...Analysis) Analysis {
 	analysis := knownAnalysis(value)
 	for _, input := range inputs {
 		analysis.Effects.GitHubToken |= input.Effects.GitHubToken
+		analysis.Effects.EventPayload = analysis.Effects.EventPayload || input.Effects.EventPayload
 	}
 	return analysis
 }
@@ -120,6 +123,7 @@ func newAbstractEvaluator(surface evaluationSurface) expressionEvaluator[Analysi
 
 func analyzeActionInputDefault(node actionlint.ExprNode, knownReferences map[string]any) (Analysis, error) {
 	evaluator := newAbstractEvaluator(actionInputDefaultSurface)
+	evaluator.policy.resolveStaticIndexedReference = true
 	evaluator.resolve = func(root string, path []string) (Analysis, error) {
 		if strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "token") {
 			analysis := Analysis{Effects: Effects{GitHubToken: GitHubTokenDirect}}
@@ -133,11 +137,165 @@ func analyzeActionInputDefault(node actionlint.ExprNode, knownReferences map[str
 		}
 		return Analysis{}, nil
 	}
+	// Dynamic access to a runtime root is valid but unavailable to planning.
+	// Static references still resolve through resolve above.
+	evaluator.resolveRoot = func(string) (Analysis, error) { return Analysis{}, nil }
 	evaluator.call = func(evaluator *expressionEvaluator[Analysis], node *actionlint.FuncCallNode) (Analysis, error) {
+		if strings.EqualFold(node.Callee, "toJSON") && len(node.Args) == 1 && strings.EqualFold(referenceRoot(node.Args[0]), "matrix") {
+			return Analysis{}, nil
+		}
 		if value, recognized, err := evaluatePureFunction(evaluator, node); recognized {
 			return value, err
 		}
 		return Analysis{}, fmt.Errorf("action input default function %q is unsupported", node.Callee)
+	}
+	return evaluator.evaluate(node)
+}
+
+// analyzeRuntimeNode uses the same evaluator traversal as concrete step
+// evaluation while resolving only planning-known references. Unknown values
+// retain effects from every reachable branch; known lazy guards exclude
+// effects from branches concrete evaluation cannot select.
+func analyzeRuntimeNode(node actionlint.ExprNode, knownReferences map[string]any, purpose Purpose) (Analysis, error) {
+	evaluator := newAbstractEvaluator(stepRuntimeSurface)
+	evaluator.policy.resolveStaticIndexedReference = true
+	evaluator.resolve = func(root string, path []string) (Analysis, error) {
+		name := strings.ToLower(referenceName(root, path))
+		analysis := Analysis{}
+		if strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "token") {
+			analysis.Effects.GitHubToken = GitHubTokenDirect
+		}
+		if value, ok := knownReferences[name]; ok {
+			analysis.Value = AbstractValue{Known: true, Value: value}
+		}
+		return analysis, nil
+	}
+	evaluator.resolveRoot = func(root string) (Analysis, error) {
+		analysis := Analysis{}
+		if strings.EqualFold(root, "github") {
+			if purpose == PurposeCompositeActionInput {
+				analysis.Effects.GitHubToken = GitHubTokenCompositeContext
+			} else {
+				analysis.Effects.GitHubToken = GitHubTokenWorkflowContext
+			}
+		}
+		if value, ok := knownReferences[strings.ToLower(root)]; ok {
+			analysis.Value = AbstractValue{Known: true, Value: value}
+		}
+		return analysis, nil
+	}
+	evaluator.call = func(evaluator *expressionEvaluator[Analysis], node *actionlint.FuncCallNode) (Analysis, error) {
+		if value, recognized, err := evaluatePureFunction(evaluator, node); recognized {
+			return value, err
+		}
+		if strings.EqualFold(node.Callee, "hashFiles") {
+			return Analysis{}, nil
+		}
+		return Analysis{}, fmt.Errorf("runtime function %q is unsupported", node.Callee)
+	}
+	evaluator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported runtime expression") }
+	evaluator.logicalError = func(kind actionlint.LogicalOpNodeKind) error {
+		return fmt.Errorf("unsupported runtime logical operator %s", kind)
+	}
+	return evaluator.evaluate(node)
+}
+
+// analyzeTemplate renders a known template value and combines effects through
+// the expression domain. It deliberately parses in evaluation order so a
+// later ordered action default can consume a fully known earlier default.
+func analyzeTemplate(template string, analyze func(actionlint.ExprNode) (Analysis, error)) (Analysis, error) {
+	const open = "${{"
+	remaining := template
+	var rendered strings.Builder
+	result := knownAnalysis("")
+	for {
+		start := strings.Index(remaining, open)
+		if start < 0 {
+			rendered.WriteString(remaining)
+			if result.Value.Known {
+				result.Value.Value = rendered.String()
+			}
+			return result, nil
+		}
+		rendered.WriteString(remaining[:start])
+		source := remaining[start+len(open):]
+		_, consumed, lexErr := actionlint.LexExpression(source)
+		if lexErr != nil {
+			if !strings.Contains(source, "}}") {
+				return Analysis{}, fmt.Errorf("unterminated expression in %q", template)
+			}
+			return Analysis{}, fmt.Errorf("invalid expression: %w", lexErr)
+		}
+		node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(source[:consumed]))
+		if parseErr != nil {
+			return Analysis{}, fmt.Errorf("invalid expression: %w", parseErr)
+		}
+		value, err := analyze(node)
+		if err != nil {
+			return Analysis{}, err
+		}
+		result.Effects.GitHubToken |= value.Effects.GitHubToken
+		result.Effects.EventPayload = result.Effects.EventPayload || value.Effects.EventPayload
+		if result.Value.Known && value.Value.Known {
+			switch concrete := value.Value.Value.(type) {
+			case nil:
+			case string:
+				rendered.WriteString(concrete)
+			default:
+				text, ok := expressionString(concrete)
+				if !ok {
+					return Analysis{}, fmt.Errorf("template expression resolved to %T, want a scalar", concrete)
+				}
+				rendered.WriteString(text)
+			}
+		} else {
+			result.Value = AbstractValue{}
+		}
+		remaining = source[consumed:]
+	}
+}
+
+func analyzeConditionNode(node actionlint.ExprNode, context ConditionContext) (Analysis, error) {
+	evaluator := newAbstractEvaluator(conditionSurface)
+	evaluator.resolve = func(root string, path []string) (Analysis, error) {
+		if strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "token") {
+			analysis := Analysis{Effects: Effects{GitHubToken: GitHubTokenDirect}}
+			if value, ok := lookupRuntimeValue(context.GitHub, path); ok {
+				analysis.Value = AbstractValue{Known: true, Value: value}
+			}
+			return analysis, nil
+		}
+		value, err := resolveConditionReference(root, path, context)
+		if err != nil {
+			return Analysis{}, nil
+		}
+		return knownAnalysis(value), nil
+	}
+	evaluator.resolveRoot = func(root string) (Analysis, error) {
+		value, err := resolveConditionRoot(root, context)
+		if err != nil {
+			return Analysis{}, nil
+		}
+		return knownAnalysis(value), nil
+	}
+	evaluator.call = func(evaluator *expressionEvaluator[Analysis], node *actionlint.FuncCallNode) (Analysis, error) {
+		if value, recognized, err := evaluatePureFunction(evaluator, node); recognized {
+			return value, err
+		}
+		switch strings.ToLower(node.Callee) {
+		case "always":
+			return knownAnalysis(true), nil
+		case "success":
+			return knownAnalysis(!context.Unsuccessful && !context.Cancelled), nil
+		case "failure":
+			return knownAnalysis(context.Failure), nil
+		case "cancelled":
+			return knownAnalysis(context.Cancelled), nil
+		case "hashfiles":
+			return Analysis{}, nil
+		default:
+			return Analysis{}, fmt.Errorf("condition function %q is unsupported", node.Callee)
+		}
 	}
 	return evaluator.evaluate(node)
 }

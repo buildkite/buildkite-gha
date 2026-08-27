@@ -29,6 +29,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
@@ -701,7 +702,7 @@ runs:
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "prebuilt", Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID}}})
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath)), DockerImage: image}}
-	result, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Docker: fake.path}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -735,7 +736,7 @@ runs:
 	secondLockID := "a-0000000000000002"
 	mismatched.Steps = append(mismatched.Steps, plan.Step{ID: "prebuilt-second", Kind: "uses", Uses: "./" + secondActionPath, Action: &plan.ActionSelector{Lock: secondLockID}})
 	mismatched.Actions = append(mismatched.Actions, plan.ActionLock{ID: secondLockID, Source: "workspace", Path: secondActionPath, SourceDigest: digestTree(t, filepath.Join(workspace, secondActionPath)), DockerImage: image})
-	if _, err := (Runner{Docker: mismatchFake.path}).RunJob(t.Context(), mismatched, workspace); err == nil || !strings.Contains(err.Error(), "metadata image \""+image+"\" does not match planned image \"alpine:3.20\"") {
+	if _, err := (Runner{Docker: mismatchFake.path}).runTestJob(t.Context(), mismatched, workspace); err == nil || !strings.Contains(err.Error(), "metadata image \""+image+"\" does not match planned image \"alpine:3.20\"") {
 		t.Fatalf("RunJob() mismatched planned image error = %v", err)
 	}
 	if calls := mismatchFake.calls(t); callIndex(calls, "pull", "alpine:3.20") < 0 || callIndex(calls, "pull", image) < 0 || callIndex(calls, "run") >= 0 {
@@ -746,7 +747,7 @@ runs:
 	unplanned := job
 	unplanned.Actions = append([]plan.ActionLock(nil), job.Actions...)
 	unplanned.Actions[0].DockerImage = ""
-	if _, err := (Runner{Docker: unplannedFake.path}).RunJob(t.Context(), unplanned, workspace); err == nil || !strings.Contains(err.Error(), "metadata image \""+image+"\" does not match planned image \"\"") {
+	if _, err := (Runner{Docker: unplannedFake.path}).runTestJob(t.Context(), unplanned, workspace); err == nil || !strings.Contains(err.Error(), "metadata image \""+image+"\" does not match planned image \"\"") {
 		t.Fatalf("RunJob() unplanned metadata image error = %v", err)
 	}
 	if _, err := os.Stat(unplannedFake.transcript); !errors.Is(err, os.ErrNotExist) {
@@ -837,7 +838,7 @@ runs:
 		ID: "docker", Kind: "uses", Uses: "./action", With: map[string]string{"supplied": "--privileged"},
 	}})
 	job.RequiredCapabilities = []string{"docker", "network"}
-	result, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Docker: fake.path}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -871,7 +872,7 @@ func TestRunJobRevalidatesDockerArgsWithInputsOnly(t *testing.T) {
 	writeFixtureFile(t, workspace, "action/Dockerfile", "FROM scratch\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "docker", Kind: "uses", Uses: "./action"}})
 	job.RequiredCapabilities = []string{"docker", "network"}
-	_, err := (Runner{Docker: filepath.Join(t.TempDir(), "docker-must-not-run")}).RunJob(t.Context(), job, workspace)
+	_, err := (Runner{Docker: filepath.Join(t.TempDir(), "docker-must-not-run")}).runTestJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "argument 1") || !strings.Contains(err.Error(), "only inputs.<name>") {
 		t.Fatalf("RunJob() error = %v, want runtime inputs-only rejection", err)
 	}
@@ -913,7 +914,7 @@ func TestRunDockerPreservesExplicitPath(t *testing.T) {
 			if test.jobPATH != "" {
 				job.Env = map[string]string{"PATH": test.jobPATH}
 			}
-			if _, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace); err != nil {
+			if _, err := (Runner{Docker: fake.path}).runTestJob(t.Context(), job, workspace); err != nil {
 				t.Fatal(err)
 			}
 			calls := fake.calls(t)
@@ -940,7 +941,7 @@ func TestRunDockerPreservesPathWrittenThroughGitHubEnv(t *testing.T) {
 		{ID: "docker", Kind: "uses", Uses: "./.github/actions/docker"},
 	})
 	job.RequiredCapabilities = []string{"docker", "network"}
-	if _, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace); err != nil {
+	if _, err := (Runner{Docker: fake.path}).runTestJob(t.Context(), job, workspace); err != nil {
 		t.Fatal(err)
 	}
 	calls := fake.calls(t)
@@ -974,7 +975,7 @@ runs:
 		Env:  map[string]string{"MODE": "caller"},
 	}})
 	job.RequiredCapabilities = []string{"docker", "network"}
-	if _, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace); err != nil {
+	if _, err := (Runner{Docker: fake.path}).runTestJob(t.Context(), job, workspace); err != nil {
 		t.Fatal(err)
 	}
 	calls := fake.calls(t)
@@ -1109,7 +1110,7 @@ func TestRunJobUnresolvedDockerActionUsesFakeBackend(t *testing.T) {
 	workspace := fixturePath(t)
 	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "docker", Kind: "uses", Uses: "./actions/docker"}})
 	job.RequiredCapabilities = []string{"docker", "network"}
-	result, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Docker: fake.path}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Env["DOCKER_RUNTIME_SEEN"] != "true" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1126,7 +1127,7 @@ func TestRunJobEvaluatesIndexedWorkflowInputs(t *testing.T) {
 	job.Inputs = map[string]any{"label": "dispatched"}
 	job.Env = map[string]string{"KEY": "label"}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -1179,7 +1180,7 @@ func TestRunJobDoesNotTolerateDockerActionCleanupFailure(t *testing.T) {
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.ContinueOnError = true
 
-	result, err := (Runner{Docker: fake.path}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Docker: fake.path}).runTestJob(t.Context(), job, workspace)
 	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "owned Docker resources remain after cleanup") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1215,7 +1216,7 @@ echo after-soft`},
 	job.Event.Ref = "refs/heads/main"
 	job.Event.SHA = "0123456789abcdef"
 	job.Event.Actor = "octocat"
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: testSecretResolver{"CANARY": "mask-me"}, Redactor: redactor}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: testSecretResolver{"CANARY": "mask-me"}, Redactor: redactor}).runTestJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v, logs = %q", err, logs.String())
 	}
@@ -1243,7 +1244,7 @@ echo "first=${{ secrets.FIRST }} second=${{ secrets.SECOND }}"`,
 	resolver := &countingSecretResolver{values: map[string]string{"ORIGINAL": "shared-value"}, calls: map[string]int{}}
 	redactor := &testRedactor{}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: resolver, Redactor: redactor}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: resolver, Redactor: redactor}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -1340,7 +1341,7 @@ jobs:
 		t.Fatalf("plans = %d, want four defaults cases", len(plans))
 	}
 	for _, job := range plans {
-		result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+		result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 		if err != nil || result.Conclusion != "success" {
 			t.Fatalf("RunJob(%s) result = %#v, error = %v", job.Workflow.LogicalJobID, result, err)
 		}
@@ -1379,7 +1380,7 @@ jobs:
 	if len(plans) != 1 || plans[0].Steps[0].Shell != "${{ env.DEFAULT_SHELL }}" {
 		t.Fatalf("compiled plans = %#v", plans)
 	}
-	_, err = (Runner{}).RunJob(t.Context(), plans[0], workspace)
+	_, err = (Runner{}).runTestJob(t.Context(), plans[0], workspace)
 	if err == nil {
 		t.Fatal("RunJob() succeeded")
 	}
@@ -1414,7 +1415,7 @@ func TestCompiledBracketSecretResolvesAndMasks(t *testing.T) {
 	}
 	var logs bytes.Buffer
 	redactor := &testRedactor{}
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: testSecretResolver{"TOKEN": "secret-value"}, Redactor: redactor}).RunJob(t.Context(), plans[0], workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: testSecretResolver{"TOKEN": "secret-value"}, Redactor: redactor}).runTestJob(t.Context(), plans[0], workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1559,14 +1560,14 @@ func TestFailureConditionsAndCancellation(t *testing.T) {
 		{ID: "default", Kind: "run", Command: "echo must-not-run"},
 		{ID: "recover", Kind: "run", Condition: "failure()", Command: "echo recovered"},
 	})
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" || strings.Contains(logs.String(), "must-not-run") || !strings.Contains(logs.String(), "recovered") {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
 
 	job = runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "timeout", Kind: "run", Command: "sleep 30", TimeoutMinutes: 0.0005}})
 	started := time.Now()
-	result, err = (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err = (Runner{}).runTestJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "failure" || time.Since(started) > 3*time.Second {
 		t.Fatalf("timed RunJob() result = %#v, error = %v, elapsed = %s", result, err, time.Since(started))
 	}
@@ -1574,7 +1575,7 @@ func TestFailureConditionsAndCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	job = runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "cancel", Kind: "run", Condition: "always()", Command: "sleep 30"}})
-	result, err = (Runner{}).RunJob(ctx, job, workspace)
+	result, err = (Runner{}).runTestJob(ctx, job, workspace)
 	if !errors.Is(err, context.Canceled) || result.Conclusion != "cancelled" {
 		t.Fatalf("cancelled RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1608,7 +1609,7 @@ while :; do sleep 1; done`},
 		{ID: "after-cancel", Kind: "run", Condition: "steps.background.outcome == 'cancelled' && steps.cancel.conclusion == 'success' && steps.cancel-again.conclusion == 'success'", Command: `test "$CANCEL_EFFECT" = visible; test -f "$TERMINATED"; echo after-cancel`},
 	})
 	job.Env = map[string]string{"READY": ready, "TERMINATED": terminated}
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Env["CANCEL_EFFECT"] != "visible" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1636,7 +1637,7 @@ func TestCancelQueuedBackgroundNeverStartsIt(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, steps)
 	job.Env = map[string]string{"RELEASE": release, "QUEUED_MARKER": queuedMarker}
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1663,7 +1664,7 @@ func TestQueuedBackgroundTimeoutStartsAtDispatch(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, steps)
 	job.Env = map[string]string{"RELEASE": release, "QUEUED_MARKER": queuedMarker}
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1695,7 +1696,7 @@ func TestCancelQueuedBackgroundNeverRegistersPostAction(t *testing.T) {
 	job.Env = map[string]string{"RELEASE": release}
 	var logs bytes.Buffer
 
-	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1719,7 +1720,7 @@ func TestFailureBeforeCancelStillFailsJob(t *testing.T) {
 	})
 	job.Env = map[string]string{"FAILED_PID": failedPID}
 
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" || !strings.Contains(logs.String(), "recovered") || strings.Contains(logs.String(), "must-not-run") {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -1763,7 +1764,7 @@ test "${{ steps.two.outputs.value }}" = output-two`},
 	job.Env = map[string]string{"ONE_DONE": oneDone, "TWO_DONE": twoDone, "PATH_ENTRY": pathEntry}
 	job.Outputs = map[string]string{"one": "${{ steps.one.outputs.value }}", "two": "${{ steps.two.outputs.value }}"}
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -1898,7 +1899,7 @@ test "$(printf '%s' "$PATH" | tr ':' '\n' | grep -Fxc "$FOREGROUND_PATH")" -eq 1
 		"ONE_PATH": onePath, "TWO_PATH": twoPath, "FOREGROUND_PATH": foregroundPath,
 	}
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -1928,7 +1929,7 @@ runs:
 	})
 	job.Env = map[string]string{"COMPOSITE_PATH": compositePath, "FOREGROUND_PATH": foregroundPath}
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -1971,7 +1972,7 @@ esac
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "javascript", Kind: "uses", Uses: "./.github/actions/path"}})
 	job.Env = map[string]string{"PATH_ENTRY": pathEntry}
 
-	result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode}).runTestJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -2014,7 +2015,7 @@ printf 'NODE16_%s=true\n' "$(basename "$1" .js | tr '[:lower:]' '[:upper:]')" >>
 	}
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "javascript", Kind: "uses", Uses: "./.github/actions/node16"}})
 	var logs bytes.Buffer
-	result, err := (Runner{Node16: fakeNode, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node16: fakeNode, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2051,7 +2052,7 @@ func TestNode16WarningAggregatesInvokedActions(t *testing.T) {
 		{ID: "modern", Kind: "uses", Uses: "./.github/actions/modern"},
 	})
 	var logs bytes.Buffer
-	result, err := (Runner{Node16: node16, Node24: node24, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node16: node16, Node24: node24, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2085,7 +2086,7 @@ printf '\n'
 	}
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "node16", Kind: "uses", Uses: "./.github/actions/sensitive"}})
 	var logs bytes.Buffer
-	result, err := (Runner{Node16: fakeNode, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node16: fakeNode, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "line exceeds 1048576-byte limit") || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v, want oversized-line failure", result, err)
 	}
@@ -2123,7 +2124,7 @@ done
 	}
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "node16", Kind: "uses", Uses: "./.github/actions/node16"}})
 	var logs bytes.Buffer
-	result, err := (Runner{Node16: fakeNode, Stdout: io.Discard, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node16: fakeNode, Stdout: io.Discard, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2151,7 +2152,7 @@ func TestBackgroundFailureSurfacesAtWait(t *testing.T) {
 	})
 	job.Env = map[string]string{"FAILURE_DONE": marker}
 
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2171,7 +2172,7 @@ func TestBackgroundContinueOnError(t *testing.T) {
 		{ID: "after-soft", Kind: "run", Condition: "steps.soft-background.outcome == 'failure' && steps.soft-background.conclusion == 'success'", Command: "echo after-soft"},
 	})
 
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2195,7 +2196,7 @@ func TestSkippedBackgroundAndRepeatedWaitAreCommittedAtMostOnce(t *testing.T) {
 		{ID: "verify", Kind: "run", Condition: "steps.skipped.conclusion == 'skipped' && steps.skipped.outputs.missing == '' && steps.cancel-skipped.conclusion == 'success' && steps.cancel-skipped.outputs.missing == '' && steps.wait-skipped.conclusion == 'success' && steps.wait-skipped.outputs.missing == '' && steps.first-wait.outputs.missing == '' && steps.cancel-completed.conclusion == 'success' && steps.cancel-completed.outputs.missing == '' && steps.second-wait.outputs.missing == ''", Command: "true"},
 	})
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Summary != "once\n" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2210,7 +2211,7 @@ func TestBackgroundOutputsReturnErrorBeforeBarrier(t *testing.T) {
 		{ID: "premature-reader", Kind: "run", Command: `echo "${{ steps.background.outputs.value }}"`},
 	})
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), "unavailable step") {
 		t.Fatalf("RunJob() result = %#v, error = %v, want unavailable background output", result, err)
 	}
@@ -2234,7 +2235,7 @@ func TestExpressionValuedStepControls(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2247,7 +2248,7 @@ func TestSkippedStepDoesNotEvaluateTypedControls(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
 		ID: "skipped", Kind: "run", Condition: "false", Command: "true", TimeoutMinutesExpression: "${{ fromJSON('invalid') }}",
 	}})
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2255,6 +2256,7 @@ func TestSkippedStepDoesNotEvaluateTypedControls(t *testing.T) {
 
 func TestStepTimeoutExpressionUsesSameStepEnvironment(t *testing.T) {
 	step := plan.Step{Env: map[string]string{"MINUTES": "5"}, TimeoutMinutesExpression: "${{ fromJSON(env.MINUTES) }}"}
+	step = normalizedTestStep(step)
 	context := expression.Context{}
 	env, err := evaluateStepMap(step.Env, context)
 	if err != nil {
@@ -2278,15 +2280,22 @@ func TestExpressionValuedStepControlsRequireTypedBoundedResults(t *testing.T) {
 		{name: "range", step: plan.Step{TimeoutMinutesExpression: "${{ 361 }}"}, want: "at most 360"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := evaluateStepControls(test.step, expression.Context{}); err == nil || !strings.Contains(err.Error(), test.want) {
+			if _, err := evaluateStepControls(normalizedTestStep(test.step), expression.Context{}); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("evaluateStepControls() error = %v, want %q", err, test.want)
 			}
 		})
 	}
 }
 
+func normalizedTestStep(step plan.Step) plan.Step {
+	job := plan.Job{Steps: []plan.Step{step}}
+	attachTestProgram(&job)
+	return job.Steps[0]
+}
+
 func TestExpressionContinueOnErrorAppliesToPreparedActionFailure(t *testing.T) {
 	step := plan.Step{ID: "action", ContinueOnErrorExpression: "${{ true }}"}
+	step = normalizedTestStep(step)
 	execution := classifyStepExecutionWithControls(t.Context(), t.Context(), step, newResult(), errors.New("pre failed"), expression.Context{})
 	if execution.outcome != "failure" || execution.conclusion != "success" {
 		t.Fatalf("prepared action execution = %#v", execution)
@@ -2297,6 +2306,7 @@ func TestExpressionContinueOnErrorIsNotEvaluatedForCancellation(t *testing.T) {
 	jobCtx, cancel := context.WithCancel(t.Context())
 	cancel()
 	step := plan.Step{ID: "cancelled", ContinueOnErrorExpression: "${{ fromJSON('invalid') }}"}
+	step = normalizedTestStep(step)
 	execution := classifyStepExecutionWithControls(jobCtx, jobCtx, step, newResult(), context.Canceled, expression.Context{})
 	if execution.outcome != "cancelled" || execution.err != context.Canceled {
 		t.Fatalf("cancelled execution = %#v", execution)
@@ -2312,7 +2322,7 @@ func TestStepNameFailsClosedOnUnavailableBackgroundOutput(t *testing.T) {
 		{ID: "premature-reader", Name: `${{ steps.background.outputs.value }}`, Kind: "run", Command: `touch should-not-run`},
 	})
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), "name: expression references unavailable step") {
 		t.Fatalf("RunJob() result = %#v, error = %v, want unavailable background output in name", result, err)
 	}
@@ -2483,7 +2493,7 @@ console.log('post-after-implicit-wait')
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "background", Kind: "uses", Uses: "./.github/actions/background", Background: true}})
 	job.Outputs = map[string]string{"value": "${{ steps.background.outputs.value }}"}
 
-	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Outputs["value"] != "implicit" || result.Env["BACKGROUND_READY"] != "true" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -2505,7 +2515,7 @@ require('node:fs').appendFileSync(process.env.CWD_LOG, %q + process.cwd() + '\t'
 	}
 	cwdLog := filepath.Join(t.TempDir(), "cwd.log")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "cwd", Kind: "uses", Uses: "./.github/actions/cwd", Env: map[string]string{"CWD_LOG": cwdLog}}})
-	result, err := (Runner{Node24: node}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: node}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2557,7 +2567,7 @@ require('node:fs').writeFileSync(process.env.CWD_LOG, process.cwd() + '\t' + pro
 `)
 	cwdLog := filepath.Join(base, "cwd.log")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "cwd", Kind: "uses", Uses: "./.github/actions/cwd", Env: map[string]string{"CWD_LOG": cwdLog}}})
-	result, err := (Runner{Node24: node}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: node}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2593,7 +2603,7 @@ func TestConcurrentStreamsShareMaskRegistration(t *testing.T) {
 		{ID: "wait", Kind: "wait-all"},
 	})
 	job.Env = map[string]string{"MASK_READY": marker}
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2622,12 +2632,12 @@ func TestConcurrentSmokeWorkflowEndToEnd(t *testing.T) {
 	}
 	var logs bytes.Buffer
 	runner := Runner{Stdout: &logs, Stderr: &logs}
-	concurrent, err := runner.RunJob(t.Context(), plans[0], workspace)
+	concurrent, err := runner.runTestJob(t.Context(), plans[0], workspace)
 	if err != nil || concurrent.Conclusion != "success" {
 		t.Fatalf("concurrent result = %#v, error = %v, logs = %q", concurrent, err, logs.String())
 	}
 	plans[1].Needs = map[string]plan.Need{"concurrent": {Result: concurrent.Conclusion, Outputs: concurrent.Outputs}}
-	observer, err := runner.RunJob(t.Context(), plans[1], workspace)
+	observer, err := runner.runTestJob(t.Context(), plans[1], workspace)
 	if err != nil || observer.Conclusion != "success" {
 		t.Fatalf("observer result = %#v, error = %v, logs = %q", observer, err, logs.String())
 	}
@@ -2828,7 +2838,7 @@ func TestExplicitCancelTerminatesBackgroundProcessGroup(t *testing.T) {
 	})
 	job.Env = map[string]string{"PID_FILE": pidFile, "READY": ready}
 
-	result, err := (Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2930,15 +2940,15 @@ func TestDeferredReusableWorkflowInputFlowsFromVerifiedOutputToCalleeStep(t *tes
 		Condition:      "inputs.base64-subjects != ''",
 		DeferredInputs: job.DeferredInputs,
 	}}
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "deferred reusable-workflow inputs were not hydrated") {
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "deferred reusable-workflow inputs were not hydrated") {
 		t.Fatalf("RunJob() unhydrated error = %v", err)
 	}
 	job.DeferredInputValues = inputs
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "call guard 1: deferred inputs were not hydrated") {
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "call guard 1: deferred inputs were not hydrated") {
 		t.Fatalf("RunJob() unhydrated guard error = %v", err)
 	}
 	job.CallGuards[0].DeferredInputValues = inputs
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Outputs["ran"] != "yes" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2951,13 +2961,13 @@ func TestJobConditionConsumesNeedResultAndOutput(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
 	job.Needs = map[string]plan.Need{"producer": {Result: "failure", Outputs: map[string]string{"gate": "yes"}}}
 	job.Condition = "always() && needs.producer.result == 'failure' && needs.producer.outputs.gate"
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 	job.Condition = ""
 	job.Needs["producer"] = plan.Need{Result: "skipped"}
-	result, err = (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err = (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "skipped" {
 		t.Fatalf("RunJob() skipped prerequisite result = %#v, error = %v", result, err)
 	}
@@ -2974,7 +2984,7 @@ func TestReusableWorkflowCallGuardsRunBeforeCapabilitiesAndJobConditions(t *test
 	job.RequiredSecrets = []string{"TOKEN"}
 	job.Condition = "always()"
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "skipped" || len(result.Outputs) != 0 {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -2995,7 +3005,7 @@ func TestReusableWorkflowCallGuardUsesOnlyCallerNeeds(t *testing.T) {
 	job.Needs = map[string]plan.Need{"internal": {Result: "failure"}}
 	job.Condition = "always()"
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -3006,12 +3016,12 @@ func TestReusableWorkflowCallGuardUsesOnlyCallerNeeds(t *testing.T) {
 		t.Fatal("Validate() accepted an empty call guard condition")
 	}
 	job.CallGuards[0].Condition = "needs.caller.outputs.ready"
-	result, err = (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err = (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "skipped" {
 		t.Fatalf("implicit success guard result = %#v, error = %v", result, err)
 	}
 	job.CallGuards[0].Condition = "failure()"
-	result, err = (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err = (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("failure() guard result = %#v, error = %v", result, err)
 	}
@@ -3045,7 +3055,7 @@ func TestJobRuntimeFieldsEvaluateCompoundExpressions(t *testing.T) {
 		"result":      "${{ format('{0}-{1}', steps.run.outputs.value, needs.producer.result) }}",
 	}
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Outputs["result"] != "done-success" || result.Outputs["environment"] != "job" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -3066,6 +3076,7 @@ func TestDecodedPlanMatrixNumbersDriveRuntimeConditions(t *testing.T) {
 	job.Condition = "matrix.count == 1"
 	job.Matrix = map[string]any{"count": 1, "nonzero": 2, "zero": 0, "max_uint": ^uint64(0)}
 	job.Env = map[string]string{"NONZERO": nonzeroMarker, "ZERO": zeroMarker, "MAX_UINT": maxUintMarker}
+	attachTestProgram(&job)
 
 	encoded, err := plan.Encode(job)
 	if err != nil {
@@ -3075,7 +3086,7 @@ func TestDecodedPlanMatrixNumbersDriveRuntimeConditions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := (Runner{}).RunJob(t.Context(), decoded, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), decoded, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -3098,7 +3109,7 @@ func TestRunJobRejectsRegisteredSecretInOutput(t *testing.T) {
 	job.RequiredCapabilities = []string{"secrets"}
 	job.RequiredSecrets = []string{"CANARY"}
 	job.Outputs = map[string]string{"leak": "${{ secrets.CANARY }}"}
-	_, err := (Runner{Secrets: testSecretResolver{"CANARY": "do-not-publish"}, Redactor: &testRedactor{}}).RunJob(t.Context(), job, workspace)
+	_, err := (Runner{Secrets: testSecretResolver{"CANARY": "do-not-publish"}, Redactor: &testRedactor{}}).runTestJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "contains a registered secret") || strings.Contains(err.Error(), "do-not-publish") {
 		t.Fatalf("RunJob() error = %v, want non-disclosing secret-output rejection", err)
 	}
@@ -3111,7 +3122,7 @@ func TestRunJobScrubsSecretFromRedactorFailure(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
 	job.RequiredCapabilities = []string{"secrets"}
 	job.RequiredSecrets = []string{"CANARY"}
-	_, err := (Runner{Secrets: testSecretResolver{"CANARY": "do-not-leak"}, Redactor: failingTokenRedactor{token: "do-not-leak"}}).RunJob(t.Context(), job, workspace)
+	_, err := (Runner{Secrets: testSecretResolver{"CANARY": "do-not-leak"}, Redactor: failingTokenRedactor{token: "do-not-leak"}}).runTestJob(t.Context(), job, workspace)
 	if err == nil || strings.Contains(err.Error(), "do-not-leak") || !strings.Contains(err.Error(), "***") {
 		t.Fatalf("RunJob() error = %v, want scrubbed redactor failure", err)
 	}
@@ -3135,7 +3146,7 @@ printf '%s %s\n' "$GH_TOKEN" "$ALIAS_TOKEN"`,
 	provider := &testWorkflowTokenProvider{token: token}
 	redactor := &testRedactor{}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -3191,7 +3202,7 @@ printf 'context<<EOF\n%s\nEOF\n' "$GITHUB_CONTEXT" >> "$GITHUB_OUTPUT"
 	provider := &testWorkflowTokenProvider{token: token}
 	redactor := &testRedactor{}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).runTestJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), `job output "serialized" contains a registered secret`) {
 		t.Fatalf("RunJob() error = %v, want serialized token output rejection", err)
 	}
@@ -3229,7 +3240,7 @@ func TestRunJobScrubsTokenSerializedIntoRuntimeError(t *testing.T) {
 	job.ContinueOnError = true
 	provider := &testWorkflowTokenProvider{token: token}
 	redactor := &testRedactor{}
-	result, err := (Runner{WorkflowToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{WorkflowToken: provider, Redactor: redactor}).runTestJob(t.Context(), job, workspace)
 	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") || !strings.Contains(err.Error(), "is unsupported") {
 		t.Fatalf("RunJob() error = %v, want scrubbed unsupported-shell error", err)
 	}
@@ -3251,7 +3262,7 @@ func TestRunJobRejectsInvalidWorkflowTokenPolicyBeforeMinting(t *testing.T) {
 	job.RequiredCapabilities = []string{"provider-token-write"}
 	job.GitHubToken = &plan.GitHubToken{Workflow: "nested/test.yml", Permissions: map[string]string{"contents": "read"}}
 	provider := &testWorkflowTokenProvider{token: "must-not-be-minted"}
-	_, err := (Runner{WorkflowToken: provider, Redactor: &testRedactor{}}).RunJob(t.Context(), job, workspace)
+	_, err := (Runner{WorkflowToken: provider, Redactor: &testRedactor{}}).runTestJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "simple .yml or .yaml filename") || provider.calls != 0 {
 		t.Fatalf("RunJob() error/calls = %v / %d", err, provider.calls)
 	}
@@ -3281,7 +3292,7 @@ func TestResolveActionInputsExposesScopedTokenToMetadataDefaults(t *testing.T) {
 	if _, leaked := eval.GitHub["token"]; leaked {
 		t.Fatalf("metadata default evaluation mutated the shared GitHub context: %#v", eval.GitHub)
 	}
-	if _, err := expression.Evaluate("${{ github.token }}", eval); err == nil || !strings.Contains(err.Error(), `unavailable github value "token"`) {
+	if _, err := evaluateLegacyTemplate("${{ github.token }}", expression.ProfileRuntimeTemplate, eval); err == nil || !strings.Contains(err.Error(), `unavailable github value "token"`) {
 		t.Fatalf("workflow github.token evaluation error = %v, want unavailable value", err)
 	}
 
@@ -3342,7 +3353,7 @@ func TestStepExpressionContextExposesScopedTokenWithoutMutatingJobContext(t *tes
 		Secrets: map[string]string{"GITHUB_TOKEN": "ghs_scoped_step"},
 	}
 	stepEval := stepExpressionContext(eval)
-	value, err := expression.Evaluate("${{ github.token }}", stepEval)
+	value, err := evaluateLegacyTemplate("${{ github.token }}", expression.ProfileRuntimeTemplate, stepEval)
 	if err != nil || value != "ghs_scoped_step" {
 		t.Fatalf("step github.token = %q, %v", value, err)
 	}
@@ -3389,14 +3400,15 @@ func TestGitHubContextExposesRuntimeEventIdentity(t *testing.T) {
 				t.Fatalf("GitHub context = %#v", github)
 			}
 			stepContext := stepExpressionContext(expression.Context{GitHub: github, Secrets: map[string]string{"GITHUB_TOKEN": "ghs_test"}})
-			serialized, err := expression.EvaluateStep("${{ toJSON(github) }}", stepContext)
+			serialized, err := evaluateLegacyTemplate("${{ toJSON(github) }}", expression.ProfileStepTemplate, stepContext)
 			if err != nil || !strings.Contains(serialized, `"action_path": ""`) || !strings.Contains(serialized, `"action_ref": ""`) || !strings.Contains(serialized, `"action_repository": ""`) {
 				t.Fatalf("serialized top-level GitHub context = %q, %v", serialized, err)
 			}
 			condition := "github.repository_owner == '" + test.wantOwner + "' && github.ref_name == '" + test.wantRefName + "' && github.ref_type == '" + test.wantRefType + "' && github.base_ref == '" + test.wantBaseRef + "'"
-			got, err := expression.EvaluateCondition(condition, expression.ConditionContext{GitHub: github})
+			value, err := expression.NewEngine().Evaluate(expression.Site{Source: condition, Profile: expression.ProfileStepCondition, Result: expression.ResultBoolean, Purpose: expression.PurposeExpression}, expression.Values{Condition: expression.ConditionContext{GitHub: github}})
+			got, _ := value.(bool)
 			if err != nil || !got {
-				t.Fatalf("EvaluateCondition(%q) = %v, %v", condition, got, err)
+				t.Fatalf("condition %q = %v, %v", condition, got, err)
 			}
 			if test.name == "release" {
 				env := standardEnvironment(plan.Job{Event: test.event}, "/workspace", "/tmp", "/tool-cache", RunIdentity{})
@@ -3533,7 +3545,7 @@ runs:
 	provider := &testWorkflowTokenProvider{token: "ghs_scoped_action_default"}
 	redactor := &testRedactor{}
 	var logs bytes.Buffer
-	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).RunJob(t.Context(), plans[0], workspace)
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).runTestJob(t.Context(), plans[0], workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -3587,12 +3599,17 @@ runs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "METADATA_ONLY") || strings.Contains(string(encoded), "DEPLOY_TOKEN") {
-		t.Fatalf("top-level action env leaked into plan: %s", encoded)
+	if strings.Contains(string(encoded), "DEPLOY_TOKEN") {
+		t.Fatalf("top-level action env authority leaked into plan: %s", encoded)
+	}
+	for _, action := range plans[0].Program.Actions {
+		if _, leaked := action.Metadata("", "").Runs.Env["METADATA_ONLY"]; leaked {
+			t.Fatal("top-level action env leaked into normalized action environment")
+		}
 	}
 
 	provider := &testWorkflowTokenProvider{token: "must-not-be-minted"}
-	result, err := (Runner{WorkflowToken: provider, Secrets: testSecretResolver{}}).RunJob(t.Context(), plans[0], workspace)
+	result, err := (Runner{WorkflowToken: provider, Secrets: testSecretResolver{}}).runTestJob(t.Context(), plans[0], workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -3611,7 +3628,7 @@ func TestRunJobAbortsAndScrubsWorkflowTokenWhenRedactionFails(t *testing.T) {
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
 	job.GitHubToken = &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"pull_requests": "write"}}
-	_, err := (Runner{WorkflowToken: &testWorkflowTokenProvider{token: token}, Redactor: failingTokenRedactor{token: token}}).RunJob(t.Context(), job, workspace)
+	_, err := (Runner{WorkflowToken: &testWorkflowTokenProvider{token: token}, Redactor: failingTokenRedactor{token: token}}).runTestJob(t.Context(), job, workspace)
 	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") {
 		t.Fatalf("RunJob() error = %v, want redaction failure without token disclosure", err)
 	}
@@ -3623,11 +3640,11 @@ func TestRunJobRequiresHydratedStaticDependencyResults(t *testing.T) {
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
 	job.Dependencies = []string{"gha-producer"}
 	job.NeedSources = map[string][]plan.NeedSource{"producer": {{StepKey: "gha-producer", PlanDigest: "sha256:" + strings.Repeat("1", 64)}}}
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "no hydrated prerequisite results") {
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "no hydrated prerequisite results") {
 		t.Fatalf("RunJob() error = %v, want missing hydration rejection", err)
 	}
 	job.Needs = map[string]plan.Need{"producer": {Result: "success"}}
-	if result, err := (Runner{}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() hydrated result = %#v, error = %v", result, err)
 	}
 }
@@ -3639,7 +3656,7 @@ func TestJavaScriptPreMainPostFilesAndMasking(t *testing.T) {
 	runner := Runner{Stdout: &logs, Stderr: &logs, Node24: node}
 	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "javascript", Kind: "uses", Uses: "./actions/javascript", With: map[string]string{"message": "hello"}}})
 	job.Outputs = map[string]string{"result": "${{ steps.javascript.outputs.result }}"}
-	result, err := runner.RunJob(t.Context(), job, workspace)
+	result, err := runner.runTestJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -3704,7 +3721,7 @@ esac
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "summary", Kind: "uses", Uses: "./.github/actions/summary"}})
 	job.Env = map[string]string{"MAIN_SUMMARY_BYTES": strconv.Itoa(maxJobSummaryBytes)}
 
-	result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -3728,7 +3745,7 @@ printf 'retained summary\n' >> "$GITHUB_STEP_SUMMARY"`},
 	job.Env = map[string]string{"SUMMARY_BYTES": strconv.Itoa(maxCommandFileBytes + 1)}
 	var logs bytes.Buffer
 
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Env["SUMMARY_EFFECT"] != "preserved" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -3748,7 +3765,7 @@ func TestPostActionsRunLIFOAfterMainFailure(t *testing.T) {
 		{ID: "one", Kind: "uses", Uses: "./actions/javascript", With: map[string]string{"message": "one", "order": "one"}},
 		{ID: "two", Kind: "uses", Uses: "./actions/javascript", With: map[string]string{"message": "two", "order": "two", "fail": "true"}},
 	})
-	_, err := runner.RunJob(t.Context(), job, workspace)
+	_, err := runner.runTestJob(t.Context(), job, workspace)
 	if err == nil {
 		t.Fatal("RunJob() error = nil, want main failure")
 	}
@@ -3808,8 +3825,13 @@ if [ "${1##*/}" = post.js ]; then printenv INPUT_JOB_STATUS > "$POST_MARKER"; fi
 	recovery := filepath.Join(workspace, "recovery")
 	post := filepath.Join(workspace, "post")
 	plans[0].Env = map[string]string{"ORDINARY_MARKER": ordinary, "RECOVERY_MARKER": recovery, "POST_MARKER": post}
+	plans[0].Program.Job.Env = []executionprogram.Binding{
+		{Name: "ORDINARY_MARKER", Value: executionprogram.Site{Source: ordinary, Surface: executionprogram.SurfaceJobEnvironment, Result: executionprogram.ResultString, Provenance: executionprogram.ProvenanceWorkflow, Purpose: executionprogram.PurposeExpression}},
+		{Name: "POST_MARKER", Value: executionprogram.Site{Source: post, Surface: executionprogram.SurfaceJobEnvironment, Result: executionprogram.ResultString, Provenance: executionprogram.ProvenanceWorkflow, Purpose: executionprogram.PurposeExpression}},
+		{Name: "RECOVERY_MARKER", Value: executionprogram.Site{Source: recovery, Surface: executionprogram.SurfaceJobEnvironment, Result: executionprogram.ResultString, Provenance: executionprogram.ProvenanceWorkflow, Purpose: executionprogram.PurposeExpression}},
+	}
 
-	result, runErr := (Runner{Node24: fakeNode}).RunJob(t.Context(), plans[0], workspace)
+	result, runErr := (Runner{Node24: fakeNode}).runTestJob(t.Context(), plans[0], workspace)
 	if runErr == nil || !IsToleratedJobFailure(runErr) || result.Conclusion != "success" || result.Outputs["diagnostic"] != "failed" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, runErr)
 	}
@@ -3829,9 +3851,18 @@ if [ "${1##*/}" = post.js ]; then printenv INPUT_JOB_STATUS > "$POST_MARKER"; fi
 	}
 	timedOut := plans[0]
 	timedOut.TimeoutMinutes = 0.001
+	programCopy := *timedOut.Program
+	programCopy.Job = timedOut.Program.Job
+	programCopy.Job.TimeoutMinutes = 0.001
+	programCopy.Job.Steps = slices.Clone(timedOut.Program.Job.Steps)
+	runCopy := *programCopy.Job.Steps[1].Run
+	runCopy.Command.Source = "sleep 1"
+	programCopy.Job.Steps[1].Run = &runCopy
+	timedOut.Program = &programCopy
 	timedOut.Steps = slices.Clone(timedOut.Steps)
 	timedOut.Steps[1].Command = "sleep 1"
-	result, runErr = (Runner{Node24: fakeNode}).RunJob(t.Context(), timedOut, workspace)
+	timedOut.Steps[1].Execution = &timedOut.Program.Job.Steps[1]
+	result, runErr = (Runner{Node24: fakeNode}).runTestJob(t.Context(), timedOut, workspace)
 	if !errors.Is(runErr, context.DeadlineExceeded) || IsToleratedJobFailure(runErr) || result.Conclusion != "cancelled" {
 		t.Fatalf("timed out RunJob() result = %#v, error = %v", result, runErr)
 	}
@@ -3846,12 +3877,13 @@ func TestJobTimeoutDuringSetupIsCancelled(t *testing.T) {
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
 	job.ContinueOnError = true
 	job.TimeoutMinutes = 0.001
+	attachTestProgram(&job)
 	runner := Runner{ResolveMise: func(ctx context.Context) (string, error) {
 		<-ctx.Done()
 		return "", ctx.Err()
 	}}
 
-	result, err := runner.RunJob(t.Context(), job, workspace)
+	result, err := runner.runTestJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -3896,7 +3928,7 @@ if [ "${1##*/}" = main.js ] && [ "${FAIL_MAIN:-false}" = true ]; then exit 9; fi
 			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "conditional", Kind: "uses", Uses: "./.github/actions/conditional"}})
 			job.Env = map[string]string{"POST_MARKER": marker, "FAIL_MAIN": strconv.FormatBool(test.failMain)}
 
-			result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace)
+			result, err := (Runner{Node24: fakeNode}).runTestJob(t.Context(), job, workspace)
 			if (err != nil) != test.wantFailure || (result.Conclusion == "failure") != test.wantFailure {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 			}
@@ -3972,7 +4004,7 @@ esac
 			}
 			job := runtimePlan(t, workspace, workflowPath, steps)
 			job.Env = map[string]string{"CACHE_SETTING": test.cacheValue, "POST_MARKER": marker}
-			result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace)
+			result, err := (Runner{Node24: fakeNode}).runTestJob(t.Context(), job, workspace)
 			if (err != nil) != test.failJob || (result.Conclusion == "failure") != test.failJob {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 			}
@@ -4032,7 +4064,7 @@ esac
 		{ID: "finalize", Kind: "run", Command: "exit 7"},
 	})
 	job.Env = map[string]string{"POST_MARKER": marker}
-	result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -4068,7 +4100,7 @@ if [ "$(basename "$1")" = post.js ]; then touch "$POST_MARKER"; fi
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "cache", Kind: "uses", Uses: "./.github/actions/cache"}})
 	job.Inputs = map[string]any{"cache": true}
 	job.Env = map[string]string{"POST_MARKER": marker}
-	result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -4087,7 +4119,7 @@ func TestRunnerToolCacheIsPerJobAndReserved(t *testing.T) {
 		Command: `test -d "$RUNNER_TOOL_CACHE"; case "$RUNNER_TOOL_CACHE" in "$RUNNER_TEMP"/*) ;; *) exit 9 ;; esac`,
 	}})
 	job.Env = map[string]string{"RUNNER_TOOL_CACHE": filepath.Join(workspace, "untrusted")}
-	if result, err := (Runner{}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 }
@@ -4106,7 +4138,7 @@ func TestRunnerUsesConfiguredToolCache(t *testing.T) {
 		Command: `test "$RUNNER_TOOL_CACHE" = "$EXPECTED_TOOL_CACHE"`,
 	}})
 	job.Env = map[string]string{"EXPECTED_TOOL_CACHE": toolCache}
-	if result, err := (Runner{ToolCache: toolCache}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{ToolCache: toolCache}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 }
@@ -4224,7 +4256,7 @@ func TestConcurrentPostActionsRunLIFOByRegistration(t *testing.T) {
 	job.Env = map[string]string{"READY": ready}
 	var logs bytes.Buffer
 
-	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -4247,7 +4279,7 @@ func TestPostActionsUseBoundedCleanupContext(t *testing.T) {
 	runner := Runner{Node24: node, CleanupTimeout: 200 * time.Millisecond}
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "slow", Kind: "uses", Uses: "./.github/actions/slow"}})
 	started := time.Now()
-	_, err := runner.RunJob(t.Context(), job, workspace)
+	_, err := runner.runTestJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("RunJob() error = %v, want context deadline exceeded", err)
 	}
@@ -4280,12 +4312,13 @@ sleep 30
 	// hosts; the post still has only the separate 250 ms cleanup grace.
 	job.TimeoutMinutes = 0.01
 	job.Env = map[string]string{"POST_STARTED": postStarted}
+	attachTestProgram(&job)
 	runner := Runner{
 		Node24: fakeNode, CleanupTimeout: 250 * time.Millisecond, PostActionTimeout: 3 * time.Second,
 		InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond,
 	}
 	started := time.Now()
-	result, err := runner.RunJob(t.Context(), job, workspace)
+	result, err := runner.runTestJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -4310,7 +4343,7 @@ func TestCancellationStillRunsRegisteredPostAction(t *testing.T) {
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "cancel", Kind: "uses", Uses: "./.github/actions/cancel"}})
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
-	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(ctx, job, workspace)
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).runTestJob(ctx, job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" || !strings.Contains(logs.String(), "post-after-cancel") {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -4334,7 +4367,7 @@ func TestExplicitBackgroundCancelStillRunsRegisteredPostAction(t *testing.T) {
 	})
 	job.Env = map[string]string{"READY": ready}
 
-	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || !strings.Contains(logs.String(), "post-after-explicit-cancel") {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -4884,7 +4917,7 @@ func TestRunJobLogsSynchronousStepSectionsAndExpandsFailures(t *testing.T) {
 	job.Matrix = map[string]any{"version": "1.26"}
 	var logs bytes.Buffer
 
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -4985,7 +5018,7 @@ func TestInvalidWorkflowCommandStopTokenFailsTheStep(t *testing.T) {
 			}})
 			var logs bytes.Buffer
 
-			result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+			result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 			if err == nil || !strings.Contains(err.Error(), "invalid ::stop-commands workflow command") || result.Conclusion != "failure" {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 			}
@@ -5009,7 +5042,7 @@ func TestRunJobCollectsWarningAndErrorCommandsWithoutChangingConclusion(t *testi
 	}})
 	var stdout, stderr bytes.Buffer
 
-	result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -5126,7 +5159,7 @@ runs:
   steps: []
 `)
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "conflict", Kind: "uses", Uses: "./.github/actions/conflict"}})
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `duplicate case-insensitive name "result"`) {
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `duplicate case-insensitive name "result"`) {
 		t.Fatalf("RunJob() error = %v, want duplicate output rejection", err)
 	}
 }
@@ -5652,7 +5685,7 @@ func TestRunJobShellJavaScriptCompositeAndPost(t *testing.T) {
 	})
 	job.Outputs = map[string]string{"result": "${{ steps.composite.outputs.result }}"}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, Node24: node}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Node24: node}).runTestJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v\nlogs:\n%s", err, logs.String())
 	}
@@ -5685,7 +5718,7 @@ printf '%s\n' 'derived-mask-value' >> "$GITHUB_STEP_SUMMARY"`,
 	}})
 	job.Outputs = map[string]string{"secret": "${{ steps.derive.outputs.secret }}"}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), `job output "secret" contains a registered secret`) {
 		t.Fatalf("RunJob() error = %v, want dynamically masked output rejection", err)
 	}
@@ -5722,7 +5755,7 @@ runs:
 		"private": "${{ steps.composite.outputs.private }}",
 		"public":  "${{ steps.composite.outputs.public }}",
 	}
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -5753,7 +5786,7 @@ with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
 `,
 	}})
 	job.Outputs = map[string]string{"script": "${{ steps.python.outputs.script }}"}
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -5793,7 +5826,7 @@ func TestRunJobCustomShellTemplatesUseTemporaryScripts(t *testing.T) {
 				},
 			})
 			job.Outputs = map[string]string{"script": "${{ steps.custom.outputs.script }}"}
-			result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+			result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 			if err != nil {
 				t.Fatalf("RunJob() error = %v", err)
 			}
@@ -5822,7 +5855,7 @@ func TestRunJobLoginBashTemplate(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "login", Kind: "run", Shell: "bash -l {0}", Command: `printf 'value=login-bash\n' >> "$GITHUB_OUTPUT"`}})
 	job.Outputs = map[string]string{"value": "${{ steps.login.outputs.value }}"}
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Outputs["value"] != "login-bash" {
 		t.Fatalf("RunJob() output = %q, error = %v, want login-bash", result.Outputs["value"], err)
 	}
@@ -5849,7 +5882,7 @@ runs:
 `)
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
 	job.Outputs = map[string]string{"value": "${{ steps.composite.outputs.value }}"}
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -5959,7 +5992,7 @@ runs:
 		}
 	}
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", With: map[string]string{"dir": "sub"}}})
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -5970,7 +6003,7 @@ func TestRunStepMissingWorkingDirectoryFailsClearly(t *testing.T) {
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Shell: "sh", Command: "true", WorkingDirectory: "missing"}})
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `working directory "missing" does not exist`) {
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `working directory "missing" does not exist`) {
 		t.Fatalf("RunJob() error = %v, want missing working directory diagnostic", err)
 	}
 }
@@ -6050,7 +6083,7 @@ printf '%s\n' 'result=nested-ok' >> "$GITHUB_OUTPUT"
 	}
 	job.Outputs = map[string]string{"result": "${{ steps.outer.outputs.result }}"}
 	var logs bytes.Buffer
-	result, err := (Runner{Node24: fakeNode, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v\nlogs: %s", err, logs.String())
 	}
@@ -6107,7 +6140,7 @@ runs:
 		"EXPECTED_WORKFLOW":   workflowPath,
 	}
 	var logs bytes.Buffer
-	if _, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace); err != nil {
+	if _, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace); err != nil {
 		t.Fatalf("RunJob() error = %v\nlogs: %s", err, logs.String())
 	}
 }
@@ -6135,7 +6168,7 @@ runs:
 	job.RequiredCapabilities = []string{"network"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "composite", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	if result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{Actions: materializer}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 }
@@ -6189,7 +6222,7 @@ printf '%s\n' "$(basename "$1" .js)" >> "$PHASES"
 	job.Env = map[string]string{"PHASES": phases}
 	job.Actions = []plan.ActionLock{rootLock, childLock, jsLock}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	if result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 	got, err := os.ReadFile(phases)
@@ -6230,7 +6263,7 @@ if [ "$(basename "$(dirname "$1")")/$(basename "$1")" = child/pre.js ]; then sle
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	started := time.Now()
-	_, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	_, err := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("RunJob() nested pre timeout error = %v", err)
 	}
@@ -6282,7 +6315,7 @@ test -z "$TARGETS"
 		remoteLifecycleLock(childID, "child", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -6328,7 +6361,7 @@ test "$CALLER_PATH_ENV" = "$EXPECTED_ROOT_PATH"
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	var logs bytes.Buffer
-	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v\nlogs: %s", result, err, logs.String())
 	}
@@ -6349,7 +6382,7 @@ func TestSkippedRemoteCompositeWithoutPreDoesNotEvaluateTimeout(t *testing.T) {
 	job.RequiredCapabilities = []string{"network"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(rootID, "root", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	if result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{Actions: materializer}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() skipped composite result = %#v, error = %v", result, err)
 	}
 }
@@ -6383,7 +6416,7 @@ runs:
 	})
 	job.Env = map[string]string{"STATUS_MARKER": marker}
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v; want original step failure", result, err)
 	}
@@ -6426,7 +6459,7 @@ printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
 		{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"},
 	})
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
-	if result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{Node24: fakeNode}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 	events, err := os.ReadFile(lifecycle)
@@ -6452,7 +6485,7 @@ printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
 		},
 		{ID: nestedID, Source: "workspace", Path: ".github/actions/nested", SourceDigest: digestTree(t, filepath.Join(workspace, ".github", "actions", "nested"))},
 	}
-	if result, err := (Runner{Node24: fakeNode}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{Node24: fakeNode}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("v3 RunJob() result = %#v, error = %v", result, err)
 	}
 	events, err = os.ReadFile(lifecycle)
@@ -6582,7 +6615,7 @@ printf '%s\n' 'job:main' >> "$LIFECYCLE_LOG"`},
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	var logs bytes.Buffer
-	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -6663,7 +6696,7 @@ if [ "$action:$phase" = main-fails:main ]; then exit 7; fi
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	provider := &testWorkflowTokenProvider{token: "ghs_scoped_pre"}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer, WorkflowToken: provider, Redactor: &testRedactor{}}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer, WorkflowToken: provider, Redactor: &testRedactor{}}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -6728,7 +6761,7 @@ printf 'child:%s:%s\n' "$(basename "$1" .js)" "$INPUT_MESSAGE" >> "$LIFECYCLE_LO
 		remoteLifecycleLock(childID, "child", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -6796,7 +6829,7 @@ if [ "$action:$phase" = fails:pre ]; then exit 7; fi
 		remoteLifecycleLock(onSuccessID, "on-success", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), `action "owner/repo/fails@v1" pre`) {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -6852,7 +6885,7 @@ fi
 		remoteLifecycleLock(afterID, "after", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -6908,7 +6941,7 @@ if [ "$action:$phase" = after:pre ]; then touch "$MARKER"; fi
 		remoteLifecycleLock(afterID, "after", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -6935,7 +6968,7 @@ func TestRemoteCompositeSoftPreIfFailureSkipsMain(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: softened composite pre-if failure\n")
 	remote := t.TempDir()
 	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: owner/repo/child@v1\n      continue-on-error: true\n    - shell: sh\n      run: touch \"$LATER_STEP_MARKER\"\n")
-	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: runner.debug == 'true'\n  main: main.js\n")
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: fromJSON('invalid')\n  main: main.js\n")
 	writeFixtureFile(t, remote, "child/pre.js", "")
 	writeFixtureFile(t, remote, "child/main.js", "")
 	laterStepMarker := filepath.Join(workspace, "later-step-observed")
@@ -6962,7 +6995,7 @@ if [ "$action:$phase" = child:main ]; then touch "$CHILD_MAIN_MARKER"; fi
 		remoteLifecycleLock(childID, "child", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -6979,7 +7012,7 @@ func TestRemoteCompositeSoftConditionFailureBindsPostToFinalStepState(t *testing
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: softened composite condition failure post scope\n")
 	remote := t.TempDir()
-	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\nruns:\n  using: composite\n  steps:\n    - id: child\n      if: runner.debug == 'true'\n      uses: owner/repo/child@v1\n      continue-on-error: true\n    - id: finalize\n      shell: sh\n      run: touch \"$FINALIZE_MARKER\"\n")
+	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\nruns:\n  using: composite\n  steps:\n    - id: child\n      if: fromJSON('invalid')\n      uses: owner/repo/child@v1\n      continue-on-error: true\n    - id: finalize\n      shell: sh\n      run: touch \"$FINALIZE_MARKER\"\n")
 	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n  post-if: steps.finalize.conclusion == 'success'\n")
 	for _, path := range []string{"child/pre.js", "child/main.js", "child/post.js"} {
 		writeFixtureFile(t, remote, path, "")
@@ -7010,7 +7043,7 @@ if [ "$action:$phase" = child:post ]; then touch "$POST_MARKER"; fi
 		remoteLifecycleLock(childID, "child", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -7062,7 +7095,7 @@ if [ "$action:$phase" = after:pre ]; then touch "$MARKER"; fi
 		remoteLifecycleLock(afterID, "after", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -7107,7 +7140,7 @@ printf '%s:%s\n' "$(basename "$(dirname "$1")")" "$(basename "$1" .js)" >> "$LIF
 	}
 	job.ContinueOnError = true
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "materialized source digest mismatch") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -7135,7 +7168,7 @@ func TestJobContinueOnErrorDoesNotTolerateLazyWorkspaceActionIntegrityFailure(t 
 	job.Actions = []plan.ActionLock{lock}
 	job.ContinueOnError = true
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "workspace action digest mismatch") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -7178,7 +7211,7 @@ printf '%s:%s\n' "$(basename "$(dirname "$1")")" "$(basename "$1" .js)" >> "$LIF
 		remoteLifecycleLock(directID, "direct", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -7220,7 +7253,7 @@ runs:
 	shouldNotRun := filepath.Join(workspace, "should-not-run")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/conditions"}})
 	job.Env = map[string]string{"STATUS_RAN": statusRan, "ALWAYS_RAN": alwaysRan, "SHOULD_NOT_RUN": shouldNotRun}
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v, want preserved composite failure", result, err)
 	}
@@ -7256,7 +7289,7 @@ runs:
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/soft-failure"}})
 	job.Env = map[string]string{"LATER_STEP_RAN": laterStep}
 	job.Outputs = map[string]string{"status": "${{ steps.composite.outputs.status }}"}
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, want soft composite failure", result, err)
 	}
@@ -7280,7 +7313,7 @@ runs:
   using: composite
   steps:
     - id: failed
-      if: runner.debug == 'true'
+      if: fromJSON('invalid')
       shell: sh
       run: touch "$SHOULD_NOT_RUN"
       continue-on-error: true
@@ -7292,7 +7325,7 @@ runs:
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/soft-condition"}})
 	job.Env = map[string]string{"LATER_STEP_RAN": laterStep, "SHOULD_NOT_RUN": shouldNotRun}
 	job.Outputs = map[string]string{"status": "${{ steps.composite.outputs.status }}"}
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, want soft condition failure", result, err)
 	}
@@ -7327,7 +7360,7 @@ runs:
 			marker := filepath.Join(workspace, "conditional-ran")
 			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/conditional", With: map[string]string{"enabled": enabled}}})
 			job.Env = map[string]string{"CONDITIONAL_RAN": marker}
-			result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+			result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 			if err != nil || result.Conclusion != "success" {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 			}
@@ -7379,7 +7412,7 @@ runs:
 	job.Env = map[string]string{"RESULT": output}
 	job.Event.Repository = "buildkite/buildkite-gha"
 
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -7398,19 +7431,19 @@ func TestRuntimeRejectsRecursiveAndOverDepthCompositeActions(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 	writeFixtureFile(t, workspace, ".github/actions/recursive/action.yml", "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/recursive\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "recursive", Kind: "uses", Uses: "./.github/actions/recursive"}})
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "recursion detected") {
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "contains a cycle") {
 		t.Fatalf("RunJob() recursion error = %v", err)
 	}
 
 	for i := 0; i <= metadata.MaxNestedActionDepth; i++ {
-		next := ""
+		next := "  steps:\n    - shell: sh\n      run: \"true\"\n"
 		if i < metadata.MaxNestedActionDepth {
 			next = fmt.Sprintf("  steps:\n    - uses: ./.github/actions/depth-%d\n", i+1)
 		}
 		writeFixtureFile(t, workspace, fmt.Sprintf(".github/actions/depth-%d/action.yml", i), "runs:\n  using: composite\n"+next)
 	}
 	job = runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "deep", Kind: "uses", Uses: "./.github/actions/depth-0"}})
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds maximum depth %d", metadata.MaxNestedActionDepth)) {
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds maximum depth %d", metadata.MaxNestedActionDepth)) {
 		t.Fatalf("RunJob() depth error = %v", err)
 	}
 }
@@ -7427,13 +7460,13 @@ func TestRuntimeMapDiagnosticsAreSorted(t *testing.T) {
 	workspace := fixturePath(t, "smoke")
 	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "shell", Kind: "run", Shell: "sh", Command: "true"}})
 	job.Needs = map[string]plan.Need{"z-last": {}, "a-first": {}}
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `prerequisite result "a-first"`) {
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `prerequisite result "a-first"`) {
 		t.Fatalf("RunJob() prerequisite error = %v, want alphabetically first key", err)
 	}
 
 	job.Needs = nil
 	job.Outputs = map[string]string{"z-valid": "partial", "a-invalid": "${{ unsupported.a }}"}
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), `job output "a-invalid"`) {
 		t.Fatalf("RunJob() output error = %v, want alphabetically first key", err)
 	}
@@ -7513,7 +7546,7 @@ jobs:
 		t.Fatalf("setup-node plan input = %q, want 24", got)
 	}
 	var logs bytes.Buffer
-	result, err := (Runner{Node24: node, Actions: store, Stdout: &logs, Stderr: &logs}).RunJob(ctx, plans[0], workspace)
+	result, err := (Runner{Node24: node, Actions: store, Stdout: &logs, Stderr: &logs}).runTestJob(ctx, plans[0], workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v\nlogs:\n%s", result, err, logs.String())
 	}
@@ -7542,7 +7575,7 @@ jobs:
 	if err != nil || len(plans) != 1 {
 		t.Fatalf("compile hashFiles workflow = %#v, %v", plans, err)
 	}
-	result, err := (Runner{}).RunJob(t.Context(), plans[0], workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), plans[0], workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -7554,7 +7587,7 @@ func TestRunJobDockerUsesSharedMasking(t *testing.T) {
 	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "docker", Kind: "uses", Uses: "./actions/docker"}})
 	job.RequiredCapabilities = []string{"docker", "network"}
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, Docker: docker}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Docker: docker}).runTestJob(t.Context(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -7567,12 +7600,12 @@ func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
 	workspace := fixturePath(t, "smoke")
 	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "local", Kind: "uses", Uses: "./actions/javascript"}})
 	job.Workflow.Digest = "sha256:" + strings.Repeat("0", 64)
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "workflow digest mismatch") {
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "workflow digest mismatch") {
 		t.Fatalf("RunJob() error = %v, want workflow digest mismatch", err)
 	}
 	job = runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "remote", Kind: "uses", Uses: "actions/checkout@v4"}})
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "remote action") {
-		t.Fatalf("RunJob() error = %v, want explicit remote action error", err)
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "has no immutable selector") {
+		t.Fatalf("RunJob() error = %v, want missing immutable selector error", err)
 	}
 
 	for _, using := range []string{"future"} {
@@ -7582,7 +7615,7 @@ func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
 			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 			writeFixtureFile(t, workspace, ".github/actions/unsupported/action.yml", "runs:\n  using: "+using+"\n")
 			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "unsupported", Kind: "uses", Uses: "./.github/actions/unsupported"}})
-			if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `unsupported runtime "`+using+`"`) {
+			if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `unsupported runtime "`+using+`"`) {
 				t.Fatalf("RunJob() error = %v, want %s runtime rejection", err, using)
 			}
 		})
@@ -7618,7 +7651,7 @@ func runtimePlan(t *testing.T, workspace, workflowPath string, steps []plan.Step
 	}
 	digest := sha256.Sum256(source)
 	requiresMise := true
-	return plan.Job{
+	job := plan.Job{
 		Schema: plan.Schema, Compiler: plan.Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
 		Runtime:      &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
 		Workflow:     plan.Workflow{Path: workflowPath, Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "fixture"},
@@ -7627,6 +7660,309 @@ func runtimePlan(t *testing.T, workspace, workflowPath string, steps []plan.Step
 		Steps:        steps,
 		RequiresMise: &requiresMise,
 	}
+	attachTestProgram(&job)
+	return job
+}
+
+func attachTestProgram(job *plan.Job) {
+	actions := map[string]executionprogram.Action(nil)
+	if job.Program != nil {
+		actions = job.Program.Actions
+	}
+	program := executionprogram.Program{Version: executionprogram.Version, Actions: actions, Job: executionprogram.Job{
+		Condition:       testProgramSite(job.Condition, executionprogram.SurfaceJobCondition, executionprogram.ResultBoolean),
+		ContinueOnError: job.ContinueOnError,
+		TimeoutMinutes:  job.TimeoutMinutes,
+		Env:             testProgramBindings(job.Env, executionprogram.SurfaceJobEnvironment),
+		Defaults: executionprogram.Defaults{
+			Shell:            testProgramSite(job.DefaultShell, executionprogram.SurfaceJobDefault, executionprogram.ResultString),
+			WorkingDirectory: testProgramSite(job.DefaultWorkingDirectory, executionprogram.SurfaceJobDefault, executionprogram.ResultString),
+		},
+		Outputs: testProgramBindings(job.Outputs, executionprogram.SurfaceJobOutput),
+	}}
+	program.Job.Guards = make([]executionprogram.Guard, len(job.CallGuards))
+	for i, guard := range job.CallGuards {
+		program.Job.Guards[i].Condition = testProgramSite(guard.Condition, executionprogram.SurfaceCallCondition, executionprogram.ResultBoolean)
+	}
+	program.Job.Steps = make([]executionprogram.Step, len(job.Steps))
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		normalized := executionprogram.Step{
+			ID: step.ID, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...),
+			Env:             testProgramBindings(step.Env, executionprogram.SurfaceStepTemplate),
+			Condition:       testProgramSite(step.Condition, executionprogram.SurfaceStepCondition, executionprogram.ResultBoolean),
+			ContinueOnError: executionprogram.BoolControl{Literal: step.ContinueOnError},
+			TimeoutMinutes:  executionprogram.NumberControl{Literal: step.TimeoutMinutes},
+			Name:            testProgramSite(step.Name, executionprogram.SurfaceStepTemplate, executionprogram.ResultString),
+		}
+		if step.ContinueOnErrorExpression != "" {
+			site := testProgramSite(step.ContinueOnErrorExpression, executionprogram.SurfaceStepControl, executionprogram.ResultBoolean)
+			normalized.ContinueOnError.Expression = &site
+		}
+		if step.TimeoutMinutesExpression != "" {
+			site := testProgramSite(step.TimeoutMinutesExpression, executionprogram.SurfaceStepControl, executionprogram.ResultNumber)
+			normalized.TimeoutMinutes.Expression = &site
+		}
+		switch step.Kind {
+		case "run":
+			normalized.Run = &executionprogram.Run{
+				Command:          testProgramSite(step.Command, executionprogram.SurfaceStepTemplate, executionprogram.ResultString),
+				Shell:            testProgramSite(step.Shell, executionprogram.SurfaceStepTemplate, executionprogram.ResultString),
+				WorkingDirectory: testProgramSite(step.WorkingDirectory, executionprogram.SurfaceStepTemplate, executionprogram.ResultString),
+			}
+		case "uses":
+			normalized.Invocation = &executionprogram.Invocation{
+				Uses: testProgramSite(step.Uses, executionprogram.SurfaceRuntimeTemplate, executionprogram.ResultString),
+				With: testProgramBindingsPurpose(step.With, executionprogram.SurfaceStepTemplate, executionprogram.PurposeActionInput),
+			}
+			if step.Action != nil {
+				normalized.Invocation.Lock = step.Action.Lock
+			}
+		}
+		program.Job.Steps[i] = normalized
+		step.Execution = &program.Job.Steps[i]
+	}
+	if job.Container != nil {
+		program.Job.Container = &executionprogram.Container{
+			Image: testProgramSite(job.Container.Image, executionprogram.SurfaceRuntimeTemplate, executionprogram.ResultString),
+			Env:   testProgramBindings(job.Container.Env, executionprogram.SurfaceRuntimeTemplate),
+			Ports: testProgramSites(job.Container.Ports, executionprogram.SurfaceRuntimeTemplate),
+		}
+	}
+	if job.ServicesExpression != "" {
+		site := testProgramSite(job.ServicesExpression, executionprogram.SurfaceServiceMap, executionprogram.ResultObject)
+		program.Job.Services.Dynamic = &site
+	} else {
+		for _, name := range job.ServiceOrder {
+			service := job.Services[name]
+			container := executionprogram.ServiceContainer{
+				Image:      testProgramSite(service.Image, executionprogram.SurfaceServiceTemplate, executionprogram.ResultString),
+				Env:        testProgramBindings(service.Env, executionprogram.SurfaceServiceTemplate),
+				Ports:      testProgramSites(service.Ports, executionprogram.SurfaceServiceTemplate),
+				Volumes:    testProgramSites(service.Volumes, executionprogram.SurfaceServiceTemplate),
+				Options:    testProgramSite(service.Options, executionprogram.SurfaceServiceTemplate, executionprogram.ResultString),
+				Command:    testProgramSite(service.Command, executionprogram.SurfaceServiceTemplate, executionprogram.ResultString),
+				Entrypoint: testProgramSite(service.Entrypoint, executionprogram.SurfaceServiceTemplate, executionprogram.ResultString),
+			}
+			if service.Credentials != nil {
+				container.Credentials = &executionprogram.ContainerCredentials{
+					Username: testProgramSite(service.Credentials.Username, executionprogram.SurfaceServiceCredential, executionprogram.ResultString),
+					Password: testProgramSite(service.Credentials.Password, executionprogram.SurfaceServiceCredential, executionprogram.ResultString),
+				}
+			}
+			program.Job.Services.Static = append(program.Job.Services.Static, executionprogram.Service{Name: name, Container: container})
+		}
+	}
+	job.Program = &program
+}
+
+// runTestJob upgrades direct runtime fixtures to the normalized plan contract
+// at their execution boundary. Compiler-produced plans already contain these
+// programs; rebuilding their projection only incorporates deliberate fixture
+// mutations made after compilation.
+func (runner Runner) runTestJob(ctx context.Context, job plan.Job, workspace string) (JobResult, error) {
+	if workspace != "" {
+		if err := verifyWorkflow(job, workspace); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}, Artifacts: []transport.ResultArtifact{}}, err
+		}
+	}
+	if err := synthesizeTestLocalActionLocks(&job, workspace); err != nil {
+		return JobResult{}, err
+	}
+	attachTestProgram(&job)
+	if err := attachTestActionPrograms(&job, workspace, runner.Actions); err != nil {
+		return JobResult{}, err
+	}
+	return runner.RunJob(ctx, job, workspace)
+}
+
+func synthesizeTestLocalActionLocks(job *plan.Job, workspace string) error {
+	byPath := make(map[string]string, len(job.Actions))
+	for _, lock := range job.Actions {
+		if lock.Source == "workspace" {
+			byPath[lock.Path] = lock.ID
+		}
+	}
+	var ensure func(string) (string, error)
+	ensure = func(path string) (string, error) {
+		path = strings.TrimPrefix(filepath.ToSlash(filepath.Clean(path)), "./")
+		if lockID, ok := byPath[path]; ok {
+			return lockID, nil
+		}
+		actionRoot := filepath.Join(workspace, filepath.FromSlash(path))
+		digest, err := source.DigestTree(actionRoot)
+		if err != nil {
+			return "", err
+		}
+		lockID := fmt.Sprintf("a-%016x", len(job.Actions)+1)
+		byPath[path] = lockID
+		job.Actions = append(job.Actions, plan.ActionLock{ID: lockID, Source: "workspace", Path: path, SourceDigest: digest})
+		lockIndex := len(job.Actions) - 1
+		loaded, err := metadata.Load(workspace, path)
+		if err != nil {
+			return "", err
+		}
+		actionRuntime, err := loaded.Runtime()
+		if err != nil {
+			var unsupported *metadata.UnsupportedRuntimeError
+			if errors.As(err, &unsupported) {
+				return lockID, nil
+			}
+			return "", err
+		}
+		if actionRuntime != metadata.RuntimeComposite {
+			return lockID, nil
+		}
+		for _, child := range loaded.Runs.Steps {
+			if !strings.HasPrefix(child.Uses, "./") {
+				continue
+			}
+			childID, err := ensure(child.Uses)
+			if err != nil {
+				return "", err
+			}
+			if job.Actions[lockIndex].Children == nil {
+				job.Actions[lockIndex].Children = map[string]plan.ActionSelector{}
+			}
+			job.Actions[lockIndex].Children[child.Uses] = plan.ActionSelector{Lock: childID}
+		}
+		return lockID, nil
+	}
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		if step.Kind != "uses" || step.Action != nil || !strings.HasPrefix(step.Uses, "./") {
+			continue
+		}
+		lockID, err := ensure(step.Uses)
+		if err != nil {
+			return fmt.Errorf("normalize test action %q: %w", step.Uses, err)
+		}
+		step.Action = &plan.ActionSelector{Lock: lockID}
+	}
+	return nil
+}
+
+func attachTestActionPrograms(job *plan.Job, workspace string, materializer ActionMaterializer) error {
+	if job.Program.Actions == nil {
+		job.Program.Actions = map[string]executionprogram.Action{}
+	}
+	var remoteRoot string
+	if fake, ok := materializer.(*fakeActionMaterializer); ok {
+		remoteRoot = fake.result.RepositoryRoot
+		if remoteRoot == "" {
+			remoteRoot = fake.result.ActionRoot
+		}
+	}
+	for _, lock := range job.Actions {
+		if usesNativeAdapter(lock) {
+			continue
+		}
+		if _, ok := job.Program.Actions[lock.ID]; ok {
+			continue
+		}
+		root, path := workspace, lock.Path
+		if lock.Source == "github" {
+			root = remoteRoot
+			if root == "" {
+				return fmt.Errorf("normalize test action %q: materialized repository root is unavailable", lock.ID)
+			}
+			if filepath.Clean(root) == filepath.Clean(fakeActionRoot(materializer)) {
+				path = "."
+			}
+		}
+		if err := attachTestActionProgramFromRoot(job, lock.ID, root, path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func attachTestActionProgramFromRoot(job *plan.Job, lockID, root, path string) error {
+	if job.Program == nil {
+		attachTestProgram(job)
+	}
+	if job.Program.Actions == nil {
+		job.Program.Actions = map[string]executionprogram.Action{}
+	}
+	loaded, err := metadata.Load(root, path)
+	if err != nil {
+		return fmt.Errorf("normalize test action %q: %w", lockID, err)
+	}
+	actionRuntime, err := loaded.Runtime()
+	if err != nil {
+		var unsupported *metadata.UnsupportedRuntimeError
+		if !errors.As(err, &unsupported) {
+			return fmt.Errorf("normalize test action %q: %w", lockID, err)
+		}
+		actionRuntime = metadata.Runtime(loaded.Runs.Using)
+	}
+	var lock plan.ActionLock
+	for _, candidate := range job.Actions {
+		if candidate.ID == lockID {
+			lock = candidate
+			break
+		}
+	}
+	children := make(map[string]string, len(lock.Children))
+	for uses, selector := range lock.Children {
+		children[uses] = selector.Lock
+	}
+	job.Program.Actions[lockID] = executionprogram.ActionFromMetadata(loaded, string(actionRuntime), children)
+	return nil
+}
+
+func fakeActionRoot(materializer ActionMaterializer) string {
+	if fake, ok := materializer.(*fakeActionMaterializer); ok {
+		return fake.result.ActionRoot
+	}
+	return ""
+}
+
+func testActionLockResolver(t *testing.T, job plan.Job, workspace string, materializer ActionMaterializer) *actionLockResolver {
+	t.Helper()
+	if job.Program == nil {
+		job.Program = &executionprogram.Program{Version: executionprogram.Version, Actions: map[string]executionprogram.Action{}, Job: executionprogram.Job{Condition: testProgramSite("", executionprogram.SurfaceJobCondition, executionprogram.ResultBoolean)}}
+	}
+	if job.Program.Actions == nil {
+		job.Program.Actions = map[string]executionprogram.Action{}
+	}
+	for _, lock := range job.Actions {
+		if usesNativeAdapter(lock) {
+			continue
+		}
+		job.Program.Actions[lock.ID] = executionprogram.Action{
+			Name: "test", Runtime: "node24", Main: "index.js",
+			PreIf:  testProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean),
+			PostIf: testProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean),
+		}
+	}
+	return newActionLockResolver(job, workspace, materializer)
+}
+
+func testProgramSite(source string, surface executionprogram.Surface, result executionprogram.ResultType) executionprogram.Site {
+	return executionprogram.Site{Source: source, Surface: surface, Result: result, Provenance: executionprogram.ProvenanceWorkflow, Purpose: executionprogram.PurposeExpression}
+}
+
+func testProgramBindings(values map[string]string, surface executionprogram.Surface) []executionprogram.Binding {
+	return testProgramBindingsPurpose(values, surface, executionprogram.PurposeExpression)
+}
+
+func testProgramBindingsPurpose(values map[string]string, surface executionprogram.Surface, purpose executionprogram.Purpose) []executionprogram.Binding {
+	bindings := make([]executionprogram.Binding, 0, len(values))
+	for _, name := range sortedKeys(values) {
+		value := testProgramSite(values[name], surface, executionprogram.ResultString)
+		value.Purpose = purpose
+		bindings = append(bindings, executionprogram.Binding{Name: name, Value: value})
+	}
+	return bindings
+}
+
+func testProgramSites(values []string, surface executionprogram.Surface) []executionprogram.Site {
+	sites := make([]executionprogram.Site, len(values))
+	for i, value := range values {
+		sites[i] = testProgramSite(value, surface, executionprogram.ResultString)
+	}
+	return sites
 }
 
 func writeFixtureFile(t *testing.T, root, path, contents string) {

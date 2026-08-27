@@ -30,6 +30,7 @@ func TestPushChangedPathsBindsWebhookAndLocalDiff(t *testing.T) {
 	runGit("init", "-q")
 	runGit("config", "user.email", "test@example.com")
 	runGit("config", "user.name", "Test")
+	runGit("config", "commit.gpgsign", "false")
 	runGit("remote", "add", "origin", "https://github.com/buildkite/buildkite-gha.git")
 	for path, source := range map[string][]byte{
 		"ci.yml": workflowSource, "src/main.go": []byte("package main\n"),
@@ -176,6 +177,7 @@ func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 	runGit("init", "-q")
 	runGit("config", "user.email", "test@example.com")
 	runGit("config", "user.name", "Test")
+	runGit("config", "commit.gpgsign", "false")
 	if err := os.WriteFile(filepath.Join(repository, "ci.yml"), filteredWorkflow, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -292,6 +294,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 	runGit("init", "-q")
 	runGit("config", "user.email", "test@example.com")
 	runGit("config", "user.name", "Test")
+	runGit("config", "commit.gpgsign", "false")
 	workflowPath := filepath.Join(repository, "ci.yml")
 	if err := os.WriteFile(workflowPath, unfiltered, 0o600); err != nil {
 		t.Fatal(err)

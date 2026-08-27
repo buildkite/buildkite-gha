@@ -17,10 +17,10 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
-	"github.com/buildkite/buildkite-gha/internal/expression"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
-const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json"
+const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json"
 
 const MaxNeedProducers = 1024
 const MaxNeedOutputs = 64
@@ -256,6 +256,7 @@ type Step struct {
 	TimeoutMinutes            float64           `json:"timeout_minutes,omitempty"`
 	TimeoutMinutesExpression  string            `json:"timeout_minutes_expression,omitempty"`
 	Source                    *Span             `json:"source,omitempty"`
+	Execution                 *program.Step     `json:"-"`
 }
 
 type Container struct {
@@ -329,22 +330,25 @@ type Job struct {
 	CallGuards           []CallGuard              `json:"call_guards,omitempty"`
 	// Needs is populated only from verified producer-attributed manifests at
 	// runtime. It is never accepted from or encoded into an immutable plan.
-	Needs                   map[string]Need   `json:"-"`
-	Env                     map[string]string `json:"env,omitempty"`
-	Condition               string            `json:"condition,omitempty"`
-	ContinueOnError         bool              `json:"continue_on_error,omitempty"`
-	TimeoutMinutes          float64           `json:"timeout_minutes,omitempty"`
-	DefaultShell            string            `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
-	Outputs                 map[string]string `json:"outputs,omitempty"`
-	Steps                   []Step            `json:"steps"`
+	Needs   map[string]Need  `json:"-"`
+	Program *program.Program `json:"program"`
+	// The executor-facing projections below are derived from Program. They are
+	// never accepted from or encoded into the plan boundary.
+	Env                     map[string]string `json:"-"`
+	Condition               string            `json:"-"`
+	ContinueOnError         bool              `json:"-"`
+	TimeoutMinutes          float64           `json:"-"`
+	DefaultShell            string            `json:"-"`
+	DefaultWorkingDirectory string            `json:"-"`
+	Outputs                 map[string]string `json:"-"`
+	Steps                   []Step            `json:"-"`
 	Actions                 []ActionLock      `json:"actions,omitempty"`
 	// RequiresMise is the compiler's explicit action-runtime decision.
 	RequiresMise       *bool                       `json:"requires_mise,omitempty"`
-	Container          *Container                  `json:"container,omitempty"`
-	Services           map[string]ServiceContainer `json:"services,omitempty"`
-	ServiceOrder       []string                    `json:"service_order,omitempty"`
-	ServicesExpression string                      `json:"services_expression,omitempty"`
+	Container          *Container                  `json:"-"`
+	Services           map[string]ServiceContainer `json:"-"`
+	ServiceOrder       []string                    `json:"-"`
+	ServicesExpression string                      `json:"-"`
 }
 
 // NeedsMise reports whether a generated job needs the managed action runtime.
@@ -373,31 +377,16 @@ func Decode(source []byte) (Job, error) {
 		return Job{}, fmt.Errorf("decode job plan: %w", err)
 	}
 	var presence struct {
-		Steps []map[string]json.RawMessage `json:"steps"`
+		Program json.RawMessage `json:"program"`
 	}
 	if err := json.Unmarshal(source, &presence); err != nil {
 		return Job{}, fmt.Errorf("decode job plan: %w", err)
 	}
-	for i, step := range presence.Steps {
-		controls := make(map[string]bool, 4)
-		for name := range step {
-			for _, canonical := range []string{"continue_on_error", "continue_on_error_expression", "timeout_minutes", "timeout_minutes_expression"} {
-				if !strings.EqualFold(name, canonical) {
-					continue
-				}
-				if controls[canonical] {
-					return Job{}, fmt.Errorf("decode job plan: step %d repeats %s with different casing", i+1, canonical)
-				}
-				controls[canonical] = true
-				break
-			}
-		}
-		if controls["continue_on_error"] && controls["continue_on_error_expression"] {
-			return Job{}, fmt.Errorf("decode job plan: step %d has both continue_on_error fields", i+1)
-		}
-		if controls["timeout_minutes"] && controls["timeout_minutes_expression"] {
-			return Job{}, fmt.Errorf("decode job plan: step %d has both timeout_minutes fields", i+1)
-		}
+	if len(presence.Program) == 0 || string(presence.Program) == "null" {
+		return Job{}, fmt.Errorf("decode job plan: normalized execution program is required")
+	}
+	if err := rejectAmbiguousProgramControls(presence.Program); err != nil {
+		return Job{}, fmt.Errorf("decode job plan: %w", err)
 	}
 	var job Job
 	decoder := json.NewDecoder(bytes.NewReader(source))
@@ -409,6 +398,9 @@ func Decode(source []byte) (Job, error) {
 	if job.RequiredCapabilities == nil {
 		return Job{}, fmt.Errorf("decode job plan: required_capabilities must be a concrete array")
 	}
+	if err := hydrateProgramProjection(&job); err != nil {
+		return Job{}, fmt.Errorf("decode job plan: %w", err)
+	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		if err == nil {
 			return Job{}, fmt.Errorf("decode job plan: multiple JSON values")
@@ -419,6 +411,44 @@ func Decode(source []byte) (Job, error) {
 		return Job{}, err
 	}
 	return job, nil
+}
+
+func rejectAmbiguousProgramControls(source json.RawMessage) error {
+	var document struct {
+		Job struct {
+			Steps []map[string]json.RawMessage `json:"steps"`
+		} `json:"job"`
+	}
+	if err := json.Unmarshal(source, &document); err != nil {
+		return err
+	}
+	for i, step := range document.Job.Steps {
+		for _, controlName := range []string{"continue_on_error", "timeout_minutes"} {
+			var controlSource json.RawMessage
+			for name, value := range step {
+				if strings.EqualFold(name, controlName) {
+					controlSource = value
+					break
+				}
+			}
+			if len(controlSource) == 0 {
+				continue
+			}
+			var control map[string]json.RawMessage
+			if err := json.Unmarshal(controlSource, &control); err != nil {
+				continue
+			}
+			hasLiteral, hasExpression := false, false
+			for name := range control {
+				hasLiteral = hasLiteral || strings.EqualFold(name, "literal")
+				hasExpression = hasExpression || strings.EqualFold(name, "expression")
+			}
+			if hasLiteral && hasExpression {
+				return fmt.Errorf("step %d has both literal and expression %s", i+1, strings.ReplaceAll(controlName, "_", "-"))
+			}
+		}
+	}
+	return nil
 }
 
 func rejectDuplicateKeys(source []byte) error {
@@ -483,6 +513,9 @@ func Encode(job Job) ([]byte, error) {
 	if job.RequiredCapabilities == nil {
 		job.RequiredCapabilities = []string{}
 	}
+	if err := hydrateProgramProjection(&job); err != nil {
+		return nil, err
+	}
 	if err := job.Validate(); err != nil {
 		return nil, err
 	}
@@ -529,6 +562,12 @@ func DecodeEventPayload(source []byte, expectedDigest string) (map[string]any, e
 func (job Job) Validate() error {
 	if job.Schema != Schema {
 		return fmt.Errorf("unsupported job plan schema %q", job.Schema)
+	}
+	if job.Program == nil {
+		return fmt.Errorf("normalized execution program is required")
+	}
+	if err := job.Program.Validate(); err != nil {
+		return fmt.Errorf("normalized execution program: %w", err)
 	}
 	if job.RequiresMise == nil {
 		return fmt.Errorf("job plan requires an explicit requires_mise decision")
@@ -640,13 +679,8 @@ func (job Job) Validate() error {
 				return fmt.Errorf("service %q: %w", name, err)
 			}
 		}
-		if job.ServicesExpression != "" {
-			if len(job.ServicesExpression) > 65536 {
-				return fmt.Errorf("services expression exceeds its size limit")
-			}
-			if err := expression.ValidateServiceMapRuntimeExpression(job.ServicesExpression); err != nil {
-				return err
-			}
+		if len(job.ServicesExpression) > 65536 {
+			return fmt.Errorf("services expression exceeds its size limit")
 		}
 	}
 	if !sort.StringsAreSorted(job.RequiredSecrets) {
@@ -836,9 +870,6 @@ func (job Job) Validate() error {
 	for i, guard := range job.CallGuards {
 		if strings.TrimSpace(guard.Condition) == "" || len(guard.Condition) > 65536 {
 			return fmt.Errorf("job plan call guard %d has an invalid condition", i+1)
-		}
-		if err := expression.ValidateCallCondition(guard.Condition); err != nil {
-			return fmt.Errorf("job plan call guard %d condition: %w", i+1, err)
 		}
 		if err := validateInputs(guard.Inputs); err != nil {
 			return fmt.Errorf("job plan call guard %d: %w", i+1, err)
@@ -1128,24 +1159,7 @@ func validateServiceContainer(service ServiceContainer, templates bool) error {
 		}
 	}
 	values := append(append(append([]string{service.Image, service.Options, service.Command, service.Entrypoint}, service.Ports...), service.Volumes...), mapStringValues(service.Env)...)
-	if templates {
-		for _, value := range values {
-			if strings.Contains(value, "${{") {
-				if err := expression.ValidateRuntimeTemplate(value); err != nil {
-					return fmt.Errorf("service container has invalid runtime template: %w", err)
-				}
-			}
-		}
-		if service.Credentials != nil {
-			for _, value := range []string{service.Credentials.Username, service.Credentials.Password} {
-				if strings.Contains(value, "${{") {
-					if err := expression.ValidateServiceCredentialTemplate(value); err != nil {
-						return fmt.Errorf("service container has invalid credential template: %w", err)
-					}
-				}
-			}
-		}
-	} else {
+	if !templates {
 		for _, value := range values {
 			if strings.Contains(value, "${{") {
 				return fmt.Errorf("service container retains a runtime template")
@@ -1397,6 +1411,29 @@ func validateActionLocks(job Job) error {
 	}
 	if len(reachable) != len(locks) {
 		return fmt.Errorf("job plan contains unused action locks")
+	}
+	{
+		for id, action := range job.Program.Actions {
+			lock, ok := locks[id]
+			if !ok || !reachable[id] {
+				return fmt.Errorf("action program %q has no reachable immutable lock", id)
+			}
+			if action.Runtime == "docker" {
+				image, _ := metadata.DockerImageReference(action.Image)
+				if image != lock.DockerImage {
+					return fmt.Errorf("action program %q Docker image does not match its immutable lock", id)
+				}
+			}
+			for i, step := range action.Steps {
+				if step.Invocation == nil {
+					continue
+				}
+				selector, ok := lock.Children[step.Invocation.Uses.Source]
+				if !ok || selector.Lock != step.Invocation.Lock {
+					return fmt.Errorf("action program %q composite step %d does not match its immutable child lock", id, i+1)
+				}
+			}
+		}
 	}
 	return nil
 }

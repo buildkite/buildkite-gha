@@ -67,7 +67,7 @@ func TestRunJobClassifiesStepProcessExit(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: failing\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "fail", Kind: "run", Command: "exit 7"}})
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -82,7 +82,7 @@ func TestRunJobClassifiesUnsupportedShell(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: shell\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "shell", Kind: "run", Shell: "pwsh", Command: "Get-Location"}})
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -98,7 +98,7 @@ func TestRunJobClassifiesUnsupportedActionRuntime(t *testing.T) {
 	writeFixtureFile(t, workspace, "action/action.yml", "name: future\nruns:\n  using: future\n  main: main.js\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "future", Kind: "uses", Uses: "./action"}})
 	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}

@@ -17,7 +17,6 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/program"
 	shellcompat "github.com/buildkite/buildkite-gha/internal/shell"
-	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
 // planBuilder lowers expanded job instances into validated execution-plan
@@ -44,6 +43,7 @@ type builtPlanActions struct {
 	requiresEventPayload bool
 	requiresMise         bool
 	resolved             bool
+	programs             map[string]program.Action
 }
 
 func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, []PlanAuthorization, []JobEvaluation, error) {
@@ -131,6 +131,7 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
 	bindProgramActionSelectors(&workflowProgram, steps)
+	workflowProgram.Actions = actions.programs
 	steps = projectPlanSteps(workflowProgram.Job.Steps)
 	if err := addContainerCapabilities(instance, actionRefs, &actions); err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
@@ -179,7 +180,7 @@ func (b planBuilder) validateShellCompatibility(instance JobInstance, workflowPr
 		if site.Source == "" {
 			return
 		}
-		resolved, err := expression.EvaluateAvailableCompileTemplate(site.Source, context)
+		resolved, err := reduceCompileString(site.Source, context)
 		if err != nil || strings.Contains(resolved, "${{") {
 			return
 		}
@@ -211,19 +212,19 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 	context.Matrix = instance.Matrix
 	retainsEventPayload := false
 
-	reduceTemplate := func(value string) (string, error) {
+	reduceTemplate := func(value string, profile expression.ProfileID) (string, error) {
 		if value == "" {
 			return value, nil
 		}
-		reduced, err := expression.ReduceAvailableCompileTemplate(value, context)
+		reduced, err := reduceTemplateString(value, profile, context)
 		if err != nil {
 			return "", err
 		}
-		referencesEvent, err := expression.TemplateReferencesGitHubEvent(reduced)
+		referencesEvent, err := siteReferencesEvent(reduced, profile, expression.ResultString, false)
 		if err != nil {
 			return "", err
 		}
-		referencesEventAlias, err := expression.TemplateUsesContext(reduced, "event")
+		referencesEventAlias, err := referencesContext(reduced, profile, "event", false)
 		if err != nil {
 			return "", err
 		}
@@ -233,22 +234,26 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		retainsEventPayload = retainsEventPayload || referencesEvent
 		return reduced, nil
 	}
-	reduceCondition := func(value string) (string, error) {
+	reduceCondition := func(value string, profile expression.ProfileID) (string, error) {
 		if value == "" {
 			return value, nil
 		}
-		referencesEvent, err := expression.ReferencesGitHubEvent(value)
+		referencesEvent, err := siteReferencesEvent(value, profile, expression.ResultBoolean, true)
 		if err != nil {
 			return "", err
 		}
 		if !referencesEvent {
 			return value, nil
 		}
-		reduced, err := expression.ReduceCompileCondition(value, context)
+		reduction, err := reduceCompileSite(value, profile, expression.ResultBoolean, context)
 		if err != nil {
 			return "", err
 		}
-		referencesEvent, err = expression.ReferencesGitHubEvent(reduced)
+		reduced := reduction.Source
+		if reduction.Known {
+			reduced = fmt.Sprint(reduction.Value)
+		}
+		referencesEvent, err = siteReferencesEvent(reduced, profile, expression.ResultBoolean, true)
 		if err != nil {
 			return "", err
 		}
@@ -258,144 +263,127 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		return reduced, nil
 	}
 	reduceTypedExpression := func(value string) (string, error) {
-		referencesEvent, err := expression.ReferencesGitHubEvent(value)
+		referencesEvent, err := siteReferencesEvent(value, expression.ProfileCompile, expression.ResultAny, true)
 		if err != nil || !referencesEvent {
 			return value, err
 		}
-		reduced, err := reduceCondition(value)
+		reduced, err := reduceCompileSite(value, expression.ProfileCompile, expression.ResultAny, context)
 		if err != nil {
 			return "", err
 		}
-		return "${{ " + reduced + " }}", nil
-	}
-	reduceMap := func(values map[string]string) (map[string]string, error) {
-		if values == nil {
-			return nil, nil
+		if reduced.Known {
+			return "${{ " + fmt.Sprint(reduced.Value) + " }}", nil
 		}
-		result := cloneMap(values)
-		for _, name := range sortedValueKeys(result) {
-			value, err := reduceTemplate(result[name])
-			if err != nil {
-				return nil, err
+		return reduced.Source, nil
+	}
+	workflowProgram := lowerWorkflowProgram(instance)
+	reducedProgram, err := workflowProgram.TransformSites(func(site program.Site) (program.Site, error) {
+		var reduceErr error
+		switch site.Surface {
+		case program.SurfaceJobCondition:
+			site.Source, reduceErr = reduceCondition(site.Source, expression.ProfileCompileJobCondition)
+		case program.SurfaceCallCondition:
+			site.Source, reduceErr = reduceCondition(site.Source, expression.ProfileCompileCallCondition)
+		case program.SurfaceStepCondition:
+			site.Source, reduceErr = reduceCondition(site.Source, expression.ProfileCompileStepCondition)
+		case program.SurfaceStepControl:
+			site.Source, reduceErr = reduceTypedExpression(site.Source)
+		case program.SurfaceJobEnvironment:
+			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileJobEnvironment)
+		case program.SurfaceJobDefault:
+			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileJobDefault)
+		case program.SurfaceJobOutput:
+			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileJobOutput)
+		case program.SurfaceStepTemplate:
+			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileStepTemplate)
+		case program.SurfaceRuntimeTemplate:
+			if strings.HasSuffix(site.Location.Field, ".uses") {
+				var referencesEvent bool
+				referencesEvent, reduceErr = siteReferencesEvent(site.Source, expression.ProfileRuntimeTemplate, expression.ResultString, false)
+				if reduceErr == nil && referencesEvent {
+					reduceErr = fmt.Errorf("github.event cannot select an action reference")
+				}
+				break
 			}
-			result[name] = value
+			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileRuntimeTemplate)
+		case program.SurfaceServiceTemplate:
+			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileRuntimeTemplate)
+		case program.SurfaceServiceCredential:
+			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileServiceCredential)
+		case program.SurfaceServiceMap:
+			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileStepTemplate)
 		}
-		return result, nil
-	}
-	reduceSlice := func(values []string) ([]string, error) {
-		if values == nil {
-			return nil, nil
-		}
-		result := append([]string(nil), values...)
-		for i := range result {
-			value, err := reduceTemplate(result[i])
-			if err != nil {
-				return nil, err
-			}
-			result[i] = value
-		}
-		return result, nil
-	}
-
-	var err error
-	if instance.If, err = reduceCondition(instance.If); err != nil {
+		return site, reduceErr
+	})
+	if err != nil {
 		return JobInstance{}, err
 	}
-	for _, field := range []*string{&instance.DefaultShell, &instance.DefaultWorkingDirectory, &instance.ServicesExpression} {
-		if *field, err = reduceTemplate(*field); err != nil {
-			return JobInstance{}, err
-		}
-	}
-	if instance.Env, err = reduceMap(instance.Env); err != nil {
-		return JobInstance{}, err
-	}
-	if instance.Outputs, err = reduceMap(instance.Outputs); err != nil {
-		return JobInstance{}, err
-	}
-
-	instance.CallGuards = append([]CallGuard(nil), instance.CallGuards...)
-	for i := range instance.CallGuards {
-		if instance.CallGuards[i].Condition, err = reduceCondition(instance.CallGuards[i].Condition); err != nil {
-			return JobInstance{}, err
-		}
-	}
-
-	instance.Steps = append([]workflow.Step(nil), instance.Steps...)
-	for i := range instance.Steps {
-		step := &instance.Steps[i]
-		referencesEvent, referencesErr := expression.TemplateReferencesGitHubEvent(step.Uses)
-		if referencesErr != nil {
-			return JobInstance{}, referencesErr
-		}
-		if referencesEvent {
-			return JobInstance{}, fmt.Errorf("github.event cannot select an action reference")
-		}
-		if step.If, err = reduceCondition(step.If); err != nil {
-			return JobInstance{}, err
-		}
-		for _, field := range []*string{&step.Name, &step.Run, &step.Shell, &step.WorkingDirectory} {
-			if *field, err = reduceTemplate(*field); err != nil {
-				return JobInstance{}, err
-			}
-		}
-		for _, field := range []*string{&step.ContinueOnErrorExpression, &step.TimeoutMinutesExpression} {
-			if *field, err = reduceTypedExpression(*field); err != nil {
-				return JobInstance{}, err
-			}
-		}
-		if step.Env, err = reduceMap(step.Env); err != nil {
-			return JobInstance{}, err
-		}
-		if step.With, err = reduceMap(step.With); err != nil {
-			return JobInstance{}, err
-		}
-	}
-
-	if instance.Container != nil {
-		container := *instance.Container
-		if container.Image, err = reduceTemplate(container.Image); err != nil {
-			return JobInstance{}, err
-		}
-		if container.Env, err = reduceMap(container.Env); err != nil {
-			return JobInstance{}, err
-		}
-		if container.Ports, err = reduceSlice(container.Ports); err != nil {
-			return JobInstance{}, err
-		}
-		instance.Container = &container
-	}
-
-	instance.Services = append([]workflow.Service(nil), instance.Services...)
-	for i := range instance.Services {
-		container := instance.Services[i].Container
-		for _, field := range []*string{&container.Image, &container.Options, &container.Command, &container.Entrypoint} {
-			if *field, err = reduceTemplate(*field); err != nil {
-				return JobInstance{}, err
-			}
-		}
-		if container.Env, err = reduceMap(container.Env); err != nil {
-			return JobInstance{}, err
-		}
-		if container.Ports, err = reduceSlice(container.Ports); err != nil {
-			return JobInstance{}, err
-		}
-		if container.Volumes, err = reduceSlice(container.Volumes); err != nil {
-			return JobInstance{}, err
-		}
-		if container.Credentials != nil {
-			credentials := *container.Credentials
-			if credentials.Username, err = reduceTemplate(credentials.Username); err != nil {
-				return JobInstance{}, err
-			}
-			if credentials.Password, err = reduceTemplate(credentials.Password); err != nil {
-				return JobInstance{}, err
-			}
-			container.Credentials = &credentials
-		}
-		instance.Services[i].Container = container
-	}
+	projectReducedProgram(&instance, reducedProgram)
 	instance.RetainEventPayload = retainsEventPayload
 	return instance, nil
+}
+
+// projectReducedProgram updates the source-oriented IR after the immutable
+// whole-program pass. Expression traversal remains owned by Program.TransformSites.
+func projectReducedProgram(instance *JobInstance, reduced program.Program) {
+	instance.If = reduced.Job.Condition.Source
+	instance.Env = programBindingMap(reduced.Job.Env)
+	instance.DefaultShell = reduced.Job.Defaults.Shell.Source
+	instance.DefaultWorkingDirectory = reduced.Job.Defaults.WorkingDirectory.Source
+	instance.Outputs = programBindingMap(reduced.Job.Outputs)
+	for i := range instance.CallGuards {
+		instance.CallGuards[i].Condition = reduced.Job.Guards[i].Condition.Source
+	}
+	for i := range instance.Steps {
+		source := reduced.Job.Steps[i]
+		target := &instance.Steps[i]
+		target.Name = source.Name.Source
+		target.If = source.Condition.Source
+		target.Env = programBindingMap(source.Env)
+		if source.ContinueOnError.Expression != nil {
+			target.ContinueOnErrorExpression = source.ContinueOnError.Expression.Source
+		}
+		if source.TimeoutMinutes.Expression != nil {
+			target.TimeoutMinutesExpression = source.TimeoutMinutes.Expression.Source
+		}
+		if source.Run != nil {
+			target.Run = source.Run.Command.Source
+			target.Shell = source.Run.Shell.Source
+			target.WorkingDirectory = source.Run.WorkingDirectory.Source
+		}
+		if source.Invocation != nil {
+			target.Uses = source.Invocation.Uses.Source
+			target.With = programBindingMap(source.Invocation.With)
+		}
+	}
+	if instance.Container != nil && reduced.Job.Container != nil {
+		container := *instance.Container
+		container.Image = reduced.Job.Container.Image.Source
+		container.Env = programBindingMap(reduced.Job.Container.Env)
+		container.Ports = programSiteSources(reduced.Job.Container.Ports)
+		instance.Container = &container
+	}
+	for i := range instance.Services {
+		source := reduced.Job.Services.Static[i].Container
+		target := instance.Services[i].Container
+		target.Image = source.Image.Source
+		target.Env = programBindingMap(source.Env)
+		target.Ports = programSiteSources(source.Ports)
+		target.Volumes = programSiteSources(source.Volumes)
+		target.Options = source.Options.Source
+		target.Command = source.Command.Source
+		target.Entrypoint = source.Entrypoint.Source
+		if target.Credentials != nil && source.Credentials != nil {
+			credentials := *target.Credentials
+			credentials.Username = source.Credentials.Username.Source
+			credentials.Password = source.Credentials.Password.Source
+			target.Credentials = &credentials
+		}
+		instance.Services[i].Container = target
+	}
+	if reduced.Job.Services.Dynamic != nil {
+		instance.ServicesExpression = reduced.Job.Services.Dynamic.Source
+	}
 }
 
 func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actionIndexes []int, actionRefs []string, actionInputs []map[string]string) (builtPlanActions, error) {
@@ -425,6 +413,7 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 	built.requiresGitHubToken = compiled.requiresGitHubToken
 	built.requiresEventPayload = compiled.requiresEventPayload
 	built.requiredSecrets = compiled.requiredSecrets
+	built.programs = compiled.programs
 	built.authorization.GitHubTokenActions = append([]string(nil), compiled.githubTokenActions...)
 	built.inputsInspected = true
 	locksByID := make(map[string]plan.ActionLock, len(compiled.locks))
@@ -465,7 +454,7 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 			if !strings.EqualFold(name, "ref") {
 				continue
 			}
-			root, path, err := expression.ReferencePath(value)
+			root, path, err := staticReference(value)
 			if err == nil && (strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "sha") ||
 				strings.EqualFold(root, "needs") && len(path) == 3 && strings.EqualFold(path[1], "outputs")) {
 				checkoutInputs[name] = b.ir.Event.SHA
@@ -669,6 +658,7 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		NeedSources:             needSources,
 		NeedOutputs:             needOutputs,
 		CallGuards:              callGuards,
+		Program:                 &workflowProgram,
 		Env:                     programBindingMap(programJob.Env),
 		Condition:               programJob.Condition.Source,
 		ContinueOnError:         programJob.ContinueOnError,
@@ -746,7 +736,7 @@ func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, 
 			if site.Purpose != program.PurposeActionInput {
 				return nil
 			}
-			names, err := expression.SecretReferences(site.Source)
+			names, err := program.ValidateSite(site)
 			if err != nil {
 				return err
 			}

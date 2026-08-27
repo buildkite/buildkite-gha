@@ -1042,8 +1042,9 @@ action's optional `runs.entrypoint` overrides the image `ENTRYPOINT`.
 Args may contain literals and direct `inputs.<name>` or `inputs['name']`
 interpolation. Operators, functions, whole or dynamic inputs, and every other
 context are rejected. Invocation inputs and metadata defaults resolve before
-args evaluation. Args remain in digest-bound action metadata and are not stored
-in job plans.
+args evaluation. The compiler stores args as action-authored sites in the
+normalized job program. Runtime verifies the locked action tree but does not
+reparse its metadata.
 
 Dockerfile actions cannot declare explicit entrypoints. Docker actions cannot
 declare pre/post lifecycle or request credentials, volumes, arbitrary options,

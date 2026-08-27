@@ -8,6 +8,7 @@ import (
 
 type AuthorityOptions struct {
 	ActionInputsInspected bool
+	Values                expression.AbstractValues
 }
 
 // Authority is the workflow-authored secret inventory retained by the current
@@ -23,54 +24,111 @@ func InventoryAuthority(workflow Program, options AuthorityOptions) (Authority, 
 	found := map[string]struct{}{}
 	authority := Authority{}
 	err := workflow.VisitSites(func(site Site) error {
-		if options.ActionInputsInspected && site.Purpose == PurposeActionInput {
-			return nil
-		}
-		if site.Surface == SurfaceJobCondition || site.Surface == SurfaceStepCondition {
-			return inventoryConditionAuthority(site.Source, found, &authority)
-		}
-		names, err := expression.SecretReferences(site.Source)
+		names, err := ValidateSite(site)
 		if err != nil {
 			return err
 		}
-		for _, name := range names {
-			found[name] = struct{}{}
+		if !options.ActionInputsInspected || site.Purpose != PurposeActionInput {
+			for _, name := range names {
+				found[name] = struct{}{}
+			}
 		}
-		var referencesToken bool
-		if site.Surface == SurfaceStepTemplate || site.Surface == SurfaceStepControl {
-			referencesToken, err = expression.ReferencesStepGitHubToken(site.Source)
-		} else {
-			referencesToken, err = expression.ReferencesGitHubToken(site.Source)
-		}
-		if err != nil {
-			return err
-		}
-		authority.GitHubToken = authority.GitHubToken || referencesToken
 		return nil
 	})
 	if err != nil {
 		return Authority{}, err
 	}
+	// Authority follows structural guards after exhaustive validation and
+	// ordinary-secret inventory. Known-false conditions narrow token effects;
+	// unknown conditions conservatively retain them.
+	engine := expression.NewEngine()
+	analyze := func(site Site) (expression.Analysis, error) {
+		return engine.Analyze(site.expressionSite(), options.Values)
+	}
+	for _, guard := range workflow.Job.Guards {
+		analysis, err := analyze(guard.Condition)
+		if err != nil {
+			return Authority{}, err
+		}
+		authority.GitHubToken = authority.GitHubToken || grantsToken(analysis.Effects.GitHubToken)
+		if analysis.Value.Known && !truthy(analysis.Value.Value) {
+			return finishAuthority(found, authority), nil
+		}
+	}
+	jobCondition, err := analyze(workflow.Job.Condition)
+	if err != nil {
+		return Authority{}, err
+	}
+	authority.GitHubToken = authority.GitHubToken || grantsToken(jobCondition.Effects.GitHubToken)
+	if jobCondition.Value.Known && !truthy(jobCondition.Value.Value) {
+		return finishAuthority(found, authority), nil
+	}
+	for _, step := range workflow.Job.Steps {
+		condition, err := analyze(step.Condition)
+		if err != nil {
+			return Authority{}, err
+		}
+		authority.GitHubToken = authority.GitHubToken || grantsToken(condition.Effects.GitHubToken)
+		if condition.Value.Known && !truthy(condition.Value.Value) {
+			continue
+		}
+		stepProgram := Program{Version: Version, Job: Job{Steps: []Step{step}}}
+		err = stepProgram.VisitSites(func(site Site) error {
+			if site.Surface == SurfaceStepCondition {
+				return nil
+			}
+			analysis, err := analyze(site)
+			if err == nil {
+				authority.GitHubToken = authority.GitHubToken || grantsToken(analysis.Effects.GitHubToken)
+			}
+			return err
+		})
+		if err != nil {
+			return Authority{}, err
+		}
+	}
+	// Job setup and outputs are outside step guards.
+	setup := workflow
+	setup.Job.Guards, setup.Job.Condition, setup.Job.Steps = nil, Site{}, nil
+	err = setup.VisitSites(func(site Site) error {
+		analysis, err := analyze(site)
+		if err == nil {
+			authority.GitHubToken = authority.GitHubToken || grantsToken(analysis.Effects.GitHubToken)
+		}
+		return err
+	})
+	if err != nil {
+		return Authority{}, err
+	}
+	return finishAuthority(found, authority), nil
+}
+
+func grantsToken(effect expression.GitHubTokenEffect) bool {
+	return effect&(expression.GitHubTokenDirect|expression.GitHubTokenWorkflowContext) != 0
+}
+
+func finishAuthority(found map[string]struct{}, authority Authority) Authority {
 	authority.Secrets = make([]string, 0, len(found))
 	for name := range found {
 		authority.Secrets = append(authority.Secrets, name)
 	}
 	sort.Strings(authority.Secrets)
-	return authority, nil
+	return authority
 }
 
-func inventoryConditionAuthority(source string, found map[string]struct{}, authority *Authority) error {
-	names, err := expression.ConditionSecretReferences(source)
-	if err != nil {
-		return err
+func truthy(value any) bool {
+	switch value := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return value
+	case string:
+		return value != ""
+	case int:
+		return value != 0
+	case float64:
+		return value != 0
+	default:
+		return true
 	}
-	for _, name := range names {
-		found[name] = struct{}{}
-	}
-	referencesToken, err := expression.ConditionReferencesGitHubToken(source)
-	if err != nil {
-		return err
-	}
-	authority.GitHubToken = authority.GitHubToken || referencesToken
-	return nil
 }

@@ -14,11 +14,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -133,6 +135,7 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 		Steps:        []plan.Step{{ID: "produce", Kind: "run", Command: `echo "result=cli-ok" >> "$GITHUB_OUTPUT"`}},
 		RequiresMise: &requiresMise,
 	}
+	attachCLIExecutionProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -867,6 +870,7 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
 		RequiresMise:         &requiresMise,
 	}
+	attachCLIExecutionProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -941,8 +945,86 @@ func cliRunJobPlan() plan.Job {
 	}
 }
 
+func attachCLIExecutionProgram(job *plan.Job) {
+	actions := map[string]executionprogram.Action{}
+	for _, lock := range job.Actions {
+		action := executionprogram.Action{Runtime: "node24", Main: "index.js", PreIf: cliProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean), PostIf: cliProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean)}
+		action.PreIf.Provenance, action.PostIf.Provenance = executionprogram.ProvenanceAction, executionprogram.ProvenanceAction
+		if lock.DockerImage != "" {
+			action.Runtime, action.Main, action.Image = "docker", "", lock.DockerImage
+		}
+		actions[lock.ID] = action
+	}
+	normalized := executionprogram.Program{Version: executionprogram.Version, Actions: actions, Job: executionprogram.Job{
+		Condition: cliProgramSite(job.Condition, executionprogram.SurfaceJobCondition, executionprogram.ResultBoolean), ContinueOnError: job.ContinueOnError, TimeoutMinutes: job.TimeoutMinutes,
+		Env:      cliProgramBindings(job.Env, executionprogram.SurfaceJobEnvironment, executionprogram.PurposeExpression),
+		Defaults: executionprogram.Defaults{Shell: cliProgramSite(job.DefaultShell, executionprogram.SurfaceJobDefault, executionprogram.ResultString), WorkingDirectory: cliProgramSite(job.DefaultWorkingDirectory, executionprogram.SurfaceJobDefault, executionprogram.ResultString)},
+		Outputs:  cliProgramBindings(job.Outputs, executionprogram.SurfaceJobOutput, executionprogram.PurposeExpression),
+	}}
+	normalized.Job.Guards = make([]executionprogram.Guard, len(job.CallGuards))
+	for i, guard := range job.CallGuards {
+		normalized.Job.Guards[i].Condition = cliProgramSite(guard.Condition, executionprogram.SurfaceCallCondition, executionprogram.ResultBoolean)
+	}
+	normalized.Job.Steps = make([]executionprogram.Step, len(job.Steps))
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		projected := executionprogram.Step{ID: step.ID, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Env: cliProgramBindings(step.Env, executionprogram.SurfaceStepTemplate, executionprogram.PurposeExpression), Condition: cliProgramSite(step.Condition, executionprogram.SurfaceStepCondition, executionprogram.ResultBoolean), ContinueOnError: executionprogram.BoolControl{Literal: step.ContinueOnError}, TimeoutMinutes: executionprogram.NumberControl{Literal: step.TimeoutMinutes}, Name: cliProgramSite(step.Name, executionprogram.SurfaceStepTemplate, executionprogram.ResultString)}
+		if step.ContinueOnErrorExpression != "" {
+			value := cliProgramSite(step.ContinueOnErrorExpression, executionprogram.SurfaceStepControl, executionprogram.ResultBoolean)
+			projected.ContinueOnError.Expression = &value
+		}
+		if step.TimeoutMinutesExpression != "" {
+			value := cliProgramSite(step.TimeoutMinutesExpression, executionprogram.SurfaceStepControl, executionprogram.ResultNumber)
+			projected.TimeoutMinutes.Expression = &value
+		}
+		switch step.Kind {
+		case "run":
+			projected.Run = &executionprogram.Run{Command: cliProgramSite(step.Command, executionprogram.SurfaceStepTemplate, executionprogram.ResultString), Shell: cliProgramSite(step.Shell, executionprogram.SurfaceStepTemplate, executionprogram.ResultString), WorkingDirectory: cliProgramSite(step.WorkingDirectory, executionprogram.SurfaceStepTemplate, executionprogram.ResultString)}
+		case "uses":
+			projected.Invocation = &executionprogram.Invocation{Uses: cliProgramSite(step.Uses, executionprogram.SurfaceRuntimeTemplate, executionprogram.ResultString), With: cliProgramBindings(step.With, executionprogram.SurfaceStepTemplate, executionprogram.PurposeActionInput)}
+			if step.Action != nil {
+				projected.Invocation.Lock = step.Action.Lock
+			}
+		}
+		normalized.Job.Steps[i] = projected
+		step.Execution = &normalized.Job.Steps[i]
+	}
+	if job.Container != nil {
+		normalized.Job.Container = &executionprogram.Container{Image: cliProgramSite(job.Container.Image, executionprogram.SurfaceRuntimeTemplate, executionprogram.ResultString), Env: cliProgramBindings(job.Container.Env, executionprogram.SurfaceRuntimeTemplate, executionprogram.PurposeExpression), Ports: cliProgramSites(job.Container.Ports, executionprogram.SurfaceRuntimeTemplate)}
+	}
+	job.Program = &normalized
+}
+
+func cliProgramSite(source string, surface executionprogram.Surface, result executionprogram.ResultType) executionprogram.Site {
+	return executionprogram.Site{Source: source, Surface: surface, Result: result, Provenance: executionprogram.ProvenanceWorkflow, Purpose: executionprogram.PurposeExpression}
+}
+
+func cliProgramBindings(values map[string]string, surface executionprogram.Surface, purpose executionprogram.Purpose) []executionprogram.Binding {
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]executionprogram.Binding, 0, len(names))
+	for _, name := range names {
+		value := cliProgramSite(values[name], surface, executionprogram.ResultString)
+		value.Purpose = purpose
+		result = append(result, executionprogram.Binding{Name: name, Value: value})
+	}
+	return result
+}
+
+func cliProgramSites(values []string, surface executionprogram.Surface) []executionprogram.Site {
+	result := make([]executionprogram.Site, len(values))
+	for i, value := range values {
+		result[i] = cliProgramSite(value, surface, executionprogram.ResultString)
+	}
+	return result
+}
+
 func writeCLIJobPlan(t *testing.T, job plan.Job) (string, string) {
 	t.Helper()
+	attachCLIExecutionProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
 		t.Fatal(err)

@@ -10,15 +10,19 @@ import (
 	"github.com/rhysd/actionlint"
 )
 
-// ValidateActionInputDefault verifies the restricted compound expression
+// validateActionInputDefault verifies the restricted compound expression
 // surface supported only while evaluating action metadata input defaults.
-func ValidateActionInputDefault(template string) error {
-	referencesJobStatus, err := ReferencesJobStatus(template)
+func validateActionInputDefault(template string) error {
+	return validateActionInputDefaultTemplate(template)
+}
+
+func validateActionInputDefaultTemplate(template string) error {
+	referencesJobStatus, err := templateReferencesJobStatus(template)
 	if err != nil {
 		return err
 	}
 	if referencesJobStatus {
-		root, path, err := ReferencePath(template)
+		root, path, err := staticReferencePath(template)
 		if err != nil || !isJobStatusReference(root, path) {
 			return fmt.Errorf("action input default job.status must be one direct expression")
 		}
@@ -95,9 +99,9 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 	return validator.validate(node)
 }
 
-// EvaluateActionInputDefault substitutes the restricted compound expressions
+// evaluateActionInputDefault substitutes the restricted compound expressions
 // supported only in action metadata input defaults.
-func EvaluateActionInputDefault(template string, context Context) (string, error) {
+func evaluateActionInputDefault(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateActionInputDefaultNode)
 }
 
@@ -118,8 +122,8 @@ func isRunnerTempReference(root string, path []string) bool {
 // reach github.token for the event provider. A token branch guarded by an
 // unknown runtime value requires the token because that value is not known
 // during compilation.
-func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, error) {
-	referencesToken, err := ReferencesGitHubToken(template)
+func actionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, error) {
+	referencesToken, err := templateReferencesGitHubToken(template)
 	if err != nil || !referencesToken {
 		return referencesToken, err
 	}

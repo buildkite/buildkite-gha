@@ -9,11 +9,12 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
 
 type registeredPost struct {
-	condition  string
-	invocation *preparedInvocation
+	conditionSite *executionprogram.Site
+	invocation    *preparedInvocation
 }
 
 type postRegistry struct {

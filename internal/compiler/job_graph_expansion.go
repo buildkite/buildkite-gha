@@ -234,7 +234,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		conditionValidationJob := instanceJob
 		conditionContext := jobContext
 		conditionContext.Matrix = matrix
-		if resolved, err := expression.EvaluateCompileCondition(instanceJob.If, conditionContext); err == nil && !resolved {
+		if value, err := evaluateCompileSite(instanceJob.If, expression.ProfileCompileJobCondition, expression.ResultBoolean, conditionContext); err == nil && !value.(bool) {
 			instanceJob.If = "false"
 			instanceJob.Steps = []workflow.Step{{Name: "Statically disabled job", Kind: "run", Run: ":", If: "false", Span: job.Span}}
 		}

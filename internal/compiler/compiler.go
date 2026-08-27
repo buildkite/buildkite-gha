@@ -364,7 +364,8 @@ func resolveWorkflowRunName(path string, parsed *workflow.Workflow, context expr
 	if strings.TrimSpace(parsed.RunName) == "" {
 		return "", nil
 	}
-	resolved, err := expression.EvaluateRunName(parsed.RunName, context)
+	value, err := evaluateCompileSite(parsed.RunName, expression.ProfileRunName, expression.ResultString, context)
+	resolved, _ := value.(string)
 	if err == nil {
 		if strings.TrimSpace(resolved) == "" {
 			return "", nil
@@ -380,7 +381,7 @@ func validateWorkflowRunName(path string, parsed *workflow.Workflow) error {
 	if strings.TrimSpace(parsed.RunName) == "" {
 		return nil
 	}
-	if err := expression.ValidateRunName(parsed.RunName); err != nil {
+	if err := validateCompileSite(parsed.RunName, expression.ProfileRunName, expression.ResultString); err != nil {
 		position := parsed.RunNameSpan.Start
 		return attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, position.Line, position.Column, "", "", "", 0,
 			fmt.Errorf("%s:%d:%d: workflow run-name: %w", path, position.Line, position.Column, err))
@@ -565,11 +566,11 @@ func resolveCompileContainer(container *workflow.Container, context expression.C
 	resolved.Env = cloneMap(container.Env)
 	resolved.Ports = append([]string(nil), container.Ports...)
 	if strings.Contains(resolved.Image, "${{") {
-		image, err := expression.EvaluateCompileStringTemplate(resolved.Image, context)
+		value, err := evaluateCompileSite(resolved.Image, expression.ProfileCompileTemplate, expression.ResultString, context)
 		if err != nil {
 			return nil, err
 		}
-		resolved.Image = image
+		resolved.Image = value.(string)
 	}
 	if strings.TrimSpace(resolved.Image) == "" {
 		return nil, fmt.Errorf("container image resolved to an empty string")
@@ -591,10 +592,10 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 			credentials := *container.Credentials
 			container.Credentials = &credentials
 			for _, field := range []*string{&container.Credentials.Username, &container.Credentials.Password} {
-				if err := expression.ValidateServiceCredentialTemplate(*field); err != nil {
+				if err := validateCompileSite(*field, expression.ProfileServiceCredential, expression.ResultString); err != nil {
 					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
 				}
-				value, err := expression.EvaluateAvailableCompileTemplate(*field, context)
+				value, err := reducePartialTemplateString(*field, expression.ProfileServiceCredential, context)
 				if err != nil {
 					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
 				}
@@ -603,14 +604,14 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 		}
 		fields := []*string{&container.Image, &container.Options, &container.Command, &container.Entrypoint}
 		for _, field := range fields {
-			value, err := expression.EvaluateAvailableCompileTemplate(*field, context)
+			value, err := reducePartialTemplateString(*field, expression.ProfileServiceTemplate, context)
 			if err != nil {
 				return nil, fmt.Errorf("service %q: %w", service.Name, err)
 			}
 			*field = value
 		}
 		for key, value := range container.Env {
-			resolvedValue, err := expression.EvaluateAvailableCompileTemplate(value, context)
+			resolvedValue, err := reducePartialTemplateString(value, expression.ProfileServiceTemplate, context)
 			if err != nil {
 				return nil, fmt.Errorf("service %q environment %q: %w", service.Name, key, err)
 			}
@@ -618,7 +619,7 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 		}
 		for _, values := range [][]string{container.Ports, container.Volumes} {
 			for j, value := range values {
-				resolvedValue, err := expression.EvaluateAvailableCompileTemplate(value, context)
+				resolvedValue, err := reducePartialTemplateString(value, expression.ProfileServiceTemplate, context)
 				if err != nil {
 					return nil, fmt.Errorf("service %q: %w", service.Name, err)
 				}
@@ -627,7 +628,7 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 		}
 		for _, value := range append(append(append([]string{container.Image, container.Options, container.Command, container.Entrypoint}, container.Ports...), container.Volumes...), mapValues(container.Env)...) {
 			if strings.Contains(value, "${{") {
-				if err := expression.ValidateServiceRuntimeTemplate(value); err != nil {
+				if err := validateCompileSite(value, expression.ProfileServiceTemplate, expression.ResultString); err != nil {
 					return nil, fmt.Errorf("service %q: %w", service.Name, err)
 				}
 			}
@@ -654,7 +655,8 @@ func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, c
 		return "", nil
 	}
 	context.Matrix = matrix
-	group, err := expression.EvaluateCompileTemplate(concurrency.Group, context)
+	value, err := evaluateCompileSite(concurrency.Group, expression.ProfileCompileTemplate, expression.ResultString, context)
+	group, _ := value.(string)
 	if err != nil {
 		message := fmt.Sprintf("concurrency group cannot be resolved at compile time: %v", err)
 		if jobID == "" {
@@ -683,7 +685,7 @@ func resolveWorkflowCancellation(path string, concurrency *workflow.Concurrency,
 	if concurrency == nil || concurrency.CancelInProgressExpression == nil {
 		return concurrency != nil && concurrency.CancelInProgress, nil
 	}
-	value, err := expression.EvaluateCompile(*concurrency.CancelInProgressExpression, context)
+	value, err := evaluateCompileSite(concurrency.CancelInProgressExpression.Text, expression.ProfileCompile, expression.ResultAny, context)
 	if err != nil {
 		position := concurrency.CancelInProgressPosition
 		return false, fmt.Errorf("%s:%d:%d: workflow concurrency cancel-in-progress cannot be resolved at compile time: %v", path, position.Line, position.Column, err)
@@ -736,59 +738,68 @@ func supported(path string, job workflow.Job) error {
 
 func resolveCompileTimeConditions(job workflow.Job, context expression.CompileContext, matrix map[string]any) workflow.Job {
 	context.Matrix = matrix
-	if resolved, ok := resolveCompileTimeCondition(job.If, context); ok {
+	if resolved, ok := resolveCompileTimeCondition(job.If, expression.ProfileCompileJobCondition, context); ok {
 		job.If = resolved
 	}
 	job.Steps = append([]workflow.Step(nil), job.Steps...)
 	for i := range job.Steps {
 		step := &job.Steps[i]
-		if resolved, ok := resolveCompileTimeCondition(step.If, context); ok {
+		if resolved, ok := resolveCompileTimeCondition(step.If, expression.ProfileCompileStepCondition, context); ok {
 			step.If = resolved
 		}
 	}
 	return job
 }
 
-func resolveCompileTimeCondition(source string, context expression.CompileContext) (string, bool) {
-	usesEvent, err := expression.ReferencesGitHubEvent(source)
+func resolveCompileTimeCondition(source string, profile expression.ProfileID, context expression.CompileContext) (string, bool) {
+	usesEvent, err := siteReferencesEvent(source, profile, expression.ResultBoolean, true)
 	if err != nil || !usesEvent {
 		return source, false
 	}
-	resolved, err := expression.EvaluateCompileCondition(source, context)
-	if err == nil {
+	reduced, err := reduceCompileSite(source, profile, expression.ResultBoolean, context)
+	if err != nil {
+		return source, false
+	}
+	if reduced.Known {
+		resolved, _ := reduced.Value.(bool)
 		if resolved {
-			referencesStatus, _ := expression.ReferencesStatusFunction(source)
+			referencesStatus, _ := referencesStatus(source, profile)
 			if referencesStatus {
 				return "always()", true
 			}
 		}
 		return strconv.FormatBool(resolved), true
 	}
-	reduced, err := expression.ReduceCompileCondition(source, context)
-	if err != nil {
-		return source, false
-	}
-	return reduced, true
+	return reduced.Source, true
 }
 
 func supportedConditions(path string, job workflow.Job, matrix map[string]any, matrixKnown bool) error {
-	validate := expression.ValidateCondition
-	if matrixKnown {
-		validate = func(source string, scope expression.ConditionScope) error {
-			return expression.ValidateConditionWithMatrix(source, scope, matrix)
+	validate := func(source string, scope expression.ConditionScope) error {
+		profile, err := runtimeConditionProfile(scope)
+		if err != nil {
+			return err
 		}
+		return validateCompileSite(source, profile, expression.ResultBoolean)
 	}
+	_ = matrix
+	_ = matrixKnown
 	return validateConditions(path, job, validate)
 }
 
 func supportedCompileTimeConditions(path string, job workflow.Job, context expression.CompileContext, matrix map[string]any) error {
 	validate := func(source string, scope expression.ConditionScope) error {
-		usesEvent, err := expression.ReferencesGitHubEvent(source)
+		profile, err := compileConditionProfile(scope)
+		if err != nil {
+			return err
+		}
+		usesEvent, err := siteReferencesEvent(source, profile, expression.ResultBoolean, true)
 		if err != nil || !usesEvent {
 			return nil
 		}
-		return expression.ValidateCompileConditionWithMatrix(source, scope, context, matrix)
+		_, err = reduceCompileSite(source, profile, expression.ResultBoolean, context)
+		return err
 	}
+	_ = matrix
 	return validateConditions(path, job, validate)
 }
 

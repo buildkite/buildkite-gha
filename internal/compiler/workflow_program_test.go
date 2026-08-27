@@ -44,7 +44,7 @@ func TestWorkflowProgramInventoriesEveryExecutionField(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"job.call-guards[0].if|job-condition|boolean|expression",
+		"job.call-guards[0].if|call-condition|boolean|expression",
 		"job.if|job-condition|boolean|expression",
 		"job.env.A|job-environment|string|expression",
 		"job.env.Z|job-environment|string|expression",
@@ -53,15 +53,15 @@ func TestWorkflowProgramInventoriesEveryExecutionField(t *testing.T) {
 		"job.container.image|runtime-template|string|expression",
 		"job.container.env.C|runtime-template|string|expression",
 		"job.container.ports[0]|runtime-template|string|expression",
-		"job.services.db.image|runtime-template|string|expression",
+		"job.services.db.image|service-template|string|expression",
 		"job.services.db.credentials.username|service-credential|string|expression",
 		"job.services.db.credentials.password|service-credential|string|expression",
-		"job.services.db.env.S|runtime-template|string|expression",
-		"job.services.db.ports[0]|runtime-template|string|expression",
-		"job.services.db.volumes[0]|runtime-template|string|expression",
-		"job.services.db.options|runtime-template|string|expression",
-		"job.services.db.command|runtime-template|string|expression",
-		"job.services.db.entrypoint|runtime-template|string|expression",
+		"job.services.db.env.S|service-template|string|expression",
+		"job.services.db.ports[0]|service-template|string|expression",
+		"job.services.db.volumes[0]|service-template|string|expression",
+		"job.services.db.options|service-template|string|expression",
+		"job.services.db.command|service-template|string|expression",
+		"job.services.db.entrypoint|service-template|string|expression",
 		"job.services|service-map|object|expression",
 		"job.steps[0].env.R|step-template|string|expression",
 		"job.steps[0].if|step-condition|boolean|expression",
@@ -116,14 +116,14 @@ func TestWorkflowProgramProjectsLegacyPlanSteps(t *testing.T) {
 func TestProgramOwnedSecretInventory(t *testing.T) {
 	instance := JobInstance{
 		secretAuthority: secretAuthority{unrestricted: true},
-		If:              "secrets.CONDITION != ''",
+		If:              "github.ref != ''",
 		Env:             map[string]string{"VALUE": "${{ secrets.JOB_ENV }}"},
 		Outputs:         map[string]string{"value": "${{ secrets.JOB_OUTPUT }}"},
 		Services: []workflow.Service{{Name: "db", Container: workflow.ServiceContainer{
-			Image: "postgres", Command: "start --token=${{ github.token }}",
+			Image: "postgres", Command: "start",
 		}}},
 		Steps: []workflow.Step{
-			{Kind: "run", Run: "echo ${{ secrets.RUN }}", Name: "${{ toJSON(github) }}"},
+			{Kind: "run", Run: "echo ${{ secrets.RUN }}", Name: "${{ toJSON(github) }}", Env: map[string]string{"CONDITION": "${{ secrets.CONDITION }}"}},
 			{Kind: "uses", Uses: "owner/action@v1", With: map[string]string{"ignored": "${{ secrets.INSPECTED_INPUT }}"}},
 		},
 	}

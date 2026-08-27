@@ -52,7 +52,7 @@ func runCompatibilityGapWorkflow(t *testing.T, name string) {
 	if len(bundle.Plans) != 1 {
 		t.Fatalf("plans = %d, want 1", len(bundle.Plans))
 	}
-	result, err := (Runner{}).RunJob(t.Context(), bundle.Plans[0].Job, root)
+	result, err := (Runner{}).runTestJob(t.Context(), bundle.Plans[0].Job, root)
 	if err != nil {
 		t.Fatalf("RunJob() conclusion = %q, error = %v", result.Conclusion, err)
 	}

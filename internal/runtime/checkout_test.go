@@ -21,6 +21,7 @@ import (
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
 
 func TestAnonymousCheckoutAdapterPopulatesVerifiedWorkspace(t *testing.T) {
@@ -115,7 +116,11 @@ esac
 		RequiresMise: &requiresMise,
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
-	result, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, workspace)
+	attachTestProgram(&job)
+	if err := attachTestActionProgramFromRoot(&job, localID, localFixture, "."); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (Runner{Git: git, Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Env["CHECKOUT_CHAIN"] != "ok" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -149,7 +154,7 @@ esac
 	if err := os.Remove(gitLog); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, t.TempDir()); err == nil || !strings.Contains(err.Error(), "dynamic ref must resolve to the exact event SHA") {
+	if _, err := (Runner{Git: git, Actions: materializer}).runTestJob(t.Context(), job, t.TempDir()); err == nil || !strings.Contains(err.Error(), "dynamic ref must resolve to the exact event SHA") {
 		t.Fatalf("dynamic checkout ref error = %v", err)
 	}
 	if _, err := os.Stat(gitLog); !os.IsNotExist(err) {
@@ -160,14 +165,14 @@ esac
 
 	job.Actions[0].Commit = strings.Repeat("0", 40)
 	unknownWorkspace := t.TempDir()
-	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, unknownWorkspace); err != nil {
+	if _, err := (Runner{Git: git, Actions: materializer}).runTestJob(t.Context(), job, unknownWorkspace); err != nil {
 		t.Fatalf("unknown checkout fallback error = %v", err)
 	}
 	if err := os.Remove(gitLog); err != nil {
 		t.Fatal(err)
 	}
 	job.Actions[0].Commit = strings.Repeat("z", 40)
-	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, t.TempDir()); err == nil || !strings.Contains(err.Error(), "invalid GitHub identity") {
+	if _, err := (Runner{Git: git, Actions: materializer}).runTestJob(t.Context(), job, t.TempDir()); err == nil || !strings.Contains(err.Error(), "invalid GitHub identity") {
 		t.Fatalf("malformed checkout commit error = %v", err)
 	}
 	if _, err := os.Stat(gitLog); !os.IsNotExist(err) {
@@ -177,7 +182,7 @@ esac
 	job.Actions[0].Commit = actionintegration.CheckoutV7Commit
 	job.Actions[0].SourceDigest = "sha256:" + strings.Repeat("0", 64)
 	secondWorkspace := t.TempDir()
-	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, secondWorkspace); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+	if _, err := (Runner{Git: git, Actions: materializer}).runTestJob(t.Context(), job, secondWorkspace); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
 		t.Fatalf("tampered checkout lock error = %v", err)
 	}
 	if _, err := os.Stat(gitLog); !os.IsNotExist(err) {
@@ -843,6 +848,7 @@ func runTestGit(t *testing.T, directory string, args ...string) string {
 
 func runTestGitInput(t *testing.T, directory string, input []byte, args ...string) string {
 	t.Helper()
+	args = append([]string{"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"}, args...)
 	if directory != "" {
 		args = append([]string{"-C", directory}, args...)
 	}
@@ -1249,7 +1255,7 @@ func TestValidateCheckoutRefProvenance(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := validateCheckoutRefProvenance(map[string]string{"Ref": test.sourceRef}, map[string]string{"ref": test.value}, eventSHA)
+			err := validateCheckoutRefProvenance([]executionprogram.Binding{{Name: "Ref", Value: testProgramSite(test.sourceRef, executionprogram.SurfaceStepTemplate, executionprogram.ResultString)}}, map[string]string{"ref": test.value}, eventSHA)
 			if test.wantError && (err == nil || !strings.Contains(err.Error(), "exact event SHA")) {
 				t.Fatalf("validateCheckoutRefProvenance() error = %v, want exact event SHA error", err)
 			}
@@ -1513,7 +1519,7 @@ fi
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: remoteDigest}}
 	var logs bytes.Buffer
 	credentials := &AgentRepositoryCredentials{JobID: testCacheJobID, JobToken: "job-secret"}
-	result, err := (Runner{Node24: node, RepositoryCredentials: credentials, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: node, RepositoryCredentials: credentials, Actions: materializer, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -1638,7 +1644,7 @@ esac
 			}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
 			var logs bytes.Buffer
-			result, err := (Runner{Git: git, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+			result, err := (Runner{Git: git, Actions: materializer, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 			if err != nil || result.Conclusion != "success" {
 				t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 			}
@@ -1675,7 +1681,7 @@ func TestContainerPreparationSkipsNativeCheckoutClassification(t *testing.T) {
 				},
 			}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
-			actions := newActionLockResolver(job, t.TempDir(), materializer)
+			actions := testActionLockResolver(t, job, t.TempDir(), materializer)
 			runner := newJobRun(Runner{})
 			if err := runner.verifyRemoteActionTree(t.Context(), actions, plan.ActionSelector{Lock: checkoutID}, nil); err != nil {
 				t.Fatalf("verifyRemoteActionTree() error = %v", err)
@@ -1719,7 +1725,7 @@ func TestProviderTokenReadRuntimeAuthorityIsCheckoutOnly(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: authority\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "ordinary", Kind: "run", Command: "true"}})
 	job.RequiredCapabilities = []string{"provider-token-read"}
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "restricted to the verified checkout adapter") {
+	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "restricted to the verified checkout adapter") {
 		t.Fatalf("ordinary provider-token-read error = %v", err)
 	}
 }
@@ -1753,9 +1759,16 @@ func TestCompositeCheckoutPreservesDynamicRefProvenance(t *testing.T) {
 		{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: actionintegration.CheckoutV7Commit, SourceDigest: remoteDigest},
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
+	attachTestProgram(&job)
+	if err := attachTestActionPrograms(&job, workspace, materializer); err != nil {
+		t.Fatal(err)
+	}
+	if got := job.Program.Actions[outerID].Steps[0].Invocation.With[0].Value.Source; got != "${{ needs.configure.outputs.sha }}" {
+		t.Fatalf("normalized composite ref = %q", got)
+	}
 
-	if _, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "dynamic ref must resolve to the exact event SHA") {
-		t.Fatalf("nested dynamic checkout ref error = %v", err)
+	if result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "dynamic ref must resolve to the exact event SHA") {
+		t.Fatalf("nested dynamic checkout ref result/error = %#v / %v", result, err)
 	}
 }
 

@@ -7,16 +7,16 @@ import (
 	"github.com/rhysd/actionlint"
 )
 
-// ValidateDockerActionArg permits literals and direct inputs.<name>
+// validateDockerActionArg permits literals and direct inputs.<name>
 // interpolation in one Docker action argument.
-func ValidateDockerActionArg(template string) error {
+func validateDockerActionArg(template string) error {
 	return visitTemplateExpressions(template, validateDockerActionArgNode)
 }
 
-// EvaluateDockerActionArg revalidates and evaluates one Docker action argument
+// evaluateDockerActionArg revalidates and evaluates one Docker action argument
 // without exposing any context other than resolved action inputs.
-func EvaluateDockerActionArg(template string, inputs map[string]string) (string, error) {
-	if err := ValidateDockerActionArg(template); err != nil {
+func evaluateDockerActionArg(template string, inputs map[string]string) (string, error) {
+	if err := validateDockerActionArg(template); err != nil {
 		return "", err
 	}
 	return evaluateRuntimeTemplate(template, Context{Inputs: inputs}, func(node actionlint.ExprNode, context Context) (any, error) {

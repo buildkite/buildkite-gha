@@ -44,28 +44,28 @@ const (
 	actionLifecycleCondition
 )
 
-// ValidateCondition verifies that a job or step condition uses only expression
+// validateCondition verifies that a job or step condition uses only expression
 // syntax, functions, and contexts implemented by the corresponding runtime
 // phase. Runtime-dependent values are not evaluated.
-func ValidateCondition(source string, scope ConditionScope) error {
+func validateConditionLegacy(source string, scope ConditionScope) error {
 	return validateCondition(source, scope, nil, false)
 }
 
-// ValidateConditionWithMatrix additionally verifies references and operand
+// validateConditionWithMatrix additionally verifies references and operand
 // types against one concrete, statically expanded matrix instance.
-func ValidateConditionWithMatrix(source string, scope ConditionScope, matrix map[string]any) error {
+func validateConditionWithMatrix(source string, scope ConditionScope, matrix map[string]any) error {
 	return validateCondition(source, scope, matrix, true)
 }
 
-// ValidateCallCondition verifies the caller-only runtime surface of a local
+// validateCallCondition verifies the caller-only runtime surface of a local
 // reusable-workflow call condition.
-func ValidateCallCondition(source string) error {
+func validateCallCondition(source string) error {
 	return validateCondition(source, CallCondition, nil, false)
 }
 
-// ValidateCompileCallCondition verifies every branch of a call condition
+// validateCompileCallCondition verifies every branch of a call condition
 // before event-backed values are reduced by the compiler.
-func ValidateCompileCallCondition(source string, context CompileContext) error {
+func validateCompileCallCondition(source string, context CompileContext) error {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return err
@@ -73,9 +73,9 @@ func ValidateCompileCallCondition(source string, context CompileContext) error {
 	return validateCompileConditionNode(node, CallCondition, context, nil)
 }
 
-// ValidateActionLifecycleCondition verifies an action pre-if or post-if
+// validateActionLifecycleCondition verifies an action pre-if or post-if
 // expression without resolving runtime-dependent values.
-func ValidateActionLifecycleCondition(source string) error {
+func validateActionLifecycleCondition(source string) error {
 	if err := validateLifecycleDelimiters(source); err != nil {
 		return err
 	}
@@ -90,11 +90,11 @@ func validateLifecycleDelimiters(source string) error {
 	return nil
 }
 
-// ValidateCompileConditionWithMatrix verifies every branch of an event-backed
+// validateCompileConditionWithMatrix verifies every branch of an event-backed
 // condition before compile-time evaluation can short-circuit it. It admits the
 // union of compile-time and runtime condition references, while retaining the
 // concrete matrix type checks used by runtime validation.
-func ValidateCompileConditionWithMatrix(source string, scope ConditionScope, context CompileContext, matrix map[string]any) error {
+func validateCompileConditionWithMatrix(source string, scope ConditionScope, context CompileContext, matrix map[string]any) error {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return err
@@ -392,10 +392,10 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 	return validationErr
 }
 
-// EvaluateActionLifecycleCondition evaluates action pre-if or post-if
+// evaluateActionLifecycleCondition evaluates action pre-if or post-if
 // metadata. Empty conditions are unconditionally true and, unlike workflow
 // step conditions, lifecycle conditions have no implicit success guard.
-func EvaluateActionLifecycleCondition(source string, context ConditionContext) (bool, error) {
+func evaluateActionLifecycleCondition(source string, context ConditionContext) (bool, error) {
 	if err := validateLifecycleDelimiters(source); err != nil {
 		return false, err
 	}
@@ -418,9 +418,9 @@ func EvaluateActionLifecycleCondition(source string, context ConditionContext) (
 	return githubTruthy(value), nil
 }
 
-// EvaluateCondition evaluates a job or step condition. Unsupported syntax and
+// evaluateCondition evaluates a job or step condition. Unsupported syntax and
 // unavailable values return an error.
-func EvaluateCondition(source string, context ConditionContext) (bool, error) {
+func evaluateConditionLegacy(source string, context ConditionContext) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil {
 		return false, err

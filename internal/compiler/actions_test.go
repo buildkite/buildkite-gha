@@ -2126,8 +2126,8 @@ runs:
 		if err != nil {
 			t.Fatal(err)
 		}
-		if bytes.Contains(encoded, []byte("/bin/echo")) {
-			t.Fatalf("job plan retained Docker action entrypoint: %s", encoded)
+		if !bytes.Contains(encoded, []byte(`"entrypoint": "/bin/echo"`)) {
+			t.Fatalf("job plan omitted normalized Docker action entrypoint: %s", encoded)
 		}
 		return encoded
 	}

@@ -11,7 +11,7 @@ import (
 
 func lowerWorkflowProgram(instance JobInstance) program.Program {
 	jobLocation := programLocation(instance.SourcePath, "job", instance.Source)
-	result := program.Program{Job: program.Job{
+	result := program.Program{Version: program.Version, Job: program.Job{
 		Condition:       workflowSite(instance.If, program.SurfaceJobCondition, program.ResultBoolean, jobLocation, "job.if"),
 		ContinueOnError: instance.ContinueOnError,
 		TimeoutMinutes:  instance.TimeoutMinutes,
@@ -26,7 +26,7 @@ func lowerWorkflowProgram(instance JobInstance) program.Program {
 		result.Job.Guards = make([]program.Guard, len(instance.CallGuards))
 		for i, guard := range instance.CallGuards {
 			field := fmt.Sprintf("job.call-guards[%d].if", i)
-			result.Job.Guards[i] = program.Guard{Condition: workflowSite(guard.Condition, program.SurfaceJobCondition, program.ResultBoolean, jobLocation, field)}
+			result.Job.Guards[i] = program.Guard{Condition: workflowSite(guard.Condition, program.SurfaceCallCondition, program.ResultBoolean, jobLocation, field)}
 		}
 	}
 	if instance.Container != nil {
@@ -43,13 +43,13 @@ func lowerWorkflowProgram(instance JobInstance) program.Program {
 			location := programLocation(instance.SourcePath, field, service.Container.Span)
 			container := service.Container
 			lowered := program.ServiceContainer{
-				Image:      workflowSite(container.Image, program.SurfaceRuntimeTemplate, program.ResultString, location, field+".image"),
-				Env:        workflowBindings(container.Env, program.SurfaceRuntimeTemplate, location, field+".env", program.PurposeExpression),
-				Ports:      workflowSites(container.Ports, program.SurfaceRuntimeTemplate, program.ResultString, location, field+".ports"),
-				Volumes:    workflowSites(container.Volumes, program.SurfaceRuntimeTemplate, program.ResultString, location, field+".volumes"),
-				Options:    workflowSite(container.Options, program.SurfaceRuntimeTemplate, program.ResultString, location, field+".options"),
-				Command:    workflowSite(container.Command, program.SurfaceRuntimeTemplate, program.ResultString, location, field+".command"),
-				Entrypoint: workflowSite(container.Entrypoint, program.SurfaceRuntimeTemplate, program.ResultString, location, field+".entrypoint"),
+				Image:      workflowSite(container.Image, program.SurfaceServiceTemplate, program.ResultString, location, field+".image"),
+				Env:        workflowBindings(container.Env, program.SurfaceServiceTemplate, location, field+".env", program.PurposeExpression),
+				Ports:      workflowSites(container.Ports, program.SurfaceServiceTemplate, program.ResultString, location, field+".ports"),
+				Volumes:    workflowSites(container.Volumes, program.SurfaceServiceTemplate, program.ResultString, location, field+".volumes"),
+				Options:    workflowSite(container.Options, program.SurfaceServiceTemplate, program.ResultString, location, field+".options"),
+				Command:    workflowSite(container.Command, program.SurfaceServiceTemplate, program.ResultString, location, field+".command"),
+				Entrypoint: workflowSite(container.Entrypoint, program.SurfaceServiceTemplate, program.ResultString, location, field+".entrypoint"),
 			}
 			if container.Credentials != nil {
 				lowered.Credentials = &program.ContainerCredentials{
@@ -134,6 +134,7 @@ func lowerWorkflowSteps(sourcePath string, source []workflow.Step) []program.Ste
 func projectPlanSteps(source []program.Step) []plan.Step {
 	steps := make([]plan.Step, len(source))
 	for i, step := range source {
+		execution := step
 		steps[i] = plan.Step{
 			ID: step.ID, Name: step.Name.Source, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...),
 			Env: programBindingMap(step.Env), Condition: step.Condition.Source,
@@ -142,6 +143,7 @@ func projectPlanSteps(source []program.Step) []plan.Step {
 				Start: plan.Position{Line: step.Source.Start.Line, Column: step.Source.Start.Column},
 				End:   plan.Position{Line: step.Source.End.Line, Column: step.Source.End.Column},
 			},
+			Execution: &execution,
 		}
 		if step.ContinueOnError.Expression != nil {
 			steps[i].ContinueOnErrorExpression = step.ContinueOnError.Expression.Source

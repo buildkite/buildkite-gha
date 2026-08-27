@@ -108,7 +108,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	}
 	sort.Strings(envNames)
 	for _, name := range envNames {
-		if err := expression.ValidateRuntimeTemplate(owned.Env[name]); err != nil {
+		if err := validateExpressionSite(owned.Env[name], expression.ProfileRuntimeTemplate, expression.ResultString); err != nil {
 			return nil, fmt.Errorf("%s: workflow env %q: %w", path, name, err)
 		}
 	}
@@ -119,10 +119,10 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		if parsed.Defaults.Run.WorkingDirectory != nil {
 			owned.DefaultWorkingDirectory = parsed.Defaults.Run.WorkingDirectory.Value
 		}
-		if err := expression.ValidateRuntimeTemplate(owned.DefaultShell); err != nil {
+		if err := validateExpressionSite(owned.DefaultShell, expression.ProfileRuntimeTemplate, expression.ResultString); err != nil {
 			return nil, fmt.Errorf("%s: workflow default shell: %w", path, err)
 		}
-		if err := expression.ValidateRuntimeTemplate(owned.DefaultWorkingDirectory); err != nil {
+		if err := validateExpressionSite(owned.DefaultWorkingDirectory, expression.ProfileRuntimeTemplate, expression.ResultString); err != nil {
 			return nil, fmt.Errorf("%s: workflow default working-directory: %w", path, err)
 		}
 	}
@@ -142,7 +142,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 			if input.Default != nil {
 				value := Value{Data: scalarAt(input.Default, scalars), Span: spanFrom(input.Default.Pos, input.Default.Value)}
 				if text, ok := value.Data.(string); ok && strings.Contains(text, "${{") {
-					if err := expression.ValidateReusableInputDefault(text); err != nil {
+					if err := validateExpressionSite(text, expression.ProfileReusableInput, expression.ResultString); err != nil {
 						message := fmt.Sprintf("default for workflow_call input %q is invalid: %v", input.ID, err)
 						if strings.Contains(err.Error(), `context "inputs" is unavailable`) {
 							message = fmt.Sprintf("default for workflow_call input %q references workflow-dispatch inputs, which are unavailable during compilation", input.ID)
@@ -602,7 +602,7 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 	if in.Services != nil {
 		if in.Services.Expression != nil {
 			out.ServicesExpression = in.Services.Expression.Value
-			if err := expression.ValidateServiceMapRuntimeExpression(out.ServicesExpression); err != nil {
+			if err := validateExpressionSite(out.ServicesExpression, expression.ProfileServiceMap, expression.ResultObject); err != nil {
 				return Job{}, locatedError(path, in.Services.Expression.Pos, in.ID.Value, err.Error())
 			}
 		} else {
@@ -1632,7 +1632,12 @@ func workflowSpanError(path string, span Span, jobID, message string) error {
 }
 
 func adaptExpression(in *actionlint.String) (expression.Expression, error) {
-	return expression.Parse(in.Value, in.Pos.Line, in.Pos.Col)
+	return expression.NewEngine().Parse(expression.Site{Source: in.Value, Profile: expression.ProfileCompile, Result: expression.ResultAny}, in.Pos.Line, in.Pos.Col)
+}
+
+func validateExpressionSite(source string, profile expression.ProfileID, result expression.ResultType) error {
+	_, err := expression.NewEngine().Validate(expression.Site{Source: source, Profile: profile, Result: result})
+	return err
 }
 
 func locatedError(path string, pos *actionlint.Pos, jobID, message string) error {

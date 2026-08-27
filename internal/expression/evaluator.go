@@ -224,7 +224,7 @@ func (e *expressionEvaluator[T]) evaluate(node actionlint.ExprNode) (T, error) {
 		// contexts resolve as ordinary references so evaluation never
 		// exposes the whole context root.
 		staticAuthority := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets")
-		if err == nil && (staticAuthority || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
+		if err == nil && (staticAuthority || e.policy.resolveStaticIndexedReference || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
 			return e.resolve(root, path)
 		}
 		if e.resolveRoot != nil {
