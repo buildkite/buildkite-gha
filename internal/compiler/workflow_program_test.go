@@ -19,7 +19,8 @@ func TestWorkflowProgramInventoriesEveryExecutionField(t *testing.T) {
 		DefaultShell:            "job-shell",
 		DefaultWorkingDirectory: "job-directory",
 		Container: &workflow.Container{
-			Image: "container-image", Env: map[string]string{"C": "container-env"}, Ports: []string{"container-port"}, Span: span,
+			Image: "container-image", Env: map[string]string{"C": "container-env"}, Ports: []string{"container-port"},
+			Volumes: []string{"container-volume"}, Options: "container-options", Span: span,
 		},
 		Services: []workflow.Service{{Name: "db", Container: workflow.ServiceContainer{
 			Image: "service-image", Env: map[string]string{"S": "service-env"}, Ports: []string{"service-port"}, Volumes: []string{"service-volume"},
@@ -53,6 +54,8 @@ func TestWorkflowProgramInventoriesEveryExecutionField(t *testing.T) {
 		"job.container.image|runtime-template|string|expression",
 		"job.container.env.C|runtime-template|string|expression",
 		"job.container.ports[0]|runtime-template|string|expression",
+		"job.container.volumes[0]|runtime-template|string|expression",
+		"job.container.options|runtime-template|string|expression",
 		"job.services.db.image|runtime-template|string|expression",
 		"job.services.db.credentials.username|service-credential|string|expression",
 		"job.services.db.credentials.password|service-credential|string|expression",

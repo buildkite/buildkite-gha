@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -269,13 +270,13 @@ func TestParseRejectsJobPermissionShorthand(t *testing.T) {
 }
 
 func TestParseOwnsLiteralContainersInDeclarationOrder(t *testing.T) {
-	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      env: {NODE_ENV: test}\n      ports: [8080]\n    services:\n      zed: {image: redis:7}\n      alpha: {image: 'registry.example:5000/team/postgres:16', ports: ['5432:5432']}\n    steps:\n      - run: true\n")
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      env: {NODE_ENV: test}\n      ports: [8080]\n      volumes: ['cache:/cache:ro', '/anonymous', '/srv/data:/data']\n      options: --privileged --label \"description=two words\"\n    services:\n      zed: {image: redis:7}\n      alpha: {image: 'registry.example:5000/team/postgres:16', ports: ['5432:5432']}\n    steps:\n      - run: true\n")
 	parsed, err := Parse("containers.yml", source)
 	if err != nil {
 		t.Fatal(err)
 	}
 	job := parsed.Jobs[0]
-	if job.Container == nil || job.Container.Image != "node:24" || job.Container.Env["NODE_ENV"] != "test" || len(job.Services) != 2 || job.Services[0].Name != "zed" || job.Services[1].Name != "alpha" || job.Services[1].Container.Image != "registry.example:5000/team/postgres:16" {
+	if job.Container == nil || job.Container.Image != "node:24" || job.Container.Env["NODE_ENV"] != "test" || !slices.Equal(job.Container.Volumes, []string{"cache:/cache:ro", "/anonymous", "/srv/data:/data"}) || job.Container.Options != `--privileged --label "description=two words"` || len(job.Services) != 2 || job.Services[0].Name != "zed" || job.Services[1].Name != "alpha" || job.Services[1].Container.Image != "registry.example:5000/team/postgres:16" {
 		t.Fatalf("owned containers = %#v / %#v", job.Container, job.Services)
 	}
 }
@@ -364,8 +365,8 @@ func TestParseRejectsExpressionValuedServiceContainerEnvironment(t *testing.T) {
 func TestParseRejectsUnsupportedContainerControls(t *testing.T) {
 	for name, body := range map[string]string{
 		"credentials": "credentials: {username: me, password: secret}",
-		"volumes":     "volumes: ['/tmp:/tmp']",
-		"options":     "options: --privileged",
+		"command":     "command: sleep 1",
+		"entrypoint":  "entrypoint: sh",
 	} {
 		t.Run(name, func(t *testing.T) {
 			source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      " + body + "\n    steps:\n      - run: true\n")
@@ -373,6 +374,30 @@ func TestParseRejectsUnsupportedContainerControls(t *testing.T) {
 				t.Fatalf("Parse() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestParseRejectsUnsupportedJobContainerOptionsAndVolumes(t *testing.T) {
+	for name, body := range map[string]string{
+		"network option":          "options: --network host",
+		"entrypoint option":       "options: --entrypoint sh",
+		"option expression":       "options: --cpus ${{ matrix.cpus }}",
+		"volume expression":       "volumes: ['${{ matrix.name }}:/data']",
+		"unsupported volume mode": "volumes: ['cache:/data:z']",
+	} {
+		t.Run(name, func(t *testing.T) {
+			source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      " + body + "\n    steps: [{run: true}]\n")
+			if _, err := Parse("containers.yml", source); err == nil {
+				t.Fatal("Parse() accepted unsupported job container control")
+			}
+		})
+	}
+}
+
+func TestParseAcceptsGitHubJobContainerOptionsAndVolumes(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      options: --privileged --cap-add SYS_ADMIN\n      volumes: ['v:/data', '/anonymous', '/tmp:/host', 'one:/same', 'two:/same', 'cache:/__w/repo']\n    steps: [{run: true}]\n")
+	if _, err := Parse("containers.yml", source); err != nil {
+		t.Fatalf("Parse() rejected GitHub-compatible job container controls: %v", err)
 	}
 }
 
@@ -566,6 +591,18 @@ func TestParseContainerShortForms(t *testing.T) {
 	}
 	if parsed.Jobs[0].Container.Image != "node:24" || len(parsed.Jobs[0].Services) != 2 {
 		t.Fatalf("containers = %#v, %#v", parsed.Jobs[0].Container, parsed.Jobs[0].Services)
+	}
+}
+
+func TestParseContainerUnderAliasedJobID(t *testing.T) {
+	source := []byte("on: push\nenv: {ID: &job-id test}\njobs:\n  *job-id:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      ports: [8080]\n      volumes: ['cache:/cache']\n      options: --cpus 2\n    steps: [{run: true}]\n")
+	parsed, err := Parse("alias.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := parsed.Jobs[0].Container
+	if container == nil || !slices.Equal(container.Ports, []string{"8080"}) || !slices.Equal(container.Volumes, []string{"cache:/cache"}) || container.Options != "--cpus 2" {
+		t.Fatalf("container = %#v", container)
 	}
 }
 

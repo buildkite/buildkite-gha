@@ -958,7 +958,7 @@ func validateJobPlanSchema(t *testing.T, encoded []byte) {
 func TestContainerContract(t *testing.T) {
 	job := validJob()
 	job.RequiredCapabilities = []string{"docker", "network"}
-	job.Container = &Container{Image: "node:24", Env: map[string]string{"NODE_ENV": "test"}, Ports: []string{"8080"}}
+	job.Container = &Container{Image: "node:24", Env: map[string]string{"NODE_ENV": "test"}, Ports: []string{"8080"}, Volumes: []string{"cache:/cache:ro"}, Options: "--cpus 2"}
 	job.Services = map[string]ServiceContainer{"database": {
 		Image:       "postgres:16",
 		Credentials: &ContainerCredentials{Username: "user", Password: "password"},
@@ -991,7 +991,7 @@ func TestContainerContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"container":{"image":"node:24","env":{"NODE_ENV":"test"},"ports":["8080"]},"services":{"database":{"image":"postgres:16","credentials":{"username":"user","password":"password"},"env":{"POSTGRES_DB":"app"},"ports":["5432:5432"],"volumes":["database:/data"],"options":"--health-retries 5","command":"postgres -c fsync=off","entrypoint":"docker-entrypoint.sh"}}}`
+	want := `{"container":{"image":"node:24","env":{"NODE_ENV":"test"},"ports":["8080"],"volumes":["cache:/cache:ro"],"options":"--cpus 2"},"services":{"database":{"image":"postgres:16","credentials":{"username":"user","password":"password"},"env":{"POSTGRES_DB":"app"},"ports":["5432:5432"],"volumes":["database:/data"],"options":"--health-retries 5","command":"postgres -c fsync=off","entrypoint":"docker-entrypoint.sh"}}}`
 	if string(wire) != want {
 		t.Fatalf("encoded containers = %s, want %s", wire, want)
 	}
@@ -1003,7 +1003,7 @@ func TestContainerModelFields(t *testing.T) {
 		typeOf reflect.Type
 		fields []string
 	}{
-		{name: "job", typeOf: reflect.TypeFor[Container](), fields: []string{"Image:image", "Env:env,omitempty", "Ports:ports,omitempty"}},
+		{name: "job", typeOf: reflect.TypeFor[Container](), fields: []string{"Image:image", "Env:env,omitempty", "Ports:ports,omitempty", "Volumes:volumes,omitempty", "Options:options,omitempty"}},
 		{name: "service", typeOf: reflect.TypeFor[ServiceContainer](), fields: []string{"Image:image", "Credentials:credentials,omitempty", "Env:env,omitempty", "Ports:ports,omitempty", "Volumes:volumes,omitempty", "Options:options,omitempty", "Command:command,omitempty", "Entrypoint:entrypoint,omitempty"}},
 	}
 	for _, test := range tests {
@@ -1016,6 +1016,36 @@ func TestContainerModelFields(t *testing.T) {
 				t.Fatalf("fields = %#v, want %#v", got, test.fields)
 			}
 		})
+	}
+}
+
+func TestJobContainerPlanRejectsUnsupportedOptionsAndVolumes(t *testing.T) {
+	for name, container := range map[string]Container{
+		"network":            {Image: "node:24", Options: "--network=host"},
+		"entrypoint":         {Image: "node:24", Options: "--entrypoint sh"},
+		"unsupported volume": {Image: "node:24", Volumes: []string{"cache:/data:z"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			job := validJob()
+			job.RequiredCapabilities = []string{"docker", "network"}
+			job.Container = &container
+			if err := job.Validate(); err == nil {
+				t.Fatal("Validate() accepted unsupported job container control")
+			}
+		})
+	}
+}
+
+func TestJobContainerPlanAcceptsGitHubOptionsAndVolumes(t *testing.T) {
+	job := validJob()
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &Container{
+		Image:   "node:24",
+		Options: `--privileged --label "description=two words" --memory-swap -1`,
+		Volumes: []string{"v:/data", "/anonymous", "/tmp:/host", "one:/same", "two:/same", "cache:/__buildkite-gha/runtime"},
+	}
+	if err := job.Validate(); err != nil {
+		t.Fatalf("Validate() rejected GitHub-compatible job container controls: %v", err)
 	}
 }
 
@@ -1232,7 +1262,7 @@ func TestContainerPortGrammarMatchesSchema(t *testing.T) {
 		{"08", false}, {"+80", false}, {"80/udp/tcp", false},
 	} {
 		t.Run(test.port, func(t *testing.T) {
-			goValid := validateContainer("node:24", nil, []string{test.port}) == nil
+			goValid := validateContainer(Container{Image: "node:24", Ports: []string{test.port}}) == nil
 			job := validJob()
 			job.RequiredCapabilities = []string{"docker", "network"}
 			job.Container = &Container{Image: "node:24", Ports: []string{test.port}}

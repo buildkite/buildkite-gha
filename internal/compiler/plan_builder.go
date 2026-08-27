@@ -353,13 +353,18 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 
 	if instance.Container != nil {
 		container := *instance.Container
-		if container.Image, err = reduceTemplate(container.Image); err != nil {
-			return JobInstance{}, err
+		for _, field := range []*string{&container.Image, &container.Options} {
+			if *field, err = reduceTemplate(*field); err != nil {
+				return JobInstance{}, err
+			}
 		}
 		if container.Env, err = reduceMap(container.Env); err != nil {
 			return JobInstance{}, err
 		}
 		if container.Ports, err = reduceSlice(container.Ports); err != nil {
+			return JobInstance{}, err
+		}
+		if container.Volumes, err = reduceSlice(container.Volumes); err != nil {
 			return JobInstance{}, err
 		}
 		instance.Container = &container
@@ -683,9 +688,11 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 	job.RequiresMise = &actions.requiresMise
 	if programJob.Container != nil {
 		job.Container = &plan.Container{
-			Image: programJob.Container.Image.Source,
-			Env:   programBindingMap(programJob.Container.Env),
-			Ports: programSiteSources(programJob.Container.Ports),
+			Image:   programJob.Container.Image.Source,
+			Env:     programBindingMap(programJob.Container.Env),
+			Ports:   programSiteSources(programJob.Container.Ports),
+			Volumes: programSiteSources(programJob.Container.Volumes),
+			Options: programJob.Container.Options.Source,
 		}
 	}
 	if programJob.Services.Dynamic != nil {
