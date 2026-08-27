@@ -15,16 +15,17 @@ import (
 // runtime evaluators; abstract evaluation uses the same traversal with a value
 // that can represent unknown runtime data and authority effects.
 type expressionEvaluator[T any] struct {
-	policy          evaluationPolicy
-	resolve         func(string, []string) (T, error)
-	resolveRoot     func(string) (T, error)
-	domain          expressionDomain[T]
-	truthy          func(any) bool
-	validateCompare func(actionlint.CompareOpNodeKind) error
-	compare         func(actionlint.CompareOpNodeKind, any, any) (any, error)
-	call            func(*expressionEvaluator[T], *actionlint.FuncCallNode) (T, error)
-	unsupported     func(actionlint.ExprNode) error
-	logicalError    func(actionlint.LogicalOpNodeKind) error
+	policy               evaluationPolicy
+	resolve              func(string, []string) (T, error)
+	resolveRoot          func(string) (T, error)
+	resolveComputedIndex bool
+	domain               expressionDomain[T]
+	truthy               func(any) bool
+	validateCompare      func(actionlint.CompareOpNodeKind) error
+	compare              func(actionlint.CompareOpNodeKind, any, any) (any, error)
+	call                 func(*expressionEvaluator[T], *actionlint.FuncCallNode) (T, error)
+	unsupported          func(actionlint.ExprNode) error
+	logicalError         func(actionlint.LogicalOpNodeKind) error
 }
 
 type semanticEvaluator = expressionEvaluator[any]
@@ -33,8 +34,10 @@ type expressionDomain[T any] interface {
 	known(any) T
 	derive(any, ...T) T
 	value(T) (any, bool)
+	truthiness(T, func(any) bool) (bool, bool)
 	unknown(...T) T
-	join(...T) T
+	unknownWithTruthiness(bool, ...T) T
+	join(func(any) bool, ...T) T
 }
 
 type concreteExpressionDomain struct{}
@@ -42,10 +45,16 @@ type concreteExpressionDomain struct{}
 func (concreteExpressionDomain) known(value any) any            { return value }
 func (concreteExpressionDomain) derive(value any, _ ...any) any { return value }
 func (concreteExpressionDomain) value(value any) (any, bool)    { return value, true }
+func (concreteExpressionDomain) truthiness(value any, truthy func(any) bool) (bool, bool) {
+	return truthy(value), true
+}
 func (concreteExpressionDomain) unknown(...any) any {
 	panic("concrete expression evaluation produced an unknown value")
 }
-func (concreteExpressionDomain) join(...any) any {
+func (concreteExpressionDomain) unknownWithTruthiness(bool, ...any) any {
+	panic("concrete expression evaluation produced an unknown value")
+}
+func (concreteExpressionDomain) join(func(any) bool, ...any) any {
 	panic("concrete expression evaluation joined multiple paths")
 }
 
@@ -92,6 +101,9 @@ func (e *expressionEvaluator[T]) result(value T, inputs ...T) T {
 	concrete, known := e.domain.value(value)
 	inputs = append(inputs, value)
 	if !known {
+		if truthy, truthKnown := e.domain.truthiness(value, e.truthy); truthKnown {
+			return e.domain.unknownWithTruthiness(truthy, inputs...)
+		}
 		return e.domain.unknown(inputs...)
 	}
 	return e.domain.derive(concrete, inputs...)
@@ -245,11 +257,11 @@ func (e *expressionEvaluator[T]) evaluate(node actionlint.ExprNode) (T, error) {
 			if err != nil {
 				return zero, err
 			}
-			concrete, known := e.domain.value(value)
+			truthy, known := e.domain.truthiness(value, e.truthy)
 			if !known {
 				return e.domain.unknown(value), nil
 			}
-			return e.domain.derive(!e.truthy(concrete), value), nil
+			return e.domain.derive(!truthy, value), nil
 		}
 	case *actionlint.LogicalOpNode:
 		if e.policy.allowLogical {
@@ -257,15 +269,29 @@ func (e *expressionEvaluator[T]) evaluate(node actionlint.ExprNode) (T, error) {
 			if err != nil {
 				return zero, err
 			}
-			leftValue, leftKnown := e.domain.value(left)
+			leftTruthy, leftKnown := e.domain.truthiness(left, e.truthy)
 			if !leftKnown {
 				right, err := e.evaluate(node.Right)
 				if err != nil {
 					return zero, err
 				}
+				rightTruthy, rightKnown := e.domain.truthiness(right, e.truthy)
+				if rightKnown {
+					switch node.Kind {
+					case actionlint.LogicalOpNodeKindAnd:
+						if !rightTruthy {
+							return e.domain.unknownWithTruthiness(false, left, right), nil
+						}
+					case actionlint.LogicalOpNodeKindOr:
+						if rightTruthy {
+							return e.domain.unknownWithTruthiness(true, left, right), nil
+						}
+					default:
+						return zero, e.logicalError(node.Kind)
+					}
+				}
 				return e.domain.unknown(left, right), nil
 			}
-			leftTruthy := e.truthy(leftValue)
 			switch node.Kind {
 			case actionlint.LogicalOpNodeKindAnd:
 				if !leftTruthy {
@@ -289,11 +315,11 @@ func (e *expressionEvaluator[T]) evaluate(node actionlint.ExprNode) (T, error) {
 				return zero, err
 			}
 			if e.policy.logicalBool {
-				rightValue, rightKnown := e.domain.value(right)
+				rightTruthy, rightKnown := e.domain.truthiness(right, e.truthy)
 				if !rightKnown {
 					return e.domain.unknown(left, right), nil
 				}
-				return e.domain.derive(e.truthy(rightValue), left, right), nil
+				return e.domain.derive(rightTruthy, left, right), nil
 			}
 			return e.result(right, left), nil
 		}
@@ -384,6 +410,25 @@ func (e *expressionEvaluator[T]) evaluateAccess(node actionlint.ExprNode) (T, er
 		}
 		return e.domain.derive(nil, receiver), nil
 	case *actionlint.IndexAccessNode:
+		if root, ok := node.Operand.(*actionlint.VariableNode); ok && e.resolveComputedIndex {
+			index, err := e.evaluate(node.Index)
+			if err != nil {
+				return zero, err
+			}
+			indexValue, known := e.domain.value(index)
+			if !known {
+				return e.domain.unknown(index), nil
+			}
+			name, ok := indexValue.(string)
+			if !ok {
+				return e.domain.unknown(index), nil
+			}
+			value, err := e.resolve(root.Name, []string{name})
+			if err != nil {
+				return zero, err
+			}
+			return e.result(value, index), nil
+		}
 		operand, err := e.evaluateAccess(node.Operand)
 		if err != nil {
 			return zero, err

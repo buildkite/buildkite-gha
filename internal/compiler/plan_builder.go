@@ -417,7 +417,15 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 		built.capabilities = capabilities
 		return built, nil
 	}
-	compiled, err := compileActionInvocations(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs)
+	reachable := make([]bool, len(actionIndexes))
+	knownReferences := make(map[string]any, len(instance.Matrix))
+	for name, value := range instance.Matrix {
+		knownReferences["matrix."+strings.ToLower(name)] = value
+	}
+	for i, stepIndex := range actionIndexes {
+		reachable[i] = compositeStepMayRun(steps[stepIndex].Condition, knownReferences)
+	}
+	compiled, err := compileReachableActionInvocations(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs, reachable)
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -619,7 +627,7 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram 
 		policyWorkflow = filepath.Base(instance.SourcePath)
 	}
 	if len(b.ir.Workflow.WorkflowTokenPermissions) == 0 {
-		reference := "an action input default that references github.token"
+		reference := "resolved action metadata that references github.token"
 		if referencesGitHubTokenSecret {
 			reference = "secrets.GITHUB_TOKEN"
 		} else if referencesGitHubToken {

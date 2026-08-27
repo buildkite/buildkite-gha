@@ -217,11 +217,18 @@ func compileActionLocks(ctx context.Context, workspace string, actionSource Acti
 }
 
 func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
+	return compileReachableActionInvocations(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil)
+}
+
+func compileReachableActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, reachable []bool) (actionCompilation, error) {
 	if workspace == "" {
 		return actionCompilation{}, fmt.Errorf("workflow path must identify a repository root")
 	}
 	if suppliedInputs != nil && len(suppliedInputs) != len(refs) {
 		return actionCompilation{}, fmt.Errorf("action references and supplied inputs have different lengths")
+	}
+	if reachable != nil && len(reachable) != len(refs) {
+		return actionCompilation{}, fmt.Errorf("action references and reachability have different lengths")
 	}
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
@@ -259,7 +266,8 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	var githubTokenActions []string
 	if suppliedInputs != nil {
 		for i, root := range roots {
-			requirements, err := root.inspectInvocation(suppliedInputs[i], true, serverURL)
+			mayRun := reachable == nil || reachable[i]
+			requirements, err := root.inspectInvocation(suppliedInputs[i], true, serverURL, mayRun, nil)
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
@@ -378,7 +386,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	return n, nil
 }
 
-func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string) (actionRequirements, error) {
+func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string, reachable bool, callerReferences map[string]any) (actionRequirements, error) {
 	requirements := actionRequirements{requiredSecrets: map[string]bool{}}
 	for _, condition := range []string{n.metadata.Runs.PreIf, n.metadata.Runs.PostIf} {
 		referencesEvent, err := expression.ConditionReferencesGitHubEventPayload(condition)
@@ -497,7 +505,27 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 	if n.runtime != metadata.RuntimeComposite {
 		return requirements, nil
 	}
+	knownReferences := n.knownInputReferences(supplied, serverURL, callerReferences)
 	for i, step := range n.metadata.Runs.Steps {
+		if step.Uses == "" {
+			mayRun := reachable && compositeStepMayRun(step.If, knownReferences)
+			for _, field := range []struct {
+				name  string
+				value string
+			}{
+				{name: "run", value: step.Run},
+				{name: "working-directory", value: step.WorkingDirectory},
+			} {
+				if err := inspectCompositeStepTemplate(fmt.Sprintf("step %d %s", i+1, field.name), field.value, knownReferences, mayRun, &requirements); err != nil {
+					return actionRequirements{}, err
+				}
+			}
+			for _, name := range sortedKeys(step.Env) {
+				if err := inspectCompositeStepTemplate(fmt.Sprintf("step %d environment %q", i+1, name), step.Env[name], knownReferences, mayRun, &requirements); err != nil {
+					return actionRequirements{}, err
+				}
+			}
+		}
 		if step.Uses == "" {
 			continue
 		}
@@ -511,7 +539,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
 			}
 		}
-		childRequirements, err := child.inspectInvocation(step.With, false, serverURL)
+		childRequirements, err := child.inspectInvocation(step.With, false, serverURL, reachable && compositeStepMayRun(step.If, knownReferences), knownReferences)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 		}
@@ -522,6 +550,66 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		}
 	}
 	return requirements, nil
+}
+
+func (n *actionNode) knownInputReferences(supplied map[string]string, serverURL string, callerReferences map[string]any) map[string]any {
+	known := map[string]any{
+		"github.server_url": serverURL,
+		"job.check_run_id":  "",
+	}
+	if callerReferences == nil {
+		callerReferences = known
+	}
+	for _, name := range sortedKeys(supplied) {
+		value, resolved, err := expression.EvaluateKnownStepTemplate(supplied[name], callerReferences)
+		if err != nil || !resolved {
+			continue
+		}
+		known["inputs."+strings.ToLower(name)] = value
+	}
+	for _, name := range sortedKeys(n.metadata.Inputs) {
+		input := n.metadata.Inputs[name]
+		if input.Default == nil || hasActionInput(supplied, name) {
+			continue
+		}
+		value, resolved, err := expression.EvaluateKnownActionInputDefault(*input.Default, known)
+		if err != nil || !resolved {
+			continue
+		}
+		known["inputs."+strings.ToLower(name)] = value
+	}
+	return known
+}
+
+func compositeStepMayRun(condition string, knownReferences map[string]any) bool {
+	run, err := expression.ConditionMayBeTrue(condition, knownReferences)
+	return err != nil || run
+}
+
+func inspectCompositeStepTemplate(field, template string, knownReferences map[string]any, reachable bool, requirements *actionRequirements) error {
+	if template == "" {
+		return nil
+	}
+	referencesEvent, err := expression.TemplateReferencesGitHubEvent(template)
+	if err != nil {
+		return fmt.Errorf("composite action %s: %w", field, err)
+	}
+	if referencesEvent {
+		return fmt.Errorf("composite action %s: github.event cannot be retained in a job plan", field)
+	}
+	names, err := expression.SecretReferences(template)
+	if err != nil {
+		return fmt.Errorf("composite action %s: %w", field, err)
+	}
+	if len(names) != 0 {
+		return fmt.Errorf("composite action %s: composite action metadata cannot grant secret authority", field)
+	}
+	referencesToken, err := expression.StepTemplateRequiresGitHubToken(template, knownReferences)
+	if err != nil {
+		return fmt.Errorf("composite action %s: %w", field, err)
+	}
+	requirements.githubToken = requirements.githubToken || reachable && referencesToken
+	return nil
 }
 
 func hasActionInput(inputs map[string]string, name string) bool {

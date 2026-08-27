@@ -107,6 +107,94 @@ func TestActionInputDefaultAuthorityPreservesRuntimeErrorFallback(t *testing.T) 
 	}
 }
 
+func TestStepTemplateTokenEffectsNarrowWithKnownInputs(t *testing.T) {
+	template := "${{ inputs.fallback == 'cargo-binstall' && github.server_url == 'https://github.com' && github.token || '' }}"
+	for _, test := range []struct {
+		name  string
+		known map[string]any
+		want  bool
+	}{
+		{name: "unknown input", known: map[string]any{"github.server_url": "https://github.com"}, want: true},
+		{name: "matching input", known: map[string]any{"inputs.fallback": "cargo-binstall", "github.server_url": "https://github.com"}, want: true},
+		{name: "disabled input", known: map[string]any{"inputs.fallback": "none", "github.server_url": "https://github.com"}},
+		{name: "Origin provider", known: map[string]any{"inputs.fallback": "cargo-binstall", "github.server_url": "https://origin.cursor.com"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := StepTemplateRequiresGitHubToken(template, test.known)
+			if err != nil || got != test.want {
+				t.Fatalf("StepTemplateRequiresGitHubToken() = %v, %v, want %v", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestStepTemplateWholeGitHubContextDoesNotGrantTokenAuthority(t *testing.T) {
+	got, err := StepTemplateRequiresGitHubToken("${{ toJSON(github) }}", nil)
+	if err != nil || got {
+		t.Fatalf("StepTemplateRequiresGitHubToken() = %v, %v, want false", got, err)
+	}
+}
+
+func TestStepTemplateFunctionsPreserveTokenReachability(t *testing.T) {
+	for _, test := range []struct {
+		template string
+		want     bool
+	}{
+		{template: "${{ hashFiles(github.token) }}", want: true},
+		{template: "${{ format('constant', github.token) }}"},
+	} {
+		got, err := StepTemplateRequiresGitHubToken(test.template, nil)
+		if err != nil || got != test.want {
+			t.Fatalf("StepTemplateRequiresGitHubToken(%q) = %v, %v, want %v", test.template, got, err, test.want)
+		}
+	}
+}
+
+func TestStepTemplateKnownRightGuardPrunesUnknownLeft(t *testing.T) {
+	for _, template := range []string{
+		"${{ env.RUNTIME == 'yes' && inputs.enabled == 'true' && github.token || '' }}",
+		"${{ true && (env.RUNTIME == 'yes' && inputs.enabled == 'true') && github.token || '' }}",
+		"${{ case(env.SELECT == 'yes', env.RUNTIME == 'yes' && false, false) && github.token || '' }}",
+		"${{ case(env.RUNTIME == 'yes' && inputs.enabled == 'true', github.token, '') }}",
+	} {
+		got, err := StepTemplateRequiresGitHubToken(template, map[string]any{"inputs.enabled": "false"})
+		if err != nil || got {
+			t.Errorf("StepTemplateRequiresGitHubToken(%q) = %v, %v, want false", template, got, err)
+		}
+	}
+}
+
+func TestConditionMayBeTrueUsesKnownReferencesAfterUnknownValues(t *testing.T) {
+	known := map[string]any{
+		"inputs.enabled":    "false",
+		"github.server_url": "https://origin.cursor.com",
+	}
+	for _, condition := range []string{
+		"env.RUNTIME == 'yes' && inputs.enabled == 'true'",
+		"env.RUNTIME == 'yes' && github.server_url == 'https://github.com'",
+		"success() && inputs.enabled == 'true'",
+	} {
+		mayRun, err := ConditionMayBeTrue(condition, known)
+		if err != nil || mayRun {
+			t.Errorf("ConditionMayBeTrue(%q) = %v, %v, want false", condition, mayRun, err)
+		}
+	}
+}
+
+func TestEvaluateKnownActionInputDefaultUsesProviderValues(t *testing.T) {
+	value, known, err := EvaluateKnownActionInputDefault(
+		"${{ github.server_url == 'https://github.com' && 'true' || 'false' }}",
+		map[string]any{"github.server_url": "https://origin.cursor.com"},
+	)
+	if err != nil || !known || value != "false" {
+		t.Fatalf("EvaluateKnownActionInputDefault() = %q, %v, %v, want false, true", value, known, err)
+	}
+	_, known, err = EvaluateKnownActionInputDefault("${{ matrix.enabled }}", map[string]any{"github.server_url": "https://github.com"})
+	if err != nil || known {
+		t.Fatalf("runtime-dependent EvaluateKnownActionInputDefault() known = %v, error = %v", known, err)
+	}
+}
+
 func TestAbstractActionInputDefaultIsSoundAsValuesBecomeKnown(t *testing.T) {
 	for _, source := range []string{
 		"matrix.enabled && github.token || ''",
