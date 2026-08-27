@@ -141,8 +141,9 @@ func TestParseKeepsWorkflowAndJobExpressionSurfacesSeparate(t *testing.T) {
 
 func TestParseRejectsGitHubEnvironment(t *testing.T) {
 	_, err := Parse("environment.yml", []byte("on: push\njobs:\n  deploy:\n    environment: production\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
-	if err == nil || !strings.Contains(err.Error(), "GitHub environments and environment secrets are unsupported") {
-		t.Fatalf("Parse() error = %v", err)
+	want := `environment.yml:4:5: GitHub environments and environment secrets are unsupported. Remove the environment key from job "deploy". Approvals, deployment records, and protection rules are unavailable. Move environment secrets into Buildkite secrets and reference them by name. If you need GitHub environments, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`
+	if err == nil || err.Error() != want {
+		t.Fatalf("Parse() error = %q, want %q", err, want)
 	}
 }
 
@@ -225,7 +226,7 @@ func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
 	for _, test := range []struct {
 		name, declaration, want string
 	}{
-		{name: "non-canonical name", declaration: "permissions:\n  pull_requests: write\n", want: "permissions.yml:3:3: job \"permissions\": unsupported permission \"pull_requests\""},
+		{name: "non-canonical name", declaration: "permissions:\n  pull_requests: write\n", want: "permissions.yml:3:3: workflow permissions: unsupported permission \"pull_requests\""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			source := []byte("on: push\n" + test.declaration + "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
@@ -237,14 +238,31 @@ func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
 	}
 }
 
-func TestParseRejectsJobPermissionAliases(t *testing.T) {
-	for _, alias := range []string{"read-all", "write-all"} {
-		t.Run(alias, func(t *testing.T) {
-			source := []byte("on: push\njobs:\n  test:\n    permissions: " + alias + "\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+func TestParseRejectsInvalidPermissionScalars(t *testing.T) {
+	for _, test := range []struct {
+		name, source, want string
+	}{
+		{name: "workflow", source: "on: push\npermissions: write\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n", want: `permissions.yml:2:14: workflow permissions: invalid permissions scalar "write"; use read-all, write-all, or a permissions map`},
+		{name: "job", source: "on: push\njobs:\n  test:\n    permissions: write\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n", want: `permissions.yml:4:18: job "test": invalid permissions scalar "write"; declare each needed permission in a map`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Parse("permissions.yml", []byte(test.source))
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("Parse() error = %q, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestParseRejectsJobPermissionShorthand(t *testing.T) {
+	for _, shorthand := range []string{"read-all", "write-all"} {
+		t.Run(shorthand, func(t *testing.T) {
+			source := []byte("on: push\njobs:\n  publish:\n    permissions: " + shorthand + "\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 			_, err := Parse("permissions.yml", source)
-			want := "permissions.yml:4:18: job \"permissions\": permission aliases are unsupported"
-			if err == nil || !strings.Contains(err.Error(), want) {
-				t.Fatalf("Parse() error = %v, want %q", err, want)
+			access := strings.TrimSuffix(shorthand, "-all")
+			want := `permissions.yml:4:18: permissions: ` + shorthand + ` is unsupported as job-level shorthand. In job "publish", you cannot set separate repository permissions. At the workflow top level, declare each needed repository permission, such as contents: ` + access + ` and pull-requests: ` + access + `. These permissions apply to every job that receives GITHUB_TOKEN. Use permissions: ` + shorthand + ` at the workflow top level only when every supported repository permission should have ` + access + ` access. If you need different repository permissions for individual jobs, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`
+			if err == nil || err.Error() != want {
+				t.Fatalf("Parse() error = %q, want %q", err, want)
 			}
 		})
 	}

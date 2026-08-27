@@ -400,11 +400,11 @@ Supported values are `read`, `write`, and `none`. Supported repository permissio
 
 An omitted map defaults to exactly `contents: read` when a token is needed. This deterministic default does not inherit GitHub repository or organization settings. Hosted token issuance uses only the top-level map. Job-level repository permission maps do not narrow or expand `GITHUB_TOKEN`; the separate `id-token` permission retains job-level behavior. Write access therefore requires an explicit top-level map.
 
-The top-level scalars `permissions: read-all` and `permissions: write-all` expand during compilation to explicit maps containing the 13 supported repository permissions listed above. Plans and workflow-token requests contain those maps, not the aliases. Both expansions exclude `id-token`, `models`, `repository-projects`, `code-quality`, `metadata`, and `vulnerability-alerts`.
+Put `permissions: read-all` or `permissions: write-all` at the top level to apply the same access to all 13 supported repository permissions listed above. These shorthands exclude `id-token`, `models`, `repository-projects`, `code-quality`, `metadata`, and `vulnerability-alerts`.
 
 Jobs expanded from reusable workflows use the top-level requesting workflow's repository permissions for `GITHUB_TOKEN`. Only this immutable top-level map is enforced server-side; permission maps in called workflows do not narrow `GITHUB_TOKEN`. The separate `id-token` permission retains called-workflow narrowing. Warnings identify job-level repository maps that differ from the applied top-level permissions and called-workflow maps that would have narrowed the token scope.
 
-Job-level aliases and noncanonical permission names are unsupported. An empty top-level map, or a top-level map containing only `none`, creates no token.
+To grant repository access, list each required permission at the top level, such as `contents: write`. Every job that receives `GITHUB_TOKEN` gets that access. You cannot give different repository permissions to individual jobs. Use top-level `read-all` or `write-all` only when every job should get read or write access for every supported repository permission. An empty top-level permissions map, or one that contains only `none`, creates no token. Use GitHub's exact permission names.
 
 ### Environment and defaults
 

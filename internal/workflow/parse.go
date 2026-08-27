@@ -94,7 +94,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		owned.Concurrency.CancelInProgress = true
 		owned.Concurrency.CancelInProgressPosition = *workflowCancellation
 	}
-	owned.Permissions, err = adaptPermissions(path, parsed.Permissions, true)
+	owned.Permissions, err = adaptPermissions(path, parsed.Permissions, "")
 	if err != nil {
 		return nil, err
 	}
@@ -545,14 +545,14 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurrency map[Position]stepConcurrency, serviceContainers map[string]rawServiceContainer) (Job, error) {
 	out := Job{ID: in.ID.Value, Span: pointSpan(in.Pos)}
 	if in.Environment != nil {
-		return Job{}, locatedError(path, in.Environment.Pos, fmt.Sprintf("job %q", in.ID.Value), "GitHub environments and environment secrets are unsupported")
+		return Job{}, fmt.Errorf("%s:%d:%d: GitHub environments and environment secrets are unsupported. Remove the environment key from job %q. Approvals, deployment records, and protection rules are unavailable. Move environment secrets into Buildkite secrets and reference them by name. If you need GitHub environments, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support", path, in.Environment.Pos.Line, in.Environment.Pos.Col, in.ID.Value)
 	}
 	ownedConcurrency, err := adaptConcurrency(path, in.ID.Value, in.Concurrency)
 	if err != nil {
 		return Job{}, err
 	}
 	out.Concurrency = ownedConcurrency
-	permissions, err := adaptPermissions(path, in.Permissions, false)
+	permissions, err := adaptPermissions(path, in.Permissions, in.ID.Value)
 	if err != nil {
 		return Job{}, err
 	}
@@ -849,12 +849,25 @@ func adaptConcurrency(path, jobID string, in *actionlint.Concurrency) (*Concurre
 	}, nil
 }
 
-func adaptPermissions(path string, in *actionlint.Permissions, allowAll bool) (*Permissions, error) {
+func adaptPermissions(path string, in *actionlint.Permissions, jobID string) (*Permissions, error) {
 	if in == nil {
 		return nil, nil
 	}
+	permissionError := func(pos *actionlint.Pos, message string) error {
+		if jobID == "" {
+			return fmt.Errorf("%s:%d:%d: workflow permissions: %s", path, pos.Line, pos.Col, message)
+		}
+		return locatedError(path, pos, jobID, message)
+	}
 	if in.All != nil {
-		if allowAll && (in.All.Value == "read-all" || in.All.Value == "write-all") {
+		if in.All.Value != "read-all" && in.All.Value != "write-all" {
+			message := fmt.Sprintf("invalid permissions scalar %q; declare each needed permission in a map", in.All.Value)
+			if jobID == "" {
+				message = fmt.Sprintf("invalid permissions scalar %q; use read-all, write-all, or a permissions map", in.All.Value)
+			}
+			return nil, permissionError(in.All.Pos, message)
+		}
+		if jobID == "" {
 			access := strings.TrimSuffix(in.All.Value, "-all")
 			scopes := make(map[string]string, len(topLevelAllPermissionNames))
 			for _, name := range topLevelAllPermissionNames {
@@ -862,7 +875,8 @@ func adaptPermissions(path string, in *actionlint.Permissions, allowAll bool) (*
 			}
 			return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
 		}
-		return nil, locatedError(path, in.All.Pos, "permissions", "permission aliases are unsupported; declare each required permission explicitly")
+		access := strings.TrimSuffix(in.All.Value, "-all")
+		return nil, fmt.Errorf("%s:%d:%d: permissions: %s is unsupported as job-level shorthand. In job %q, you cannot set separate repository permissions. At the workflow top level, declare each needed repository permission, such as contents: %s and pull-requests: %s. These permissions apply to every job that receives GITHUB_TOKEN. Use permissions: %s at the workflow top level only when every supported repository permission should have %s access. If you need different repository permissions for individual jobs, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support", path, in.All.Pos.Line, in.All.Pos.Col, in.All.Value, jobID, access, access, in.All.Value, access)
 	}
 	scopes := make(map[string]string, len(in.Scopes))
 	names := make([]string, 0, len(in.Scopes))
@@ -873,17 +887,17 @@ func adaptPermissions(path string, in *actionlint.Permissions, allowAll bool) (*
 	for _, name := range names {
 		scope := in.Scopes[name]
 		if scope == nil || scope.Name == nil || scope.Value == nil {
-			return nil, locatedError(path, in.Pos, "permissions", "invalid permission declaration")
+			return nil, permissionError(in.Pos, "invalid permission declaration")
 		}
 		if name != "id-token" && !supportedGitHubTokenPermission(name) {
-			return nil, locatedError(path, scope.Name.Pos, "permissions", fmt.Sprintf("unsupported permission %q; use canonical GitHub permission names", name))
+			return nil, permissionError(scope.Name.Pos, fmt.Sprintf("unsupported permission %q; use canonical GitHub permission names", name))
 		}
 		switch scope.Value.Value {
 		case "read", "write":
 			scopes[name] = scope.Value.Value
 		case "none":
 		default:
-			return nil, locatedError(path, scope.Value.Pos, "permissions", fmt.Sprintf("invalid access %q for permission %q", scope.Value.Value, name))
+			return nil, permissionError(scope.Value.Pos, fmt.Sprintf("invalid access %q for permission %q", scope.Value.Value, name))
 		}
 	}
 	return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
