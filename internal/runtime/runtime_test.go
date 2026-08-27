@@ -1256,9 +1256,11 @@ jobs:
       - run: test "$(basename "$PWD")" = vars
   explicit-precedence:
     runs-on: ubuntu-latest
+    env:
+      DEFAULT_SHELL: unsupported-default
     defaults:
       run:
-        shell: unsupported-default
+        shell: ${{ env.DEFAULT_SHELL }}
         working-directory: missing-default
     steps:
       - shell: sh
@@ -1304,6 +1306,55 @@ jobs:
 		result, err := (Runner{}).RunJob(t.Context(), job, workspace)
 		if err != nil || result.Conclusion != "success" {
 			t.Fatalf("RunJob(%s) result = %#v, error = %v", job.Workflow.LogicalJobID, result, err)
+		}
+	}
+}
+
+func TestCompiledDynamicUnsupportedShellFailsAtRuntime(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/dynamic-shell.yml"
+	source := `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DEFAULT_SHELL: pwsh
+    steps:
+      - shell: ${{ env.DEFAULT_SHELL }}
+        run: Write-Output test
+`
+	writeFixtureFile(t, workspace, workflowPath, source)
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(
+		filepath.Join(workspace, workflowPath),
+		[]byte(source),
+		event,
+		"0.0.0-test",
+		"sha256:"+strings.Repeat("2", 64),
+		"gha-untrusted",
+	)
+	if err != nil {
+		t.Fatalf("compile runtime-dependent shell: %v", err)
+	}
+	if len(plans) != 1 || plans[0].Steps[0].Shell != "${{ env.DEFAULT_SHELL }}" {
+		t.Fatalf("compiled plans = %#v", plans)
+	}
+	_, err = (Runner{}).RunJob(t.Context(), plans[0], workspace)
+	if err == nil {
+		t.Fatal("RunJob() succeeded")
+	}
+	if got := ClassifyFailure(err); got != FailureClassUnsupportedFeature {
+		t.Fatalf("ClassifyFailure() = %q, want %q", got, FailureClassUnsupportedFeature)
+	}
+	for _, want := range []string{
+		`shell "pwsh" is unsupported`,
+		"Use bash, sh, python, or a valid custom shell template whose command is available on PATH",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("RunJob() error = %v, want %q", err, want)
 		}
 	}
 }
@@ -5675,39 +5726,6 @@ with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
 	}
 	if _, err := os.Stat(script); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("temporary Python script remains at %q: %v", script, err)
-	}
-}
-
-func TestParseShellTemplate(t *testing.T) {
-	tests := []struct {
-		name    string
-		shell   string
-		want    []string
-		wantErr string
-	}{
-		{name: "arguments and quotes", shell: `julia --color=yes "two words" {0} --project='quoted value'`, want: []string{"julia", "--color=yes", "two words", "{0}", "--project=quoted value"}},
-		{name: "literal values without expansion", shell: `julia "" '$HOME' semi;colon escaped\ value {0}`, want: []string{"julia", "", "$HOME", "semi;colon", "escaped value", "{0}"}},
-		{name: "embedded and repeated placeholders", shell: `Rscript --file={0} {0}`, want: []string{"Rscript", "--file={0}", "{0}"}},
-		{name: "empty command", shell: `"" {0}`, wantErr: "must contain a command"},
-		{name: "missing placeholder", shell: `Rscript --vanilla`, wantErr: "must contain {0}"},
-		{name: "malformed quote", shell: `julia "unterminated {0}`, wantErr: "parse shell template"},
-		{name: "PowerShell remains unsupported", shell: `/usr/bin/pwsh -File {0}`, wantErr: "unsupported in the supported runtime subset"},
-		{name: "Windows shell remains unsupported", shell: `cmd.exe /C {0}`, wantErr: "unsupported in the supported runtime subset"},
-		{name: "MSYS2 remains unsupported", shell: `msys2 {0}`, wantErr: "unsupported in the supported runtime subset"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := parseShellTemplate(test.shell)
-			if test.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
-					t.Fatalf("parseShellTemplate(%q) error = %v, want %q", test.shell, err, test.wantErr)
-				}
-				return
-			}
-			if err != nil || !slices.Equal(got, test.want) {
-				t.Fatalf("parseShellTemplate(%q) = %#v, %v, want %#v", test.shell, got, err, test.want)
-			}
-		})
 	}
 }
 
