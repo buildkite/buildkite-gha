@@ -69,31 +69,32 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 	type example struct {
 		source string
 		result ResultType
+		want   any
 	}
 	examples := map[ProfileID]example{
-		ProfileCompile:              {"${{ contains('abc', 'b') }}", ResultBoolean},
-		ProfileCompileTemplate:      {"value-${{ github.event_name }}", ResultString},
-		ProfilePartialTemplate:      {"value-${{ inputs.name }}", ResultString},
-		ProfileCompileJobCondition:  {"github.event_name == 'push'", ResultBoolean},
-		ProfileCompileStepCondition: {"inputs.enabled", ResultBoolean},
-		ProfileCompileCallCondition: {"inputs.enabled", ResultBoolean},
-		ProfileReusableInput:        {"${{ 'value' }}", ResultString},
-		ProfileRunName:              {"run-${{ github.event_name }}", ResultString},
-		ProfileJobCondition:         {"always() && inputs.enabled", ResultBoolean},
-		ProfileStepCondition:        {"always() && inputs.enabled", ResultBoolean},
-		ProfileCallCondition:        {"always() && inputs.enabled", ResultBoolean},
-		ProfileActionLifecycle:      {"${{ always() && inputs.enabled }}", ResultBoolean},
-		ProfileJobEnvironment:       {"${{ inputs.name }}", ResultString},
-		ProfileJobDefault:           {"${{ inputs.name }}", ResultString},
-		ProfileJobOutput:            {"${{ inputs.name }}", ResultString},
-		ProfileStepTemplate:         {"${{ format('{0}', inputs.name) }}", ResultString},
-		ProfileStepControl:          {"${{ true }}", ResultBoolean},
-		ProfileRuntimeTemplate:      {"${{ env.NAME }}", ResultString},
-		ProfileServiceTemplate:      {"${{ needs.build.outputs.value }}", ResultString},
-		ProfileServiceCredential:    {"${{ env.NAME }}", ResultString},
-		ProfileServiceMap:           {"${{ fromJSON(needs.build.outputs.value) }}", ResultObject},
-		ProfileActionInputDefault:   {"${{ inputs.name }}", ResultString},
-		ProfileDockerActionArg:      {"${{ inputs.name }}", ResultString},
+		ProfileCompile:              {"${{ contains('abc', 'b') }}", ResultBoolean, true},
+		ProfileCompileTemplate:      {"value-${{ github.event_name }}", ResultString, "value-push"},
+		ProfilePartialTemplate:      {"value-${{ inputs.name }}", ResultString, "value-value"},
+		ProfileCompileJobCondition:  {"github.event_name == 'push'", ResultBoolean, true},
+		ProfileCompileStepCondition: {"inputs.enabled", ResultBoolean, true},
+		ProfileCompileCallCondition: {"inputs.enabled", ResultBoolean, true},
+		ProfileReusableInput:        {"${{ 'value' }}", ResultString, "value"},
+		ProfileRunName:              {"run-${{ github.event_name }}", ResultString, "run-push"},
+		ProfileJobCondition:         {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileStepCondition:        {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileCallCondition:        {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileActionLifecycle:      {"${{ always() && inputs.enabled }}", ResultBoolean, true},
+		ProfileJobEnvironment:       {"${{ inputs.name }}", ResultString, "value"},
+		ProfileJobDefault:           {"${{ inputs.name }}", ResultString, "value"},
+		ProfileJobOutput:            {"${{ inputs.name }}", ResultString, "value"},
+		ProfileStepTemplate:         {"${{ format('{0}', inputs.name) }}", ResultString, "value"},
+		ProfileStepControl:          {"${{ true }}", ResultBoolean, true},
+		ProfileRuntimeTemplate:      {"${{ env.NAME }}", ResultString, "value"},
+		ProfileServiceTemplate:      {"${{ needs.build.outputs.value }}", ResultString, `{"name":"value"}`},
+		ProfileServiceCredential:    {"${{ env.NAME }}", ResultString, "value"},
+		ProfileServiceMap:           {"${{ fromJSON(needs.build.outputs.value) }}", ResultObject, []ObjectEntry{{Name: "name", Value: "value"}}},
+		ProfileActionInputDefault:   {"${{ inputs.name }}", ResultString, "value"},
+		ProfileDockerActionArg:      {"${{ inputs.name }}", ResultString, "value"},
 	}
 	for _, id := range profileIDs() {
 		t.Run(string(id), func(t *testing.T) {
@@ -108,8 +109,10 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 			if _, err := engine.Validate(site); err != nil {
 				t.Fatalf("Validate() error = %v", err)
 			}
-			if _, err := engine.Evaluate(site, values); err != nil {
+			if got, err := engine.Evaluate(site, values); err != nil {
 				t.Fatalf("Evaluate() error = %v", err)
+			} else if !reflect.DeepEqual(got, example.want) {
+				t.Fatalf("Evaluate() = %#v, want %#v", got, example.want)
 			}
 			if reduced, err := engine.Reduce(site, values); err != nil || (!reduced.Known && reduced.Source == "") {
 				t.Fatalf("Reduce() = %#v, %v", reduced, err)
@@ -457,6 +460,49 @@ func FuzzEngineAbstractRuntimeTemplateMatchesConcrete(f *testing.F) {
 		}
 		if !narrow.Value.Known || !reflect.DeepEqual(narrow.Value.Value, concrete) {
 			t.Fatalf("known analysis = %#v, concrete = %#v", narrow.Value, concrete)
+		}
+	})
+}
+
+func FuzzEngineAbstractKnownTemplateShapesMatchConcrete(f *testing.F) {
+	for _, source := range []string{
+		"literal",
+		"${{ env.FLAG }}",
+		"prefix-${{ inputs.name }}-suffix",
+		"${{ github.event_name == 'push' && inputs.name || env.FLAG }}",
+		"${{ format('{0}-{1}', inputs.name, github.event_name) }}",
+	} {
+		f.Add(source)
+	}
+	engine := NewEngine()
+	values := Values{Runtime: Context{
+		Env:     map[string]string{"FLAG": "yes"},
+		GitHub:  map[string]any{"event_name": "push", "token": "ghs_scoped"},
+		Inputs:  map[string]string{"name": "value"},
+		Secrets: map[string]string{"NAME": "secret"},
+	}}
+	abstract := AbstractValues{References: map[string]any{
+		"env.flag":          "yes",
+		"github.event_name": "push",
+		"github.token":      "ghs_scoped",
+		"inputs.name":       "value",
+		"secrets.name":      "secret",
+	}}
+	f.Fuzz(func(t *testing.T, source string) {
+		site := Site{Source: source, Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}
+		if _, err := engine.Validate(site); err != nil {
+			return
+		}
+		concrete, err := engine.Evaluate(site, values)
+		if err != nil {
+			return
+		}
+		analysis, err := engine.Analyze(site, abstract)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if analysis.Value.Known && !reflect.DeepEqual(analysis.Value.Value, concrete) {
+			t.Fatalf("known analysis = %#v, concrete = %#v", analysis.Value, concrete)
 		}
 	})
 }

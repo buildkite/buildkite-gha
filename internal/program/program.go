@@ -62,10 +62,10 @@ type Position struct {
 // Location retains the workflow source and stable normalized field path used
 // for diagnostics and coverage tests.
 type Location struct {
-	File  string   `json:"file"`
+	File  string   `json:"file,omitempty"`
 	Field string   `json:"field"`
-	Start Position `json:"start"`
-	End   Position `json:"end"`
+	Start Position `json:"start,omitzero"`
+	End   Position `json:"end,omitzero"`
 }
 
 // Site is one expression or template evaluated at a defined execution point.
@@ -214,7 +214,7 @@ type Program struct {
 // Validate rejects structural/profile mismatches before an adapter interprets
 // the program. Execution positions, not serialized profile claims, select the
 // expression policy.
-func (p Program) Validate() error {
+func (p *Program) Validate() error {
 	if p.Version != Version {
 		return fmt.Errorf("execution program version must be %d", Version)
 	}
@@ -233,11 +233,8 @@ func (p Program) Validate() error {
 				return fmt.Errorf("step %q has literal and expression timeout-minutes", step.ID)
 			}
 		}
-		switch {
-		case step.Run != nil && step.Invocation != nil:
+		if step.Run != nil && step.Invocation != nil {
 			return fmt.Errorf("step %q has both run and invocation operations", step.ID)
-		case step.Run != nil:
-		case step.Invocation != nil:
 		}
 	}
 	for _, id := range SortedActionIDs(p.Actions) {
@@ -249,8 +246,8 @@ func (p Program) Validate() error {
 			return fmt.Errorf("action program %q: %w", id, err)
 		}
 	}
-	copy := cloneProgram(p)
-	return copy.walkSites(func(site *Site) error {
+	p.DeriveSiteSemantics()
+	return p.walkSites(func(site *Site) error {
 		_, err := engine.Validate(site.expressionSite())
 		return err
 	})
@@ -261,8 +258,8 @@ func (p Program) Validate() error {
 // Validation and ordinary-secret inventory deliberately use this exhaustive
 // walk rather than following runtime guards.
 func (p Program) VisitSites(visit func(Site) error) error {
-	copy := cloneProgram(p)
-	return copy.walkWorkflowSites(func(site *Site) error {
+	derived := cloneProgram(p)
+	return derived.walkWorkflowSites(func(site *Site) error {
 		if site.Source == "" {
 			return nil
 		}

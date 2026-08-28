@@ -471,7 +471,7 @@ func bundleRunsUnprovenActions(bundle compiler.Bundle) bool {
 	for _, artifact := range bundle.Plans {
 		for _, lock := range artifact.Job.Actions {
 			identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
-			if !actionintegration.UsesNativeAdapter(identity) {
+			if _, native, err := actionintegration.AdmitNativeAdapter(identity, lock.Commit); err != nil || !native {
 				return true
 			}
 		}

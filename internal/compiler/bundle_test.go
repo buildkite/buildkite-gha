@@ -1778,6 +1778,12 @@ func TestCompileBundlePreservesFoldedStepControlTypes(t *testing.T) {
 }`)
 			if _, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer"); err == nil {
 				t.Fatal("CompileBundle() accepted a folded value with the wrong type")
+			} else {
+				for _, detail := range []string{"workflow.yml:6:9", test.control} {
+					if !strings.Contains(err.Error(), detail) {
+						t.Fatalf("CompileBundle() error = %v, want location detail %q", err, detail)
+					}
+				}
 			}
 		})
 	}

@@ -405,7 +405,7 @@ func evaluateActionLifecycleCondition(source string, context ConditionContext) (
 	return githubTruthy(value), nil
 }
 
-// evaluateCondition evaluates a job or step condition. Unsupported syntax and
+// evaluateConditionLegacy evaluates a job or step condition. Unsupported syntax and
 // unavailable values return an error.
 func evaluateConditionLegacy(source string, context ConditionContext) (bool, error) {
 	node, empty, err := parseCondition(source)

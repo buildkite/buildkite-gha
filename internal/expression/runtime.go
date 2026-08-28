@@ -87,7 +87,7 @@ func validateRuntimeReferenceNode(node actionlint.ExprNode) error {
 	return validator.validate(node)
 }
 
-// evaluateRuntimeTemplate substitutes direct runtime references in a template once.
+// evaluateDirectTemplate substitutes direct runtime references in a template once.
 func evaluateDirectTemplate(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateDirectRuntimeNode)
 }
@@ -129,7 +129,7 @@ type ObjectEntry struct {
 	Value any
 }
 
-// evaluateRuntimeObject evaluates one fromJSON expression while retaining JSON object
+// evaluateObject evaluates one fromJSON expression while retaining JSON object
 // order for surfaces, such as services, where declaration order is observable.
 func evaluateObject(source string, context Context) ([]ObjectEntry, error) {
 	return evaluateRuntimeObject(source, context)
@@ -198,7 +198,7 @@ func evaluateRuntimeObject(source string, context Context) ([]ObjectEntry, error
 	return result, nil
 }
 
-// evaluateStepTemplate evaluates the expression surface available to workflow step
+// evaluateStep evaluates the expression surface available to workflow step
 // fields. Other runtime surfaces remain direct-reference only.
 func evaluateStep(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateStepRuntimeNode)
@@ -701,25 +701,25 @@ func lookupRuntimeValue(value any, path []string) (any, bool) {
 		matched := false
 		switch object := current.(type) {
 		case map[string]any:
-			for name, item := range object {
-				if strings.EqualFold(name, part) {
-					current, matched = item, true
-					break
-				}
-			}
+			current, matched = findFold(object, part)
 		case map[string]string:
-			for name, item := range object {
-				if strings.EqualFold(name, part) {
-					current, matched = item, true
-					break
-				}
-			}
+			current, matched = findFold(object, part)
 		}
 		if !matched {
 			return nil, false
 		}
 	}
 	return current, true
+}
+
+func findFold[V any](values map[string]V, target string) (V, bool) {
+	for name, value := range values {
+		if strings.EqualFold(name, target) {
+			return value, true
+		}
+	}
+	var zero V
+	return zero, false
 }
 
 func findString(values map[string]string, name string) string {

@@ -81,6 +81,12 @@ func (p *Program) DeriveSiteSemantics() {
 	_ = p.walkSites(func(*Site) error { return nil })
 }
 
+// DeriveSiteSemantics populates the in-memory expression policy selected by
+// each structural position in an action program.
+func (action *Action) DeriveSiteSemantics() {
+	_ = walkActionSites(action, func(*Site) error { return nil })
+}
+
 func (p *Program) walkWorkflowSites(visit func(*Site) error) error {
 	w := func(site *Site, surface Surface, result ResultType, purpose Purpose) error {
 		return walkOne(site, workflowSemantics(surface, result, purpose), visit)

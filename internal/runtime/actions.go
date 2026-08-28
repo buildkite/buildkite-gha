@@ -166,7 +166,8 @@ func usesDownloadArtifactAdapter(lock plan.ActionLock) bool {
 }
 
 func usesNativeAdapter(lock plan.ActionLock) bool {
-	return actionintegration.UsesNativeAdapter(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	_, admitted, err := actionintegration.AdmitNativeAdapter(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
+	return err == nil && admitted
 }
 
 func usesCacheService(lock plan.ActionLock) bool {

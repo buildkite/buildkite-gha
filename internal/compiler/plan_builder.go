@@ -262,12 +262,20 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		}
 		return reduced, nil
 	}
-	reduceTypedExpression := func(value string, profile expression.ProfileID, result expression.ResultType) (string, error) {
+	reduceTypedExpression := func(site program.Site, profile expression.ProfileID) (string, error) {
+		value := site.Source
+		result := expression.ResultType(site.Result)
 		referencesEvent, err := siteReferencesEvent(value, profile, result, true)
 		if err != nil || !referencesEvent {
 			return value, err
 		}
-		reduced, err := reduceCompileSite(value, profile, result, context)
+		reduced, err := reduceCompileSiteAt(value, profile, result, context, expression.Location{
+			File: site.Location.File, Field: site.Location.Field,
+			Span: expression.Span{
+				Start: expression.Position{Line: site.Location.Start.Line, Column: site.Location.Start.Column},
+				End:   expression.Position{Line: site.Location.End.Line, Column: site.Location.End.Column},
+			},
+		})
 		if err != nil {
 			return "", err
 		}
@@ -294,7 +302,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		case program.SurfaceStepCondition:
 			site.Source, reduceErr = reduceCondition(site.Source, profile)
 		case program.SurfaceStepControl:
-			site.Source, reduceErr = reduceTypedExpression(site.Source, profile, expression.ResultType(site.Result))
+			site.Source, reduceErr = reduceTypedExpression(site, profile)
 		case program.SurfaceJobEnvironment:
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceJobDefault:
@@ -332,22 +340,23 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 
 // compileReductionProfile is the single admission policy for event reduction.
 // Program.Validate applies the destination runtime profile to every residual.
+var compileReductionProfiles = map[program.Surface]expression.ProfileID{
+	program.SurfaceJobCondition:      expression.ProfileCompileJobCondition,
+	program.SurfaceCallCondition:     expression.ProfileCompileCallCondition,
+	program.SurfaceStepCondition:     expression.ProfileCompileStepCondition,
+	program.SurfaceStepControl:       expression.ProfileCompile,
+	program.SurfaceJobEnvironment:    expression.ProfileJobEnvironment,
+	program.SurfaceJobDefault:        expression.ProfileJobDefault,
+	program.SurfaceJobOutput:         expression.ProfileJobOutput,
+	program.SurfaceStepTemplate:      expression.ProfileStepTemplate,
+	program.SurfaceRuntimeTemplate:   expression.ProfileRuntimeTemplate,
+	program.SurfaceServiceTemplate:   expression.ProfileRuntimeTemplate,
+	program.SurfaceServiceCredential: expression.ProfileServiceCredential,
+	program.SurfaceServiceMap:        expression.ProfileStepTemplate,
+}
+
 func compileReductionProfile(surface program.Surface) (expression.ProfileID, error) {
-	profiles := map[program.Surface]expression.ProfileID{
-		program.SurfaceJobCondition:      expression.ProfileCompileJobCondition,
-		program.SurfaceCallCondition:     expression.ProfileCompileCallCondition,
-		program.SurfaceStepCondition:     expression.ProfileCompileStepCondition,
-		program.SurfaceStepControl:       expression.ProfileCompile,
-		program.SurfaceJobEnvironment:    expression.ProfileJobEnvironment,
-		program.SurfaceJobDefault:        expression.ProfileJobDefault,
-		program.SurfaceJobOutput:         expression.ProfileJobOutput,
-		program.SurfaceStepTemplate:      expression.ProfileStepTemplate,
-		program.SurfaceRuntimeTemplate:   expression.ProfileRuntimeTemplate,
-		program.SurfaceServiceTemplate:   expression.ProfileRuntimeTemplate,
-		program.SurfaceServiceCredential: expression.ProfileServiceCredential,
-		program.SurfaceServiceMap:        expression.ProfileStepTemplate,
-	}
-	profile, ok := profiles[surface]
+	profile, ok := compileReductionProfiles[surface]
 	if !ok {
 		return "", fmt.Errorf("expression surface %q has no compile reduction profile", surface)
 	}

@@ -17,7 +17,7 @@ type NeedOutputReference struct {
 	Output string
 }
 
-// referencePath extracts one complete static variable reference. Dot and
+// staticReferencePath extracts one complete static variable reference. Dot and
 // literal string index access are accepted; functions, operators, literals,
 // compound templates, and dynamic indexes return an error.
 func staticReferencePath(text string) (string, []string, error) {

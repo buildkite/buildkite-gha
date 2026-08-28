@@ -12,12 +12,22 @@ func compileExpressionSite(source string, profile expression.ProfileID, result e
 	return expression.Site{Source: source, Profile: profile, Result: result, Purpose: expression.PurposeExpression}
 }
 
+func compileExpressionSiteAt(source string, profile expression.ProfileID, result expression.ResultType, location expression.Location) expression.Site {
+	site := compileExpressionSite(source, profile, result)
+	site.Location = location
+	return site
+}
+
 func evaluateCompileSite(source string, profile expression.ProfileID, result expression.ResultType, context expression.CompileContext) (any, error) {
 	return compilerExpressionEngine.Evaluate(compileExpressionSite(source, profile, result), expression.Values{Compile: context})
 }
 
 func reduceCompileSite(source string, profile expression.ProfileID, result expression.ResultType, context expression.CompileContext) (expression.Reduced, error) {
 	return compilerExpressionEngine.Reduce(compileExpressionSite(source, profile, result), expression.Values{Compile: context})
+}
+
+func reduceCompileSiteAt(source string, profile expression.ProfileID, result expression.ResultType, context expression.CompileContext, location expression.Location) (expression.Reduced, error) {
+	return compilerExpressionEngine.Reduce(compileExpressionSiteAt(source, profile, result, location), expression.Values{Compile: context})
 }
 
 func validateCompileSite(source string, profile expression.ProfileID, result expression.ResultType) error {

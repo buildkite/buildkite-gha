@@ -3779,6 +3779,42 @@ func TestPostActionsRunLIFOAfterMainFailure(t *testing.T) {
 	}
 }
 
+func TestConditionInspectionFailureAfterMainFailureStillRunsPostPhase(t *testing.T) {
+	invalidStepCondition := executionprogram.Site{
+		Source: "(", Surface: executionprogram.SurfaceStepCondition, Result: executionprogram.ResultBoolean,
+		Provenance: executionprogram.ProvenanceWorkflow, Purpose: executionprogram.PurposeExpression,
+	}
+	invalidPostCondition := executionprogram.Site{
+		Source: "(", Surface: executionprogram.SurfaceActionLifecycle, Result: executionprogram.ResultBoolean,
+		Provenance: executionprogram.ProvenanceAction, Purpose: executionprogram.PurposeExpression,
+	}
+	run := newJobRun(Runner{})
+	run.job = plan.Job{
+		Steps:   []plan.Step{{ID: "inspect", Kind: "run", Execution: &executionprogram.Step{Condition: invalidStepCondition}}},
+		Program: &executionprogram.Program{Version: executionprogram.Version},
+	}
+	run.processor = newCommandProcessor(io.Discard, io.Discard)
+	run.eval = expression.Context{Env: map[string]string{}, Steps: map[string]expression.StepStatus{}}
+	run.result = JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}}
+	run.runtimeEnv = map[string]string{}
+	run.posts = &postRegistry{}
+	run.posts.register(&registeredPost{
+		conditionSite: &invalidPostCondition,
+		invocation:    &preparedInvocation{action: javaScriptAction{Name: "cleanup"}, eval: expression.Context{}},
+	})
+	run.supervisor = newBackgroundSupervisor(1)
+	run.preFailures = map[int]stepExecution{}
+	run.runErr = errors.New("main failed")
+
+	_, err := run.runSteps(t.Context(), t.Context())
+	if err == nil || !strings.Contains(err.Error(), `step "inspect"`) || !strings.Contains(err.Error(), `post action "cleanup" condition`) {
+		t.Fatalf("runSteps() error = %v, want step and post-phase diagnostics", err)
+	}
+	if got := run.eval.Steps["inspect"].Conclusion; got != "failure" {
+		t.Fatalf("condition inspection conclusion = %q, want failure", got)
+	}
+}
+
 func TestJobContinueOnErrorPreservesFailureLifecycleAndOutputs(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "test.yml")

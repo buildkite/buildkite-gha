@@ -366,7 +366,11 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	b.active[key] = true
 	defer delete(b.active, key)
 
-	if actionintegration.UsesNativeAdapter(actionintegration.Identity{Source: n.lock.Source, Repository: n.lock.Repository, Path: n.lock.Path}) {
+	_, native, err := actionintegration.AdmitNativeAdapter(actionintegration.Identity{Source: n.lock.Source, Repository: n.lock.Repository, Path: n.lock.Path}, n.lock.Commit)
+	if err != nil {
+		return nil, err
+	}
+	if native {
 		// The native adapter replaces the admitted release's execution
 		// entirely, and admitted legacy releases predate the supported
 		// metadata and runtime set, so upstream metadata must not gate

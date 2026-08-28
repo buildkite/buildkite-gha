@@ -880,7 +880,7 @@ func (job Job) Validate() error {
 	if len(job.CallGuards) > MaxCallGuards {
 		return fmt.Errorf("job plan has more than %d reusable-workflow call guards", MaxCallGuards)
 	}
-	if job.Program == nil || len(job.CallGuards) != len(job.Program.Job.Guards) {
+	if len(job.CallGuards) != len(job.Program.Job.Guards) {
 		return fmt.Errorf("job plan call guard projection does not match normalized program")
 	}
 	for i, guard := range job.CallGuards {
@@ -1451,12 +1451,15 @@ func validateActionLocks(job Job) error {
 	}
 	for _, lock := range job.Actions {
 		id := lock.ID
-		if descriptor, known, err := integration.Admit(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit); err == nil && known && descriptor.Adapter != "" {
+		if _, ok := job.Program.Actions[id]; ok {
 			continue
 		}
-		if _, ok := job.Program.Actions[id]; !ok {
-			return fmt.Errorf("reachable action lock %q has no normalized execution program", id)
+		if _, native, err := integration.AdmitNativeAdapter(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit); err != nil {
+			return fmt.Errorf("action lock %q is not an admitted native-adapter release: %w", id, err)
+		} else if native {
+			continue
 		}
+		return fmt.Errorf("reachable action lock %q has no normalized execution program", id)
 	}
 	return nil
 }

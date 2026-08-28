@@ -617,7 +617,10 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 		if runErr != nil || runCtx.Err() != nil {
 			referencesStatus, err := executionprogram.ReferencesStatus(step.Execution.Condition)
 			if err != nil {
-				return jobResult, errors.Join(runErr, fmt.Errorf("step %q condition: %w", step.ID, err))
+				stepEval := stepExpressionContext(eval)
+				execution := classifyStepExecutionWithControls(ctx, runCtx, step, newResult(), fmt.Errorf("condition: %w", err), stepEval)
+				runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
+				continue
 			}
 			if !referencesStatus {
 				eval.Steps[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}

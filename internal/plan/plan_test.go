@@ -395,6 +395,30 @@ func TestStepControlExpressionContract(t *testing.T) {
 		t.Fatalf("decoded step = %#v", step)
 	}
 	validateJobPlanSchema(t, encoded)
+	if strings.Contains(string(encoded), `"file":""`) {
+		t.Fatal("encoded program retains empty location files")
+	}
+
+	schema := compileJobPlanSchema(t)
+	for _, test := range []struct {
+		control string
+		literal any
+	}{
+		{control: "continue_on_error", literal: false},
+		{control: "timeout_minutes", literal: float64(0)},
+	} {
+		var invalid map[string]any
+		if err := json.Unmarshal(encoded, &invalid); err != nil {
+			t.Fatal(err)
+		}
+		program := invalid["program"].(map[string]any)
+		programJob := program["job"].(map[string]any)
+		control := programJob["steps"].([]any)[0].(map[string]any)[test.control].(map[string]any)
+		control["literal"] = test.literal
+		if err := schema.Validate(invalid); err == nil {
+			t.Errorf("schema accepted literal and expression for %s", test.control)
+		}
+	}
 
 	job.Steps[0].ContinueOnError = true
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "both literal and expression continue_on_error") {
@@ -700,9 +724,9 @@ func TestReachableActionLocksRequireProgramsExceptNativeAdapters(t *testing.T) {
 	if err := job.Validate(); err != nil {
 		t.Fatalf("Validate() native adapter error = %v", err)
 	}
-	job.Actions[0].Commit = strings.Repeat("c", 40)
-	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "has no normalized execution program") {
-		t.Fatalf("Validate() unadmitted native commit error = %v", err)
+	job.Actions[0].Commit = strings.Repeat("z", 40)
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "invalid GitHub identity") {
+		t.Fatalf("Validate() malformed native commit error = %v", err)
 	}
 }
 
@@ -1069,22 +1093,22 @@ func synchronizeExecutionProgram(job *Job) {
 
 func programFromProjection(job Job) program.Program {
 	result := program.Program{Version: program.Version, Job: program.Job{
-		Condition:       testPlanSite(job.Condition, program.SurfaceJobCondition, program.ResultBoolean),
+		Condition:       testPlanSite(job.Condition),
 		ContinueOnError: job.ContinueOnError, TimeoutMinutes: job.TimeoutMinutes,
-		Env: testPlanBindings(job.Env, program.SurfaceJobEnvironment, program.PurposeExpression),
+		Env: testPlanBindings(job.Env),
 		Defaults: program.Defaults{
-			Shell:            testPlanSite(job.DefaultShell, program.SurfaceJobDefault, program.ResultString),
-			WorkingDirectory: testPlanSite(job.DefaultWorkingDirectory, program.SurfaceJobDefault, program.ResultString),
+			Shell:            testPlanSite(job.DefaultShell),
+			WorkingDirectory: testPlanSite(job.DefaultWorkingDirectory),
 		},
-		Outputs: testPlanBindings(job.Outputs, program.SurfaceJobOutput, program.PurposeExpression),
+		Outputs: testPlanBindings(job.Outputs),
 	}}
 	result.Actions = make(map[string]program.Action)
 	for _, lock := range job.Actions {
-		descriptor, known, err := integration.Admit(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
-		if err == nil && known && descriptor.Adapter != "" {
+		_, native, err := integration.AdmitNativeAdapter(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
+		if err == nil && native {
 			continue
 		}
-		action := program.Action{Runtime: "node24", Main: "index.js", PreIf: testActionSite("", program.SurfaceActionLifecycle, program.ResultBoolean), PostIf: testActionSite("", program.SurfaceActionLifecycle, program.ResultBoolean)}
+		action := program.Action{Runtime: "node24", Main: "index.js", PreIf: testActionSite(""), PostIf: testActionSite("")}
 		if lock.DockerImage != "" {
 			action.Runtime, action.Main, action.Image = "docker", "", "docker://"+lock.DockerImage
 		}
@@ -1095,24 +1119,24 @@ func programFromProjection(job Job) program.Program {
 	}
 	result.Job.Guards = make([]program.Guard, len(job.CallGuards))
 	for i, guard := range job.CallGuards {
-		result.Job.Guards[i].Condition = testPlanSite(guard.Condition, program.SurfaceCallCondition, program.ResultBoolean)
+		result.Job.Guards[i].Condition = testPlanSite(guard.Condition)
 	}
 	result.Job.Steps = make([]program.Step, len(job.Steps))
 	for i, step := range job.Steps {
-		projected := program.Step{ID: step.ID, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Env: testPlanBindings(step.Env, program.SurfaceStepTemplate, program.PurposeExpression), Condition: testPlanSite(step.Condition, program.SurfaceStepCondition, program.ResultBoolean), ContinueOnError: program.BoolControl{Literal: step.ContinueOnError}, TimeoutMinutes: program.NumberControl{Literal: step.TimeoutMinutes}, Name: testPlanSite(step.Name, program.SurfaceStepTemplate, program.ResultString)}
+		projected := program.Step{ID: step.ID, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Env: testPlanBindings(step.Env), Condition: testPlanSite(step.Condition), ContinueOnError: program.BoolControl{Literal: step.ContinueOnError}, TimeoutMinutes: program.NumberControl{Literal: step.TimeoutMinutes}, Name: testPlanSite(step.Name)}
 		if step.ContinueOnErrorExpression != "" {
-			value := testPlanSite(step.ContinueOnErrorExpression, program.SurfaceStepControl, program.ResultBoolean)
+			value := testPlanSite(step.ContinueOnErrorExpression)
 			projected.ContinueOnError.Expression = &value
 		}
 		if step.TimeoutMinutesExpression != "" {
-			value := testPlanSite(step.TimeoutMinutesExpression, program.SurfaceStepControl, program.ResultNumber)
+			value := testPlanSite(step.TimeoutMinutesExpression)
 			projected.TimeoutMinutes.Expression = &value
 		}
 		switch step.Kind {
 		case "run":
-			projected.Run = &program.Run{Command: testPlanSite(step.Command, program.SurfaceStepTemplate, program.ResultString), Shell: testPlanSite(step.Shell, program.SurfaceStepTemplate, program.ResultString), WorkingDirectory: testPlanSite(step.WorkingDirectory, program.SurfaceStepTemplate, program.ResultString)}
+			projected.Run = &program.Run{Command: testPlanSite(step.Command), Shell: testPlanSite(step.Shell), WorkingDirectory: testPlanSite(step.WorkingDirectory)}
 		case "uses":
-			projected.Invocation = &program.Invocation{Uses: testPlanSite(step.Uses, program.SurfaceRuntimeTemplate, program.ResultString), With: testPlanBindings(step.With, program.SurfaceStepTemplate, program.PurposeActionInput)}
+			projected.Invocation = &program.Invocation{Uses: testPlanSite(step.Uses), With: testPlanBindings(step.With)}
 			if step.Action != nil {
 				projected.Invocation.Lock = step.Action.Lock
 			}
@@ -1120,32 +1144,33 @@ func programFromProjection(job Job) program.Program {
 		result.Job.Steps[i] = projected
 	}
 	if job.Container != nil {
-		result.Job.Container = &program.Container{Image: testPlanSite(job.Container.Image, program.SurfaceRuntimeTemplate, program.ResultString), Env: testPlanBindings(job.Container.Env, program.SurfaceRuntimeTemplate, program.PurposeExpression), Ports: testPlanSites(job.Container.Ports, program.SurfaceRuntimeTemplate)}
+		result.Job.Container = &program.Container{Image: testPlanSite(job.Container.Image), Env: testPlanBindings(job.Container.Env), Ports: testPlanSites(job.Container.Ports)}
 	}
 	if job.ServicesExpression != "" {
-		value := testPlanSite(job.ServicesExpression, program.SurfaceServiceMap, program.ResultObject)
+		value := testPlanSite(job.ServicesExpression)
 		result.Job.Services.Dynamic = &value
 	}
 	for _, name := range job.ServiceOrder {
 		container := job.Services[name]
-		service := program.Service{Name: name, Container: program.ServiceContainer{Image: testPlanSite(container.Image, program.SurfaceServiceTemplate, program.ResultString), Env: testPlanBindings(container.Env, program.SurfaceServiceTemplate, program.PurposeExpression), Ports: testPlanSites(container.Ports, program.SurfaceServiceTemplate), Volumes: testPlanSites(container.Volumes, program.SurfaceServiceTemplate), Options: testPlanSite(container.Options, program.SurfaceServiceTemplate, program.ResultString), Command: testPlanSite(container.Command, program.SurfaceServiceTemplate, program.ResultString), Entrypoint: testPlanSite(container.Entrypoint, program.SurfaceServiceTemplate, program.ResultString)}}
+		service := program.Service{Name: name, Container: program.ServiceContainer{Image: testPlanSite(container.Image), Env: testPlanBindings(container.Env), Ports: testPlanSites(container.Ports), Volumes: testPlanSites(container.Volumes), Options: testPlanSite(container.Options), Command: testPlanSite(container.Command), Entrypoint: testPlanSite(container.Entrypoint)}}
 		if container.Credentials != nil {
-			service.Container.Credentials = &program.ContainerCredentials{Username: testPlanSite(container.Credentials.Username, program.SurfaceServiceCredential, program.ResultString), Password: testPlanSite(container.Credentials.Password, program.SurfaceServiceCredential, program.ResultString)}
+			service.Container.Credentials = &program.ContainerCredentials{Username: testPlanSite(container.Credentials.Username), Password: testPlanSite(container.Credentials.Password)}
 		}
 		result.Job.Services.Static = append(result.Job.Services.Static, service)
 	}
+	result.DeriveSiteSemantics()
 	return result
 }
 
-func testPlanSite(source string, surface program.Surface, result program.ResultType) program.Site {
-	return program.Site{Source: source, Surface: surface, Result: result, Provenance: program.ProvenanceWorkflow, Purpose: program.PurposeExpression}
+func testPlanSite(source string) program.Site {
+	return program.Site{Source: source}
 }
 
-func testActionSite(source string, surface program.Surface, result program.ResultType) program.Site {
-	return program.Site{Source: source, Surface: surface, Result: result, Provenance: program.ProvenanceAction, Purpose: program.PurposeExpression}
+func testActionSite(source string) program.Site {
+	return program.Site{Source: source}
 }
 
-func testPlanBindings(values map[string]string, surface program.Surface, purpose program.Purpose) []program.Binding {
+func testPlanBindings(values map[string]string) []program.Binding {
 	names := make([]string, 0, len(values))
 	for name := range values {
 		names = append(names, name)
@@ -1153,17 +1178,15 @@ func testPlanBindings(values map[string]string, surface program.Surface, purpose
 	sort.Strings(names)
 	result := make([]program.Binding, 0, len(names))
 	for _, name := range names {
-		value := testPlanSite(values[name], surface, program.ResultString)
-		value.Purpose = purpose
-		result = append(result, program.Binding{Name: name, Value: value})
+		result = append(result, program.Binding{Name: name, Value: testPlanSite(values[name])})
 	}
 	return result
 }
 
-func testPlanSites(values []string, surface program.Surface) []program.Site {
+func testPlanSites(values []string) []program.Site {
 	result := make([]program.Site, len(values))
 	for i, value := range values {
-		result[i] = testPlanSite(value, surface, program.ResultString)
+		result[i] = testPlanSite(value)
 	}
 	return result
 }

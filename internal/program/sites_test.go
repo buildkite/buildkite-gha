@@ -2,6 +2,8 @@ package program
 
 import (
 	"encoding/json"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -85,6 +87,57 @@ func TestPositionalWalkerVisitsAndTransformsEverySiteExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestPositionalWalkerCoversEverySiteField(t *testing.T) {
+	var program Program
+	marker := 0
+	populateSiteFields(reflect.ValueOf(&program).Elem(), &marker)
+
+	walked := make(map[string]int, marker)
+	if err := program.walkSites(func(site *Site) error {
+		walked[site.Source]++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(walked) != marker {
+		t.Fatalf("walker visited %d of %d reflected Site fields", len(walked), marker)
+	}
+	for source, count := range walked {
+		if count != 1 {
+			t.Fatalf("site %q walked %d times", source, count)
+		}
+	}
+}
+
+var siteType = reflect.TypeFor[Site]()
+
+func populateSiteFields(value reflect.Value, marker *int) {
+	if value.Type() == siteType {
+		(*marker)++
+		value.Set(reflect.ValueOf(Site{Source: "site-" + strconv.Itoa(*marker)}))
+		return
+	}
+	switch value.Kind() {
+	case reflect.Pointer:
+		value.Set(reflect.New(value.Type().Elem()))
+		populateSiteFields(value.Elem(), marker)
+	case reflect.Struct:
+		for i := range value.NumField() {
+			if value.Field(i).CanSet() {
+				populateSiteFields(value.Field(i), marker)
+			}
+		}
+	case reflect.Slice:
+		value.Set(reflect.MakeSlice(value.Type(), 1, 1))
+		populateSiteFields(value.Index(0), marker)
+	case reflect.Map:
+		value.Set(reflect.MakeMap(value.Type()))
+		entry := reflect.New(value.Type().Elem()).Elem()
+		populateSiteFields(entry, marker)
+		value.SetMapIndex(reflect.ValueOf("entry").Convert(value.Type().Key()), entry)
+	}
+}
+
 func TestProgramWireDerivesSiteSemanticsFromPosition(t *testing.T) {
 	program := Program{Version: Version, Job: Job{
 		Condition: Site{Source: "true"}, Defaults: Defaults{}, Services: Services{},
@@ -108,6 +161,22 @@ func TestProgramWireDerivesSiteSemanticsFromPosition(t *testing.T) {
 	}
 	if got := decoded.Actions["action"].PreIf; got.Surface != SurfaceActionLifecycle || got.Result != ResultBoolean || got.Provenance != ProvenanceAction || got.Purpose != PurposeExpression {
 		t.Fatalf("action pre-if semantics = %#v", got)
+	}
+}
+
+func TestValidateDerivesSiteSemanticsInPlace(t *testing.T) {
+	program := Program{Version: Version, Job: Job{
+		Condition: Site{Source: "true"},
+		Steps:     []Step{{ID: "step", Condition: Site{Source: "true"}, Run: &Run{Command: Site{Source: "echo ok"}}}},
+	}}
+	if err := program.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := program.Job.Steps[0].Run.Command; got.Surface != SurfaceStepTemplate || got.Result != ResultString || got.Provenance != ProvenanceWorkflow {
+		t.Fatalf("validated command semantics = %#v", got)
+	}
+	if _, err := InventoryAuthority(program, AuthorityOptions{}); err != nil {
+		t.Fatalf("InventoryAuthority() after Validate() = %v", err)
 	}
 }
 

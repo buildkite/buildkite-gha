@@ -22,8 +22,8 @@ type ActionInput struct {
 // VisitSites walks every action-authored expression site once in normalized
 // execution order.
 func (action Action) VisitSites(visit func(Site) error) error {
-	copy := cloneAction(action)
-	return walkActionSites(&copy, func(site *Site) error {
+	derived := cloneAction(action)
+	return walkActionSites(&derived, func(site *Site) error {
 		if site.Source == "" {
 			return nil
 		}
@@ -155,7 +155,7 @@ func ActionFromMetadata(source metadata.Metadata, runtime string, children map[s
 		}
 		result.Steps[i] = lowered
 	}
-	_ = walkActionSites(&result, func(*Site) error { return nil })
+	result.DeriveSiteSemantics()
 	return result
 }
 
