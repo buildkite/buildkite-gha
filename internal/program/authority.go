@@ -2,6 +2,7 @@ package program
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
 )
@@ -33,8 +34,8 @@ type Reachability struct {
 func WorkflowReachability(workflow Program, values expression.AbstractValues) (Reachability, error) {
 	result := Reachability{Steps: make([]bool, len(workflow.Job.Steps))}
 	engine := expression.NewEngine()
-	analyze := func(site Site) (expression.Analysis, error) {
-		analysis, err := engine.Analyze(site.expressionSite(), values)
+	analyze := func(site Site, analysisValues expression.AbstractValues) (expression.Analysis, error) {
+		analysis, err := engine.Analyze(site.expressionSite(), analysisValues)
 		if err == nil {
 			result.githubToken = result.githubToken || grantsToken(analysis.Effects.GitHubToken)
 		}
@@ -43,8 +44,21 @@ func WorkflowReachability(workflow Program, values expression.AbstractValues) (R
 	knownFalse := func(analysis expression.Analysis) bool {
 		return analysis.Value.Known && !engine.Truthy(analysis.Value.Value)
 	}
+	// Flattened call guards retain their caller-scoped inputs and needs in the
+	// execution plan, not in Program.Guard. Only use values whose scope is shared
+	// by caller and callee when proving a guard false.
+	guardValues := expression.AbstractValues{References: map[string]any{}}
+	for name, value := range values.References {
+		root := name
+		if dot := strings.IndexByte(root, '.'); dot >= 0 {
+			root = root[:dot]
+		}
+		if strings.EqualFold(root, "github") || strings.EqualFold(root, "vars") {
+			guardValues.References[name] = value
+		}
+	}
 	for _, guard := range workflow.Job.Guards {
-		analysis, err := analyze(guard.Condition)
+		analysis, err := analyze(guard.Condition, guardValues)
 		if err != nil {
 			return Reachability{}, err
 		}
@@ -52,7 +66,7 @@ func WorkflowReachability(workflow Program, values expression.AbstractValues) (R
 			return result, nil
 		}
 	}
-	job, err := analyze(workflow.Job.Condition)
+	job, err := analyze(workflow.Job.Condition, values)
 	if err != nil {
 		return Reachability{}, err
 	}
@@ -61,7 +75,7 @@ func WorkflowReachability(workflow Program, values expression.AbstractValues) (R
 	}
 	result.Job = true
 	for i, step := range workflow.Job.Steps {
-		condition, err := analyze(step.Condition)
+		condition, err := analyze(step.Condition, values)
 		if err != nil {
 			return Reachability{}, err
 		}

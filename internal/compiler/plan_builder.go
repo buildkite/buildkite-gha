@@ -463,7 +463,6 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
 	built.requiresMise = compiled.requiresMise
-	built.requiresEventPayload = compiled.requiresEventPayload
 	built.requiredSecrets = compiled.requiredSecrets
 	built.programs = compiled.programs
 	built.inputsInspected = true
@@ -477,6 +476,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 			continue
 		}
 		built.requiresGitHubToken = built.requiresGitHubToken || authority.GitHubToken
+		built.requiresEventPayload = built.requiresEventPayload || authority.EventPayload
 		if authority.GitHubToken {
 			built.authorization.GitHubTokenActions = append(built.authorization.GitHubTokenActions, actionRefs[i])
 		}
@@ -505,7 +505,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 		if !ok {
 			return built, fmt.Errorf("build plan for job %q: action lock %q is missing", instance.LogicalJobID, selector.Lock)
 		}
-		if err := b.validateActionAdapter(instance, stepIndex, lock, &built); err != nil {
+		if err := b.validateActionAdapter(instance, stepIndex, lock, reachability.Steps[stepIndex], &built); err != nil {
 			return built, err
 		}
 	}
@@ -532,7 +532,7 @@ func (b planBuilder) authorityReferences(instance JobInstance) map[string]any {
 	}
 }
 
-func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, built *builtPlanActions) error {
+func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, reachable bool, built *builtPlanActions) error {
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
 	switch descriptor.Adapter {
 	case actionintegration.AdapterCheckoutExactEventSHA:
@@ -551,8 +551,10 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 			span := instance.Steps[stepIndex].Span.Start
 			return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 		}
-		built.capabilities = append(built.capabilities, "provider-token-read")
-		built.authorization.ProviderTokenReadCapabilitySources = append(built.authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
+		if reachable {
+			built.capabilities = append(built.capabilities, "provider-token-read")
+			built.authorization.ProviderTokenReadCapabilitySources = append(built.authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
+		}
 	case actionintegration.AdapterUploadArtifactBuildkite:
 		if err := actionintegration.ValidateUploadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
 			span := instance.Steps[stepIndex].Span.Start

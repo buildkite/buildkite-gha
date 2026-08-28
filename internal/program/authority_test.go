@@ -63,7 +63,7 @@ func TestInventoryAuthorityNarrowsExplicitKnownConditionValues(t *testing.T) {
 	}
 }
 
-func TestWorkflowReachabilityIncludesGuardsAndPlanningValues(t *testing.T) {
+func TestWorkflowReachabilityKeepsCallerScopedGuardValuesUnknown(t *testing.T) {
 	condition := func(source string, surface Surface) Site {
 		return Site{Source: source, Surface: surface, Result: ResultBoolean, Provenance: ProvenanceWorkflow, Purpose: PurposeExpression}
 	}
@@ -76,7 +76,7 @@ func TestWorkflowReachabilityIncludesGuardsAndPlanningValues(t *testing.T) {
 		},
 	}}
 	values := expression.AbstractValues{References: map[string]any{
-		"inputs": map[string]any{"guard": true},
+		"inputs": map[string]any{"guard": false},
 		"matrix": map[string]any{"job": true},
 		"vars":   map[string]string{"STEP": "skip"},
 	}}
@@ -85,12 +85,29 @@ func TestWorkflowReachabilityIncludesGuardsAndPlanningValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reachability.Job || len(reachability.Steps) != 2 || reachability.Steps[0] || !reachability.Steps[1] {
-		t.Fatalf("reachability = %#v, want known-false first step and unknown second step", reachability)
+		t.Fatalf("reachability = %#v, want caller input guard unknown, known-false first step, and unknown second step", reachability)
 	}
-	values.References["inputs"] = map[string]any{"guard": false}
+	workflow.Job.Guards[0].Condition.Source = "false"
 	reachability, err = WorkflowReachability(workflow, values)
 	if err != nil || reachability.Job || reachability.Steps[0] || reachability.Steps[1] {
-		t.Fatalf("known-false call guard reachability = %#v, %v", reachability, err)
+		t.Fatalf("literal known-false call guard reachability = %#v, %v", reachability, err)
+	}
+}
+
+func TestWorkflowReachabilityUsesSharedGuardValues(t *testing.T) {
+	workflow := Program{Version: Version, Job: Job{
+		Guards:    []Guard{{Condition: Site{Source: "vars.ENABLED != 'yes'", Surface: SurfaceCallCondition, Result: ResultBoolean, Provenance: ProvenanceWorkflow, Purpose: PurposeExpression}}},
+		Condition: Site{Surface: SurfaceJobCondition, Result: ResultBoolean, Provenance: ProvenanceWorkflow, Purpose: PurposeExpression},
+		Steps:     []Step{{Condition: Site{Surface: SurfaceStepCondition, Result: ResultBoolean, Provenance: ProvenanceWorkflow, Purpose: PurposeExpression}}},
+	}}
+	reachability, err := WorkflowReachability(workflow, expression.AbstractValues{References: map[string]any{
+		"vars": map[string]string{"ENABLED": "yes"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reachability.Job || reachability.Steps[0] {
+		t.Fatalf("known-false shared-value guard reachability = %#v", reachability)
 	}
 }
 
