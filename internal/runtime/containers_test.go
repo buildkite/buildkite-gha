@@ -40,6 +40,7 @@ import (
 func (r Runner) startJobContainer(ctx context.Context, processor *commandProcessor, workspace, temp string, spec *plan.Container, services map[string]plan.ServiceContainer, extra ...containerMount) (*jobContainerBackend, error) {
 	return r.startJobContainerOrdered(ctx, processor, workspace, temp, spec, services, sortedKeys(services), extra...)
 }
+
 // fakeJobDocker deliberately goes through a shell and a fresh copy of this test
 // process.  Thus tests exercise exec.Cmd cancellation, pipes, quoting and argv
 // boundaries rather than an in-process mock of Docker.

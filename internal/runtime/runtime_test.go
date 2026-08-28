@@ -1151,7 +1151,7 @@ test "$GITHUB_RUN_ATTEMPT" = 2`,
 	}
 	var logs bytes.Buffer
 	runner := Runner{Stdout: &logs, Stderr: &logs, RunIdentity: RunIdentity{BuildID: "b5e828e8-7457-013c-9a17-2f01b563f36a", BuildNumber: "512", RetryCount: "1"}}
-	result, err := runner.RunJob(t.Context(), job, workspace)
+	result, err := runner.runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -1164,7 +1164,7 @@ func TestRunJobRejectsRunIdentityExpressionsWithoutIdentity(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "check", Kind: "run", Command: "true"}})
 	job.Env = map[string]string{"RUN_KEY": "key-${{ github.run_id }}"}
 	var logs bytes.Buffer
-	_, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	_, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), `unavailable github value "run_id"`) {
 		t.Fatalf("RunJob() error = %v, want unavailable run_id", err)
 	}
