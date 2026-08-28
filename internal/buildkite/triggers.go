@@ -381,7 +381,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		return "", false, &UnsupportedTriggerEventError{Event: t.Event}
 	}
 	pathFilters := t.Paths != nil || t.PathsIgnore != nil
-	if pathFilters {
+	if pathFilters && t.Event != "merge_group" {
 		if t.Event != "push" && t.Event != "pull_request" {
 			return "", false, &UnsupportedPathFiltersError{Event: t.Event}
 		}
@@ -525,7 +525,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return strings.Join(parts, " && "), true, nil
 	case "merge_group":
-		if t.Tags != nil || t.TagsIgnore != nil || t.Paths != nil || t.PathsIgnore != nil || t.Workflows != nil {
+		if t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
 			return "", false, fmt.Errorf("merge_group has unsupported filters")
 		}
 		if expressions.EventPredicate == "" || expressions.MergeGroupAction == "" {

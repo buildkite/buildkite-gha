@@ -81,7 +81,7 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 		{name: "leading negative", triggers: []workflow.Trigger{{Event: "push", Branches: []string{"!release/**"}}}, want: "must follow a positive"},
 		{name: "unsupported PR type", triggers: []workflow.Trigger{{Event: "pull_request", Types: []string{"not-real"}}}, want: "cannot be mapped exactly"},
 		{name: "unsupported merge group type", triggers: []workflow.Trigger{{Event: "merge_group", Types: []string{"destroyed"}}}, want: `merge_group type "destroyed" is unsupported`},
-		{name: "merge group paths", triggers: []workflow.Trigger{{Event: "merge_group", Paths: []string{"src/**"}}}, want: "path filters are unsupported"},
+		{name: "merge group tags", triggers: []workflow.Trigger{{Event: "merge_group", Tags: []string{"v*"}}}, want: "unsupported filters"},
 		{name: "bare release", triggers: []workflow.Trigger{{Event: "release"}}, want: "on: release needs a types list"},
 		{name: "release unpublished", triggers: []workflow.Trigger{{Event: "release", Types: []string{"unpublished"}}}, want: "cannot be mapped exactly"},
 		{name: "release edited", triggers: []workflow.Trigger{{Event: "release", Types: []string{"edited"}}}, want: "cannot be mapped exactly"},
@@ -146,6 +146,7 @@ func TestTranslateEventTriggerConditionUsesMergeGroupSnapshot(t *testing.T) {
 	}
 	condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{{
 		Event: "merge_group", Branches: []string{"main"}, Types: []string{"checks_requested"},
+		Paths: []string{"src/**"},
 	}}, "merge_group", expressions, snapshot)
 	if err != nil || !applicable {
 		t.Fatalf("condition/applicable/error = %q / %t / %v", condition, applicable, err)

@@ -426,6 +426,9 @@ func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warnin
 	}
 	sort.Strings(supportedNames)
 	for _, trigger := range parsed.Triggers {
+		if trigger.Event == "merge_group" && (trigger.Paths != nil || trigger.PathsIgnore != nil) {
+			warnings = append(warnings, mergeGroupPathFiltersWarning(trigger.Position))
+		}
 		if buildkitepipeline.SupportedTriggerEvent(trigger.Event) {
 			continue
 		}
@@ -448,6 +451,15 @@ func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warnin
 		warnings = append(warnings, workflowCancellationWarning(parsed.Concurrency.CancelInProgressPosition))
 	}
 	return warnings
+}
+
+func mergeGroupPathFiltersWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_MERGE_GROUP_PATH_FILTERS_IGNORED",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "on.merge_group paths and paths-ignore are ignored, matching GitHub, which does not evaluate path filters for merge_group events. Every merge_group delivery runs this workflow. Move the filtering into a job or step condition if you need it.",
+	}
 }
 
 func workflowCancellationWarning(position workflow.Position) Warning {
