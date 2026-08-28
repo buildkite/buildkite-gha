@@ -32,6 +32,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
 
 // startJobContainer is a test convenience that starts services in sorted-key
@@ -1174,7 +1175,7 @@ func TestEvaluateServicesResolvesNeedsAndSkipsEmptyImages(t *testing.T) {
 		},
 		"optional": {Image: "${{ needs.build.outputs.optional }}"},
 	}
-	got, err := evaluateServices(services, expression.Context{Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{
+	got, _, err := evaluateProgramServices(testProgramServices(services), expression.Context{Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{
 		"version": "16", "source": "runtime", "port": "5432", "target": "/data", "setting": "fsync=off", "entrypoint": "docker-entrypoint.sh", "optional": "",
 	}}}})
 	if err != nil {
@@ -1191,7 +1192,8 @@ func TestEvaluateServicesResolvesNeedsAndSkipsEmptyImages(t *testing.T) {
 
 func TestEvaluateServiceMapExpression(t *testing.T) {
 	eval := expression.Context{Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{"services": `{"database":{"image":"postgres:16","env":{"MODE":"test","RETRIES":3.0,"NEGATIVE_ZERO":-0,"ENABLED":true},"ports":[5.432e3],"volumes":[2],"options":1e20,"command":1e2,"entrypoint":false},"cache":"redis:7"}`}}}}
-	got, order, err := evaluateServiceMap(nil, nil, "${{ fromJSON(needs.build.outputs.services) }}", eval)
+	site := testProgramSite("${{ fromJSON(needs.build.outputs.services) }}", executionprogram.SurfaceServiceMap, executionprogram.ResultObject)
+	got, order, err := evaluateProgramServices(executionprogram.Services{Dynamic: &site}, eval)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1219,7 +1221,8 @@ func TestEvaluateServiceMapExpressionRejectsUnsafeShapes(t *testing.T) {
 		{name: "nested expression", value: `{"db":{"image":"redis:7","options":"--label token=${{ secrets.TOKEN }}"}}`, want: "retains a runtime template"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, _, err := evaluateServiceMap(nil, nil, "${{ fromJSON(needs.build.outputs.services) }}", expression.Context{Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{"services": test.value}}}})
+			site := testProgramSite("${{ fromJSON(needs.build.outputs.services) }}", executionprogram.SurfaceServiceMap, executionprogram.ResultObject)
+			_, _, err := evaluateProgramServices(executionprogram.Services{Dynamic: &site}, expression.Context{Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{"services": test.value}}}})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want %q", err, test.want)
 			}
@@ -1228,10 +1231,34 @@ func TestEvaluateServiceMapExpressionRejectsUnsafeShapes(t *testing.T) {
 }
 
 func TestEvaluateServicesDoesNotHideErrorsBehindEmptyImage(t *testing.T) {
-	_, err := evaluateServices(map[string]plan.ServiceContainer{"optional": {Image: "${{ needs.build.outputs.image }}", Env: map[string]string{"VALUE": "${{ needs.build.outputs.value"}}}, expression.Context{Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{"image": ""}}}})
+	_, _, err := evaluateProgramServices(testProgramServices(map[string]plan.ServiceContainer{"optional": {Image: "${{ needs.build.outputs.image }}", Env: map[string]string{"VALUE": "${{ needs.build.outputs.value"}}}), expression.Context{Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{"image": ""}}}})
 	if err == nil || !strings.Contains(err.Error(), "unterminated") {
 		t.Fatalf("error = %v, want unterminated expression error", err)
 	}
+}
+
+func testProgramServices(services map[string]plan.ServiceContainer) executionprogram.Services {
+	result := executionprogram.Services{Static: make([]executionprogram.Service, 0, len(services))}
+	for _, name := range sortedKeys(services) {
+		service := services[name]
+		container := executionprogram.ServiceContainer{
+			Image:      testProgramSite(service.Image, executionprogram.SurfaceServiceTemplate, executionprogram.ResultString),
+			Env:        testProgramBindings(service.Env, executionprogram.SurfaceServiceTemplate),
+			Ports:      testProgramSites(service.Ports, executionprogram.SurfaceServiceTemplate),
+			Volumes:    testProgramSites(service.Volumes, executionprogram.SurfaceServiceTemplate),
+			Options:    testProgramSite(service.Options, executionprogram.SurfaceServiceTemplate, executionprogram.ResultString),
+			Command:    testProgramSite(service.Command, executionprogram.SurfaceServiceTemplate, executionprogram.ResultString),
+			Entrypoint: testProgramSite(service.Entrypoint, executionprogram.SurfaceServiceTemplate, executionprogram.ResultString),
+		}
+		if service.Credentials != nil {
+			container.Credentials = &executionprogram.ContainerCredentials{
+				Username: testProgramSite(service.Credentials.Username, executionprogram.SurfaceServiceCredential, executionprogram.ResultString),
+				Password: testProgramSite(service.Credentials.Password, executionprogram.SurfaceServiceCredential, executionprogram.ResultString),
+			}
+		}
+		result.Static = append(result.Static, executionprogram.Service{Name: name, Container: container})
+	}
+	return result
 }
 
 func TestRunServiceContainerRemovesOnlyNewNamedVolumes(t *testing.T) {
