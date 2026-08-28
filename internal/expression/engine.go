@@ -197,25 +197,11 @@ type Validation struct {
 }
 
 // Engine is the only site-oriented expression entry point.
-type Engine interface {
-	Validate(Site) (Validation, error)
-	Evaluate(Site, Values) (any, error)
-	Reduce(Site, Values) (Reduced, error)
-	Analyze(Site, AbstractValues) (Analysis, error)
-	StaticReference(Site) (string, []string, error)
-	ReferencesStatus(Site) (bool, error)
-	ReferencesContext(Site, string, bool) (bool, error)
-	ReferencesEvent(Site, bool) (bool, error)
-	Parse(Site, int, int) (Expression, error)
-	Literal(any) (string, error)
-	Truthy(any) bool
-}
+type Engine struct{}
 
-type siteEngine struct{}
+func NewEngine() Engine { return Engine{} }
 
-func NewEngine() Engine { return siteEngine{} }
-
-func (siteEngine) Parse(site Site, line, column int) (Expression, error) {
+func (Engine) Parse(site Site, line, column int) (Expression, error) {
 	if _, ok := profiles[site.Profile]; !ok {
 		return Expression{}, siteError(site, fmt.Errorf("unknown expression profile %q", site.Profile))
 	}
@@ -226,7 +212,7 @@ func (siteEngine) Parse(site Site, line, column int) (Expression, error) {
 	return parsed, nil
 }
 
-func (engine siteEngine) StaticReference(site Site) (string, []string, error) {
+func (engine Engine) StaticReference(site Site) (string, []string, error) {
 	if _, err := engine.Validate(site); err != nil {
 		return "", nil, err
 	}
@@ -237,7 +223,7 @@ func (engine siteEngine) StaticReference(site Site) (string, []string, error) {
 	return root, path, nil
 }
 
-func (engine siteEngine) ReferencesStatus(site Site) (bool, error) {
+func (engine Engine) ReferencesStatus(site Site) (bool, error) {
 	if _, err := engine.Validate(site); err != nil {
 		return false, err
 	}
@@ -250,7 +236,7 @@ func (engine siteEngine) ReferencesStatus(site Site) (bool, error) {
 
 // ReferencesContext reports any named context reference, or only static
 // direct/literal-index references when static is true.
-func (engine siteEngine) ReferencesContext(site Site, contextName string, static bool) (bool, error) {
+func (engine Engine) ReferencesContext(site Site, contextName string, static bool) (bool, error) {
 	profile, ok := profiles[site.Profile]
 	if !ok {
 		return false, siteError(site, fmt.Errorf("unknown expression profile %q", site.Profile))
@@ -292,7 +278,7 @@ func (engine siteEngine) ReferencesContext(site Site, contextName string, static
 // ReferencesEvent reports event-payload references. Expression profiles also
 // include compiler-folded GitHub ref identity fields when includeDerived is
 // true.
-func (engine siteEngine) ReferencesEvent(site Site, includeDerived bool) (bool, error) {
+func (engine Engine) ReferencesEvent(site Site, includeDerived bool) (bool, error) {
 	profile, ok := profiles[site.Profile]
 	if !ok {
 		return false, siteError(site, fmt.Errorf("unknown expression profile %q", site.Profile))
@@ -321,7 +307,7 @@ func (engine siteEngine) ReferencesEvent(site Site, includeDerived bool) (bool, 
 	return found, siteError(site, err)
 }
 
-func (siteEngine) Validate(site Site) (Validation, error) {
+func (Engine) Validate(site Site) (Validation, error) {
 	profile, ok := profiles[site.Profile]
 	if !ok {
 		return Validation{}, siteError(site, fmt.Errorf("unknown expression profile %q", site.Profile))
@@ -502,7 +488,7 @@ func validateDeclaredProfile(source string, profile Profile) error {
 	return visitTemplateExpressions(source, validate)
 }
 
-func (engine siteEngine) Evaluate(site Site, values Values) (any, error) {
+func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 	if _, err := engine.Validate(site); err != nil {
 		return nil, err
 	}
@@ -612,7 +598,7 @@ func evaluateProfileCondition(source string, context ConditionContext, implicitS
 	return githubTruthy(value), nil
 }
 
-func (engine siteEngine) Reduce(site Site, values Values) (Reduced, error) {
+func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 	profile, ok := profiles[site.Profile]
 	if !ok {
 		return Reduced{}, siteError(site, fmt.Errorf("unknown expression profile %q", site.Profile))
@@ -708,7 +694,7 @@ func (engine siteEngine) Reduce(site Site, values Values) (Reduced, error) {
 	return Reduced{Source: reduced}, nil
 }
 
-func (engine siteEngine) Analyze(site Site, values AbstractValues) (Analysis, error) {
+func (engine Engine) Analyze(site Site, values AbstractValues) (Analysis, error) {
 	profile, ok := profiles[site.Profile]
 	if !ok {
 		return Analysis{}, siteError(site, fmt.Errorf("unknown expression profile %q", site.Profile))
@@ -768,11 +754,11 @@ func (engine siteEngine) Analyze(site Site, values AbstractValues) (Analysis, er
 	return analysis, nil
 }
 
-func (siteEngine) Literal(value any) (string, error) {
+func (Engine) Literal(value any) (string, error) {
 	return compileInputLiteral(value)
 }
 
-func (siteEngine) Truthy(value any) bool {
+func (Engine) Truthy(value any) bool {
 	return githubTruthy(value)
 }
 

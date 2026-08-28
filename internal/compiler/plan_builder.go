@@ -43,6 +43,7 @@ type builtPlanActions struct {
 	requiresEventPayload bool
 	requiresMise         bool
 	resolved             bool
+	hasInvocations       bool
 	programs             map[string]program.Action
 }
 
@@ -124,16 +125,12 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	if err := b.validateShellCompatibility(instance, workflowProgram); err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
-	steps := projectPlanSteps(workflowProgram.Job.Steps)
-	actionIndexes, actionRefs, actionInputs := programActionInvocations(workflowProgram.Job.Steps)
-	actions, err := b.buildActions(instance, steps, actionIndexes, actionRefs, actionInputs)
+	actions, err := b.buildActions(instance, workflowProgram.Job.Steps)
 	if err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
-	bindProgramActionSelectors(&workflowProgram, steps)
 	workflowProgram.Actions = actions.programs
-	steps = projectPlanSteps(workflowProgram.Job.Steps)
-	if err := addContainerCapabilities(instance, actionRefs, &actions); err != nil {
+	if err := addContainerCapabilities(instance, &actions); err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
 	needSources, err := buildPlanNeedSources(instance, b.planDigests)
@@ -160,7 +157,10 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	if instance.Platform == PlatformDarwinARM64 && slices.Contains(actions.capabilities, "docker") {
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on darwin/arm64", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
 	}
-	job := b.lowerPlanJob(instance, workflowProgram, runtimeDistributionDigest, steps, actions, needSources, buildPlanNeedOutputs(instance), deferredInputs, callGuards, secrets, secretMappings, githubToken)
+	job := b.lowerPlanJob(instance, workflowProgram, runtimeDistributionDigest, actions, needSources, buildPlanNeedOutputs(instance), deferredInputs, callGuards, secrets, secretMappings, githubToken)
+	if err := job.ProjectProgram(); err != nil {
+		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+	}
 	if err := job.Validate(); err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -426,8 +426,19 @@ func projectReducedProgram(instance *JobInstance, reduced program.Program) {
 	}
 }
 
-func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actionIndexes []int, actionRefs []string, actionInputs []map[string]string) (builtPlanActions, error) {
-	built := builtPlanActions{requiresMise: len(actionRefs) != 0, resolved: b.options.ResolveActions}
+func (b planBuilder) buildActions(instance JobInstance, steps []program.Step) (builtPlanActions, error) {
+	var actionIndexes []int
+	var actionRefs []string
+	var actionInputs []map[string]string
+	for i, step := range steps {
+		if step.Invocation == nil {
+			continue
+		}
+		actionIndexes = append(actionIndexes, i)
+		actionRefs = append(actionRefs, step.Invocation.Uses.Source)
+		actionInputs = append(actionInputs, programBindingMap(step.Invocation.With))
+	}
+	built := builtPlanActions{requiresMise: len(actionRefs) != 0, resolved: b.options.ResolveActions, hasInvocations: len(actionRefs) != 0}
 	if len(actionRefs) != 0 && !built.resolved {
 		built.resolved = true
 		for _, ref := range actionRefs {
@@ -462,7 +473,7 @@ func (b planBuilder) buildActions(instance JobInstance, steps []plan.Step, actio
 	}
 	for i, selector := range compiled.selectors {
 		stepIndex := actionIndexes[i]
-		steps[stepIndex].Action = &plan.ActionSelector{Lock: selector.Lock}
+		steps[stepIndex].Invocation.Lock = selector.Lock
 		lock, ok := locksByID[selector.Lock]
 		if !ok {
 			return built, fmt.Errorf("build plan for job %q: action lock %q is missing", instance.LogicalJobID, selector.Lock)
@@ -524,11 +535,11 @@ func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, 
 	return nil
 }
 
-func addContainerCapabilities(instance JobInstance, actionRefs []string, built *builtPlanActions) error {
+func addContainerCapabilities(instance JobInstance, built *builtPlanActions) error {
 	if instance.Container == nil && len(instance.Services) == 0 && instance.ServicesExpression == "" {
 		return nil
 	}
-	if len(actionRefs) != 0 && !built.resolved {
+	if built.hasInvocations && !built.resolved {
 		return fmt.Errorf("build plan for job %q: containers with remote actions require action resolution through upload or profile validation", instance.LogicalJobID)
 	}
 	built.capabilities = append(built.capabilities, "docker", "network")
@@ -664,8 +675,7 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram 
 	return secrets, mappings, &plan.GitHubToken{Workflow: policyWorkflow, Permissions: cloneMap(b.ir.Workflow.WorkflowTokenPermissions), Aliases: tokenAliases}, nil
 }
 
-func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.Program, runtimeDistributionDigest string, steps []plan.Step, actions builtPlanActions, needSources map[string][]plan.NeedSource, needOutputs map[string][]plan.NeedOutput, deferredInputs map[string]plan.DeferredInput, callGuards []plan.CallGuard, secrets []string, secretMappings map[string]string, githubToken *plan.GitHubToken) plan.Job {
-	programJob := workflowProgram.Job
+func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.Program, runtimeDistributionDigest string, actions builtPlanActions, needSources map[string][]plan.NeedSource, needOutputs map[string][]plan.NeedOutput, deferredInputs map[string]plan.DeferredInput, callGuards []plan.CallGuard, secrets []string, secretMappings map[string]string, githubToken *plan.GitHubToken) plan.Job {
 	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
@@ -684,63 +694,26 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 			Repository: b.ir.Event.Repository.Owner + "/" + b.ir.Event.Repository.Name,
 			Ref:        b.ir.Event.Ref, HeadRef: eventHeadRef(b.ir.Event), BaseRef: eventBaseRef(b.ir.Event), SHA: b.ir.Event.SHA, Actor: b.ir.Event.Actor,
 		},
-		Target:                  plan.Target{StepKey: instance.Key, Queue: instance.Queue},
-		RequiredCapabilities:    actions.capabilities,
-		RequiredSecrets:         secrets,
-		SecretMappings:          secretMappings,
-		GitHubToken:             githubToken,
-		IDTokenPermission:       instance.Permissions["id-token"],
-		OIDC:                    cloneOIDCConfiguration(b.options.OIDC),
-		Matrix:                  instance.Matrix,
-		Inputs:                  cloneAnyMap(instance.Inputs),
-		DeferredInputs:          deferredInputs,
-		Vars:                    cloneMap(b.ir.Vars),
-		Dependencies:            append([]string(nil), instance.Needs...),
-		NeedSources:             needSources,
-		NeedOutputs:             needOutputs,
-		CallGuards:              callGuards,
-		Program:                 &workflowProgram,
-		Env:                     programBindingMap(programJob.Env),
-		Condition:               programJob.Condition.Source,
-		ContinueOnError:         programJob.ContinueOnError,
-		TimeoutMinutes:          programJob.TimeoutMinutes,
-		DefaultShell:            programJob.Defaults.Shell.Source,
-		DefaultWorkingDirectory: programJob.Defaults.WorkingDirectory.Source,
-		Outputs:                 programBindingMap(programJob.Outputs),
-		Steps:                   steps,
-		Actions:                 actions.locks,
+		Target:               plan.Target{StepKey: instance.Key, Queue: instance.Queue},
+		RequiredCapabilities: actions.capabilities,
+		RequiredSecrets:      secrets,
+		SecretMappings:       secretMappings,
+		GitHubToken:          githubToken,
+		IDTokenPermission:    instance.Permissions["id-token"],
+		OIDC:                 cloneOIDCConfiguration(b.options.OIDC),
+		Matrix:               instance.Matrix,
+		Inputs:               cloneAnyMap(instance.Inputs),
+		DeferredInputs:       deferredInputs,
+		Vars:                 cloneMap(b.ir.Vars),
+		Dependencies:         append([]string(nil), instance.Needs...),
+		NeedSources:          needSources,
+		NeedOutputs:          needOutputs,
+		CallGuards:           callGuards,
+		Program:              &workflowProgram,
+		Actions:              actions.locks,
 	}
 	job.Event.PayloadArtifact = instance.RetainEventPayload || actions.requiresEventPayload
 	job.RequiresMise = &actions.requiresMise
-	if programJob.Container != nil {
-		job.Container = &plan.Container{
-			Image: programJob.Container.Image.Source,
-			Env:   programBindingMap(programJob.Container.Env),
-			Ports: programSiteSources(programJob.Container.Ports),
-		}
-	}
-	if programJob.Services.Dynamic != nil {
-		job.ServicesExpression = programJob.Services.Dynamic.Source
-	}
-	if len(programJob.Services.Static) != 0 {
-		job.Services = make(map[string]plan.ServiceContainer, len(programJob.Services.Static))
-		job.ServiceOrder = make([]string, 0, len(programJob.Services.Static))
-	}
-	for _, service := range programJob.Services.Static {
-		container := plan.ServiceContainer{
-			Image: service.Container.Image.Source, Env: programBindingMap(service.Container.Env), Ports: programSiteSources(service.Container.Ports),
-			Volumes: programSiteSources(service.Container.Volumes), Options: service.Container.Options.Source,
-			Command: service.Container.Command.Source, Entrypoint: service.Container.Entrypoint.Source,
-		}
-		if service.Container.Credentials != nil {
-			container.Credentials = &plan.ContainerCredentials{
-				Username: service.Container.Credentials.Username.Source,
-				Password: service.Container.Credentials.Password.Source,
-			}
-		}
-		job.Services[service.Name] = container
-		job.ServiceOrder = append(job.ServiceOrder, service.Name)
-	}
 	return job
 }
 

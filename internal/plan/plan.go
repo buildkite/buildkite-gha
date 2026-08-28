@@ -399,7 +399,7 @@ func Decode(source []byte) (Job, error) {
 	if job.RequiredCapabilities == nil {
 		return Job{}, fmt.Errorf("decode job plan: required_capabilities must be a concrete array")
 	}
-	if err := hydrateProgramProjection(&job); err != nil {
+	if err := job.ProjectProgram(); err != nil {
 		return Job{}, fmt.Errorf("decode job plan: %w", err)
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
@@ -526,7 +526,7 @@ func Encode(job Job) ([]byte, error) {
 	if job.RequiredCapabilities == nil {
 		job.RequiredCapabilities = []string{}
 	}
-	if err := hydrateProgramProjection(&job); err != nil {
+	if err := job.ProjectProgram(); err != nil {
 		return nil, err
 	}
 	if err := job.Validate(); err != nil {

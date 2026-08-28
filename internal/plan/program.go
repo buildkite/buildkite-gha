@@ -6,7 +6,9 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
-func hydrateProgramProjection(job *Job) error {
+// ProjectProgram populates the executor-only job fields from the normalized
+// execution program.
+func (job *Job) ProjectProgram() error {
 	if job.Program == nil {
 		return fmt.Errorf("execution program is required")
 	}
@@ -97,7 +99,7 @@ func hydrateProgramProjection(job *Job) error {
 }
 
 func bindingMap(values []program.Binding) map[string]string {
-	if len(values) == 0 {
+	if values == nil {
 		return nil
 	}
 	result := make(map[string]string, len(values))
@@ -108,7 +110,7 @@ func bindingMap(values []program.Binding) map[string]string {
 }
 
 func siteSources(values []program.Site) []string {
-	if len(values) == 0 {
+	if values == nil {
 		return nil
 	}
 	result := make([]string, len(values))

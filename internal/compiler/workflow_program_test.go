@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
@@ -100,13 +101,16 @@ func TestWorkflowProgramProjectsLegacyPlanSteps(t *testing.T) {
 		{Kind: "uses", Uses: "owner/action@v1", With: map[string]string{"name": "value"}, Span: span},
 	}}
 	workflowProgram := lowerWorkflowProgram(instance)
-	steps := projectPlanSteps(workflowProgram.Job.Steps)
-	indexes, references, inputs := programActionInvocations(workflowProgram.Job.Steps)
+	job := plan.Job{Program: &workflowProgram}
+	if err := job.ProjectProgram(); err != nil {
+		t.Fatal(err)
+	}
+	steps := job.Steps
 	if len(steps) != 2 || steps[0].ID != "step-1" || steps[0].Command != "echo hi" || steps[0].Shell != "bash" || steps[0].WorkingDirectory != "src" || steps[0].Condition != "success()" || steps[0].ContinueOnErrorExpression != "${{ matrix.experimental }}" || steps[0].TimeoutMinutes != 5 {
 		t.Fatalf("projected run step = %#v", steps[0])
 	}
-	if len(indexes) != 1 || indexes[0] != 1 || !reflect.DeepEqual(references, []string{"owner/action@v1"}) || !reflect.DeepEqual(inputs, []map[string]string{{"name": "value"}}) {
-		t.Fatalf("projected invocation metadata = %#v, %#v, %#v", indexes, references, inputs)
+	if steps[1].Execution.Invocation == nil || steps[1].Execution.Invocation.Uses.Source != "owner/action@v1" || !reflect.DeepEqual(steps[1].With, map[string]string{"name": "value"}) {
+		t.Fatalf("projected invocation = %#v", steps[1])
 	}
 	if steps[0].Env == nil || steps[1].With["name"] != "value" || steps[0].Source.Start.Line != 3 {
 		t.Fatalf("projected step details = %#v", steps)

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
@@ -130,65 +129,6 @@ func lowerWorkflowSteps(sourcePath string, source []workflow.Step) []program.Ste
 		}
 	}
 	return steps
-}
-
-func projectPlanSteps(source []program.Step) []plan.Step {
-	steps := make([]plan.Step, len(source))
-	for i, step := range source {
-		execution := step
-		steps[i] = plan.Step{
-			ID: step.ID, Name: step.Name.Source, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...),
-			Env: programBindingMap(step.Env), Condition: step.Condition.Source,
-			ContinueOnError: step.ContinueOnError.Literal, TimeoutMinutes: step.TimeoutMinutes.Literal,
-			Source: &plan.Span{
-				Start: plan.Position{Line: step.Source.Start.Line, Column: step.Source.Start.Column},
-				End:   plan.Position{Line: step.Source.End.Line, Column: step.Source.End.Column},
-			},
-			Execution: &execution,
-		}
-		if step.ContinueOnError.Expression != nil {
-			steps[i].ContinueOnErrorExpression = step.ContinueOnError.Expression.Source
-		}
-		if step.TimeoutMinutes.Expression != nil {
-			steps[i].TimeoutMinutesExpression = step.TimeoutMinutes.Expression.Source
-		}
-		if step.Run != nil {
-			steps[i].Command = step.Run.Command.Source
-			steps[i].Shell = step.Run.Shell.Source
-			steps[i].WorkingDirectory = step.Run.WorkingDirectory.Source
-		}
-		if step.Invocation != nil {
-			steps[i].Uses = step.Invocation.Uses.Source
-			steps[i].With = programBindingMap(step.Invocation.With)
-			if step.Invocation.Lock != "" {
-				steps[i].Action = &plan.ActionSelector{Lock: step.Invocation.Lock}
-			}
-		}
-	}
-	return steps
-}
-
-func programActionInvocations(steps []program.Step) ([]int, []string, []map[string]string) {
-	var indexes []int
-	var references []string
-	var inputs []map[string]string
-	for i, step := range steps {
-		if step.Invocation == nil {
-			continue
-		}
-		indexes = append(indexes, i)
-		references = append(references, step.Invocation.Uses.Source)
-		inputs = append(inputs, programBindingMap(step.Invocation.With))
-	}
-	return indexes, references, inputs
-}
-
-func bindProgramActionSelectors(target *program.Program, steps []plan.Step) {
-	for i := range target.Job.Steps {
-		if target.Job.Steps[i].Invocation != nil && steps[i].Action != nil {
-			target.Job.Steps[i].Invocation.Lock = steps[i].Action.Lock
-		}
-	}
 }
 
 func workflowBindings(values map[string]string, location program.Location, field string) []program.Binding {
