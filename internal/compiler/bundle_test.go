@@ -15,6 +15,7 @@ import (
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/workflow"
 	"go.yaml.in/yaml/v4"
 )
 
@@ -1756,6 +1757,32 @@ jobs:
 	}
 }
 
+func TestCompileBundlePreservesFoldedStepControlTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		control string
+		value   string
+	}{
+		{name: "boolean string", control: "continue-on-error", value: `"yes please"`},
+		{name: "numeric string", control: "timeout-minutes", value: `"10"`},
+		{name: "null", control: "timeout-minutes", value: `null`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        " + test.control + ": ${{ github.event.value }}\n")
+			event := []byte(`{
+  "provider": "github", "event": "push",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"value": ` + test.value + `}
+}`)
+			if _, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer"); err == nil {
+				t.Fatal("CompileBundle() accepted a folded value with the wrong type")
+			}
+		})
+	}
+}
+
 func TestCompileBundleDoesNotReduceEventExpressionsInActionReferences(t *testing.T) {
 	source := []byte(`on: push
 jobs:
@@ -1872,12 +1899,35 @@ jobs:
 
 func TestRequiredSecretsDoesNotInterpretConditionLiteralsAsTemplates(t *testing.T) {
 	instance := JobInstance{If: "'${{ github.token }} ${{ secrets.DEPLOY }} ${{ github.event.action }}' == runner.os"}
-	secrets, _, _, referencesToken, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, nil, false)
+	secrets, _, _, referencesToken, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, nil, false, "https://github.com")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(secrets) != 0 || referencesToken {
 		t.Fatalf("condition literal granted secret authority: %#v, token = %v", secrets, referencesToken)
+	}
+}
+
+func TestRequiredSecretsNarrowsTokenAuthorityByKnownServerURL(t *testing.T) {
+	instance := JobInstance{Steps: []workflow.Step{{Kind: "run", Run: "${{ github.server_url == 'https://github.com' && github.token || '' }}"}}}
+	workflowProgram := lowerWorkflowProgram(instance)
+	for _, test := range []struct {
+		name      string
+		serverURL string
+		wantToken bool
+	}{
+		{name: "GitHub", serverURL: "https://github.com", wantToken: true},
+		{name: "non-GitHub provider", serverURL: "https://origin.cursor.com"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, _, token, err := requiredSecrets(workflowProgram, instance.secretAuthority, nil, false, test.serverURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if token != test.wantToken {
+				t.Fatalf("github.token authority = %v, want %v", token, test.wantToken)
+			}
+		})
 	}
 }
 

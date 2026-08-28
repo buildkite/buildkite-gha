@@ -51,7 +51,7 @@ func InventoryAuthority(workflow Program, options AuthorityOptions) (Authority, 
 			return Authority{}, err
 		}
 		authority.GitHubToken = authority.GitHubToken || grantsToken(analysis.Effects.GitHubToken)
-		if analysis.Value.Known && !truthy(analysis.Value.Value) {
+		if analysis.Value.Known && !engine.Truthy(analysis.Value.Value) {
 			return finishAuthority(found, authority), nil
 		}
 	}
@@ -60,7 +60,7 @@ func InventoryAuthority(workflow Program, options AuthorityOptions) (Authority, 
 		return Authority{}, err
 	}
 	authority.GitHubToken = authority.GitHubToken || grantsToken(jobCondition.Effects.GitHubToken)
-	if jobCondition.Value.Known && !truthy(jobCondition.Value.Value) {
+	if jobCondition.Value.Known && !engine.Truthy(jobCondition.Value.Value) {
 		return finishAuthority(found, authority), nil
 	}
 	for _, step := range workflow.Job.Steps {
@@ -69,7 +69,7 @@ func InventoryAuthority(workflow Program, options AuthorityOptions) (Authority, 
 			return Authority{}, err
 		}
 		authority.GitHubToken = authority.GitHubToken || grantsToken(condition.Effects.GitHubToken)
-		if condition.Value.Known && !truthy(condition.Value.Value) {
+		if condition.Value.Known && !engine.Truthy(condition.Value.Value) {
 			continue
 		}
 		stepProgram := Program{Version: Version, Job: Job{Steps: []Step{step}}}
@@ -114,21 +114,4 @@ func finishAuthority(found map[string]struct{}, authority Authority) Authority {
 	}
 	sort.Strings(authority.Secrets)
 	return authority
-}
-
-func truthy(value any) bool {
-	switch value := value.(type) {
-	case nil:
-		return false
-	case bool:
-		return value
-	case string:
-		return value != ""
-	case int:
-		return value != 0
-	case float64:
-		return value != 0
-	default:
-		return true
-	}
 }

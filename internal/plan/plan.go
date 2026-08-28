@@ -15,6 +15,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/program"
@@ -425,11 +426,15 @@ func rejectAmbiguousProgramControls(source json.RawMessage) error {
 	for i, step := range document.Job.Steps {
 		for _, controlName := range []string{"continue_on_error", "timeout_minutes"} {
 			var controlSource json.RawMessage
+			matches := 0
 			for name, value := range step {
 				if strings.EqualFold(name, controlName) {
+					matches++
 					controlSource = value
-					break
 				}
+			}
+			if matches > 1 {
+				return fmt.Errorf("step %d repeats %s with different casing", i+1, strings.ReplaceAll(controlName, "_", "-"))
 			}
 			if len(controlSource) == 0 {
 				continue
@@ -439,9 +444,17 @@ func rejectAmbiguousProgramControls(source json.RawMessage) error {
 				continue
 			}
 			hasLiteral, hasExpression := false, false
+			literalCount, expressionCount := 0, 0
 			for name := range control {
-				hasLiteral = hasLiteral || strings.EqualFold(name, "literal")
-				hasExpression = hasExpression || strings.EqualFold(name, "expression")
+				if strings.EqualFold(name, "literal") {
+					hasLiteral, literalCount = true, literalCount+1
+				}
+				if strings.EqualFold(name, "expression") {
+					hasExpression, expressionCount = true, expressionCount+1
+				}
+			}
+			if literalCount > 1 || expressionCount > 1 {
+				return fmt.Errorf("step %d repeats a field in %s with different casing", i+1, strings.ReplaceAll(controlName, "_", "-"))
 			}
 			if hasLiteral && hasExpression {
 				return fmt.Errorf("step %d has both literal and expression %s", i+1, strings.ReplaceAll(controlName, "_", "-"))
@@ -866,6 +879,9 @@ func (job Job) Validate() error {
 	}
 	if len(job.CallGuards) > MaxCallGuards {
 		return fmt.Errorf("job plan has more than %d reusable-workflow call guards", MaxCallGuards)
+	}
+	if job.Program == nil || len(job.CallGuards) != len(job.Program.Job.Guards) {
+		return fmt.Errorf("job plan call guard projection does not match normalized program")
 	}
 	for i, guard := range job.CallGuards {
 		if strings.TrimSpace(guard.Condition) == "" || len(guard.Condition) > 65536 {
@@ -1412,27 +1428,34 @@ func validateActionLocks(job Job) error {
 	if len(reachable) != len(locks) {
 		return fmt.Errorf("job plan contains unused action locks")
 	}
-	{
-		for id, action := range job.Program.Actions {
-			lock, ok := locks[id]
-			if !ok || !reachable[id] {
-				return fmt.Errorf("action program %q has no reachable immutable lock", id)
+	for id, action := range job.Program.Actions {
+		lock, ok := locks[id]
+		if !ok || !reachable[id] {
+			return fmt.Errorf("action program %q has no reachable immutable lock", id)
+		}
+		if action.Runtime == "docker" {
+			image, _ := metadata.DockerImageReference(action.Image)
+			if image != lock.DockerImage {
+				return fmt.Errorf("action program %q Docker image does not match its immutable lock", id)
 			}
-			if action.Runtime == "docker" {
-				image, _ := metadata.DockerImageReference(action.Image)
-				if image != lock.DockerImage {
-					return fmt.Errorf("action program %q Docker image does not match its immutable lock", id)
-				}
+		}
+		for i, step := range action.Steps {
+			if step.Invocation == nil {
+				continue
 			}
-			for i, step := range action.Steps {
-				if step.Invocation == nil {
-					continue
-				}
-				selector, ok := lock.Children[step.Invocation.Uses.Source]
-				if !ok || selector.Lock != step.Invocation.Lock {
-					return fmt.Errorf("action program %q composite step %d does not match its immutable child lock", id, i+1)
-				}
+			selector, ok := lock.Children[step.Invocation.Uses.Source]
+			if !ok || selector.Lock != step.Invocation.Lock {
+				return fmt.Errorf("action program %q composite step %d does not match its immutable child lock", id, i+1)
 			}
+		}
+	}
+	for _, lock := range job.Actions {
+		id := lock.ID
+		if descriptor, known, err := integration.Admit(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit); err == nil && known && descriptor.Adapter != "" {
+			continue
+		}
+		if _, ok := job.Program.Actions[id]; !ok {
+			return fmt.Errorf("reachable action lock %q has no normalized execution program", id)
 		}
 	}
 	return nil

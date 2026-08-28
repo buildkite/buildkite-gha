@@ -84,7 +84,7 @@ func runtimeMatrixIdentifier(value string) bool {
 	return true
 }
 
-// SecretReferences returns the statically named secrets referenced by a
+// secretReferences returns the statically named secrets referenced by a
 // template. Dynamic indexes return an error because the runtime cannot determine
 // which values to resolve and register with the log redactor before execution.
 func secretReferences(template string) ([]string, error) {
@@ -98,7 +98,7 @@ func secretReferences(template string) ([]string, error) {
 	return sortedReferenceNames(found), nil
 }
 
-// ConditionSecretReferences returns statically named secrets from one
+// conditionSecretReferences returns statically named secrets from one
 // condition without interpreting string literal contents as templates.
 func conditionSecretReferences(source string) ([]string, error) {
 	node, empty, err := parseCondition(source)
@@ -192,10 +192,6 @@ func validateServiceCredentialNode(node actionlint.ExprNode) error {
 	}
 }
 
-func validateServiceMapRuntimeExpression(source string) error {
-	return validateServiceMapExpression(source)
-}
-
 func validateServiceMapExpression(source string) error {
 	body, err := expressionBody(source)
 	if err != nil {
@@ -225,20 +221,20 @@ func sortedReferenceNames(found map[string]struct{}) []string {
 	return names
 }
 
-// ReferencesGitHubToken reports whether a template statically references
+// templateReferencesGitHubToken reports whether a template statically references
 // github.token. Dynamic GitHub indexes return an error so compiler-owned token
 // authority cannot depend on a runtime-selected property.
 func templateReferencesGitHubToken(template string) (bool, error) {
 	return referencesGitHubToken(template, false, false)
 }
 
-// ReferencesStepGitHubToken reports whether a step runtime template statically
+// stepReferencesGitHubToken reports whether a step runtime template statically
 // references github.token, including the exact toJSON(github) shape.
 func stepReferencesGitHubToken(template string) (bool, error) {
 	return referencesGitHubToken(template, true, true)
 }
 
-// ReferencesCompositeStepGitHubToken validates the same runtime surface for a
+// compositeStepReferencesGitHubToken validates the same runtime surface for a
 // composite-authored step input, but does not let toJSON(github) grant token
 // authority. A direct github.token reference still reports true.
 func compositeStepReferencesGitHubToken(template string) (bool, error) {
@@ -273,7 +269,7 @@ func isGitHubEventAccess(node actionlint.ExprNode) bool {
 	}
 }
 
-// ConditionReferencesGitHubToken reports direct token references in one
+// conditionReferencesGitHubToken reports direct token references in one
 // condition without interpreting string literal contents as templates.
 func conditionReferencesGitHubToken(source string) (bool, error) {
 	node, empty, err := parseCondition(source)
@@ -392,7 +388,7 @@ func referenceReceiver(node, parent actionlint.ExprNode) bool {
 	}
 }
 
-// ReferencesJobStatus reports whether a template statically references
+// templateReferencesJobStatus reports whether a template statically references
 // job.status.
 func templateReferencesJobStatus(template string) (bool, error) {
 	found := false
@@ -416,7 +412,7 @@ func templateReferencesJobStatus(template string) (bool, error) {
 	return found, err
 }
 
-// ReferencesGitHubEvent reports whether a condition reads the event payload or
+// conditionReferencesCompileEvent reports whether a condition reads the event payload or
 // an event-derived GitHub ref scalar that the compiler must fold.
 func conditionReferencesCompileEvent(source string) (bool, error) {
 	node, empty, err := parseCondition(source)
@@ -426,7 +422,7 @@ func conditionReferencesCompileEvent(source string) (bool, error) {
 	return nodeReferencesCompileGitHubEvent(node), nil
 }
 
-// ConditionReferencesGitHubEventPayload reports whether a condition reads the
+// conditionReferencesEventPayload reports whether a condition reads the
 // event payload, excluding event-derived identity fields folded by the compiler.
 func conditionReferencesEventPayload(source string) (bool, error) {
 	node, empty, err := parseCondition(source)
@@ -436,7 +432,7 @@ func conditionReferencesEventPayload(source string) (bool, error) {
 	return nodeReferencesGitHubEventPayload(node), nil
 }
 
-// TemplateReferencesGitHubEvent reports whether an interpolated template
+// templateReferencesEventPayload reports whether an interpolated template
 // retains the compile-time-only event payload.
 func templateReferencesEventPayload(template string) (bool, error) {
 	found := false
@@ -492,7 +488,7 @@ func nodeReferencesGitHub(node actionlint.ExprNode, matches func([]string) bool)
 	return found
 }
 
-// ReferencesStatusFunction reports whether a condition explicitly names one of
+// referencesStatusFunction reports whether a condition explicitly names one of
 // the status functions that suppress the implicit success guard.
 func referencesStatusFunction(source string) (bool, error) {
 	node, empty, err := parseCondition(source)

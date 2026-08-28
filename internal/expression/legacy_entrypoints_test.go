@@ -1,6 +1,7 @@
 package expression
 
-// These aliases keep the pre-engine conformance corpus as a test-only oracle.
+// These aliases keep the pre-engine conformance corpus compiling against the
+// engine's unexported semantic implementations.
 // Production callers must select a site profile through Engine.
 func Parse(text string, line, column int) (Expression, error) {
 	return parseExpression(text, line, column)
@@ -60,7 +61,9 @@ func EvaluateRunName(source string, context CompileContext) (string, error) {
 	return evaluateRunName(source, context)
 }
 
-func ValidateActionInputDefault(source string) error { return validateActionInputDefault(source) }
+func ValidateActionInputDefault(source string) error {
+	return validateActionInputDefaultTemplate(source)
+}
 
 func EvaluateActionInputDefault(source string, context Context) (string, error) {
 	return evaluateActionInputDefault(source, context)
@@ -109,11 +112,7 @@ func EvaluateJobOutput(source string, context Context) (string, error) {
 }
 
 func ValidateCondition(source string, scope ConditionScope) error {
-	return validateConditionLegacy(source, scope)
-}
-
-func ValidateConditionWithMatrix(source string, scope ConditionScope, matrix map[string]any) error {
-	return validateConditionWithMatrix(source, scope, matrix)
+	return validateCondition(source, scope)
 }
 
 func ValidateCallCondition(source string) error { return validateCallCondition(source) }
@@ -147,7 +146,7 @@ func ValidateServiceCredentialTemplate(source string) error {
 }
 
 func ValidateServiceMapRuntimeExpression(source string) error {
-	return validateServiceMapRuntimeExpression(source)
+	return validateServiceMapExpression(source)
 }
 
 func ReferencesGitHubToken(source string) (bool, error) {

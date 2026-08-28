@@ -229,7 +229,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		instanceContext := jobContext
 		instanceContext.Matrix = matrix
 		instanceContext.Strategy = strategy
-		compileConditionErr := supportedCompileTimeConditions(jobPath, job, jobContext, matrix)
+		compileConditionErr := supportedCompileTimeConditions(jobPath, job, jobContext)
 		instanceJob := resolveCompileTimeConditions(job, jobContext, matrix)
 		conditionValidationJob := instanceJob
 		conditionContext := jobContext
@@ -265,7 +265,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		} else if compileConditionErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, compileConditionErr))
 			valid = false
-		} else if err := supportedConditions(jobPath, conditionValidationJob, matrix, true); err != nil {
+		} else if err := supportedConditions(jobPath, conditionValidationJob); err != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, err))
 			valid = false
 		}

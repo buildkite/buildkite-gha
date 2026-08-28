@@ -14,6 +14,12 @@ func hydrateProgramProjection(job *Job) error {
 		return err
 	}
 	source := job.Program.Job
+	if len(job.CallGuards) != len(source.Guards) {
+		return fmt.Errorf("call guard projection has %d entries, normalized program has %d", len(job.CallGuards), len(source.Guards))
+	}
+	for i := range job.CallGuards {
+		job.CallGuards[i].Condition = source.Guards[i].Condition.Source
+	}
 	job.Env = bindingMap(source.Env)
 	job.Condition = source.Condition.Source
 	job.ContinueOnError = source.ContinueOnError

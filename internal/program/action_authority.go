@@ -35,6 +35,9 @@ func InventoryActionAuthority(actions map[string]Action, root string, supplied [
 		if !ok {
 			return fmt.Errorf("action program %q is missing", id)
 		}
+		if err := walkActionSites(&action, func(*Site) error { return nil }); err != nil {
+			return err
+		}
 		if active[id] {
 			return fmt.Errorf("action recursion detected at program %q", id)
 		}

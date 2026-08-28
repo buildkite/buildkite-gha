@@ -59,10 +59,9 @@ const (
 	MissingEmpty MissingPolicy = "empty"
 	MissingNull  MissingPolicy = "null"
 
-	TokenDenied           TokenPolicy = "denied"
-	TokenDirect           TokenPolicy = "direct"
-	TokenWorkflowContext  TokenPolicy = "workflow-context"
-	TokenCompositeContext TokenPolicy = "composite-context"
+	TokenDenied          TokenPolicy = "denied"
+	TokenDirect          TokenPolicy = "direct"
+	TokenWorkflowContext TokenPolicy = "workflow-context"
 )
 
 type ContextSet []string
@@ -185,7 +184,6 @@ type Values struct {
 // Reference keys are canonical names such as github.server_url.
 type AbstractValues struct {
 	References map[string]any
-	Condition  ConditionContext
 }
 
 type Reduced struct {
@@ -209,6 +207,8 @@ type Engine interface {
 	ReferencesContext(Site, string, bool) (bool, error)
 	ReferencesEvent(Site, bool) (bool, error)
 	Parse(Site, int, int) (Expression, error)
+	Literal(any) (string, error)
+	Truthy(any) bool
 }
 
 type siteEngine struct{}
@@ -366,11 +366,11 @@ func (siteEngine) Validate(site Site) (Validation, error) {
 	case semanticsRunName:
 		err = visitTemplateExpressions(site.Source, validateRunNameNode)
 	case semanticsCondition:
-		err = validateCondition(site.Source, profile.condition, nil, false)
+		err = validateCondition(site.Source, profile.condition)
 	case semanticsActionLifecycle:
 		err = validateLifecycleDelimiters(site.Source)
 		if err == nil {
-			err = validateCondition(site.Source, profile.condition, nil, false)
+			err = validateCondition(site.Source, profile.condition)
 		}
 	case semanticsJobEnvironment:
 		_, err = templateReferencesGitHubToken(site.Source)
@@ -634,6 +634,9 @@ func (engine siteEngine) Reduce(site Site, values Values) (Reduced, error) {
 			return Reduced{}, siteError(site, err)
 		}
 		if available {
+			if !matchesEngineResult(value, site.Result) {
+				return Reduced{}, siteError(site, fmt.Errorf("expression produced %T, want %s", value, site.Result))
+			}
 			return Reduced{Known: true, Value: value}, nil
 		}
 		return Reduced{Source: site.Source}, nil
@@ -677,15 +680,18 @@ func (engine siteEngine) Reduce(site Site, values Values) (Reduced, error) {
 		if err != nil {
 			return Reduced{}, siteError(site, err)
 		}
-		residual := site
-		residual.Source = reduced
-		if _, err := engine.Validate(residual); err != nil {
-			return Reduced{}, err
-		}
 		if value, err := evaluateCompileCondition(reduced, values.Compile); err == nil {
 			return Reduced{Known: true, Value: value}, nil
 		}
-		return Reduced{Source: reduced}, nil
+		residual := site
+		residual.Source = reduced
+		if profile.semantics == semanticsStepControl || profile.semantics == semanticsServiceMap {
+			residual.Source = "${{ " + reduced + " }}"
+		}
+		if _, err := engine.Validate(residual); err != nil {
+			return Reduced{}, err
+		}
+		return Reduced{Source: residual.Source}, nil
 	}
 	reduced, err := reduceAvailableCompileTemplate(site.Source, values.Compile)
 	if err != nil {
@@ -716,28 +722,17 @@ func (engine siteEngine) Analyze(site Site, values AbstractValues) (Analysis, er
 		}
 		return knownAnalysis(zeroResult(site.Result)), nil
 	}
-	var referencesEvent bool
-	var eventErr error
-	if profiles[site.Profile].Form == FormExpression {
-		referencesEvent, eventErr = conditionReferencesEventPayload(site.Source)
-	} else {
-		referencesEvent, eventErr = templateReferencesEventPayload(site.Source)
-	}
-	if eventErr != nil {
-		return Analysis{}, siteError(site, eventErr)
-	}
 	// Apply the profile's static authority grammar before reachability. This
 	// keeps prohibited dynamic and whole-context access exhaustive even when a
 	// lazy branch would not execute.
-	var staticToken bool
 	var staticErr error
 	switch {
-	case profile.Token == TokenWorkflowContext || profile.Token == TokenCompositeContext:
-		staticToken, staticErr = stepReferencesGitHubToken(site.Source)
+	case profile.Token == TokenWorkflowContext:
+		_, staticErr = stepReferencesGitHubToken(site.Source)
 	case profile.Form == FormExpression:
-		staticToken, staticErr = conditionReferencesGitHubToken(site.Source)
+		_, staticErr = conditionReferencesGitHubToken(site.Source)
 	default:
-		staticToken, staticErr = templateReferencesGitHubToken(site.Source)
+		_, staticErr = templateReferencesGitHubToken(site.Source)
 	}
 	if staticErr != nil {
 		return Analysis{}, siteError(site, staticErr)
@@ -759,7 +754,7 @@ func (engine siteEngine) Analyze(site Site, values AbstractValues) (Analysis, er
 		if err == nil && !empty {
 			switch profile.semantics {
 			case semanticsCondition, semanticsActionLifecycle, semanticsCompileCondition:
-				analysis, err = analyzeConditionNode(node, values.Condition)
+				analysis, err = analyzeConditionNode(node, knownReferences)
 			default:
 				analysis, err = analyzeNode(node)
 			}
@@ -770,9 +765,15 @@ func (engine siteEngine) Analyze(site Site, values AbstractValues) (Analysis, er
 	if err != nil {
 		return Analysis{}, siteError(site, err)
 	}
-	_ = staticToken // The exhaustive pass owns grammar; traversal owns reachability.
-	analysis.Effects.EventPayload = referencesEvent
 	return analysis, nil
+}
+
+func (siteEngine) Literal(value any) (string, error) {
+	return compileInputLiteral(value)
+}
+
+func (siteEngine) Truthy(value any) bool {
+	return githubTruthy(value)
 }
 
 func canonicalAbstractReferences(source map[string]any) map[string]any {

@@ -698,15 +698,21 @@ func referenceName(root string, path []string) string {
 func lookupRuntimeValue(value any, path []string) (any, bool) {
 	current := value
 	for _, part := range path {
-		object, ok := current.(map[string]any)
-		if !ok {
-			return nil, false
-		}
 		matched := false
-		for name, item := range object {
-			if strings.EqualFold(name, part) {
-				current, matched = item, true
-				break
+		switch object := current.(type) {
+		case map[string]any:
+			for name, item := range object {
+				if strings.EqualFold(name, part) {
+					current, matched = item, true
+					break
+				}
+			}
+		case map[string]string:
+			for name, item := range object {
+				if strings.EqualFold(name, part) {
+					current, matched = item, true
+					break
+				}
 			}
 		}
 		if !matched {

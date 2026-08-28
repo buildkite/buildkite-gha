@@ -32,10 +32,6 @@
       "job": {
         "condition": {
           "source": "",
-          "profile": "job-condition",
-          "result": "boolean",
-          "provenance": "workflow",
-          "purpose": "expression",
           "location": {
             "file": "./.github/workflows/shell.yml",
             "field": "job.if",
@@ -52,10 +48,6 @@
         "defaults": {
           "shell": {
             "source": "",
-            "profile": "job-default",
-            "result": "string",
-            "provenance": "workflow",
-            "purpose": "expression",
             "location": {
               "file": "./.github/workflows/shell.yml",
               "field": "job.defaults.run.shell",
@@ -71,10 +63,6 @@
           },
           "working_directory": {
             "source": "",
-            "profile": "job-default",
-            "result": "string",
-            "provenance": "workflow",
-            "purpose": "expression",
             "location": {
               "file": "./.github/workflows/shell.yml",
               "field": "job.defaults.run.working-directory",
@@ -108,10 +96,6 @@
             },
             "condition": {
               "source": "",
-              "profile": "step-condition",
-              "result": "boolean",
-              "provenance": "workflow",
-              "purpose": "expression",
               "location": {
                 "file": "./.github/workflows/shell.yml",
                 "field": "job.steps[0].if",
@@ -129,10 +113,6 @@
             "timeout_minutes": {},
             "name": {
               "source": "Produce bounded output",
-              "profile": "step-template",
-              "result": "string",
-              "provenance": "workflow",
-              "purpose": "expression",
               "location": {
                 "file": "./.github/workflows/shell.yml",
                 "field": "job.steps[0].name",
@@ -149,10 +129,6 @@
             "run": {
               "command": {
                 "source": "echo \"result=smoke-shell\" \u003e\u003e \"$GITHUB_OUTPUT\"",
-                "profile": "step-template",
-                "result": "string",
-                "provenance": "workflow",
-                "purpose": "expression",
                 "location": {
                   "file": "./.github/workflows/shell.yml",
                   "field": "job.steps[0].run",
@@ -168,10 +144,6 @@
               },
               "shell": {
                 "source": "bash",
-                "profile": "step-template",
-                "result": "string",
-                "provenance": "workflow",
-                "purpose": "expression",
                 "location": {
                   "file": "./.github/workflows/shell.yml",
                   "field": "job.steps[0].shell",
@@ -187,10 +159,6 @@
               },
               "working_directory": {
                 "source": "",
-                "profile": "step-template",
-                "result": "string",
-                "provenance": "workflow",
-                "purpose": "expression",
                 "location": {
                   "file": "./.github/workflows/shell.yml",
                   "field": "job.steps[0].working-directory",
@@ -226,10 +194,6 @@
                 "name": "CANARY",
                 "value": {
                   "source": "shell-secret-canary-7f4c2a91",
-                  "profile": "step-template",
-                  "result": "string",
-                  "provenance": "workflow",
-                  "purpose": "expression",
                   "location": {
                     "file": "./.github/workflows/shell.yml",
                     "field": "job.steps[1].env.CANARY",
@@ -247,10 +211,6 @@
             ],
             "condition": {
               "source": "",
-              "profile": "step-condition",
-              "result": "boolean",
-              "provenance": "workflow",
-              "purpose": "expression",
               "location": {
                 "file": "./.github/workflows/shell.yml",
                 "field": "job.steps[1].if",
@@ -268,10 +228,6 @@
             "timeout_minutes": {},
             "name": {
               "source": "Mask fixture before logging",
-              "profile": "step-template",
-              "result": "string",
-              "provenance": "workflow",
-              "purpose": "expression",
               "location": {
                 "file": "./.github/workflows/shell.yml",
                 "field": "job.steps[1].name",
@@ -288,10 +244,6 @@
             "run": {
               "command": {
                 "source": "echo \"::add-mask::$CANARY\"\nprintf 'MASKED_CANARY=%s\\n' \"$CANARY\"\n",
-                "profile": "step-template",
-                "result": "string",
-                "provenance": "workflow",
-                "purpose": "expression",
                 "location": {
                   "file": "./.github/workflows/shell.yml",
                   "field": "job.steps[1].run",
@@ -307,10 +259,6 @@
               },
               "shell": {
                 "source": "bash",
-                "profile": "step-template",
-                "result": "string",
-                "provenance": "workflow",
-                "purpose": "expression",
                 "location": {
                   "file": "./.github/workflows/shell.yml",
                   "field": "job.steps[1].shell",
@@ -326,10 +274,6 @@
               },
               "working_directory": {
                 "source": "",
-                "profile": "step-template",
-                "result": "string",
-                "provenance": "workflow",
-                "purpose": "expression",
                 "location": {
                   "file": "./.github/workflows/shell.yml",
                   "field": "job.steps[1].working-directory",
@@ -351,10 +295,6 @@
             "name": "result",
             "value": {
               "source": "${{ steps.produce.outputs.result }}",
-              "profile": "job-output",
-              "result": "string",
-              "provenance": "workflow",
-              "purpose": "expression",
               "location": {
                 "file": "./.github/workflows/shell.yml",
                 "field": "job.outputs.result",
@@ -412,7 +352,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:09688528a6f0cf05a0d838d7b385af110c403fd75aabb00b49d701b1903a6ac6"
+          "plan_digest": "sha256:ef20d47d6b84803323d803f6b5a8b695e90babce5f104021b721a820e2602577"
         }
       ]
     },
@@ -421,10 +361,6 @@
       "job": {
         "condition": {
           "source": "",
-          "profile": "job-condition",
-          "result": "boolean",
-          "provenance": "workflow",
-          "purpose": "expression",
           "location": {
             "file": "./.github/workflows/shell.yml",
             "field": "job.if",
@@ -441,10 +377,6 @@
         "defaults": {
           "shell": {
             "source": "",
-            "profile": "job-default",
-            "result": "string",
-            "provenance": "workflow",
-            "purpose": "expression",
             "location": {
               "file": "./.github/workflows/shell.yml",
               "field": "job.defaults.run.shell",
@@ -460,10 +392,6 @@
           },
           "working_directory": {
             "source": "",
-            "profile": "job-default",
-            "result": "string",
-            "provenance": "workflow",
-            "purpose": "expression",
             "location": {
               "file": "./.github/workflows/shell.yml",
               "field": "job.defaults.run.working-directory",
@@ -500,10 +428,6 @@
                 "name": "RESULT",
                 "value": {
                   "source": "${{ needs.producer.outputs.result }}",
-                  "profile": "step-template",
-                  "result": "string",
-                  "provenance": "workflow",
-                  "purpose": "expression",
                   "location": {
                     "file": "./.github/workflows/shell.yml",
                     "field": "job.steps[0].env.RESULT",
@@ -522,10 +446,6 @@
                 "name": "VARIANT",
                 "value": {
                   "source": "${{ matrix.variant }}",
-                  "profile": "step-template",
-                  "result": "string",
-                  "provenance": "workflow",
-                  "purpose": "expression",
                   "location": {
                     "file": "./.github/workflows/shell.yml",
                     "field": "job.steps[0].env.VARIANT",
@@ -543,10 +463,6 @@
             ],
             "condition": {
               "source": "",
-              "profile": "step-condition",
-              "result": "boolean",
-              "provenance": "workflow",
-              "purpose": "expression",
               "location": {
                 "file": "./.github/workflows/shell.yml",
                 "field": "job.steps[0].if",
@@ -564,10 +480,6 @@
             "timeout_minutes": {},
             "name": {
               "source": "Consume bounded output",
-              "profile": "step-template",
-              "result": "string",
-              "provenance": "workflow",
-              "purpose": "expression",
               "location": {
                 "file": "./.github/workflows/shell.yml",
                 "field": "job.steps[0].name",
@@ -584,10 +496,6 @@
             "run": {
               "command": {
                 "source": "test \"$RESULT\" = \"smoke-shell\"\nprintf 'SMOKE_OBSERVATION={\"result\":\"%s\",\"variant\":\"%s\"}\\n' \\\n  \"$RESULT\" \"$VARIANT\"\n",
-                "profile": "step-template",
-                "result": "string",
-                "provenance": "workflow",
-                "purpose": "expression",
                 "location": {
                   "file": "./.github/workflows/shell.yml",
                   "field": "job.steps[0].run",
@@ -603,10 +511,6 @@
               },
               "shell": {
                 "source": "bash",
-                "profile": "step-template",
-                "result": "string",
-                "provenance": "workflow",
-                "purpose": "expression",
                 "location": {
                   "file": "./.github/workflows/shell.yml",
                   "field": "job.steps[0].shell",
@@ -622,10 +526,6 @@
               },
               "working_directory": {
                 "source": "",
-                "profile": "step-template",
-                "result": "string",
-                "provenance": "workflow",
-                "purpose": "expression",
                 "location": {
                   "file": "./.github/workflows/shell.yml",
                   "field": "job.steps[0].working-directory",
@@ -684,7 +584,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:09688528a6f0cf05a0d838d7b385af110c403fd75aabb00b49d701b1903a6ac6"
+          "plan_digest": "sha256:ef20d47d6b84803323d803f6b5a8b695e90babce5f104021b721a820e2602577"
         }
       ]
     },
@@ -693,10 +593,6 @@
       "job": {
         "condition": {
           "source": "",
-          "profile": "job-condition",
-          "result": "boolean",
-          "provenance": "workflow",
-          "purpose": "expression",
           "location": {
             "file": "./.github/workflows/shell.yml",
             "field": "job.if",
@@ -713,10 +609,6 @@
         "defaults": {
           "shell": {
             "source": "",
-            "profile": "job-default",
-            "result": "string",
-            "provenance": "workflow",
-            "purpose": "expression",
             "location": {
               "file": "./.github/workflows/shell.yml",
               "field": "job.defaults.run.shell",
@@ -732,10 +624,6 @@
           },
           "working_directory": {
             "source": "",
-            "profile": "job-default",
-            "result": "string",
-            "provenance": "workflow",
-            "purpose": "expression",
             "location": {
               "file": "./.github/workflows/shell.yml",
               "field": "job.defaults.run.working-directory",
@@ -772,10 +660,6 @@
                 "name": "RESULT",
                 "value": {
                   "source": "${{ needs.producer.outputs.result }}",
-                  "profile": "step-template",
-                  "result": "string",
-                  "provenance": "workflow",
-                  "purpose": "expression",
                   "location": {
                     "file": "./.github/workflows/shell.yml",
                     "field": "job.steps[0].env.RESULT",
@@ -794,10 +678,6 @@
                 "name": "VARIANT",
                 "value": {
                   "source": "${{ matrix.variant }}",
-                  "profile": "step-template",
-                  "result": "string",
-                  "provenance": "workflow",
-                  "purpose": "expression",
                   "location": {
                     "file": "./.github/workflows/shell.yml",
                     "field": "job.steps[0].env.VARIANT",
@@ -815,10 +695,6 @@
             ],
             "condition": {
               "source": "",
-              "profile": "step-condition",
-              "result": "boolean",
-              "provenance": "workflow",
-              "purpose": "expression",
               "location": {
                 "file": "./.github/workflows/shell.yml",
                 "field": "job.steps[0].if",
@@ -836,10 +712,6 @@
             "timeout_minutes": {},
             "name": {
               "source": "Consume bounded output",
-              "profile": "step-template",
-              "result": "string",
-              "provenance": "workflow",
-              "purpose": "expression",
               "location": {
                 "file": "./.github/workflows/shell.yml",
                 "field": "job.steps[0].name",
@@ -856,10 +728,6 @@
             "run": {
               "command": {
                 "source": "test \"$RESULT\" = \"smoke-shell\"\nprintf 'SMOKE_OBSERVATION={\"result\":\"%s\",\"variant\":\"%s\"}\\n' \\\n  \"$RESULT\" \"$VARIANT\"\n",
-                "profile": "step-template",
-                "result": "string",
-                "provenance": "workflow",
-                "purpose": "expression",
                 "location": {
                   "file": "./.github/workflows/shell.yml",
                   "field": "job.steps[0].run",
@@ -875,10 +743,6 @@
               },
               "shell": {
                 "source": "bash",
-                "profile": "step-template",
-                "result": "string",
-                "provenance": "workflow",
-                "purpose": "expression",
                 "location": {
                   "file": "./.github/workflows/shell.yml",
                   "field": "job.steps[0].shell",
@@ -894,10 +758,6 @@
               },
               "working_directory": {
                 "source": "",
-                "profile": "step-template",
-                "result": "string",
-                "provenance": "workflow",
-                "purpose": "expression",
                 "location": {
                   "file": "./.github/workflows/shell.yml",
                   "field": "job.steps[0].working-directory",

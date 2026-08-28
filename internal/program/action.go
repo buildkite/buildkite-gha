@@ -22,116 +22,13 @@ type ActionInput struct {
 // VisitSites walks every action-authored expression site once in normalized
 // execution order.
 func (action Action) VisitSites(visit func(Site) error) error {
-	for _, input := range action.Inputs {
-		if input.Default != nil {
-			if err := visitSite(*input.Default, visit); err != nil {
-				return err
-			}
+	copy := cloneAction(action)
+	return walkActionSites(&copy, func(site *Site) error {
+		if site.Source == "" {
+			return nil
 		}
-	}
-	if err := visitSite(action.PreIf, visit); err != nil {
-		return err
-	}
-	if err := visitBindings(action.Env, visit); err != nil {
-		return err
-	}
-	for _, argument := range action.Args {
-		if err := visitSite(argument, visit); err != nil {
-			return err
-		}
-	}
-	for _, step := range action.Steps {
-		for _, site := range []Site{step.Name, step.Condition} {
-			if err := visitSite(site, visit); err != nil {
-				return err
-			}
-		}
-		if err := visitBindings(step.Env, visit); err != nil {
-			return err
-		}
-		if step.Run != nil {
-			if err := visitSite(step.Run.Command, visit); err != nil {
-				return err
-			}
-		}
-		for _, site := range []Site{step.Shell, step.WorkingDirectory} {
-			if err := visitSite(site, visit); err != nil {
-				return err
-			}
-		}
-		if step.Invocation != nil {
-			if err := visitSite(step.Invocation.Uses, visit); err != nil {
-				return err
-			}
-			if err := visitBindings(step.Invocation.With, visit); err != nil {
-				return err
-			}
-		}
-	}
-	for _, output := range action.Outputs {
-		if err := visitSite(output.Value, visit); err != nil {
-			return err
-		}
-	}
-	return visitSite(action.PostIf, visit)
-}
-
-func (action Action) transformSites(apply func(*Site) error) (Action, error) {
-	result := cloneAction(action)
-	for i := range result.Inputs {
-		if result.Inputs[i].Default != nil {
-			if err := apply(result.Inputs[i].Default); err != nil {
-				return Action{}, err
-			}
-		}
-	}
-	if err := apply(&result.PreIf); err != nil {
-		return Action{}, err
-	}
-	if err := transformBindings(result.Env, apply); err != nil {
-		return Action{}, err
-	}
-	if err := transformSites(result.Args, apply); err != nil {
-		return Action{}, err
-	}
-	for i := range result.Steps {
-		step := &result.Steps[i]
-		for _, site := range []*Site{&step.Name, &step.Condition} {
-			if err := apply(site); err != nil {
-				return Action{}, err
-			}
-		}
-		if err := transformBindings(step.Env, apply); err != nil {
-			return Action{}, err
-		}
-		if step.Run != nil {
-			if err := apply(&step.Run.Command); err != nil {
-				return Action{}, err
-			}
-		}
-		for _, site := range []*Site{&step.Shell, &step.WorkingDirectory} {
-			if err := apply(site); err != nil {
-				return Action{}, err
-			}
-		}
-		if step.Invocation != nil {
-			if err := apply(&step.Invocation.Uses); err != nil {
-				return Action{}, err
-			}
-			if err := transformBindings(step.Invocation.With, apply); err != nil {
-				return Action{}, err
-			}
-		}
-	}
-	for i := range result.Outputs {
-		if err := apply(&result.Outputs[i].Value); err != nil {
-			return Action{}, err
-		}
-	}
-	if err := apply(&result.PostIf); err != nil {
-		return Action{}, err
-	}
-	return result, nil
+		return visit(*site)
+	})
 }
 
 func cloneAction(source Action) Action {
@@ -171,20 +68,22 @@ type ActionOutput struct {
 // Action is the compiler-owned execution model for one immutable action lock.
 // Entrypoints remain literal source-relative paths; every expression is a Site.
 type Action struct {
-	Name       string         `json:"name,omitempty"`
-	Runtime    string         `json:"runtime"`
-	Inputs     []ActionInput  `json:"inputs,omitempty"`
-	Outputs    []ActionOutput `json:"outputs,omitempty"`
-	Pre        string         `json:"pre,omitempty"`
-	PreIf      Site           `json:"pre_if"`
-	Main       string         `json:"main,omitempty"`
-	Post       string         `json:"post,omitempty"`
-	PostIf     Site           `json:"post_if"`
-	Image      string         `json:"image,omitempty"`
-	Entrypoint string         `json:"entrypoint,omitempty"`
-	Args       []Site         `json:"args,omitempty"`
-	Env        []Binding      `json:"env,omitempty"`
-	Steps      []ActionStep   `json:"steps,omitempty"`
+	Name           string         `json:"name,omitempty"`
+	Runtime        string         `json:"runtime"`
+	Inputs         []ActionInput  `json:"inputs,omitempty"`
+	Outputs        []ActionOutput `json:"outputs,omitempty"`
+	Pre            string         `json:"pre,omitempty"`
+	PreIf          Site           `json:"pre_if"`
+	Main           string         `json:"main,omitempty"`
+	Post           string         `json:"post,omitempty"`
+	PostIf         Site           `json:"post_if"`
+	Image          string         `json:"image,omitempty"`
+	Entrypoint     string         `json:"entrypoint,omitempty"`
+	PreEntrypoint  string         `json:"pre_entrypoint,omitempty"`
+	PostEntrypoint string         `json:"post_entrypoint,omitempty"`
+	Args           []Site         `json:"args,omitempty"`
+	Env            []Binding      `json:"env,omitempty"`
+	Steps          []ActionStep   `json:"steps,omitempty"`
 }
 
 type ActionStep struct {
@@ -209,62 +108,65 @@ type ActionRun struct {
 func ActionFromMetadata(source metadata.Metadata, runtime string, children map[string]string) Action {
 	result := Action{
 		Name: source.Name, Runtime: runtime, Pre: source.Runs.Pre,
-		PreIf: actionMetadataSite(source.Runs.PreIf, SurfaceActionLifecycle, ResultBoolean, "runs.pre-if", PurposeExpression),
+		PreIf: actionMetadataSite(source.Runs.PreIf, "runs.pre-if"),
 		Main:  source.Runs.Main, Post: source.Runs.Post,
-		PostIf:     actionMetadataSite(source.Runs.PostIf, SurfaceActionLifecycle, ResultBoolean, "runs.post-if", PurposeExpression),
-		Image:      source.Runs.Image,
-		Entrypoint: source.Runs.Entrypoint,
-		Env:        actionMetadataBindings(source.Runs.Env, SurfaceRuntimeTemplate, "runs.env", PurposeExpression),
+		PostIf:         actionMetadataSite(source.Runs.PostIf, "runs.post-if"),
+		Image:          source.Runs.Image,
+		Entrypoint:     source.Runs.Entrypoint,
+		PreEntrypoint:  source.Runs.PreEntrypoint,
+		PostEntrypoint: source.Runs.PostEntrypoint,
+		Env:            actionMetadataBindings(source.Runs.Env, "runs.env"),
 	}
 	for _, name := range sortedMetadataKeys(source.Inputs) {
 		input := source.Inputs[name]
 		lowered := ActionInput{Name: name, Required: input.Required}
 		if input.Default != nil {
-			value := actionMetadataSite(*input.Default, SurfaceActionInputDefault, ResultString, "inputs."+name+".default", PurposeExpression)
+			value := actionMetadataSite(*input.Default, "inputs."+name+".default")
 			lowered.Default = &value
 		}
 		result.Inputs = append(result.Inputs, lowered)
 	}
 	for _, name := range sortedMetadataKeys(source.Outputs) {
-		result.Outputs = append(result.Outputs, ActionOutput{Name: name, Value: actionMetadataSite(source.Outputs[name].Value, SurfaceStepTemplate, ResultString, "outputs."+name+".value", PurposeExpression)})
+		result.Outputs = append(result.Outputs, ActionOutput{Name: name, Value: actionMetadataSite(source.Outputs[name].Value, "outputs."+name+".value")})
 	}
 	for i, argument := range source.Runs.Args {
-		result.Args = append(result.Args, actionMetadataSite(argument, SurfaceDockerActionArg, ResultString, fmt.Sprintf("runs.args[%d]", i), PurposeExpression))
+		result.Args = append(result.Args, actionMetadataSite(argument, fmt.Sprintf("runs.args[%d]", i)))
 	}
 	result.Steps = make([]ActionStep, len(source.Runs.Steps))
 	for i, step := range source.Runs.Steps {
 		field := fmt.Sprintf("runs.steps[%d]", i)
 		lowered := ActionStep{
-			ID: step.ID, Name: actionMetadataSite(step.Name, SurfaceStepTemplate, ResultString, field+".name", PurposeExpression),
-			Shell:            actionMetadataSite(step.Shell, SurfaceStepTemplate, ResultString, field+".shell", PurposeExpression),
-			WorkingDirectory: actionMetadataSite(step.WorkingDirectory, SurfaceStepTemplate, ResultString, field+".working-directory", PurposeExpression),
-			Env:              actionMetadataBindings(step.Env, SurfaceStepTemplate, field+".env", PurposeExpression),
-			Condition:        actionMetadataSite(step.If, SurfaceStepCondition, ResultBoolean, field+".if", PurposeExpression),
+			ID: step.ID, Name: actionMetadataSite(step.Name, field+".name"),
+			Shell:            actionMetadataSite(step.Shell, field+".shell"),
+			WorkingDirectory: actionMetadataSite(step.WorkingDirectory, field+".working-directory"),
+			Env:              actionMetadataBindings(step.Env, field+".env"),
+			Condition:        actionMetadataSite(step.If, field+".if"),
 			ContinueOnError:  step.ContinueOnError,
 		}
 		if step.Run != "" {
-			lowered.Run = &ActionRun{Command: actionMetadataSite(step.Run, SurfaceStepTemplate, ResultString, field+".run", PurposeExpression)}
+			lowered.Run = &ActionRun{Command: actionMetadataSite(step.Run, field+".run")}
 		}
 		if step.Uses != "" {
 			lowered.Invocation = &Invocation{
-				Uses: actionMetadataSite(step.Uses, SurfaceRuntimeTemplate, ResultString, field+".uses", PurposeExpression),
-				With: actionMetadataBindings(step.With, SurfaceStepTemplate, field+".with", PurposeCompositeActionInput),
+				Uses: actionMetadataSite(step.Uses, field+".uses"),
+				With: actionMetadataBindings(step.With, field+".with"),
 				Lock: children[step.Uses],
 			}
 		}
 		result.Steps[i] = lowered
 	}
+	_ = walkActionSites(&result, func(*Site) error { return nil })
 	return result
 }
 
-func actionMetadataSite(source string, surface Surface, result ResultType, field string, purpose Purpose) Site {
-	return Site{Source: source, Surface: surface, Result: result, Provenance: ProvenanceAction, Purpose: purpose, Location: Location{Field: field}}
+func actionMetadataSite(source, field string) Site {
+	return Site{Source: source, Location: Location{Field: field}}
 }
 
-func actionMetadataBindings(values map[string]string, surface Surface, field string, purpose Purpose) []Binding {
+func actionMetadataBindings(values map[string]string, field string) []Binding {
 	result := make([]Binding, 0, len(values))
 	for _, name := range sortedMetadataKeys(values) {
-		result = append(result, Binding{Name: name, Value: actionMetadataSite(values[name], surface, ResultString, field+"."+name, purpose)})
+		result = append(result, Binding{Name: name, Value: actionMetadataSite(values[name], field+"."+name)})
 	}
 	return result
 }
@@ -297,6 +199,7 @@ func (action Action) Metadata(path, sourceRoot string) metadata.Metadata {
 		Using: action.Runtime, Pre: action.Pre, PreIf: action.PreIf.Source,
 		Main: action.Main, Post: action.Post, PostIf: action.PostIf.Source,
 		Image: action.Image, Entrypoint: action.Entrypoint,
+		PreEntrypoint: action.PreEntrypoint, PostEntrypoint: action.PostEntrypoint,
 		Args: siteSourcesAction(action.Args), Env: bindingMapAction(action.Env),
 	}
 	result.Runs.Steps = make([]metadata.CompositeStep, len(action.Steps))

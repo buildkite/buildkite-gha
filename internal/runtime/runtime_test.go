@@ -4333,19 +4333,78 @@ sleep 30
 func TestCancellationStillRunsRegisteredPostAction(t *testing.T) {
 	t.Parallel()
 
-	node := requireNode24(t)
-	workspace := t.TempDir()
+	workspace := canonicalTempDir(t)
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: runtime test\n")
 	writeFixtureFile(t, workspace, ".github/actions/cancel/action.yml", "name: Cancellation cleanup\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
-	writeFixtureFile(t, workspace, ".github/actions/cancel/main.js", "setTimeout(() => {}, 30000)\n")
-	writeFixtureFile(t, workspace, ".github/actions/cancel/post.js", "console.log('post-after-cancel')\n")
+	writeFixtureFile(t, workspace, ".github/actions/cancel/main.js", "")
+	writeFixtureFile(t, workspace, ".github/actions/cancel/post.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+if [ "$(basename "$1")" = post.js ]; then echo post-after-cancel; exit 0; fi
+sleep 30
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	var logs bytes.Buffer
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "cancel", Kind: "uses", Uses: "./.github/actions/cancel"}})
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 600*time.Millisecond)
 	defer cancel()
-	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).runTestJob(ctx, job, workspace)
+	result, err := (Runner{Node24: fakeNode, Stdout: &logs, Stderr: &logs}).runTestJob(ctx, job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" || !strings.Contains(logs.String(), "post-after-cancel") {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+}
+
+func TestPriorFailureSkipsLaterStepEnvironmentWithoutStatusCondition(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: runtime test\n")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+		{ID: "fail", Kind: "run", Command: "exit 1"},
+		{ID: "skipped", Kind: "run", Command: "exit 1", Env: map[string]string{"INVALID": "${{ fromJSON('invalid') }}"}},
+	})
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if strings.Contains(err.Error(), "environment") {
+		t.Fatalf("failed job evaluated a skipped step environment: %v", err)
+	}
+}
+
+func TestCancellationSkipsLaterStepEnvironmentWithoutStatusCondition(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: runtime test\n")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+		{ID: "cancel", Kind: "run", Command: "sleep 30"},
+		{ID: "skipped", Kind: "run", Command: "exit 1", Env: map[string]string{"INVALID": "${{ fromJSON('invalid') }}"}},
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	result, err := (Runner{}).runTestJob(ctx, job, workspace)
+	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if strings.Contains(err.Error(), "environment") {
+		t.Fatalf("cancelled job evaluated a skipped step environment: %v", err)
+	}
+}
+
+func TestServiceContainerExpressionErrorsUseFieldOrder(t *testing.T) {
+	invalid := testProgramSite("${{", executionprogram.SurfaceServiceTemplate, executionprogram.ResultString)
+	container := executionprogram.ServiceContainer{
+		Image:      testProgramSite("postgres:16", executionprogram.SurfaceServiceTemplate, executionprogram.ResultString),
+		Options:    invalid,
+		Command:    invalid,
+		Entrypoint: invalid,
+	}
+	for range 20 {
+		_, err := evaluateProgramServiceContainer(container, expression.Context{})
+		if err == nil || !strings.HasPrefix(err.Error(), "options:") {
+			t.Fatalf("evaluateProgramServiceContainer() error = %v, want options first", err)
+		}
 	}
 }
 
@@ -7465,7 +7524,7 @@ func TestRuntimeMapDiagnosticsAreSorted(t *testing.T) {
 	}
 
 	job.Needs = nil
-	job.Outputs = map[string]string{"z-valid": "partial", "a-invalid": "${{ unsupported.a }}"}
+	job.Outputs = map[string]string{"z-valid": "partial", "a-invalid": "${{ fromJSON('invalid') }}"}
 	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), `job output "a-invalid"`) {
 		t.Fatalf("RunJob() output error = %v, want alphabetically first key", err)

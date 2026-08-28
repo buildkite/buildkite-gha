@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -192,6 +193,80 @@ func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 	job.CallGuards[0].NeedSources["prepare"][0].PlanDigest = "sha256:tampered"
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "producer identity") {
 		t.Fatalf("Validate() tampered call producer error = %v", err)
+	}
+}
+
+func TestCallGuardProjectionMustMatchProgram(t *testing.T) {
+	job := validJob()
+	job.CallGuards = []CallGuard{{Condition: "always()"}}
+	synchronizeExecutionProgram(&job)
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	programDocument := document["program"].(map[string]any)
+	programDocument["job"].(map[string]any)["guards"] = []any{}
+	tampered, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(tampered); err == nil || !strings.Contains(err.Error(), "call guard projection") {
+		t.Fatalf("Decode() mismatch error = %v", err)
+	}
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	delete(document, "call_guards")
+	tampered, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(tampered); err == nil || !strings.Contains(err.Error(), "call guard projection") {
+		t.Fatalf("Decode() inverse mismatch error = %v", err)
+	}
+
+	job.Program.Job.Guards = nil
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "call guard projection") {
+		t.Fatalf("Validate() mismatch error = %v", err)
+	}
+}
+
+func TestDecodeRejectsCaseCollidingProgramControls(t *testing.T) {
+	job := validJob()
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	step := document["program"].(map[string]any)["job"].(map[string]any)["steps"].([]any)[0].(map[string]any)
+	step["Continue_On_Error"] = map[string]any{"literal": true}
+	tampered, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(tampered); err == nil || !strings.Contains(err.Error(), "different casing") {
+		t.Fatalf("Decode() collision error = %v", err)
+	}
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	step = document["program"].(map[string]any)["job"].(map[string]any)["steps"].([]any)[0].(map[string]any)
+	control := step["continue_on_error"].(map[string]any)
+	control["literal"] = false
+	control["Literal"] = true
+	tampered, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(tampered); err == nil || !strings.Contains(err.Error(), "different casing") {
+		t.Fatalf("Decode() inner collision error = %v", err)
 	}
 }
 
@@ -608,13 +683,36 @@ func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 	}
 }
 
+func TestReachableActionLocksRequireProgramsExceptNativeAdapters(t *testing.T) {
+	job := validJob()
+	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./action", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "workspace", Path: "action", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
+	synchronizeExecutionProgram(&job)
+	delete(job.Program.Actions, "a-0000000000000001")
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "has no normalized execution program") {
+		t.Fatalf("Validate() missing action program error = %v", err)
+	}
+
+	job = validJob()
+	job.Steps = []Step{{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v4", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "github", Repository: "actions/checkout", RequestedRef: "v4", Commit: integration.CheckoutV4Commit, SourceDigest: "sha256:" + strings.Repeat("b", 64)}}
+	synchronizeExecutionProgram(&job)
+	if err := job.Validate(); err != nil {
+		t.Fatalf("Validate() native adapter error = %v", err)
+	}
+	job.Actions[0].Commit = strings.Repeat("c", 40)
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "has no normalized execution program") {
+		t.Fatalf("Validate() unadmitted native commit error = %v", err)
+	}
+}
+
 func TestRequiresMiseRoundTripAndSchema(t *testing.T) {
 	requiresMise := false
 	job := validJob()
 	job.Steps = []Step{{ID: "native", Kind: "uses", Uses: "actions/checkout@v4", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{{
 		ID: "a-0000000000000001", Source: "github", Repository: "actions/checkout", RequestedRef: "v4",
-		Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
+		Commit: integration.CheckoutV4Commit, SourceDigest: "sha256:" + strings.Repeat("b", 64),
 	}}
 	job.RequiresMise = &requiresMise
 	synchronizeExecutionProgram(&job)
@@ -689,7 +787,13 @@ func TestRuntimeDistributionRoundTripAndSchema(t *testing.T) {
 		}},
 		{name: "invalid container", edit: func(document map[string]any) {
 			program := document["program"].(map[string]any)
-			program["job"].(map[string]any)["container"] = map[string]any{}
+			programJob := program["job"].(map[string]any)
+			step := programJob["steps"].([]any)[0].(map[string]any)
+			image := maps.Clone(step["name"].(map[string]any))
+			image["source"] = "INVALID IMAGE"
+			port := maps.Clone(step["name"].(map[string]any))
+			port["source"] = "65536"
+			programJob["container"] = map[string]any{"image": image, "ports": []any{port}}
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -728,6 +832,7 @@ func TestRemoteNestedActionLocks(t *testing.T) {
 		{ID: "a-0000000000000001", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: commit, Path: "root", SourceDigest: digest, Children: map[string]ActionSelector{"owner/repo/root/child@v1": {Lock: "a-0000000000000002"}}},
 		{ID: "a-0000000000000002", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: commit, Path: "root/child", SourceDigest: digest},
 	}
+	synchronizeExecutionProgram(&job)
 	if err := job.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -742,6 +847,7 @@ func TestActionLockValidationMatrix(t *testing.T) {
 		job := validJob()
 		job.Steps = []Step{{ID: "remote", Kind: "uses", Uses: "Owner/Repo/root@v1", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 		job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: strings.Repeat("c", 40), Path: "root", SourceDigest: "sha256:" + strings.Repeat("b", 64)}}
+		synchronizeExecutionProgram(&job)
 		return job
 	}
 	if err := remote().Validate(); err != nil {
@@ -789,6 +895,7 @@ func TestLocalChildPreservesParentIdentity(t *testing.T) {
 		{ID: "a-0000000000000001", Source: "workspace", Path: "root", SourceDigest: digest, Children: map[string]ActionSelector{"./child": {Lock: "a-0000000000000002"}}},
 		{ID: "a-0000000000000002", Source: "workspace", Path: "child", SourceDigest: digest},
 	}
+	synchronizeExecutionProgram(&job)
 	if err := job.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -814,6 +921,7 @@ func TestRemoteCompositeLocalChildUsesWorkspaceIdentity(t *testing.T) {
 		},
 		{ID: "a-0000000000000002", Source: "workspace", Path: "child", SourceDigest: "sha256:" + strings.Repeat("b", 64)},
 	}
+	synchronizeExecutionProgram(&job)
 	if err := job.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -833,6 +941,7 @@ func TestActionSelectorsAndPathsRejectInvalidValues(t *testing.T) {
 		job.RequiresMise = &requiresMise
 		job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 		job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "workspace", Path: "actions/build", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
+		synchronizeExecutionProgram(&job)
 		return job
 	}
 	tests := []struct {
@@ -886,6 +995,7 @@ func TestWorkspaceRootActionAndSharedChildDAG(t *testing.T) {
 		{ID: "a-0000000000000001", Source: "workspace", SourceDigest: digest, Children: children},
 		{ID: "a-0000000000000002", Source: "github", Repository: "manyletters/repository", RequestedRef: "v1", Commit: strings.Repeat("b", 40), SourceDigest: "sha256:" + strings.Repeat("c", 64)},
 	}
+	synchronizeExecutionProgram(&job)
 	if err := job.Validate(); err != nil {
 		t.Fatalf("workspace-root action with shared-child DAG rejected: %v", err)
 	}
@@ -907,6 +1017,7 @@ func TestActionLockGraphDepthAndCycles(t *testing.T) {
 				job.Actions[i].Children = map[string]ActionSelector{"./child": {Lock: "a-" + leftPadHex(i+1)}}
 			}
 		}
+		synchronizeExecutionProgram(&job)
 		return job
 	}
 	exact := chain(metadata.MaxNestedActionDepth)
@@ -967,6 +1078,21 @@ func programFromProjection(job Job) program.Program {
 		},
 		Outputs: testPlanBindings(job.Outputs, program.SurfaceJobOutput, program.PurposeExpression),
 	}}
+	result.Actions = make(map[string]program.Action)
+	for _, lock := range job.Actions {
+		descriptor, known, err := integration.Admit(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
+		if err == nil && known && descriptor.Adapter != "" {
+			continue
+		}
+		action := program.Action{Runtime: "node24", Main: "index.js", PreIf: testActionSite("", program.SurfaceActionLifecycle, program.ResultBoolean), PostIf: testActionSite("", program.SurfaceActionLifecycle, program.ResultBoolean)}
+		if lock.DockerImage != "" {
+			action.Runtime, action.Main, action.Image = "docker", "", "docker://"+lock.DockerImage
+		}
+		result.Actions[lock.ID] = action
+	}
+	if len(result.Actions) == 0 {
+		result.Actions = nil
+	}
 	result.Job.Guards = make([]program.Guard, len(job.CallGuards))
 	for i, guard := range job.CallGuards {
 		result.Job.Guards[i].Condition = testPlanSite(guard.Condition, program.SurfaceCallCondition, program.ResultBoolean)
@@ -1013,6 +1139,10 @@ func programFromProjection(job Job) program.Program {
 
 func testPlanSite(source string, surface program.Surface, result program.ResultType) program.Site {
 	return program.Site{Source: source, Surface: surface, Result: result, Provenance: program.ProvenanceWorkflow, Purpose: program.PurposeExpression}
+}
+
+func testActionSite(source string, surface program.Surface, result program.ResultType) program.Site {
+	return program.Site{Source: source, Surface: surface, Result: result, Provenance: program.ProvenanceAction, Purpose: program.PurposeExpression}
 }
 
 func testPlanBindings(values map[string]string, surface program.Surface, purpose program.Purpose) []program.Binding {

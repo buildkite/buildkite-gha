@@ -10,12 +10,9 @@ import (
 	"github.com/rhysd/actionlint"
 )
 
-// validateActionInputDefault verifies the restricted compound expression
-// surface supported only while evaluating action metadata input defaults.
-func validateActionInputDefault(template string) error {
-	return validateActionInputDefaultTemplate(template)
-}
-
+// validateActionInputDefaultTemplate verifies the restricted compound
+// expression surface supported only while evaluating action metadata input
+// defaults.
 func validateActionInputDefaultTemplate(template string) error {
 	referencesJobStatus, err := templateReferencesJobStatus(template)
 	if err != nil {
@@ -118,7 +115,7 @@ func isRunnerTempReference(root string, path []string) bool {
 	return strings.EqualFold(root, "runner") && len(path) == 1 && strings.EqualFold(path[0], "temp")
 }
 
-// ActionInputDefaultRequiresGitHubToken reports whether a metadata default can
+// actionInputDefaultRequiresGitHubToken reports whether a metadata default can
 // reach github.token for the event provider. A token branch guarded by an
 // unknown runtime value requires the token because that value is not known
 // during compilation.

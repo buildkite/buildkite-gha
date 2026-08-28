@@ -195,8 +195,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		jobCondition.Cancelled = jobCondition.Cancelled || need.Result == "cancelled"
 		jobCondition.Unsuccessful = jobCondition.Unsuccessful || need.Result != "success"
 	}
-	value, err := executionprogram.EvaluateSite(job.Program.Job.Condition, executionprogram.EvaluationContext{Expression: eval, Condition: jobCondition})
-	run, _ := value.(bool)
+	run, err := evaluateProgramTyped[bool](job.Program.Job.Condition, executionprogram.EvaluationContext{Expression: eval, Condition: jobCondition})
 	if err != nil {
 		return jobResult, fmt.Errorf("evaluate job condition: %w", err)
 	}
@@ -326,7 +325,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	if err != nil {
 		return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate services: %w", err))
 	}
-	containerSpec := job.Container
+	var containerSpec *plan.Container
 	if job.Program.Job.Container != nil {
 		containerSpec, err = evaluateProgramContainer(*job.Program.Job.Container, serviceEval)
 		if err != nil {
@@ -615,6 +614,16 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval))
 			continue
 		}
+		if runErr != nil || runCtx.Err() != nil {
+			referencesStatus, err := executionprogram.ReferencesStatus(step.Execution.Condition)
+			if err != nil {
+				return jobResult, errors.Join(runErr, fmt.Errorf("step %q condition: %w", step.ID, err))
+			}
+			if !referencesStatus {
+				eval.Steps[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
+				continue
+			}
+		}
 		evaluationCtx, cancelEvaluation := stepContext(runCtx, step.TimeoutMinutes)
 		stepEval := stepExpressionContext(eval)
 		bindHashFilesContext(evaluationCtx, &stepEval)
@@ -627,8 +636,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 		}
 		stepEval.Env = mergeStringMaps(stepEval.Env, stepEnv)
 		condition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, Steps: eval.Steps, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
-		value, err := executionprogram.EvaluateSite(step.Execution.Condition, executionprogram.EvaluationContext{Expression: stepEval, Condition: condition})
-		run, _ := value.(bool)
+		run, err := evaluateProgramTyped[bool](step.Execution.Condition, executionprogram.EvaluationContext{Expression: stepEval, Condition: condition})
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("condition: %w", err), stepEval)
 			cancelEvaluation()
@@ -781,11 +789,10 @@ func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
 	outputBindings := job.Program.Job.Outputs
 	for _, output := range outputBindings {
 		name := output.Name
-		resolved, err := executionprogram.EvaluateSite(output.Value, executionprogram.EvaluationContext{Expression: eval})
+		value, err := evaluateProgramTyped[string](output.Value, executionprogram.EvaluationContext{Expression: eval})
 		if err != nil {
 			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, fmt.Errorf("job output %q: %w", name, err))
 		}
-		value := resolved.(string)
 		if len(value) > maxJobOutputBytes {
 			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, fmt.Errorf("job output %q exceeds the %d-byte limit", name, maxJobOutputBytes))
 		}
@@ -809,6 +816,9 @@ func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
 }
 
 func evaluateCallGuards(job plan.Job) (bool, error) {
+	if job.Program == nil || len(job.CallGuards) != len(job.Program.Job.Guards) {
+		return false, fmt.Errorf("evaluate reusable-workflow call guards: plan projection does not match normalized program")
+	}
 	github := githubContext(job)
 	for i, guard := range job.CallGuards {
 		if len(guard.DeferredInputs) != 0 && !deferredInputsHydrated(guard.DeferredInputs, guard.DeferredInputValues) {
@@ -831,8 +841,7 @@ func evaluateCallGuards(job plan.Job) (bool, error) {
 			condition.Cancelled = condition.Cancelled || need.Result == "cancelled"
 			condition.Unsuccessful = condition.Unsuccessful || need.Result != "success"
 		}
-		value, err := executionprogram.EvaluateSite(job.Program.Job.Guards[i].Condition, executionprogram.EvaluationContext{Condition: condition})
-		run, _ := value.(bool)
+		run, err := evaluateProgramTyped[bool](job.Program.Job.Guards[i].Condition, executionprogram.EvaluationContext{Condition: condition})
 		if err != nil {
 			return false, fmt.Errorf("evaluate reusable-workflow call guard %d: %w", i+1, err)
 		}
@@ -882,11 +891,11 @@ func evaluateProgramContainer(container executionprogram.Container, eval express
 
 func evaluateProgramServices(services executionprogram.Services, eval expression.Context) (map[string]plan.ServiceContainer, []string, error) {
 	if services.Dynamic != nil {
-		value, err := executionprogram.EvaluateSite(*services.Dynamic, executionprogram.EvaluationContext{Expression: eval})
+		value, err := evaluateProgramTyped[[]expression.ObjectEntry](*services.Dynamic, executionprogram.EvaluationContext{Expression: eval})
 		if err != nil {
 			return nil, nil, err
 		}
-		return evaluateServiceEntries(value.([]expression.ObjectEntry))
+		return evaluateServiceEntries(value)
 	}
 	result := make(map[string]plan.ServiceContainer, len(services.Static))
 	order := make([]string, 0, len(services.Static))
@@ -922,15 +931,18 @@ func evaluateProgramServiceContainer(container executionprogram.ServiceContainer
 	if result.Volumes, err = evaluateProgramStrings(container.Volumes, eval); err != nil {
 		return result, fmt.Errorf("volumes: %w", err)
 	}
-	for name, pair := range map[string]struct {
+	for _, pair := range []struct {
+		name  string
 		site  executionprogram.Site
 		value *string
 	}{
-		"options": {container.Options, &result.Options}, "command": {container.Command, &result.Command}, "entrypoint": {container.Entrypoint, &result.Entrypoint},
+		{"options", container.Options, &result.Options},
+		{"command", container.Command, &result.Command},
+		{"entrypoint", container.Entrypoint, &result.Entrypoint},
 	} {
 		*pair.value, err = evaluateProgramString(pair.site, eval)
 		if err != nil {
-			return result, fmt.Errorf("%s: %w", name, err)
+			return result, fmt.Errorf("%s: %w", pair.name, err)
 		}
 	}
 	if container.Credentials != nil {
@@ -961,11 +973,20 @@ func evaluateProgramStrings(sites []executionprogram.Site, eval expression.Conte
 }
 
 func evaluateProgramString(site executionprogram.Site, eval expression.Context) (string, error) {
-	value, err := executionprogram.EvaluateSite(site, executionprogram.EvaluationContext{Expression: eval})
+	return evaluateProgramTyped[string](site, executionprogram.EvaluationContext{Expression: eval})
+}
+
+func evaluateProgramTyped[T any](site executionprogram.Site, context executionprogram.EvaluationContext) (T, error) {
+	var zero T
+	value, err := executionprogram.EvaluateSite(site, context)
 	if err != nil {
-		return "", err
+		return zero, err
 	}
-	return value.(string), nil
+	typed, ok := value.(T)
+	if !ok {
+		return zero, fmt.Errorf("expression produced %T, want the normalized result type", value)
+	}
+	return typed, nil
 }
 
 func evaluateServiceEntries(entries []expression.ObjectEntry) (map[string]plan.ServiceContainer, []string, error) {
@@ -1090,11 +1111,7 @@ func serviceScalarString(value any) (string, error) {
 
 func stepDisplayName(step plan.Step, eval expression.Context) (string, error) {
 	if step.Execution.Name.Source != "" {
-		value, err := executionprogram.EvaluateSite(step.Execution.Name, executionprogram.EvaluationContext{Expression: eval})
-		if err != nil {
-			return "", err
-		}
-		return value.(string), nil
+		return evaluateProgramTyped[string](step.Execution.Name, executionprogram.EvaluationContext{Expression: eval})
 	}
 	if step.Uses != "" {
 		return step.Uses, nil
@@ -1873,8 +1890,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 	environment := r.invocationEnvironment(jobEnv, stepEnv)
 	result := newResult()
 	if step.Kind == "run" {
-		value, err := executionprogram.EvaluateSite(step.Execution.Run.Command, executionprogram.EvaluationContext{Expression: eval})
-		script, _ := value.(string)
+		script, err := evaluateProgramTyped[string](step.Execution.Run.Command, executionprogram.EvaluationContext{Expression: eval})
 		if err != nil {
 			return result, err
 		}
@@ -1882,8 +1898,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 		if shellSite.Source == "" {
 			shellSite = job.Program.Job.Defaults.Shell
 		}
-		value, err = executionprogram.EvaluateSite(shellSite, executionprogram.EvaluationContext{Expression: eval})
-		shell, _ := value.(string)
+		shell, err := evaluateProgramTyped[string](shellSite, executionprogram.EvaluationContext{Expression: eval})
 		if err != nil {
 			return result, err
 		}
@@ -1898,8 +1913,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 		if workingDirectorySite.Source == "" {
 			workingDirectorySite = job.Program.Job.Defaults.WorkingDirectory
 		}
-		value, err = executionprogram.EvaluateSite(workingDirectorySite, executionprogram.EvaluationContext{Expression: eval})
-		workingDirectory, _ := value.(string)
+		workingDirectory, err := evaluateProgramTyped[string](workingDirectorySite, executionprogram.EvaluationContext{Expression: eval})
 		if err != nil {
 			return result, err
 		}
@@ -1921,46 +1935,44 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 	if step.Action == nil {
 		return result, markHardJobFailure(fmt.Errorf("action %q has no immutable selector", step.Uses))
 	}
-	{
-		resolvedAction, lock, err := actions.resolve(ctx, *step.Action)
-		if err != nil {
-			return result, err
-		}
-		action, actionLock = resolvedAction, &lock
-		actionProgram = actions.program(*step.Action)
-		if usesCheckoutAdapter(lock) {
-			inputs := evaluatedWith
-			if inputs == nil {
-				inputs, err = evaluatePlanStepWith(step, eval)
-				if err != nil {
-					return result, err
-				}
-			}
-			if err := validateCheckoutRefProvenance(step.Execution.Invocation.With, inputs, job.Event.SHA); err != nil {
+	resolvedAction, lock, err := actions.resolve(ctx, *step.Action)
+	if err != nil {
+		return result, err
+	}
+	action, actionLock = resolvedAction, &lock
+	actionProgram = actions.program(*step.Action)
+	if usesCheckoutAdapter(lock) {
+		inputs := evaluatedWith
+		if inputs == nil {
+			inputs, err = evaluatePlanStepWith(step, eval)
+			if err != nil {
 				return result, err
 			}
-			return r.runCheckout(ctx, processor, workspace, job, lock.Commit, inputs)
 		}
-		if usesUploadArtifactAdapter(lock) {
-			inputs := evaluatedWith
-			if inputs == nil {
-				inputs, err = evaluatePlanStepWith(step, eval)
-				if err != nil {
-					return result, err
-				}
+		if err := validateCheckoutRefProvenance(step.Execution.Invocation.With, inputs, job.Event.SHA); err != nil {
+			return result, err
+		}
+		return r.runCheckout(ctx, processor, workspace, job, lock.Commit, inputs)
+	}
+	if usesUploadArtifactAdapter(lock) {
+		inputs := evaluatedWith
+		if inputs == nil {
+			inputs, err = evaluatePlanStepWith(step, eval)
+			if err != nil {
+				return result, err
 			}
-			return r.runUploadArtifactCommit(ctx, processor, workspace, lock.Commit, inputs)
 		}
-		if usesDownloadArtifactAdapter(lock) {
-			inputs := evaluatedWith
-			if inputs == nil {
-				inputs, err = evaluatePlanStepWith(step, eval)
-				if err != nil {
-					return result, err
-				}
+		return r.runUploadArtifactCommit(ctx, processor, workspace, lock.Commit, inputs)
+	}
+	if usesDownloadArtifactAdapter(lock) {
+		inputs := evaluatedWith
+		if inputs == nil {
+			inputs, err = evaluatePlanStepWith(step, eval)
+			if err != nil {
+				return result, err
 			}
-			return r.runDownloadArtifact(ctx, processor, workspace, job.Needs, lock.Commit, inputs)
 		}
+		return r.runDownloadArtifact(ctx, processor, workspace, job.Needs, lock.Commit, inputs)
 	}
 	if actionProgram == nil {
 		return result, markHardJobFailure(fmt.Errorf("action %q has no normalized execution program", step.Uses))
@@ -2162,8 +2174,7 @@ func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandPro
 			inputs[name] = value
 		}
 		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, Steps: eval.Steps, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
-		value, err := executionprogram.EvaluateSite(executionStep.Condition, executionprogram.EvaluationContext{Expression: eval, Condition: condition})
-		run, _ := value.(bool)
+		run, err := evaluateProgramTyped[bool](executionStep.Condition, executionprogram.EvaluationContext{Expression: eval, Condition: condition})
 		if err != nil {
 			childErr := fmt.Errorf("composite action step %d condition: %w", i+1, err)
 			execution := classifyStepExecution(ctx, ctx, plan.Step{ContinueOnError: step.ContinueOnError}, newResult(), childErr)
@@ -2329,11 +2340,11 @@ func resolveProgramActionInputs(action executionprogram.Action, supplied map[str
 		}
 		if input.Default != nil {
 			defaultContext.Inputs = inputs
-			value, err := executionprogram.EvaluateSite(*input.Default, executionprogram.EvaluationContext{Expression: defaultContext})
+			value, err := evaluateProgramTyped[string](*input.Default, executionprogram.EvaluationContext{Expression: defaultContext})
 			if err != nil {
 				return nil, fmt.Errorf("action input %q default: %w", name, err)
 			}
-			inputs[name] = value.(string)
+			inputs[name] = value
 			continue
 		}
 		if input.Required {
@@ -2514,11 +2525,7 @@ func postForInvocation(invocation *preparedInvocation, site *executionprogram.Si
 }
 
 func evaluateActionLifecycleSite(site executionprogram.Site, condition expression.ConditionContext) (bool, error) {
-	value, err := executionprogram.EvaluateSite(site, executionprogram.EvaluationContext{Condition: condition})
-	if err != nil {
-		return false, err
-	}
-	return value.(bool), nil
+	return evaluateProgramTyped[bool](site, executionprogram.EvaluationContext{Condition: condition})
 }
 
 func jobStatusValue(unsuccessful, cancelled bool) string {

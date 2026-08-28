@@ -12,28 +12,28 @@ import (
 func lowerWorkflowProgram(instance JobInstance) program.Program {
 	jobLocation := programLocation(instance.SourcePath, "job", instance.Source)
 	result := program.Program{Version: program.Version, Job: program.Job{
-		Condition:       workflowSite(instance.If, program.SurfaceJobCondition, program.ResultBoolean, jobLocation, "job.if"),
+		Condition:       workflowSite(instance.If, jobLocation, "job.if"),
 		ContinueOnError: instance.ContinueOnError,
 		TimeoutMinutes:  instance.TimeoutMinutes,
-		Env:             workflowBindings(instance.Env, program.SurfaceJobEnvironment, jobLocation, "job.env", program.PurposeExpression),
+		Env:             workflowBindings(instance.Env, jobLocation, "job.env"),
 		Defaults: program.Defaults{
-			Shell:            workflowSite(instance.DefaultShell, program.SurfaceJobDefault, program.ResultString, jobLocation, "job.defaults.run.shell"),
-			WorkingDirectory: workflowSite(instance.DefaultWorkingDirectory, program.SurfaceJobDefault, program.ResultString, jobLocation, "job.defaults.run.working-directory"),
+			Shell:            workflowSite(instance.DefaultShell, jobLocation, "job.defaults.run.shell"),
+			WorkingDirectory: workflowSite(instance.DefaultWorkingDirectory, jobLocation, "job.defaults.run.working-directory"),
 		},
-		Outputs: workflowBindings(instance.Outputs, program.SurfaceJobOutput, jobLocation, "job.outputs", program.PurposeExpression),
+		Outputs: workflowBindings(instance.Outputs, jobLocation, "job.outputs"),
 	}}
 	if len(instance.CallGuards) != 0 {
 		result.Job.Guards = make([]program.Guard, len(instance.CallGuards))
 		for i, guard := range instance.CallGuards {
 			field := fmt.Sprintf("job.call-guards[%d].if", i)
-			result.Job.Guards[i] = program.Guard{Condition: workflowSite(guard.Condition, program.SurfaceCallCondition, program.ResultBoolean, jobLocation, field)}
+			result.Job.Guards[i] = program.Guard{Condition: workflowSite(guard.Condition, jobLocation, field)}
 		}
 	}
 	if instance.Container != nil {
 		result.Job.Container = &program.Container{
-			Image: workflowSite(instance.Container.Image, program.SurfaceRuntimeTemplate, program.ResultString, jobLocation, "job.container.image"),
-			Env:   workflowBindings(instance.Container.Env, program.SurfaceRuntimeTemplate, jobLocation, "job.container.env", program.PurposeExpression),
-			Ports: workflowSites(instance.Container.Ports, program.SurfaceRuntimeTemplate, program.ResultString, jobLocation, "job.container.ports"),
+			Image: workflowSite(instance.Container.Image, jobLocation, "job.container.image"),
+			Env:   workflowBindings(instance.Container.Env, jobLocation, "job.container.env"),
+			Ports: workflowSites(instance.Container.Ports, jobLocation, "job.container.ports"),
 		}
 	}
 	if len(instance.Services) != 0 {
@@ -43,28 +43,29 @@ func lowerWorkflowProgram(instance JobInstance) program.Program {
 			location := programLocation(instance.SourcePath, field, service.Container.Span)
 			container := service.Container
 			lowered := program.ServiceContainer{
-				Image:      workflowSite(container.Image, program.SurfaceServiceTemplate, program.ResultString, location, field+".image"),
-				Env:        workflowBindings(container.Env, program.SurfaceServiceTemplate, location, field+".env", program.PurposeExpression),
-				Ports:      workflowSites(container.Ports, program.SurfaceServiceTemplate, program.ResultString, location, field+".ports"),
-				Volumes:    workflowSites(container.Volumes, program.SurfaceServiceTemplate, program.ResultString, location, field+".volumes"),
-				Options:    workflowSite(container.Options, program.SurfaceServiceTemplate, program.ResultString, location, field+".options"),
-				Command:    workflowSite(container.Command, program.SurfaceServiceTemplate, program.ResultString, location, field+".command"),
-				Entrypoint: workflowSite(container.Entrypoint, program.SurfaceServiceTemplate, program.ResultString, location, field+".entrypoint"),
+				Image:      workflowSite(container.Image, location, field+".image"),
+				Env:        workflowBindings(container.Env, location, field+".env"),
+				Ports:      workflowSites(container.Ports, location, field+".ports"),
+				Volumes:    workflowSites(container.Volumes, location, field+".volumes"),
+				Options:    workflowSite(container.Options, location, field+".options"),
+				Command:    workflowSite(container.Command, location, field+".command"),
+				Entrypoint: workflowSite(container.Entrypoint, location, field+".entrypoint"),
 			}
 			if container.Credentials != nil {
 				lowered.Credentials = &program.ContainerCredentials{
-					Username: workflowSite(container.Credentials.Username, program.SurfaceServiceCredential, program.ResultString, location, field+".credentials.username"),
-					Password: workflowSite(container.Credentials.Password, program.SurfaceServiceCredential, program.ResultString, location, field+".credentials.password"),
+					Username: workflowSite(container.Credentials.Username, location, field+".credentials.username"),
+					Password: workflowSite(container.Credentials.Password, location, field+".credentials.password"),
 				}
 			}
 			result.Job.Services.Static[i] = program.Service{Name: service.Name, Container: lowered}
 		}
 	}
 	if instance.ServicesExpression != "" {
-		site := workflowSite(instance.ServicesExpression, program.SurfaceServiceMap, program.ResultObject, jobLocation, "job.services")
+		site := workflowSite(instance.ServicesExpression, jobLocation, "job.services")
 		result.Job.Services.Dynamic = &site
 	}
 	result.Job.Steps = lowerWorkflowSteps(instance.SourcePath, instance.Steps)
+	result.DeriveSiteSemantics()
 	return result
 }
 
@@ -96,35 +97,35 @@ func lowerWorkflowSteps(sourcePath string, source []workflow.Step) []program.Ste
 			Background: step.Background,
 			Targets:    append([]string(nil), step.Targets...),
 			Source:     location,
-			Env:        workflowBindings(step.Env, program.SurfaceStepTemplate, location, field+".env", program.PurposeExpression),
-			Condition:  workflowSite(step.If, program.SurfaceStepCondition, program.ResultBoolean, location, field+".if"),
+			Env:        workflowBindings(step.Env, location, field+".env"),
+			Condition:  workflowSite(step.If, location, field+".if"),
 			ContinueOnError: program.BoolControl{
 				Literal: step.ContinueOnError,
 			},
 			TimeoutMinutes: program.NumberControl{
 				Literal: step.TimeoutMinutes,
 			},
-			Name: workflowSite(step.Name, program.SurfaceStepTemplate, program.ResultString, location, field+".name"),
+			Name: workflowSite(step.Name, location, field+".name"),
 		}
 		if step.ContinueOnErrorExpression != "" {
-			site := workflowSite(step.ContinueOnErrorExpression, program.SurfaceStepControl, program.ResultBoolean, location, field+".continue-on-error")
+			site := workflowSite(step.ContinueOnErrorExpression, location, field+".continue-on-error")
 			steps[i].ContinueOnError.Expression = &site
 		}
 		if step.TimeoutMinutesExpression != "" {
-			site := workflowSite(step.TimeoutMinutesExpression, program.SurfaceStepControl, program.ResultNumber, location, field+".timeout-minutes")
+			site := workflowSite(step.TimeoutMinutesExpression, location, field+".timeout-minutes")
 			steps[i].TimeoutMinutes.Expression = &site
 		}
 		switch step.Kind {
 		case "run":
 			steps[i].Run = &program.Run{
-				Command:          workflowSite(step.Run, program.SurfaceStepTemplate, program.ResultString, location, field+".run"),
-				Shell:            workflowSite(step.Shell, program.SurfaceStepTemplate, program.ResultString, location, field+".shell"),
-				WorkingDirectory: workflowSite(step.WorkingDirectory, program.SurfaceStepTemplate, program.ResultString, location, field+".working-directory"),
+				Command:          workflowSite(step.Run, location, field+".run"),
+				Shell:            workflowSite(step.Shell, location, field+".shell"),
+				WorkingDirectory: workflowSite(step.WorkingDirectory, location, field+".working-directory"),
 			}
 		case "uses":
 			steps[i].Invocation = &program.Invocation{
-				Uses: workflowSite(step.Uses, program.SurfaceRuntimeTemplate, program.ResultString, location, field+".uses"),
-				With: workflowBindings(step.With, program.SurfaceStepTemplate, location, field+".with", program.PurposeActionInput),
+				Uses: workflowSite(step.Uses, location, field+".uses"),
+				With: workflowBindings(step.With, location, field+".with"),
 			}
 		}
 	}
@@ -190,7 +191,7 @@ func bindProgramActionSelectors(target *program.Program, steps []plan.Step) {
 	}
 }
 
-func workflowBindings(values map[string]string, surface program.Surface, location program.Location, field string, purpose program.Purpose) []program.Binding {
+func workflowBindings(values map[string]string, location program.Location, field string) []program.Binding {
 	if values == nil {
 		return nil
 	}
@@ -198,30 +199,26 @@ func workflowBindings(values map[string]string, surface program.Surface, locatio
 	for _, name := range sortedValueKeys(values) {
 		bindings = append(bindings, program.Binding{
 			Name:  name,
-			Value: workflowSiteWithPurpose(values[name], surface, program.ResultString, location, field+"."+name, purpose),
+			Value: workflowSite(values[name], location, field+"."+name),
 		})
 	}
 	return bindings
 }
 
-func workflowSites(values []string, surface program.Surface, result program.ResultType, location program.Location, field string) []program.Site {
+func workflowSites(values []string, location program.Location, field string) []program.Site {
 	if values == nil {
 		return nil
 	}
 	sites := make([]program.Site, len(values))
 	for i, value := range values {
-		sites[i] = workflowSite(value, surface, result, location, fmt.Sprintf("%s[%d]", field, i))
+		sites[i] = workflowSite(value, location, fmt.Sprintf("%s[%d]", field, i))
 	}
 	return sites
 }
 
-func workflowSite(source string, surface program.Surface, result program.ResultType, location program.Location, field string) program.Site {
-	return workflowSiteWithPurpose(source, surface, result, location, field, program.PurposeExpression)
-}
-
-func workflowSiteWithPurpose(source string, surface program.Surface, result program.ResultType, location program.Location, field string, purpose program.Purpose) program.Site {
+func workflowSite(source string, location program.Location, field string) program.Site {
 	location.Field = field
-	return program.Site{Source: source, Surface: surface, Result: result, Provenance: program.ProvenanceWorkflow, Purpose: purpose, Location: location}
+	return program.Site{Source: source, Location: location}
 }
 
 func programLocation(path, field string, span workflow.Span) program.Location {

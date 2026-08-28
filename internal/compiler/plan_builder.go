@@ -262,56 +262,63 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		}
 		return reduced, nil
 	}
-	reduceTypedExpression := func(value string) (string, error) {
-		referencesEvent, err := siteReferencesEvent(value, expression.ProfileCompile, expression.ResultAny, true)
+	reduceTypedExpression := func(value string, profile expression.ProfileID, result expression.ResultType) (string, error) {
+		referencesEvent, err := siteReferencesEvent(value, profile, result, true)
 		if err != nil || !referencesEvent {
 			return value, err
 		}
-		reduced, err := reduceCompileSite(value, expression.ProfileCompile, expression.ResultAny, context)
+		reduced, err := reduceCompileSite(value, profile, result, context)
 		if err != nil {
 			return "", err
 		}
 		if reduced.Known {
-			return "${{ " + fmt.Sprint(reduced.Value) + " }}", nil
+			literal, err := expression.NewEngine().Literal(reduced.Value)
+			if err != nil {
+				return "", err
+			}
+			return "${{ " + literal + " }}", nil
 		}
 		return reduced.Source, nil
 	}
 	workflowProgram := lowerWorkflowProgram(instance)
 	reducedProgram, err := workflowProgram.TransformSites(func(site program.Site) (program.Site, error) {
-		var reduceErr error
+		profile, reduceErr := compileReductionProfile(site.Surface)
+		if reduceErr != nil {
+			return site, reduceErr
+		}
 		switch site.Surface {
 		case program.SurfaceJobCondition:
-			site.Source, reduceErr = reduceCondition(site.Source, expression.ProfileCompileJobCondition)
+			site.Source, reduceErr = reduceCondition(site.Source, profile)
 		case program.SurfaceCallCondition:
-			site.Source, reduceErr = reduceCondition(site.Source, expression.ProfileCompileCallCondition)
+			site.Source, reduceErr = reduceCondition(site.Source, profile)
 		case program.SurfaceStepCondition:
-			site.Source, reduceErr = reduceCondition(site.Source, expression.ProfileCompileStepCondition)
+			site.Source, reduceErr = reduceCondition(site.Source, profile)
 		case program.SurfaceStepControl:
-			site.Source, reduceErr = reduceTypedExpression(site.Source)
+			site.Source, reduceErr = reduceTypedExpression(site.Source, profile, expression.ResultType(site.Result))
 		case program.SurfaceJobEnvironment:
-			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileJobEnvironment)
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceJobDefault:
-			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileJobDefault)
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceJobOutput:
-			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileJobOutput)
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceStepTemplate:
-			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileStepTemplate)
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceRuntimeTemplate:
 			if strings.HasSuffix(site.Location.Field, ".uses") {
 				var referencesEvent bool
-				referencesEvent, reduceErr = siteReferencesEvent(site.Source, expression.ProfileRuntimeTemplate, expression.ResultString, false)
+				referencesEvent, reduceErr = siteReferencesEvent(site.Source, profile, expression.ResultString, false)
 				if reduceErr == nil && referencesEvent {
 					reduceErr = fmt.Errorf("github.event cannot select an action reference")
 				}
 				break
 			}
-			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileRuntimeTemplate)
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceServiceTemplate:
-			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileRuntimeTemplate)
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceServiceCredential:
-			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileServiceCredential)
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		case program.SurfaceServiceMap:
-			site.Source, reduceErr = reduceTemplate(site.Source, expression.ProfileStepTemplate)
+			site.Source, reduceErr = reduceTemplate(site.Source, profile)
 		}
 		return site, reduceErr
 	})
@@ -321,6 +328,30 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 	projectReducedProgram(&instance, reducedProgram)
 	instance.RetainEventPayload = retainsEventPayload
 	return instance, nil
+}
+
+// compileReductionProfile is the single admission policy for event reduction.
+// Program.Validate applies the destination runtime profile to every residual.
+func compileReductionProfile(surface program.Surface) (expression.ProfileID, error) {
+	profiles := map[program.Surface]expression.ProfileID{
+		program.SurfaceJobCondition:      expression.ProfileCompileJobCondition,
+		program.SurfaceCallCondition:     expression.ProfileCompileCallCondition,
+		program.SurfaceStepCondition:     expression.ProfileCompileStepCondition,
+		program.SurfaceStepControl:       expression.ProfileCompile,
+		program.SurfaceJobEnvironment:    expression.ProfileJobEnvironment,
+		program.SurfaceJobDefault:        expression.ProfileJobDefault,
+		program.SurfaceJobOutput:         expression.ProfileJobOutput,
+		program.SurfaceStepTemplate:      expression.ProfileStepTemplate,
+		program.SurfaceRuntimeTemplate:   expression.ProfileRuntimeTemplate,
+		program.SurfaceServiceTemplate:   expression.ProfileRuntimeTemplate,
+		program.SurfaceServiceCredential: expression.ProfileServiceCredential,
+		program.SurfaceServiceMap:        expression.ProfileStepTemplate,
+	}
+	profile, ok := profiles[surface]
+	if !ok {
+		return "", fmt.Errorf("expression surface %q has no compile reduction profile", surface)
+	}
+	return profile, nil
 }
 
 // projectReducedProgram updates the source-oriented IR after the immutable
@@ -594,7 +625,8 @@ func buildPlanCallGuards(instance JobInstance, planDigests map[string]string) ([
 }
 
 func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram program.Program, actions *builtPlanActions) ([]string, map[string]string, *plan.GitHubToken, error) {
-	secrets, mappings, tokenAliases, referencesGitHubToken, err := requiredSecrets(workflowProgram, instance.secretAuthority, actions.requiredSecrets, actions.inputsInspected)
+	serverURL := plan.EventServerURL(b.ir.Event.Provider)
+	secrets, mappings, tokenAliases, referencesGitHubToken, err := requiredSecrets(workflowProgram, instance.secretAuthority, actions.requiredSecrets, actions.inputsInspected, serverURL)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -722,8 +754,13 @@ func planConstructionFinding(instance JobInstance, err error) error {
 	)
 }
 
-func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, actionRequired []string, actionInputsInspected bool) ([]string, map[string]string, []string, bool, error) {
-	authority, err := program.InventoryAuthority(workflowProgram, program.AuthorityOptions{ActionInputsInspected: actionInputsInspected})
+func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, actionRequired []string, actionInputsInspected bool, serverURL string) ([]string, map[string]string, []string, bool, error) {
+	authority, err := program.InventoryAuthority(workflowProgram, program.AuthorityOptions{
+		ActionInputsInspected: actionInputsInspected,
+		Values: expression.AbstractValues{References: map[string]any{
+			"github.server_url": serverURL,
+		}},
+	})
 	if err != nil {
 		return nil, nil, nil, false, err
 	}

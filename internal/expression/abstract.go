@@ -125,21 +125,29 @@ func analyzeActionInputDefault(node actionlint.ExprNode, knownReferences map[str
 	evaluator := newAbstractEvaluator(actionInputDefaultSurface)
 	evaluator.policy.resolveStaticIndexedReference = true
 	evaluator.resolve = func(root string, path []string) (Analysis, error) {
+		analysis := Analysis{Effects: abstractReferenceEffects(root, path)}
 		if strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "token") {
-			analysis := Analysis{Effects: Effects{GitHubToken: GitHubTokenDirect}}
+			analysis.Effects.GitHubToken = GitHubTokenDirect
 			if value, ok := knownReferences["github.token"]; ok {
 				analysis.Value = AbstractValue{Known: true, Value: value}
 			}
 			return analysis, nil
 		}
 		if value, ok := knownReferences[strings.ToLower(referenceName(root, path))]; ok {
-			return knownAnalysis(value), nil
+			analysis.Value = AbstractValue{Known: true, Value: value}
 		}
-		return Analysis{}, nil
+		return analysis, nil
 	}
 	// Dynamic access to a runtime root is valid but unavailable to planning.
-	// Static references still resolve through resolve above.
-	evaluator.resolveRoot = func(string) (Analysis, error) { return Analysis{}, nil }
+	// Static references still resolve through resolve above. Root effects remain
+	// visible so dynamic github.event access retains payload authority.
+	evaluator.resolveRoot = func(root string) (Analysis, error) {
+		analysis := Analysis{Effects: abstractReferenceEffects(root, nil)}
+		if value, ok := knownReferences[strings.ToLower(root)]; ok {
+			analysis.Value = AbstractValue{Known: true, Value: value}
+		}
+		return analysis, nil
+	}
 	evaluator.call = func(evaluator *expressionEvaluator[Analysis], node *actionlint.FuncCallNode) (Analysis, error) {
 		if strings.EqualFold(node.Callee, "toJSON") && len(node.Args) == 1 && strings.EqualFold(referenceRoot(node.Args[0]), "matrix") {
 			return Analysis{}, nil
@@ -161,7 +169,7 @@ func analyzeRuntimeNode(node actionlint.ExprNode, knownReferences map[string]any
 	evaluator.policy.resolveStaticIndexedReference = true
 	evaluator.resolve = func(root string, path []string) (Analysis, error) {
 		name := strings.ToLower(referenceName(root, path))
-		analysis := Analysis{}
+		analysis := Analysis{Effects: abstractReferenceEffects(root, path)}
 		if strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "token") {
 			analysis.Effects.GitHubToken = GitHubTokenDirect
 		}
@@ -171,7 +179,7 @@ func analyzeRuntimeNode(node actionlint.ExprNode, knownReferences map[string]any
 		return analysis, nil
 	}
 	evaluator.resolveRoot = func(root string) (Analysis, error) {
-		analysis := Analysis{}
+		analysis := Analysis{Effects: abstractReferenceEffects(root, nil)}
 		if strings.EqualFold(root, "github") {
 			if purpose == PurposeCompositeActionInput {
 				analysis.Effects.GitHubToken = GitHubTokenCompositeContext
@@ -255,28 +263,31 @@ func analyzeTemplate(template string, analyze func(actionlint.ExprNode) (Analysi
 	}
 }
 
-func analyzeConditionNode(node actionlint.ExprNode, context ConditionContext) (Analysis, error) {
+func analyzeConditionNode(node actionlint.ExprNode, known map[string]any) (Analysis, error) {
 	evaluator := newAbstractEvaluator(conditionSurface)
 	evaluator.resolve = func(root string, path []string) (Analysis, error) {
+		analysis := Analysis{Effects: abstractReferenceEffects(root, path)}
 		if strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "token") {
-			analysis := Analysis{Effects: Effects{GitHubToken: GitHubTokenDirect}}
-			if value, ok := lookupRuntimeValue(context.GitHub, path); ok {
-				analysis.Value = AbstractValue{Known: true, Value: value}
-			}
+			analysis.Effects.GitHubToken = GitHubTokenDirect
+		}
+		name := strings.ToLower(root + "." + strings.Join(path, "."))
+		if value, ok := known[name]; ok {
+			analysis.Value = AbstractValue{Known: true, Value: value}
 			return analysis, nil
 		}
-		value, err := resolveConditionReference(root, path, context)
-		if err != nil {
-			return Analysis{}, nil
+		if value, ok := known[strings.ToLower(root)]; ok {
+			if resolved, found := lookupRuntimeValue(value, path); found {
+				analysis.Value = AbstractValue{Known: true, Value: resolved}
+			}
 		}
-		return knownAnalysis(value), nil
+		return analysis, nil
 	}
 	evaluator.resolveRoot = func(root string) (Analysis, error) {
-		value, err := resolveConditionRoot(root, context)
-		if err != nil {
-			return Analysis{}, nil
+		analysis := Analysis{Effects: abstractReferenceEffects(root, nil)}
+		if value, ok := known[strings.ToLower(root)]; ok {
+			analysis.Value = AbstractValue{Known: true, Value: value}
 		}
-		return knownAnalysis(value), nil
+		return analysis, nil
 	}
 	evaluator.call = func(evaluator *expressionEvaluator[Analysis], node *actionlint.FuncCallNode) (Analysis, error) {
 		if value, recognized, err := evaluatePureFunction(evaluator, node); recognized {
@@ -286,11 +297,20 @@ func analyzeConditionNode(node actionlint.ExprNode, context ConditionContext) (A
 		case "always":
 			return knownAnalysis(true), nil
 		case "success":
-			return knownAnalysis(!context.Unsuccessful && !context.Cancelled), nil
+			if value, ok := known["success"]; ok {
+				return knownAnalysis(value), nil
+			}
+			return Analysis{}, nil
 		case "failure":
-			return knownAnalysis(context.Failure), nil
+			if value, ok := known["failure"]; ok {
+				return knownAnalysis(value), nil
+			}
+			return Analysis{}, nil
 		case "cancelled":
-			return knownAnalysis(context.Cancelled), nil
+			if value, ok := known["cancelled"]; ok {
+				return knownAnalysis(value), nil
+			}
+			return Analysis{}, nil
 		case "hashfiles":
 			return Analysis{}, nil
 		default:
@@ -298,4 +318,9 @@ func analyzeConditionNode(node actionlint.ExprNode, context ConditionContext) (A
 		}
 	}
 	return evaluator.evaluate(node)
+}
+
+func abstractReferenceEffects(root string, path []string) Effects {
+	return Effects{EventPayload: strings.EqualFold(root, "event") ||
+		strings.EqualFold(root, "github") && (len(path) == 0 || strings.EqualFold(path[0], "event"))}
 }

@@ -44,23 +44,10 @@ const (
 	actionLifecycleCondition
 )
 
-// validateCondition verifies that a job or step condition uses only expression
-// syntax, functions, and contexts implemented by the corresponding runtime
-// phase. Runtime-dependent values are not evaluated.
-func validateConditionLegacy(source string, scope ConditionScope) error {
-	return validateCondition(source, scope, nil, false)
-}
-
-// validateConditionWithMatrix additionally verifies references and operand
-// types against one concrete, statically expanded matrix instance.
-func validateConditionWithMatrix(source string, scope ConditionScope, matrix map[string]any) error {
-	return validateCondition(source, scope, matrix, true)
-}
-
 // validateCallCondition verifies the caller-only runtime surface of a local
 // reusable-workflow call condition.
 func validateCallCondition(source string) error {
-	return validateCondition(source, CallCondition, nil, false)
+	return validateCondition(source, CallCondition)
 }
 
 // validateCompileCallCondition verifies every branch of a call condition
@@ -79,7 +66,7 @@ func validateActionLifecycleCondition(source string) error {
 	if err := validateLifecycleDelimiters(source); err != nil {
 		return err
 	}
-	return validateCondition(source, actionLifecycleCondition, nil, false)
+	return validateCondition(source, actionLifecycleCondition)
 }
 
 func validateLifecycleDelimiters(source string) error {
@@ -103,15 +90,15 @@ func validateCompileConditionWithMatrix(source string, scope ConditionScope, con
 	return validateCompileConditionNode(node, scope, context, matrix)
 }
 
-func validateCondition(source string, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
+func validateCondition(source string, scope ConditionScope) error {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return err
 	}
-	return validateConditionNode(node, scope, matrix, matrixKnown)
+	return validateConditionNode(node, scope)
 }
 
-func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
+func validateConditionNode(node actionlint.ExprNode, scope ConditionScope) error {
 	validator := newSemanticValidator(conditionSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		return validateConditionReference(root, path, scope)
@@ -141,7 +128,7 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 				return fmt.Errorf("condition function %q requires 1 to 255 arguments", node.Callee)
 			}
 			for _, argument := range node.Args {
-				if err := validateHashFilesArgument(argument, scope, matrix, matrixKnown); err != nil {
+				if err := validateHashFilesArgument(argument, scope); err != nil {
 					return err
 				}
 			}
@@ -202,7 +189,7 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 				return fmt.Errorf("condition function %q requires 1 to 255 arguments", node.Callee)
 			}
 			for _, argument := range node.Args {
-				if err := validateHashFilesArgument(argument, scope, matrix, true); err != nil {
+				if err := validateHashFilesArgument(argument, scope); err != nil {
 					return err
 				}
 			}
@@ -408,7 +395,7 @@ func evaluateActionLifecycleCondition(source string, context ConditionContext) (
 	}
 	// Validate before evaluation so short-circuiting cannot hide an
 	// unsupported context or function in an unselected branch.
-	if err := validateConditionNode(node, actionLifecycleCondition, nil, false); err != nil {
+	if err := validateConditionNode(node, actionLifecycleCondition); err != nil {
 		return false, err
 	}
 	value, err := evaluateConditionNode(node, context)
@@ -428,7 +415,7 @@ func evaluateConditionLegacy(source string, context ConditionContext) (bool, err
 	if empty {
 		return !context.Unsuccessful && !context.Cancelled, nil
 	}
-	if err := validateConditionNode(node, StepCondition, nil, false); err != nil {
+	if err := validateConditionNode(node, StepCondition); err != nil {
 		return false, err
 	}
 	if !containsStatusFunction(node) && (context.Unsuccessful || context.Cancelled) {
@@ -552,12 +539,12 @@ func resolveConditionRoot(root string, context ConditionContext) (any, error) {
 	}
 }
 
-func validateHashFilesArgument(node actionlint.ExprNode, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
+func validateHashFilesArgument(node actionlint.ExprNode, scope ConditionScope) error {
 	switch node.(type) {
 	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
 		return nil
 	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		return validateConditionNode(node, scope, matrix, matrixKnown)
+		return validateConditionNode(node, scope)
 	default:
 		return fmt.Errorf("condition function %q arguments must be literals or direct context references", "hashFiles")
 	}

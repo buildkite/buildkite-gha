@@ -773,7 +773,7 @@ func resolveCompileTimeCondition(source string, profile expression.ProfileID, co
 	return reduced.Source, true
 }
 
-func supportedConditions(path string, job workflow.Job, matrix map[string]any, matrixKnown bool) error {
+func supportedConditions(path string, job workflow.Job) error {
 	validate := func(source string, scope expression.ConditionScope) error {
 		profile, err := runtimeConditionProfile(scope)
 		if err != nil {
@@ -781,12 +781,10 @@ func supportedConditions(path string, job workflow.Job, matrix map[string]any, m
 		}
 		return validateCompileSite(source, profile, expression.ResultBoolean)
 	}
-	_ = matrix
-	_ = matrixKnown
 	return validateConditions(path, job, validate)
 }
 
-func supportedCompileTimeConditions(path string, job workflow.Job, context expression.CompileContext, matrix map[string]any) error {
+func supportedCompileTimeConditions(path string, job workflow.Job, context expression.CompileContext) error {
 	validate := func(source string, scope expression.ConditionScope) error {
 		profile, err := compileConditionProfile(scope)
 		if err != nil {
@@ -799,7 +797,6 @@ func supportedCompileTimeConditions(path string, job workflow.Job, context expre
 		_, err = reduceCompileSite(source, profile, expression.ResultBoolean, context)
 		return err
 	}
-	_ = matrix
 	return validateConditions(path, job, validate)
 }
 

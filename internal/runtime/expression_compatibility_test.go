@@ -9,8 +9,10 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/expression"
 )
 
-// These helpers retain the superseded field-oriented evaluator only as a
-// differential oracle. Production execution accepts normalized programs only.
+// These helpers preserve field-oriented test setup while exercising the same
+// expression engine as normalized programs. They are compatibility helpers,
+// not an independent differential oracle. Production execution accepts
+// normalized programs only.
 func evaluateMap(values map[string]string, context expression.Context) (map[string]string, error) {
 	out := make(map[string]string, len(values))
 	for _, name := range sortedKeys(values) {
