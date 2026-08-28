@@ -2394,6 +2394,10 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: lazyDir, SourceDigest: digestTree(t, actionSource)}}
 	job.Outputs = map[string]string{"lazy": "${{ steps.lazy.outputs.lazy }}"}
+	attachTestProgram(&job)
+	if err := attachTestActionProgramFromRoot(&job, lockID, actionSource, "."); err != nil {
+		t.Fatal(err)
+	}
 	node16 := filepath.Join(t.TempDir(), "node16")
 	writeNodeExecutable(t, node16, 16)
 	node20 := filepath.Join(t.TempDir(), "node20")
