@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -487,6 +488,16 @@ func legacyCheckoutWarning(position workflow.Position, release string, defaultsT
 		Line:    position.Line,
 		Column:  position.Column,
 		Message: message,
+	}
+}
+
+func unknownCheckoutCommitWarning(position workflow.Position, commit string) Warning {
+	return Warning{
+		Code:   "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("actions/checkout resolved to immutable commit %s, which is absent from the frozen per-commit snapshot. The native adapter is using the supported %s contract instead; it still restricts repository, ref, path, credentials, and other inputs, and does not run the upstream action JavaScript.",
+			commit, actionintegration.CheckoutFallbackContractRelease),
 	}
 }
 

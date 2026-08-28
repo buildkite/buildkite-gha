@@ -160,11 +160,18 @@ esac
 
 	job.Actions[0].Commit = strings.Repeat("0", 40)
 	unknownWorkspace := t.TempDir()
-	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, unknownWorkspace); err == nil || !strings.Contains(err.Error(), "does not admit") {
-		t.Fatalf("unknown checkout commit error = %v", err)
+	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, unknownWorkspace); err != nil {
+		t.Fatalf("unknown checkout fallback error = %v", err)
+	}
+	if err := os.Remove(gitLog); err != nil {
+		t.Fatal(err)
+	}
+	job.Actions[0].Commit = strings.Repeat("z", 40)
+	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(t.Context(), job, t.TempDir()); err == nil || !strings.Contains(err.Error(), "invalid GitHub identity") {
+		t.Fatalf("malformed checkout commit error = %v", err)
 	}
 	if _, err := os.Stat(gitLog); !os.IsNotExist(err) {
-		t.Fatalf("Git ran before unknown checkout commit rejection: %v", err)
+		t.Fatalf("Git ran before malformed checkout commit rejection: %v", err)
 	}
 
 	job.Actions[0].Commit = actionintegration.CheckoutV7Commit
@@ -382,6 +389,7 @@ func TestCheckoutOutputsMatchReleaseContract(t *testing.T) {
 		{name: "v4.1.7 before outputs", commit: "692973e3d937129bcbf40652eb9f2f61becf3332", want: map[string]string{}},
 		{name: "v4.2.0 with outputs", commit: "d632683dd7b4114ad314bca15554477dd762a938", want: map[string]string{"ref": "refs/heads/main", "commit": strings.Repeat("a", 40)}},
 		{name: "current v4", commit: actionintegration.CheckoutV4Commit, want: map[string]string{"ref": "refs/heads/main", "commit": strings.Repeat("a", 40)}},
+		{name: "unknown commit uses fallback outputs", commit: strings.Repeat("0", 40), want: map[string]string{"ref": "refs/heads/main", "commit": strings.Repeat("a", 40)}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			outputs := map[string]string{}
@@ -406,6 +414,7 @@ func TestCheckoutInputsWithReleaseDefaults(t *testing.T) {
 		{name: "v1 keeps explicit depth", commit: actionintegration.CheckoutV1Commit, inputs: map[string]string{"Fetch-Depth": "5"}, want: map[string]string{"Fetch-Depth": "5"}},
 		{name: "v2 keeps shallow default", commit: actionintegration.CheckoutV2Commit, inputs: nil, want: nil},
 		{name: "v4 keeps shallow default", commit: actionintegration.CheckoutV4Commit, inputs: map[string]string{"ref": "main"}, want: map[string]string{"ref": "main"}},
+		{name: "unknown commit uses fallback default", commit: strings.Repeat("0", 40), inputs: nil, want: nil},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := checkoutInputsWithReleaseDefaults(test.commit, test.inputs); !maps.Equal(got, test.want) {
@@ -1750,7 +1759,7 @@ func TestCompositeCheckoutPreservesDynamicRefProvenance(t *testing.T) {
 	}
 }
 
-func TestProviderTokenReadPreflightRejectsAnyUnknownCheckoutCommit(t *testing.T) {
+func TestProviderTokenReadPreflightAcceptsUnknownImmutableCheckoutCommit(t *testing.T) {
 	validID, parentID, unknownID := "a-0000000000000001", "a-0000000000000002", "a-0000000000000003"
 	job := plan.Job{
 		Steps: []plan.Step{
@@ -1763,8 +1772,12 @@ func TestProviderTokenReadPreflightRejectsAnyUnknownCheckoutCommit(t *testing.T)
 			{ID: unknownID, Source: "github", Repository: "actions/checkout", Commit: strings.Repeat("0", 40)},
 		},
 	}
+	if found, err := validateJobCheckoutAdapters(job); err != nil || !found {
+		t.Fatalf("validateJobCheckoutAdapters() = %t, %v, want fallback admission", found, err)
+	}
+	job.Actions[2].Commit = strings.Repeat("z", 40)
 	if found, err := validateJobCheckoutAdapters(job); err == nil || found || !strings.Contains(err.Error(), "does not admit") {
-		t.Fatalf("validateJobCheckoutAdapters() = %t, %v, want unknown commit rejection", found, err)
+		t.Fatalf("validateJobCheckoutAdapters() = %t, %v, want malformed commit rejection", found, err)
 	}
 }
 

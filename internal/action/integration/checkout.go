@@ -25,6 +25,10 @@ const (
 	CheckoutV6Commit        = "d23441a48e516b6c34aea4fa41551a30e30af803"
 	CheckoutV7InitialCommit = "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
 	CheckoutV7Commit        = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+
+	// CheckoutFallbackContractRelease identifies the stable contract used for
+	// immutable commits absent from the frozen per-commit snapshot.
+	CheckoutFallbackContractRelease = "v7.0.1"
 )
 
 var checkoutCommits = map[string]string{
@@ -97,17 +101,39 @@ func (c checkoutContract) declaresInput(name string) bool {
 	return strings.Contains(","+c.inputs+",", ","+name+",")
 }
 
-// CheckoutSupportsOutputs reports whether the admitted release declares the
-// ref and commit outputs, added upstream in v4.2.0.
-func CheckoutSupportsOutputs(commit string) bool {
-	contract, ok := checkoutCommitContracts[commit]
-	return ok && contract.refOutput && contract.commitOutput
+func checkoutContractForCommit(commit string) (checkoutContract, bool) {
+	contract, exact := checkoutCommitContracts[commit]
+	if exact {
+		return contract, true
+	}
+	if !ValidCheckoutSHA(commit) {
+		return checkoutContract{}, false
+	}
+	return checkoutCommitContracts[CheckoutV7Commit], false
 }
 
-// CheckoutDefaultsToFullHistory reports whether the admitted release fetched
-// full history when fetch-depth was omitted, as v1's runner plugin did.
+// CheckoutUsesFallbackContract reports whether an immutable commit is absent
+// from the frozen snapshot and therefore uses the stable fallback contract.
+func CheckoutUsesFallbackContract(commit string) bool {
+	if !ValidCheckoutSHA(commit) {
+		return false
+	}
+	_, exact := checkoutCommitContracts[commit]
+	return !exact
+}
+
+// CheckoutSupportsOutputs reports whether the selected exact or fallback
+// contract declares the ref and commit outputs, added upstream in v4.2.0.
+func CheckoutSupportsOutputs(commit string) bool {
+	contract, _ := checkoutContractForCommit(commit)
+	return contract.refOutput && contract.commitOutput
+}
+
+// CheckoutDefaultsToFullHistory reports whether the selected exact or fallback
+// contract fetches full history when fetch-depth is omitted.
 func CheckoutDefaultsToFullHistory(commit string) bool {
-	return checkoutCommitContracts[commit].fullHistory
+	contract, _ := checkoutContractForCommit(commit)
+	return contract.fullHistory
 }
 
 // LegacyCheckoutRelease reports the admitted release label for the v1 and v2
@@ -119,15 +145,20 @@ func LegacyCheckoutRelease(commit string) (string, bool) {
 	return "", false
 }
 
-// validateCheckoutCommit admits commits with contracts captured from frozen
-// upstream release and main snapshots. Mutable references are resolved before
-// this check, so changes after the snapshots are rejected until regeneration.
+// validateCheckoutCommit admits immutable commits. Commits captured by the
+// frozen snapshots retain their exact contract; other valid SHAs use the
+// stable fallback contract.
 func validateCheckoutCommit(commit string) error {
-	if _, ok := checkoutCommitContracts[commit]; !ok {
-		supported := append(sortedCheckoutCommits(), "frozen upstream release and main snapshots (main "+checkoutMainSnapshotCommit+")")
-		return versionError("actions/checkout", "native adapter", commit, supported)
+	if !ValidCheckoutSHA(commit) {
+		return versionError("actions/checkout", "native adapter", commit, supportedCheckoutContracts())
 	}
 	return nil
+}
+
+func supportedCheckoutContracts() []string {
+	return append(sortedCheckoutCommits(),
+		"frozen upstream release and main snapshots (main "+checkoutMainSnapshotCommit+")",
+		"other lowercase 40-hex immutable commits via the "+CheckoutFallbackContractRelease+" fallback contract")
 }
 
 func sortedCheckoutCommits() []string {
@@ -142,9 +173,9 @@ func sortedCheckoutCommits() []string {
 // ValidateCheckoutInputs enforces the release-specific input contract
 // implemented by the tokenless event-repository checkout adapter.
 func ValidateCheckoutInputs(commit string, inputs map[string]string, repository, sha string) error {
-	contract, ok := checkoutCommitContracts[commit]
-	if !ok {
-		return versionError("actions/checkout", "native adapter", commit, append(sortedCheckoutCommits(), "frozen upstream release and main snapshots (main "+checkoutMainSnapshotCommit+")"))
+	contract, exact := checkoutContractForCommit(commit)
+	if !exact && !ValidCheckoutSHA(commit) {
+		return versionError("actions/checkout", "native adapter", commit, supportedCheckoutContracts())
 	}
 	names := sortedNames(inputs)
 	seen := make(map[string]bool, len(names))

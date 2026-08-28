@@ -1077,15 +1077,17 @@ Pre conditions use the status and action-scoped environment available when prepa
 | v7.0.0 corpus pin | [`9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`](https://github.com/actions/checkout/tree/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0) |
 | v7.0.1 | [`3d3c42e5aac5ba805825da76410c181273ba90b1`](https://github.com/actions/checkout/tree/3d3c42e5aac5ba805825da76410c181273ba90b1) |
 
-Mutable refs work only while they resolve to a commit in the frozen snapshots. Every admitted commit uses the native adapter; the upstream JavaScript doesn't run. Each commit retains the inputs, full-history default, and outputs declared by its upstream contract. For example, early v2 commits reject later v2 inputs, and v4.0 and v4.1 commits don't expose the `ref` and `commit` outputs. Commits absent from the snapshots and manifests with unsupported output contracts remain unsupported. Compilation emits `W_CHECKOUT_LEGACY_RELEASE` for v1.2.0 and v2.8.0 to nudge an upgrade to v4 or later.
+Every resolved immutable commit uses the native adapter; the upstream JavaScript doesn't run. Commits in the frozen snapshots retain their exact inputs, full-history default, and outputs. For example, early v2 commits reject later v2 inputs, and v4.0 and v4.1 commits don't expose the `ref` and `commit` outputs.
 
-Maintainers can refresh the frozen refs and per-commit profiles with `go generate ./internal/action/integration`. Regeneration admits only commits reachable from the selected upstream tags and branches at that time; it doesn't blanket-admit future commits.
+An immutable commit absent from the snapshots uses the stable v7.0.1 contract as a compatibility fallback. Compilation emits one `W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK` warning for each distinct unknown commit. This higher-risk fallback can differ from the commit's upstream manifest, but it doesn't widen the native adapter: repository, ref, path, credentials, and every other input still use the restrictions below. Known snapshotted commits never use the fallback. Compilation emits `W_CHECKOUT_LEGACY_RELEASE` for v1.2.0 and v2.8.0 to nudge an upgrade to v4 or later.
+
+Maintainers can refresh the frozen refs and per-commit profiles with `go generate ./internal/action/integration`. Regeneration gives exact profiles only to commits reachable from the selected upstream tags and branches at that time. Other valid resolved SHAs continue to use the fallback.
 
 Buildkite runs v1.2.0 like v1 and v2.8.0 like v2, and warns about their differences from v4 and later. Neither release sets the `ref` or `commit` outputs added in v4.2.0. v1.2.0 also fetches full history by default when `fetch-depth` is omitted. Upgrade only if your workflow needs those outputs or different v1 history behavior. Otherwise, keep the current version.
 
 The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean nested directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to the Git commands that fetch repository, LFS, or submodule data and are never persisted.
 
-An explicit input is accepted only when the snapshotted manifest for that commit declares it. The following value restrictions then apply:
+An explicit input is accepted only when the exact snapshotted contract declares it, or when the v7.0.1 fallback contract declares it for an unknown commit. The following value restrictions then apply:
 
 | Input | Supported values |
 | --- | --- |
@@ -1110,7 +1112,7 @@ An explicit input is accepted only when the snapshotted manifest for that commit
 | `github-server-url` | When declared by the commit: omitted, empty, or `https://github.com`. Otherwise omitted. |
 | `allow-unsafe-pr-checkout` | When declared by the commit: omitted or `false`. Otherwise omitted. |
 
-The `ref` and `commit` outputs are available only for commits whose action manifest declares them. Upstream added both outputs in v4.2.0.
+The `ref` and `commit` outputs are available when the selected exact or fallback contract declares them. Exact contracts follow each commit's action manifest; the v7.0.1 fallback exposes both outputs. Upstream added both outputs in v4.2.0.
 
 The `false` value and omission do not run submodule commands. The `true` value runs native Git for direct children, and `recursive` includes nested children. Relative URLs and `fetch-depth` follow native Git behavior. Public and private GitHub submodules are supported under the job's repository access; external HTTPS submodules are anonymous. `git@github.com:` URLs are rewritten to HTTPS. Other SSH and non-HTTPS transports are unsupported.
 
