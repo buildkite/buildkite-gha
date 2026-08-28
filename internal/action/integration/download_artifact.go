@@ -23,16 +23,25 @@ const (
 	DownloadArtifactV801Commit = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 	// DownloadArtifactCommit is retained as the original v4.3.0 spelling.
 	DownloadArtifactCommit = DownloadArtifactV4Commit
+	// DownloadArtifactFallbackContractRelease identifies the stable contract
+	// used for immutable commits outside the exact admission set.
+	DownloadArtifactFallbackContractRelease = "v8.0.1"
 
 	MaxDownloadArtifactPatternAlternatives = 8
 	MaxDownloadArtifactPatternBytes        = MaxUploadArtifactNameBytes
 )
 
 func validateDownloadArtifactCommit(commit string) error {
-	if slices.Contains(DownloadArtifactCommits(), commit) {
+	if slices.Contains(DownloadArtifactCommits(), commit) || ValidCheckoutSHA(commit) {
 		return nil
 	}
 	return versionError("actions/download-artifact", "native adapter", commit, DownloadArtifactCommits())
+}
+
+// DownloadArtifactUsesFallbackContract reports whether an immutable commit is
+// outside the exact admission set and therefore uses the stable v8 contract.
+func DownloadArtifactUsesFallbackContract(commit string) bool {
+	return ValidCheckoutSHA(commit) && !slices.Contains(DownloadArtifactCommits(), commit)
 }
 
 // DownloadArtifactCommits returns the complete immutable admission set.
@@ -65,7 +74,7 @@ func validateDownloadArtifactInputs(commit string, inputs map[string]string, all
 		return err
 	}
 	allowed := map[string]bool{"name": true, "pattern": true, "path": true, "merge-multiple": true}
-	if commit == DownloadArtifactV8Commit || commit == DownloadArtifactV801Commit {
+	if commit == DownloadArtifactV8Commit || commit == DownloadArtifactV801Commit || DownloadArtifactUsesFallbackContract(commit) {
 		allowed["skip-decompress"] = true
 		allowed["digest-mismatch"] = true
 	}

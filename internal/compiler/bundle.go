@@ -101,7 +101,9 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	}
 	warnedLegacyCheckout := map[string]bool{}
 	warnedUnknownCheckout := map[string]bool{}
+	warnedUnknownUploadArtifact := map[string]bool{}
 	warnedLegacyUploadArtifact := map[string]bool{}
+	warnedUnknownDownloadArtifact := map[string]bool{}
 	for i, job := range plans {
 		locks := make(map[string]plan.ActionLock, len(job.Actions))
 		for _, lock := range job.Actions {
@@ -138,12 +140,34 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 					warning.Step = stepIndex + 1
 					bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
 				case actionintegration.AdapterUploadArtifactBuildkite:
+					if actionintegration.UploadArtifactUsesFallbackContract(lock.Commit) {
+						if warnedUnknownUploadArtifact[lock.Commit] {
+							continue
+						}
+						warnedUnknownUploadArtifact[lock.Commit] = true
+						warning := unknownUploadArtifactCommitWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, lock.Commit)
+						warning.Path = ir.Jobs[i].SourcePath
+						warning.Job = ir.Jobs[i].LogicalJobID
+						warning.Step = stepIndex + 1
+						bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
+						continue
+					}
 					release, legacy := actionintegration.LegacyUploadArtifactRelease(lock.Commit)
 					if !legacy || warnedLegacyUploadArtifact[release] {
 						continue
 					}
 					warnedLegacyUploadArtifact[release] = true
 					bundle.IR.Warnings = append(bundle.IR.Warnings, legacyUploadArtifactWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release))
+				case actionintegration.AdapterDownloadArtifactBuildkite:
+					if !actionintegration.DownloadArtifactUsesFallbackContract(lock.Commit) || warnedUnknownDownloadArtifact[lock.Commit] {
+						continue
+					}
+					warnedUnknownDownloadArtifact[lock.Commit] = true
+					warning := unknownDownloadArtifactCommitWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, lock.Commit)
+					warning.Path = ir.Jobs[i].SourcePath
+					warning.Job = ir.Jobs[i].LogicalJobID
+					warning.Step = stepIndex + 1
+					bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
 				}
 			}
 		}
