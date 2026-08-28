@@ -42,9 +42,9 @@ func TestLiveEventPredicatePreservesNonWebhookMappings(t *testing.T) {
 		{event: "pull_request", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "pull_request"`, `build.env("BUILDKITE_GITHUB_EVENT") == null`, `build.pull_request.id != null`}},
 		{event: "workflow_dispatch", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "workflow_dispatch"`, `build.env("BUILDKITE_GITHUB_EVENT") == null`, `build.pull_request.id == null`, `build.source == "ui"`, `build.source == "api"`}},
 		{event: "schedule", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "schedule"`, `build.env("BUILDKITE_GITHUB_EVENT") == null`, `build.pull_request.id == null`, `build.source == "schedule"`}},
-		{event: "merge_group", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "merge_group"`}, excludes: []string{" == null", "build.source"}},
-		{event: "release", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "release"`}, excludes: []string{" == null", "build.source"}},
-		{event: "issues", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "issues"`}, excludes: []string{" == null", "build.source"}},
+		{event: "merge_group", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "merge_group"`}, excludes: []string{"build.source"}},
+		{event: "release", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "release"`}, excludes: []string{"build.source"}},
+		{event: "issues", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "issues"`}, excludes: []string{"build.source"}},
 	}
 	for _, test := range tests {
 		t.Run(test.event, func(t *testing.T) {
@@ -66,6 +66,25 @@ func TestLiveEventPredicatePreservesNonWebhookMappings(t *testing.T) {
 	}
 	if predicate := LiveEventPredicate("issue_comment"); predicate != "" {
 		t.Fatalf("unsupported predicate = %q", predicate)
+	}
+}
+
+func TestLiveEventPredicatePrefersGitHubEventName(t *testing.T) {
+	predicate := LiveEventPredicate("push")
+	preferred := "build.env(" + yamlScalar("GITHUB_EVENT_NAME") + ")"
+	compatibility := "build.env(" + yamlScalar("BUILDKITE_GITHUB_EVENT") + ")"
+	for _, want := range []string{
+		preferred + " == " + yamlScalar("push"),
+		preferred + " == null",
+		preferred + " == " + yamlScalar(""),
+		compatibility + " == " + yamlScalar("push"),
+	} {
+		if !strings.Contains(predicate, want) {
+			t.Fatalf("LiveEventPredicate(push) = %q, want %q", predicate, want)
+		}
+	}
+	if strings.Contains(predicate, "("+compatibility+" == "+yamlScalar("push")+" ||") {
+		t.Fatalf("LiveEventPredicate(push) allows the compatibility event to override GITHUB_EVENT_NAME: %q", predicate)
 	}
 }
 

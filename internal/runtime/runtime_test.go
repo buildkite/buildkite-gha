@@ -3443,6 +3443,83 @@ func TestStandardEnvironmentSuppliesProtectedGitHubWorkflow(t *testing.T) {
 	}
 }
 
+func TestRuntimeWorkflowIdentityUsesImmutableCallerPlanData(t *testing.T) {
+	event := plan.Event{
+		Repository: "acme/widgets",
+		Ref:        "refs/heads/main",
+		SHA:        strings.Repeat("a", 40),
+	}
+	tests := []struct {
+		name     string
+		workflow plan.Workflow
+	}{
+		{
+			name:     "direct workflow",
+			workflow: plan.Workflow{Path: "./.github/workflows/caller.yml"},
+		},
+		{
+			name:     "local reusable workflow",
+			workflow: plan.Workflow{Path: "./.github/workflows/reusable.yml", RunPath: "./.github/workflows/caller.yml"},
+		},
+		{
+			name: "remote reusable workflow",
+			workflow: plan.Workflow{
+				Path:    "shared/workflows/.github/workflows/reusable.yml@v2",
+				RunPath: "./.github/workflows/caller.yml",
+				Remote: &plan.RemoteWorkflowSource{
+					Repository: "shared/workflows", RequestedRef: "v2", Commit: strings.Repeat("b", 40),
+				},
+			},
+		},
+	}
+	wantRef := "acme/widgets/.github/workflows/caller.yml@refs/heads/main"
+	wantSHA := strings.Repeat("a", 40)
+	engine := expression.NewEngine()
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			job := plan.Job{Workflow: test.workflow, Event: event}
+			github := githubContext(job)
+			if github["workflow_ref"] != wantRef || github["workflow_sha"] != wantSHA {
+				t.Fatalf("GitHub workflow identity = %#v / %#v, want %q / %q", github["workflow_ref"], github["workflow_sha"], wantRef, wantSHA)
+			}
+			for expressionSource, want := range map[string]string{
+				"${{ github.workflow_ref }}": wantRef,
+				"${{ github.workflow_sha }}": wantSHA,
+			} {
+				value, err := engine.Evaluate(
+					expression.Site{Source: expressionSource, Profile: expression.ProfileStepTemplate, Result: expression.ResultString, Purpose: expression.PurposeExpression},
+					expression.Values{Runtime: stepExpressionContext(expression.Context{GitHub: github})},
+				)
+				got, _ := value.(string)
+				if err != nil || got != want {
+					t.Fatalf("EvaluateStep(%q) = %q, %v, want %q", expressionSource, got, err, want)
+				}
+			}
+			condition := "github.workflow_ref == '" + wantRef + "' && github.workflow_sha == '" + wantSHA + "'"
+			value, err := engine.Evaluate(
+				expression.Site{Source: condition, Profile: expression.ProfileStepCondition, Result: expression.ResultBoolean, Purpose: expression.PurposeExpression},
+				expression.Values{Condition: expression.ConditionContext{GitHub: github}},
+			)
+			got, _ := value.(bool)
+			if err != nil || !got {
+				t.Fatalf("EvaluateCondition(%q) = %v, %v", condition, got, err)
+			}
+
+			env := standardEnvironment(job, "/workspace", "/tmp", "/tool-cache", RunIdentity{})
+			if env["GITHUB_WORKFLOW_REF"] != wantRef || env["GITHUB_WORKFLOW_SHA"] != wantSHA {
+				t.Fatalf("workflow environment = %q / %q, want %q / %q", env["GITHUB_WORKFLOW_REF"], env["GITHUB_WORKFLOW_SHA"], wantRef, wantSHA)
+			}
+			merged := mergeStepEnvironment(env, map[string]string{
+				"GITHUB_WORKFLOW_REF": "spoofed-ref",
+				"GITHUB_WORKFLOW_SHA": "spoofed-sha",
+			})
+			if merged["GITHUB_WORKFLOW_REF"] != wantRef || merged["GITHUB_WORKFLOW_SHA"] != wantSHA {
+				t.Fatalf("protected workflow environment = %q / %q, want %q / %q", merged["GITHUB_WORKFLOW_REF"], merged["GITHUB_WORKFLOW_SHA"], wantRef, wantSHA)
+			}
+		})
+	}
+}
+
 func TestRunJobSuppliesScopedGitHubTokenToEffectiveActionDefault(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()

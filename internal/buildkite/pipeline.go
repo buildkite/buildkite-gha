@@ -188,7 +188,9 @@ func EventPath(digest string) (string, error) {
 
 // Emit validates and emits stable YAML terminated by a newline.
 func Emit(pipeline Pipeline) ([]byte, error) {
-	if !validStepKey(pipeline.CompilerStep) {
+	aggregate := len(pipeline.Workflows) != 0
+	keylessAggregate := aggregate && pipeline.CompilerStep == "" && pipeline.ArtifactProducer != ""
+	if !keylessAggregate && !validStepKey(pipeline.CompilerStep) {
 		return nil, fmt.Errorf("invalid compiler step key %q", pipeline.CompilerStep)
 	}
 	artifactProducer := pipeline.ArtifactProducer
@@ -198,7 +200,6 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	if !identifierPattern.MatchString(artifactProducer) {
 		return nil, fmt.Errorf("invalid artifact producer %q", artifactProducer)
 	}
-	aggregate := len(pipeline.Workflows) != 0
 	workflows := pipeline.Workflows
 	if aggregate {
 		if len(pipeline.Jobs) != 0 || pipeline.GroupLabel != "" || pipeline.ConcurrencyGate != nil {
@@ -216,7 +217,10 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	}
 
 	prepared := make([]preparedWorkflow, len(workflows))
-	usedKeys := map[string]string{pipeline.CompilerStep: "compiler step"}
+	usedKeys := make(map[string]string)
+	if pipeline.CompilerStep != "" {
+		usedKeys[pipeline.CompilerStep] = "compiler step"
+	}
 	usedDigests := make(map[string]string)
 	for i, workflow := range workflows {
 		if len(workflow.Jobs) == 0 && workflow.Failure == nil && (!aggregate || workflow.SkipReason == "") {
@@ -374,7 +378,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		}
 		out.WriteString("    plugins:\n")
 		out.WriteString("      - artifacts#v1.9.4:\n")
-		_, _ = fmt.Fprintf(out, "          step: %s\n", yamlScalar(pipeline.CompilerStep))
+		_, _ = fmt.Fprintf(out, "          step: %s\n", yamlScalar(artifactProducer))
 		out.WriteString("          download:\n")
 		_, _ = fmt.Fprintf(out, "            - from: %s\n", yamlScalar(failure.MessagePath))
 		out.WriteString("              to: .buildkite-gha-failure-message.txt\n")
@@ -389,7 +393,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(command))
 		out.WriteString("    retry:\n      manual:\n        allowed: false\n")
 		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, workflow.GroupKey, "", "Workflow could not be run", failure.Summary)
-		_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
+		if pipeline.CompilerStep != "" {
+			_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
+		}
 		out.WriteString("    checkout:\n      skip: true\n")
 		return nil
 	}
@@ -402,7 +408,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
 		out.WriteString("    type: command\n")
 		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, workflow.GroupKey, "", "", "")
-		_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
+		if pipeline.CompilerStep != "" {
+			_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
+		}
 		out.WriteString("    checkout:\n      skip: true\n")
 		return nil
 	}
@@ -422,7 +430,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if workflow.SkipReason != "" {
 			_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
 		}
-		if workflow.Aggregate {
+		if workflow.Aggregate && pipeline.CompilerStep != "" {
 			_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
 		}
 		out.WriteString("    steps:\n")

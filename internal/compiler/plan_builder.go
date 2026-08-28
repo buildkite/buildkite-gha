@@ -29,6 +29,7 @@ type planBuilder struct {
 	options                    Options
 	actionSource               ActionSource
 	workflowName               string
+	workflowRunPath            string
 	eventDigest                [sha256.Size]byte
 	planDigests                map[string]string
 }
@@ -57,9 +58,13 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 	if workflowName == "" {
 		workflowName = canonicalWorkflowName(ir.Workflow.Path)
 	}
+	workflowRunPath, err := canonicalWorkflowRunPath(ir.Workflow.Path)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	builder := planBuilder{
 		ctx: ctx, ir: ir, compilerVersion: compilerVersion, compilerDistributionDigest: compilerDistributionDigest,
-		options: options, actionSource: newMemoizedActionSource(options.ActionSource), workflowName: workflowName,
+		options: options, actionSource: newMemoizedActionSource(options.ActionSource), workflowName: workflowName, workflowRunPath: workflowRunPath,
 		eventDigest: sha256.Sum256(payload), planDigests: make(map[string]string, len(ir.Jobs)),
 	}
 	plans := make([]plan.Job, 0, len(ir.Jobs))
@@ -94,6 +99,20 @@ instances:
 		evaluations = append(evaluations, JobEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Evaluated: true, Passed: true})
 	}
 	return plans, authorizations, evaluations, errors.Join(diagnostics...)
+}
+
+func canonicalWorkflowRunPath(workflowPath string) (string, error) {
+	if !isRepositoryWorkflowPath(workflowPath) {
+		if filepath.IsAbs(workflowPath) {
+			return "", nil
+		}
+		return filepath.ToSlash(filepath.Clean(workflowPath)), nil
+	}
+	repositoryRoot, canonicalPath, err := workflowRepository(workflowPath)
+	if err != nil {
+		return "", err
+	}
+	return repositoryWorkflowPath(repositoryRoot, canonicalPath)
 }
 
 // reducePlanEventExpressions is the phase boundary for compile-time-only event
@@ -712,6 +731,10 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram 
 }
 
 func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.Program, runtimeDistributionDigest string, actions builtPlanActions, needSources map[string][]plan.NeedSource, needOutputs map[string][]plan.NeedOutput, deferredInputs map[string]plan.DeferredInput, callGuards []plan.CallGuard, secrets []string, secretMappings map[string]string, githubToken *plan.GitHubToken) plan.Job {
+	workflowRunPath := b.workflowRunPath
+	if workflowRunPath == instance.SourcePath {
+		workflowRunPath = ""
+	}
 	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
@@ -720,6 +743,7 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		Runtime: &plan.Runtime{DistributionDigest: runtimeDistributionDigest},
 		Workflow: plan.Workflow{
 			Path:         instance.SourcePath,
+			RunPath:      workflowRunPath,
 			Name:         b.workflowName,
 			Digest:       instance.SourceDigest,
 			LogicalJobID: instance.LogicalJobID,

@@ -108,6 +108,7 @@ func TestEventPayloadArtifactRoundTripAndValidation(t *testing.T) {
 func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 	job := validJob()
 	job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v1"
+	job.Workflow.RunPath = "./.github/workflows/caller.yml"
 	job.Workflow.Remote = &RemoteWorkflowSource{
 		Repository: "owner/repository", RequestedRef: "v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
 	}
@@ -132,6 +133,8 @@ func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 		{name: "nested path", edit: func(job *Job) { job.Workflow.Path = "owner/repository/.github/workflows/nested/ci.yml@v1" }, want: "path does not match"},
 		{name: "commit", edit: func(job *Job) { job.Workflow.Remote.Commit = strings.Repeat("A", 40) }, want: "invalid immutable source provenance"},
 		{name: "tree digest", edit: func(job *Job) { job.Workflow.Remote.SourceDigest = "sha256:invalid" }, want: "invalid immutable source provenance"},
+		{name: "absolute run path", edit: func(job *Job) { job.Workflow.RunPath = "/.github/workflows/caller.yml" }, want: "invalid workflow run path"},
+		{name: "escaping run path", edit: func(job *Job) { job.Workflow.RunPath = "../caller.yml" }, want: "invalid workflow run path"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

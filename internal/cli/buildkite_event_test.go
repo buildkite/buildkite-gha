@@ -103,6 +103,34 @@ func TestBuildkiteWebhookEventSourceOriginGitHubCompatibleMetadata(t *testing.T)
 	}
 }
 
+func TestBuildkiteEventSourcePrefersGitHubEventName(t *testing.T) {
+	env := map[string]string{
+		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "importer",
+		"BUILDKITE_REPO":         "https://github.com/acme/widgets.git",
+		"BUILDKITE_COMMIT":       strings.Repeat("a", 40),
+		"BUILDKITE_BRANCH":       "main",
+		"BUILDKITE_PULL_REQUEST": "false",
+		"BUILDKITE_GITHUB_EVENT": "pull_request",
+		"GITHUB_EVENT_NAME":      "push",
+	}
+	source, err := buildkiteEventSource(func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(source, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot["event"] != "push" || snapshot["ref"] != "refs/heads/main" {
+		t.Fatalf("snapshot = %#v, want preferred GITHUB_EVENT_NAME push identity", snapshot)
+	}
+
+	env["GITHUB_EVENT_NAME"] = " push"
+	if _, err := buildkiteEventSource(func(key string) string { return env[key] }); err == nil || !strings.Contains(err.Error(), "GITHUB_EVENT_NAME") {
+		t.Fatalf("buildkiteEventSource() error = %v, want malformed preferred event failure", err)
+	}
+}
+
 func TestBuildkiteEventSourceMappings(t *testing.T) {
 	base := map[string]string{
 		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "importer",
@@ -115,7 +143,8 @@ func TestBuildkiteEventSourceMappings(t *testing.T) {
 		env              map[string]string
 		check            func(t *testing.T, snapshot map[string]any)
 	}{
-		{name: "branch", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main"}},
+		{name: "branch without preferred workflow ref", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main"}},
+		{name: "preferred workflow branch ref", event: "push", ref: "refs/heads/triggered", env: map[string]string{"BUILDKITE_BRANCH": "built", githubEventNameEnvironment: "push", githubWorkflowRefEnvironment: "acme/widgets/.github/workflows/ci.yml@refs/heads/triggered"}},
 		{name: "UI", event: "workflow_dispatch", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "ui"}},
 		{name: "API", event: "workflow_dispatch", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "api"}},
 		{name: "schedule", event: "schedule", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "schedule"}},
@@ -124,8 +153,9 @@ func TestBuildkiteEventSourceMappings(t *testing.T) {
 		{name: "webhook source fallback", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "webhook"}},
 		{name: "trigger job source fallback", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "trigger_job"}},
 		{name: "rebuilt push preserves GitHub event", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "ui", "BUILDKITE_GITHUB_EVENT": "push"}},
-		{name: "tag", event: "push", ref: "refs/tags/v1.2.3", env: map[string]string{"BUILDKITE_TAG": "v1.2.3"}},
-		{name: "pull request head compatibility ref", event: "pull_request", ref: "refs/pull/42/head", env: map[string]string{"BUILDKITE_PULL_REQUEST": "42", "BUILDKITE_BRANCH": "contributor:feature", "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "main", "BUILDKITE_PULL_REQUEST_REPO": "https://github.com/contributor/widgets.git"}, check: func(t *testing.T, snapshot map[string]any) {
+		{name: "tag without preferred workflow ref", event: "push", ref: "refs/tags/v1.2.3", env: map[string]string{"BUILDKITE_TAG": "v1.2.3"}},
+		{name: "preferred workflow tag ref", event: "push", ref: "refs/tags/v2.0.0", env: map[string]string{"BUILDKITE_TAG": "built-tag", githubEventNameEnvironment: "push", githubWorkflowRefEnvironment: "acme/widgets/.github/workflows/release.yml@refs/tags/v2.0.0"}},
+		{name: "pull request without preferred workflow ref", event: "pull_request", ref: "refs/pull/42/head", env: map[string]string{"BUILDKITE_PULL_REQUEST": "42", "BUILDKITE_BRANCH": "contributor:feature", "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "main", "BUILDKITE_PULL_REQUEST_REPO": "https://github.com/contributor/widgets.git"}, check: func(t *testing.T, snapshot map[string]any) {
 			t.Helper()
 			payload := snapshot["payload"].(map[string]any)
 			pr := payload["pull_request"].(map[string]any)
@@ -134,6 +164,12 @@ func TestBuildkiteEventSourceMappings(t *testing.T) {
 			baseRepo := pr["base"].(map[string]any)["repo"].(map[string]any)
 			if payload["action"] != "synchronize" || payload["number"] != float64(42) || head["sha"] != base["BUILDKITE_COMMIT"] || head["ref"] != "feature" || headRepo["full_name"] != "contributor/widgets" || baseRepo["full_name"] != "acme/widgets" || pr["base"].(map[string]any)["ref"] != "main" {
 				t.Fatalf("pull request payload = %#v", payload)
+			}
+		}},
+		{name: "Pipeline Trigger preferred pull request ref and action", event: "pull_request", ref: "refs/pull/42/merge", env: map[string]string{"BUILDKITE_PULL_REQUEST": "42", "BUILDKITE_BRANCH": "feature", "BUILDKITE_GITHUB_ACTION": "opened", "BUILDKITE_GITHUB_WORKFLOW_PATH": ".github/workflows/ci.yml", githubEventNameEnvironment: "pull_request", githubWorkflowRefEnvironment: "acme/widgets/.github/workflows/ci.yml@refs/pull/42/merge"}, check: func(t *testing.T, snapshot map[string]any) {
+			t.Helper()
+			if action := snapshot["payload"].(map[string]any)["action"]; action != "opened" {
+				t.Fatalf("pull request action = %#v, want opened", action)
 			}
 		}},
 		{name: "pull request overrides UI", event: "pull_request", ref: "refs/pull/42/head", env: map[string]string{"BUILDKITE_PULL_REQUEST": "42", "BUILDKITE_BRANCH": "feature", "BUILDKITE_SOURCE": "ui"}},
@@ -223,7 +259,7 @@ func TestGeneratedIssuesEventIsCanonicalOpenedIssue(t *testing.T) {
 func TestBuildkiteEventSourceFailsClosed(t *testing.T) {
 	valid := map[string]string{"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step", "BUILDKITE_REPO": "https://github.com/a/b", "BUILDKITE_COMMIT": strings.Repeat("a", 40), "BUILDKITE_BRANCH": "main"}
 	for _, test := range []struct{ name, key, value string }{
-		{"not Buildkite", "BUILDKITE", "false"}, {"missing step", "BUILDKITE_STEP_KEY", ""},
+		{"not Buildkite", "BUILDKITE", "false"},
 		{"bad repo", "BUILDKITE_REPO", "https://example.com/a/b"}, {"symbolic commit", "BUILDKITE_COMMIT", "HEAD"},
 		{"uppercase commit", "BUILDKITE_COMMIT", strings.Repeat("A", 40)},
 		{"missing branch", "BUILDKITE_BRANCH", ""}, {"malformed PR", "BUILDKITE_PULL_REQUEST", "nope"},

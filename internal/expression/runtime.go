@@ -375,7 +375,7 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 					return fmt.Errorf("github.token is unavailable in this field")
 				}
 				return nil
-			case "action_path", "action_ref", "action_repository", "actor", "base_ref", "event_name", "head_ref", "job", "ref", "ref_name", "ref_type", "repository", "repository_owner", "run_attempt", "run_id", "run_number", "server_url", "sha", "workflow", "workspace":
+			case "action_path", "action_ref", "action_repository", "actor", "base_ref", "event_name", "head_ref", "job", "ref", "ref_name", "ref_type", "repository", "repository_owner", "run_attempt", "run_id", "run_number", "server_url", "sha", "workflow", "workflow_ref", "workflow_sha", "workspace":
 				return nil
 			default:
 				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))

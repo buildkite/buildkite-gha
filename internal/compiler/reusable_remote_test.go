@@ -138,7 +138,7 @@ jobs:
 	wantRemote := plan.RemoteWorkflowSource{
 		Repository: "galoisinc/.github", RequestedRef: "v2", Commit: fake.commits["galoisinc/.github"], SourceDigest: fake.digests["galoisinc/.github"],
 	}
-	if plans[1].Workflow.Remote == nil || *plans[1].Workflow.Remote != wantRemote || plans[1].Workflow.Path != nested.SourcePath || plans[1].Workflow.Digest != wantNestedDigest {
+	if plans[1].Workflow.Remote == nil || *plans[1].Workflow.Remote != wantRemote || plans[1].Workflow.Path != nested.SourcePath || plans[1].Workflow.RunPath != "./.github/workflows/caller.yml" || plans[1].Workflow.Digest != wantNestedDigest {
 		t.Fatalf("remote plan provenance = %#v", plans)
 	}
 	validateCompiledPlansAgainstSchema(t, plans)

@@ -1372,6 +1372,7 @@ func githubContext(job plan.Job) map[string]any {
 	if job.Event.Payload != nil {
 		event = *job.Event.Payload
 	}
+	workflowRef, workflowSHA := workflowRunIdentity(job)
 	return map[string]any{
 		"action_path":       "",
 		"action_ref":        "",
@@ -1389,6 +1390,8 @@ func githubContext(job plan.Job) map[string]any {
 		"event":             event,
 		"server_url":        plan.EventServerURL(job.Event.Provider),
 		"workflow":          workflowDisplayName(job),
+		"workflow_ref":      workflowRef,
+		"workflow_sha":      workflowSHA,
 		"job":               job.Workflow.LogicalJobID,
 	}
 }
@@ -1400,25 +1403,43 @@ func workflowDisplayName(job plan.Job) string {
 	return job.Workflow.Path
 }
 
+func workflowRunIdentity(job plan.Job) (string, string) {
+	workflowPath := job.Workflow.RunPath
+	if workflowPath == "" {
+		if job.Workflow.Remote != nil {
+			return "", job.Event.SHA
+		}
+		workflowPath = job.Workflow.Path
+	}
+	workflowPath = strings.TrimPrefix(workflowPath, "./")
+	if job.Event.Repository == "" || workflowPath == "" || filepath.IsAbs(workflowPath) || job.Event.Ref == "" {
+		return "", job.Event.SHA
+	}
+	return job.Event.Repository + "/" + workflowPath + "@" + job.Event.Ref, job.Event.SHA
+}
+
 func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string, identity RunIdentity) map[string]string {
 	runner, _ := canonicalRunnerContext(goruntime.GOOS, goruntime.GOARCH)
 	workflowName := workflowDisplayName(job)
+	workflowRef, workflowSHA := workflowRunIdentity(job)
 	env := map[string]string{
-		"CI":                "true",
-		"GITHUB_ACTIONS":    "true",
-		"GITHUB_ACTOR":      job.Event.Actor,
-		"GITHUB_EVENT_NAME": job.Event.Name,
-		"GITHUB_JOB":        job.Workflow.LogicalJobID,
-		"GITHUB_REF":        job.Event.Ref,
-		"GITHUB_REPOSITORY": job.Event.Repository,
-		"GITHUB_SERVER_URL": plan.EventServerURL(job.Event.Provider),
-		"GITHUB_SHA":        job.Event.SHA,
-		"GITHUB_WORKFLOW":   workflowName,
-		"GITHUB_WORKSPACE":  workspace,
-		"RUNNER_OS":         runner["os"],
-		"RUNNER_ARCH":       runner["arch"],
-		"RUNNER_TEMP":       runnerTemp,
-		"RUNNER_TOOL_CACHE": toolCache,
+		"CI":                  "true",
+		"GITHUB_ACTIONS":      "true",
+		"GITHUB_ACTOR":        job.Event.Actor,
+		"GITHUB_EVENT_NAME":   job.Event.Name,
+		"GITHUB_JOB":          job.Workflow.LogicalJobID,
+		"GITHUB_REF":          job.Event.Ref,
+		"GITHUB_REPOSITORY":   job.Event.Repository,
+		"GITHUB_SERVER_URL":   plan.EventServerURL(job.Event.Provider),
+		"GITHUB_SHA":          job.Event.SHA,
+		"GITHUB_WORKFLOW":     workflowName,
+		"GITHUB_WORKFLOW_REF": workflowRef,
+		"GITHUB_WORKFLOW_SHA": workflowSHA,
+		"GITHUB_WORKSPACE":    workspace,
+		"RUNNER_OS":           runner["os"],
+		"RUNNER_ARCH":         runner["arch"],
+		"RUNNER_TEMP":         runnerTemp,
+		"RUNNER_TOOL_CACHE":   toolCache,
 	}
 	for name, value := range identity.githubValues() {
 		env["GITHUB_"+strings.ToUpper(name)] = value
@@ -1554,6 +1575,8 @@ func isRuntimeContextEnvironment(name string) bool {
 		"GITHUB_SERVER_URL",
 		"GITHUB_SHA",
 		"GITHUB_WORKFLOW",
+		"GITHUB_WORKFLOW_REF",
+		"GITHUB_WORKFLOW_SHA",
 		"GITHUB_WORKSPACE",
 		"RUNNER_ARCH",
 		"RUNNER_OS",

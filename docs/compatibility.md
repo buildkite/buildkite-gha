@@ -82,9 +82,26 @@ Steps remain inside one job because they share a workspace, environment files, a
 ### Aggregate workflow upload
 
 The plugin accepts either one `workflow` path or a non-empty `workflows` array.
-Missing or untracked paths warn and are skipped, so removing a workflow does not
-require a simultaneous pipeline configuration change. If every configured path
-is missing or untracked, the importer succeeds without uploading a pipeline.
+In a build created by a GitHub Actions Pipeline Trigger, an empty plugin
+configuration instead uses the single workflow selected by Buildkite.
+`BUILDKITE_GITHUB_WORKFLOW_PATH` marks the selection. When present, the plugin
+prefers the repository, path, and event ref from `GITHUB_WORKFLOW_REF`; the
+workflow name or fallback path from `GITHUB_WORKFLOW`; the event from
+`GITHUB_EVENT_NAME`; and the commit from `GITHUB_WORKFLOW_SHA`. These values
+must match the repository and checked-out workflow. The Buildkite-prefixed path
+and event remain compatibility fallbacks, while `BUILDKITE_GITHUB_ACTION`
+supplies the pull request action. Explicit plugin selection takes precedence
+over server workflow selection. Without either selection, the plugin fails.
+The server-selected importer does not need a step key. The plugin uploads its
+artifacts before the dynamic pipeline and scopes retrieval to the importer job
+ID without using that UUID as a dependency key. Explicit-selector importers
+still require a step key, and their generated groups depend on it.
+
+Missing or untracked explicitly configured paths warn and are skipped, so
+removing a workflow does not require a simultaneous pipeline configuration
+change. If every configured path is missing or untracked, the importer succeeds
+without uploading a pipeline. A missing or untracked Pipeline Trigger-selected
+path fails because the server claimed that exact workflow selected the build.
 Every present path must be a regular, tracked `.yml` or `.yaml` file inside the
 repository. Directories, tracked files missing from the checkout, outside paths,
 symlinks, and globs fail. A custom importer may upload one explicit regular
@@ -194,8 +211,9 @@ Upload selects one effective event, in this order:
 1. The GitHub event name accompanying Buildkite's reserved linked-webhook metadata.
 1. A Buildkite environment fallback.
 
-The fallback preserves `push`, `pull_request`, `workflow_dispatch`, and
-`schedule` from `BUILDKITE_GITHUB_EVENT` across rebuilds. Otherwise:
+The fallback prefers `GITHUB_EVENT_NAME`, then preserves `push`, `pull_request`,
+`workflow_dispatch`, and `schedule` from `BUILDKITE_GITHUB_EVENT` across
+rebuilds. Otherwise:
 
 | Buildkite source | Effective event |
 | --- | --- |
@@ -824,7 +842,7 @@ Conditions support computed object indexes, numeric array indexes, whole
 
 | Context | Job `if` | Step `if` |
 | --- | --- | --- |
-| `github.actor`, `github.base_ref`, `github.event_name`, `github.head_ref`, `github.ref`, `github.ref_name`, `github.ref_type`, `github.repository`, `github.repository_owner`, `github.sha` | ✅ Yes | ✅ Yes |
+| `github.actor`, `github.base_ref`, `github.event_name`, `github.head_ref`, `github.ref`, `github.ref_name`, `github.ref_type`, `github.repository`, `github.repository_owner`, `github.sha`, `github.workflow_ref`, `github.workflow_sha` | ✅ Yes | ✅ Yes |
 | `runner.os`, `runner.arch` | ✅ Yes | ✅ Yes |
 | `runner.temp` | ❌ No | ✅ Yes |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
@@ -1405,7 +1423,7 @@ The endpoint variables are scoped to each host action lifecycle invocation. Shel
 
 ### Default environment
 
-The runtime sets `GITHUB_WORKFLOW` to the workflow's top-level `name`. If the workflow has no name, it uses the repository-relative workflow path. Workflow and step environment entries cannot override this value.
+The runtime sets `GITHUB_WORKFLOW` to the workflow's top-level `name`. If the workflow has no name, it uses the repository-relative workflow path. `GITHUB_WORKFLOW_REF` identifies that top-level workflow as `<owner>/<repo>/<path>@<event-ref>`, and `GITHUB_WORKFLOW_SHA` is the event commit. Jobs expanded from local or public reusable workflows retain this caller identity. Workflow and step environment entries cannot override these values.
 
 ### Runner tools
 

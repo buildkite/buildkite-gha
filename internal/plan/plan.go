@@ -163,7 +163,10 @@ func EventServerURL(provider string) string {
 }
 
 type Workflow struct {
-	Path         string                `json:"path"`
+	Path string `json:"path"`
+	// RunPath identifies the top-level caller when Path identifies a reusable
+	// workflow. An empty RunPath means Path already identifies the workflow run.
+	RunPath      string                `json:"run_path,omitempty"`
 	Name         string                `json:"name,omitempty"`
 	Digest       string                `json:"digest"`
 	LogicalJobID string                `json:"logical_job_id"`
@@ -619,6 +622,9 @@ func (job Job) Validate() error {
 	}
 	if job.Workflow.Path == "" || len(job.Workflow.Path) > 1024 || !utf8.ValidString(job.Workflow.Path) || hasControl(job.Workflow.Path) || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {
 		return fmt.Errorf("job plan requires a workflow path, sha256 digest, and logical job id")
+	}
+	if job.Workflow.RunPath != "" && !validWorkflowRunPath(job.Workflow.RunPath) {
+		return fmt.Errorf("job plan has invalid workflow run path")
 	}
 	if err := validateRemoteWorkflowSource(job.Workflow); err != nil {
 		return err
@@ -1214,6 +1220,14 @@ func validGitHubRepository(repository string) bool {
 	}
 	parts := strings.Split(repository, "/")
 	return parts[0] != "." && parts[0] != ".." && parts[1] != "." && parts[1] != ".."
+}
+
+func validWorkflowRunPath(value string) bool {
+	if len(value) > 1024 || !utf8.ValidString(value) || hasControl(value) || strings.Contains(value, `\`) {
+		return false
+	}
+	relative := strings.TrimPrefix(value, "./")
+	return relative != "" && relative != "." && !path.IsAbs(relative) && path.Clean(relative) == relative && relative != ".." && !strings.HasPrefix(relative, "../")
 }
 
 // GitHubWorkflowPolicyFilename derives the workflow-policy endpoint filename

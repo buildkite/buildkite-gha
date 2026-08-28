@@ -874,6 +874,12 @@ jobs:
 	if len(plans) != 4 {
 		t.Fatalf("plans = %d, want 4", len(plans))
 	}
+	if plans[0].Workflow.RunPath != "" || plans[3].Workflow.RunPath != "" {
+		t.Fatalf("direct workflow run paths = %q / %q, want implicit source paths", plans[0].Workflow.RunPath, plans[3].Workflow.RunPath)
+	}
+	if plans[1].Workflow.RunPath != "./.github/workflows/caller.yml" || plans[2].Workflow.RunPath != "./.github/workflows/caller.yml" {
+		t.Fatalf("reusable workflow run paths = %q / %q, want caller path", plans[1].Workflow.RunPath, plans[2].Workflow.RunPath)
+	}
 	firstPlan, err := plan.Encode(plans[1])
 	if err != nil {
 		t.Fatal(err)

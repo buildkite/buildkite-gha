@@ -301,6 +301,78 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 	}
 }
 
+func TestEmitKeylessAggregateScopesArtifactsWithoutImporterDependencies(t *testing.T) {
+	producer := "22222222-2222-4222-8222-222222222222"
+	output, err := Emit(Pipeline{
+		ArtifactProducer:   producer,
+		DistributionDigest: testDigest("distribution"),
+		EventProvider:      "github",
+		DisableRunnerUser:  true,
+		Workflows: []Workflow{
+			{
+				GroupLabel: "CI", GroupKey: "workflow-ci", Event: "push", Condition: "true",
+				ConcurrencyGate: &ConcurrencyGate{Group: "buildkite-gha/concurrency/ci"},
+				Jobs:            []Job{{Key: "test", Label: "Test", PlanDigest: testDigest("plan")}},
+			},
+			{
+				GroupLabel: "Skipped", GroupKey: "workflow-skipped", Event: "push",
+				SkipReason: "This workflow is not triggered by a `push` event",
+			},
+			{
+				GroupLabel: "Failed", GroupKey: "workflow-failed", Event: "push",
+				Failure: &Failure{
+					AnnotationPath: ".buildkite-gha/failures/annotations/annotation.html",
+					MessagePath:    ".buildkite-gha/failures/messages/message.txt",
+					Summary:        "Workflow preparation failed.",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type dependency struct {
+		Step string `yaml:"step"`
+	}
+	var document struct {
+		Steps []struct {
+			DependsOn *yaml.Node `yaml:"depends_on"`
+			Plugins   []map[string]struct {
+				Step string `yaml:"step"`
+			} `yaml:"plugins"`
+			Steps []struct {
+				Key       string       `yaml:"key"`
+				Command   string       `yaml:"command"`
+				DependsOn []dependency `yaml:"depends_on"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 3 {
+		t.Fatalf("steps = %#v\n%s", document.Steps, output)
+	}
+	for _, workflow := range document.Steps {
+		if workflow.DependsOn != nil {
+			t.Fatalf("keyless workflow emitted importer dependency: %#v\n%s", workflow.DependsOn, output)
+		}
+		for _, step := range workflow.Steps {
+			for _, dependency := range step.DependsOn {
+				if dependency.Step == "" || dependency.Step == producer {
+					t.Fatalf("step %q emitted invalid importer dependency %#v\n%s", step.Key, dependency, output)
+				}
+			}
+			if step.Key == "test" && (!strings.Contains(step.Command, "--step '"+producer+"'") || !strings.Contains(step.Command, "--plan-producer '"+producer+"'")) {
+				t.Fatalf("job artifacts are not scoped to importer job %q:\n%s", producer, step.Command)
+			}
+		}
+	}
+	if failurePlugin := document.Steps[2].Plugins[0]["artifacts#v1.9.4"]; failurePlugin.Step != producer {
+		t.Fatalf("failure artifacts are scoped to %q, want %q", failurePlugin.Step, producer)
+	}
+}
+
 func TestEmitAggregateOriginWorkflowChecks(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep:       "importer",
@@ -1116,6 +1188,8 @@ func TestEmitRejectsInvalidGraphsAndIdentifiers(t *testing.T) {
 		{name: "compiler dependency", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest, Dependencies: []string{"compiler"}}}}, want: "invalid dependency"},
 		{name: "compiler collision", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "compiler", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid generated step key"},
 		{name: "UUID compiler", in: Pipeline{CompilerStep: "123e4567-e89b-12d3-a456-426614174000", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid compiler step key"},
+		{name: "keyless non-aggregate", in: Pipeline{ArtifactProducer: "producer", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid compiler step key"},
+		{name: "keyless aggregate without producer", in: Pipeline{EventProvider: "github", Workflows: []Workflow{{GroupLabel: "CI", GroupKey: "workflow-ci", Event: "push", Condition: "true", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}}}, want: "invalid compiler step key"},
 		{name: "UUID key", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "123e4567-e89b-12d3-a456-426614174000", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid generated step key"},
 		{name: "bad digest", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: "sha256:nope"}}}, want: "invalid plan digest"},
 		{name: "mutable runtime image", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest, RuntimeImage: "buildkite/agent-base:ubuntu-jammy-hosted-toolchains", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "immutable registry sha256 reference"},
