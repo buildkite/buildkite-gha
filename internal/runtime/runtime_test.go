@@ -736,18 +736,18 @@ runs:
 	secondLockID := "a-0000000000000002"
 	mismatched.Steps = append(mismatched.Steps, plan.Step{ID: "prebuilt-second", Kind: "uses", Uses: "./" + secondActionPath, Action: &plan.ActionSelector{Lock: secondLockID}})
 	mismatched.Actions = append(mismatched.Actions, plan.ActionLock{ID: secondLockID, Source: "workspace", Path: secondActionPath, SourceDigest: digestTree(t, filepath.Join(workspace, secondActionPath)), DockerImage: image})
-	if _, err := (Runner{Docker: mismatchFake.path}).runTestJob(t.Context(), mismatched, workspace); err == nil || !strings.Contains(err.Error(), "metadata image \""+image+"\" does not match planned image \"alpine:3.20\"") {
+	if _, err := (Runner{Docker: mismatchFake.path}).runTestJob(t.Context(), mismatched, workspace); err == nil || !strings.Contains(err.Error(), "Docker image does not match its immutable lock") {
 		t.Fatalf("RunJob() mismatched planned image error = %v", err)
 	}
-	if calls := mismatchFake.calls(t); callIndex(calls, "pull", "alpine:3.20") < 0 || callIndex(calls, "pull", image) < 0 || callIndex(calls, "run") >= 0 {
-		t.Fatalf("mismatched plan Docker calls = %#v, want only planned image pulls", calls)
+	if _, err := os.Stat(mismatchFake.transcript); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mismatched plan Docker transcript exists: %v", err)
 	}
 
 	unplannedFake := newFakeDocker(t, "success")
 	unplanned := job
 	unplanned.Actions = append([]plan.ActionLock(nil), job.Actions...)
 	unplanned.Actions[0].DockerImage = ""
-	if _, err := (Runner{Docker: unplannedFake.path}).runTestJob(t.Context(), unplanned, workspace); err == nil || !strings.Contains(err.Error(), "metadata image \""+image+"\" does not match planned image \"\"") {
+	if _, err := (Runner{Docker: unplannedFake.path}).runTestJob(t.Context(), unplanned, workspace); err == nil || !strings.Contains(err.Error(), "Docker image does not match its immutable lock") {
 		t.Fatalf("RunJob() unplanned metadata image error = %v", err)
 	}
 	if _, err := os.Stat(unplannedFake.transcript); !errors.Is(err, os.ErrNotExist) {
@@ -873,8 +873,8 @@ func TestRunJobRevalidatesDockerArgsWithInputsOnly(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "docker", Kind: "uses", Uses: "./action"}})
 	job.RequiredCapabilities = []string{"docker", "network"}
 	_, err := (Runner{Docker: filepath.Join(t.TempDir(), "docker-must-not-run")}).runTestJob(t.Context(), job, workspace)
-	if err == nil || !strings.Contains(err.Error(), "argument 1") || !strings.Contains(err.Error(), "only inputs.<name>") {
-		t.Fatalf("RunJob() error = %v, want runtime inputs-only rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "docker action argument") || !strings.Contains(err.Error(), "only inputs.<name>") {
+		t.Fatalf("RunJob() error = %v, want normalized inputs-only rejection", err)
 	}
 }
 

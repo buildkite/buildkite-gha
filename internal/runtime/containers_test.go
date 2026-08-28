@@ -1232,8 +1232,8 @@ func TestEvaluateServiceMapExpressionRejectsUnsafeShapes(t *testing.T) {
 
 func TestEvaluateServicesDoesNotHideErrorsBehindEmptyImage(t *testing.T) {
 	_, _, err := evaluateProgramServices(testProgramServices(map[string]plan.ServiceContainer{"optional": {Image: "${{ needs.build.outputs.image }}", Env: map[string]string{"VALUE": "${{ needs.build.outputs.value"}}}), expression.Context{Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{"image": ""}}}})
-	if err == nil || !strings.Contains(err.Error(), "unterminated") {
-		t.Fatalf("error = %v, want unterminated expression error", err)
+	if err == nil || !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Fatalf("error = %v, want incomplete expression error", err)
 	}
 }
 
@@ -2008,6 +2008,10 @@ esac
 		Container:    &plan.Container{Image: "debian:bookworm-slim"},
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
+	attachTestProgram(&job)
+	if err := attachTestActionProgramFromRoot(&job, localID, localFixture, "."); err != nil {
+		t.Fatal(err)
+	}
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Git: git, Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Env["CHECKOUT_CHAIN"] != "ok" {
 		t.Fatalf("container checkout chain result = %#v, error = %v", result, err)
@@ -2023,7 +2027,7 @@ func TestRunJobContainerReadOnlyMountProbeFailureCleansOwnedResources(t *testing
 	f := newJobDocker(t, "fail-mount-probe")
 	w := t.TempDir()
 	remote := t.TempDir()
-	writeFixtureFile(t, remote, "selected/action.yml", "name: remote\nruns:\n  using: composite\n  steps: []\n")
+	writeFixtureFile(t, remote, "selected/action.yml", "name: remote\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: \"true\"\n")
 	digest := digestTree(t, remote)
 	j := jobContainerPlan(t, w, nil)
 	lockID := remoteLifecycleLockID(1)
@@ -2289,6 +2293,13 @@ func TestRunJobContainerRemoteActionPreparationTimeoutIsCancelled(t *testing.T) 
 	job.ContinueOnError = true
 	job.TimeoutMinutes = 0.001
 	attachTestProgram(&job)
+	job.Program.Actions = map[string]executionprogram.Action{
+		lockID: {
+			Name: "remote", Runtime: "node24", Main: "index.js",
+			PreIf:  testProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean),
+			PostIf: testProgramSite("", executionprogram.SurfaceActionLifecycle, executionprogram.ResultBoolean),
+		},
+	}
 	materializer := &fakeActionMaterializer{materialize: func(ctx context.Context, _ source.Resolved) (source.Materialized, error) {
 		<-ctx.Done()
 		return source.Materialized{}, ctx.Err()

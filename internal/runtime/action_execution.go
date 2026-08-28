@@ -1619,13 +1619,16 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 		if lock.Source != "github" && lock.Source != "workspace" {
 			return nil, fmt.Errorf("unsupported action lock source %q", lock.Source)
 		}
-		action, _, err := actions.resolve(ctx, plan.ActionSelector{Lock: lock.ID})
-		if err != nil {
-			return nil, err
+		selector := plan.ActionSelector{Lock: lock.ID}
+		planned := actions.program(selector)
+		if planned == nil {
+			return nil, fmt.Errorf("resolve action lock %q: action program is missing", lock.ID)
 		}
-		actionRuntime, err := action.Runtime()
-		if err != nil {
-			return nil, err
+		actionRuntime := metadata.Runtime(planned.Runtime)
+		if lock.Source == "github" {
+			if _, _, err := actions.resolve(ctx, selector); err != nil {
+				return nil, err
+			}
 		}
 		if material != nil && actionRuntime != metadata.RuntimeDocker {
 			target := remoteMountTarget(entry.lock.Repository, entry.lock.Commit)
