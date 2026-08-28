@@ -22,10 +22,10 @@ func TestUploadArtifactCommitContracts(t *testing.T) {
 	if UploadArtifactUsesFallbackContract(UploadArtifactV7Commit) {
 		t.Fatal("known v7 commit uses fallback contract")
 	}
-	for _, commit := range []string{"v7", strings.Repeat("A", 40), strings.Repeat("0", 39)} {
+	for _, commit := range []string{uploadArtifactV322Commit, "v7", strings.Repeat("A", 40), strings.Repeat("0", 39)} {
 		err := validateUploadArtifactCommit(commit)
 		if err == nil {
-			t.Fatalf("malformed commit %s accepted", commit)
+			t.Fatalf("unsupported commit %s accepted", commit)
 		}
 		for _, supported := range commits {
 			if !strings.Contains(err.Error(), supported) {

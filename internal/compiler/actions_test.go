@@ -1823,6 +1823,9 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	if plans, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n          archive: true\n"); err != nil || len(plans) != 1 {
 		t.Fatalf("unknown upload-artifact fallback plans = %#v, error = %v", plans, err)
 	}
+	if _, err := compile("c6a366c94c3e0affe28c06c8df20a878f24da3cf", "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), "does not admit resolved commit") {
+		t.Fatalf("known unsupported upload-artifact commit error = %v", err)
+	}
 
 	matrixWorkflow := []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        mode: [production, test]\n    steps:\n      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV6Commit + "\n        if: matrix.mode == 'test'\n        with:\n          name: ${{ github.sha }}\n          path: ./artifacts.tar.gz\n          retention-days: '0'\n")
 	if err := os.WriteFile(workflowPath, matrixWorkflow, 0o644); err != nil {

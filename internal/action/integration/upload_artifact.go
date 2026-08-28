@@ -25,6 +25,9 @@ const (
 	UploadArtifactV5Commit = "330a01c490aca151604b8cf639adc76d48f6c5d4"
 	UploadArtifactV6Commit = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
 	UploadArtifactV7Commit = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+	// uploadArtifactV322Commit is a GHES-only legacy security backport that
+	// remains outside the github.com native adapter contract.
+	uploadArtifactV322Commit = "c6a366c94c3e0affe28c06c8df20a878f24da3cf"
 
 	// UploadArtifactFallbackContractRelease identifies the stable contract used
 	// for immutable commits outside the exact admission set.
@@ -72,7 +75,7 @@ func uploadArtifactGeneration(commit string) int {
 // UploadArtifactUsesFallbackContract reports whether an immutable commit is
 // outside the exact admission set and therefore uses the stable v7 contract.
 func UploadArtifactUsesFallbackContract(commit string) bool {
-	if !ValidCheckoutSHA(commit) {
+	if !ValidCheckoutSHA(commit) || commit == uploadArtifactV322Commit {
 		return false
 	}
 	_, exact := uploadArtifactCommits[commit]
@@ -109,7 +112,7 @@ func LegacyUploadArtifactRelease(commit string) (string, bool) {
 }
 
 func validateUploadArtifactCommit(commit string) error {
-	if _, ok := uploadArtifactCommits[commit]; !ok && !ValidCheckoutSHA(commit) {
+	if _, ok := uploadArtifactCommits[commit]; !ok && (!ValidCheckoutSHA(commit) || commit == uploadArtifactV322Commit) {
 		commits := make([]string, 0, len(uploadArtifactCommits))
 		for supported, version := range uploadArtifactCommits {
 			commits = append(commits, version+" ("+supported+")")
