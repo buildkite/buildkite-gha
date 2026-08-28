@@ -175,6 +175,9 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		JobStatus:      "success",
 		Runner:         runnerContext,
 	}
+	for name, value := range r.RunIdentity.githubValues() {
+		eval.GitHub[name] = value
+	}
 	for _, name := range sortedKeys(job.Needs) {
 		need := job.Needs[name]
 		if need.Result == "" {
@@ -264,6 +267,13 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	workspace, err = filepath.EvalSymlinks(workspace)
 	if err != nil {
 		return jobResult, fmt.Errorf("canonicalize workspace: %w", err)
+	}
+	// github.workspace resolves to the path the executing steps observe:
+	// container jobs see the fixed job-container mount, host jobs see the
+	// canonical workspace directory.
+	eval.GitHub["workspace"] = workspace
+	if job.Container != nil {
+		eval.GitHub["workspace"] = jobContainerWorkspace
 	}
 	hashRoot, err := os.OpenRoot(workspace)
 	if err != nil {
@@ -435,7 +445,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	if r.jobContainer != nil {
 		runnerContext["temp"] = r.jobContainer.containerPath(runnerTemp)
 	}
-	runtimeEnv := standardEnvironment(job, workspace, runnerTemp, toolCache)
+	runtimeEnv := standardEnvironment(job, workspace, runnerTemp, toolCache, r.RunIdentity)
 	jobResult.Env = mergeStepEnvironment(runtimeEnv, jobEnv)
 	if r.jobContainer != nil && !explicitJobPATH {
 		jobResult.Env["PATH"] = r.jobContainer.imagePATH
@@ -1321,7 +1331,7 @@ func workflowDisplayName(job plan.Job) string {
 	return job.Workflow.Path
 }
 
-func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string) map[string]string {
+func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string, identity RunIdentity) map[string]string {
 	runner, _ := canonicalRunnerContext(goruntime.GOOS, goruntime.GOARCH)
 	workflowName := workflowDisplayName(job)
 	env := map[string]string{
@@ -1340,6 +1350,9 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string) 
 		"RUNNER_ARCH":       runner["arch"],
 		"RUNNER_TEMP":       runnerTemp,
 		"RUNNER_TOOL_CACHE": toolCache,
+	}
+	for name, value := range identity.githubValues() {
+		env["GITHUB_"+strings.ToUpper(name)] = value
 	}
 	if imageOS := runnerImageOS(); imageOS != "" {
 		env["ImageOS"] = imageOS
@@ -1466,6 +1479,9 @@ func isRuntimeContextEnvironment(name string) bool {
 		"GITHUB_JOB",
 		"GITHUB_REF",
 		"GITHUB_REPOSITORY",
+		"GITHUB_RUN_ATTEMPT",
+		"GITHUB_RUN_ID",
+		"GITHUB_RUN_NUMBER",
 		"GITHUB_SERVER_URL",
 		"GITHUB_SHA",
 		"GITHUB_WORKFLOW",
@@ -1876,6 +1892,9 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 		if err != nil {
 			return result, err
 		}
+		if r.jobContainer != nil {
+			workingDirectory = r.jobContainer.hostPath(workingDirectory)
+		}
 		dir, err := stepWorkingDirectory(workspace, workingDirectory)
 		if err != nil {
 			return result, err
@@ -2219,6 +2238,9 @@ func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandPro
 				var workingDirectory string
 				workingDirectory, childErr = expression.EvaluateStep(step.WorkingDirectory, eval)
 				if childErr == nil {
+					if r.jobContainer != nil {
+						workingDirectory = r.jobContainer.hostPath(workingDirectory)
+					}
 					dir, childErr = stepWorkingDirectory(workspace, workingDirectory)
 				}
 			}
