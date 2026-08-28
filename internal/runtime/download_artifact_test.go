@@ -179,11 +179,12 @@ func TestDownloadArtifactSupportsAuditedCommitsAndNonASCIIExactName(t *testing.T
 		Digest: digest, Size: size, FileCount: 1,
 		Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"},
 	}
-	for _, commit := range actionintegration.DownloadArtifactCommits() {
+	commits := append(actionintegration.DownloadArtifactCommits(), strings.Repeat("0", 40))
+	for _, commit := range commits {
 		t.Run(commit[:7], func(t *testing.T) {
 			workspace := t.TempDir()
 			inputs := map[string]string{"name": " 成果物 ", "path": ""}
-			if commit == actionintegration.DownloadArtifactV8Commit || commit == actionintegration.DownloadArtifactV801Commit {
+			if commit == actionintegration.DownloadArtifactV8Commit || commit == actionintegration.DownloadArtifactV801Commit || actionintegration.DownloadArtifactUsesFallbackContract(commit) {
 				inputs["skip-decompress"] = "False"
 				inputs["digest-mismatch"] = "error"
 			}
@@ -1286,8 +1287,15 @@ func TestDownloadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) 
 	}
 
 	job.Actions[0].Commit = strings.Repeat("b", 40)
-	if _, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), actionintegration.DownloadArtifactCommit) {
-		t.Fatalf("unsupported runtime commit error = %v", err)
+	job.Steps[0].With = map[string]string{"name": "payload", "path": "fallback-downloaded", "skip-decompress": "false", "digest-mismatch": "error"}
+	fallbackResult, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(t.Context(), job, workspace)
+	if err != nil || fallbackResult.Conclusion != "success" || fallbackResult.Outputs["download_path"] != filepath.Join(workspace, "fallback-downloaded") || store.jobID != artifact.Producer.JobID {
+		t.Fatalf("unknown commit fallback result = %#v, error = %v", fallbackResult, err)
+	}
+
+	job.Actions[0].Commit = strings.Repeat("b", 39)
+	if _, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "invalid GitHub identity") {
+		t.Fatalf("malformed runtime commit error = %v", err)
 	}
 }
 

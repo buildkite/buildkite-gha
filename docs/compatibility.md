@@ -1193,6 +1193,8 @@ For v4.6.2 and later, the adapter sets `artifact-id` and `artifact-digest`; `art
 | v8.0.0 | [`70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3`](https://github.com/actions/download-artifact/tree/70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3) |
 | v8.0.1 | [`3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c`](https://github.com/actions/download-artifact/tree/3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c) |
 
+An unknown lowercase 40-hex immutable commit uses the stable v8.0.1 contract as a compatibility fallback. Compilation emits one `W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK` warning for each distinct unknown commit. The fallback can differ from the commit's upstream manifest, but it does not widen the native adapter or execute upstream JavaScript. Malformed commits remain unsupported.
+
 | Input | Supported values |
 | --- | --- |
 | `name` | Exact name, mutually exclusive with `pattern`; runtime expressions are allowed. |

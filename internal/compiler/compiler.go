@@ -510,6 +510,16 @@ func legacyUploadArtifactWarning(position workflow.Position, release string) War
 	}
 }
 
+func unknownDownloadArtifactCommitWarning(position workflow.Position, commit string) Warning {
+	return Warning{
+		Code:   "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("actions/download-artifact resolved to immutable commit %s, which is outside the exact admission set. The native adapter is using the supported %s contract instead; it still restricts selection to artifacts from verified direct needs producers and enforces destination, ZIP, digest, count, and size bounds, and does not run the upstream action JavaScript.",
+			commit, actionintegration.DownloadArtifactFallbackContractRelease),
+	}
+}
+
 func reusableWorkflowTokenWarning(position workflow.Position) Warning {
 	return Warning{
 		Code:    "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS",
