@@ -1905,7 +1905,7 @@ jobs:
 
 func TestRequiredSecretsDoesNotInterpretConditionLiteralsAsTemplates(t *testing.T) {
 	instance := JobInstance{If: "'${{ github.token }} ${{ secrets.DEPLOY }} ${{ github.event.action }}' == runner.os"}
-	secrets, _, _, referencesToken, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, nil, false, "https://github.com")
+	secrets, _, _, referencesToken, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, nil, nil, false, "https://github.com", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1926,7 +1926,7 @@ func TestRequiredSecretsNarrowsTokenAuthorityByKnownServerURL(t *testing.T) {
 		{name: "non-GitHub provider", serverURL: "https://origin.cursor.com"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, _, _, token, err := requiredSecrets(workflowProgram, instance.secretAuthority, nil, false, test.serverURL)
+			_, _, _, token, err := requiredSecrets(workflowProgram, instance.secretAuthority, nil, nil, false, test.serverURL, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

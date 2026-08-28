@@ -22,6 +22,18 @@ func TestInventoryActionAuthorityRefinesOrderedKnownDefaults(t *testing.T) {
 	}
 }
 
+func TestInventoryActionAuthorityHonorsLazyCaseDefault(t *testing.T) {
+	defaultValue := Site{Source: "${{ case(true, 'safe', github.token) }}", Surface: SurfaceActionInputDefault, Result: ResultString, Provenance: ProvenanceAction, Purpose: PurposeExpression}
+	action := Action{Runtime: "node24", Inputs: []ActionInput{{Name: "token", Default: &defaultValue}}}
+	authority, err := InventoryActionAuthority(map[string]Action{"root": action}, "root", nil, ActionAuthorityOptions{ServerURL: "https://github.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authority.GitHubToken {
+		t.Fatal("unselected case branch retained action github.token authority")
+	}
+}
+
 func TestActionMetadataRoundTripPreservesDockerEntrypoints(t *testing.T) {
 	source := metadata.Metadata{Name: "docker", Runs: metadata.Runs{
 		Using: "docker", Image: "Dockerfile", Entrypoint: "main.sh",

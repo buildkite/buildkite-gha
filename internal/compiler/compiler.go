@@ -566,7 +566,7 @@ func resolveCompileContainer(container *workflow.Container, context expression.C
 	resolved.Env = cloneMap(container.Env)
 	resolved.Ports = append([]string(nil), container.Ports...)
 	if strings.Contains(resolved.Image, "${{") {
-		value, err := evaluateCompileSite(resolved.Image, expression.ProfileCompileTemplate, expression.ResultString, context)
+		value, err := evaluateCompileSite(resolved.Image, expression.ProfileCompileContainerImage, expression.ResultString, context)
 		if err != nil {
 			return nil, err
 		}

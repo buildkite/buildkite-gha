@@ -13,29 +13,30 @@ import (
 type ProfileID string
 
 const (
-	ProfileCompile              ProfileID = "compile"
-	ProfileCompileTemplate      ProfileID = "compile-template"
-	ProfilePartialTemplate      ProfileID = "partial-template"
-	ProfileCompileJobCondition  ProfileID = "compile-job-condition"
-	ProfileCompileStepCondition ProfileID = "compile-step-condition"
-	ProfileCompileCallCondition ProfileID = "compile-call-condition"
-	ProfileReusableInput        ProfileID = "reusable-input"
-	ProfileRunName              ProfileID = "run-name"
-	ProfileJobCondition         ProfileID = "job-condition"
-	ProfileStepCondition        ProfileID = "step-condition"
-	ProfileCallCondition        ProfileID = "call-condition"
-	ProfileActionLifecycle      ProfileID = "action-lifecycle"
-	ProfileJobEnvironment       ProfileID = "job-environment"
-	ProfileJobDefault           ProfileID = "job-default"
-	ProfileJobOutput            ProfileID = "job-output"
-	ProfileStepTemplate         ProfileID = "step-template"
-	ProfileStepControl          ProfileID = "step-control"
-	ProfileRuntimeTemplate      ProfileID = "runtime-template"
-	ProfileServiceTemplate      ProfileID = "service-template"
-	ProfileServiceCredential    ProfileID = "service-credential"
-	ProfileServiceMap           ProfileID = "service-map"
-	ProfileActionInputDefault   ProfileID = "action-input-default"
-	ProfileDockerActionArg      ProfileID = "docker-action-arg"
+	ProfileCompile               ProfileID = "compile"
+	ProfileCompileTemplate       ProfileID = "compile-template"
+	ProfileCompileContainerImage ProfileID = "compile-container-image"
+	ProfilePartialTemplate       ProfileID = "partial-template"
+	ProfileCompileJobCondition   ProfileID = "compile-job-condition"
+	ProfileCompileStepCondition  ProfileID = "compile-step-condition"
+	ProfileCompileCallCondition  ProfileID = "compile-call-condition"
+	ProfileReusableInput         ProfileID = "reusable-input"
+	ProfileRunName               ProfileID = "run-name"
+	ProfileJobCondition          ProfileID = "job-condition"
+	ProfileStepCondition         ProfileID = "step-condition"
+	ProfileCallCondition         ProfileID = "call-condition"
+	ProfileActionLifecycle       ProfileID = "action-lifecycle"
+	ProfileJobEnvironment        ProfileID = "job-environment"
+	ProfileJobDefault            ProfileID = "job-default"
+	ProfileJobOutput             ProfileID = "job-output"
+	ProfileStepTemplate          ProfileID = "step-template"
+	ProfileStepControl           ProfileID = "step-control"
+	ProfileRuntimeTemplate       ProfileID = "runtime-template"
+	ProfileServiceTemplate       ProfileID = "service-template"
+	ProfileServiceCredential     ProfileID = "service-credential"
+	ProfileServiceMap            ProfileID = "service-map"
+	ProfileActionInputDefault    ProfileID = "action-input-default"
+	ProfileDockerActionArg       ProfileID = "docker-action-arg"
 )
 
 // Form identifies whether a site is one expression or an interpolated
@@ -84,6 +85,7 @@ type profileSemantics uint8
 const (
 	semanticsCompile profileSemantics = iota
 	semanticsCompileTemplate
+	semanticsCompileStringTemplate
 	semanticsPartialTemplate
 	semanticsCompileCondition
 	semanticsReusableInput
@@ -103,30 +105,37 @@ const (
 	semanticsDockerActionArg
 )
 
+var commonPureFunctions = FunctionSet{"case", "contains", "endsWith", "format", "fromJSON", "join", "startsWith", "toJSON"}
+
+func profileFunctions(additional ...string) FunctionSet {
+	return append(append(FunctionSet(nil), commonPureFunctions...), additional...)
+}
+
 var profiles = map[ProfileID]Profile{
-	ProfileCompile:              {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: FunctionSet{"contains", "endsWith", "format", "fromJSON", "join", "startsWith", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompile},
-	ProfileCompileTemplate:      {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: FunctionSet{"contains", "endsWith", "format", "fromJSON", "join", "startsWith", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileTemplate},
-	ProfilePartialTemplate:      {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"env", "event", "github", "inputs", "job", "jobs", "matrix", "needs", "runner", "secrets", "steps", "strategy", "vars"}, Functions: FunctionSet{"contains", "endsWith", "format", "fromJSON", "join", "startsWith", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsPartialTemplate},
-	ProfileCompileJobCondition:  {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "needs", "runner", "strategy", "vars"}, Functions: FunctionSet{"always", "cancelled", "contains", "endsWith", "failure", "format", "fromJSON", "join", "startsWith", "success", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileCondition, condition: JobCondition},
-	ProfileCompileStepCondition: {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"env", "event", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "strategy", "vars"}, Functions: FunctionSet{"always", "cancelled", "contains", "endsWith", "failure", "format", "fromJSON", "hashFiles", "join", "startsWith", "success", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileCondition, condition: StepCondition},
-	ProfileCompileCallCondition: {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "needs", "vars"}, Functions: FunctionSet{"always", "cancelled", "contains", "endsWith", "failure", "format", "fromJSON", "join", "startsWith", "success", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileCondition, condition: CallCondition},
-	ProfileReusableInput:        {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"github", "vars"}, Functions: FunctionSet{"contains", "endsWith", "format", "fromJSON", "join", "startsWith", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsReusableInput},
-	ProfileRunName:              {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"github", "inputs"}, Functions: FunctionSet{"contains", "endsWith", "format", "fromJSON", "join", "startsWith", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsRunName},
-	ProfileJobCondition:         {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "runner", "vars"}, Functions: FunctionSet{"always", "cancelled", "contains", "endsWith", "failure", "format", "fromJSON", "join", "startsWith", "success", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: JobCondition},
-	ProfileStepCondition:        {Form: FormExpression, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: FunctionSet{"always", "cancelled", "contains", "endsWith", "failure", "format", "fromJSON", "hashFiles", "join", "startsWith", "success", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: StepCondition},
-	ProfileCallCondition:        {Form: FormExpression, Scope: ScopeCall, Contexts: ContextSet{"github", "inputs", "needs", "vars"}, Functions: FunctionSet{"always", "cancelled", "contains", "endsWith", "failure", "format", "fromJSON", "join", "startsWith", "success", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: CallCondition},
-	ProfileActionLifecycle:      {Form: FormExpression, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "runner", "steps"}, Functions: FunctionSet{"always", "cancelled", "contains", "endsWith", "failure", "format", "fromJSON", "hashFiles", "join", "startsWith", "success", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsActionLifecycle, condition: actionLifecycleCondition},
-	ProfileJobEnvironment:       {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "secrets", "vars"}, Functions: FunctionSet{"contains", "endsWith", "format", "fromJSON", "join", "startsWith", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobEnvironment},
-	ProfileJobDefault:           {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "vars"}, Functions: FunctionSet{"contains", "endsWith", "format", "fromJSON", "join", "startsWith", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobDefault},
-	ProfileJobOutput:            {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: FunctionSet{"contains", "endsWith", "format", "fromJSON", "join", "startsWith", "toJSON"}, Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobOutput},
-	ProfileStepTemplate:         {Form: FormTemplate, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: FunctionSet{"contains", "endsWith", "format", "fromJSON", "hashFiles", "join", "startsWith", "toJSON"}, Missing: MissingNull, Token: TokenWorkflowContext, semantics: semanticsStepTemplate},
-	ProfileStepControl:          {Form: FormExpression, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: FunctionSet{"contains", "endsWith", "format", "fromJSON", "join", "startsWith", "toJSON"}, Missing: MissingNull, Token: TokenWorkflowContext, semantics: semanticsStepControl},
-	ProfileRuntimeTemplate:      {Form: FormTemplate, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Missing: MissingEmpty, Token: TokenDirect, semantics: semanticsRuntimeTemplate},
-	ProfileServiceTemplate:      {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsServiceTemplate},
-	ProfileServiceCredential:    {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "secrets", "vars"}, Missing: MissingEmpty, Token: TokenDirect, semantics: semanticsServiceCredential},
-	ProfileServiceMap:           {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: FunctionSet{"fromJSON"}, Missing: MissingError, Token: TokenDenied, semantics: semanticsServiceMap},
-	ProfileActionInputDefault:   {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: FunctionSet{"contains", "endsWith", "format", "fromJSON", "join", "startsWith", "toJSON"}, Missing: MissingNull, Token: TokenDirect, semantics: semanticsActionInputDefault},
-	ProfileDockerActionArg:      {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"inputs"}, Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDockerActionArg},
+	ProfileCompile:               {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompile},
+	ProfileCompileTemplate:       {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileTemplate},
+	ProfileCompileContainerImage: {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileStringTemplate},
+	ProfilePartialTemplate:       {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"env", "event", "github", "inputs", "job", "jobs", "matrix", "needs", "runner", "secrets", "steps", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsPartialTemplate},
+	ProfileCompileJobCondition:   {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "needs", "runner", "strategy", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileCondition, condition: JobCondition},
+	ProfileCompileStepCondition:  {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"env", "event", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "strategy", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "hashFiles", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileCondition, condition: StepCondition},
+	ProfileCompileCallCondition:  {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "needs", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileCondition, condition: CallCondition},
+	ProfileReusableInput:         {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"github", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsReusableInput},
+	ProfileRunName:               {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"github", "inputs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsRunName},
+	ProfileJobCondition:          {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "runner", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: JobCondition},
+	ProfileStepCondition:         {Form: FormExpression, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "hashFiles", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: StepCondition},
+	ProfileCallCondition:         {Form: FormExpression, Scope: ScopeCall, Contexts: ContextSet{"github", "inputs", "needs", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: CallCondition},
+	ProfileActionLifecycle:       {Form: FormExpression, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "runner", "steps"}, Functions: profileFunctions("always", "cancelled", "failure", "hashFiles", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsActionLifecycle, condition: actionLifecycleCondition},
+	ProfileJobEnvironment:        {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "secrets", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobEnvironment},
+	ProfileJobDefault:            {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobDefault},
+	ProfileJobOutput:             {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobOutput},
+	ProfileStepTemplate:          {Form: FormTemplate, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: profileFunctions("hashFiles"), Missing: MissingNull, Token: TokenWorkflowContext, semantics: semanticsStepTemplate},
+	ProfileStepControl:           {Form: FormExpression, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenWorkflowContext, semantics: semanticsStepControl},
+	ProfileRuntimeTemplate:       {Form: FormTemplate, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Missing: MissingEmpty, Token: TokenDirect, semantics: semanticsRuntimeTemplate},
+	ProfileServiceTemplate:       {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsServiceTemplate},
+	ProfileServiceCredential:     {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "secrets", "vars"}, Missing: MissingEmpty, Token: TokenDirect, semantics: semanticsServiceCredential},
+	ProfileServiceMap:            {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: FunctionSet{"fromJSON"}, Missing: MissingError, Token: TokenDenied, semantics: semanticsServiceMap},
+	ProfileActionInputDefault:    {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsActionInputDefault},
+	ProfileDockerActionArg:       {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"inputs"}, Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDockerActionArg},
 }
 
 // Profiles returns a copy of the closed profile table for exhaustive tests.
@@ -336,7 +345,7 @@ func (Engine) Validate(site Site) (Validation, error) {
 		if err == nil {
 			err = validateCompileExpressionNode(node)
 		}
-	case semanticsCompileTemplate:
+	case semanticsCompileTemplate, semanticsCompileStringTemplate:
 		err = visitTemplateExpressions(site.Source, validateCompileExpressionNode)
 	case semanticsPartialTemplate:
 		err = visitTemplateExpressions(site.Source, func(actionlint.ExprNode) error { return nil })
@@ -513,11 +522,9 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 			value, err = evaluateCompile(expression, values.Compile)
 		}
 	case semanticsCompileTemplate:
-		if site.Result == ResultString {
-			value, err = evaluateCompileStringTemplate(site.Source, values.Compile)
-		} else {
-			value, err = evaluateCompileTemplate(site.Source, values.Compile)
-		}
+		value, err = evaluateCompileTemplate(site.Source, values.Compile)
+	case semanticsCompileStringTemplate:
+		value, err = evaluateCompileStringTemplate(site.Source, values.Compile)
 	case semanticsPartialTemplate:
 		value, err = evaluateAvailableCompileTemplate(site.Source, values.Compile)
 	case semanticsCompileCondition:
@@ -639,6 +646,10 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 			return Reduced{Known: true, Value: value}, nil
 		}
 		return Reduced{Source: reduced}, nil
+	}
+	if profile.semantics == semanticsCompileStringTemplate {
+		value, err := engine.Evaluate(site, values)
+		return Reduced{Known: err == nil, Value: value}, err
 	}
 	if profile.semantics == semanticsCompileTemplate || profile.semantics == semanticsPartialTemplate {
 		if _, err := engine.Validate(site); err != nil {

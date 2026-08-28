@@ -41,6 +41,7 @@ type builtPlanActions struct {
 	inputsInspected      bool
 	requiresGitHubToken  bool
 	requiresEventPayload bool
+	reachableSecrets     []string
 	requiresMise         bool
 	resolved             bool
 	hasInvocations       bool
@@ -125,7 +126,7 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	if err := b.validateShellCompatibility(instance, workflowProgram); err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
-	actions, err := b.buildActions(instance, workflowProgram.Job.Steps)
+	actions, err := b.buildActions(instance, &workflowProgram)
 	if err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
 	}
@@ -426,7 +427,8 @@ func projectReducedProgram(instance *JobInstance, reduced program.Program) {
 	}
 }
 
-func (b planBuilder) buildActions(instance JobInstance, steps []program.Step) (builtPlanActions, error) {
+func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program.Program) (builtPlanActions, error) {
+	steps := workflowProgram.Job.Steps
 	var actionIndexes []int
 	var actionRefs []string
 	var actionInputs []map[string]string
@@ -461,12 +463,37 @@ func (b planBuilder) buildActions(instance JobInstance, steps []program.Step) (b
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
 	built.requiresMise = compiled.requiresMise
-	built.requiresGitHubToken = compiled.requiresGitHubToken
 	built.requiresEventPayload = compiled.requiresEventPayload
 	built.requiredSecrets = compiled.requiredSecrets
 	built.programs = compiled.programs
-	built.authorization.GitHubTokenActions = append([]string(nil), compiled.githubTokenActions...)
 	built.inputsInspected = true
+	reachability, err := program.WorkflowReachability(*workflowProgram, expression.AbstractValues{References: b.authorityReferences(instance)})
+	if err != nil {
+		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+	}
+	reachableSecrets := map[string]bool{}
+	for i, authority := range compiled.rootAuthorities {
+		if !reachability.Steps[actionIndexes[i]] {
+			continue
+		}
+		built.requiresGitHubToken = built.requiresGitHubToken || authority.GitHubToken
+		if authority.GitHubToken {
+			built.authorization.GitHubTokenActions = append(built.authorization.GitHubTokenActions, actionRefs[i])
+		}
+		for _, name := range authority.Secrets {
+			reachableSecrets[name] = true
+		}
+		for _, binding := range steps[actionIndexes[i]].Invocation.With {
+			names, err := program.ValidateSite(binding.Value)
+			if err != nil {
+				return built, fmt.Errorf("build plan for job %q: action input %q: %w", instance.LogicalJobID, binding.Name, err)
+			}
+			for _, name := range names {
+				reachableSecrets[name] = true
+			}
+		}
+	}
+	built.reachableSecrets = sortedKeys(reachableSecrets)
 	locksByID := make(map[string]plan.ActionLock, len(compiled.locks))
 	for _, lock := range compiled.locks {
 		locksByID[lock.ID] = lock
@@ -494,6 +521,15 @@ func (b planBuilder) buildActions(instance JobInstance, steps []program.Step) (b
 		built.authorization.DockerCapabilitySources = append(built.authorization.DockerCapabilitySources, "dockerfile-actions")
 	}
 	return built, nil
+}
+
+func (b planBuilder) authorityReferences(instance JobInstance) map[string]any {
+	return map[string]any{
+		"github.server_url": plan.EventServerURL(b.ir.Event.Provider),
+		"inputs":            instance.Inputs,
+		"matrix":            instance.Matrix,
+		"vars":              b.ir.Vars,
+	}
 }
 
 func (b planBuilder) validateActionAdapter(instance JobInstance, stepIndex int, lock plan.ActionLock, built *builtPlanActions) error {
@@ -646,7 +682,7 @@ func buildPlanCallGuards(instance JobInstance, planDigests map[string]string) ([
 
 func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram program.Program, actions *builtPlanActions) ([]string, map[string]string, *plan.GitHubToken, error) {
 	serverURL := plan.EventServerURL(b.ir.Event.Provider)
-	secrets, mappings, tokenAliases, referencesGitHubToken, err := requiredSecrets(workflowProgram, instance.secretAuthority, actions.requiredSecrets, actions.inputsInspected, serverURL)
+	secrets, mappings, tokenAliases, referencesGitHubToken, err := requiredSecrets(workflowProgram, instance.secretAuthority, actions.requiredSecrets, actions.reachableSecrets, actions.inputsInspected, serverURL, b.authorityReferences(instance))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
@@ -736,19 +772,24 @@ func planConstructionFinding(instance JobInstance, err error) error {
 	)
 }
 
-func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, actionRequired []string, actionInputsInspected bool, serverURL string) ([]string, map[string]string, []string, bool, error) {
+func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, actionRequired, reachableActionRequired []string, actionInputsInspected bool, serverURL string, references map[string]any) ([]string, map[string]string, []string, bool, error) {
+	if references == nil {
+		references = map[string]any{"github.server_url": serverURL}
+	}
 	authority, err := program.InventoryAuthority(workflowProgram, program.AuthorityOptions{
 		ActionInputsInspected: actionInputsInspected,
-		Values: expression.AbstractValues{References: map[string]any{
-			"github.server_url": serverURL,
-		}},
+		Values:                expression.AbstractValues{References: references},
 	})
 	if err != nil {
 		return nil, nil, nil, false, err
 	}
 	found := make(map[string]string, len(authority.Secrets)+len(actionRequired))
+	workflowFound := make(map[string]bool, len(authority.ReachableSecrets))
 	for _, name := range authority.Secrets {
 		found[name] = name
+	}
+	for _, name := range authority.ReachableSecrets {
+		workflowFound[name] = true
 	}
 	if actionInputsInspected {
 		err = workflowProgram.VisitSites(func(site program.Site) error {
@@ -774,12 +815,18 @@ func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, 
 	for _, name := range actionRequired {
 		found[name] = name
 	}
+	reachableActionFound := make(map[string]bool, len(reachableActionRequired))
+	for _, name := range reachableActionRequired {
+		reachableActionFound[name] = true
+	}
 	sources := make(map[string]struct{}, len(found))
 	mappings := map[string]string{}
 	var tokenAliases []string
 	for alias := range found {
 		if alias == "GITHUB_TOKEN" {
-			tokenAliases = append(tokenAliases, alias)
+			if workflowFound[alias] || reachableActionFound[alias] {
+				tokenAliases = append(tokenAliases, alias)
+			}
 			continue
 		}
 		binding, ok := bindings.resolve(alias)
@@ -787,7 +834,9 @@ func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, 
 			continue
 		}
 		if binding.token {
-			tokenAliases = append(tokenAliases, alias)
+			if workflowFound[alias] || reachableActionFound[alias] {
+				tokenAliases = append(tokenAliases, alias)
+			}
 			continue
 		}
 		sources[binding.source] = struct{}{}

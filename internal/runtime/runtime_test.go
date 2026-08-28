@@ -6482,6 +6482,32 @@ func TestSkippedRemoteCompositeWithoutPreDoesNotEvaluateTimeout(t *testing.T) {
 	}
 }
 
+func TestCompileKnownFalseRootActionDoesNotPrepareRemoteLifecycle(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: skipped remote lifecycle\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "root/action.yml", "name: root\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "root/pre.js", "")
+	writeFixtureFile(t, remote, "root/main.js", "")
+	digest := digestTree(t, remote)
+	rootID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}, Condition: "false",
+	}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(rootID, "root", digest, nil)}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Actions: materializer}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() skipped root result = %#v, error = %v", result, err)
+	}
+	if materializer.calls != 0 {
+		t.Fatalf("known-false root materializations = %d, want 0", materializer.calls)
+	}
+}
+
 func TestNestedCompositePreservesInheritedJobStatus(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

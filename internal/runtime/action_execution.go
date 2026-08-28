@@ -55,6 +55,7 @@ func verifyWorkflow(job plan.Job, workspace string) error {
 
 func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error) {
 	job := r.job
+	planningInputs := cloneAnyMap(job.Inputs)
 	workspace := r.workspace
 	callerWorkspace := r.callerWorkspace
 	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}, Artifacts: []transport.ResultArtifact{}}
@@ -203,6 +204,16 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		jobResult.Conclusion = "skipped"
 		return jobResult, nil
 	}
+	reachability, err := executionprogram.WorkflowReachability(*job.Program, expression.AbstractValues{References: map[string]any{
+		"github.server_url": plan.EventServerURL(job.Event.Provider),
+		"inputs":            planningInputs,
+		"matrix":            job.Matrix,
+		"vars":              job.Vars,
+	}})
+	if err != nil {
+		return jobResult, fmt.Errorf("analyze workflow reachability: %w", err)
+	}
+	r.reachableSteps = reachability.Steps
 	runCtx := ctx
 	cancelJob := func() {}
 	if job.TimeoutMinutes > 0 {
@@ -500,6 +511,9 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 		for stepIndex, step := range job.Steps {
 			eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
 			if step.Kind != "uses" {
+				continue
+			}
+			if stepIndex < len(r.reachableSteps) && !r.reachableSteps[stepIndex] {
 				continue
 			}
 			if step.Action == nil {

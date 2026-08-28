@@ -89,6 +89,7 @@ type actionCompilation struct {
 	requiresGitHubToken  bool
 	requiresEventPayload bool
 	programs             map[string]program.Action
+	rootAuthorities      []program.ActionAuthority
 }
 
 // validateActionResolutions resolves each independent root invocation before
@@ -262,7 +263,9 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	requiresEventPayload := false
 	requiredSecrets := map[string]bool{}
 	var githubTokenActions []string
+	var rootAuthorities []program.ActionAuthority
 	if suppliedInputs != nil {
+		rootAuthorities = make([]program.ActionAuthority, len(roots))
 		for i, root := range roots {
 			if err := validateActionAdapterInputs(root); err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
@@ -271,6 +274,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
+			rootAuthorities[i] = authority
 			requiresGitHubToken = requiresGitHubToken || authority.GitHubToken
 			requiresEventPayload = requiresEventPayload || authority.EventPayload
 			if authority.GitHubToken {
@@ -292,6 +296,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 		requiresGitHubToken:  requiresGitHubToken,
 		requiresEventPayload: requiresEventPayload,
 		programs:             programs,
+		rootAuthorities:      rootAuthorities,
 	}, nil
 }
 

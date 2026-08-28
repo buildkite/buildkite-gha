@@ -72,29 +72,30 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 		want   any
 	}
 	examples := map[ProfileID]example{
-		ProfileCompile:              {"${{ contains('abc', 'b') }}", ResultBoolean, true},
-		ProfileCompileTemplate:      {"value-${{ github.event_name }}", ResultString, "value-push"},
-		ProfilePartialTemplate:      {"value-${{ inputs.name }}", ResultString, "value-value"},
-		ProfileCompileJobCondition:  {"github.event_name == 'push'", ResultBoolean, true},
-		ProfileCompileStepCondition: {"inputs.enabled", ResultBoolean, true},
-		ProfileCompileCallCondition: {"inputs.enabled", ResultBoolean, true},
-		ProfileReusableInput:        {"${{ 'value' }}", ResultString, "value"},
-		ProfileRunName:              {"run-${{ github.event_name }}", ResultString, "run-push"},
-		ProfileJobCondition:         {"always() && inputs.enabled", ResultBoolean, true},
-		ProfileStepCondition:        {"always() && inputs.enabled", ResultBoolean, true},
-		ProfileCallCondition:        {"always() && inputs.enabled", ResultBoolean, true},
-		ProfileActionLifecycle:      {"${{ always() && inputs.enabled }}", ResultBoolean, true},
-		ProfileJobEnvironment:       {"${{ inputs.name }}", ResultString, "value"},
-		ProfileJobDefault:           {"${{ inputs.name }}", ResultString, "value"},
-		ProfileJobOutput:            {"${{ inputs.name }}", ResultString, "value"},
-		ProfileStepTemplate:         {"${{ format('{0}', inputs.name) }}", ResultString, "value"},
-		ProfileStepControl:          {"${{ true }}", ResultBoolean, true},
-		ProfileRuntimeTemplate:      {"${{ env.NAME }}", ResultString, "value"},
-		ProfileServiceTemplate:      {"${{ needs.build.outputs.value }}", ResultString, `{"name":"value"}`},
-		ProfileServiceCredential:    {"${{ env.NAME }}", ResultString, "value"},
-		ProfileServiceMap:           {"${{ fromJSON(needs.build.outputs.value) }}", ResultObject, []ObjectEntry{{Name: "name", Value: "value"}}},
-		ProfileActionInputDefault:   {"${{ inputs.name }}", ResultString, "value"},
-		ProfileDockerActionArg:      {"${{ inputs.name }}", ResultString, "value"},
+		ProfileCompile:               {"${{ case(true, contains('abc', 'b'), false) }}", ResultBoolean, true},
+		ProfileCompileTemplate:       {"${{ case(true, true, false) }}", ResultString, "true"},
+		ProfileCompileContainerImage: {"node:${{ case(true, 24, 25) }}", ResultString, "node:24"},
+		ProfilePartialTemplate:       {"value-${{ inputs.name }}", ResultString, "value-value"},
+		ProfileCompileJobCondition:   {"github.event_name == 'push'", ResultBoolean, true},
+		ProfileCompileStepCondition:  {"inputs.enabled", ResultBoolean, true},
+		ProfileCompileCallCondition:  {"inputs.enabled", ResultBoolean, true},
+		ProfileReusableInput:         {"${{ 'value' }}", ResultString, "value"},
+		ProfileRunName:               {"run-${{ github.event_name }}", ResultString, "run-push"},
+		ProfileJobCondition:          {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileStepCondition:         {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileCallCondition:         {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileActionLifecycle:       {"${{ always() && inputs.enabled }}", ResultBoolean, true},
+		ProfileJobEnvironment:        {"${{ inputs.name }}", ResultString, "value"},
+		ProfileJobDefault:            {"${{ inputs.name }}", ResultString, "value"},
+		ProfileJobOutput:             {"${{ inputs.name }}", ResultString, "value"},
+		ProfileStepTemplate:          {"${{ case(true, format('{0}', inputs.name), 'unused') }}", ResultString, "value"},
+		ProfileStepControl:           {"${{ true }}", ResultBoolean, true},
+		ProfileRuntimeTemplate:       {"${{ env.NAME }}", ResultString, "value"},
+		ProfileServiceTemplate:       {"${{ needs.build.outputs.value }}", ResultString, `{"name":"value"}`},
+		ProfileServiceCredential:     {"${{ env.NAME }}", ResultString, "value"},
+		ProfileServiceMap:            {"${{ fromJSON(needs.build.outputs.value) }}", ResultObject, []ObjectEntry{{Name: "name", Value: "value"}}},
+		ProfileActionInputDefault:    {"${{ case(true, inputs.name, 'unused') }}", ResultString, "value"},
+		ProfileDockerActionArg:       {"${{ inputs.name }}", ResultString, "value"},
 	}
 	for _, id := range profileIDs() {
 		t.Run(string(id), func(t *testing.T) {
@@ -121,6 +122,34 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 				t.Fatalf("Analyze() = %#v, %v", analysis, err)
 			}
 		})
+	}
+}
+
+func TestEngineCompileTemplateScalarAndContainerImageBoundaries(t *testing.T) {
+	engine := NewEngine()
+	for _, test := range []struct {
+		source string
+		want   string
+	}{
+		{source: "${{ true }}", want: "true"},
+		{source: "${{ 2.5 }}", want: "2.5"},
+		{source: "${{ null }}", want: ""},
+	} {
+		value, err := engine.Evaluate(Site{Source: test.source, Profile: ProfileCompileTemplate, Result: ResultString}, Values{})
+		if err != nil || value != test.want {
+			t.Errorf("Evaluate(%q) = %#v, %v; want %q", test.source, value, err, test.want)
+		}
+	}
+	if _, err := engine.Evaluate(Site{Source: "${{ true }}", Profile: ProfileCompileContainerImage, Result: ResultString}, Values{}); err == nil || !strings.Contains(err.Error(), "want string") {
+		t.Fatalf("strict complete expression error = %v", err)
+	}
+	value, err := engine.Evaluate(Site{Source: "node:${{ 24 }}", Profile: ProfileCompileContainerImage, Result: ResultString}, Values{})
+	if err != nil || value != "node:24" {
+		t.Fatalf("interpolated container image = %#v, %v", value, err)
+	}
+	_, err = engine.Evaluate(Site{Source: "${{ vars.IMAGE }}", Profile: ProfileCompileContainerImage, Result: ResultString}, Values{Compile: CompileContext{Vars: map[string]string{"IMAGE": "${{ secrets.TOKEN }}"}}})
+	if err == nil || !strings.Contains(err.Error(), "contains expression syntax") {
+		t.Fatalf("container image injection error = %v", err)
 	}
 }
 
@@ -544,9 +573,29 @@ func containsFold(values []string, target string) bool {
 	return false
 }
 
+func TestEngineCaseFunctionPolicyIsClosedByProfile(t *testing.T) {
+	profiles := Profiles()
+	for _, id := range []ProfileID{
+		ProfileCompile, ProfileCompileTemplate, ProfileCompileContainerImage, ProfilePartialTemplate,
+		ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
+		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileStepCondition,
+		ProfileCallCondition, ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault,
+		ProfileJobOutput, ProfileStepTemplate, ProfileStepControl, ProfileActionInputDefault,
+	} {
+		if !containsFold(profiles[id].Functions, "case") {
+			t.Errorf("profile %q does not admit case", id)
+		}
+	}
+	for _, id := range []ProfileID{ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileServiceCredential, ProfileServiceMap, ProfileDockerActionArg} {
+		if containsFold(profiles[id].Functions, "case") {
+			t.Errorf("profile %q unexpectedly admits case", id)
+		}
+	}
+}
+
 func profileIDs() []ProfileID {
 	return []ProfileID{
-		ProfileCompile, ProfileCompileTemplate, ProfilePartialTemplate, ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
+		ProfileCompile, ProfileCompileTemplate, ProfileCompileContainerImage, ProfilePartialTemplate, ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileStepCondition, ProfileCallCondition,
 		ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput, ProfileStepTemplate,
 		ProfileStepControl, ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileServiceCredential, ProfileServiceMap,
