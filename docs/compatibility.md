@@ -1161,7 +1161,9 @@ Alternate repositories, tags, non-event dynamic commits, GitHub Enterprise Serve
 | v6.0.0 | [`b7c566a772e6b6bfb58ed0dc250532a479d7789f`](https://github.com/actions/upload-artifact/tree/b7c566a772e6b6bfb58ed0dc250532a479d7789f) |
 | v7.0.1 | [`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`](https://github.com/actions/upload-artifact/tree/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a) |
 
-The v1.0.0, v2.3.1, and v3.2.1 commits match the floating legacy major tags used on github.com. Other legacy commits are unsupported, including v3.2.2, which upstream publishes only as a GitHub Enterprise Server security backport and deprecates on github.com. Every admitted release accepts only its declared inputs. Compilation emits `W_UPLOAD_ARTIFACT_LEGACY_RELEASE` for v1 through v3 to recommend v4 or later.
+The v1.0.0, v2.3.1, and v3.2.1 commits match the floating legacy major tags used on github.com. Other known legacy commits are unsupported, including v3.2.2, which upstream publishes only as a GitHub Enterprise Server security backport and deprecates on github.com. Every known admitted release accepts only its declared inputs.
+
+An unknown lowercase 40-hex immutable commit uses the stable v7.0.1 contract as a compatibility fallback. Compilation emits one `W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK` warning for each distinct unknown commit. The fallback can differ from the commit's upstream manifest, but it does not widen the native adapter or execute upstream JavaScript. Malformed commits remain unsupported. Compilation emits `W_UPLOAD_ARTIFACT_LEGACY_RELEASE` for known v1 through v3 commits to recommend v4 or later.
 
 | Input | Supported values |
 | --- | --- |

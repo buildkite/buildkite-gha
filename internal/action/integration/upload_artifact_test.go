@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestUploadArtifactCommitsAreExact(t *testing.T) {
+func TestUploadArtifactCommitContracts(t *testing.T) {
 	commits := []string{
 		UploadArtifactV1Commit, UploadArtifactV2Commit, UploadArtifactV3Commit,
 		UploadArtifactCommit, UploadArtifactV5Commit, UploadArtifactV6Commit, UploadArtifactV7Commit,
@@ -15,15 +15,45 @@ func TestUploadArtifactCommitsAreExact(t *testing.T) {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
 	}
-	for _, commit := range []string{"bbbca2ddaa5d8feaa63e36b76fdaad77386f024f", strings.Repeat("0", 40)} {
+	unknown := strings.Repeat("0", 40)
+	if err := validateUploadArtifactCommit(unknown); err != nil || !UploadArtifactUsesFallbackContract(unknown) {
+		t.Fatalf("unknown immutable commit fallback = %v, %t", err, UploadArtifactUsesFallbackContract(unknown))
+	}
+	if UploadArtifactUsesFallbackContract(UploadArtifactV7Commit) {
+		t.Fatal("known v7 commit uses fallback contract")
+	}
+	for _, commit := range []string{"v7", strings.Repeat("A", 40), strings.Repeat("0", 39)} {
 		err := validateUploadArtifactCommit(commit)
 		if err == nil {
-			t.Fatalf("unrecognized commit %s accepted", commit)
+			t.Fatalf("malformed commit %s accepted", commit)
 		}
 		for _, supported := range commits {
 			if !strings.Contains(err.Error(), supported) {
 				t.Fatalf("unrecognized commit %s error = %v, want audited commit %s", commit, err, supported)
 			}
+		}
+	}
+}
+
+func TestUploadArtifactFallbackUsesBoundedV7Contract(t *testing.T) {
+	unknown := strings.Repeat("0", 40)
+	if err := ValidateUploadArtifactInputs(unknown, map[string]string{
+		"path": "payload/*.zip", "archive": "true", "include-hidden-files": "false",
+		"compression-level": "0", "overwrite": "false",
+	}); err != nil {
+		t.Fatalf("fallback rejected bounded v7 inputs: %v", err)
+	}
+	if !UploadArtifactSupportsOutputs(unknown) || UploadArtifactIncludesHiddenByDefault(unknown) {
+		t.Fatal("fallback did not use v7 outputs and hidden-file default")
+	}
+	for _, inputs := range []map[string]string{
+		{"path": "../outside"},
+		{"path": "payload", "archive": "false"},
+		{"path": "payload", "overwrite": "true"},
+		{"path": "payload", "future-input": "value"},
+	} {
+		if err := ValidateUploadArtifactInputs(unknown, inputs); err == nil {
+			t.Fatalf("fallback accepted unsafe inputs %#v", inputs)
 		}
 	}
 }
