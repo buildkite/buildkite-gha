@@ -302,11 +302,16 @@ The importer must run on Linux/amd64 or Darwin/arm64 with Buildkite agent v3.129
 The hidden, zero-argument `buildkite-gha plugin` entry point reads plugin
 configuration from `BUILDKITE_PLUGIN_CONFIGURATION`. It accepts:
 
-- either one `workflow` path, a non-empty `workflows` array, or no selector in a
-  GitHub Actions Pipeline Trigger build
+- either one `workflow` path or a non-empty `workflows` array
 - `runners` and `oidc`
 - plugin-owned `version`, `source-ref`, and `minimum-release-age` fields
 - the Boolean `experimental-runner-user` field
+
+### Private-preview Pipeline Trigger selection
+
+Server-selected workflow imports are available only in private-preview GitHub
+Actions Pipeline Trigger builds. Most users should configure an explicit
+`workflow` or `workflows` selector.
 
 Without an explicit selector, `BUILDKITE_GITHUB_WORKFLOW_PATH` marks a GitHub
 Actions Pipeline Trigger selection. The server also supplies:
@@ -332,13 +337,12 @@ Buildkite checkout use the pull request head commit.
 because GitHub's `GITHUB_ACTION` has a different meaning. An explicit
 `workflow` or `workflows` value takes precedence over server workflow selection.
 
-Use an empty mapping to request server selection:
+Use the plugin shorthand to request server selection:
 
 ```yaml
 steps:
   - label: ":github:"
-    plugins:
-      - github-actions#latest: {}
+    plugin: github-actions
 ```
 
 This server-selected form does not require the importer step to have a `key`.

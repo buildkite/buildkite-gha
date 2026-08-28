@@ -82,8 +82,8 @@ Steps remain inside one job because they share a workspace, environment files, a
 ### Aggregate workflow upload
 
 The plugin accepts either one `workflow` path or a non-empty `workflows` array.
-In a build created by a GitHub Actions Pipeline Trigger, an empty plugin
-configuration instead uses the single workflow selected by Buildkite.
+Private-preview GitHub Actions Pipeline Trigger builds can instead use an empty
+plugin configuration and the single workflow selected by Buildkite.
 `BUILDKITE_GITHUB_WORKFLOW_PATH` marks the selection. When present, the plugin
 prefers the repository, path, and event ref from `GITHUB_WORKFLOW_REF`; the
 workflow name or fallback path from `GITHUB_WORKFLOW`; the event from
