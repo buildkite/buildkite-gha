@@ -1609,6 +1609,116 @@ func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
 	}
 }
 
+func TestCompileBundleUnknownUploadArtifactWarningIsDeduplicated(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unknown := strings.Repeat("0", 40)
+	otherUnknown := strings.Repeat("1", 40)
+	roots := map[string]string{}
+	for _, commit := range []string{unknown, otherUnknown} {
+		root := t.TempDir()
+		writeAction(t, root, "", uploadArtifactTestManifest(commit))
+		roots[commit] = root
+	}
+	compile := func(workflow []byte) Bundle {
+		t.Helper()
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions: true,
+			ActionSource:   commitActionSource{roots: roots},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bundle
+	}
+	workflow := []byte("on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n      - uses: actions/upload-artifact@" + unknown + "\n        with:\n          path: payload\n          archive: true\n      - uses: actions/upload-artifact@" + unknown + "\n        with:\n          path: again\n      - uses: actions/upload-artifact@" + otherUnknown + "\n        with:\n          path: other\n")
+	bundle := compile(workflow)
+	if len(bundle.Plans) != 2 || len(bundle.IR.Warnings) != 2 {
+		t.Fatalf("plans = %d, warnings = %#v, want one warning per distinct commit across matrix and repeated steps", len(bundle.Plans), bundle.IR.Warnings)
+	}
+	warning := bundle.IR.Warnings[0]
+	if warning.Code != "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || warning.Path != "./.github/workflows/artifact.yml" || warning.Job != "upload" || warning.Step != 1 || warning.Line == 0 ||
+		!strings.Contains(warning.Message, unknown) || !strings.Contains(warning.Message, actionintegration.UploadArtifactFallbackContractRelease) || !strings.Contains(warning.Message, "does not run the upstream action JavaScript") {
+		t.Fatalf("unknown upload-artifact fallback warning = %#v", warning)
+	}
+	if bundle.IR.Warnings[1].Code != "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[1].Step != 3 || !strings.Contains(bundle.IR.Warnings[1].Message, otherUnknown) {
+		t.Fatalf("second unknown upload-artifact fallback warning = %#v", bundle.IR.Warnings[1])
+	}
+
+	writeAction(t, workspace, ".github/actions/wrapper", "runs:\n  using: composite\n  steps:\n    - uses: actions/upload-artifact@"+unknown+"\n      with:\n        path: payload\n")
+	workflow = []byte("on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n")
+	bundle = compile(workflow)
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[0].Step != 1 || !strings.Contains(bundle.IR.Warnings[0].Message, unknown) {
+		t.Fatalf("nested unknown upload-artifact fallback warnings = %#v", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleUnknownDownloadArtifactWarningIsDeduplicated(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unknown := strings.Repeat("0", 40)
+	otherUnknown := strings.Repeat("1", 40)
+	roots := map[string]string{}
+	for _, commit := range []string{unknown, otherUnknown} {
+		root := t.TempDir()
+		writeAction(t, root, "", "name: download artifact\nruns:\n  using: node24\n  main: index.js\n")
+		roots[commit] = root
+	}
+	compile := func(workflow []byte) Bundle {
+		t.Helper()
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions: true,
+			ActionSource:   commitActionSource{roots: roots},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bundle
+	}
+	workflow := []byte("on: push\njobs:\n  producer:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo payload\n  download:\n    needs: producer\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n      - uses: actions/download-artifact@" + unknown + "\n        with:\n          name: payload\n          skip-decompress: false\n          digest-mismatch: error\n      - uses: actions/download-artifact@" + unknown + "\n        with:\n          name: again\n      - uses: actions/download-artifact@" + otherUnknown + "\n        with:\n          name: other\n")
+	bundle := compile(workflow)
+	if len(bundle.Plans) != 3 || len(bundle.IR.Warnings) != 2 {
+		t.Fatalf("plans = %d, warnings = %#v, want one warning per distinct commit across matrix and repeated steps", len(bundle.Plans), bundle.IR.Warnings)
+	}
+	warning := bundle.IR.Warnings[0]
+	if warning.Code != "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || warning.Path != "./.github/workflows/artifact.yml" || warning.Job != "download" || warning.Step != 1 || warning.Line == 0 ||
+		!strings.Contains(warning.Message, unknown) || !strings.Contains(warning.Message, actionintegration.DownloadArtifactFallbackContractRelease) || !strings.Contains(warning.Message, "verified direct needs producers") || !strings.Contains(warning.Message, "does not run the upstream action JavaScript") {
+		t.Fatalf("unknown download-artifact fallback warning = %#v", warning)
+	}
+	if bundle.IR.Warnings[1].Code != "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[1].Step != 3 || !strings.Contains(bundle.IR.Warnings[1].Message, otherUnknown) {
+		t.Fatalf("second unknown download-artifact fallback warning = %#v", bundle.IR.Warnings[1])
+	}
+
+	writeAction(t, workspace, ".github/actions/wrapper", "runs:\n  using: composite\n  steps:\n    - uses: actions/download-artifact@"+unknown+"\n      with:\n        name: payload\n")
+	workflow = []byte("on: push\njobs:\n  producer:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo payload\n  download:\n    needs: producer\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n")
+	bundle = compile(workflow)
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[0].Step != 1 || !strings.Contains(bundle.IR.Warnings[0].Message, unknown) {
+		t.Fatalf("nested unknown download-artifact fallback warnings = %#v", bundle.IR.Warnings)
+	}
+}
+
 func TestNativeCheckoutIgnoresUpstreamTokenDefaultForOrigin(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
@@ -1765,8 +1875,11 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		})
 	}
 
-	if _, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.UploadArtifactV1Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV2Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV3Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactCommit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV5Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV6Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV7Commit) {
-		t.Fatalf("unsupported upload-artifact commit error = %v", err)
+	if plans, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n          archive: true\n"); err != nil || len(plans) != 1 {
+		t.Fatalf("unknown upload-artifact fallback plans = %#v, error = %v", plans, err)
+	}
+	if _, err := compile("c6a366c94c3e0affe28c06c8df20a878f24da3cf", "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), "does not admit resolved commit") {
+		t.Fatalf("known unsupported upload-artifact commit error = %v", err)
 	}
 
 	matrixWorkflow := []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        mode: [production, test]\n    steps:\n      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV6Commit + "\n        if: matrix.mode == 'test'\n        with:\n          name: ${{ github.sha }}\n          path: ./artifacts.tar.gz\n          retention-days: '0'\n")
@@ -1861,8 +1974,8 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 	if _, err := compile(actionintegration.DownloadArtifactCommit, "", "        with:\n          name: payload\n"); err == nil || !strings.Contains(err.Error(), "direct needs producer") {
 		t.Fatalf("needs-free download-artifact error = %v", err)
 	}
-	if _, err := compile(strings.Repeat("b", 40), "    needs: producer\n", "        with:\n          name: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.DownloadArtifactCommit) || !strings.Contains(err.Error(), actionintegration.DownloadArtifactV5Commit) {
-		t.Fatalf("unsupported download-artifact commit error = %v", err)
+	if plans, err := compile(strings.Repeat("b", 40), "    needs: producer\n", "        with:\n          name: payload\n          skip-decompress: false\n          digest-mismatch: error\n"); err != nil || len(plans) != 2 {
+		t.Fatalf("unknown download-artifact fallback plans = %#v, error = %v", plans, err)
 	}
 	for name, with := range map[string]string{
 		"raw":             "        with:\n          name: payload\n          skip-decompress: true\n",
@@ -1954,8 +2067,8 @@ func TestDownloadArtifactMutableTagMustResolveToAuditedExactLock(t *testing.T) {
 	}
 
 	resolved.commit = strings.Repeat("b", 40)
-	if _, _, _, _, err := compileActionLocks(t.Context(), t.TempDir(), resolved, []string{"actions/download-artifact@v8"}); err == nil {
-		t.Fatal("mutable v8 tag resolving to an unaudited commit was accepted")
+	if _, locks, _, _, err := compileActionLocks(t.Context(), t.TempDir(), resolved, []string{"actions/download-artifact@v8"}); err != nil || len(locks) != 1 || locks[0].Commit != resolved.commit {
+		t.Fatalf("mutable v8 tag unknown commit fallback locks = %#v, error = %v", locks, err)
 	}
 }
 

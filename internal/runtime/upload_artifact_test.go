@@ -102,6 +102,7 @@ func TestUploadArtifactRuntimeVersionMatrix(t *testing.T) {
 		{name: "v5.0.0 defaults", commit: actionintegration.UploadArtifactV5Commit, inputs: map[string]string{"path": "./payload"}, wantOutputs: true},
 		{name: "v6.0.0 defaults", commit: actionintegration.UploadArtifactV6Commit, inputs: map[string]string{"path": "./payload", "retention-days": "0"}, wantOutputs: true},
 		{name: "v7.0.1 ZIP", commit: actionintegration.UploadArtifactV7Commit, inputs: map[string]string{"path": "payload", "archive": " true ", "name": "v7"}, wantOutputs: true},
+		{name: "unknown commit v7 fallback", commit: strings.Repeat("0", 40), inputs: map[string]string{"path": "payload", "archive": "true"}, wantOutputs: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			uploader := &captureArtifactUploader{}
@@ -748,8 +749,14 @@ func TestUploadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) {
 	}
 
 	job.Actions[0].Commit = strings.Repeat("b", 40)
-	if _, err := (Runner{Actions: materializer, Artifacts: &captureArtifactUploader{}}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), actionintegration.UploadArtifactCommit) {
-		t.Fatalf("unsupported runtime commit error = %v", err)
+	fallbackResult, err := (Runner{Actions: materializer, Artifacts: &captureArtifactUploader{}}).RunJob(t.Context(), job, workspace)
+	if err != nil || fallbackResult.Conclusion != "success" || fallbackResult.Outputs["artifact_id"] == "" || fallbackResult.Outputs["artifact_digest"] == "" {
+		t.Fatalf("unknown commit fallback result = %#v, error = %v", fallbackResult, err)
+	}
+
+	job.Actions[0].Commit = strings.Repeat("b", 39)
+	if _, err := (Runner{Actions: materializer, Artifacts: &captureArtifactUploader{}}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "invalid GitHub identity") {
+		t.Fatalf("malformed runtime commit error = %v", err)
 	}
 }
 

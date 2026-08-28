@@ -25,6 +25,13 @@ const (
 	UploadArtifactV5Commit = "330a01c490aca151604b8cf639adc76d48f6c5d4"
 	UploadArtifactV6Commit = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
 	UploadArtifactV7Commit = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+	// uploadArtifactV322Commit is a GHES-only legacy security backport that
+	// remains outside the github.com native adapter contract.
+	uploadArtifactV322Commit = "c6a366c94c3e0affe28c06c8df20a878f24da3cf"
+
+	// UploadArtifactFallbackContractRelease identifies the stable contract used
+	// for immutable commits outside the exact admission set.
+	UploadArtifactFallbackContractRelease = "v7.0.1"
 
 	MaxUploadArtifactNameBytes = 255
 	MaxUploadArtifactRoots     = 32
@@ -65,15 +72,33 @@ func uploadArtifactGeneration(commit string) int {
 	return 4
 }
 
+// UploadArtifactUsesFallbackContract reports whether an immutable commit is
+// outside the exact admission set and therefore uses the stable v7 contract.
+func UploadArtifactUsesFallbackContract(commit string) bool {
+	if !ValidCheckoutSHA(commit) || commit == uploadArtifactV322Commit {
+		return false
+	}
+	_, exact := uploadArtifactCommits[commit]
+	return !exact
+}
+
+func uploadArtifactContractCommit(commit string) string {
+	if UploadArtifactUsesFallbackContract(commit) {
+		return UploadArtifactV7Commit
+	}
+	return commit
+}
+
 // UploadArtifactSupportsOutputs reports whether the admitted release declares
 // artifact outputs. Upstream legacy v1 through v3 releases declared none.
 func UploadArtifactSupportsOutputs(commit string) bool {
-	return uploadArtifactGeneration(commit) >= 4
+	return uploadArtifactGeneration(uploadArtifactContractCommit(commit)) >= 4
 }
 
 // UploadArtifactIncludesHiddenByDefault reports whether omission of
 // include-hidden-files retains hidden paths for the admitted release.
 func UploadArtifactIncludesHiddenByDefault(commit string) bool {
+	commit = uploadArtifactContractCommit(commit)
 	return commit == UploadArtifactV1Commit || commit == UploadArtifactV2Commit
 }
 
@@ -87,7 +112,7 @@ func LegacyUploadArtifactRelease(commit string) (string, bool) {
 }
 
 func validateUploadArtifactCommit(commit string) error {
-	if _, ok := uploadArtifactCommits[commit]; !ok {
+	if _, ok := uploadArtifactCommits[commit]; !ok && (!ValidCheckoutSHA(commit) || commit == uploadArtifactV322Commit) {
 		commits := make([]string, 0, len(uploadArtifactCommits))
 		for supported, version := range uploadArtifactCommits {
 			commits = append(commits, version+" ("+supported+")")
@@ -115,7 +140,8 @@ func validateUploadArtifactInputs(commit string, inputs map[string]string, evalu
 	if err := validateUploadArtifactCommit(commit); err != nil {
 		return err
 	}
-	generation := uploadArtifactGeneration(commit)
+	contractCommit := uploadArtifactContractCommit(commit)
+	generation := uploadArtifactGeneration(contractCommit)
 	allowed := map[string]bool{"name": true, "path": true, "if-no-files-found": true, "include-hidden-files": true, "compression-level": true, "overwrite": true, "archive": true, "retention-days": true}
 	seen := map[string]bool{}
 	for _, name := range sortedNames(inputs) {
@@ -127,7 +153,7 @@ func validateUploadArtifactInputs(commit string, inputs map[string]string, evalu
 		if !allowed[lower] {
 			return fmt.Errorf("unknown input %q is unsupported by the bounded upload-artifact adapter", name)
 		}
-		if lower == "archive" && commit != UploadArtifactV7Commit {
+		if lower == "archive" && contractCommit != UploadArtifactV7Commit {
 			return fmt.Errorf("input %q exists only in actions/upload-artifact v7", name)
 		}
 		if uploadArtifactInputIntroduced[lower] > generation {

@@ -501,12 +501,32 @@ func unknownCheckoutCommitWarning(position workflow.Position, commit string) War
 	}
 }
 
+func unknownUploadArtifactCommitWarning(position workflow.Position, commit string) Warning {
+	return Warning{
+		Code:   "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("actions/upload-artifact resolved to immutable commit %s, which is outside the exact admission set. The native adapter is using the supported %s contract instead; it still restricts names, paths, archive mode, overwrite, hidden files, sizes, and outputs, and does not run the upstream action JavaScript.",
+			commit, actionintegration.UploadArtifactFallbackContractRelease),
+	}
+}
+
 func legacyUploadArtifactWarning(position workflow.Position, release string) Warning {
 	return Warning{
 		Code:    "W_UPLOAD_ARTIFACT_LEGACY_RELEASE",
 		Line:    position.Line,
 		Column:  position.Column,
 		Message: fmt.Sprintf("actions/upload-artifact %s is emulated by the native adapter with its release contract; upgrade to v4 or later", release),
+	}
+}
+
+func unknownDownloadArtifactCommitWarning(position workflow.Position, commit string) Warning {
+	return Warning{
+		Code:   "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("actions/download-artifact resolved to immutable commit %s, which is outside the exact admission set. The native adapter is using the supported %s contract instead; it still restricts selection to artifacts from verified direct needs producers and enforces destination, ZIP, digest, count, and size bounds, and does not run the upstream action JavaScript.",
+			commit, actionintegration.DownloadArtifactFallbackContractRelease),
 	}
 }
 
