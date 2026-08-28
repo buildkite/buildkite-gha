@@ -1687,7 +1687,7 @@ jobs:
     steps:
       - name: Head ${{ github.event.pull_request.head.sha }}
         run: echo '${{ github.event.pull_request.head.sha }}' '${{ github.event.missing }}' '${{ github.event.action }}' '${{ github.event.pull_request.head.sha == steps.previous.outputs.sha }}'
-        continue-on-error: ${{ github.event.allow_failure }}
+        continue-on-error: ${{ github.event.allow_failure && steps.previous.outcome == 'failure' }}
         timeout-minutes: ${{ github.event.timeout }}
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -1726,7 +1726,7 @@ runs:
 	if step.Name != "Head 2222222222222222222222222222222222222222" || step.Env["HEAD_SHA"] != "2222222222222222222222222222222222222222" || step.Shell != "bash" || step.WorkingDirectory != "." {
 		t.Fatalf("step templates were not reduced: %#v", step)
 	}
-	if step.ContinueOnErrorExpression != "${{ true }}" || step.TimeoutMinutesExpression != "${{ 7 }}" {
+	if step.ContinueOnErrorExpression != "${{ (true && (steps.previous.outcome == 'failure')) }}" || step.TimeoutMinutesExpression != "${{ 7 }}" {
 		t.Fatalf("typed step expressions were not reduced: %#v", step)
 	}
 	if want := "echo '2222222222222222222222222222222222222222' '' 'opened' '${{ ('2222222222222222222222222222222222222222' == steps.previous.outputs.sha) }}'"; step.Command != want {

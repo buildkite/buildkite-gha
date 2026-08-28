@@ -677,7 +677,20 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 		if err != nil {
 			return Reduced{}, siteError(site, err)
 		}
-		if value, err := evaluateCompileCondition(reduced, values.Compile); err == nil {
+		if profile.semantics == semanticsStepControl {
+			node, empty, parseErr := parseCondition(reduced)
+			if parseErr != nil {
+				return Reduced{}, siteError(site, parseErr)
+			}
+			if !empty {
+				if value, available, evaluateErr := evaluateCompileNodeAvailable(node, values.Compile); evaluateErr == nil && available {
+					if !matchesEngineResult(value, site.Result) {
+						return Reduced{}, siteError(site, fmt.Errorf("expression produced %T, want %s", value, site.Result))
+					}
+					return Reduced{Known: true, Value: value}, nil
+				}
+			}
+		} else if value, evaluateErr := evaluateCompileCondition(reduced, values.Compile); evaluateErr == nil {
 			return Reduced{Known: true, Value: value}, nil
 		}
 		residual := site

@@ -247,6 +247,50 @@ func TestEngineTemplateAnalysisExcludesKnownFalseTokenBranch(t *testing.T) {
 	}
 }
 
+func TestEngineReduceStepControlPreservesTypeAndRuntimeResidual(t *testing.T) {
+	engine := NewEngine()
+	values := Values{Compile: CompileContext{GitHub: map[string]any{"event": map[string]any{
+		"allow_failure": true,
+		"timeout":       json.Number("7"),
+	}}}}
+	tests := []struct {
+		name        string
+		site        Site
+		wantKnown   bool
+		wantLiteral string
+		wantSource  string
+	}{
+		{
+			name:        "known number",
+			site:        Site{Source: "${{ github.event.timeout }}", Profile: ProfileStepControl, Result: ResultNumber},
+			wantKnown:   true,
+			wantLiteral: "7",
+		},
+		{
+			name:       "runtime residual",
+			site:       Site{Source: "${{ github.event.allow_failure && steps.setup.outcome == 'failure' }}", Profile: ProfileStepControl, Result: ResultBoolean},
+			wantSource: "${{ (true && (steps.setup.outcome == 'failure')) }}",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := engine.Reduce(test.site, values)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Known != test.wantKnown || got.Source != test.wantSource {
+				t.Fatalf("Reduce() = %#v, want known %v and source %q", got, test.wantKnown, test.wantSource)
+			}
+			if got.Known {
+				literal, literalErr := engine.Literal(got.Value)
+				if literalErr != nil || literal != test.wantLiteral {
+					t.Fatalf("Literal(Reduce().Value) = %q, %v; want %q", literal, literalErr, test.wantLiteral)
+				}
+			}
+		})
+	}
+}
+
 func TestEngineEventPayloadEffectsFollowLazyBranches(t *testing.T) {
 	engine := NewEngine()
 	tests := []struct {

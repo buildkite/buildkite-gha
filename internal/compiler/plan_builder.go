@@ -345,7 +345,7 @@ var compileReductionProfiles = map[program.Surface]expression.ProfileID{
 	program.SurfaceJobCondition:      expression.ProfileCompileJobCondition,
 	program.SurfaceCallCondition:     expression.ProfileCompileCallCondition,
 	program.SurfaceStepCondition:     expression.ProfileCompileStepCondition,
-	program.SurfaceStepControl:       expression.ProfileCompile,
+	program.SurfaceStepControl:       expression.ProfileStepControl,
 	program.SurfaceJobEnvironment:    expression.ProfileJobEnvironment,
 	program.SurfaceJobDefault:        expression.ProfileJobDefault,
 	program.SurfaceJobOutput:         expression.ProfileJobOutput,
