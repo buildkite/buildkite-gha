@@ -331,7 +331,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	result, err := (Runner{
 		Node24: node, Actions: materializer, Cache: provider, Redactor: redactor,
 		Stdout: &logs, Stderr: &logs,
-	}).RunJob(t.Context(), job, workspace)
+	}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -389,7 +389,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	}
 
 	job.Actions[0].Commit = strings.Repeat("b", 40)
-	if _, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
+	if _, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: redactor}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
 		t.Fatalf("unsupported runtime cache commit error = %v", err)
 	}
 }
@@ -503,7 +503,7 @@ fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "\n");
 				Commit: strings.Repeat("a", 40), SourceDigest: digest,
 			}}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-			result, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: &testRedactor{}}).RunJob(t.Context(), job, workspace)
+			result, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: &testRedactor{}}).runTestJob(t.Context(), job, workspace)
 			if err != nil || result.Conclusion != "success" {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 			}
@@ -561,7 +561,7 @@ func TestActionCacheRedactorIsPinnedBeforeWorkflowExecution(t *testing.T) {
 		SourceDigest: digestTree(t, filepath.Join(workspace, filepath.FromSlash(actionPath))),
 	}}
 	provider := &sequenceCacheCredentials{tokens: []string{token}}
-	result, err := (Runner{Node24: node, Cache: provider, Redactor: AgentRedactor{}}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: node, Cache: provider, Redactor: AgentRedactor{}}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -595,7 +595,7 @@ func TestGenericActionCacheDisablesWhenRedactorCannotBePinned(t *testing.T) {
 	result, err := (Runner{
 		Node24: node, Cache: provider,
 		Redactor: AgentRedactor{Executable: filepath.Join(t.TempDir(), "missing-agent")},
-	}).RunJob(t.Context(), job, workspace)
+	}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -624,11 +624,15 @@ func TestExplicitCacheRequiresPinnedRedactorBeforeWorkflowExecution(t *testing.T
 		RequestedRef: actionintegration.CacheCommit, Commit: actionintegration.CacheCommit,
 		SourceDigest: digestTree(t, remote),
 	}}
+	attachTestProgram(&job)
+	if err := attachTestActionProgramFromRoot(&job, lockID, remote, "."); err != nil {
+		t.Fatal(err)
+	}
 	provider := &sequenceCacheCredentials{tokens: []string{"header.unused.signature"}}
 	_, err := (Runner{
 		Cache:    provider,
 		Redactor: AgentRedactor{Executable: filepath.Join(t.TempDir(), "missing-agent")},
-	}).RunJob(t.Context(), job, workspace)
+	}).runTestJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "resolve Buildkite Agent redactor before workflow execution") {
 		t.Fatalf("RunJob() error = %v", err)
 	}

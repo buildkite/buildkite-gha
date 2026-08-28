@@ -14,11 +14,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -133,6 +135,7 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 		Steps:        []plan.Step{{ID: "produce", Kind: "run", Command: `echo "result=cli-ok" >> "$GITHUB_OUTPUT"`}},
 		RequiresMise: &requiresMise,
 	}
+	attachCLIExecutionProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -867,6 +870,7 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
 		RequiresMise:         &requiresMise,
 	}
+	attachCLIExecutionProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -941,8 +945,84 @@ func cliRunJobPlan() plan.Job {
 	}
 }
 
+func attachCLIExecutionProgram(job *plan.Job) {
+	actions := map[string]executionprogram.Action{}
+	for _, lock := range job.Actions {
+		action := executionprogram.Action{Runtime: "node24", Main: "index.js", PreIf: cliProgramSite(""), PostIf: cliProgramSite("")}
+		if lock.DockerImage != "" {
+			action.Runtime, action.Main, action.Image = "docker", "", lock.DockerImage
+		}
+		actions[lock.ID] = action
+	}
+	normalized := executionprogram.Program{Version: executionprogram.Version, Actions: actions, Job: executionprogram.Job{
+		Condition: cliProgramSite(job.Condition), ContinueOnError: job.ContinueOnError, TimeoutMinutes: job.TimeoutMinutes,
+		Env:      cliProgramBindings(job.Env),
+		Defaults: executionprogram.Defaults{Shell: cliProgramSite(job.DefaultShell), WorkingDirectory: cliProgramSite(job.DefaultWorkingDirectory)},
+		Outputs:  cliProgramBindings(job.Outputs),
+	}}
+	normalized.Job.Guards = make([]executionprogram.Guard, len(job.CallGuards))
+	for i, guard := range job.CallGuards {
+		normalized.Job.Guards[i].Condition = cliProgramSite(guard.Condition)
+	}
+	normalized.Job.Steps = make([]executionprogram.Step, len(job.Steps))
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		projected := executionprogram.Step{ID: step.ID, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Env: cliProgramBindings(step.Env), Condition: cliProgramSite(step.Condition), ContinueOnError: executionprogram.BoolControl{Literal: step.ContinueOnError}, TimeoutMinutes: executionprogram.NumberControl{Literal: step.TimeoutMinutes}, Name: cliProgramSite(step.Name)}
+		if step.ContinueOnErrorExpression != "" {
+			value := cliProgramSite(step.ContinueOnErrorExpression)
+			projected.ContinueOnError.Expression = &value
+		}
+		if step.TimeoutMinutesExpression != "" {
+			value := cliProgramSite(step.TimeoutMinutesExpression)
+			projected.TimeoutMinutes.Expression = &value
+		}
+		switch step.Kind {
+		case "run":
+			projected.Run = &executionprogram.Run{Command: cliProgramSite(step.Command), Shell: cliProgramSite(step.Shell), WorkingDirectory: cliProgramSite(step.WorkingDirectory)}
+		case "uses":
+			projected.Invocation = &executionprogram.Invocation{Uses: cliProgramSite(step.Uses), With: cliProgramBindings(step.With)}
+			if step.Action != nil {
+				projected.Invocation.Lock = step.Action.Lock
+			}
+		}
+		normalized.Job.Steps[i] = projected
+		step.Execution = &normalized.Job.Steps[i]
+	}
+	if job.Container != nil {
+		normalized.Job.Container = &executionprogram.Container{Image: cliProgramSite(job.Container.Image), Env: cliProgramBindings(job.Container.Env), Ports: cliProgramSites(job.Container.Ports)}
+	}
+	normalized.DeriveSiteSemantics()
+	job.Program = &normalized
+}
+
+func cliProgramSite(source string) executionprogram.Site {
+	return executionprogram.Site{Source: source}
+}
+
+func cliProgramBindings(values map[string]string) []executionprogram.Binding {
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]executionprogram.Binding, 0, len(names))
+	for _, name := range names {
+		result = append(result, executionprogram.Binding{Name: name, Value: cliProgramSite(values[name])})
+	}
+	return result
+}
+
+func cliProgramSites(values []string) []executionprogram.Site {
+	result := make([]executionprogram.Site, len(values))
+	for i, value := range values {
+		result[i] = cliProgramSite(value)
+	}
+	return result
+}
+
 func writeCLIJobPlan(t *testing.T, job plan.Job) (string, string) {
 	t.Helper()
+	attachCLIExecutionProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
 		t.Fatal(err)

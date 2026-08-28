@@ -1400,8 +1400,8 @@ jobs:
 	if got := conditions["enabled-call.string-gated"]; got != [2]string{"'deploy'", "'deploy'"} {
 		t.Fatalf("non-empty string conditions = %#v, want a quoted expression literal", got)
 	}
-	if got := conditions["disabled-call.string-gated"]; got != [2]string{"false", "false"} {
-		t.Fatalf("empty string conditions = %#v, want inert statically disabled step", got)
+	if got := conditions["disabled-call.string-gated"]; got != [2]string{"false", "''"} {
+		t.Fatalf("empty string conditions = %#v, want original step condition retained", got)
 	}
 }
 
@@ -1709,6 +1709,26 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 	}
 	if resolved.Steps[0].ContinueOnErrorExpression != "${{ true && matrix.experimental }}" || resolved.Steps[0].TimeoutMinutesExpression != "${{ matrix.timeout || 5 }}" {
 		t.Fatalf("partially resolved controls = %#v", resolved.Steps[0])
+	}
+
+	job.Steps[0].ContinueOnErrorExpression = "${{ inputs.allow && steps.setup.outcome == 'success' }}"
+	job.Steps[0].TimeoutMinutesExpression = "${{ steps.setup.outputs.timeout || inputs.wait }}"
+	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"allow": true, "wait": 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Steps[0].ContinueOnErrorExpression != "${{ true && steps.setup.outcome == 'success' }}" || resolved.Steps[0].TimeoutMinutesExpression != "${{ steps.setup.outputs.timeout || 5 }}" {
+		t.Fatalf("runtime step controls = %#v", resolved.Steps[0])
+	}
+
+	job.Steps[0].ContinueOnErrorExpression = "${{ inputs.allow && hashFiles('go.sum') != '' }}"
+	job.Steps[0].TimeoutMinutesExpression = ""
+	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"allow": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Steps[0].ContinueOnErrorExpression != "${{ true && hashFiles('go.sum') != '' }}" {
+		t.Fatalf("runtime hashFiles control = %#v", resolved.Steps[0])
 	}
 
 	for _, field := range []string{"continue-on-error", "timeout-minutes"} {
@@ -2807,8 +2827,11 @@ jobs:
 	}
 	conditions := map[string]bool{}
 	for _, job := range matrix {
-		if !slices.Equal(job.RequiredSecrets, []string{"BETA"}) || !job.HasCapability("secrets") || job.GitHubToken == nil || !job.HasCapability("provider-token-write") {
+		if !slices.Equal(job.RequiredSecrets, []string{"BETA"}) || !job.HasCapability("secrets") {
 			t.Fatalf("matrix callee authority = secrets %#v, token %#v, capabilities %#v", job.RequiredSecrets, job.GitHubToken, job.RequiredCapabilities)
+		}
+		if reachable := job.Condition != "false"; reachable != (job.GitHubToken != nil && job.HasCapability("provider-token-write")) {
+			t.Fatalf("matrix callee condition %q token authority = %#v / %#v", job.Condition, job.GitHubToken, job.RequiredCapabilities)
 		}
 		conditions[job.Condition] = true
 	}
@@ -4254,6 +4277,20 @@ jobs:
 	}
 	if encoded, err := plan.Encode(plans[0]); err != nil || bytes.Contains(encoded, []byte("${{")) {
 		t.Fatalf("encoded plan retained an expression: %s, %v", encoded, err)
+	}
+}
+
+func TestCompileTemplateScalarCallersRenderCompleteExpressions(t *testing.T) {
+	group, err := resolveConcurrency("workflow.yml", "test", &workflow.Concurrency{Group: "${{ true }}"}, expression.CompileContext{}, nil)
+	if err != nil || group != "true" {
+		t.Fatalf("scalar concurrency group = %q, %v", group, err)
+	}
+	labels, err := resolveRunsOn(workflow.Job{RunsOn: []string{"${{ 24 }}"}}, expression.CompileContext{}, nil)
+	if err != nil || !slices.Equal(labels, []string{"24"}) {
+		t.Fatalf("scalar runs-on labels = %#v, %v", labels, err)
+	}
+	if label := instanceLabel(workflow.Job{ID: "test", Name: "${{ 2.5 }}"}, nil, expression.CompileContext{}); label != "2.5" {
+		t.Fatalf("scalar job name = %q", label)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/workflow"
 	"go.yaml.in/yaml/v4"
 )
 
@@ -1686,7 +1687,7 @@ jobs:
     steps:
       - name: Head ${{ github.event.pull_request.head.sha }}
         run: echo '${{ github.event.pull_request.head.sha }}' '${{ github.event.missing }}' '${{ github.event.action }}' '${{ github.event.pull_request.head.sha == steps.previous.outputs.sha }}'
-        continue-on-error: ${{ github.event.allow_failure }}
+        continue-on-error: ${{ github.event.allow_failure && steps.previous.outcome == 'failure' }}
         timeout-minutes: ${{ github.event.timeout }}
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -1718,6 +1719,9 @@ runs:
 		t.Fatal(err)
 	}
 	job := bundle.Plans[0].Job
+	if job.Event.PayloadArtifact {
+		t.Fatal("fully reduced event expressions retained the event payload")
+	}
 	if job.Env["JOB_SHA"] != "2222222222222222222222222222222222222222" || job.DefaultShell != "bash" || job.DefaultWorkingDirectory != "." {
 		t.Fatalf("job templates were not reduced: env = %#v, shell = %q, working-directory = %q", job.Env, job.DefaultShell, job.DefaultWorkingDirectory)
 	}
@@ -1725,7 +1729,7 @@ runs:
 	if step.Name != "Head 2222222222222222222222222222222222222222" || step.Env["HEAD_SHA"] != "2222222222222222222222222222222222222222" || step.Shell != "bash" || step.WorkingDirectory != "." {
 		t.Fatalf("step templates were not reduced: %#v", step)
 	}
-	if step.ContinueOnErrorExpression != "${{ true }}" || step.TimeoutMinutesExpression != "${{ 7 }}" {
+	if step.ContinueOnErrorExpression != "${{ (true && (steps.previous.outcome == 'failure')) }}" || step.TimeoutMinutesExpression != "${{ 7 }}" {
 		t.Fatalf("typed step expressions were not reduced: %#v", step)
 	}
 	if want := "echo '2222222222222222222222222222222222222222' '' 'opened' '${{ ('2222222222222222222222222222222222222222' == steps.previous.outputs.sha) }}'"; step.Command != want {
@@ -1753,6 +1757,38 @@ jobs:
 	_, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err == nil || !strings.Contains(err.Error(), "result contains expression syntax") {
 		t.Fatalf("CompileBundle() error = %v, want expression injection rejection", err)
+	}
+}
+
+func TestCompileBundlePreservesFoldedStepControlTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		control string
+		value   string
+	}{
+		{name: "boolean string", control: "continue-on-error", value: `"yes please"`},
+		{name: "numeric string", control: "timeout-minutes", value: `"10"`},
+		{name: "null", control: "timeout-minutes", value: `null`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        " + test.control + ": ${{ github.event.value }}\n")
+			event := []byte(`{
+  "provider": "github", "event": "push",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+  "ref": "refs/heads/main", "sha": "1111111111111111111111111111111111111111", "actor": "octocat",
+  "payload": {"value": ` + test.value + `}
+}`)
+			if _, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer"); err == nil {
+				t.Fatal("CompileBundle() accepted a folded value with the wrong type")
+			} else {
+				for _, detail := range []string{"workflow.yml:6:9", test.control} {
+					if !strings.Contains(err.Error(), detail) {
+						t.Fatalf("CompileBundle() error = %v, want location detail %q", err, detail)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -1821,6 +1857,64 @@ jobs:
 	}
 }
 
+func TestCompileBundleEventPayloadAuthorityFollowsReducedProgramReachability(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  false-job:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ toJSON(github.event) }}'
+  false-step:
+    runs-on: ubuntu-latest
+    steps:
+      - if: false
+        run: echo '${{ toJSON(github.event) }}'
+  unknown-step:
+    runs-on: ubuntu-latest
+    steps:
+      - if: env.RUNTIME == 'yes'
+        run: echo '${{ toJSON(github.event) }}'
+  condition-event:
+    runs-on: ubuntu-latest
+    steps:
+      - id: selector
+        run: echo selector
+      - if: github.event[steps.selector.outputs.key]
+        run: echo condition
+  control-event:
+    runs-on: ubuntu-latest
+    steps:
+      - id: selector
+        run: echo selector
+      - run: echo control
+        continue-on-error: ${{ github.event[steps.selector.outputs.boolean_key] }}
+        timeout-minutes: ${{ github.event[steps.selector.outputs.number_key] }}
+`)
+	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPayload := map[string]bool{
+		"false-job": false, "false-step": false, "unknown-step": true, "condition-event": true, "control-event": true,
+	}
+	if len(bundle.Plans) != len(wantPayload) {
+		t.Fatalf("plans = %d, want %d", len(bundle.Plans), len(wantPayload))
+	}
+	jobs := make(map[string]plan.Job, len(bundle.Plans))
+	for _, artifact := range bundle.Plans {
+		job := artifact.Job
+		jobs[job.Workflow.LogicalJobID] = job
+		if job.Event.PayloadArtifact != wantPayload[job.Workflow.LogicalJobID] {
+			t.Errorf("job %q payload artifact = %v, want %v", job.Workflow.LogicalJobID, job.Event.PayloadArtifact, wantPayload[job.Workflow.LogicalJobID])
+		}
+	}
+	control := jobs["control-event"].Steps[1]
+	if !strings.Contains(control.ContinueOnErrorExpression, "github.event") || !strings.Contains(control.TimeoutMinutesExpression, "github.event") {
+		t.Fatalf("dynamic event controls were not preserved: %#v", control)
+	}
+}
+
 func TestCompileBundleReducesEventExpressionsAfterMatrixExpansion(t *testing.T) {
 	source := []byte(`on: push
 jobs:
@@ -1872,12 +1966,35 @@ jobs:
 
 func TestRequiredSecretsDoesNotInterpretConditionLiteralsAsTemplates(t *testing.T) {
 	instance := JobInstance{If: "'${{ github.token }} ${{ secrets.DEPLOY }} ${{ github.event.action }}' == runner.os"}
-	secrets, _, _, referencesToken, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, nil, false)
+	secrets, _, _, referencesToken, _, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, nil, nil, false, "https://github.com", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(secrets) != 0 || referencesToken {
 		t.Fatalf("condition literal granted secret authority: %#v, token = %v", secrets, referencesToken)
+	}
+}
+
+func TestRequiredSecretsNarrowsTokenAuthorityByKnownServerURL(t *testing.T) {
+	instance := JobInstance{Steps: []workflow.Step{{Kind: "run", Run: "${{ github.server_url == 'https://github.com' && github.token || '' }}"}}}
+	workflowProgram := lowerWorkflowProgram(instance)
+	for _, test := range []struct {
+		name      string
+		serverURL string
+		wantToken bool
+	}{
+		{name: "GitHub", serverURL: "https://github.com", wantToken: true},
+		{name: "non-GitHub provider", serverURL: "https://origin.cursor.com"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, _, token, _, err := requiredSecrets(workflowProgram, instance.secretAuthority, nil, nil, false, test.serverURL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if token != test.wantToken {
+				t.Fatalf("github.token authority = %v, want %v", token, test.wantToken)
+			}
+		})
 	}
 }
 

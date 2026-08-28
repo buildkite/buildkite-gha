@@ -65,3 +65,22 @@ func TestEvaluateBindingsPreservesOrderAtFailure(t *testing.T) {
 		t.Fatalf("EvaluateBindings() error = %v", err)
 	}
 }
+
+func TestTransformSitesIncludesActionsWithoutMutatingSource(t *testing.T) {
+	original := program.Program{Version: program.Version, Job: program.Job{Condition: program.Site{Source: "job"}}, Actions: map[string]program.Action{
+		"a-1": {Runtime: "composite", Steps: []program.ActionStep{{Run: &program.ActionRun{Command: program.Site{Source: "action"}}}}},
+	}}
+	transformed, err := original.TransformSites(func(site program.Site) (program.Site, error) {
+		site.Source += "-reduced"
+		return site, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if original.Job.Condition.Source != "job" || original.Actions["a-1"].Steps[0].Run.Command.Source != "action" {
+		t.Fatalf("TransformSites() mutated source: %#v", original)
+	}
+	if transformed.Job.Condition.Source != "job-reduced" || transformed.Actions["a-1"].Steps[0].Run.Command.Source != "action-reduced" {
+		t.Fatalf("TransformSites() omitted a site: %#v", transformed)
+	}
+}

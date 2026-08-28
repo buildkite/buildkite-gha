@@ -952,6 +952,233 @@ jobs:
 	}
 }
 
+func TestCompilePlansPrunesOnlyKnownFalseRootActionTokenAuthority(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "token-reachability.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, workspace, ".github/actions/token", `name: token default
+inputs:
+  token:
+    default: ${{ case(true, github.token, '') }}
+  deploy_key:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	compile := func(source string) ([]plan.Job, error) {
+		return compilePlansForTest(t.Context(), workflowPath, []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	}
+	for _, test := range []struct {
+		name      string
+		condition string
+		jobIf     string
+	}{
+		{name: "step", condition: "        if: false\n"},
+		{name: "job", jobIf: "    if: false\n"},
+		{name: "matrix", condition: "        if: matrix.enabled\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			matrix := ""
+			if test.name == "matrix" {
+				matrix = "    strategy:\n      matrix:\n        enabled: [false]\n"
+			}
+			source := "on: push\njobs:\n  token:\n" + test.jobIf + matrix + "    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/token\n" + test.condition + "        with:\n          token: ${{ secrets.GITHUB_TOKEN }}\n          deploy_key: ${{ secrets.DEPLOY_KEY }}\n"
+			plans, err := compile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 1 || plans[0].GitHubToken != nil || plans[0].HasCapability("provider-token-write") {
+				t.Fatalf("known-false action retained token authority: %#v", plans)
+			}
+			if !reflect.DeepEqual(plans[0].RequiredSecrets, []string{"DEPLOY_KEY"}) || !plans[0].HasCapability("secrets") {
+				t.Fatalf("known-false action dropped ordinary secret inventory: %#v", plans[0])
+			}
+			if len(plans[0].Actions) == 0 || len(plans[0].Program.Actions) == 0 {
+				t.Fatal("known-false action was not resolved and retained in the plan")
+			}
+		})
+	}
+	_, err := compile(`on: push
+permissions: {}
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/token
+        if: env.RUNTIME_FLAG == 'yes'
+        with:
+          deploy_key: ${{ secrets.DEPLOY_KEY }}
+`)
+	if err == nil || !strings.Contains(err.Error(), "no effective permissions") {
+		t.Fatalf("runtime-dependent action condition error = %v, want conservative token authority", err)
+	}
+}
+
+func TestCompilePlansPrunesActionTokenAuthorityBehindKnownFalseCallGuard(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    if: false
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/token
+`)
+	writeAction(t, repository, ".github/actions/token", `name: token default
+inputs:
+  token:
+    default: ${{ github.token }}
+runs:
+  using: node24
+  main: index.js
+`)
+	plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || len(plans[0].CallGuards) != 1 || plans[0].GitHubToken != nil || plans[0].HasCapability("provider-token-write") {
+		t.Fatalf("known-false call guard retained token authority: %#v", plans)
+	}
+	if len(plans[0].Actions) == 0 || len(plans[0].Program.Actions) == 0 {
+		t.Fatal("known-false call guard skipped action resolution")
+	}
+}
+
+func TestCompilePlansDoNotUseCalleeInputsForCallerGuardReachability(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.result.outputs.deploy }}
+    steps:
+      - id: result
+        run: echo deploy=yes >> "$GITHUB_OUTPUT"
+  delegated:
+    needs: prepare
+    uses: ./.github/workflows/middle.yml
+    with:
+      deploy: ${{ needs.prepare.outputs.deploy }}
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      deploy: {type: string, required: true}
+jobs:
+  delegated:
+    if: inputs.deploy != ''
+    uses: ./.github/workflows/leaf.yml
+    with:
+      deploy: false
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      deploy: {type: boolean, required: true}
+jobs:
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/token
+`)
+	writeAction(t, repository, ".github/actions/token", `name: token default
+inputs:
+  token:
+    default: ${{ github.token }}
+runs:
+  using: node24
+  main: index.js
+`)
+	plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 || len(plans[1].CallGuards) != 1 || plans[1].Inputs["deploy"] != false || plans[1].GitHubToken == nil || !plans[1].HasCapability("provider-token-write") {
+		t.Fatalf("caller-scoped guard authority = %#v", plans)
+	}
+}
+
+func TestCompilePlansRetainsActionEventPayloadOnlyForReachableRoots(t *testing.T) {
+	repository := t.TempDir()
+	workflowPath := filepath.Join(repository, ".github", "workflows", "event.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, repository, ".github/actions/event", `name: event default
+inputs:
+  action:
+    default: ${{ github.event.action }}
+runs:
+  using: node24
+  main: index.js
+`)
+	compile := func(condition string) plan.Job {
+		t.Helper()
+		workflow := []byte("on: push\njobs:\n  event:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/event\n        if: " + condition + "\n")
+		plans, err := compilePlansForTest(t.Context(), workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(plans) != 1 {
+			t.Fatalf("plans = %#v", plans)
+		}
+		return plans[0]
+	}
+	if job := compile("false"); job.Event.PayloadArtifact || len(job.Actions) == 0 || len(job.Program.Actions) == 0 {
+		t.Fatalf("known-false event action plan = %#v", job)
+	}
+	if job := compile("env.RUNTIME == 'yes'"); !job.Event.PayloadArtifact {
+		t.Fatalf("runtime-dependent event action did not retain payload: %#v", job)
+	}
+}
+
+func TestCheckoutAuthorityFollowsRootReachability(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout-reachability.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, remote, "", checkoutTestManifest(actionintegration.CheckoutV7Commit))
+	compile := func(condition, inputs string) (Bundle, error) {
+		t.Helper()
+		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@" + actionintegration.CheckoutV7Commit + "\n        if: " + condition + "\n" + inputs)
+		return CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust:     EventUntrusted,
+			Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+			ResolveActions: true,
+			ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+		})
+	}
+	bundle, err := compile("false", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.HasCapability("provider-token-read") || len(bundle.Plans[0].Authorization.ProviderTokenReadCapabilitySources) != 0 || len(bundle.Plans[0].Job.Actions) == 0 {
+		t.Fatalf("known-false checkout authority = %#v", bundle.Plans)
+	}
+	if _, err := compile("false", "        with:\n          token: ''\n"); err == nil || !strings.Contains(err.Error(), "checkout adapter") {
+		t.Fatalf("invalid unreachable checkout input error = %v", err)
+	}
+	bundle, err = compile("env.RUNTIME == 'yes'", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || !bundle.Plans[0].Job.HasCapability("provider-token-read") || !reflect.DeepEqual(bundle.Plans[0].Authorization.ProviderTokenReadCapabilitySources, []string{"checkout-adapter"}) {
+		t.Fatalf("runtime-dependent checkout authority = %#v", bundle.Plans)
+	}
+}
+
 func TestCompileActionLocksRemoteCompositeUsesWorkspaceRoot(t *testing.T) {
 	w, remote := t.TempDir(), t.TempDir()
 	writeAction(t, w, "child", "name: child\nruns:\n  using: docker\n  image: Dockerfile\n")
@@ -2126,8 +2353,8 @@ runs:
 		if err != nil {
 			t.Fatal(err)
 		}
-		if bytes.Contains(encoded, []byte("/bin/echo")) {
-			t.Fatalf("job plan retained Docker action entrypoint: %s", encoded)
+		if !bytes.Contains(encoded, []byte(`"entrypoint": "/bin/echo"`)) {
+			t.Fatalf("job plan omitted normalized Docker action entrypoint: %s", encoded)
 		}
 		return encoded
 	}

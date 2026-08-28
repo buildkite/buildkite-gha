@@ -44,28 +44,15 @@ const (
 	actionLifecycleCondition
 )
 
-// ValidateCondition verifies that a job or step condition uses only expression
-// syntax, functions, and contexts implemented by the corresponding runtime
-// phase. Runtime-dependent values are not evaluated.
-func ValidateCondition(source string, scope ConditionScope) error {
-	return validateCondition(source, scope, nil, false)
-}
-
-// ValidateConditionWithMatrix additionally verifies references and operand
-// types against one concrete, statically expanded matrix instance.
-func ValidateConditionWithMatrix(source string, scope ConditionScope, matrix map[string]any) error {
-	return validateCondition(source, scope, matrix, true)
-}
-
-// ValidateCallCondition verifies the caller-only runtime surface of a local
+// validateCallCondition verifies the caller-only runtime surface of a local
 // reusable-workflow call condition.
-func ValidateCallCondition(source string) error {
-	return validateCondition(source, CallCondition, nil, false)
+func validateCallCondition(source string) error {
+	return validateCondition(source, CallCondition)
 }
 
-// ValidateCompileCallCondition verifies every branch of a call condition
+// validateCompileCallCondition verifies every branch of a call condition
 // before event-backed values are reduced by the compiler.
-func ValidateCompileCallCondition(source string, context CompileContext) error {
+func validateCompileCallCondition(source string, context CompileContext) error {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return err
@@ -73,13 +60,13 @@ func ValidateCompileCallCondition(source string, context CompileContext) error {
 	return validateCompileConditionNode(node, CallCondition, context, nil)
 }
 
-// ValidateActionLifecycleCondition verifies an action pre-if or post-if
+// validateActionLifecycleCondition verifies an action pre-if or post-if
 // expression without resolving runtime-dependent values.
-func ValidateActionLifecycleCondition(source string) error {
+func validateActionLifecycleCondition(source string) error {
 	if err := validateLifecycleDelimiters(source); err != nil {
 		return err
 	}
-	return validateCondition(source, actionLifecycleCondition, nil, false)
+	return validateCondition(source, actionLifecycleCondition)
 }
 
 func validateLifecycleDelimiters(source string) error {
@@ -90,11 +77,11 @@ func validateLifecycleDelimiters(source string) error {
 	return nil
 }
 
-// ValidateCompileConditionWithMatrix verifies every branch of an event-backed
+// validateCompileConditionWithMatrix verifies every branch of an event-backed
 // condition before compile-time evaluation can short-circuit it. It admits the
 // union of compile-time and runtime condition references, while retaining the
 // concrete matrix type checks used by runtime validation.
-func ValidateCompileConditionWithMatrix(source string, scope ConditionScope, context CompileContext, matrix map[string]any) error {
+func validateCompileConditionWithMatrix(source string, scope ConditionScope, context CompileContext, matrix map[string]any) error {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return err
@@ -103,15 +90,15 @@ func ValidateCompileConditionWithMatrix(source string, scope ConditionScope, con
 	return validateCompileConditionNode(node, scope, context, matrix)
 }
 
-func validateCondition(source string, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
+func validateCondition(source string, scope ConditionScope) error {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return err
 	}
-	return validateConditionNode(node, scope, matrix, matrixKnown)
+	return validateConditionNode(node, scope)
 }
 
-func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
+func validateConditionNode(node actionlint.ExprNode, scope ConditionScope) error {
 	validator := newSemanticValidator(conditionSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		return validateConditionReference(root, path, scope)
@@ -141,7 +128,7 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 				return fmt.Errorf("condition function %q requires 1 to 255 arguments", node.Callee)
 			}
 			for _, argument := range node.Args {
-				if err := validateHashFilesArgument(argument, scope, matrix, matrixKnown); err != nil {
+				if err := validateHashFilesArgument(argument, scope); err != nil {
 					return err
 				}
 			}
@@ -202,7 +189,7 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 				return fmt.Errorf("condition function %q requires 1 to 255 arguments", node.Callee)
 			}
 			for _, argument := range node.Args {
-				if err := validateHashFilesArgument(argument, scope, matrix, true); err != nil {
+				if err := validateHashFilesArgument(argument, scope); err != nil {
 					return err
 				}
 			}
@@ -392,10 +379,10 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 	return validationErr
 }
 
-// EvaluateActionLifecycleCondition evaluates action pre-if or post-if
+// evaluateActionLifecycleCondition evaluates action pre-if or post-if
 // metadata. Empty conditions are unconditionally true and, unlike workflow
 // step conditions, lifecycle conditions have no implicit success guard.
-func EvaluateActionLifecycleCondition(source string, context ConditionContext) (bool, error) {
+func evaluateActionLifecycleCondition(source string, context ConditionContext) (bool, error) {
 	if err := validateLifecycleDelimiters(source); err != nil {
 		return false, err
 	}
@@ -408,7 +395,7 @@ func EvaluateActionLifecycleCondition(source string, context ConditionContext) (
 	}
 	// Validate before evaluation so short-circuiting cannot hide an
 	// unsupported context or function in an unselected branch.
-	if err := validateConditionNode(node, actionLifecycleCondition, nil, false); err != nil {
+	if err := validateConditionNode(node, actionLifecycleCondition); err != nil {
 		return false, err
 	}
 	value, err := evaluateConditionNode(node, context)
@@ -418,9 +405,9 @@ func EvaluateActionLifecycleCondition(source string, context ConditionContext) (
 	return githubTruthy(value), nil
 }
 
-// EvaluateCondition evaluates a job or step condition. Unsupported syntax and
+// evaluateConditionLegacy evaluates a job or step condition. Unsupported syntax and
 // unavailable values return an error.
-func EvaluateCondition(source string, context ConditionContext) (bool, error) {
+func evaluateConditionLegacy(source string, context ConditionContext) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil {
 		return false, err
@@ -428,7 +415,7 @@ func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 	if empty {
 		return !context.Unsuccessful && !context.Cancelled, nil
 	}
-	if err := validateConditionNode(node, StepCondition, nil, false); err != nil {
+	if err := validateConditionNode(node, StepCondition); err != nil {
 		return false, err
 	}
 	if !containsStatusFunction(node) && (context.Unsuccessful || context.Cancelled) {
@@ -552,12 +539,12 @@ func resolveConditionRoot(root string, context ConditionContext) (any, error) {
 	}
 }
 
-func validateHashFilesArgument(node actionlint.ExprNode, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
+func validateHashFilesArgument(node actionlint.ExprNode, scope ConditionScope) error {
 	switch node.(type) {
 	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
 		return nil
 	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		return validateConditionNode(node, scope, matrix, matrixKnown)
+		return validateConditionNode(node, scope)
 	default:
 		return fmt.Errorf("condition function %q arguments must be literals or direct context references", "hashFiles")
 	}

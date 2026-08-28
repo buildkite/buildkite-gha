@@ -1275,7 +1275,7 @@ func TestDownloadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) 
 	job.Needs = map[string]plan.Need{"producer": {Result: "success", Artifacts: []plan.NeedArtifact{artifact}}}
 	store := &downloadStore{archive: archive}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: sourceDigest}}
-	result, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Actions: materializer, Artifacts: store}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Outputs["download_path"] != filepath.Join(workspace, "downloaded") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -1288,13 +1288,13 @@ func TestDownloadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) 
 
 	job.Actions[0].Commit = strings.Repeat("b", 40)
 	job.Steps[0].With = map[string]string{"name": "payload", "path": "fallback-downloaded", "skip-decompress": "false", "digest-mismatch": "error"}
-	fallbackResult, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(t.Context(), job, workspace)
+	fallbackResult, err := (Runner{Actions: materializer, Artifacts: store}).runTestJob(t.Context(), job, workspace)
 	if err != nil || fallbackResult.Conclusion != "success" || fallbackResult.Outputs["download_path"] != filepath.Join(workspace, "fallback-downloaded") || store.jobID != artifact.Producer.JobID {
 		t.Fatalf("unknown commit fallback result = %#v, error = %v", fallbackResult, err)
 	}
 
 	job.Actions[0].Commit = strings.Repeat("b", 39)
-	if _, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "invalid GitHub identity") {
+	if _, err := (Runner{Actions: materializer, Artifacts: store}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "invalid GitHub identity") {
 		t.Fatalf("malformed runtime commit error = %v", err)
 	}
 }
@@ -1337,7 +1337,7 @@ func TestDownloadArtifactMatrixConsumersEvaluateNameAndNormalizeRootPath(t *test
 			}}
 			job.Needs = map[string]plan.Need{"producer": {Result: "success", Artifacts: []plan.NeedArtifact{artifact}}}
 
-			result, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(t.Context(), job, workspace)
+			result, err := (Runner{Actions: materializer, Artifacts: store}).runTestJob(t.Context(), job, workspace)
 			wantPath, absErr := filepath.Abs(workspace)
 			if absErr != nil {
 				t.Fatal(absErr)

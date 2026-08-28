@@ -1091,50 +1091,6 @@ func TestValidateReusableInputDefaultRejectsUnavailableContexts(t *testing.T) {
 	}
 }
 
-func TestValidateConditionUsesConcreteMatrixTypes(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		source string
-		matrix map[string]any
-		want   string
-	}{
-		{name: "numeric value", source: "matrix.version == 12", matrix: map[string]any{"version": 14.0}},
-		{name: "json numeric value", source: "matrix.version == 12", matrix: map[string]any{"version": json.Number("14")}},
-		{name: "boolean value", source: "matrix.experimental == true", matrix: map[string]any{"experimental": false}},
-		{name: "string and number", source: "matrix.version == 12", matrix: map[string]any{"version": "14"}},
-		{name: "null and number", source: "matrix.version == 12", matrix: map[string]any{"version": nil}},
-		{name: "missing value", source: "matrix.version == 12", matrix: map[string]any{}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			err := ValidateConditionWithMatrix(test.source, JobCondition, test.matrix)
-			if test.want == "" && err != nil {
-				t.Fatalf("ValidateCondition() error = %v", err)
-			}
-			if test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
-				t.Fatalf("ValidateCondition() error = %v, want %q", err, test.want)
-			}
-		})
-	}
-	if err := ValidateCondition("matrix.version == 12", JobCondition); err != nil {
-		t.Fatalf("ValidateCondition() rejected unknown matrix type: %v", err)
-	}
-}
-
-func TestValidateConditionAcceptsCompilerNumericKinds(t *testing.T) {
-	values := []any{
-		int(-1), int8(-1), int16(-1), int32(-1), int64(-1),
-		uint(1), uint8(1), uint16(1), uint32(1), uint64(1), ^uint64(0),
-		float32(1.5), float64(1.5), json.Number("1e3"),
-	}
-	for _, value := range values {
-		t.Run(reflect.TypeOf(value).String(), func(t *testing.T) {
-			if err := ValidateConditionWithMatrix("matrix.value != 0", JobCondition, map[string]any{"value": value}); err != nil {
-				t.Fatalf("ValidateConditionWithMatrix(%T) error = %v", value, err)
-			}
-		})
-	}
-}
-
 func TestEvaluateFailsClosed(t *testing.T) {
 	tests := []struct {
 		name     string

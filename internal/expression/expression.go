@@ -40,9 +40,7 @@ type StepStatus struct {
 	Outputs    map[string]string
 }
 
-// Parse validates a complete ${{ ... }} expression using actionlint and returns
-// an owned representation.
-func Parse(text string, line, column int) (Expression, error) {
+func parseExpression(text string, line, column int) (Expression, error) {
 	body, err := expressionBody(text)
 	if err != nil {
 		return Expression{}, err

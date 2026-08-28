@@ -17,10 +17,10 @@ type NeedOutputReference struct {
 	Output string
 }
 
-// ReferencePath extracts one complete static variable reference. Dot and
+// staticReferencePath extracts one complete static variable reference. Dot and
 // literal string index access are accepted; functions, operators, literals,
 // compound templates, and dynamic indexes return an error.
-func ReferencePath(text string) (string, []string, error) {
+func staticReferencePath(text string) (string, []string, error) {
 	body, err := expressionBody(text)
 	if err != nil {
 		return "", nil, err
@@ -35,7 +35,7 @@ func ReferencePath(text string) (string, []string, error) {
 // DirectSecretReference accepts exactly one direct dot or literal-bracket
 // secret expression, such as ${{ secrets.NAME }} or ${{ secrets['NAME'] }}.
 func DirectSecretReference(text string) (string, error) {
-	root, path, err := ReferencePath(text)
+	root, path, err := staticReferencePath(text)
 	if err != nil || !strings.EqualFold(root, "secrets") || len(path) != 1 {
 		return "", fmt.Errorf("secret mapping must be exactly ${{ secrets.NAME }} or ${{ secrets['NAME'] }}")
 	}
@@ -84,10 +84,10 @@ func runtimeMatrixIdentifier(value string) bool {
 	return true
 }
 
-// SecretReferences returns the statically named secrets referenced by a
+// secretReferences returns the statically named secrets referenced by a
 // template. Dynamic indexes return an error because the runtime cannot determine
 // which values to resolve and register with the log redactor before execution.
-func SecretReferences(template string) ([]string, error) {
+func secretReferences(template string) ([]string, error) {
 	found := map[string]struct{}{}
 	err := visitTemplateExpressions(template, func(expression actionlint.ExprNode) error {
 		return collectSecretReferences(expression, found)
@@ -98,9 +98,9 @@ func SecretReferences(template string) ([]string, error) {
 	return sortedReferenceNames(found), nil
 }
 
-// ConditionSecretReferences returns statically named secrets from one
+// conditionSecretReferences returns statically named secrets from one
 // condition without interpreting string literal contents as templates.
-func ConditionSecretReferences(source string) ([]string, error) {
+func conditionSecretReferences(source string) ([]string, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return nil, err
@@ -158,37 +158,41 @@ func collectSecretReferences(expression actionlint.ExprNode, found map[string]st
 	return referenceErr
 }
 
-// ValidateServiceRuntimeTemplate permits only needs.<job>.outputs.<name>
+// validateServiceRuntimeTemplate permits only needs.<job>.outputs.<name>
 // references after compile-time service evaluation. Other documented service
 // contexts must already have been resolved by the compiler.
-func ValidateServiceRuntimeTemplate(template string) error {
-	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
-		root, path, err := referencePath(node)
-		if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") {
-			return fmt.Errorf("service runtime expression must directly reference needs.<job>.outputs.<name>")
-		}
-		return nil
-	})
+func validateServiceRuntimeTemplate(template string) error {
+	return visitTemplateExpressions(template, validateServiceRuntimeNode)
 }
 
-// ValidateServiceCredentialTemplate matches GitHub's narrower service
+func validateServiceRuntimeNode(node actionlint.ExprNode) error {
+	root, path, err := referencePath(node)
+	if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") {
+		return fmt.Errorf("service runtime expression must directly reference needs.<job>.outputs.<name>")
+	}
+	return nil
+}
+
+// validateServiceCredentialTemplate matches GitHub's narrower service
 // credential context: github, vars, secrets, and env direct references.
-func ValidateServiceCredentialTemplate(template string) error {
-	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
-		root, path, err := referencePath(node)
-		if err != nil {
-			return fmt.Errorf("service credential expression requires a direct context reference: %w", err)
-		}
-		switch classifyRuntimeReference(root, path) {
-		case runtimeReferenceGitHub, runtimeReferenceVar, runtimeReferenceSecret, runtimeReferenceEnv:
-			return nil
-		default:
-			return fmt.Errorf("service credential expression context %q is unsupported", root)
-		}
-	})
+func validateServiceCredentialTemplate(template string) error {
+	return visitTemplateExpressions(template, validateServiceCredentialNode)
 }
 
-func ValidateServiceMapRuntimeExpression(source string) error {
+func validateServiceCredentialNode(node actionlint.ExprNode) error {
+	root, path, err := referencePath(node)
+	if err != nil {
+		return fmt.Errorf("service credential expression requires a direct context reference: %w", err)
+	}
+	switch classifyRuntimeReference(root, path) {
+	case runtimeReferenceGitHub, runtimeReferenceVar, runtimeReferenceSecret, runtimeReferenceEnv:
+		return nil
+	default:
+		return fmt.Errorf("service credential expression context %q is unsupported", root)
+	}
+}
+
+func validateServiceMapExpression(source string) error {
 	body, err := expressionBody(source)
 	if err != nil {
 		return err
@@ -217,23 +221,23 @@ func sortedReferenceNames(found map[string]struct{}) []string {
 	return names
 }
 
-// ReferencesGitHubToken reports whether a template statically references
+// templateReferencesGitHubToken reports whether a template statically references
 // github.token. Dynamic GitHub indexes return an error so compiler-owned token
 // authority cannot depend on a runtime-selected property.
-func ReferencesGitHubToken(template string) (bool, error) {
+func templateReferencesGitHubToken(template string) (bool, error) {
 	return referencesGitHubToken(template, false, false)
 }
 
-// ReferencesStepGitHubToken reports whether a step runtime template statically
+// stepReferencesGitHubToken reports whether a step runtime template statically
 // references github.token, including the exact toJSON(github) shape.
-func ReferencesStepGitHubToken(template string) (bool, error) {
+func stepReferencesGitHubToken(template string) (bool, error) {
 	return referencesGitHubToken(template, true, true)
 }
 
-// ReferencesCompositeStepGitHubToken validates the same runtime surface for a
+// compositeStepReferencesGitHubToken validates the same runtime surface for a
 // composite-authored step input, but does not let toJSON(github) grant token
 // authority. A direct github.token reference still reports true.
-func ReferencesCompositeStepGitHubToken(template string) (bool, error) {
+func compositeStepReferencesGitHubToken(template string) (bool, error) {
 	return referencesGitHubToken(template, true, false)
 }
 
@@ -265,9 +269,9 @@ func isGitHubEventAccess(node actionlint.ExprNode) bool {
 	}
 }
 
-// ConditionReferencesGitHubToken reports direct token references in one
+// conditionReferencesGitHubToken reports direct token references in one
 // condition without interpreting string literal contents as templates.
-func ConditionReferencesGitHubToken(source string) (bool, error) {
+func conditionReferencesGitHubToken(source string) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return false, err
@@ -384,9 +388,9 @@ func referenceReceiver(node, parent actionlint.ExprNode) bool {
 	}
 }
 
-// ReferencesJobStatus reports whether a template statically references
+// templateReferencesJobStatus reports whether a template statically references
 // job.status.
-func ReferencesJobStatus(template string) (bool, error) {
+func templateReferencesJobStatus(template string) (bool, error) {
 	found := false
 	err := visitTemplateExpressions(template, func(expression actionlint.ExprNode) error {
 		actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
@@ -408,9 +412,9 @@ func ReferencesJobStatus(template string) (bool, error) {
 	return found, err
 }
 
-// ReferencesGitHubEvent reports whether a condition reads the event payload or
+// conditionReferencesCompileEvent reports whether a condition reads the event payload or
 // an event-derived GitHub ref scalar that the compiler must fold.
-func ReferencesGitHubEvent(source string) (bool, error) {
+func conditionReferencesCompileEvent(source string) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return false, err
@@ -418,9 +422,9 @@ func ReferencesGitHubEvent(source string) (bool, error) {
 	return nodeReferencesCompileGitHubEvent(node), nil
 }
 
-// ConditionReferencesGitHubEventPayload reports whether a condition reads the
+// conditionReferencesEventPayload reports whether a condition reads the
 // event payload, excluding event-derived identity fields folded by the compiler.
-func ConditionReferencesGitHubEventPayload(source string) (bool, error) {
+func conditionReferencesEventPayload(source string) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return false, err
@@ -428,9 +432,9 @@ func ConditionReferencesGitHubEventPayload(source string) (bool, error) {
 	return nodeReferencesGitHubEventPayload(node), nil
 }
 
-// TemplateReferencesGitHubEvent reports whether an interpolated template
+// templateReferencesEventPayload reports whether an interpolated template
 // retains the compile-time-only event payload.
-func TemplateReferencesGitHubEvent(template string) (bool, error) {
+func templateReferencesEventPayload(template string) (bool, error) {
 	found := false
 	err := visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
 		actionlint.VisitExprNode(node, func(candidate, _ actionlint.ExprNode, entering bool) {
@@ -484,9 +488,9 @@ func nodeReferencesGitHub(node actionlint.ExprNode, matches func([]string) bool)
 	return found
 }
 
-// ReferencesStatusFunction reports whether a condition explicitly names one of
+// referencesStatusFunction reports whether a condition explicitly names one of
 // the status functions that suppress the implicit success guard.
-func ReferencesStatusFunction(source string) (bool, error) {
+func referencesStatusFunction(source string) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return false, err
@@ -494,9 +498,9 @@ func ReferencesStatusFunction(source string) (bool, error) {
 	return containsStatusFunction(node), nil
 }
 
-// ConditionUsesContext reports whether a condition references a named context.
+// conditionUsesContext reports whether a condition references a named context.
 // Conditions may omit the normal ${{ ... }} delimiters.
-func ConditionUsesContext(source, contextName string) (bool, error) {
+func conditionUsesContext(source, contextName string) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil {
 		return false, err
@@ -520,9 +524,9 @@ func ConditionUsesContext(source, contextName string) (bool, error) {
 	return found, nil
 }
 
-// TemplateUsesContext reports whether any expression in a template references
+// templateUsesContext reports whether any expression in a template references
 // a named context.
-func TemplateUsesContext(source, contextName string) (bool, error) {
+func templateUsesContext(source, contextName string) (bool, error) {
 	found := false
 	err := visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
 		actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
@@ -542,10 +546,10 @@ func TemplateUsesContext(source, contextName string) (bool, error) {
 	return found, err
 }
 
-// ConditionUsesStaticContextReference reports whether a condition contains a
+// conditionUsesStaticContextReference reports whether a condition contains a
 // direct or literal-index reference to a context. Computed indexes and
 // projections remain runtime expressions.
-func ConditionUsesStaticContextReference(source, contextName string) (bool, error) {
+func conditionUsesStaticContextReference(source, contextName string) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return false, err
@@ -553,10 +557,10 @@ func ConditionUsesStaticContextReference(source, contextName string) (bool, erro
 	return usesStaticContextReference(node, contextName), nil
 }
 
-// TemplateUsesStaticContextReference reports whether a template contains a
+// templateUsesStaticContextReference reports whether a template contains a
 // direct or literal-index reference to a context. Computed indexes and
 // projections remain runtime expressions.
-func TemplateUsesStaticContextReference(source, contextName string) (bool, error) {
+func templateUsesStaticContextReference(source, contextName string) (bool, error) {
 	found := false
 	err := visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
 		found = found || usesStaticContextReference(expression, contextName)

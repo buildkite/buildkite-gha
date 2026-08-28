@@ -175,6 +175,16 @@ comparing commits.
 
 ## Verify runtime behavior
 
+The compiler writes a normalized execution program into every v2 job plan.
+The runtime rejects plans without that program and executes its typed sites;
+it does not reconstruct expressions from projected plan fields or action
+metadata. Keep compiler and runtime changes to the program schema atomic.
+The program's positional walker defines each expression site's profile, result
+type, provenance, and authority purpose. Site objects serialize only source
+text and diagnostic location; decoders derive their semantics from position.
+See [Expression authority architecture](expression-authority.md) for the design
+rationale, security invariants, and remaining design work.
+
 Every normal Buildkite build runs repository checks, Test Engine-split Go tests, native macOS tests, the starter workflow compatibility report, and the shell and public-action smoke workflows against the build's exact CLI source. The public-action proof executes pinned checkout, Node, Go, Python, and Java setup actions. Test Engine records the Linux test results; the repository checks retain the race-enabled suite. GitHub Actions differential oracles run only when manually dispatched.
 
 The **Expression differential oracle** records hosted GitHub expression results

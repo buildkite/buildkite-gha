@@ -987,7 +987,7 @@ parts with values supported by their runtime surface. Action references in
 | Public `owner/repo[/path]@ref` action | 🟡 Supported subset | Resolved to an exact commit and digest. |
 | Private action | ❌ Unsupported | No private action source access. |
 | JavaScript action | ✅ Supported | Declares `node16`, `node20`, or `node24`. |
-| Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; `bash`, `sh`, `python`, or a custom shell template for `run`; literal `continue-on-error`. |
+| Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; `bash`, `sh`, `python`, or an expression-backed custom shell template for `run`; literal `continue-on-error`. |
 | Docker action | 🟡 Supported subset | Verified local or public Dockerfile or prebuilt-image action on Linux with optional bounded `runs.args`. Rejected on macOS, including through a composite action. |
 | Direct workflow `uses: docker://...` action | ❌ Unsupported | Rejected during validation. |
 | Top-level action metadata `env` | ➖ Accepted, no effect | Any valid YAML value is discarded. It is not evaluated, injected, retained in plans, or used to request secrets or tokens. |
@@ -1042,8 +1042,9 @@ action's optional `runs.entrypoint` overrides the image `ENTRYPOINT`.
 Args may contain literals and direct `inputs.<name>` or `inputs['name']`
 interpolation. Operators, functions, whole or dynamic inputs, and every other
 context are rejected. Invocation inputs and metadata defaults resolve before
-args evaluation. Args remain in digest-bound action metadata and are not stored
-in job plans.
+args evaluation. The compiler stores args as action-authored sites in the
+normalized job program. Runtime verifies the locked action tree but does not
+reparse its metadata.
 
 Dockerfile actions cannot declare explicit entrypoints. Docker actions cannot
 declare pre/post lifecycle or request credentials, volumes, arbitrary options,

@@ -730,7 +730,7 @@ func TestUploadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) {
 	}}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: digest}}
 	uploader := &captureArtifactUploader{}
-	result, err := (Runner{Actions: materializer, Artifacts: uploader}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Actions: materializer, Artifacts: uploader}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || len(result.Artifacts) != 1 || result.Outputs["artifact_id"] == "" || len(result.Outputs["artifact_digest"]) != 64 {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -743,19 +743,19 @@ func TestUploadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) {
 		ID: "mask-after-upload", Kind: "run", Shell: "bash",
 		Command: `echo "::add-mask::load"`,
 	})
-	maskedResult, err := (Runner{Actions: materializer, Artifacts: &captureArtifactUploader{}}).RunJob(t.Context(), maskedJob, workspace)
+	maskedResult, err := (Runner{Actions: materializer, Artifacts: &captureArtifactUploader{}}).runTestJob(t.Context(), maskedJob, workspace)
 	if err == nil || !strings.Contains(err.Error(), "artifact name contains a registered secret") || len(maskedResult.Artifacts) != 0 || maskedResult.Conclusion != "failure" {
 		t.Fatalf("late artifact-name mask result = %#v, error = %v", maskedResult, err)
 	}
 
 	job.Actions[0].Commit = strings.Repeat("b", 40)
-	fallbackResult, err := (Runner{Actions: materializer, Artifacts: &captureArtifactUploader{}}).RunJob(t.Context(), job, workspace)
+	fallbackResult, err := (Runner{Actions: materializer, Artifacts: &captureArtifactUploader{}}).runTestJob(t.Context(), job, workspace)
 	if err != nil || fallbackResult.Conclusion != "success" || fallbackResult.Outputs["artifact_id"] == "" || fallbackResult.Outputs["artifact_digest"] == "" {
 		t.Fatalf("unknown commit fallback result = %#v, error = %v", fallbackResult, err)
 	}
 
 	job.Actions[0].Commit = strings.Repeat("b", 39)
-	if _, err := (Runner{Actions: materializer, Artifacts: &captureArtifactUploader{}}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "invalid GitHub identity") {
+	if _, err := (Runner{Actions: materializer, Artifacts: &captureArtifactUploader{}}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "invalid GitHub identity") {
 		t.Fatalf("malformed runtime commit error = %v", err)
 	}
 }
@@ -800,7 +800,7 @@ func TestUploadArtifactLegacyManifestsUseNativeAdapter(t *testing.T) {
 			}}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: digest}}
 			uploader := &captureArtifactUploader{}
-			result, err := (Runner{Actions: materializer, Artifacts: uploader}).RunJob(t.Context(), job, workspace)
+			result, err := (Runner{Actions: materializer, Artifacts: uploader}).runTestJob(t.Context(), job, workspace)
 			if err != nil || result.Conclusion != "success" || len(result.Artifacts) != 1 || len(uploader.uploads) != 1 || materializer.calls != 1 {
 				t.Fatalf("legacy RunJob() result = %#v, uploads = %d, materializations = %d, error = %v", result, len(uploader.uploads), materializer.calls, err)
 			}
@@ -840,14 +840,14 @@ func TestUploadArtifactV6ConditionalMatrixAndExpressionName(t *testing.T) {
 
 	job.Matrix = map[string]any{"mode": "production"}
 	uploader := &captureArtifactUploader{}
-	result, err := (Runner{Actions: materializer, Artifacts: uploader}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Actions: materializer, Artifacts: uploader}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || len(uploader.uploads) != 0 || len(result.Artifacts) != 0 {
 		t.Fatalf("production matrix result = %#v, uploads = %d, error = %v", result, len(uploader.uploads), err)
 	}
 
 	job.Matrix = map[string]any{"mode": "test"}
 	uploader = &captureArtifactUploader{}
-	result, err = (Runner{Actions: materializer, Artifacts: uploader}).RunJob(t.Context(), job, workspace)
+	result, err = (Runner{Actions: materializer, Artifacts: uploader}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || len(uploader.uploads) != 1 || len(result.Artifacts) != 1 || result.Artifacts[0].Name != strings.Repeat("a", 40) {
 		t.Fatalf("test matrix result = %#v, uploads = %d, error = %v", result, len(uploader.uploads), err)
 	}

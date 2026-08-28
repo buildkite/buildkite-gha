@@ -107,7 +107,7 @@ func expandMatrixDefinition(matrix *workflow.Matrix) ([]map[string]any, error) {
 
 func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (*workflow.Matrix, error) {
 	if matrix.Expression != nil {
-		value, err := expression.EvaluateCompile(*matrix.Expression, context)
+		value, err := evaluateCompileSite(matrix.Expression.Text, expression.ProfileCompile, expression.ResultAny, context)
 		if err != nil {
 			return nil, matrixPositionError{err: matrixExpressionError(err), line: matrix.Expression.Span.Start.Line, column: matrix.Expression.Span.Start.Column}
 		}
@@ -133,7 +133,7 @@ func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (
 			}
 			continue
 		}
-		value, err := expression.EvaluateCompile(*row.Expression, context)
+		value, err := evaluateCompileSite(row.Expression.Text, expression.ProfileCompile, expression.ResultAny, context)
 		if err != nil {
 			return nil, matrixPositionError{err: fmt.Errorf("matrix dimension %q: %w", row.Name, matrixExpressionError(err)), line: row.Expression.Span.Start.Line, column: row.Expression.Span.Start.Column}
 		}
@@ -183,7 +183,7 @@ func resolveMatrixCombinations(name string, combinations []workflow.MatrixCombin
 		}
 		return resolved, nil
 	}
-	value, err := expression.EvaluateCompile(*expr, context)
+	value, err := evaluateCompileSite(expr.Text, expression.ProfileCompile, expression.ResultAny, context)
 	if err != nil {
 		return nil, fmt.Errorf("matrix %s: %w", name, matrixExpressionError(err))
 	}
@@ -200,10 +200,10 @@ func resolveAuthoredMatrixValue(value any, span workflow.Span, context expressio
 		if !strings.Contains(value, "${{") {
 			return value, nil
 		}
-		if expr, err := expression.Parse(value, span.Start.Line, span.Start.Column); err == nil {
-			return expression.EvaluateCompile(expr, context)
+		if err := validateCompileSite(value, expression.ProfileCompile, expression.ResultAny); err == nil {
+			return evaluateCompileSite(value, expression.ProfileCompile, expression.ResultAny, context)
 		}
-		return expression.EvaluateCompileTemplate(value, context)
+		return evaluateCompileSite(value, expression.ProfileCompileTemplate, expression.ResultString, context)
 	case []any:
 		resolved := make([]any, len(value))
 		for i, item := range value {
@@ -294,7 +294,7 @@ func matrixCombinationsFromValue(name string, value any) ([]workflow.MatrixCombi
 func resolveRunsOn(job workflow.Job, context expression.CompileContext, matrix map[string]any) ([]string, error) {
 	context.Matrix = matrix
 	if job.RunsOnExpr != nil {
-		value, err := expression.EvaluateCompile(*job.RunsOnExpr, context)
+		value, err := evaluateCompileSite(job.RunsOnExpr.Text, expression.ProfileCompile, expression.ResultAny, context)
 		if err != nil {
 			return nil, fmt.Errorf("runs-on expression cannot be resolved at compile time: %w", err)
 		}
@@ -317,7 +317,8 @@ func resolveRunsOn(job workflow.Job, context expression.CompileContext, matrix m
 	}
 	labels := make([]string, len(job.RunsOn))
 	for i, label := range job.RunsOn {
-		resolved, err := expression.EvaluateCompileTemplate(label, context)
+		value, err := evaluateCompileSite(label, expression.ProfileCompileTemplate, expression.ResultString, context)
+		resolved, _ := value.(string)
 		if err != nil {
 			return nil, fmt.Errorf("runs-on label %q cannot be resolved at compile time: %w", label, err)
 		}
@@ -491,11 +492,12 @@ func instanceLabel(job workflow.Job, matrix map[string]any, context expression.C
 		label = job.ID
 	} else {
 		context.Matrix = matrix
-		if resolved, err := expression.EvaluateCompileTemplate(label, context); err == nil {
+		if value, err := evaluateCompileSite(label, expression.ProfileCompileTemplate, expression.ResultString, context); err == nil {
+			resolved, _ := value.(string)
 			label = resolved
 			withoutMatrix := context
 			withoutMatrix.Matrix = nil
-			if _, err := expression.EvaluateCompileTemplate(job.Name, withoutMatrix); err != nil {
+			if _, err := evaluateCompileSite(job.Name, expression.ProfileCompileTemplate, expression.ResultString, withoutMatrix); err != nil {
 				return label
 			}
 		}

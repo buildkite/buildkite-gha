@@ -289,14 +289,18 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			conditionContext.Inputs = inputs.values
 			conditionContext.Matrix = nil
 			conditionContext.Strategy = nil
-			if err := expression.ValidateCompileCallCondition(job.If, conditionContext); err != nil {
+			if err := validateCompileSite(job.If, expression.ProfileCompileCallCondition, expression.ResultBoolean); err != nil {
 				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow call condition: %v", err))
 			}
-			condition, err := expression.ReduceCompileCondition(job.If, conditionContext)
+			reduced, err := reduceCompileSite(job.If, expression.ProfileCompileCallCondition, expression.ResultBoolean, conditionContext)
 			if err != nil {
 				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reduce reusable-workflow call condition: %v", err))
 			}
-			if err := expression.ValidateCallCondition(condition); err != nil {
+			condition := reduced.Source
+			if reduced.Known {
+				condition = fmt.Sprint(reduced.Value)
+			}
+			if err := validateCompileSite(condition, expression.ProfileCallCondition, expression.ResultBoolean); err != nil {
 				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow call condition: %v", err))
 			}
 			calleeGuards = append(cloneSourcedCallGuards(callGuards), sourcedCallGuard{
@@ -619,7 +623,7 @@ func resolveWorkflowCallOutputs(path string, declarations map[string]workflow.Ca
 		if !callOutputNamePattern.MatchString(declaration.Name) {
 			return nil, workflowCallOutputError(path, declaration, "has an invalid name")
 		}
-		root, reference, err := expression.ReferencePath(declaration.Value)
+		root, reference, err := staticReference(declaration.Value)
 		if err != nil || !strings.EqualFold(root, "jobs") || len(reference) != 3 || !strings.EqualFold(reference[1], "outputs") {
 			return nil, workflowCallOutputError(path, declaration, "must be one static jobs.<job_id>.outputs.<output_name> reference")
 		}
@@ -797,7 +801,7 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 			value, ok = declaration.Default.Data, true
 			if text, isString := value.(string); isString && strings.Contains(text, "${{") {
 				var err error
-				value, err = expression.EvaluateReusableInputDefault(text, context)
+				value, err = evaluateCompileSite(text, expression.ProfileReusableInput, expression.ResultAny, context)
 				if err != nil {
 					return reusableInputs{}, locatedJobError(call.Uses, job, declaration.Default.Span.Start.Line, declaration.Default.Span.Start.Column, fmt.Sprintf("evaluate default for reusable-workflow input %q: %v", name, err))
 				}
@@ -829,7 +833,7 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 }
 
 func forwardedDeferredInput(value string, deferred map[string]needBinding) (needBinding, bool) {
-	root, path, err := expression.ReferencePath(value)
+	root, path, err := staticReference(value)
 	if err != nil || !strings.EqualFold(root, "inputs") || len(path) != 1 {
 		return needBinding{}, false
 	}
@@ -870,7 +874,7 @@ func deferredNeedInput(value string, needs map[string]needBinding) (needBinding,
 }
 
 func deferredNeedReference(value string) (need, output string, ok bool) {
-	root, path, err := expression.ReferencePath(value)
+	root, path, err := staticReference(value)
 	if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") {
 		return "", "", false
 	}
@@ -902,10 +906,10 @@ func evaluateStaticCallValue(value string, inputs, matrix map[string]any, contex
 		return nil, fmt.Errorf("expression references an unavailable or unsupported input")
 	}
 	context.Matrix = matrix
-	if expr, err := expression.Parse(resolved, 1, 1); err == nil {
-		return expression.EvaluateCompile(expr, context)
+	if err := validateCompileSite(resolved, expression.ProfileCompile, expression.ResultAny); err == nil {
+		return evaluateCompileSite(resolved, expression.ProfileCompile, expression.ResultAny, context)
 	}
-	return expression.EvaluateCompileTemplate(resolved, context)
+	return evaluateCompileSite(resolved, expression.ProfileCompileTemplate, expression.ResultString, context)
 }
 
 func containsExpression(value any) bool {
@@ -1029,20 +1033,16 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 			if err != nil {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("resolve continue-on-error expression: %v", err))
 			}
-			if err := expression.ValidateStepControl(resolved); err != nil {
+			if err := validateCompileSite(resolved, expression.ProfileStepControl, expression.ResultBoolean); err != nil {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("validate continue-on-error expression: %v", err))
 			}
-			expr, err := expression.Parse(resolved, step.Span.Start.Line, step.Span.Start.Column)
-			if err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("parse continue-on-error expression: %v", err))
-			}
-			value, available, err := expression.EvaluateCompileAvailable(expr, expression.CompileContext{})
+			reduced, err := reduceCompileSite(resolved, expression.ProfileReusableStepControl, expression.ResultAny, expression.CompileContext{})
 			if err != nil {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("evaluate continue-on-error expression: %v", err))
 			}
-			if !available {
+			if !reduced.Known {
 				step.ContinueOnErrorExpression = resolved
-			} else if enabled, ok := value.(bool); ok {
+			} else if enabled, ok := reduced.Value.(bool); ok {
 				step.ContinueOnError, step.ContinueOnErrorExpression = enabled, ""
 			} else {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "continue-on-error expression must produce a boolean")
@@ -1053,20 +1053,16 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 			if err != nil {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("resolve timeout-minutes expression: %v", err))
 			}
-			if err := expression.ValidateStepControl(resolved); err != nil {
+			if err := validateCompileSite(resolved, expression.ProfileStepControl, expression.ResultNumber); err != nil {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("validate timeout-minutes expression: %v", err))
 			}
-			expr, err := expression.Parse(resolved, step.Span.Start.Line, step.Span.Start.Column)
-			if err != nil {
-				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("parse timeout-minutes expression: %v", err))
-			}
-			value, available, err := expression.EvaluateCompileAvailable(expr, expression.CompileContext{})
+			reduced, err := reduceCompileSite(resolved, expression.ProfileReusableStepControl, expression.ResultAny, expression.CompileContext{})
 			if err != nil {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("evaluate timeout-minutes expression: %v", err))
 			}
-			if !available {
+			if !reduced.Known {
 				step.TimeoutMinutesExpression = resolved
-			} else if minutes, ok := staticTimeoutMinutes(value); ok {
+			} else if minutes, ok := staticTimeoutMinutes(reduced.Value); ok {
 				if minutes <= 0 || minutes > 360 || math.IsNaN(minutes) || math.IsInf(minutes, 0) {
 					return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "timeout-minutes expression must produce a number greater than 0 and at most 360")
 				}
@@ -1219,7 +1215,7 @@ func containsInputExpression(value any) bool {
 }
 
 func hasInputExpression(value string) bool {
-	usesInputs, err := expression.TemplateUsesContext(value, "inputs")
+	usesInputs, err := referencesContext(value, expression.ProfilePartialTemplate, "inputs", false)
 	return err != nil || usesInputs
 }
 
@@ -1228,7 +1224,7 @@ func hasUnresolvedTemplateInput(value string, deferredInputs map[string]needBind
 	if err != nil {
 		return true
 	}
-	usesInputs, err := expression.TemplateUsesStaticContextReference(resolved, "inputs")
+	usesInputs, err := referencesContext(resolved, expression.ProfilePartialTemplate, "inputs", true)
 	return err != nil || usesInputs
 }
 
@@ -1300,15 +1296,19 @@ func resolveAuthoredMatrixInputs(value any, inputs map[string]any) any {
 		if err != nil || resolved == value {
 			return value
 		}
-		if expr, err := expression.Parse(resolved, 1, 1); err == nil {
-			if evaluated, available, err := expression.EvaluateCompileAvailable(expr, expression.CompileContext{}); err == nil && available {
+		if err := validateCompileSite(resolved, expression.ProfileCompile, expression.ResultAny); err == nil {
+			if reduced, err := reduceCompileSite(resolved, expression.ProfileCompile, expression.ResultAny, expression.CompileContext{}); err == nil && reduced.Known {
+				evaluated := reduced.Value
 				if text, ok := evaluated.(string); !ok || !strings.Contains(text, "${{") {
 					return evaluated
 				}
 			}
 		}
-		if evaluated, err := expression.EvaluateAvailableCompileTemplate(resolved, expression.CompileContext{}); err == nil {
-			return evaluated
+		if reduced, err := reduceCompileSite(resolved, expression.ProfilePartialTemplate, expression.ResultString, expression.CompileContext{}); err == nil {
+			if reduced.Known {
+				return reduced.Value
+			}
+			return reduced.Source
 		}
 		return value
 	case []any:
@@ -1343,7 +1343,7 @@ func replaceStaticInputCondition(value string, inputs map[string]any) string {
 	match := staticInputCondition.FindStringSubmatch(value)
 	if match == nil {
 		if !strings.Contains(value, "${{") {
-			usesInputs, err := expression.ConditionUsesContext(value, "inputs")
+			usesInputs, err := referencesContext(value, expression.ProfileCompileStepCondition, "inputs", false)
 			if err == nil && usesInputs {
 				return replaceStaticInputs("${{ "+value+" }}", inputs)
 			}
@@ -1373,8 +1373,11 @@ func replaceStaticInputs(value string, inputs map[string]any) string {
 	if err != nil || resolved == value {
 		return value
 	}
-	if evaluated, err := expression.EvaluateAvailableCompileTemplate(resolved, expression.CompileContext{}); err == nil {
-		return evaluated
+	if reduced, err := reduceCompileSite(resolved, expression.ProfilePartialTemplate, expression.ResultString, expression.CompileContext{}); err == nil {
+		if reduced.Known {
+			return reduced.Value.(string)
+		}
+		return reduced.Source
 	}
 	return value
 }

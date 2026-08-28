@@ -229,14 +229,13 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		instanceContext := jobContext
 		instanceContext.Matrix = matrix
 		instanceContext.Strategy = strategy
-		compileConditionErr := supportedCompileTimeConditions(jobPath, job, jobContext, matrix)
+		compileConditionErr := supportedCompileTimeConditions(jobPath, job, jobContext)
 		instanceJob := resolveCompileTimeConditions(job, jobContext, matrix)
 		conditionValidationJob := instanceJob
 		conditionContext := jobContext
 		conditionContext.Matrix = matrix
-		if resolved, err := expression.EvaluateCompileCondition(instanceJob.If, conditionContext); err == nil && !resolved {
+		if value, err := evaluateCompileSite(instanceJob.If, expression.ProfileCompileJobCondition, expression.ResultBoolean, conditionContext); err == nil && !value.(bool) {
 			instanceJob.If = "false"
-			instanceJob.Steps = []workflow.Step{{Name: "Statically disabled job", Kind: "run", Run: ":", If: "false", Span: job.Span}}
 		}
 		key, err := namespacedInstanceKey(e.options.StepKeyNamespace, job.ID, matrix)
 		if err != nil {
@@ -265,7 +264,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		} else if compileConditionErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, compileConditionErr))
 			valid = false
-		} else if err := supportedConditions(jobPath, conditionValidationJob, matrix, true); err != nil {
+		} else if err := supportedConditions(jobPath, conditionValidationJob); err != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, err))
 			valid = false
 		}

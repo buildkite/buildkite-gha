@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -153,9 +154,9 @@ func TestUnprovenActionRuntimeIgnoresNativeAdapters(t *testing.T) {
 			Steps:   []plan.Step{{Kind: "uses", Uses: "actions/checkout@v4"}},
 		}}}}
 	}
-	checkout := plan.ActionLock{Source: "github", Repository: "actions/checkout"}
-	upload := plan.ActionLock{Source: "github", Repository: "actions/upload-artifact"}
-	download := plan.ActionLock{Source: "github", Repository: "actions/download-artifact"}
+	checkout := plan.ActionLock{Source: "github", Repository: "actions/checkout", Commit: actionintegration.CheckoutV7Commit}
+	upload := plan.ActionLock{Source: "github", Repository: "actions/upload-artifact", Commit: actionintegration.UploadArtifactV7Commit}
+	download := plan.ActionLock{Source: "github", Repository: "actions/download-artifact", Commit: actionintegration.DownloadArtifactV8Commit}
 	setupGo := plan.ActionLock{Source: "github", Repository: "actions/setup-go"}
 	local := plan.ActionLock{Source: "workspace", Path: "actions/build"}
 

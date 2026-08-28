@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json",
+  "$id": "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json",
   "title": "buildkite-gha job plan",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "compiler", "runtime", "workflow", "event", "target", "required_capabilities", "steps", "requires_mise"],
+  "required": ["schema", "compiler", "runtime", "workflow", "event", "target", "required_capabilities", "program", "requires_mise"],
   "properties": {
-    "schema": {"const": "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json"},
+    "schema": {"const": "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json"},
     "compiler": {"$ref": "#/$defs/compiler"},
     "runtime": {"$ref": "#/$defs/runtime"},
     "workflow": {"$ref": "#/$defs/workflow"},
@@ -26,20 +26,9 @@
     "need_sources": {"type": "object", "additionalProperties": {"type": "array", "minItems": 1, "maxItems": 1024, "uniqueItems": true, "items": {"$ref": "#/$defs/needSource"}}},
     "need_outputs": {"type": "object", "additionalProperties": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/needOutput"}}},
     "call_guards": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/callGuard"}},
-    "env": {"$ref": "#/$defs/stringMap"},
-    "condition": {"type": "string", "maxLength": 65536},
-    "continue_on_error": {"type": "boolean"},
-    "timeout_minutes": {"type": "number", "exclusiveMinimum": 0, "maximum": 360},
-    "default_shell": {"type": "string"},
-    "default_working_directory": {"type": "string"},
-    "outputs": {"$ref": "#/$defs/stringMap"},
-    "steps": {"type": "array", "minItems": 1, "maxItems": 1000, "items": {"$ref": "#/$defs/step"}},
+    "program": {"$ref": "#/$defs/program"},
     "actions": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/actionLock"}},
-    "requires_mise": {"type": "boolean"},
-    "container": {"$ref": "#/$defs/container"},
-    "services": {"type": "object", "maxProperties": 32, "propertyNames": {"pattern": "^[a-z_][a-z0-9_-]{0,254}$"}, "additionalProperties": {"$ref": "#/$defs/serviceContainer"}},
-    "service_order": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z_][a-z0-9_-]{0,254}$"}},
-    "services_expression": {"type": "string", "minLength": 1, "maxLength": 65536}
+    "requires_mise": {"type": "boolean"}
   },
   "allOf": [
     {
@@ -57,13 +46,33 @@
         }
       }
     },
-    {"if": {"properties": {"required_capabilities": {"contains": {"const": "provider-token-write"}}}}, "then": {"required": ["github_token"]}},
-    {"if": {"required": ["services"]}, "then": {"required": ["service_order"]}}
+    {"if": {"properties": {"required_capabilities": {"contains": {"const": "provider-token-write"}}}}, "then": {"required": ["github_token"]}}
   ],
   "$defs": {
     "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "buildkiteName": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$", "minLength": 1, "maxLength": 255},
     "stringMap": {"type": "object", "additionalProperties": {"type": "string"}},
+    "program": {"type": "object", "additionalProperties": false, "required": ["version", "job"], "properties": {"version": {"const": 1}, "job": {"$ref": "#/$defs/programJob"}, "actions": {"type": "object", "maxProperties": 1024, "propertyNames": {"pattern": "^a-[0-9a-f]{16}$"}, "additionalProperties": {"$ref": "#/$defs/actionProgram"}}}},
+    "programJob": {"type": "object", "additionalProperties": false, "required": ["condition", "defaults", "services", "steps"], "properties": {"guards": {"type": "array", "maxItems": 4, "items": {"type": "object", "additionalProperties": false, "required": ["condition"], "properties": {"condition": {"$ref": "#/$defs/site"}}}}, "condition": {"$ref": "#/$defs/site"}, "continue_on_error": {"type": "boolean"}, "timeout_minutes": {"type": "number", "minimum": 0, "maximum": 360}, "env": {"$ref": "#/$defs/bindings"}, "defaults": {"type": "object", "additionalProperties": false, "required": ["shell", "working_directory"], "properties": {"shell": {"$ref": "#/$defs/site"}, "working_directory": {"$ref": "#/$defs/site"}}}, "container": {"$ref": "#/$defs/programContainer"}, "services": {"$ref": "#/$defs/programServices"}, "steps": {"type": "array", "minItems": 1, "maxItems": 1000, "items": {"$ref": "#/$defs/programStep"}}, "outputs": {"$ref": "#/$defs/bindings"}}},
+    "position": {"type": "object", "additionalProperties": false, "required": ["line", "column"], "properties": {"line": {"type": "integer", "minimum": 0}, "column": {"type": "integer", "minimum": 0}}},
+    "location": {"type": "object", "additionalProperties": false, "required": ["field"], "properties": {"file": {"type": "string", "maxLength": 1024}, "field": {"type": "string", "maxLength": 2048}, "start": {"$ref": "#/$defs/position"}, "end": {"$ref": "#/$defs/position"}}},
+    "site": {"type": "object", "additionalProperties": false, "required": ["source", "location"], "properties": {"source": {"type": "string", "maxLength": 65536}, "location": {"$ref": "#/$defs/location"}}},
+    "commandSite": {"type": "object", "additionalProperties": false, "required": ["source", "location"], "properties": {"source": {"type": "string", "maxLength": 1048576}, "location": {"$ref": "#/$defs/location"}}},
+    "bindings": {"type": "array", "maxItems": 1024, "items": {"type": "object", "additionalProperties": false, "required": ["name", "value"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 255}, "value": {"$ref": "#/$defs/site"}}}},
+    "boolControl": {"type": "object", "additionalProperties": false, "not": {"required": ["literal", "expression"]}, "properties": {"literal": {"type": "boolean"}, "expression": {"$ref": "#/$defs/site"}}},
+    "numberControl": {"type": "object", "additionalProperties": false, "not": {"required": ["literal", "expression"]}, "properties": {"literal": {"type": "number", "minimum": 0, "maximum": 360}, "expression": {"$ref": "#/$defs/site"}}},
+    "programRun": {"type": "object", "additionalProperties": false, "required": ["command", "shell", "working_directory"], "properties": {"command": {"$ref": "#/$defs/commandSite"}, "shell": {"$ref": "#/$defs/site"}, "working_directory": {"$ref": "#/$defs/site"}}},
+    "programInvocation": {"type": "object", "additionalProperties": false, "required": ["uses"], "properties": {"uses": {"$ref": "#/$defs/site"}, "with": {"$ref": "#/$defs/bindings"}, "lock": {"type": "string", "pattern": "^a-[0-9a-f]{16}$"}}},
+    "programStep": {"type": "object", "additionalProperties": false, "required": ["id", "kind", "source", "condition", "continue_on_error", "timeout_minutes", "name"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 255}, "kind": {"enum": ["run", "uses", "wait", "wait-all", "cancel"]}, "background": {"type": "boolean"}, "targets": {"type": "array", "maxItems": 256, "items": {"type": "string"}}, "source": {"$ref": "#/$defs/location"}, "env": {"$ref": "#/$defs/bindings"}, "condition": {"$ref": "#/$defs/site"}, "continue_on_error": {"$ref": "#/$defs/boolControl"}, "timeout_minutes": {"$ref": "#/$defs/numberControl"}, "name": {"$ref": "#/$defs/site"}, "run": {"$ref": "#/$defs/programRun"}, "invocation": {"$ref": "#/$defs/programInvocation"}}},
+    "programContainer": {"type": "object", "additionalProperties": false, "required": ["image"], "properties": {"image": {"$ref": "#/$defs/containerImageSite"}, "env": {"$ref": "#/$defs/bindings"}, "ports": {"type": "array", "items": {"$ref": "#/$defs/containerPortSite"}}}},
+    "containerImageSite": {"allOf": [{"$ref": "#/$defs/site"}, {"properties": {"source": {"$ref": "#/$defs/image"}}}]},
+    "containerPortSite": {"allOf": [{"$ref": "#/$defs/site"}, {"properties": {"source": {"type": "string", "pattern": "^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$"}}}]},
+    "programServiceContainer": {"type": "object", "additionalProperties": false, "required": ["image", "options", "command", "entrypoint"], "properties": {"image": {"$ref": "#/$defs/site"}, "credentials": {"type": "object", "additionalProperties": false, "required": ["username", "password"], "properties": {"username": {"$ref": "#/$defs/site"}, "password": {"$ref": "#/$defs/site"}}}, "env": {"$ref": "#/$defs/bindings"}, "ports": {"type": "array", "items": {"$ref": "#/$defs/site"}}, "volumes": {"type": "array", "items": {"$ref": "#/$defs/site"}}, "options": {"$ref": "#/$defs/site"}, "command": {"$ref": "#/$defs/site"}, "entrypoint": {"$ref": "#/$defs/site"}}},
+    "programServices": {"type": "object", "additionalProperties": false, "properties": {"static": {"type": "array", "maxItems": 32, "items": {"type": "object", "additionalProperties": false, "required": ["name", "container"], "properties": {"name": {"type": "string", "pattern": "^[a-z_][a-z0-9_-]{0,254}$"}, "container": {"$ref": "#/$defs/programServiceContainer"}}}}, "dynamic": {"$ref": "#/$defs/site"}}},
+    "actionProgram": {"type": "object", "additionalProperties": false, "required": ["runtime", "pre_if", "post_if"], "properties": {"name": {"type": "string"}, "runtime": {"enum": ["node16", "node24", "composite", "docker"]}, "inputs": {"type": "array", "items": {"$ref": "#/$defs/actionInput"}}, "outputs": {"type": "array", "items": {"$ref": "#/$defs/actionOutput"}}, "pre": {"type": "string"}, "pre_if": {"$ref": "#/$defs/site"}, "main": {"type": "string"}, "post": {"type": "string"}, "post_if": {"$ref": "#/$defs/site"}, "image": {"type": "string"}, "entrypoint": {"type": "string"}, "pre_entrypoint": {"type": "string"}, "post_entrypoint": {"type": "string"}, "args": {"type": "array", "items": {"$ref": "#/$defs/site"}}, "env": {"$ref": "#/$defs/bindings"}, "steps": {"type": "array", "items": {"$ref": "#/$defs/actionStep"}}}},
+    "actionInput": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 255}, "required": {"type": "boolean"}, "default": {"$ref": "#/$defs/site"}}},
+    "actionOutput": {"type": "object", "additionalProperties": false, "required": ["name", "value"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 255}, "value": {"$ref": "#/$defs/site"}}},
+    "actionStep": {"type": "object", "additionalProperties": false, "required": ["name", "shell", "working_directory", "condition"], "properties": {"id": {"type": "string", "maxLength": 255}, "name": {"$ref": "#/$defs/site"}, "run": {"type": "object", "additionalProperties": false, "required": ["command"], "properties": {"command": {"$ref": "#/$defs/commandSite"}}}, "invocation": {"$ref": "#/$defs/programInvocation"}, "shell": {"$ref": "#/$defs/site"}, "working_directory": {"$ref": "#/$defs/site"}, "env": {"$ref": "#/$defs/bindings"}, "condition": {"$ref": "#/$defs/site"}, "continue_on_error": {"type": "boolean"}}},
     "capability": {"enum": ["network", "docker", "privileged-container", "secrets", "provider-token-read", "provider-token-write"]},
     "compiler": {"type": "object", "additionalProperties": false, "required": ["version", "distribution_digest"], "properties": {"version": {"type": "string", "pattern": "^[ -~]{1,256}$"}, "distribution_digest": {"$ref": "#/$defs/digest"}}},
     "runtime": {"type": "object", "additionalProperties": false, "required": ["distribution_digest"], "properties": {"distribution_digest": {"$ref": "#/$defs/digest"}}},
@@ -98,8 +107,6 @@
     "needOutput": {"type": "object", "additionalProperties": false, "required": ["name", "step_key", "output"], "properties": {"name": {"$ref": "#/$defs/buildkiteName"}, "step_key": {"$ref": "#/$defs/buildkiteName"}, "output": {"$ref": "#/$defs/buildkiteName"}}},
     "deferredInput": {"type": "object", "additionalProperties": false, "required": ["sources"], "properties": {"sources": {"type": "array", "minItems": 1, "maxItems": 1024, "uniqueItems": true, "items": {"$ref": "#/$defs/needSource"}}, "outputs": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/needOutput"}}}},
     "callGuard": {"type": "object", "additionalProperties": false, "required": ["condition"], "properties": {"condition": {"type": "string", "minLength": 1, "maxLength": 65536}, "inputs": {"type": "object", "maxProperties": 25, "propertyNames": {"minLength": 1, "maxLength": 255}, "additionalProperties": {"type": ["string", "number", "boolean"], "maxLength": 65536}}, "deferred_inputs": {"type": "object", "maxProperties": 25, "propertyNames": {"minLength": 1, "maxLength": 255}, "additionalProperties": {"$ref": "#/$defs/deferredInput"}}, "need_sources": {"type": "object", "additionalProperties": {"type": "array", "minItems": 1, "maxItems": 1024, "uniqueItems": true, "items": {"$ref": "#/$defs/needSource"}}}, "need_outputs": {"type": "object", "additionalProperties": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/needOutput"}}}}},
-    "position": {"type": "object", "additionalProperties": false, "required": ["line", "column"], "properties": {"line": {"type": "integer", "minimum": 0}, "column": {"type": "integer", "minimum": 0}}},
-    "span": {"type": "object", "additionalProperties": false, "required": ["start", "end"], "properties": {"start": {"$ref": "#/$defs/position"}, "end": {"$ref": "#/$defs/position"}}},
     "selector": {"type": "object", "additionalProperties": false, "required": ["lock"], "properties": {"lock": {"type": "string", "pattern": "^a-[0-9a-f]{16}$"}}},
     "path": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^/\\\\\\x00-\\x1f\\x7f]{1,255}(?:/[^/\\\\\\x00-\\x1f\\x7f]{1,255})*$", "not": {"pattern": "(^|/)\\.\\.?(/|$)"}},
     "repository": {"type": "string", "maxLength": 140, "pattern": "^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?/(?:[a-z0-9](?:[a-z0-9_.-]{0,98}[a-z0-9])?|\\.[a-z0-9](?:[a-z0-9_.-]{0,97}[a-z0-9])?)$"},
@@ -117,28 +124,6 @@
         {"if": {"properties": {"source": {"const": "github"}}, "required": ["source"]}, "then": {"required": ["repository", "requested_ref", "commit"]}}
       ]
     },
-    "container": {"type": "object", "additionalProperties": false, "required": ["image"], "properties": {"image": {"$ref": "#/$defs/image"}, "env": {"$ref": "#/$defs/containerEnv"}, "ports": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "pattern": "^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$"}}}},
-    "serviceContainer": {"type": "object", "additionalProperties": false, "required": ["image"], "properties": {"image": {"type": "string", "minLength": 1, "maxLength": 512}, "credentials": {"type": "object", "additionalProperties": false, "required": ["username", "password"], "properties": {"username": {"type": "string", "maxLength": 65536}, "password": {"type": "string", "maxLength": 65536}}}, "env": {"$ref": "#/$defs/containerEnv"}, "ports": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\x00-\\x1f\\x7f]+$"}}, "volumes": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\x00-\\x1f\\x7f]+$"}}, "options": {"type": "string", "maxLength": 65536}, "command": {"type": "string", "maxLength": 65536}, "entrypoint": {"type": "string", "maxLength": 4096}}},
-    "containerEnv": {"type": "object", "maxProperties": 256, "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_]{0,254}$"}, "additionalProperties": {"type": "string", "maxLength": 65536}},
-    "image": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?:(?:[a-z0-9]+(?:[._-][a-z0-9]+)*|\\[[0-9a-f:]+\\])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$"},
-    "step": {
-      "type": "object", "additionalProperties": false, "required": ["id", "kind"],
-      "properties": {
-        "id": {"type": "string", "minLength": 1, "maxLength": 255}, "name": {"type": "string"}, "kind": {"enum": ["run", "uses", "wait", "wait-all", "cancel"]}, "background": {"type": "boolean"},
-        "targets": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/buildkiteName"}},
-        "command": {"type": "string", "maxLength": 1048576}, "uses": {"type": "string", "maxLength": 1024}, "action": {"$ref": "#/$defs/selector"}, "shell": {"type": "string"}, "working_directory": {"type": "string"},
-        "env": {"$ref": "#/$defs/stringMap"}, "with": {"$ref": "#/$defs/stringMap"}, "condition": {"type": "string", "maxLength": 65536}, "continue_on_error": {"type": "boolean"}, "continue_on_error_expression": {"type": "string", "minLength": 1, "maxLength": 65536, "pattern": "^\\s*\\$\\{\\{[\\s\\S]*\\}\\}\\s*$"}, "timeout_minutes": {"type": "number", "exclusiveMinimum": 0, "maximum": 360}, "timeout_minutes_expression": {"type": "string", "minLength": 1, "maxLength": 65536, "pattern": "^\\s*\\$\\{\\{[\\s\\S]*\\}\\}\\s*$"}, "source": {"$ref": "#/$defs/span"}
-      },
-      "allOf": [
-        {"not": {"required": ["continue_on_error", "continue_on_error_expression"]}},
-        {"not": {"required": ["timeout_minutes", "timeout_minutes_expression"]}},
-        {"if": {"properties": {"kind": {"const": "run"}}, "required": ["kind"]}, "then": {"required": ["command"], "not": {"anyOf": [{"required": ["uses"]}, {"required": ["targets"]}, {"required": ["action"]}]}}},
-        {"if": {"properties": {"kind": {"const": "uses"}}, "required": ["kind"]}, "then": {"required": ["uses"]}},
-        {"if": {"properties": {"kind": {"const": "wait"}}, "required": ["kind"]}, "then": {"required": ["targets"], "not": {"required": ["action"]}}},
-        {"if": {"properties": {"kind": {"const": "wait-all"}}, "required": ["kind"]}, "then": {"not": {"anyOf": [{"required": ["targets"]}, {"required": ["action"]}]}}},
-        {"if": {"properties": {"kind": {"const": "cancel"}}, "required": ["kind"]}, "then": {"required": ["targets"], "properties": {"targets": {"maxItems": 1}}, "not": {"required": ["action"]}}},
-        {"if": {"properties": {"kind": {"enum": ["wait", "wait-all", "cancel"]}}, "required": ["kind"]}, "then": {"not": {"anyOf": [{"required": ["background"]}, {"required": ["command"]}, {"required": ["uses"]}, {"required": ["shell"]}, {"required": ["working_directory"]}, {"required": ["env"]}, {"required": ["with"]}, {"required": ["condition"]}, {"required": ["continue_on_error"]}, {"required": ["continue_on_error_expression"]}, {"required": ["timeout_minutes"]}, {"required": ["timeout_minutes_expression"]}, {"required": ["action"]}]}}}
-      ]
-    }
+    "image": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?:(?:[a-z0-9]+(?:[._-][a-z0-9]+)*|\\[[0-9a-f:]+\\])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$"}
   }
 }

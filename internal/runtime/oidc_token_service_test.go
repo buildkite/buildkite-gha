@@ -277,7 +277,7 @@ if (process.env.no_proxy !== "lower.example,127.0.0.1") throw new Error("no_prox
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
 	provider := &testOIDCTokenProvider{token: "header.payload.signature"}
 	redactor := &testRedactor{}
-	result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: redactor}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() = %#v, %v", result, err)
 	}
@@ -315,7 +315,7 @@ const core = require("@actions/core");
 	provider := &testOIDCTokenProvider{token: "header.payload.signature", requireLiveContext: true}
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
-	result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: &testRedactor{}}).RunJob(ctx, job, workspace)
+	result, err := (Runner{Node24: node, OIDCToken: provider, Redactor: &testRedactor{}}).runTestJob(ctx, job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" {
 		t.Fatalf("RunJob() = %#v, %v", result, err)
 	}
@@ -357,7 +357,7 @@ const core = require("@actions/core");
 		Action: &plan.ActionSelector{Lock: lockID},
 	}})
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
-	result, err := (Runner{Node24: node}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: node}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() = %#v, %v", result, err)
 	}

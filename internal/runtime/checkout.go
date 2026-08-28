@@ -12,8 +12,8 @@ import (
 	"strings"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
-	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
 var checkoutRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
@@ -246,12 +246,12 @@ func checkoutRepositoryURL(provider, repository string) (url, credentialHost str
 	}
 }
 
-func validateCheckoutRefProvenance(sourceInputs, evaluatedInputs map[string]string, eventSHA string) error {
-	for name, value := range sourceInputs {
-		if !strings.EqualFold(name, "ref") {
+func validateCheckoutRefProvenance(sourceInputs []program.Binding, evaluatedInputs map[string]string, eventSHA string) error {
+	for _, input := range sourceInputs {
+		if !strings.EqualFold(input.Name, "ref") {
 			continue
 		}
-		root, path, err := expression.ReferencePath(value)
+		root, path, err := program.StaticReference(input.Value)
 		if err != nil {
 			return nil
 		}
