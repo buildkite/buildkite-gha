@@ -838,8 +838,12 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 		"ref_name":          "feature",
 		"ref_type":          "branch",
 		"repository_owner":  "buildkite",
+		"run_attempt":       "2",
+		"run_id":            "0198c0c5-2e0f-7c68-8b0c-2e0f7c688b0c",
+		"run_number":        "512",
 		"token":             "ghs_scoped_token",
 		"workflow":          "CI",
+		"workspace":         "/workspace",
 		"event":             map[string]any{"action": "opened", "pull_request": map[string]any{"draft": true}},
 	}}
 	for template, want := range map[string]string{
@@ -850,7 +854,11 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 		"${{ github.ref_name }}":                                   "feature",
 		"${{ github.ref_type }}":                                   "branch",
 		"${{ github.repository_owner }}":                           "buildkite",
+		"${{ github.run_attempt }}":                                "2",
+		"${{ github.run_id }}":                                     "0198c0c5-2e0f-7c68-8b0c-2e0f7c688b0c",
+		"${{ github.run_number }}":                                 "512",
 		"${{ github.workflow }}":                                   "CI",
+		"${{ github.workspace }}/fake-home":                        "/workspace/fake-home",
 	} {
 		if got, err := EvaluateStep(template, context); err != nil || got != want {
 			t.Errorf("EvaluateStep(%q) = %q, %v; want %q", template, got, err, want)
@@ -871,8 +879,12 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 		"  \"ref_name\": \"feature\",\n" +
 		"  \"ref_type\": \"branch\",\n" +
 		"  \"repository_owner\": \"buildkite\",\n" +
+		"  \"run_attempt\": \"2\",\n" +
+		"  \"run_id\": \"0198c0c5-2e0f-7c68-8b0c-2e0f7c688b0c\",\n" +
+		"  \"run_number\": \"512\",\n" +
 		"  \"token\": \"ghs_scoped_token\",\n" +
-		"  \"workflow\": \"CI\"\n" +
+		"  \"workflow\": \"CI\",\n" +
+		"  \"workspace\": \"/workspace\"\n" +
 		"}"
 	for _, template := range []string{"${{ toJSON(github) }}", "${{ ToJson(GitHub) }}"} {
 		if got, err := EvaluateStep(template, context); err != nil || got != wantJSON {
@@ -885,8 +897,13 @@ func TestEvaluateStepSupportsRetainedGitHubMembers(t *testing.T) {
 	if got, err := EvaluateStep("${{ github.action_path }}", Context{GitHub: map[string]any{}}); err != nil || got != "" {
 		t.Fatalf("EvaluateStep() action_path outside composite scope = %q, %v; want empty", got, err)
 	}
-	if _, err := EvaluateStep("${{ github.run_id }}", context); err == nil {
-		t.Fatal("EvaluateStep() accepted github.run_id")
+	for _, template := range []string{"${{ github.run_attempt }}", "${{ github.run_id }}", "${{ github.run_number }}", "${{ github.workspace }}"} {
+		if _, err := EvaluateStep(template, Context{GitHub: map[string]any{}}); err == nil || !strings.Contains(err.Error(), "unavailable github value") {
+			t.Errorf("EvaluateStep(%q) without run identity error = %v, want unavailable github value", template, err)
+		}
+	}
+	if _, err := EvaluateStep("${{ github.run_started_at }}", context); err == nil || !strings.Contains(err.Error(), `unsupported runtime github reference "github.run_started_at"`) {
+		t.Fatalf("EvaluateStep() github.run_started_at error = %v, want unsupported reference", err)
 	}
 	if got, err := EvaluateStep("${{ toJSON(github.event) }}", context); err != nil || got != "{\n  \"action\": \"opened\",\n  \"pull_request\": {\n    \"draft\": true\n  }\n}" {
 		t.Fatalf("EvaluateStep() event payload = %q, %v", got, err)

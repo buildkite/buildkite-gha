@@ -366,7 +366,7 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 					return fmt.Errorf("github.token is unavailable in this field")
 				}
 				return nil
-			case "action_path", "action_ref", "action_repository", "actor", "base_ref", "event_name", "head_ref", "job", "ref", "ref_name", "ref_type", "repository", "repository_owner", "server_url", "sha", "workflow":
+			case "action_path", "action_ref", "action_repository", "actor", "base_ref", "event_name", "head_ref", "job", "ref", "ref_name", "ref_type", "repository", "repository_owner", "run_attempt", "run_id", "run_number", "server_url", "sha", "workflow", "workspace":
 				return nil
 			default:
 				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))
@@ -455,6 +455,19 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 	}
 	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported runtime expression") }
 	return validator.validate(node)
+}
+
+// requiredGitHubRuntimeValue names github members that must never fall back to
+// null: token because absence means missing authority, and run identity or
+// workspace because a silently empty value would corrupt derived cache keys
+// and paths when the runtime cannot supply them.
+func requiredGitHubRuntimeValue(name string) bool {
+	switch strings.ToLower(name) {
+	case "token", "run_attempt", "run_id", "run_number", "workspace":
+		return true
+	default:
+		return false
+	}
 }
 
 func resolveStepRuntimeRoot(root string, context Context) (any, error) {
@@ -558,7 +571,7 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 		}
 		value, ok := lookupRuntimeValue(context.GitHub, path)
 		if !ok {
-			if !allowMissing || context.GitHub == nil || strings.EqualFold(path[0], "token") {
+			if !allowMissing || context.GitHub == nil || requiredGitHubRuntimeValue(path[0]) {
 				return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
 			}
 			return nil, nil

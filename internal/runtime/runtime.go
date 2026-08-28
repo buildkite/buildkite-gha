@@ -79,7 +79,33 @@ type Runner struct {
 	RepositoryCredentials *AgentRepositoryCredentials
 	WorkflowToken         WorkflowTokenProvider
 	OIDCToken             OIDCTokenProvider
+	RunIdentity           RunIdentity
 	nodeDigests           map[int]string
+}
+
+// RunIdentity identifies the Buildkite build that owns this job run. Empty
+// fields leave the corresponding github run values unavailable.
+type RunIdentity struct {
+	BuildID     string
+	BuildNumber string
+	RetryCount  string
+}
+
+// githubValues maps Buildkite build identity onto the GitHub run identity
+// fields: run_id is the build ID, run_number is the build number, and
+// run_attempt is the retry count plus one.
+func (identity RunIdentity) githubValues() map[string]string {
+	values := map[string]string{}
+	if identity.BuildID != "" {
+		values["run_id"] = identity.BuildID
+	}
+	if identity.BuildNumber != "" {
+		values["run_number"] = identity.BuildNumber
+	}
+	if count, err := strconv.Atoi(identity.RetryCount); err == nil && count >= 0 {
+		values["run_attempt"] = strconv.Itoa(count + 1)
+	}
+	return values
 }
 
 func resolveHostExecutableBeforeWorkflow(configured, fallback, label string) (string, error) {
@@ -464,6 +490,8 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandProcessor, act
 		siblingPaths = &jobContainerBackend{mounts: []containerMount{
 			{host: action.Workspace, target: "/github/workspace"},
 			{host: action.runnerTemp, target: "/github/runner_temp"},
+			{host: jobContainerWorkspace, target: "/github/workspace"},
+			{host: jobContainerTemp, target: "/github/runner_temp"},
 		}}
 	}
 	for _, name := range sortedKeys(action.Env) {

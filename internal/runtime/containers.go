@@ -79,10 +79,6 @@ func privateDocker(r Runner) (string, string, map[string]string, error) {
 	return docker, config, map[string]string{"DOCKER_CONFIG": config}, nil
 }
 
-func (r Runner) startJobContainer(ctx context.Context, processor *commandProcessor, workspace, temp string, spec *plan.Container, services map[string]plan.ServiceContainer, extra ...containerMount) (_ *jobContainerBackend, err error) {
-	return r.startJobContainerOrdered(ctx, processor, workspace, temp, spec, services, sortedKeys(services), extra...)
-}
-
 func (r Runner) startJobContainerOrdered(ctx context.Context, processor *commandProcessor, workspace, temp string, spec *plan.Container, services map[string]plan.ServiceContainer, serviceOrder []string, extra ...containerMount) (_ *jobContainerBackend, err error) {
 	if spec != nil {
 		if err := validateEnvironmentNames(spec.Env); err != nil {
@@ -632,6 +628,18 @@ func (b *jobContainerBackend) containerPath(path string) string {
 	for _, m := range mounts {
 		if rel, err := filepath.Rel(m.host, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && len(m.host) > bestLen {
 			best, bestLen = filepath.ToSlash(filepath.Join(m.target, rel)), len(m.host)
+		}
+	}
+	return best
+}
+
+// hostPath reverses containerPath, mapping a job-container path back to its
+// host equivalent so host-side validation can resolve it.
+func (b *jobContainerBackend) hostPath(path string) string {
+	best, bestLen := path, -1
+	for _, m := range b.mounts {
+		if rel, err := filepath.Rel(m.target, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && len(m.target) > bestLen {
+			best, bestLen = filepath.Join(m.host, filepath.FromSlash(rel)), len(m.target)
 		}
 	}
 	return best

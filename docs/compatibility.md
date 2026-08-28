@@ -933,6 +933,8 @@ The runtime retains this bounded `github` context:
 | `ref_type` | `branch` for branch and pull request refs; `tag` for tag refs. |
 | `action_path` | Composite action directory inside composite steps; empty elsewhere. |
 | `action_repository`, `action_ref` | Remote composite repository and requested ref; empty for local composites and outside composite steps. |
+| `workspace` | The workspace directory: the fixed job-container mount for container jobs, the host checkout directory otherwise. Exposed as `GITHUB_WORKSPACE`. |
+| `run_id`, `run_number`, `run_attempt` | Buildkite build identity: the build ID, the build number, and the retry count plus one. Exposed as `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`, and `GITHUB_RUN_ATTEMPT`. Referencing them outside a Buildkite build is an error, and GitHub run URLs or API calls built from them do not resolve because no GitHub Actions run exists. |
 | `token` | Available only in an authorized step expression. |
 | `event` | The immutable, digest-verified event payload, loaded only for jobs that need runtime event access. |
 

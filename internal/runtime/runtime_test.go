@@ -1132,6 +1132,43 @@ func TestRunJobEvaluatesIndexedWorkflowInputs(t *testing.T) {
 	}
 }
 
+func TestRunJobResolvesWorkspaceAndRunIdentity(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/identity.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: identity\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "check", Kind: "run",
+		Command: `test "$FAKE_HOME" = "$GITHUB_WORKSPACE/fake-home" &&
+test "$RUN_KEY" = key-b5e828e8-7457-013c-9a17-2f01b563f36a-512-2 &&
+test "$GITHUB_RUN_ID" = b5e828e8-7457-013c-9a17-2f01b563f36a &&
+test "$GITHUB_RUN_NUMBER" = 512 &&
+test "$GITHUB_RUN_ATTEMPT" = 2`,
+	}})
+	job.Env = map[string]string{
+		"FAKE_HOME": "${{ github.workspace }}/fake-home",
+		"RUN_KEY":   "key-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}",
+	}
+	var logs bytes.Buffer
+	runner := Runner{Stdout: &logs, Stderr: &logs, RunIdentity: RunIdentity{BuildID: "b5e828e8-7457-013c-9a17-2f01b563f36a", BuildNumber: "512", RetryCount: "1"}}
+	result, err := runner.RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+}
+
+func TestRunJobRejectsRunIdentityExpressionsWithoutIdentity(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/identity.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: identity\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "check", Kind: "run", Command: "true"}})
+	job.Env = map[string]string{"RUN_KEY": "key-${{ github.run_id }}"}
+	var logs bytes.Buffer
+	_, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), `unavailable github value "run_id"`) {
+		t.Fatalf("RunJob() error = %v, want unavailable run_id", err)
+	}
+}
+
 func TestRunJobDoesNotTolerateDockerActionCleanupFailure(t *testing.T) {
 	requireLinuxAMD64(t)
 	fake := newFakeDocker(t, "leftover")
@@ -3317,7 +3354,7 @@ func TestStepExpressionContextExposesScopedTokenWithoutMutatingJobContext(t *tes
 func TestOriginUsesProviderServerURLWithoutGitHubToken(t *testing.T) {
 	job := plan.Job{Event: plan.Event{Provider: "cursor-origin"}}
 	github := githubContext(job)
-	env := standardEnvironment(job, "/workspace", "/tmp", "/tool-cache")
+	env := standardEnvironment(job, "/workspace", "/tmp", "/tool-cache", RunIdentity{})
 	if github["server_url"] != "https://origin.cursor.com" || env["GITHUB_SERVER_URL"] != "https://origin.cursor.com" {
 		t.Fatalf("Origin server URLs = context %#v, environment %q", github["server_url"], env["GITHUB_SERVER_URL"])
 	}
@@ -3362,7 +3399,7 @@ func TestGitHubContextExposesRuntimeEventIdentity(t *testing.T) {
 				t.Fatalf("EvaluateCondition(%q) = %v, %v", condition, got, err)
 			}
 			if test.name == "release" {
-				env := standardEnvironment(plan.Job{Event: test.event}, "/workspace", "/tmp", "/tool-cache")
+				env := standardEnvironment(plan.Job{Event: test.event}, "/workspace", "/tmp", "/tool-cache", RunIdentity{})
 				if env["GITHUB_EVENT_NAME"] != "release" || env["GITHUB_REF"] != "refs/tags/v1.2.3" || env["GITHUB_SHA"] != strings.Repeat("a", 40) {
 					t.Fatalf("release environment = %#v", env)
 				}
@@ -3382,7 +3419,7 @@ func TestStandardEnvironmentSuppliesProtectedGitHubWorkflow(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			env := standardEnvironment(plan.Job{Workflow: test.workflow}, "/workspace", "/tmp", "/tool-cache")
+			env := standardEnvironment(plan.Job{Workflow: test.workflow}, "/workspace", "/tmp", "/tool-cache", RunIdentity{})
 			if got := env["GITHUB_WORKFLOW"]; got != test.want {
 				t.Fatalf("GITHUB_WORKFLOW = %q, want %q", got, test.want)
 			}

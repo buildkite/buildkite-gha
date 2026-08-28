@@ -34,6 +34,12 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
+// startJobContainer is a test convenience that starts services in sorted-key
+// order; production callers supply the evaluated service order directly.
+func (r Runner) startJobContainer(ctx context.Context, processor *commandProcessor, workspace, temp string, spec *plan.Container, services map[string]plan.ServiceContainer, extra ...containerMount) (*jobContainerBackend, error) {
+	return r.startJobContainerOrdered(ctx, processor, workspace, temp, spec, services, sortedKeys(services), extra...)
+}
+
 // fakeJobDocker deliberately goes through a shell and a fresh copy of this test
 // process.  Thus tests exercise exec.Cmd cancellation, pipes, quoting and argv
 // boundaries rather than an in-process mock of Docker.
@@ -629,7 +635,7 @@ func TestRunJobContainerLifecycleAndEnvironment(t *testing.T) {
 	t.Setenv("DOCKER_CONTEXT", "bad")
 	t.Setenv("BUILDX_BUILDER", "bad")
 	t.Setenv("BUILDKIT_HOST", "bad")
-	j := jobContainerPlan(t, workspace, []plan.Step{{ID: "one", Kind: "run", Shell: "sh", WorkingDirectory: "nested", Env: map[string]string{"P": "step"}, Command: `test "$PATH" = /image/bin:/usr/bin; test "$P" = step; test "$PWD" = "$GITHUB_WORKSPACE/nested"; test "${{ runner.temp }}" = /__w/_temp; echo E=ok >> "$GITHUB_ENV"; echo O=out >> "$GITHUB_OUTPUT"; echo /extra >> "$GITHUB_PATH"; echo S=state >> "$GITHUB_STATE"; echo summary >> "$GITHUB_STEP_SUMMARY"`}, {ID: "two", Kind: "run", Shell: "sh", Command: `test "$E" = ok; case "$PATH" in /extra:*) ;; *) exit 8;; esac`}})
+	j := jobContainerPlan(t, workspace, []plan.Step{{ID: "one", Kind: "run", Shell: "sh", WorkingDirectory: "nested", Env: map[string]string{"P": "step"}, Command: `test "$PATH" = /image/bin:/usr/bin; test "$P" = step; test "$PWD" = "$GITHUB_WORKSPACE/nested"; test "${{ runner.temp }}" = /__w/_temp; echo E=ok >> "$GITHUB_ENV"; echo O=out >> "$GITHUB_OUTPUT"; echo /extra >> "$GITHUB_PATH"; echo S=state >> "$GITHUB_STATE"; echo summary >> "$GITHUB_STEP_SUMMARY"`}, {ID: "two", Kind: "run", Shell: "sh", WorkingDirectory: "${{ github.workspace }}/nested", Command: `test "$PWD" = "$GITHUB_WORKSPACE/nested"; test "$E" = ok; case "$PATH" in /extra:*) ;; *) exit 8;; esac`}})
 	j.Env = map[string]string{"P": "job"}
 	j.Container.Env = map[string]string{"P": "container"}
 	j.Outputs = map[string]string{"observed": "${{ steps.one.outputs.O }}"}
@@ -2394,7 +2400,7 @@ func TestRunJobContainerRunsDockerActionsAsSiblings(t *testing.T) {
 		job.Schema = plan.Schema
 		job.RequiredCapabilities = []string{"docker", "network"}
 		job.Container = &plan.Container{Image: "debian:bookworm-slim"}
-		job.Env = map[string]string{"WORKSPACE_CHILD": filepath.Join(workspace, "child")}
+		job.Env = map[string]string{"WORKSPACE_CHILD": filepath.Join(workspace, "child"), "WORKSPACE_EXPR": "${{ github.workspace }}/nested"}
 		job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "actions/docker", SourceDigest: digestTree(t, filepath.Join(workspace, "actions/docker"))}}
 		job.Outputs = map[string]string{"container": "${{ steps.docker.outputs.container }}"}
 		result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Stdout: &logs, Stderr: &logs}).RunJob(t.Context(), job, workspace)
@@ -2414,7 +2420,7 @@ func TestRunJobContainerRunsDockerActionsAsSiblings(t *testing.T) {
 			t.Fatalf("sibling network = %q, want %q", got, network)
 		}
 		joined := strings.Join(calls[run].Args, " ")
-		for _, want := range []string{"source=" + workspace + ",target=/github/workspace", "target=/github/runner_temp", "target=/github/file_commands", "WORKSPACE_CHILD=/github/workspace/child"} {
+		for _, want := range []string{"source=" + workspace + ",target=/github/workspace", "target=/github/runner_temp", "target=/github/file_commands", "WORKSPACE_CHILD=/github/workspace/child", "WORKSPACE_EXPR=/github/workspace/nested"} {
 			if !strings.Contains(joined, want) {
 				t.Fatalf("sibling run missing %q: %#v", want, calls[run].Args)
 			}

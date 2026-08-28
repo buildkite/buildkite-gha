@@ -246,6 +246,11 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		RepositoryCredentials: repositoryCredentials,
 		WorkflowToken:         workflowTokens,
 		OIDCToken:             oidcTokens,
+		RunIdentity: gharuntime.RunIdentity{
+			BuildID:     os.Getenv("BUILDKITE_BUILD_ID"),
+			BuildNumber: os.Getenv("BUILDKITE_BUILD_NUMBER"),
+			RetryCount:  os.Getenv("BUILDKITE_RETRY_COUNT"),
+		},
 	}
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {
