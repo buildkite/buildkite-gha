@@ -1719,6 +1719,9 @@ runs:
 		t.Fatal(err)
 	}
 	job := bundle.Plans[0].Job
+	if job.Event.PayloadArtifact {
+		t.Fatal("fully reduced event expressions retained the event payload")
+	}
 	if job.Env["JOB_SHA"] != "2222222222222222222222222222222222222222" || job.DefaultShell != "bash" || job.DefaultWorkingDirectory != "." {
 		t.Fatalf("job templates were not reduced: env = %#v, shell = %q, working-directory = %q", job.Env, job.DefaultShell, job.DefaultWorkingDirectory)
 	}
@@ -1854,6 +1857,64 @@ jobs:
 	}
 }
 
+func TestCompileBundleEventPayloadAuthorityFollowsReducedProgramReachability(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  false-job:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ toJSON(github.event) }}'
+  false-step:
+    runs-on: ubuntu-latest
+    steps:
+      - if: false
+        run: echo '${{ toJSON(github.event) }}'
+  unknown-step:
+    runs-on: ubuntu-latest
+    steps:
+      - if: env.RUNTIME == 'yes'
+        run: echo '${{ toJSON(github.event) }}'
+  condition-event:
+    runs-on: ubuntu-latest
+    steps:
+      - id: selector
+        run: echo selector
+      - if: github.event[steps.selector.outputs.key]
+        run: echo condition
+  control-event:
+    runs-on: ubuntu-latest
+    steps:
+      - id: selector
+        run: echo selector
+      - run: echo control
+        continue-on-error: ${{ github.event[steps.selector.outputs.boolean_key] }}
+        timeout-minutes: ${{ github.event[steps.selector.outputs.number_key] }}
+`)
+	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPayload := map[string]bool{
+		"false-job": false, "false-step": false, "unknown-step": true, "condition-event": true, "control-event": true,
+	}
+	if len(bundle.Plans) != len(wantPayload) {
+		t.Fatalf("plans = %d, want %d", len(bundle.Plans), len(wantPayload))
+	}
+	jobs := make(map[string]plan.Job, len(bundle.Plans))
+	for _, artifact := range bundle.Plans {
+		job := artifact.Job
+		jobs[job.Workflow.LogicalJobID] = job
+		if job.Event.PayloadArtifact != wantPayload[job.Workflow.LogicalJobID] {
+			t.Errorf("job %q payload artifact = %v, want %v", job.Workflow.LogicalJobID, job.Event.PayloadArtifact, wantPayload[job.Workflow.LogicalJobID])
+		}
+	}
+	control := jobs["control-event"].Steps[1]
+	if !strings.Contains(control.ContinueOnErrorExpression, "github.event") || !strings.Contains(control.TimeoutMinutesExpression, "github.event") {
+		t.Fatalf("dynamic event controls were not preserved: %#v", control)
+	}
+}
+
 func TestCompileBundleReducesEventExpressionsAfterMatrixExpansion(t *testing.T) {
 	source := []byte(`on: push
 jobs:
@@ -1905,7 +1966,7 @@ jobs:
 
 func TestRequiredSecretsDoesNotInterpretConditionLiteralsAsTemplates(t *testing.T) {
 	instance := JobInstance{If: "'${{ github.token }} ${{ secrets.DEPLOY }} ${{ github.event.action }}' == runner.os"}
-	secrets, _, _, referencesToken, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, nil, nil, false, "https://github.com", nil)
+	secrets, _, _, referencesToken, _, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, nil, nil, false, "https://github.com", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1926,7 +1987,7 @@ func TestRequiredSecretsNarrowsTokenAuthorityByKnownServerURL(t *testing.T) {
 		{name: "non-GitHub provider", serverURL: "https://origin.cursor.com"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, _, _, token, err := requiredSecrets(workflowProgram, instance.secretAuthority, nil, nil, false, test.serverURL, nil)
+			_, _, _, token, _, err := requiredSecrets(workflowProgram, instance.secretAuthority, nil, nil, false, test.serverURL, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

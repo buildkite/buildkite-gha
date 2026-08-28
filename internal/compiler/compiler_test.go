@@ -1711,6 +1711,26 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 		t.Fatalf("partially resolved controls = %#v", resolved.Steps[0])
 	}
 
+	job.Steps[0].ContinueOnErrorExpression = "${{ inputs.allow && steps.setup.outcome == 'success' }}"
+	job.Steps[0].TimeoutMinutesExpression = "${{ steps.setup.outputs.timeout || inputs.wait }}"
+	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"allow": true, "wait": 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Steps[0].ContinueOnErrorExpression != "${{ true && steps.setup.outcome == 'success' }}" || resolved.Steps[0].TimeoutMinutesExpression != "${{ steps.setup.outputs.timeout || 5 }}" {
+		t.Fatalf("runtime step controls = %#v", resolved.Steps[0])
+	}
+
+	job.Steps[0].ContinueOnErrorExpression = "${{ inputs.allow && hashFiles('go.sum') != '' }}"
+	job.Steps[0].TimeoutMinutesExpression = ""
+	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"allow": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Steps[0].ContinueOnErrorExpression != "${{ true && hashFiles('go.sum') != '' }}" {
+		t.Fatalf("runtime hashFiles control = %#v", resolved.Steps[0])
+	}
+
 	for _, field := range []string{"continue-on-error", "timeout-minutes"} {
 		t.Run("validates hidden "+field+" branch", func(t *testing.T) {
 			step := workflow.Step{Span: span}

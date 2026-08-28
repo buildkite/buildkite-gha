@@ -63,6 +63,56 @@ func TestInventoryAuthorityNarrowsExplicitKnownConditionValues(t *testing.T) {
 	}
 }
 
+func TestInventoryAuthorityEventPayloadFollowsReachability(t *testing.T) {
+	condition := func(source string, surface Surface) Site {
+		return Site{Source: source, Surface: surface, Result: ResultBoolean, Provenance: ProvenanceWorkflow, Purpose: PurposeExpression}
+	}
+	eventCommand := Site{Source: "${{ toJSON(github.event) }}", Surface: SurfaceStepTemplate, Result: ResultString, Provenance: ProvenanceWorkflow, Purpose: PurposeExpression}
+	tests := []struct {
+		name      string
+		job       string
+		step      string
+		command   Site
+		wantEvent bool
+	}{
+		{name: "false job operation", job: "false", command: eventCommand},
+		{name: "false step operation", step: "false", command: eventCommand},
+		{name: "unknown job operation", job: "vars.RUNTIME == 'yes'", command: eventCommand, wantEvent: true},
+		{name: "unknown step operation", step: "env.RUNTIME == 'yes'", command: eventCommand, wantEvent: true},
+		{name: "step condition", step: "github.event[steps.selector.outputs.key]", wantEvent: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workflow := Program{Version: Version, Job: Job{
+				Condition: condition(test.job, SurfaceJobCondition),
+				Steps: []Step{{
+					Condition: condition(test.step, SurfaceStepCondition),
+					Run:       &Run{Command: test.command},
+				}},
+			}}
+			authority, err := InventoryAuthority(workflow, AuthorityOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if authority.EventPayload != test.wantEvent {
+				t.Fatalf("event-payload authority = %v, want %v", authority.EventPayload, test.wantEvent)
+			}
+		})
+	}
+}
+
+func TestInventoryAuthorityValidatesUnreachableSites(t *testing.T) {
+	workflow := Program{Version: Version, Job: Job{
+		Condition: Site{Source: "false", Surface: SurfaceJobCondition, Result: ResultBoolean, Provenance: ProvenanceWorkflow, Purpose: PurposeExpression},
+		Steps: []Step{{Run: &Run{Command: Site{
+			Source: "${{ unsupported() }}", Surface: SurfaceStepTemplate, Result: ResultString, Provenance: ProvenanceWorkflow, Purpose: PurposeExpression,
+		}}}},
+	}}
+	if _, err := InventoryAuthority(workflow, AuthorityOptions{}); err == nil {
+		t.Fatal("unreachable invalid site passed exhaustive validation")
+	}
+}
+
 func TestWorkflowReachabilityKeepsCallerScopedGuardValuesUnknown(t *testing.T) {
 	condition := func(source string, surface Surface) Site {
 		return Site{Source: source, Surface: surface, Result: ResultBoolean, Provenance: ProvenanceWorkflow, Purpose: PurposeExpression}

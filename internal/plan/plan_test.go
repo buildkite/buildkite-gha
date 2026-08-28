@@ -1223,6 +1223,69 @@ func validateJobPlanSchema(t *testing.T, encoded []byte) {
 	}
 }
 
+func TestNormalizedRunCommandSchemaLimits(t *testing.T) {
+	encoded, err := Encode(validJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base map[string]any
+	if err := json.Unmarshal(encoded, &base); err != nil {
+		t.Fatal(err)
+	}
+	schema := compileJobPlanSchema(t)
+	validate := func(t *testing.T, document map[string]any, wantValid bool) {
+		t.Helper()
+		err := schema.Validate(document)
+		if wantValid && err != nil {
+			t.Fatalf("schema rejected command boundary: %v", err)
+		}
+		if !wantValid && err == nil {
+			t.Fatal("schema accepted an oversized normalized site")
+		}
+	}
+	clone := func(t *testing.T) map[string]any {
+		t.Helper()
+		encoded, err := json.Marshal(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document map[string]any
+		if err := json.Unmarshal(encoded, &document); err != nil {
+			t.Fatal(err)
+		}
+		return document
+	}
+	workflowCommand := func(document map[string]any) map[string]any {
+		return document["program"].(map[string]any)["job"].(map[string]any)["steps"].([]any)[0].(map[string]any)["run"].(map[string]any)["command"].(map[string]any)
+	}
+
+	document := clone(t)
+	workflowCommand(document)["source"] = strings.Repeat("x", 1048576)
+	validate(t, document, true)
+	document = clone(t)
+	workflowCommand(document)["source"] = strings.Repeat("x", 1048577)
+	validate(t, document, false)
+
+	document = clone(t)
+	site := func(source string) map[string]any {
+		return map[string]any{"source": source, "location": map[string]any{"field": "action"}}
+	}
+	document["program"].(map[string]any)["actions"] = map[string]any{"a-0000000000000001": map[string]any{
+		"runtime": "composite", "pre_if": site(""), "post_if": site(""),
+		"steps": []any{map[string]any{
+			"name": site(""), "shell": site("bash"), "working_directory": site(""), "condition": site(""),
+			"run": map[string]any{"command": site(strings.Repeat("x", 1048576))},
+		}},
+	}}
+	validate(t, document, true)
+	document["program"].(map[string]any)["actions"].(map[string]any)["a-0000000000000001"].(map[string]any)["steps"].([]any)[0].(map[string]any)["run"].(map[string]any)["command"].(map[string]any)["source"] = strings.Repeat("x", 1048577)
+	validate(t, document, false)
+
+	document = clone(t)
+	document["program"].(map[string]any)["job"].(map[string]any)["steps"].([]any)[0].(map[string]any)["name"].(map[string]any)["source"] = strings.Repeat("x", 65537)
+	validate(t, document, false)
+}
+
 func TestContainerContract(t *testing.T) {
 	job := validJob()
 	job.RequiredCapabilities = []string{"docker", "network"}

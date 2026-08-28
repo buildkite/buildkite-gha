@@ -20,6 +20,7 @@ const (
 	ProfileCompileJobCondition   ProfileID = "compile-job-condition"
 	ProfileCompileStepCondition  ProfileID = "compile-step-condition"
 	ProfileCompileCallCondition  ProfileID = "compile-call-condition"
+	ProfileReusableStepControl   ProfileID = "reusable-step-control"
 	ProfileReusableInput         ProfileID = "reusable-input"
 	ProfileRunName               ProfileID = "run-name"
 	ProfileJobCondition          ProfileID = "job-condition"
@@ -97,6 +98,7 @@ const (
 	semanticsJobOutput
 	semanticsStepTemplate
 	semanticsStepControl
+	semanticsReusableStepControl
 	semanticsRuntimeTemplate
 	semanticsServiceTemplate
 	semanticsServiceCredential
@@ -129,7 +131,8 @@ var profiles = map[ProfileID]Profile{
 	ProfileJobDefault:            {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobDefault},
 	ProfileJobOutput:             {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "inputs", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobOutput},
 	ProfileStepTemplate:          {Form: FormTemplate, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: profileFunctions("hashFiles"), Missing: MissingNull, Token: TokenWorkflowContext, semantics: semanticsStepTemplate},
-	ProfileStepControl:           {Form: FormExpression, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenWorkflowContext, semantics: semanticsStepControl},
+	ProfileStepControl:           {Form: FormExpression, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: profileFunctions("hashFiles"), Missing: MissingNull, Token: TokenWorkflowContext, semantics: semanticsStepControl},
+	ProfileReusableStepControl:   {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: profileFunctions("hashFiles"), Missing: MissingNull, Token: TokenWorkflowContext, semantics: semanticsReusableStepControl},
 	ProfileRuntimeTemplate:       {Form: FormTemplate, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Missing: MissingEmpty, Token: TokenDirect, semantics: semanticsRuntimeTemplate},
 	ProfileServiceTemplate:       {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsServiceTemplate},
 	ProfileServiceCredential:     {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "secrets", "vars"}, Missing: MissingEmpty, Token: TokenDirect, semantics: semanticsServiceCredential},
@@ -384,7 +387,7 @@ func (Engine) Validate(site Site) (Validation, error) {
 		}
 	case semanticsStepTemplate:
 		err = validateStepProfile(site.Source, profile)
-	case semanticsStepControl:
+	case semanticsStepControl, semanticsReusableStepControl:
 		var node actionlint.ExprNode
 		node, err = parseCompleteExpression(site.Source)
 		if err == nil {
@@ -419,7 +422,7 @@ func validateStepProfile(source string, profile Profile) error {
 }
 
 func stepProfileContextMap(profile Profile) map[string]bool {
-	if profile.semantics == semanticsStepTemplate || profile.semantics == semanticsStepControl {
+	if profile.semantics == semanticsStepTemplate || profile.semantics == semanticsStepControl || profile.semantics == semanticsReusableStepControl {
 		return nil
 	}
 	return profileContextMap(profile)
@@ -549,7 +552,7 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 		value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
 	case semanticsStepTemplate:
 		value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
-	case semanticsStepControl:
+	case semanticsStepControl, semanticsReusableStepControl:
 		var node actionlint.ExprNode
 		node, err = parseCompleteExpression(site.Source)
 		if err == nil {
@@ -633,6 +636,26 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 			return Reduced{Known: true, Value: value}, nil
 		}
 		return Reduced{Source: site.Source}, nil
+	}
+	if profile.semantics == semanticsReusableStepControl {
+		if _, err := engine.Validate(site); err != nil {
+			return Reduced{}, err
+		}
+		expr, err := parseExpression(site.Source, 1, 1)
+		if err != nil {
+			return Reduced{}, siteError(site, err)
+		}
+		value, available, err := evaluateCompileAvailable(expr, values.Compile)
+		if err != nil {
+			return Reduced{}, siteError(site, err)
+		}
+		if !available {
+			return Reduced{Source: site.Source}, nil
+		}
+		if !matchesEngineResult(value, site.Result) {
+			return Reduced{}, siteError(site, fmt.Errorf("expression produced %T, want %s", value, site.Result))
+		}
+		return Reduced{Known: true, Value: value}, nil
 	}
 	if profile.semantics == semanticsCompileCondition {
 		if _, err := engine.Validate(site); err != nil {

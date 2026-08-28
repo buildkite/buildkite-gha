@@ -1036,7 +1036,7 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 			if err := validateCompileSite(resolved, expression.ProfileStepControl, expression.ResultBoolean); err != nil {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("validate continue-on-error expression: %v", err))
 			}
-			reduced, err := reduceCompileSite(resolved, expression.ProfileCompile, expression.ResultAny, expression.CompileContext{})
+			reduced, err := reduceCompileSite(resolved, expression.ProfileReusableStepControl, expression.ResultAny, expression.CompileContext{})
 			if err != nil {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("evaluate continue-on-error expression: %v", err))
 			}
@@ -1056,7 +1056,7 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 			if err := validateCompileSite(resolved, expression.ProfileStepControl, expression.ResultNumber); err != nil {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("validate timeout-minutes expression: %v", err))
 			}
-			reduced, err := reduceCompileSite(resolved, expression.ProfileCompile, expression.ResultAny, expression.CompileContext{})
+			reduced, err := reduceCompileSite(resolved, expression.ProfileReusableStepControl, expression.ResultAny, expression.CompileContext{})
 			if err != nil {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("evaluate timeout-minutes expression: %v", err))
 			}

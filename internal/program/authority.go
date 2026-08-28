@@ -18,6 +18,7 @@ type Authority struct {
 	Secrets          []string
 	ReachableSecrets []string
 	GitHubToken      bool
+	EventPayload     bool
 }
 
 // Reachability records the workflow steps that planning cannot prove are
@@ -26,7 +27,8 @@ type Reachability struct {
 	Job   bool
 	Steps []bool
 
-	githubToken bool
+	githubToken  bool
+	eventPayload bool
 }
 
 // WorkflowReachability interprets structural guards using planning-known
@@ -38,6 +40,7 @@ func WorkflowReachability(workflow Program, values expression.AbstractValues) (R
 		analysis, err := engine.Analyze(site.expressionSite(), analysisValues)
 		if err == nil {
 			result.githubToken = result.githubToken || grantsToken(analysis.Effects.GitHubToken)
+			result.eventPayload = result.eventPayload || analysis.Effects.EventPayload
 		}
 		return analysis, err
 	}
@@ -113,6 +116,7 @@ func InventoryAuthority(workflow Program, options AuthorityOptions) (Authority, 
 		return Authority{}, err
 	}
 	authority.GitHubToken = reachability.githubToken
+	authority.EventPayload = reachability.eventPayload
 	if !reachability.Job {
 		return finishAuthority(found, authority), nil
 	}
@@ -139,6 +143,7 @@ func InventoryAuthority(workflow Program, options AuthorityOptions) (Authority, 
 			analysis, err := analyze(site)
 			if err == nil {
 				authority.GitHubToken = authority.GitHubToken || grantsToken(analysis.Effects.GitHubToken)
+				authority.EventPayload = authority.EventPayload || analysis.Effects.EventPayload
 			}
 			return err
 		})
@@ -160,6 +165,7 @@ func InventoryAuthority(workflow Program, options AuthorityOptions) (Authority, 
 		analysis, err := analyze(site)
 		if err == nil {
 			authority.GitHubToken = authority.GitHubToken || grantsToken(analysis.Effects.GitHubToken)
+			authority.EventPayload = authority.EventPayload || analysis.Effects.EventPayload
 		}
 		return err
 	})

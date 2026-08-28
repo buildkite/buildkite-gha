@@ -131,7 +131,7 @@ func TestProgramOwnedSecretInventory(t *testing.T) {
 			{Kind: "uses", Uses: "owner/action@v1", With: map[string]string{"ignored": "${{ secrets.INSPECTED_INPUT }}"}},
 		},
 	}
-	secrets, mappings, aliases, token, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, []string{"ACTION_DEFAULT"}, []string{"ACTION_DEFAULT"}, true, "https://github.com", nil)
+	secrets, mappings, aliases, token, _, err := requiredSecrets(lowerWorkflowProgram(instance), instance.secretAuthority, []string{"ACTION_DEFAULT"}, []string{"ACTION_DEFAULT"}, true, "https://github.com", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

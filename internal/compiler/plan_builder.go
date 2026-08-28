@@ -211,17 +211,11 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 	context := compileContext(b.ir.Event, b.ir.Vars, instance.SourcePath, b.workflowName)
 	context.Inputs = instance.Inputs
 	context.Matrix = instance.Matrix
-	retainsEventPayload := false
-
 	reduceTemplate := func(value string, profile expression.ProfileID) (string, error) {
 		if value == "" {
 			return value, nil
 		}
 		reduced, err := reduceTemplateString(value, profile, context)
-		if err != nil {
-			return "", err
-		}
-		referencesEvent, err := siteReferencesEvent(reduced, profile, expression.ResultString, false)
 		if err != nil {
 			return "", err
 		}
@@ -232,7 +226,6 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		if referencesEventAlias {
 			return "", fmt.Errorf("event context access must resolve during compilation; use github.event for whole or runtime-selected event access")
 		}
-		retainsEventPayload = retainsEventPayload || referencesEvent
 		return reduced, nil
 	}
 	reduceCondition := func(value string, profile expression.ProfileID) (string, error) {
@@ -253,13 +246,6 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		reduced := reduction.Source
 		if reduction.Known {
 			reduced = fmt.Sprint(reduction.Value)
-		}
-		referencesEvent, err = siteReferencesEvent(reduced, profile, expression.ResultBoolean, true)
-		if err != nil {
-			return "", err
-		}
-		if referencesEvent {
-			retainsEventPayload = true
 		}
 		return reduced, nil
 	}
@@ -335,7 +321,6 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 		return JobInstance{}, err
 	}
 	projectReducedProgram(&instance, reducedProgram)
-	instance.RetainEventPayload = retainsEventPayload
 	return instance, nil
 }
 
@@ -684,10 +669,11 @@ func buildPlanCallGuards(instance JobInstance, planDigests map[string]string) ([
 
 func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram program.Program, actions *builtPlanActions) ([]string, map[string]string, *plan.GitHubToken, error) {
 	serverURL := plan.EventServerURL(b.ir.Event.Provider)
-	secrets, mappings, tokenAliases, referencesGitHubToken, err := requiredSecrets(workflowProgram, instance.secretAuthority, actions.requiredSecrets, actions.reachableSecrets, actions.inputsInspected, serverURL, b.authorityReferences(instance))
+	secrets, mappings, tokenAliases, referencesGitHubToken, referencesEventPayload, err := requiredSecrets(workflowProgram, instance.secretAuthority, actions.requiredSecrets, actions.reachableSecrets, actions.inputsInspected, serverURL, b.authorityReferences(instance))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
+	actions.requiresEventPayload = actions.requiresEventPayload || referencesEventPayload
 	referencesGitHubTokenSecret := len(tokenAliases) != 0
 	tokenAliases = slices.DeleteFunc(tokenAliases, func(name string) bool { return name == "GITHUB_TOKEN" })
 	if !referencesGitHubTokenSecret && !referencesGitHubToken && !actions.requiresGitHubToken {
@@ -750,7 +736,7 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		Program:              &workflowProgram,
 		Actions:              actions.locks,
 	}
-	job.Event.PayloadArtifact = instance.RetainEventPayload || actions.requiresEventPayload
+	job.Event.PayloadArtifact = actions.requiresEventPayload
 	job.RequiresMise = &actions.requiresMise
 	return job
 }
@@ -774,7 +760,7 @@ func planConstructionFinding(instance JobInstance, err error) error {
 	)
 }
 
-func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, actionRequired, reachableActionRequired []string, actionInputsInspected bool, serverURL string, references map[string]any) ([]string, map[string]string, []string, bool, error) {
+func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, actionRequired, reachableActionRequired []string, actionInputsInspected bool, serverURL string, references map[string]any) ([]string, map[string]string, []string, bool, bool, error) {
 	if references == nil {
 		references = map[string]any{"github.server_url": serverURL}
 	}
@@ -783,7 +769,7 @@ func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, 
 		Values:                expression.AbstractValues{References: references},
 	})
 	if err != nil {
-		return nil, nil, nil, false, err
+		return nil, nil, nil, false, false, err
 	}
 	found := make(map[string]string, len(authority.Secrets)+len(actionRequired))
 	workflowFound := make(map[string]bool, len(authority.ReachableSecrets))
@@ -811,7 +797,7 @@ func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, 
 			return nil
 		})
 		if err != nil {
-			return nil, nil, nil, false, err
+			return nil, nil, nil, false, false, err
 		}
 	}
 	for _, name := range actionRequired {
@@ -851,7 +837,7 @@ func requiredSecrets(workflowProgram program.Program, bindings secretAuthority, 
 	if len(mappings) == 0 {
 		mappings = nil
 	}
-	return names, mappings, tokenAliases, authority.GitHubToken, nil
+	return names, mappings, tokenAliases, authority.GitHubToken, authority.EventPayload, nil
 }
 
 func planRemoteWorkflowSource(source *RemoteWorkflowSource) *plan.RemoteWorkflowSource {

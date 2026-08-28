@@ -79,6 +79,7 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 		ProfileCompileJobCondition:   {"github.event_name == 'push'", ResultBoolean, true},
 		ProfileCompileStepCondition:  {"inputs.enabled", ResultBoolean, true},
 		ProfileCompileCallCondition:  {"inputs.enabled", ResultBoolean, true},
+		ProfileReusableStepControl:   {"${{ true }}", ResultBoolean, true},
 		ProfileReusableInput:         {"${{ 'value' }}", ResultString, "value"},
 		ProfileRunName:               {"run-${{ github.event_name }}", ResultString, "run-push"},
 		ProfileJobCondition:          {"always() && inputs.enabled", ResultBoolean, true},
@@ -288,6 +289,21 @@ func TestEngineReduceStepControlPreservesTypeAndRuntimeResidual(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestEngineStepControlAdmitsRuntimeHashFiles(t *testing.T) {
+	engine := NewEngine()
+	site := Site{Source: "${{ hashFiles('go.sum') != '' }}", Profile: ProfileStepControl, Result: ResultBoolean}
+	if _, err := engine.Validate(site); err != nil {
+		t.Fatal(err)
+	}
+	reduced, err := engine.Reduce(site, Values{Compile: CompileContext{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reduced.Known || reduced.Source != "${{ (hashFiles('go.sum') != '') }}" {
+		t.Fatalf("Reduce() = %#v, want runtime residual", reduced)
 	}
 }
 
@@ -591,7 +607,7 @@ func TestEngineProfileTokenDeclarationsMatchValidation(t *testing.T) {
 		if profile.Form == FormTemplate {
 			source = "${{ github.token }}"
 			result = ResultString
-		} else if profile.semantics == semanticsStepControl {
+		} else if profile.semantics == semanticsStepControl || profile.semantics == semanticsReusableStepControl {
 			source = "${{ github.token }}"
 		}
 		_, err := engine.Validate(Site{Source: source, Profile: id, Result: result, Purpose: PurposeExpression})
@@ -624,7 +640,7 @@ func TestEngineCaseFunctionPolicyIsClosedByProfile(t *testing.T) {
 		ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileStepCondition,
 		ProfileCallCondition, ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault,
-		ProfileJobOutput, ProfileStepTemplate, ProfileStepControl, ProfileActionInputDefault,
+		ProfileJobOutput, ProfileStepTemplate, ProfileStepControl, ProfileReusableStepControl, ProfileActionInputDefault,
 	} {
 		if !containsFold(profiles[id].Functions, "case") {
 			t.Errorf("profile %q does not admit case", id)
@@ -642,7 +658,7 @@ func profileIDs() []ProfileID {
 		ProfileCompile, ProfileCompileTemplate, ProfileCompileContainerImage, ProfilePartialTemplate, ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileStepCondition, ProfileCallCondition,
 		ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput, ProfileStepTemplate,
-		ProfileStepControl, ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileServiceCredential, ProfileServiceMap,
+		ProfileStepControl, ProfileReusableStepControl, ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileServiceCredential, ProfileServiceMap,
 		ProfileActionInputDefault, ProfileDockerActionArg,
 	}
 }
