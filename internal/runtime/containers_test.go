@@ -2413,7 +2413,7 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 		t.Fatalf("Docker create absent: %#v", calls)
 	}
 	createArgs := calls[createIndex].Args
-	if !slices.Contains(createArgs, "type=bind,source="+node16+",target=/__buildkite-gha/node16,readonly") || !slices.Contains(createArgs, "type=bind,source="+node24+",target=/__buildkite-gha/node24,readonly") || slices.Contains(createArgs, "type=bind,source="+node20+",target=/__buildkite-gha/node20,readonly") {
+	if slices.Contains(createArgs, "type=bind,source="+node16+",target=/__buildkite-gha/node16,readonly") || slices.Contains(createArgs, "type=bind,source="+node20+",target=/__buildkite-gha/node20,readonly") || !slices.Contains(createArgs, "type=bind,source="+node24+",target=/__buildkite-gha/node24,readonly") {
 		t.Fatalf("lazy node20 declaration mounts = %#v", createArgs)
 	}
 	seenLifecycleExec := false
