@@ -522,7 +522,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	requireImporterHost(t)
 	const fullCommit = "0123456789abcdef0123456789abcdef01234567"
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"mixed.yml": "on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  configured:\n    needs: linux\n    runs-on: ubuntu-18.04\n    steps:\n      - run: echo configured\n  fallback:\n    needs: linux\n    runs-on: [self-hosted, ubuntu-20.04]\n    steps:\n      - run: echo fallback\n  macos:\n    needs: linux\n    runs-on: macos-26\n    steps:\n      - run: echo macos\n",
+		"mixed.yml": "on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  configured:\n    needs: linux\n    runs-on: ubuntu-18.04\n    steps:\n      - run: echo configured\n  fallback:\n    needs: linux\n    runs-on: [self-hosted, ubuntu-20.04]\n    steps:\n      - run: echo fallback\n  expression:\n    needs: linux\n    strategy:\n      matrix:\n        runner: [custom-linux]\n    runs-on: [self-hosted, \"${{ matrix.runner }}\"]\n    steps:\n      - run: echo expression fallback\n  macos:\n    needs: linux\n    runs-on: macos-26\n    steps:\n      - run: echo macos\n",
 	})
 	t.Chdir(repository)
 	workflowPath := filepath.Join(".github", "workflows", "mixed.yml")
@@ -587,6 +587,15 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 						"message": "This runner selector is not supported directly; using the linux-medium queue via a heuristic fallback. Configure an explicit runner mapping to use an appropriate Buildkite queue and avoid this fallback: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md",
 					}},
 				}
+			case slices.Equal(requirement.Selector.Labels, []string{"self-hosted", "custom-linux"}):
+				resolutions[i] = map[string]any{
+					"id":     requirement.ID,
+					"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage},
+					"warnings": []map[string]string{{
+						"code":    "runner_label_fallback",
+						"message": "Expression-selected runner labels [self-hosted, custom-linux] are not supported directly; using the linux-medium queue via a heuristic fallback. Configure an explicit runner mapping to use an appropriate Buildkite queue and avoid this fallback: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md",
+					}},
+				}
 			case slices.Equal(requirement.Selector.Labels, []string{"macos-26"}):
 				resolutions[i] = map[string]any{"id": requirement.ID, "target": map[string]string{"queue": "macos-26-medium", "platform": "darwin/arm64"}}
 			default:
@@ -621,7 +630,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 			break
 		}
 	}
-	if runnerAnnotation == nil || runnerAnnotation.args[8] != "warning" || !strings.Contains(string(runnerAnnotation.stdin), "heuristic fallback") || !strings.Contains(string(runnerAnnotation.stdin), "linux-medium") || !strings.Contains(string(runnerAnnotation.stdin), "docs/compatibility.md") {
+	if runnerAnnotation == nil || runnerAnnotation.args[8] != "warning" || !strings.Contains(string(runnerAnnotation.stdin), "heuristic fallback") || !strings.Contains(string(runnerAnnotation.stdin), "custom-linux") || !strings.Contains(string(runnerAnnotation.stdin), "linux-medium") || !strings.Contains(string(runnerAnnotation.stdin), "docs/compatibility.md") {
 		t.Fatalf("runner resolution annotation = %#v", runnerAnnotation)
 	}
 	darwinDigest := transport.Digest(darwinContents)
@@ -677,7 +686,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 			Command string
 		}{Image: step.Image, Queue: step.Agents["queue"], Command: step.Command}
 	}
-	var linux, configured, fallback, macos struct {
+	var linux, configured, fallback, expression, macos struct {
 		Image   string
 		Queue   string
 		Command string
@@ -690,6 +699,8 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 			configured = step
 		case strings.HasSuffix(key, "-fallback"):
 			fallback = step
+		case strings.Contains(key, "-expression-"):
+			expression = step
 		case strings.HasSuffix(key, "-macos"):
 			macos = step
 		}
@@ -702,6 +713,9 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	}
 	if fallback.Queue != "linux-medium" || fallback.Image != defaultNobleRunnerImage || !strings.Contains(fallback.Command, "--hosted-tool-cache") || !strings.Contains(fallback.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
 		t.Fatalf("fallback Linux pipeline step = %#v", fallback)
+	}
+	if expression.Queue != "linux-medium" || expression.Image != defaultNobleRunnerImage || !strings.Contains(expression.Command, "--hosted-tool-cache") || !strings.Contains(expression.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
+		t.Fatalf("expression fallback Linux pipeline step = %#v", expression)
 	}
 	if macos.Queue != "macos-26-medium" || macos.Image != "" || strings.Contains(macos.Command, "--hosted-tool-cache") || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) {
 		t.Fatalf("Darwin pipeline step = %#v", macos)
