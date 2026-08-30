@@ -45,6 +45,23 @@ mise run smoke:local
 mise run release:check
 ```
 
+## Understand the Buildkite configuration
+
+The repository keeps each pipeline entry point separate from its dynamic test
+or example logic:
+
+| File | Purpose |
+| --- | --- |
+| [`.buildkite/pipeline.yml`](../.buildkite/pipeline.yml) | Ordinary CI, scheduled vulnerability scans, and on-demand suite loaders. This pipeline runs on the Open Source cluster. |
+| [`.buildkite/release.yml`](../.buildkite/release.yml) | Tag-only release checks and publishing. This pipeline runs on the Open Source Deploy cluster. |
+| [`.buildkite/compatibility`](../.buildkite/compatibility) | Shared step generation, proof execution, continuations, and suite result aggregation. |
+| [`.buildkite/plugin-demo.yml`](../.buildkite/plugin-demo.yml) | Released-plugin demonstrations loaded on demand by ordinary CI. |
+| [`.buildkite/upload-examples.sh`](../.buildkite/upload-examples.sh) | Manual example selection for the separate Open Source examples pipeline. |
+
+Buildkite pipeline and cluster settings live in `buildkite/saas-iac`. Keep
+release publishing out of the ordinary CI pipeline so its cluster cannot read
+release credentials.
+
 ## Monitor dependency security
 
 Renovate uses the shared `buildkite/renovate-config` preset and runs every four
@@ -202,7 +219,7 @@ bk build create --pipeline buildkite/buildkite-gha \
   --env SMOKE_PROBE=hosted --env SMOKE_COMMIT="$commit" --yes
 ```
 
-This suite covers shell jobs, concurrent steps, public and Docker actions, container runtime behavior, summaries, annotations, artifact upload, and artifact roundtrip. Use `COMPATIBILITY_PROOF=<target>` with `COMPATIBILITY_PROOF_COMMIT=<commit>` only when diagnosing one target. The available target names are in [`.buildkite/pipeline.yml`](../.buildkite/pipeline.yml).
+This suite covers shell jobs, concurrent steps, public and Docker actions, container runtime behavior, summaries, annotations, artifact upload, and artifact roundtrip. Use `COMPATIBILITY_PROOF=<target>` with `COMPATIBILITY_PROOF_COMMIT=<commit>` only when diagnosing one target. The available target names are in [`.buildkite/compatibility`](../.buildkite/compatibility).
 
 Some Buildkite APIs are advisory, so a passing job does not prove that the result was persisted. Check those results independently after the build:
 
@@ -248,7 +265,7 @@ Before running the task, inspect every commit and the complete diff since the la
 
 The task runs `check`, fetches `origin/main` and tags, and accepts only the next pre-1.0 patch or minor tag. It then requires you to type the exact proposed tag before creating and pushing it. Stop without running the task when the changes do not warrant a release or the correct bump is ambiguous.
 
-The tag build reruns checks and publishes the GitHub release, paired Linux/amd64 and Darwin/arm64 archives, and checksum file. Published assets are immutable; a failed publication must not replace an existing archive for the same stable tag.
+The tag starts the separate `buildkite-gha-release` pipeline. That pipeline reruns checks on the Open Source Deploy cluster, then publishes the GitHub release, paired Linux/amd64 and Darwin/arm64 archives, and checksum file. Published assets are immutable; a failed publication must not replace an existing archive for the same stable tag.
 
 `GHA_GITHUB_RELEASE_TOKEN` must be a fine-grained, repository-scoped token with Contents read and write access. Store it as a Buildkite secret restricted to this release pipeline and webhook-created `v*` tag builds, with no access from ordinary branch or pull request builds. The publisher verifies the remote tag, checkout, and Buildkite commit before requesting the secret.
 

@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly -a targets=(shell-upload concurrent-steps public-actions hosted-docker dockerfile-action container-runtime summary-annotation workflow-annotations skipped-workflow-annotation upload-artifact artifact-roundtrip experimental-runner-user)
+readonly -a suite_targets=(shell-upload concurrent-steps public-actions hosted-docker dockerfile-action container-runtime summary-annotation workflow-annotations upload-artifact artifact-roundtrip)
+cleanup_paths=()
+
+die() { printf '[compatibility] error: %s\n' "$*" >&2; exit 1; }
+
+cleanup() {
+  local path
+  for path in "${cleanup_paths[@]}"; do
+    rm -rf -- "$path"
+  done
+}
+trap cleanup EXIT
+
+validate() {
+  local target=${1:-} known
+  for known in "${targets[@]}"; do
+    [[ $target == "$known" ]] && return
+  done
+  die "unknown compatibility proof: $target"
+}
+
+proof_commit() {
+  printf '%s' "${COMPATIBILITY_PROOF_COMMIT:-${SMOKE_COMMIT:-${BUILDKITE_COMMIT:-}}}"
+}
+
+prepare() {
+  local commit
+  commit=$(proof_commit)
+  scripts/verify-source-checkout "$commit"
+  test -z "$(git status --porcelain --untracked-files=all)"
+  printf '%s' "$commit"
+}
+
+upload_workflow() {
+  local target=$1 event=$2 workflow=$3 version_kind=$4 with_nodes=${5:-false}
+  local commit distribution_root runtime_version revision
+  commit=$(prepare)
+  distribution_root=$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-${target}.XXXXXXXX")
+  cleanup_paths+=("$distribution_root")
+
+  if [[ $version_kind == revision ]]; then
+    revision=$(git rev-parse HEAD)
+    CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false \
+      -ldflags "-X main.revision=$revision" -o "$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+  else
+    runtime_version="0.0.0-${target}.${commit}"
+    CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false \
+      -ldflags "-X main.version=$runtime_version" -o "$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+  fi
+
+  if [[ $with_nodes == true ]]; then
+    BUILDKITE_GHA_NODE20="$(mise where node@20)/bin/node" \
+    BUILDKITE_GHA_NODE24="$(mise where node@24)/bin/node" \
+      "$distribution_root/buildkite-gha" upload \
+        --event-path "$event" --runner-queue ubuntu-latest=hosted "$workflow"
+  else
+    "$distribution_root/buildkite-gha" upload \
+      --event-path "$event" --runner-queue ubuntu-latest=hosted "$workflow"
+  fi
+}
+
+run() {
+  local target=$1 commit distribution_root proof_root proof_workflow event nonce runtime_version
+  validate "$target"
+
+  case "$target" in
+    shell-upload)
+      upload_workflow "$target" testdata/smoke/events/push.json \
+        testdata/smoke/.github/workflows/shell.yml revision
+      ;;
+    concurrent-steps)
+      upload_workflow "$target" testdata/smoke/events/push.json \
+        testdata/smoke/.github/workflows/concurrent.yml revision
+      ;;
+    public-actions)
+      upload_workflow "$target" testdata/public-actions/events/public-checkout.json \
+        testdata/public-actions/.github/workflows/public-actions.yml version true
+      ;;
+    hosted-docker)
+      prepare >/dev/null
+      buildkite-agent pipeline upload --no-interpolation --reject-secrets <<'YAML'
+agents:
+  queue: "hosted"
+steps:
+  - label: ":docker: Hosted Docker capabilities"
+    key: "hosted-docker-probe"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    command: "scripts/hosted-docker-probe"
+YAML
+      ;;
+    dockerfile-action)
+      commit=$(prepare)
+      proof_root=$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-dockerfile-action.XXXXXXXX")
+      cleanup_paths+=("$proof_root")
+      mkdir -p "$proof_root/.github/workflows"
+      cp testdata/dockerfile-action/.github/workflows/docker-action.yml.tmpl \
+        "$proof_root/.github/workflows/docker-action.yml"
+      runtime_version="0.0.0-dockerfile-action.${commit}"
+      CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false \
+        -ldflags "-X main.version=$runtime_version" -o "$proof_root/buildkite-gha" ./cmd/buildkite-gha
+      BUILDKITE_GHA_NODE20="$(mise where node@20)/bin/node" \
+      BUILDKITE_GHA_NODE24="$(mise where node@24)/bin/node" \
+        "$proof_root/buildkite-gha" upload \
+          --event-path testdata/smoke/events/push.json \
+          --runner-queue ubuntu-latest=hosted \
+          "$proof_root/.github/workflows/docker-action.yml"
+      ;;
+    container-runtime)
+      prepare >/dev/null
+      buildkite-agent pipeline upload --no-interpolation --reject-secrets <<'YAML'
+agents:
+  queue: "hosted"
+steps:
+  - label: ":docker: Container runtime"
+    key: "container-runtime-probe"
+    timeout_in_minutes: 25
+    retry:
+      automatic: false
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: "scripts/container-runtime-probe"
+YAML
+      ;;
+    summary-annotation)
+      upload_workflow "$target" testdata/smoke/events/push.json \
+        testdata/smoke/.github/workflows/summary-annotation.yml version
+      ;;
+    workflow-annotations)
+      upload_workflow "$target" testdata/smoke/events/push.json \
+        testdata/smoke/.github/workflows/workflow-command-annotations.yml version
+      ;;
+    skipped-workflow-annotation)
+      prepare >/dev/null
+      event=$(mktemp "${TMPDIR:-/tmp}/buildkite-gha-skipped-workflow-event.XXXXXXXX")
+      cleanup_paths+=("$event")
+      jq '.ref = "refs/heads/feature" | .payload.ref = "refs/heads/feature"' \
+        testdata/smoke/events/push.json > "$event"
+      mise exec -- go run ./cmd/buildkite-gha upload \
+        --event-path "$event" .buildkite/fixtures/skipped-workflow-annotation.yml
+      ;;
+    upload-artifact)
+      upload_workflow "$target" testdata/smoke/events/push.json \
+        testdata/smoke/.github/workflows/upload-artifact.yml version
+      ;;
+    artifact-roundtrip)
+      commit=$(prepare)
+      distribution_root=$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-artifact-roundtrip.XXXXXXXX")
+      proof_workflow=$(mktemp testdata/smoke/.github/workflows/.artifact-roundtrip.XXXXXXXX.yml)
+      cleanup_paths+=("$distribution_root" "$proof_workflow")
+      runtime_version="0.0.0-artifact-roundtrip.${commit}"
+      CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false \
+        -ldflags "-X main.version=$runtime_version" -o "$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+      nonce=${BUILDKITE_BUILD_NUMBER:?BUILDKITE_BUILD_NUMBER is required}
+      sed "s/__ARTIFACT_ROUNDTRIP_NONCE__/$nonce/g" \
+        testdata/smoke/.github/workflows/artifact.yml > "$proof_workflow"
+      ! grep -q '__ARTIFACT_ROUNDTRIP_NONCE__' "$proof_workflow"
+      "$distribution_root/buildkite-gha" upload \
+        --event-path testdata/smoke/events/push.json \
+        --runner-queue ubuntu-latest=hosted "$proof_workflow"
+      ;;
+    experimental-runner-user)
+      buildkite-agent pipeline upload --no-interpolation --reject-secrets <<'YAML'
+agents:
+  queue: "hosted"
+steps:
+  - label: ":pipeline: Experimental runner user importer"
+    key: "experimental-runner-user-plugin"
+    timeout_in_minutes: 20
+    retry:
+      automatic: false
+    plugins:
+      - github-actions#v0.9.3:
+          workflow: .github/workflows/experimental-runner-user.yml
+          source-ref: 65209ba627e45a9c0ad124c6ca0334e4ba9e24f5
+          experimental-runner-user: true
+          runners:
+            - runs-on: ubuntu-latest
+              queue: hosted
+YAML
+      ;;
+  esac
+}
+
+dependencies() {
+  case "$1" in
+    shell-upload) printf '%s\n' gha-consumer-5ebbc197d87b gha-consumer-91934b28b00f ;;
+    concurrent-steps) printf '%s\n' gha-observe ;;
+    public-actions) printf '%s\n' gha-public-actions ;;
+    hosted-docker) printf '%s\n' hosted-docker-probe ;;
+    dockerfile-action) printf '%s\n' gha-docker-action ;;
+    container-runtime) printf '%s\n' container-runtime-probe ;;
+    summary-annotation) printf '%s\n' gha-summary-annotation ;;
+    workflow-annotations) printf '%s\n' gha-workflow-command-annotations ;;
+    upload-artifact) printf '%s\n' gha-upload-artifact ;;
+    artifact-roundtrip) printf '%s\n' gha-artifact-producer gha-artifact-consumer-5ebbc197d87b gha-artifact-consumer-91934b28b00f ;;
+    experimental-runner-user) printf '%s\n' gha-670184b66c1c7c22-runner-user-producer gha-670184b66c1c7c22-runner-user-consumer ;;
+    *) die "proof has no continuation: $1" ;;
+  esac
+}
+
+pipeline() {
+  local target
+  local -a selected
+  if [[ ${SMOKE_PROBE:-} == hosted ]]; then
+    selected=("${suite_targets[@]}")
+  else
+    target=${COMPATIBILITY_PROOF:-public-actions}
+    validate "$target"
+    selected=("$target")
+  fi
+
+  printf 'agents:\n  queue: "hosted"\nsteps:\n'
+  for target in "${selected[@]}"; do
+    printf '  - label: ":pipeline: %s importer"\n' "$target"
+    printf '    key: "%s-importer"\n' "$target"
+    case "$target" in
+      dockerfile-action|summary-annotation|workflow-annotations|skipped-workflow-annotation|upload-artifact|artifact-roundtrip)
+        printf '    timeout_in_minutes: 15\n    retry:\n      automatic: false\n'
+        ;;
+      experimental-runner-user)
+        printf '    timeout_in_minutes: 20\n    retry:\n      automatic: false\n'
+        ;;
+      container-runtime)
+        printf '    retry:\n      automatic: false\n'
+        ;;
+    esac
+    case "$target" in
+      hosted-docker|container-runtime|experimental-runner-user) ;;
+      *)
+        printf '    plugins:\n'
+        printf '      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:\n'
+        printf '          version: "2026.5.12"\n'
+        ;;
+    esac
+    printf '    command: ".buildkite/compatibility run %s"\n' "$target"
+
+    if [[ $target != skipped-workflow-annotation ]]; then
+      printf '  - label: ":pipeline: %s continuation"\n' "$target"
+      printf '    key: "%s-continuation-loader"\n' "$target"
+      printf '    depends_on: "%s-importer"\n' "$target"
+      printf '    allow_dependency_failure: true\n'
+      printf '    command: ".buildkite/compatibility continue %s"\n' "$target"
+    fi
+  done
+
+  if [[ ${SMOKE_PROBE:-} == hosted ]]; then
+    printf '  - label: ":pipeline: Complete hosted compatibility suite"\n'
+    printf '    key: "hosted-smoke-aggregator-loader"\n'
+    printf '    depends_on:\n'
+    for target in "${selected[@]}"; do
+      printf '      - step: "%s-continuation-loader"\n' "$target"
+      printf '        allow_failure: true\n'
+    done
+    printf '    command: ".buildkite/compatibility aggregate"\n'
+  fi
+}
+
+continue_proof() {
+  local target=$1 dependency
+  validate "$target"
+  printf 'agents:\n  queue: "hosted"\nsteps:\n'
+  printf '  - label: ":white_check_mark: %s complete"\n' "$target"
+  printf '    key: "%s-complete"\n' "$target"
+  printf '    depends_on:\n'
+  while read -r dependency; do
+    printf '      - step: "%s"\n        allow_failure: true\n' "$dependency"
+  done < <(dependencies "$target")
+  printf '    command: ".buildkite/compatibility complete %s"\n' "$target"
+}
+
+complete() {
+  local target=$1 dependency outcome
+  validate "$target"
+  if [[ $target != experimental-runner-user ]]; then
+    printf '%s proof jobs settled\n' "$target"
+    return
+  fi
+  while read -r dependency; do
+    outcome=$(buildkite-agent step get outcome --step "$dependency")
+    printf '%s: %s\n' "$dependency" "$outcome"
+    [[ $outcome == passed ]]
+  done < <(dependencies "$target")
+}
+
+aggregate() {
+  local target
+  printf 'agents:\n  queue: "hosted"\nsteps:\n'
+  printf '  - label: ":white_check_mark: Hosted compatibility suite"\n'
+  printf '    key: "hosted-smoke-terminal"\n'
+  printf '    depends_on:\n'
+  for target in "${suite_targets[@]}"; do
+    printf '      - step: "%s-complete"\n        allow_failure: true\n' "$target"
+  done
+  printf '    command: ".buildkite/compatibility verify-suite"\n'
+}
+
+verify_suite() {
+  local step outcome failed=0
+  for step in \
+    gha-producer gha-consumer-5ebbc197d87b gha-consumer-91934b28b00f \
+    gha-concurrent gha-observe gha-public-actions hosted-docker-probe \
+    gha-docker-action container-runtime-probe gha-summary-annotation \
+    gha-workflow-command-annotations gha-upload-artifact gha-artifact-producer \
+    gha-artifact-consumer-5ebbc197d87b gha-artifact-consumer-91934b28b00f \
+    shell-upload-complete concurrent-steps-complete public-actions-complete \
+    hosted-docker-complete dockerfile-action-complete container-runtime-complete \
+    summary-annotation-complete workflow-annotations-complete \
+    upload-artifact-complete artifact-roundtrip-complete
+  do
+    outcome=$(buildkite-agent step get outcome --step "$step")
+    printf '%s: %s\n' "$step" "$outcome"
+    [[ $outcome == passed ]] || failed=1
+  done
+  (( failed == 0 )) || die 'one or more hosted compatibility targets failed'
+  echo 'All hosted compatibility targets passed'
+}
+
+operation=${1:-}
+shift || true
+case "$operation" in
+  validate) validate "${1:-}" ;;
+  pipeline) pipeline | buildkite-agent pipeline upload ;;
+  run) run "${1:-}" ;;
+  continue) continue_proof "${1:-}" | buildkite-agent pipeline upload ;;
+  complete) complete "${1:-}" ;;
+  aggregate) aggregate | buildkite-agent pipeline upload ;;
+  verify-suite) verify_suite ;;
+  *) die 'usage: .buildkite/compatibility <validate|pipeline|run|continue|complete|aggregate|verify-suite> [proof]' ;;
+esac
