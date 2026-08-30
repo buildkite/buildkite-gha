@@ -147,7 +147,7 @@ Do not report success until all checks below pass.
 
 1. **Tag and target:** fetch tags, then confirm the local tag, remote tag, `origin/main`, and selected SHA resolve to the same commit. Confirm the GitHub release is stable, published, and targets that commit.
 2. **Body:** fetch the release body with `gh release view --json body` and compare it byte-for-byte with the presented notes file. Confirm the Highlights heading and full comparison link remain present.
-3. **CI and release build:** verify all required GitHub checks and the Buildkite tag build passed, including the `publish-release` job. Use `bk build list --pipeline buildkite/buildkite-gha --commit "$commit" --json` and `bk build view <number> --pipeline buildkite/buildkite-gha --json` when Buildkite CLI authentication is available. Soft-fail reporting jobs do not block the release, but identify them accurately.
+3. **CI and release build:** verify all required GitHub checks passed and the `buildkite-gha-release` Buildkite tag build passed, including its `publish-release` job. Use `bk build list --pipeline buildkite/buildkite-gha-release --commit "$commit" --json` and `bk build view <number> --pipeline buildkite/buildkite-gha-release --json` when Buildkite CLI authentication is available. Soft-fail reporting jobs do not block the release, but identify them accurately.
 4. **Assets:** download the release into a new temporary directory and require exactly these published assets:
    - `buildkite-gha_Linux_x86_64.tar.gz`
    - `buildkite-gha_Darwin_arm64.tar.gz`

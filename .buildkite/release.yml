@@ -1,0 +1,29 @@
+env:
+  MISE_JOBS: "1"
+  MISE_LOCKED: "1"
+
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":go: Release checks"
+    key: "release-checks"
+    cache: ".buildkite/cache-volume"
+    env:
+      BUILDKITE_GHA_LIVE_REQUIRED: "1"
+      GOLANGCI_LINT_CACHE: "/tmp/golangci-lint"
+    plugins:
+      - setup-go#v0.1.0:
+          mise-version: "2026.5.12"
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: "mise run check"
+
+  - wait: ~
+
+  - label: ":rocket: Publish release"
+    key: "publish-release"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: "mise exec -- scripts/ci-buildkite-release"
