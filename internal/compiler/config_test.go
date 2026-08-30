@@ -308,6 +308,39 @@ jobs:
 	}
 }
 
+func TestCompileAppliesRunnerSelectorToExpressionResolvedLabels(t *testing.T) {
+	workflow := []byte(`on: push
+jobs:
+  test:
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS) }}
+    steps:
+      - run: true
+`)
+	target := RunnerTarget{
+		Queue:    "linux-medium",
+		Platform: PlatformLinuxAMD64,
+		Image:    "example.com/toolchains/noble@sha256:" + strings.Repeat("0", 64),
+	}
+	compiled, err := CompileWithOptions("expression-runner.yml", workflow, pushEvent(t), Options{
+		EventTrust: EventTrusted,
+		Vars:       VariableSources{Bridge: map[string]string{"RUNNER_LABELS": `["self-hosted","custom-linux"]`}},
+		Runners: RunnerPolicy{Selectors: []RunnerSelector{{
+			Labels: []string{"self-hosted", "custom-linux"},
+			Target: target,
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 1 || !slices.Equal(ir.Jobs[0].RunsOn, []string{"self-hosted", "custom-linux"}) || ir.Jobs[0].Queue != target.Queue || ir.Jobs[0].RuntimeImage != target.Image {
+		t.Fatalf("expression-selected runner = %#v", ir.Jobs)
+	}
+}
+
 func TestRunsOnPolicyFailsClosedWithLocatedDiagnostics(t *testing.T) {
 	tests := []struct {
 		name   string
