@@ -286,16 +286,22 @@ func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 }
 
 func TestDiagnosticsPreserveDistinctBlockersForOneCode(t *testing.T) {
+	common := strings.Repeat("x", maxBlockerDetailBytes)
 	input := []Diagnostic{
-		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "runner_label", BlockerDetail: "windows-latest"},
-		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "runner_label", BlockerDetail: "macos-10"},
+		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "expression", BlockerDetail: common + "first"},
+		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "expression", BlockerDetail: common + "second"},
 	}
 	bounded, err := boundedDiagnostics(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(bounded, input) {
-		t.Fatalf("bounded diagnostics = %#v, want %#v", bounded, input)
+	if len(bounded) != 2 || bounded[0].BlockerDetail == bounded[1].BlockerDetail {
+		t.Fatalf("bounded diagnostics collapsed distinct details: %#v", bounded)
+	}
+	for _, diagnostic := range bounded {
+		if len(diagnostic.BlockerDetail) > maxBlockerDetailBytes || !strings.Contains(diagnostic.BlockerDetail, "…#") {
+			t.Fatalf("bounded diagnostic detail = %q", diagnostic.BlockerDetail)
+		}
 	}
 }
 

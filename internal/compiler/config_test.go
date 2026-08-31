@@ -351,6 +351,7 @@ func TestRunsOnPolicyFailsClosedWithLocatedDiagnostics(t *testing.T) {
 		blockerDetail string
 	}{
 		{name: "unsupported operating system", runsOn: "windows-latest", labels: map[string]string{"windows-latest": "windows"}, want: `unsupported operating system runner label "windows-latest"`, blockerDetail: "windows-latest"},
+		{name: "unsupported operating system among labels", runsOn: "[self-hosted, windows-latest]", labels: map[string]string{"self-hosted": "linux"}, want: `unsupported operating system runner label "windows-latest"`, blockerDetail: "windows-latest"},
 		{name: "unmapped label", runsOn: "ubuntu-20.04", labels: map[string]string{"ubuntu-24.04": "linux"}, want: `runner label "ubuntu-20.04" is not mapped by policy`, blockerDetail: "ubuntu-20.04"},
 		{name: "unresolved expression", runsOn: "${{ vars.RUNNER }}", labels: map[string]string{"ubuntu-24.04": "linux"}, want: `unavailable value "vars.runner"`},
 		{name: "conflicting labels", runsOn: "[self-hosted, linux]", labels: map[string]string{"self-hosted": "one", "linux": "two"}, want: "runner labels resolve to conflicting queues"},

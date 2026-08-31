@@ -4,6 +4,7 @@ package telemetry
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -320,10 +321,13 @@ func boundedBlocker(blocker, detail string) (string, string, error) {
 	}, strings.ToValidUTF8(detail, "�"))
 	detail = strings.Join(strings.Fields(detail), " ")
 	if len(detail) > maxBlockerDetailBytes {
-		detail = detail[:maxBlockerDetailBytes]
+		digest := sha256.Sum256([]byte(detail))
+		suffix := fmt.Sprintf("…#%x", digest[:6])
+		detail = detail[:maxBlockerDetailBytes-len(suffix)]
 		for !utf8.ValidString(detail) {
 			detail = detail[:len(detail)-1]
 		}
+		detail += suffix
 	}
 	return blocker, detail, nil
 }
