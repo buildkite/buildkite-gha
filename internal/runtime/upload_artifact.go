@@ -253,7 +253,7 @@ func verifyUploadZIP(ctx context.Context, path, digest string, size int64) error
 		return err
 	}
 	hash := sha256.New()
-	written, copyErr := io.Copy(hash, io.LimitReader(contextReader{ctx: ctx, reader: file}, transport.MaxResultArtifactSizeBytes+1))
+	written, copyErr := io.Copy(hash, contextReader{ctx: ctx, reader: file})
 	closeErr := file.Close()
 	if copyErr != nil {
 		return errors.Join(copyErr, closeErr)
@@ -277,14 +277,9 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 	}
 	var files []archiveFile
 	var archiveBases []string
-	var bytes int64
 	add := func(disk string, info os.FileInfo) error {
 		if err := ctx.Err(); err != nil {
 			return err
-		}
-		bytes += info.Size()
-		if bytes > transport.MaxResultArtifactSizeBytes {
-			return fmt.Errorf("artifact source bytes exceed 1 GiB")
 		}
 		files = append(files, archiveFile{disk: disk, size: info.Size(), info: info})
 		if len(files) > transport.MaxResultArtifactFileCount {
@@ -592,9 +587,6 @@ func writeUploadZIP(ctx context.Context, path, workspace string, files []archive
 	info, e := f.Stat()
 	if e != nil {
 		return "", 0, e
-	}
-	if info.Size() > transport.MaxResultArtifactSizeBytes {
-		return "", 0, fmt.Errorf("final ZIP exceeds 1 GiB")
 	}
 	return hex.EncodeToString(h.Sum(nil)), info.Size(), nil
 }

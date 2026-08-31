@@ -124,7 +124,6 @@ func TestResultManifestRejectsMalformedArtifacts(t *testing.T) {
 		{name: "uppercase path digest", mutate: func(a *ResultArtifact) { a.Path = "buildkite-gha/v1/artifacts/" + strings.Repeat("A", 64) + ".zip" }},
 		{name: "invalid digest", mutate: func(a *ResultArtifact) { a.Digest = strings.Repeat("a", 64) }},
 		{name: "zero size", mutate: func(a *ResultArtifact) { a.Size = 0 }},
-		{name: "oversized archive", mutate: func(a *ResultArtifact) { a.Size = MaxResultArtifactSizeBytes + 1 }},
 		{name: "zero files", mutate: func(a *ResultArtifact) { a.FileCount = 0 }},
 		{name: "too many files", mutate: func(a *ResultArtifact) { a.FileCount = MaxResultArtifactFileCount + 1 }},
 	}
@@ -144,6 +143,16 @@ func TestResultManifestRejectsMalformedArtifacts(t *testing.T) {
 	manifest.Artifacts = make([]ResultArtifact, MaxResultArtifacts+1)
 	if _, err := MarshalResultManifest(manifest); err == nil {
 		t.Fatal("MarshalResultManifest() accepted too many artifacts")
+	}
+}
+
+func TestResultManifestAcceptsArtifactSizeWithoutPolicyLimit(t *testing.T) {
+	artifact := resultArtifact("artifact", "1", strings.Repeat("a", 64))
+	artifact.Size = int64(^uint64(0) >> 1)
+	manifest := resultManifest(testJobID, "gha-producer", Digest([]byte("plan")), "success")
+	manifest.Artifacts = []ResultArtifact{artifact}
+	if _, err := MarshalResultManifest(manifest); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -28,7 +28,6 @@ const (
 	MaxResultArtifactNameBytes = 255
 	MaxResultArtifactIDBytes   = 20
 	MaxResultArtifactFileCount = 10_000
-	MaxResultArtifactSizeBytes = int64(1 << 30)
 )
 
 var (
@@ -102,7 +101,7 @@ func (a ResultArtifact) validate() error {
 	if !digestPattern.MatchString(a.Digest) {
 		return fmt.Errorf("invalid result artifact digest %q", a.Digest)
 	}
-	if a.Size <= 0 || a.Size > MaxResultArtifactSizeBytes {
+	if a.Size <= 0 {
 		return fmt.Errorf("invalid result artifact size %d", a.Size)
 	}
 	if a.FileCount <= 0 || a.FileCount > MaxResultArtifactFileCount {
