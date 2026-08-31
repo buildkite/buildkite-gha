@@ -288,10 +288,17 @@ func TestApplyWarningsPreservesCompilerAttribution(t *testing.T) {
 	}
 }
 
+type nestedBlockerError struct{}
+
+func (*nestedBlockerError) Error() string { return "unsupported action lifecycle condition" }
+func (*nestedBlockerError) CompatibilityBlocker() (string, string) {
+	return "expression", "secrets.TOKEN"
+}
+
 func TestDiagnosticPreservesStructuredBlockerAndActionFallback(t *testing.T) {
 	diagnostic := diagnosticFromError("ci.yml", stageResolution, compiler.CodeActionResolution, "action-resolution", &compiler.ProcessingFinding{
 		Stage: compiler.StageResolution, Code: compiler.CodeActionResolution, Category: "action-resolution",
-		Action: "actions/checkout@v99", Err: fmt.Errorf("unsupported action"),
+		Action: "actions/checkout@v99", Err: &nestedBlockerError{},
 	})
 	if diagnostic.Blocker != "action_ref" || diagnostic.BlockerDetail != "actions/checkout@v99" {
 		t.Fatalf("diagnostic blocker = %q / %q", diagnostic.Blocker, diagnostic.BlockerDetail)

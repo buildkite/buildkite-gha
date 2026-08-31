@@ -322,17 +322,6 @@ func diagnosticFromError(defaultPath, stage, code, category string, err error) D
 		diagnostic.Action = finding.Action
 		diagnostic.Step = finding.Step
 	}
-	if diagnostic.Blocker == "" {
-		var blocker interface {
-			CompatibilityBlocker() (string, string)
-		}
-		if errors.As(err, &blocker) {
-			diagnostic.Blocker, diagnostic.BlockerDetail = blocker.CompatibilityBlocker()
-		}
-	}
-	if diagnostic.Blocker == "" && diagnostic.Code == compiler.CodeExpressionInvalid {
-		diagnostic.Blocker = "expression"
-	}
 	if diagnostic.Location == nil && defaultPath != "" && stage != "" && stage != stageEventValidation {
 		diagnostic.Location = sourceLocation(defaultPath, 1, 1)
 	}
@@ -355,6 +344,17 @@ func diagnosticFromError(defaultPath, stage, code, category string, err error) D
 	if diagnostic.Blocker == "" && diagnostic.Action != "" {
 		diagnostic.Blocker = "action_ref"
 		diagnostic.BlockerDetail = diagnostic.Action
+	}
+	if diagnostic.Blocker == "" {
+		var blocker interface {
+			CompatibilityBlocker() (string, string)
+		}
+		if errors.As(err, &blocker) {
+			diagnostic.Blocker, diagnostic.BlockerDetail = blocker.CompatibilityBlocker()
+		}
+	}
+	if diagnostic.Blocker == "" && diagnostic.Code == compiler.CodeExpressionInvalid {
+		diagnostic.Blocker = "expression"
 	}
 	return diagnostic
 }
