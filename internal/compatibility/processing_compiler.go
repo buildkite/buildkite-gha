@@ -1,6 +1,7 @@
 package compatibility
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -320,6 +321,14 @@ func diagnosticFromError(defaultPath, stage, code, category string, err error) D
 		diagnostic.Instance = finding.Instance
 		diagnostic.Action = finding.Action
 		diagnostic.Step = finding.Step
+	}
+	if diagnostic.Blocker == "" {
+		var blocker interface {
+			CompatibilityBlocker() (string, string)
+		}
+		if errors.As(err, &blocker) {
+			diagnostic.Blocker, diagnostic.BlockerDetail = blocker.CompatibilityBlocker()
+		}
 	}
 	if diagnostic.Blocker == "" && diagnostic.Code == compiler.CodeExpressionInvalid {
 		diagnostic.Blocker = "expression"

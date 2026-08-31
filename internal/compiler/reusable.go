@@ -290,18 +290,18 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			conditionContext.Matrix = nil
 			conditionContext.Strategy = nil
 			if err := validateCompileSite(job.If, expression.ProfileCompileCallCondition, expression.ResultBoolean); err != nil {
-				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow call condition: %v", err))
+				return reusableResolution{}, locatedJobWrappedError(path, job, job.Span.Start.Line, job.Span.Start.Column, "reusable-workflow call condition", err)
 			}
 			reduced, err := reduceCompileSite(job.If, expression.ProfileCompileCallCondition, expression.ResultBoolean, conditionContext)
 			if err != nil {
-				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reduce reusable-workflow call condition: %v", err))
+				return reusableResolution{}, locatedJobWrappedError(path, job, job.Span.Start.Line, job.Span.Start.Column, "reduce reusable-workflow call condition", err)
 			}
 			condition := reduced.Source
 			if reduced.Known {
 				condition = fmt.Sprint(reduced.Value)
 			}
 			if err := validateCompileSite(condition, expression.ProfileCallCondition, expression.ResultBoolean); err != nil {
-				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow call condition: %v", err))
+				return reusableResolution{}, locatedJobWrappedError(path, job, job.Span.Start.Line, job.Span.Start.Column, "reusable-workflow call condition", err)
 			}
 			calleeGuards = append(cloneSourcedCallGuards(callGuards), sourcedCallGuard{
 				condition: condition, inputs: cloneReusableInputs(inputs), needBindings: cloneNeedBindings(callNeedBindings),

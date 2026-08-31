@@ -154,6 +154,20 @@ func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
 	}
 }
 
+func TestTriggerFailureTelemetryIncludesTrigger(t *testing.T) {
+	for _, triggerErr := range []error{
+		&buildkitepipeline.UnsupportedTriggerEventError{Event: "workflow_run"},
+		&buildkitepipeline.UnsupportedPathFiltersError{Event: "push", Reason: "history unavailable"},
+	} {
+		details := &commandTelemetryDetails{}
+		details.observe(triggerFailureProcessingReport(workflowInput{Path: "workflow.yml", Source: []byte("on: push\n")}, triggerErr))
+		got := details.telemetryDetails()
+		if got.Blocker != "trigger" || got.BlockerDetail == "" || len(got.Diagnostics) != 1 || got.Diagnostics[0].Blocker != "trigger" || got.Diagnostics[0].BlockerDetail != got.BlockerDetail {
+			t.Fatalf("trigger telemetry = %#v", got)
+		}
+	}
+}
+
 func TestUnprovenActionRuntimeIgnoresNativeAdapters(t *testing.T) {
 	bundleWith := func(locks ...plan.ActionLock) compiler.Bundle {
 		return compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{

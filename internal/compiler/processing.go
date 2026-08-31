@@ -94,25 +94,11 @@ func attributedProcessingFinding(stage ProcessingStage, code, category, path str
 		}
 		return errors.Join(wrapped...)
 	}
-	blocker, blockerDetail := compatibilityBlocker(err)
 	return &ProcessingFinding{
 		Stage: stage, Code: code, Category: category,
-		Blocker: blocker, BlockerDetail: blockerDetail,
 		Path: path, Line: line, Column: column, Job: job, Instance: instance, Action: action, Step: step,
 		Err: err,
 	}
-}
-
-type compatibilityBlockerError interface {
-	CompatibilityBlocker() (string, string)
-}
-
-func compatibilityBlocker(err error) (string, string) {
-	var blocker compatibilityBlockerError
-	if errors.As(err, &blocker) {
-		return blocker.CompatibilityBlocker()
-	}
-	return "", ""
 }
 
 // ActionEvaluation records an attempted immutable resolution by invocation.

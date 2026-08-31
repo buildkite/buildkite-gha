@@ -305,3 +305,25 @@ func TestDiagnosticPreservesStructuredBlockerAndActionFallback(t *testing.T) {
 		t.Fatalf("diagnostic blocker = %q / %q", diagnostic.Blocker, diagnostic.BlockerDetail)
 	}
 }
+
+func TestProcessingReportPreservesReusableCallConditionBlocker(t *testing.T) {
+	repository := t.TempDir()
+	workflows := filepath.Join(repository, ".github", "workflows")
+	if err := os.MkdirAll(workflows, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	callerPath := filepath.Join(workflows, "caller.yml")
+	caller := []byte("on: push\njobs:\n  delegated:\n    if: secrets.TOKEN\n    uses: ./.github/workflows/reusable.yml\n")
+	if err := os.WriteFile(callerPath, caller, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workflows, "reusable.yml"), []byte("on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	compilerReport, processingErr := compiler.Validate(callerPath, caller)
+	report := InitialProcessingReport(callerPath, "hosted", false, compilerReport, processingErr)
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Blocker != "expression" || report.Diagnostics[0].BlockerDetail != "secrets.TOKEN" {
+		t.Fatalf("reusable call diagnostics = %#v", report.Diagnostics)
+	}
+}
