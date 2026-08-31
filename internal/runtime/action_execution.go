@@ -2422,7 +2422,8 @@ func shellCommand(shell, script string) ([]string, error) {
 			command, _ := shellcompat.UnsupportedCommand(err)
 			return nil, errUnsupportedFeature("shell", command, "%s", err)
 		}
-		return nil, errUnsupportedFeature("shell", strings.TrimSpace(shell), "shell %q is unsupported in the supported runtime subset", shell)
+		command, _ := shellcompat.Command(shell)
+		return nil, errUnsupportedFeature("shell", command, "shell %q is unsupported in the supported runtime subset", shell)
 	}
 }
 

@@ -283,9 +283,10 @@ func TestCompileIsByteIdenticalAndCoversSmokeCorpus(t *testing.T) {
 func TestCompilePreflightsUnsupportedConditionsWithLocation(t *testing.T) {
 	eventSource := readFile(t, smokePath("events", "push.json"))
 	for _, test := range []struct {
-		name   string
-		source string
-		want   string
+		name          string
+		source        string
+		want          string
+		blockerDetail string
 	}{
 		{
 			name: "job hash function",
@@ -297,7 +298,8 @@ jobs:
     steps:
       - run: true
 `,
-			want: `conditions.yml:5:9: job "test": job condition: condition function "hashFiles" is unavailable in job conditions`,
+			want:          `conditions.yml:5:9: job "test": job condition: condition function "hashFiles" is unavailable in job conditions`,
+			blockerDetail: `hashFiles('go.sum') != ''`,
 		},
 		{
 			name: "anonymous step context",
@@ -309,7 +311,8 @@ jobs:
       - if: secrets.TOKEN
         run: true
 `,
-			want: `conditions.yml:6:13: job "test": step 1 condition: condition context "secrets" is unsupported`,
+			want:          `conditions.yml:6:13: job "test": step 1 condition: condition context "secrets" is unsupported`,
+			blockerDetail: `secrets.TOKEN`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -331,6 +334,10 @@ jobs:
 					err := compile()
 					if err == nil || !strings.Contains(err.Error(), test.want) {
 						t.Fatalf("error = %v, want %q", err, test.want)
+					}
+					var finding *ProcessingFinding
+					if !errors.As(err, &finding) || finding.Blocker != "expression" || finding.BlockerDetail != test.blockerDetail {
+						t.Fatalf("condition blocker = %#v, want expression / %q", finding, test.blockerDetail)
 					}
 				})
 			}

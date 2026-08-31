@@ -806,7 +806,7 @@ func validateConditions(path string, job workflow.Job, validate func(string, exp
 		if position.Line == 0 {
 			position = job.Span.Start
 		}
-		diagnostics = append(diagnostics, locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("job condition: %v", err)))
+		diagnostics = append(diagnostics, locatedJobWrappedError(path, job, position.Line, position.Column, "job condition", err))
 	}
 	for i, step := range job.Steps {
 		if err := validate(step.If, expression.StepCondition); err != nil {
@@ -818,7 +818,7 @@ func validateConditions(path string, job workflow.Job, validate func(string, exp
 			if step.ID != "" {
 				label = fmt.Sprintf("step %q", step.ID)
 			}
-			diagnostics = append(diagnostics, locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("%s condition: %v", label, err)))
+			diagnostics = append(diagnostics, locatedJobWrappedError(path, job, position.Line, position.Column, label+" condition", err))
 		}
 	}
 	return errors.Join(diagnostics...)
