@@ -524,9 +524,12 @@ The plugin value must be a YAML boolean, not a quoted string.
 In Buildkite jobs, the importer and runtime send best-effort completion
 telemetry through the job-authenticated Agent API. Events contain the command,
 outcome, client version, duration, and bounded diagnostic codes and severities.
-For an unsuccessful command, they also contain the final 1,024 bytes of
-normalized user-visible error output. `error_message_truncated` says whether
-earlier output was omitted.
+For an unsuccessful command, they also contain a normalized user-visible error
+message of at most 1,024 bytes. When a workflow diagnostic attributes the
+failure, the message is that diagnostic's text, kept whole so later job output
+cannot displace it. Otherwise it is the final bytes of the command's error
+output. `error_message_truncated` says whether part of the message was
+omitted.
 
 Failed runs also carry a failure phase and a code from a fixed set. The code
 separates workflow-authored process exits (`E_STEP_PROCESS_EXIT`) from
