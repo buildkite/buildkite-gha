@@ -28,17 +28,21 @@ type SourceLocation struct {
 
 // Diagnostic is one actionable compatibility finding.
 type Diagnostic struct {
-	Level    string          `json:"level"`
-	Code     string          `json:"code"`
-	Category string          `json:"category,omitempty"`
-	Stage    string          `json:"stage,omitempty"`
-	Message  string          `json:"message"`
-	Detail   string          `json:"detail,omitempty"`
-	Location *SourceLocation `json:"location,omitempty"`
-	Job      string          `json:"job,omitempty"`
-	Instance string          `json:"instance,omitempty"`
-	Action   string          `json:"action,omitempty"`
-	Step     int             `json:"step,omitempty"`
+	Level    string `json:"level"`
+	Code     string `json:"code"`
+	Category string `json:"category,omitempty"`
+	Stage    string `json:"stage,omitempty"`
+	// Blocker attribution is forwarded to telemetry but excluded from the
+	// versioned processing-report schema.
+	Blocker       string          `json:"-"`
+	BlockerDetail string          `json:"-"`
+	Message       string          `json:"message"`
+	Detail        string          `json:"detail,omitempty"`
+	Location      *SourceLocation `json:"location,omitempty"`
+	Job           string          `json:"job,omitempty"`
+	Instance      string          `json:"instance,omitempty"`
+	Action        string          `json:"action,omitempty"`
+	Step          int             `json:"step,omitempty"`
 }
 
 // ProcessingStage is one required workflow-processing boundary.
@@ -197,8 +201,8 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 		return diagnostics
 	}
 	type diagnosticKey struct {
-		level, code, category, stage, message, detail, job, action, location string
-		step                                                                 int
+		level, code, category, stage, blocker, blockerDetail, message, detail, job, action, location string
+		step                                                                                         int
 	}
 	type matrixDiagnostic struct {
 		index     int
@@ -209,7 +213,8 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 	for _, diagnostic := range diagnostics {
 		key := diagnosticKey{
 			level: diagnostic.Level, code: diagnostic.Code, category: diagnostic.Category,
-			stage: diagnostic.Stage, message: diagnostic.Message, detail: diagnostic.Detail, job: diagnostic.Job,
+			stage: diagnostic.Stage, blocker: diagnostic.Blocker, blockerDetail: diagnostic.BlockerDetail,
+			message: diagnostic.Message, detail: diagnostic.Detail, job: diagnostic.Job,
 			action: diagnostic.Action, step: diagnostic.Step,
 		}
 		if diagnostic.Location != nil {
@@ -244,7 +249,7 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 }
 
 func sameDiagnostic(left, right Diagnostic) bool {
-	return left.Level == right.Level && left.Code == right.Code && left.Category == right.Category && left.Stage == right.Stage && left.Message == right.Message && left.Detail == right.Detail && left.Job == right.Job && left.Instance == right.Instance && left.Action == right.Action && left.Step == right.Step && sameLocation(left.Location, right.Location)
+	return left.Level == right.Level && left.Code == right.Code && left.Category == right.Category && left.Stage == right.Stage && left.Blocker == right.Blocker && left.BlockerDetail == right.BlockerDetail && left.Message == right.Message && left.Detail == right.Detail && left.Job == right.Job && left.Instance == right.Instance && left.Action == right.Action && left.Step == right.Step && sameLocation(left.Location, right.Location)
 }
 
 func sameLocation(left, right *SourceLocation) bool {

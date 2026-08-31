@@ -3,6 +3,7 @@
 package expression
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -55,9 +56,9 @@ func validateCallCondition(source string) error {
 func validateCompileCallCondition(source string, context CompileContext) error {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
-		return err
+		return conditionBlocker(source, err)
 	}
-	return validateCompileConditionNode(node, CallCondition, context, nil)
+	return conditionBlocker(source, validateCompileConditionNode(node, CallCondition, context, nil))
 }
 
 // validateActionLifecycleCondition verifies an action pre-if or post-if
@@ -84,18 +85,40 @@ func validateLifecycleDelimiters(source string) error {
 func validateCompileConditionWithMatrix(source string, scope ConditionScope, context CompileContext, matrix map[string]any) error {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
-		return err
+		return conditionBlocker(source, err)
 	}
 	context.Matrix = matrix
-	return validateCompileConditionNode(node, scope, context, matrix)
+	return conditionBlocker(source, validateCompileConditionNode(node, scope, context, matrix))
 }
 
 func validateCondition(source string, scope ConditionScope) error {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
+		return conditionBlocker(source, err)
+	}
+	return conditionBlocker(source, validateConditionNode(node, scope))
+}
+
+type conditionBlockerError struct {
+	detail string
+	err    error
+}
+
+func (e *conditionBlockerError) Error() string { return e.err.Error() }
+func (e *conditionBlockerError) Unwrap() error { return e.err }
+func (e *conditionBlockerError) CompatibilityBlocker() (string, string) {
+	return "expression", e.detail
+}
+
+func conditionBlocker(source string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var blocker *conditionBlockerError
+	if errors.As(err, &blocker) {
 		return err
 	}
-	return validateConditionNode(node, scope)
+	return &conditionBlockerError{detail: strings.TrimSpace(source), err: err}
 }
 
 func validateConditionNode(node actionlint.ExprNode, scope ConditionScope) error {

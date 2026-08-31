@@ -3,6 +3,7 @@ package compatibility
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -284,5 +285,23 @@ func TestApplyWarningsPreservesCompilerAttribution(t *testing.T) {
 	}
 	if len(report.Diagnostics) != 1 || !sameDiagnostic(report.Diagnostics[0], want) {
 		t.Fatalf("diagnostics = %#v, want %#v", report.Diagnostics, []Diagnostic{want})
+	}
+}
+
+func TestDiagnosticPreservesStructuredBlockerAndActionFallback(t *testing.T) {
+	diagnostic := diagnosticFromError("ci.yml", stageResolution, compiler.CodeActionResolution, "action-resolution", &compiler.ProcessingFinding{
+		Stage: compiler.StageResolution, Code: compiler.CodeActionResolution, Category: "action-resolution",
+		Action: "actions/checkout@v99", Err: fmt.Errorf("unsupported action"),
+	})
+	if diagnostic.Blocker != "action_ref" || diagnostic.BlockerDetail != "actions/checkout@v99" {
+		t.Fatalf("diagnostic blocker = %q / %q", diagnostic.Blocker, diagnostic.BlockerDetail)
+	}
+
+	diagnostic = diagnosticFromError("ci.yml", stageExpressions, compiler.CodeExpressionInvalid, "compatibility", &compiler.ProcessingFinding{
+		Stage: compiler.StageExpressions, Code: compiler.CodeExpressionInvalid, Category: "compatibility",
+		Blocker: "runner_label", BlockerDetail: "windows-latest", Err: fmt.Errorf("unsupported runner"),
+	})
+	if diagnostic.Blocker != "runner_label" || diagnostic.BlockerDetail != "windows-latest" {
+		t.Fatalf("diagnostic blocker = %q / %q", diagnostic.Blocker, diagnostic.BlockerDetail)
 	}
 }

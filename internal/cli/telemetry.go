@@ -58,11 +58,17 @@ func telemetryOutcome(code int, conclusion string, contextErr error) telemetry.O
 }
 
 type commandTelemetryDetails struct {
-	failurePhase telemetry.FailurePhase
-	failureCode  telemetry.FailureCode
-	diagnostics  []telemetry.Diagnostic
-	seen         map[string]int
-	errorOutput  boundedTailBuffer
+	failurePhase  telemetry.FailurePhase
+	failureCode   telemetry.FailureCode
+	blocker       string
+	blockerDetail string
+	diagnostics   []telemetry.Diagnostic
+	seen          map[telemetryDiagnosticKey]int
+	errorOutput   boundedTailBuffer
+}
+
+type telemetryDiagnosticKey struct {
+	code, blocker, blockerDetail string
 }
 
 func (d *commandTelemetryDetails) captureErrors(writer io.Writer) io.Writer {
@@ -99,7 +105,10 @@ func (d *commandTelemetryDetails) addReportDiagnostics(report compatibility.Proc
 		if !ok || !allowlistedTelemetryDiagnosticCode(diagnostic.Code) {
 			continue
 		}
-		d.addDiagnostic(diagnostic.Code, severity)
+		d.addDiagnostic(diagnostic.Code, severity, diagnostic.Blocker, diagnostic.BlockerDetail)
+		if diagnostic.Level == "error" {
+			d.setBlocker(diagnostic.Blocker, diagnostic.BlockerDetail)
+		}
 	}
 }
 
@@ -118,7 +127,7 @@ func (d *commandTelemetryDetails) observe(report compatibility.ProcessingReport)
 func (d *commandTelemetryDetails) addWarnings(warnings []compiler.Warning) {
 	for _, warning := range warnings {
 		if allowlistedTelemetryDiagnosticCode(warning.Code) {
-			d.addDiagnostic(warning.Code, telemetry.SeverityWarning)
+			d.addDiagnostic(warning.Code, telemetry.SeverityWarning, "", "")
 		}
 	}
 }
@@ -127,14 +136,15 @@ func (d *commandTelemetryDetails) addWarnings(warnings []compiler.Warning) {
 // never proven. Upload keeps this in telemetry rather than the processing
 // report, where it would annotate every import that uses actions.
 func (d *commandTelemetryDetails) addActionRuntimeUnknown() {
-	d.addDiagnostic("W_ACTION_RUNTIME_UNKNOWN", telemetry.SeverityWarning)
+	d.addDiagnostic("W_ACTION_RUNTIME_UNKNOWN", telemetry.SeverityWarning, "", "")
 }
 
-func (d *commandTelemetryDetails) addDiagnostic(code string, severity telemetry.Severity) {
+func (d *commandTelemetryDetails) addDiagnostic(code string, severity telemetry.Severity, blocker, blockerDetail string) {
 	if d.seen == nil {
-		d.seen = make(map[string]int)
+		d.seen = make(map[telemetryDiagnosticKey]int)
 	}
-	if index, exists := d.seen[code]; exists {
+	key := telemetryDiagnosticKey{code: code, blocker: blocker, blockerDetail: blockerDetail}
+	if index, exists := d.seen[key]; exists {
 		if severity == telemetry.SeverityError {
 			d.diagnostics[index].Severity = severity
 		}
@@ -143,13 +153,19 @@ func (d *commandTelemetryDetails) addDiagnostic(code string, severity telemetry.
 	if len(d.diagnostics) == maxCommandTelemetryDiagnostics {
 		return
 	}
-	d.seen[code] = len(d.diagnostics)
-	d.diagnostics = append(d.diagnostics, telemetry.Diagnostic{Code: code, Severity: severity})
+	d.seen[key] = len(d.diagnostics)
+	d.diagnostics = append(d.diagnostics, telemetry.Diagnostic{Code: code, Severity: severity, Blocker: blocker, BlockerDetail: blockerDetail})
+}
+
+func (d *commandTelemetryDetails) setBlocker(blocker, detail string) {
+	if d.blocker == "" && blocker != "" {
+		d.blocker, d.blockerDetail = blocker, detail
+	}
 }
 
 func (d *commandTelemetryDetails) forOutcome(outcome telemetry.Outcome) telemetry.Details {
 	if outcome == telemetry.OutcomeSuccess || outcome == telemetry.OutcomeSkipped {
-		return telemetry.Details{Diagnostics: slices.Clone(d.diagnostics)}
+		return telemetry.Details{Diagnostics: slices.Clone(d.diagnostics), Blocker: d.blocker, BlockerDetail: d.blockerDetail}
 	}
 	phase, code := d.failurePhase, d.failureCode
 	if phase == "" {
@@ -164,12 +180,13 @@ func (d *commandTelemetryDetails) forOutcome(outcome telemetry.Outcome) telemetr
 	}
 	return telemetry.Details{
 		FailurePhase: phase, FailureCode: code, Diagnostics: slices.Clone(d.diagnostics),
+		Blocker: d.blocker, BlockerDetail: d.blockerDetail,
 		ErrorMessage: string(d.errorOutput.bytes), ErrorMessageTruncated: d.errorOutput.truncated,
 	}
 }
 
 func (d *commandTelemetryDetails) telemetryDetails() telemetry.Details {
-	return telemetry.Details{FailurePhase: d.failurePhase, FailureCode: d.failureCode, Diagnostics: slices.Clone(d.diagnostics)}
+	return telemetry.Details{FailurePhase: d.failurePhase, FailureCode: d.failureCode, Diagnostics: slices.Clone(d.diagnostics), Blocker: d.blocker, BlockerDetail: d.blockerDetail}
 }
 
 func telemetrySeverity(level string) (telemetry.Severity, bool) {

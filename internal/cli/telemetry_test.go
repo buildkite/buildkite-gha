@@ -131,6 +131,8 @@ func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
 	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
 		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: "must not be uploaded"},
 		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: "different sensitive text"},
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions), Blocker: "runner_label", BlockerDetail: "windows-latest", Message: "must not be uploaded"},
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions), Blocker: "runner_label", BlockerDetail: "macos-10", Message: "must not be uploaded"},
 		{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Stage: string(compiler.StageAdmission), Message: "must not be uploaded"},
 		{Level: "error", Code: "E_FUTURE_UNALLOWLISTED", Stage: string(compiler.StageGraph), Message: "must not be uploaded"},
 	}})
@@ -138,8 +140,13 @@ func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
 	if got.FailurePhase != "parsing" || got.FailureCode != "E_WORKFLOW_SYNTAX" {
 		t.Fatalf("failure details = %#v", got)
 	}
+	if got.Blocker != "runner_label" || got.BlockerDetail != "windows-latest" {
+		t.Fatalf("blocker = %q / %q", got.Blocker, got.BlockerDetail)
+	}
 	want := []telemetry.Diagnostic{
 		{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError},
+		{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError, Blocker: "runner_label", BlockerDetail: "windows-latest"},
+		{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError, Blocker: "runner_label", BlockerDetail: "macos-10"},
 		{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: telemetry.SeverityWarning},
 	}
 	if !reflect.DeepEqual(got.Diagnostics, want) {

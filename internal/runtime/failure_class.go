@@ -78,7 +78,9 @@ func markStepProcessExit(err error) error {
 }
 
 type unsupportedFeatureError struct {
-	err error
+	blocker string
+	detail  string
+	err     error
 }
 
 func (e *unsupportedFeatureError) Error() string { return e.err.Error() }
@@ -88,4 +90,18 @@ func (e *unsupportedFeatureError) Unwrap() error { return e.err }
 // runtime subset.
 func errUnsupportedf(format string, args ...any) error {
 	return &unsupportedFeatureError{err: fmt.Errorf(format, args...)}
+}
+
+func errUnsupportedFeature(blocker, detail, format string, args ...any) error {
+	return &unsupportedFeatureError{blocker: blocker, detail: detail, err: fmt.Errorf(format, args...)}
+}
+
+// UnsupportedFeature reports the structured feature rejected by a runtime
+// error, when the rejection site can identify one safely.
+func UnsupportedFeature(err error) (string, string, bool) {
+	var unsupported *unsupportedFeatureError
+	if errors.As(err, &unsupported) && unsupported.blocker != "" {
+		return unsupported.blocker, unsupported.detail, true
+	}
+	return "", "", false
 }

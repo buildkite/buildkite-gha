@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -144,6 +145,15 @@ func TestParseRejectsGitHubEnvironment(t *testing.T) {
 	want := `environment.yml:4:5: GitHub environments and environment secrets are unsupported. Remove the environment key from job "deploy". Approvals, deployment records, and protection rules are unavailable. Move environment secrets into Buildkite secrets and reference them by name. If you need GitHub environments, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`
 	if err == nil || err.Error() != want {
 		t.Fatalf("Parse() error = %q, want %q", err, want)
+	}
+	var blocker interface {
+		CompatibilityBlocker() (string, string)
+	}
+	if !errors.As(err, &blocker) {
+		t.Fatalf("Parse() error has no compatibility blocker: %v", err)
+	}
+	if kind, detail := blocker.CompatibilityBlocker(); kind != "environment" || detail != "production" {
+		t.Fatalf("compatibility blocker = %q / %q", kind, detail)
 	}
 }
 

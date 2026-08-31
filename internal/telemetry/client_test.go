@@ -52,6 +52,12 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 		FailureCode:           FailureCodeWorkflowSyntax,
 		ErrorMessage:          "  buildkite-gha: run-job:\ninvalid workflow\tvalue  ",
 		ErrorMessageTruncated: true,
+		Blocker:               "shell",
+		BlockerDetail:         "pwsh",
+		Diagnostics: []Diagnostic{{
+			Code: string(FailureCodeExpressionInvalid), Severity: SeverityError,
+			Blocker: "runner_label", BlockerDetail: "windows-latest",
+		}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +68,11 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 		Command: CommandRunJob, Outcome: OutcomeFailure, ClientVersion: "1.2.3", DurationMS: 1234,
 		FailurePhase: FailurePhaseParsing, FailureCode: FailureCodeWorkflowSyntax,
 		ErrorMessage: "buildkite-gha: run-job: invalid workflow value", ErrorMessageTruncated: true,
+		Blocker: "shell", BlockerDetail: "pwsh",
+		Diagnostics: []Diagnostic{{
+			Code: string(FailureCodeExpressionInvalid), Severity: SeverityError,
+			Blocker: "runner_label", BlockerDetail: "windows-latest",
+		}},
 	}
 	if !reflect.DeepEqual(request.Properties, want) {
 		t.Fatalf("properties = %#v, want %#v", request.Properties, want)
@@ -271,6 +282,30 @@ func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 	}
 	if _, err := boundedDiagnostics([]Diagnostic{{Code: "CUSTOMER_VALUE", Severity: SeverityError}}); err == nil {
 		t.Fatal("boundedDiagnostics() accepted non-allowlisted code")
+	}
+}
+
+func TestDiagnosticsPreserveDistinctBlockersForOneCode(t *testing.T) {
+	input := []Diagnostic{
+		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "runner_label", BlockerDetail: "windows-latest"},
+		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "runner_label", BlockerDetail: "macos-10"},
+	}
+	bounded, err := boundedDiagnostics(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(bounded, input) {
+		t.Fatalf("bounded diagnostics = %#v, want %#v", bounded, input)
+	}
+}
+
+func TestBlockerDetailsAreNormalizedAndBounded(t *testing.T) {
+	blocker, detail, err := boundedBlocker("shell", "  pwsh\n"+strings.Repeat("界", maxBlockerDetailBytes))
+	if err != nil || blocker != "shell" || len(detail) > maxBlockerDetailBytes || !utf8.ValidString(detail) || !strings.HasPrefix(detail, "pwsh ") {
+		t.Fatalf("boundedBlocker() = %q, %q, %v", blocker, detail, err)
+	}
+	if _, _, err := boundedBlocker("customer-value", "detail"); err == nil {
+		t.Fatal("boundedBlocker() accepted an unknown blocker")
 	}
 }
 

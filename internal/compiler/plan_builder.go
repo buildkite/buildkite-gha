@@ -186,12 +186,14 @@ func (b planBuilder) validateShellCompatibility(instance JobInstance, workflowPr
 			return
 		}
 		if err := shellcompat.ValidateCompatibility(resolved); err != nil {
+			command, _ := shellcompat.UnsupportedCommand(err)
 			owner := fmt.Sprintf("job %q", instance.LogicalJobID)
 			if step != 0 {
 				owner += fmt.Sprintf(" step %d", step)
 			}
 			diagnostics = append(diagnostics, &ProcessingFinding{
 				Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility",
+				Blocker: "shell", BlockerDetail: command,
 				Path: site.Location.File, Line: site.Location.Start.Line, Column: site.Location.Start.Column,
 				Job: instance.LogicalJobID, Instance: instance.Key, Step: step, Message: err.Error(),
 				Err: fmt.Errorf("%s:%d:%d: %s: %w", site.Location.File, site.Location.Start.Line, site.Location.Start.Column, owner, err),

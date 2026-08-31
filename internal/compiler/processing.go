@@ -36,16 +36,18 @@ const (
 // ProcessingFinding carries stable attribution independently of its rendered
 // error text. Err remains wrapped so errors.Is and errors.As keep working.
 type ProcessingFinding struct {
-	Stage    ProcessingStage
-	Code     string
-	Category string
-	Path     string
-	Line     int
-	Column   int
-	Job      string
-	Instance string
-	Action   string
-	Step     int
+	Stage         ProcessingStage
+	Code          string
+	Category      string
+	Blocker       string
+	BlockerDetail string
+	Path          string
+	Line          int
+	Column        int
+	Job           string
+	Instance      string
+	Action        string
+	Step          int
 	// Message replaces Err's text in the rendered report. Set it whenever Err
 	// can quote event-derived data, so that data cannot reach the report.
 	Message string
@@ -92,11 +94,25 @@ func attributedProcessingFinding(stage ProcessingStage, code, category, path str
 		}
 		return errors.Join(wrapped...)
 	}
+	blocker, blockerDetail := compatibilityBlocker(err)
 	return &ProcessingFinding{
 		Stage: stage, Code: code, Category: category,
+		Blocker: blocker, BlockerDetail: blockerDetail,
 		Path: path, Line: line, Column: column, Job: job, Instance: instance, Action: action, Step: step,
 		Err: err,
 	}
+}
+
+type compatibilityBlockerError interface {
+	CompatibilityBlocker() (string, string)
+}
+
+func compatibilityBlocker(err error) (string, string) {
+	var blocker compatibilityBlockerError
+	if errors.As(err, &blocker) {
+		return blocker.CompatibilityBlocker()
+	}
+	return "", ""
 }
 
 // ActionEvaluation records an attempted immutable resolution by invocation.

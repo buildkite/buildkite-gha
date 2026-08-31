@@ -80,6 +80,9 @@ jobs:
 			if finding.Job != "test" || finding.Instance == "" || finding.Step != test.wantStep {
 				t.Fatalf("finding ownership = %#v", finding)
 			}
+			if finding.Blocker != "shell" || finding.BlockerDetail != test.wantReportedCommand {
+				t.Fatalf("finding blocker = %q / %q", finding.Blocker, finding.BlockerDetail)
+			}
 			for _, want := range []string{
 				`shell "` + test.wantReportedCommand + `" is unsupported`,
 				"Use bash, sh, python, or a valid custom shell template whose command is available on PATH",

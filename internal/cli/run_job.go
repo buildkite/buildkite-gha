@@ -122,6 +122,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	if err := gharuntime.ValidateHost(job, runtime.GOOS, runtime.GOARCH); err != nil {
 		details.setFailurePhase(telemetry.FailurePhaseExecution)
 		details.setFailureCode(runtimeFailureCode(err))
+		setRuntimeBlocker(details, err)
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
@@ -307,6 +308,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		if runErr != nil {
 			details.setFailurePhase(telemetry.FailurePhaseExecution)
 			details.setFailureCode(runtimeFailureCode(runErr))
+			setRuntimeBlocker(details, runErr)
 		}
 	}
 	if result.Conclusion == "" {
@@ -375,6 +377,12 @@ func runtimeFailureCode(err error) telemetry.FailureCode {
 		return telemetry.FailureCodeRuntimeIntegrity
 	default:
 		return ""
+	}
+}
+
+func setRuntimeBlocker(details *commandTelemetryDetails, err error) {
+	if blocker, detail, ok := gharuntime.UnsupportedFeature(err); ok {
+		details.setBlocker(blocker, detail)
 	}
 }
 
