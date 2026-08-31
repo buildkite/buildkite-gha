@@ -1,0 +1,21 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":pipeline: hashFiles proof importer"
+    key: "hash-files-importer"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      commit="$${COMPATIBILITY_PROOF_COMMIT:?COMPATIBILITY_PROOF_COMMIT is required}"
+      scripts/verify-source-checkout "$$commit"
+      distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-hash-files.XXXXXXXX")"
+      trap 'rm -rf -- "$$distribution_root"' EXIT
+      revision="$$(git rev-parse HEAD)"
+      CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.revision=$$revision" -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+      "$$distribution_root/buildkite-gha" upload \
+        --event-path testdata/smoke/events/push.json \
+        --runner-queue ubuntu-latest=hosted \
+        testdata/smoke/.github/workflows/hash-files.yml
