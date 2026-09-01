@@ -11,7 +11,7 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 upload_pipeline() {
-  buildkite-agent pipeline upload --no-interpolation --reject-secrets
+  buildkite-agent pipeline upload --no-interpolation
 }
 
 if (( $# == 1 )); then
