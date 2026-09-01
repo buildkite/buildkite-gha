@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
@@ -58,11 +59,12 @@ func telemetryOutcome(code int, conclusion string, contextErr error) telemetry.O
 }
 
 type commandTelemetryDetails struct {
-	failurePhase telemetry.FailurePhase
-	failureCode  telemetry.FailureCode
-	diagnostics  []telemetry.Diagnostic
-	seen         map[string]int
-	errorOutput  boundedTailBuffer
+	failurePhase   telemetry.FailurePhase
+	failureCode    telemetry.FailureCode
+	failureMessage string
+	diagnostics    []telemetry.Diagnostic
+	seen           map[string]int
+	errorOutput    boundedTailBuffer
 }
 
 func (d *commandTelemetryDetails) captureErrors(writer io.Writer) io.Writer {
@@ -104,13 +106,19 @@ func (d *commandTelemetryDetails) addReportDiagnostics(report compatibility.Proc
 }
 
 // observe records a report that ends the command, so its first error also
-// attributes the failure.
+// attributes the failure. The attributing diagnostic's message is kept whole:
+// the stderr tail alone can lose it behind later agent output, such as
+// annotation and pipeline-upload chatter.
 func (d *commandTelemetryDetails) observe(report compatibility.ProcessingReport) {
 	d.addReportDiagnostics(report)
 	for _, diagnostic := range report.Diagnostics {
 		if diagnostic.Level == "error" && d.failureCode == "" && allowlistedTelemetryDiagnosticCode(diagnostic.Code) {
 			d.failurePhase = telemetryPhase(diagnostic.Stage)
 			d.failureCode = telemetry.FailureCode(diagnostic.Code)
+			d.failureMessage = diagnostic.Message
+			if diagnostic.Detail != "" {
+				d.failureMessage += " " + diagnostic.Detail
+			}
 		}
 	}
 }
@@ -162,9 +170,22 @@ func (d *commandTelemetryDetails) forOutcome(outcome telemetry.Outcome) telemetr
 	if code == "" {
 		code = telemetry.FailureCodeUnknown
 	}
+	errorMessage, errorMessageTruncated := string(d.errorOutput.bytes), d.errorOutput.truncated
+	if d.failureMessage != "" {
+		// An attributed failure message names the rejected feature at its
+		// start, so an over-long message keeps its head, not its tail.
+		errorMessage, errorMessageTruncated = d.failureMessage, false
+		if len(errorMessage) > telemetry.MaxErrorMessageBytes {
+			end := telemetry.MaxErrorMessageBytes
+			for end > 0 && !utf8.RuneStart(errorMessage[end]) {
+				end--
+			}
+			errorMessage, errorMessageTruncated = errorMessage[:end], true
+		}
+	}
 	return telemetry.Details{
 		FailurePhase: phase, FailureCode: code, Diagnostics: slices.Clone(d.diagnostics),
-		ErrorMessage: string(d.errorOutput.bytes), ErrorMessageTruncated: d.errorOutput.truncated,
+		ErrorMessage: errorMessage, ErrorMessageTruncated: errorMessageTruncated,
 	}
 }
 
