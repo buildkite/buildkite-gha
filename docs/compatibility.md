@@ -1181,7 +1181,9 @@ An unknown lowercase 40-hex immutable commit uses the stable v7.0.1 contract as 
 
 Unsupported path forms include exclusions, symlinks, absolute paths, traversal, braces, extglobs, leading glob comments, and special files. At most 32 path roots may be selected. For v3.2.1 and later, hidden path segments remain excluded unless explicitly enabled.
 
-An artifact may contain at most 10,000 files and 1 GiB of source data. The ZIP must also be no larger than 1 GiB. A job may publish 64 artifacts.
+An artifact may contain at most 10,000 files. `buildkite-gha` does not impose a source or ZIP byte limit; the Buildkite Agent and configured artifact storage enforce their limits. A job may publish 64 artifacts.
+
+Downloads verify the recorded archive size and digest before staging every member. File-count, path, format, and filesystem limits protect extraction; there is no separate fixed expansion-byte policy.
 
 For v4.6.2 and later, the adapter sets `artifact-id` and `artifact-digest`; `artifact-url` is empty because no GitHub run-scoped URL exists. The v1 through v3 releases expose no outputs. Merge, raw upload, overwrite, and effective retention control are unsupported.
 
@@ -1436,7 +1438,7 @@ hosted-toolchains images provide. macOS images are unsupported.
 | Job or step timeout | 360 minutes |
 | Artifacts per job | 64 |
 | Files per uploaded artifact | 10,000 |
-| Uploaded source data or ZIP | 1 GiB |
+| Uploaded source data or ZIP | No `buildkite-gha` limit; subject to Buildkite Agent and storage limits |
 | Job summary | 1 MiB |
 | `hashFiles()` patterns | 255 per call; 1 KiB each; 64 KiB total |
 | `hashFiles()` workspace entries | 100,000 per call |
