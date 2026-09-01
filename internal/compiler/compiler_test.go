@@ -901,6 +901,80 @@ jobs:
 	}
 }
 
+func TestBlockerFieldsChangedTracksInputSubstitutionSurfaces(t *testing.T) {
+	base := workflow.Job{
+		If: "true", RunsOn: []string{"ubuntu-latest"}, DefaultShell: "bash",
+		Steps: []workflow.Step{{If: "true", Uses: "owner/action@v1", Shell: "bash", Run: "echo unchanged"}},
+	}
+	tests := []struct {
+		name   string
+		change func(*workflow.Job)
+		want   bool
+	}{
+		{name: "job condition", change: func(job *workflow.Job) { job.If = "false" }, want: true},
+		{name: "runner", change: func(job *workflow.Job) { job.RunsOn = []string{"private"} }, want: true},
+		{name: "matrix", change: func(job *workflow.Job) { job.Matrix = &workflow.Matrix{} }, want: true},
+		{name: "action", change: func(job *workflow.Job) { job.Steps[0].Uses = "owner/other@v1" }, want: true},
+		{name: "shell", change: func(job *workflow.Job) { job.Steps[0].Shell = "pwsh" }, want: true},
+		{name: "unrelated run command", change: func(job *workflow.Job) { job.Steps[0].Run = "echo changed" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := base
+			changed.RunsOn = slices.Clone(base.RunsOn)
+			changed.Steps = slices.Clone(base.Steps)
+			test.change(&changed)
+			if got := blockerFieldsChanged(base, changed); got != test.want {
+				t.Fatalf("blockerFieldsChanged() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCompileDoesNotAttributeReusableInputThroughRunnerMatrix(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      runner: ${{ github.event.runner }}
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      runner:
+        type: string
+        required: true
+jobs:
+  test:
+    strategy:
+      matrix:
+        runner:
+          - ${{ inputs.runner }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - run: true
+`)
+	eventSource := pushEvent(t)
+	event := bytes.Replace(eventSource, []byte(`"payload": {`), []byte(`"payload": {"runner": "windows-secret",`), 1)
+	if bytes.Equal(event, eventSource) {
+		t.Fatal("event payload was not updated")
+	}
+
+	_, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), event, "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err == nil {
+		t.Fatal("compileUntrustedPlans() succeeded")
+	}
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) {
+		t.Fatalf("compileUntrustedPlans() error = %T %v, want ProcessingFinding", err, err)
+	}
+	if finding.Blocker != "runner_label" || finding.BlockerDetail != "" {
+		t.Fatalf("finding blocker = %q / %q, want runner_label with no detail: %v", finding.Blocker, finding.BlockerDetail, err)
+	}
+}
+
 func TestCompileProjectsOnlyDeclaredReusableWorkflowOutputs(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
@@ -4629,7 +4703,7 @@ func TestCompilerWarningsNameOnlyDeclaredSupportedTriggers(t *testing.T) {
 	}}
 	warnings := compilerWarnings(parsed, false)
 	want := Warning{
-		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Line: 4, Column: 3,
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Blocker: "trigger", BlockerDetail: "issue_comment", Line: 4, Column: 3,
 		Message: "on.issue_comment is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: issues, merge_group, pull_request, push, release, schedule, workflow_call, workflow_dispatch. Move the jobs this trigger guards to one of those triggers if you need them. If you need issue_comment, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
 	}
 	if !reflect.DeepEqual(warnings, []Warning{want}) {
@@ -4639,7 +4713,7 @@ func TestCompilerWarningsNameOnlyDeclaredSupportedTriggers(t *testing.T) {
 	parsed.Triggers = []workflow.Trigger{{Event: "issue_comment", Position: workflow.Position{Line: 1, Column: 5}}}
 	warnings = compilerWarnings(parsed, false)
 	want = Warning{
-		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Line: 1, Column: 5,
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Blocker: "trigger", BlockerDetail: "issue_comment", Line: 1, Column: 5,
 		Message: "on.issue_comment is ignored, so nothing in this workflow runs from it. This workflow declares no supported triggers that still run. If you need issue_comment, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
 	}
 	if !reflect.DeepEqual(warnings, []Warning{want}) {

@@ -115,6 +115,9 @@ func (e *jobGraphExpansion) acceptJobs(resolved []sourcedJob) {
 		e.acceptedIndex[job.ID] = len(e.accepted)
 		e.accepted = append(e.accepted, sourced)
 		if err := supported(sourced.path, job); err != nil {
+			if sourced.blockerDetailUnsafe {
+				err = suppressBlockerDetail(err)
+			}
 			e.diagnostics = append(e.diagnostics, err)
 			e.failedJobs[job.ID] = true
 		}
@@ -230,6 +233,9 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		instanceContext.Matrix = matrix
 		instanceContext.Strategy = strategy
 		compileConditionErr := supportedCompileTimeConditions(jobPath, job, jobContext)
+		if sourced.blockerDetailUnsafe {
+			compileConditionErr = suppressBlockerDetail(compileConditionErr)
+		}
 		instanceJob := resolveCompileTimeConditions(job, jobContext, matrix)
 		conditionValidationJob := instanceJob
 		conditionContext := jobContext
@@ -265,6 +271,9 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, compileConditionErr))
 			valid = false
 		} else if err := supportedConditions(jobPath, conditionValidationJob); err != nil {
+			if sourced.blockerDetailUnsafe {
+				err = suppressBlockerDetail(err)
+			}
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, err))
 			valid = false
 		}
@@ -279,9 +288,14 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		if runsOnErr == nil {
 			target, err = e.options.Runners.resolve(labels, e.options.EventTrust)
 			if err != nil {
-				message, detail := runnerRejectionDiagnostic(err, reportableRunnerLabels(job, labels), e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
+				reportableLabels := reportableRunnerLabels(job, labels)
+				if sourced.blockerDetailUnsafe {
+					reportableLabels = nil
+				}
+				message, detail := runnerRejectionDiagnostic(err, reportableLabels, e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
 				e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 					Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
+					Blocker: "runner_label", BlockerDetail: runnerRejectionBlockerDetail(err, reportableLabels),
 					Path: jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
 					Job: job.ID, Instance: key, Message: message, Detail: detail,
 					Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
@@ -356,7 +370,8 @@ func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any
 		Outputs: cloneMap(job.Outputs), Container: job.Container, Services: services,
 		ConcurrencyGates:   append([]WorkflowConcurrencyGate(nil), sourced.concurrencyGates...),
 		ServicesExpression: job.ServicesExpression, SourcePath: sourced.path, SourceDigest: sourced.digest,
-		RemoteWorkflow: cloneRemoteWorkflowSource(sourced.remote), RepositoryRoot: sourced.root, Source: job.Span,
+		RemoteWorkflow: cloneRemoteWorkflowSource(sourced.remote), BlockerDetailUnsafe: sourced.blockerDetailUnsafe,
+		RepositoryRoot: sourced.root, Source: job.Span,
 		secretAuthority: sourced.secretAuthority, tokenPolicyNarrowed: sourced.tokenPolicyNarrowed,
 		jobPermissionsIgnored: sourced.jobPermissionsIgnored, reusableCall: sourced.reusableCall,
 	}

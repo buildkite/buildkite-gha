@@ -132,6 +132,8 @@ func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
 	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
 		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: "must not be uploaded"},
 		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: "different sensitive text"},
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions), Blocker: "runner_label", BlockerDetail: "windows-latest", Message: "must not be uploaded"},
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions), Blocker: "runner_label", BlockerDetail: "macos-10", Message: "must not be uploaded"},
 		{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Stage: string(compiler.StageAdmission), Message: "must not be uploaded"},
 		{Level: "error", Code: "E_FUTURE_UNALLOWLISTED", Stage: string(compiler.StageGraph), Message: "must not be uploaded"},
 	}})
@@ -139,10 +141,44 @@ func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
 	if got.FailurePhase != "parsing" || got.FailureCode != "E_WORKFLOW_SYNTAX" {
 		t.Fatalf("failure details = %#v", got)
 	}
+	if got.Blocker != "runner_label" || got.BlockerDetail != "windows-latest" {
+		t.Fatalf("blocker = %q / %q", got.Blocker, got.BlockerDetail)
+	}
 	want := []telemetry.Diagnostic{
 		{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError},
+		{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError, Blocker: "runner_label", BlockerDetail: "windows-latest"},
+		{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError, Blocker: "runner_label", BlockerDetail: "macos-10"},
 		{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: telemetry.SeverityWarning},
 	}
+	if !reflect.DeepEqual(got.Diagnostics, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
+	}
+}
+
+func TestTriggerFailureTelemetryIncludesTrigger(t *testing.T) {
+	for _, triggerErr := range []error{
+		&buildkitepipeline.UnsupportedTriggerEventError{Event: "workflow_run"},
+		&buildkitepipeline.UnsupportedPathFiltersError{Event: "push", Reason: "history unavailable"},
+	} {
+		details := &commandTelemetryDetails{}
+		details.observe(triggerFailureProcessingReport(workflowInput{Path: "workflow.yml", Source: []byte("on: push\n")}, triggerErr))
+		got := details.telemetryDetails()
+		if got.Blocker != "trigger" || got.BlockerDetail == "" || len(got.Diagnostics) != 1 || got.Diagnostics[0].Blocker != "trigger" || got.Diagnostics[0].BlockerDetail != got.BlockerDetail {
+			t.Fatalf("trigger telemetry = %#v", got)
+		}
+	}
+}
+
+func TestUnsupportedTriggerWarningTelemetryIncludesTrigger(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	details.addWarnings([]compiler.Warning{{
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Blocker: "trigger", BlockerDetail: "workflow_run",
+	}})
+	got := details.telemetryDetails()
+	want := []telemetry.Diagnostic{{
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Severity: telemetry.SeverityWarning,
+		Blocker: "trigger", BlockerDetail: "workflow_run",
+	}}
 	if !reflect.DeepEqual(got.Diagnostics, want) {
 		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
 	}

@@ -92,6 +92,10 @@ func (e *UnsupportedTriggerEventError) Error() string {
 	return fmt.Sprintf("unsupported GitHub trigger event %q", e.Event)
 }
 
+func (e *UnsupportedTriggerEventError) CompatibilityBlocker() (string, string) {
+	return "trigger", e.Event
+}
+
 func unsupportedTriggerEvent(err error) bool {
 	var unsupported *UnsupportedTriggerEventError
 	return errors.As(err, &unsupported)
@@ -109,6 +113,10 @@ func (e *UnsupportedPathFiltersError) Error() string {
 		return fmt.Sprintf("%s path filters are unsupported: %s", e.Event, e.Reason)
 	}
 	return fmt.Sprintf("%s path filters are unsupported: Buildkite if_changed is not equivalent", e.Event)
+}
+
+func (e *UnsupportedPathFiltersError) CompatibilityBlocker() (string, string) {
+	return "trigger", e.Event
 }
 
 // LiveTriggerConditionExpressions uses fields from the Buildkite build that

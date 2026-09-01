@@ -4,6 +4,7 @@ package telemetry
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ const (
 	defaultTimeout        = 1500 * time.Millisecond
 	responseDrainLimit    = 32 << 10
 	maxClientVersionBytes = 64
+	maxBlockerDetailBytes = 1024
 	maxDurationMS         = int64(1<<31 - 1)
 	maxDiagnostics        = 20
 
@@ -96,8 +98,10 @@ const (
 )
 
 type Diagnostic struct {
-	Code     string   `json:"code"`
-	Severity Severity `json:"severity"`
+	Code          string   `json:"code"`
+	Severity      Severity `json:"severity"`
+	Blocker       string   `json:"blocker,omitempty"`
+	BlockerDetail string   `json:"blocker_detail,omitempty"`
 }
 
 type Details struct {
@@ -106,6 +110,8 @@ type Details struct {
 	ErrorMessage          string
 	ErrorMessageTruncated bool
 	Diagnostics           []Diagnostic
+	Blocker               string
+	BlockerDetail         string
 }
 
 type Properties struct {
@@ -118,6 +124,8 @@ type Properties struct {
 	ErrorMessage          string       `json:"error_message,omitempty"`
 	ErrorMessageTruncated bool         `json:"error_message_truncated,omitempty"`
 	Diagnostics           []Diagnostic `json:"diagnostics,omitempty"`
+	Blocker               string       `json:"blocker,omitempty"`
+	BlockerDetail         string       `json:"blocker_detail,omitempty"`
 }
 
 type Config struct {
@@ -202,6 +210,10 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 	if err != nil {
 		return err
 	}
+	blocker, blockerDetail, err := boundedBlocker(details.Blocker, details.BlockerDetail)
+	if err != nil {
+		return err
+	}
 	errorMessage, errorMessageTruncated := boundedErrorMessage(details.ErrorMessage)
 	errorMessageTruncated = errorMessage != "" && (errorMessageTruncated || details.ErrorMessageTruncated)
 	durationMS := duration.Milliseconds()
@@ -219,6 +231,7 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 			Command: command, Outcome: outcome, ClientVersion: c.clientVersion, DurationMS: durationMS,
 			FailurePhase: details.FailurePhase, FailureCode: details.FailureCode,
 			ErrorMessage: errorMessage, ErrorMessageTruncated: errorMessageTruncated, Diagnostics: diagnostics,
+			Blocker: blocker, BlockerDetail: blockerDetail,
 		},
 	})
 	if err != nil {
@@ -270,23 +283,58 @@ func validFailureCode(code FailureCode) bool {
 }
 
 func boundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
-	seen := make(map[string]bool, min(len(in), maxDiagnostics))
+	seen := make(map[Diagnostic]bool, min(len(in), maxDiagnostics))
 	out := make([]Diagnostic, 0, min(len(in), maxDiagnostics))
 	for _, diagnostic := range in {
 		severity, ok := diagnosticSeverity(diagnostic.Code)
 		if !ok || diagnostic.Severity != severity {
 			return nil, fmt.Errorf("invalid telemetry diagnostic")
 		}
-		if seen[diagnostic.Code] {
+		blocker, blockerDetail, err := boundedBlocker(diagnostic.Blocker, diagnostic.BlockerDetail)
+		if err != nil {
+			return nil, err
+		}
+		diagnostic.Blocker, diagnostic.BlockerDetail = blocker, blockerDetail
+		if seen[diagnostic] {
 			continue
 		}
-		seen[diagnostic.Code] = true
+		seen[diagnostic] = true
 		out = append(out, diagnostic)
 		if len(out) == maxDiagnostics {
 			break
 		}
 	}
 	return out, nil
+}
+
+func boundedBlocker(blocker, detail string) (string, string, error) {
+	switch blocker {
+	case "":
+		if detail != "" {
+			return "", "", fmt.Errorf("telemetry blocker detail requires a blocker")
+		}
+		return "", "", nil
+	case "runner_label", "environment", "shell", "action_ref", "expression", "trigger":
+	default:
+		return "", "", fmt.Errorf("invalid telemetry blocker")
+	}
+	detail = strings.Map(func(character rune) rune {
+		if unicode.IsControl(character) {
+			return ' '
+		}
+		return character
+	}, strings.ToValidUTF8(detail, "�"))
+	detail = strings.Join(strings.Fields(detail), " ")
+	if len(detail) > maxBlockerDetailBytes {
+		digest := sha256.Sum256([]byte(detail))
+		suffix := fmt.Sprintf("…#%x", digest[:6])
+		detail = detail[:maxBlockerDetailBytes-len(suffix)]
+		for !utf8.ValidString(detail) {
+			detail = detail[:len(detail)-1]
+		}
+		detail += suffix
+	}
+	return blocker, detail, nil
 }
 
 func diagnosticSeverity(code string) (Severity, bool) {
@@ -296,7 +344,7 @@ func diagnosticSeverity(code string) (Severity, bool) {
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
 		string(FailureCodeEnvironment), string(FailureCodeProfile):
 		return SeverityError, true
-	case "W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED":
+	case "W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED":
 		return SeverityWarning, true
 	default:
 		return "", false

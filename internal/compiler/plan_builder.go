@@ -108,8 +108,18 @@ func reducePlanEventExpressions(ir IR) (IR, error) {
 	ir.Jobs = append([]JobInstance(nil), ir.Jobs...)
 	var diagnostics []error
 	for i, instance := range ir.Jobs {
+		if err := builder.validateShellCompatibility(instance, lowerWorkflowProgram(instance)); err != nil {
+			if instance.BlockerDetailUnsafe {
+				err = suppressBlockerDetail(err)
+			}
+			diagnostics = append(diagnostics, planConstructionFinding(instance, err))
+			continue
+		}
 		reduced, err := builder.reducePlanInstanceEventExpressions(instance)
 		if err != nil {
+			if instance.BlockerDetailUnsafe {
+				err = suppressBlockerDetail(err)
+			}
 			diagnostics = append(diagnostics, planConstructionFinding(instance, err))
 			continue
 		}
@@ -123,9 +133,6 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
 	}
 	workflowProgram := lowerWorkflowProgram(instance)
-	if err := b.validateShellCompatibility(instance, workflowProgram); err != nil {
-		return plan.Job{}, PlanAuthorization{}, nil, err
-	}
 	actions, err := b.buildActions(instance, &workflowProgram)
 	if err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
@@ -186,12 +193,17 @@ func (b planBuilder) validateShellCompatibility(instance JobInstance, workflowPr
 			return
 		}
 		if err := shellcompat.ValidateCompatibility(resolved); err != nil {
+			command, _ := shellcompat.UnsupportedCommand(err)
+			if strings.Contains(site.Source, "${{") {
+				command = ""
+			}
 			owner := fmt.Sprintf("job %q", instance.LogicalJobID)
 			if step != 0 {
 				owner += fmt.Sprintf(" step %d", step)
 			}
 			diagnostics = append(diagnostics, &ProcessingFinding{
 				Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility",
+				Blocker: "shell", BlockerDetail: command,
 				Path: site.Location.File, Line: site.Location.Start.Line, Column: site.Location.Start.Column,
 				Job: instance.LogicalJobID, Instance: instance.Key, Step: step, Message: err.Error(),
 				Err: fmt.Errorf("%s:%d:%d: %s: %w", site.Location.File, site.Location.Start.Line, site.Location.Start.Column, owner, err),

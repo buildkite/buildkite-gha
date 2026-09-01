@@ -344,15 +344,39 @@ func reportableRunnerLabels(job workflow.Job, labels []string) []string {
 	if !strings.HasPrefix(strings.ToLower(body), "matrix.") || strings.ContainsAny(body, " []()|&") {
 		return nil
 	}
-	if job.Matrix.Expression != nil || job.Matrix.IncludeExpression != nil || job.Matrix.ExcludeExpression != nil {
+	if matrixContainsExpressions(job.Matrix) {
 		return nil
 	}
-	for _, row := range job.Matrix.Rows {
+	return labels
+}
+
+func matrixContainsExpressions(matrix *workflow.Matrix) bool {
+	if matrix == nil {
+		return false
+	}
+	if matrix.Expression != nil || matrix.IncludeExpression != nil || matrix.ExcludeExpression != nil {
+		return true
+	}
+	for _, row := range matrix.Rows {
 		if row.Expression != nil {
-			return nil
+			return true
+		}
+		for _, value := range row.Values {
+			if containsExpression(value.Data) {
+				return true
+			}
 		}
 	}
-	return labels
+	for _, combinations := range [][]workflow.MatrixCombination{matrix.Include, matrix.Exclude} {
+		for _, combination := range combinations {
+			for _, value := range combination.Values {
+				if containsExpression(value.Data) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func runsOnPosition(job workflow.Job) workflow.Position {

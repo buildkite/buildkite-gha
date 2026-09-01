@@ -335,6 +335,10 @@ func (Engine) Validate(site Site) (Validation, error) {
 		secrets, err = secretReferences(site.Source)
 	}
 	if err != nil {
+		switch profile.semantics {
+		case semanticsCompileCondition, semanticsCondition, semanticsActionLifecycle:
+			err = conditionBlocker(site.Source, err)
+		}
 		return Validation{}, siteError(site, err)
 	}
 	switch profile.semantics {
@@ -359,6 +363,7 @@ func (Engine) Validate(site Site) (Validation, error) {
 		if err == nil && !empty {
 			err = validateCompileConditionNode(node, profile.condition, CompileContext{}, nil)
 		}
+		err = conditionBlocker(site.Source, err)
 	case semanticsReusableInput:
 		err = visitTemplateExpressions(site.Source, validateReusableInputDefaultNode)
 	case semanticsRunName:

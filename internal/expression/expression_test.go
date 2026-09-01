@@ -2,6 +2,7 @@ package expression
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 	"reflect"
 	"strings"
@@ -737,6 +738,15 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 			err := ValidateCondition(test.source, test.scope)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("ValidateCondition() error = %v, want %q", err, test.want)
+			}
+			var blocker interface {
+				CompatibilityBlocker() (string, string)
+			}
+			if !errors.As(err, &blocker) {
+				t.Fatalf("ValidateCondition() error has no compatibility blocker: %v", err)
+			}
+			if kind, detail := blocker.CompatibilityBlocker(); kind != "expression" || detail != test.source {
+				t.Fatalf("compatibility blocker = %q / %q", kind, detail)
 			}
 		})
 	}

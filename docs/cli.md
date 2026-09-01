@@ -525,7 +525,10 @@ The plugin value must be a YAML boolean, not a quoted string.
 
 In Buildkite jobs, the importer and runtime send best-effort completion
 telemetry through the job-authenticated Agent API. Events contain the command,
-outcome, client version, duration, and bounded diagnostic codes and severities.
+outcome, client version, duration, and bounded diagnostics. Diagnostics can
+identify a rejected feature with a `blocker` slug and bounded `blocker_detail`,
+such as `runner_label` and `windows-latest`. Distinct rejected values remain
+separate diagnostics even when they share a diagnostic code.
 For an unsuccessful command, they also contain a normalized user-visible error
 message of at most 1,024 bytes. When a workflow diagnostic attributes the
 failure, the message is that diagnostic's text, kept whole so later job output
@@ -536,12 +539,17 @@ omitted.
 Failed runs also carry a failure phase and a code from a fixed set. The code
 separates workflow-authored process exits (`E_STEP_PROCESS_EXIT`) from
 unsupported-feature rejections (`E_UNSUPPORTED_FEATURE`) and runtime integrity
-failures (`E_RUNTIME_INTEGRITY`). Secret resolution failures use
-`E_SECRET_UNAVAILABLE`, making secret availability independently measurable.
+failures (`E_RUNTIME_INTEGRITY`), so a failing test suite is not counted as a
+compatibility gap. Runtime rejections include the same blocker fields when the
+runtime can identify the rejected shell or action reference.
+Secret resolution failures use `E_SECRET_UNAVAILABLE`, making secret
+availability independently measurable.
 
 Buildkite adds organization, pipeline, build, and job identifiers on the
 server. The client does not send workflow or event content, environment
-variables, command text, or secrets as separate properties.
+variables, command text, or secrets as separate properties. Blocker details
+come from workflow-authored configuration. Event-derived runner labels and
+environment expressions are omitted.
 
 Error output can include details already printed in the job log, such as
 workflow paths, action references, expressions, or invalid configuration

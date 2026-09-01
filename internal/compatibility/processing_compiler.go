@@ -1,6 +1,7 @@
 package compatibility
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -101,6 +102,7 @@ func (r *ProcessingReport) ApplyWarnings(path string, warnings []compiler.Warnin
 			Level: "warning", Code: warning.Code, Category: "compatibility", Stage: stageExpressions,
 			Message:  fmt.Sprintf("%s:%d:%d: %s", warningPath, warning.Line, warning.Column, warning.Message),
 			Location: sourceLocation(warningPath, warning.Line, warning.Column), Job: warning.Job, Step: warning.Step,
+			Blocker: warning.Blocker, BlockerDetail: warning.BlockerDetail,
 		})
 	}
 }
@@ -314,6 +316,8 @@ func diagnosticFromError(defaultPath, stage, code, category string, err error) D
 		Message: message, Detail: detail, Location: location,
 	}
 	if finding != nil {
+		diagnostic.Blocker = finding.Blocker
+		diagnostic.BlockerDetail = finding.BlockerDetail
 		diagnostic.Job = finding.Job
 		diagnostic.Instance = finding.Instance
 		diagnostic.Action = finding.Action
@@ -337,6 +341,17 @@ func diagnosticFromError(defaultPath, stage, code, category string, err error) D
 				diagnostic.Action = before
 			}
 		}
+	}
+	if diagnostic.Blocker == "" {
+		var blocker interface {
+			CompatibilityBlocker() (string, string)
+		}
+		if errors.As(err, &blocker) {
+			diagnostic.Blocker, diagnostic.BlockerDetail = blocker.CompatibilityBlocker()
+		}
+	}
+	if diagnostic.Blocker == "" && diagnostic.Code == compiler.CodeExpressionInvalid {
+		diagnostic.Blocker = "expression"
 	}
 	return diagnostic
 }

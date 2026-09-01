@@ -343,14 +343,16 @@ jobs:
 
 func TestRunsOnPolicyFailsClosedWithLocatedDiagnostics(t *testing.T) {
 	tests := []struct {
-		name   string
-		runsOn string
-		vars   map[string]string
-		labels map[string]string
-		want   string
+		name          string
+		runsOn        string
+		vars          map[string]string
+		labels        map[string]string
+		want          string
+		blockerDetail string
 	}{
-		{name: "unsupported operating system", runsOn: "windows-latest", labels: map[string]string{"windows-latest": "windows"}, want: `unsupported operating system runner label "windows-latest"`},
-		{name: "unmapped label", runsOn: "ubuntu-20.04", labels: map[string]string{"ubuntu-24.04": "linux"}, want: `runner label "ubuntu-20.04" is not mapped by policy`},
+		{name: "unsupported operating system", runsOn: "windows-latest", labels: map[string]string{"windows-latest": "windows"}, want: `unsupported operating system runner label "windows-latest"`, blockerDetail: "windows-latest"},
+		{name: "unsupported operating system among labels", runsOn: "[self-hosted, windows-latest]", labels: map[string]string{"self-hosted": "linux"}, want: `unsupported operating system runner label "windows-latest"`, blockerDetail: "windows-latest"},
+		{name: "unmapped label", runsOn: "ubuntu-20.04", labels: map[string]string{"ubuntu-24.04": "linux"}, want: `runner label "ubuntu-20.04" is not mapped by policy`, blockerDetail: "ubuntu-20.04"},
 		{name: "unresolved expression", runsOn: "${{ vars.RUNNER }}", labels: map[string]string{"ubuntu-24.04": "linux"}, want: `unavailable value "vars.runner"`},
 		{name: "conflicting labels", runsOn: "[self-hosted, linux]", labels: map[string]string{"self-hosted": "one", "linux": "two"}, want: "runner labels resolve to conflicting queues"},
 	}
@@ -364,6 +366,66 @@ func TestRunsOnPolicyFailsClosedWithLocatedDiagnostics(t *testing.T) {
 			})
 			if err == nil || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), "policy.yml:") {
 				t.Fatalf("CompileWithOptions() error = %v, want located %q", err, test.want)
+			}
+			if test.blockerDetail != "" {
+				var finding *ProcessingFinding
+				if !errors.As(err, &finding) || finding.Blocker != "runner_label" || finding.BlockerDetail != test.blockerDetail {
+					t.Fatalf("processing blocker = %#v, want runner_label/%s", finding, test.blockerDetail)
+				}
+			}
+		})
+	}
+}
+
+func TestEventDerivedRunnerLabelsOmitBlockerDetail(t *testing.T) {
+	tests := []struct {
+		name     string
+		workflow []byte
+		event    []byte
+	}{
+		{
+			name: "workflow dispatch input",
+			workflow: []byte(`on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        type: string
+jobs:
+  test:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - run: true
+`),
+			event: bytes.Replace(readFile(t, smokePath("events", "workflow_dispatch.json")), []byte(`"inputs": {}`), []byte(`"inputs": {"runner": "windows-secret"}`), 1),
+		},
+		{
+			name: "matrix value",
+			workflow: []byte(`on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        runner:
+          - ${{ github.event.runner }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - run: true
+`),
+			event: bytes.Replace(pushEvent(t), []byte(`"payload": {`), []byte(`"payload": {"runner": "windows-secret",`), 1),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := CompileWithOptions("policy.yml", test.workflow, test.event, Options{
+				EventTrust: EventTrusted,
+				Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
+			})
+			if err == nil {
+				t.Fatal("CompileWithOptions() error = nil, want runner policy rejection")
+			}
+			var finding *ProcessingFinding
+			if !errors.As(err, &finding) || finding.Blocker != "runner_label" || finding.BlockerDetail != "" {
+				t.Fatalf("processing blocker = %#v, want runner_label with no detail", finding)
 			}
 		})
 	}

@@ -39,13 +39,17 @@ type ProcessingFinding struct {
 	Stage    ProcessingStage
 	Code     string
 	Category string
-	Path     string
-	Line     int
-	Column   int
-	Job      string
-	Instance string
-	Action   string
-	Step     int
+	Blocker  string
+	// BlockerDetail is opt-in telemetry attribution. Set it only from original
+	// workflow syntax or values proven to depend solely on workflow literals.
+	BlockerDetail string
+	Path          string
+	Line          int
+	Column        int
+	Job           string
+	Instance      string
+	Action        string
+	Step          int
 	// Message replaces Err's text in the rendered report. Set it whenever Err
 	// can quote event-derived data, so that data cannot reach the report.
 	Message string
@@ -57,6 +61,52 @@ type ProcessingFinding struct {
 
 func (e *ProcessingFinding) Error() string { return e.Err.Error() }
 func (e *ProcessingFinding) Unwrap() error { return e.Err }
+
+type blockerDetailSuppressedError struct {
+	blocker string
+	err     error
+}
+
+func (e *blockerDetailSuppressedError) Error() string { return e.err.Error() }
+func (e *blockerDetailSuppressedError) Unwrap() error { return e.err }
+func (e *blockerDetailSuppressedError) CompatibilityBlocker() (string, string) {
+	return e.blocker, ""
+}
+
+func suppressBlockerDetail(err error) error {
+	if err == nil {
+		return nil
+	}
+	if finding, ok := err.(*ProcessingFinding); ok {
+		copy := *finding
+		copy.BlockerDetail = ""
+		if copy.Blocker == "" {
+			var blocker interface {
+				CompatibilityBlocker() (string, string)
+			}
+			if errors.As(copy.Err, &blocker) {
+				copy.Blocker, _ = blocker.CompatibilityBlocker()
+			}
+		}
+		return &copy
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		wrapped := make([]error, 0, len(children))
+		for _, child := range children {
+			wrapped = append(wrapped, suppressBlockerDetail(child))
+		}
+		return errors.Join(wrapped...)
+	}
+	var blocker interface {
+		CompatibilityBlocker() (string, string)
+	}
+	if !errors.As(err, &blocker) {
+		return err
+	}
+	kind, _ := blocker.CompatibilityBlocker()
+	return &blockerDetailSuppressedError{blocker: kind, err: err}
+}
 
 func processingFinding(stage ProcessingStage, code, category string, err error) error {
 	return attributedProcessingFinding(stage, code, category, "", 0, 0, "", "", "", 0, err)

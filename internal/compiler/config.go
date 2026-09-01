@@ -314,6 +314,7 @@ const (
 // resolved label.
 type runnerPolicyRejection struct {
 	reason string
+	label  string
 	err    error
 }
 
@@ -322,6 +323,10 @@ func (e *runnerPolicyRejection) Unwrap() error { return e.err }
 
 func rejectRunner(reason, format string, args ...any) error {
 	return &runnerPolicyRejection{reason: reason, err: fmt.Errorf(format, args...)}
+}
+
+func rejectRunnerLabel(reason, label, format string, args ...any) error {
+	return &runnerPolicyRejection{reason: reason, label: label, err: fmt.Errorf(format, args...)}
 }
 
 // Resolve returns the target selected by labels under this policy and trust
@@ -339,7 +344,7 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 	for i, label := range labels {
 		normalized := strings.ToLower(strings.TrimSpace(label))
 		if _, duplicate := seen[normalized]; duplicate {
-			return RunnerTarget{}, rejectRunner(reasonDuplicateLabel, "runs-on contains duplicate runner label %q", label)
+			return RunnerTarget{}, rejectRunnerLabel(reasonDuplicateLabel, label, "runs-on contains duplicate runner label %q", label)
 		}
 		seen[normalized] = struct{}{}
 		normalizedLabels[i] = normalized
@@ -356,7 +361,7 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 	for i, label := range labels {
 		normalized := normalizedLabels[i]
 		if unsupportedOS(normalized) {
-			return RunnerTarget{}, rejectRunner(reasonUnsupportedOS, "unsupported operating system runner label %q", label)
+			return RunnerTarget{}, rejectRunnerLabel(reasonUnsupportedOS, label, "unsupported operating system runner label %q", label)
 		}
 		mapped, ok := policy.Targets[normalized]
 		if !ok {
@@ -380,7 +385,7 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 			}
 		}
 		if !ok {
-			return RunnerTarget{}, rejectRunner(reasonUnmappedLabel, "runner label %q is not mapped by policy", label)
+			return RunnerTarget{}, rejectRunnerLabel(reasonUnmappedLabel, label, "runner label %q is not mapped by policy", label)
 		}
 		if resolved && !RunnerTargetsEqual(target, mapped) {
 			if target.Queue != mapped.Queue && target.Platform == mapped.Platform && target.Image == mapped.Image && cachesEqual(target.Cache, mapped.Cache) {
@@ -467,6 +472,17 @@ func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []s
 	default:
 		return "Runner target is unsupported. Use a configured Linux or macOS runner target.", detail
 	}
+}
+
+func runnerRejectionBlockerDetail(err error, reportableLabels []string) string {
+	var rejection *runnerPolicyRejection
+	if errors.As(err, &rejection) && rejection.label != "" && slices.Contains(reportableLabels, rejection.label) {
+		return rejection.label
+	}
+	if len(reportableLabels) == 1 {
+		return reportableLabels[0]
+	}
+	return ""
 }
 
 func (policy RunnerPolicy) supportedLabels() []string {

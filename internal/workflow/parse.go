@@ -545,7 +545,14 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurrency map[Position]stepConcurrency, serviceContainers map[string]rawServiceContainer) (Job, error) {
 	out := Job{ID: in.ID.Value, Span: pointSpan(in.Pos)}
 	if in.Environment != nil {
-		return Job{}, fmt.Errorf("%s:%d:%d: GitHub environments and environment secrets are unsupported. Remove the environment key from job %q. Approvals, deployment records, and protection rules are unavailable. Move environment secrets into Buildkite secrets and reference them by name. If you need GitHub environments, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support", path, in.Environment.Pos.Line, in.Environment.Pos.Col, in.ID.Value)
+		detail := ""
+		if in.Environment.Name != nil && !strings.Contains(in.Environment.Name.Value, "${{") {
+			detail = in.Environment.Name.Value
+		}
+		return Job{}, &unsupportedEnvironmentError{
+			detail: detail,
+			err:    fmt.Errorf("%s:%d:%d: GitHub environments and environment secrets are unsupported. Remove the environment key from job %q. Approvals, deployment records, and protection rules are unavailable. Move environment secrets into Buildkite secrets and reference them by name. If you need GitHub environments, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support", path, in.Environment.Pos.Line, in.Environment.Pos.Col, in.ID.Value),
+		}
 	}
 	ownedConcurrency, err := adaptConcurrency(path, in.ID.Value, in.Concurrency)
 	if err != nil {
@@ -809,6 +816,17 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		return Job{}, err
 	}
 	return out, nil
+}
+
+type unsupportedEnvironmentError struct {
+	detail string
+	err    error
+}
+
+func (e *unsupportedEnvironmentError) Error() string { return e.err.Error() }
+func (e *unsupportedEnvironmentError) Unwrap() error { return e.err }
+func (e *unsupportedEnvironmentError) CompatibilityBlocker() (string, string) {
+	return "environment", e.detail
 }
 
 func adaptConcurrency(path, jobID string, in *actionlint.Concurrency) (*Concurrency, error) {

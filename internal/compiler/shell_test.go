@@ -59,7 +59,7 @@ jobs:
       - shell: ${{ matrix.shell }}
         run: Write-Output test
 `,
-			wantReportedCommand: "powershell",
+			wantReportedCommand: "",
 			wantLine:            9,
 			wantStep:            1,
 		},
@@ -80,14 +80,19 @@ jobs:
 			if finding.Job != "test" || finding.Instance == "" || finding.Step != test.wantStep {
 				t.Fatalf("finding ownership = %#v", finding)
 			}
+			if finding.Blocker != "shell" || finding.BlockerDetail != test.wantReportedCommand {
+				t.Fatalf("finding blocker = %q / %q", finding.Blocker, finding.BlockerDetail)
+			}
 			for _, want := range []string{
-				`shell "` + test.wantReportedCommand + `" is unsupported`,
 				"Use bash, sh, python, or a valid custom shell template whose command is available on PATH",
 				"https://github.com/buildkite/buildkite-gha",
 			} {
 				if !strings.Contains(finding.Message, want) {
 					t.Fatalf("finding message = %q, want %q", finding.Message, want)
 				}
+			}
+			if !strings.Contains(finding.Message, "is unsupported") {
+				t.Fatalf("finding message = %q, want unsupported shell", finding.Message)
 			}
 		})
 	}
@@ -121,6 +126,50 @@ jobs:
 	}
 	if !strings.Contains(finding.Message, `shell "pwsh" is unsupported`) {
 		t.Fatalf("finding message = %q", finding.Message)
+	}
+	if finding.Blocker != "shell" || finding.BlockerDetail != "" {
+		t.Fatalf("finding blocker = %q / %q, want shell with no detail", finding.Blocker, finding.BlockerDetail)
+	}
+}
+
+func TestCompilePlansDoNotAttributeReusableInputShellValues(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      shell: ${{ github.event.shell }}
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      shell:
+        type: string
+        required: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: ${{ inputs.shell }}
+        run: Write-Output test
+`)
+	eventSource := pushEvent(t)
+	event := bytes.Replace(eventSource, []byte(`"payload": {`), []byte(`"payload": {"shell": "pwsh",`), 1)
+	if bytes.Equal(event, eventSource) {
+		t.Fatal("event payload was not updated")
+	}
+
+	_, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), event, "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err == nil {
+		t.Fatal("compileUntrustedPlans() succeeded")
+	}
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) {
+		t.Fatalf("compileUntrustedPlans() error = %T %v, want ProcessingFinding", err, err)
+	}
+	if finding.Blocker != "shell" || finding.BlockerDetail != "" {
+		t.Fatalf("finding blocker = %q / %q, want shell with no detail", finding.Blocker, finding.BlockerDetail)
 	}
 }
 

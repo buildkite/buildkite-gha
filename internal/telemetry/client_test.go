@@ -52,6 +52,12 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 		FailureCode:           FailureCodeWorkflowSyntax,
 		ErrorMessage:          "  buildkite-gha: run-job:\ninvalid workflow\tvalue  ",
 		ErrorMessageTruncated: true,
+		Blocker:               "shell",
+		BlockerDetail:         "pwsh",
+		Diagnostics: []Diagnostic{{
+			Code: string(FailureCodeExpressionInvalid), Severity: SeverityError,
+			Blocker: "runner_label", BlockerDetail: "windows-latest",
+		}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +68,11 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 		Command: CommandRunJob, Outcome: OutcomeFailure, ClientVersion: "1.2.3", DurationMS: 1234,
 		FailurePhase: FailurePhaseParsing, FailureCode: FailureCodeWorkflowSyntax,
 		ErrorMessage: "buildkite-gha: run-job: invalid workflow value", ErrorMessageTruncated: true,
+		Blocker: "shell", BlockerDetail: "pwsh",
+		Diagnostics: []Diagnostic{{
+			Code: string(FailureCodeExpressionInvalid), Severity: SeverityError,
+			Blocker: "runner_label", BlockerDetail: "windows-latest",
+		}},
 	}
 	if !reflect.DeepEqual(request.Properties, want) {
 		t.Fatalf("properties = %#v, want %#v", request.Properties, want)
@@ -253,7 +264,7 @@ func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
 		string(FailureCodeEnvironment), string(FailureCodeProfile),
 	}
-	warningCodes := []string{"W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED"}
+	warningCodes := []string{"W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED"}
 	input := make([]Diagnostic, 0, len(errorCodes)+len(warningCodes)+2)
 	for _, code := range errorCodes {
 		input = append(input, Diagnostic{Code: code, Severity: SeverityError})
@@ -271,6 +282,36 @@ func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 	}
 	if _, err := boundedDiagnostics([]Diagnostic{{Code: "CUSTOMER_VALUE", Severity: SeverityError}}); err == nil {
 		t.Fatal("boundedDiagnostics() accepted non-allowlisted code")
+	}
+}
+
+func TestDiagnosticsPreserveDistinctBlockersForOneCode(t *testing.T) {
+	common := strings.Repeat("x", maxBlockerDetailBytes)
+	input := []Diagnostic{
+		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "expression", BlockerDetail: common + "first"},
+		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "expression", BlockerDetail: common + "second"},
+	}
+	bounded, err := boundedDiagnostics(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded) != 2 || bounded[0].BlockerDetail == bounded[1].BlockerDetail {
+		t.Fatalf("bounded diagnostics collapsed distinct details: %#v", bounded)
+	}
+	for _, diagnostic := range bounded {
+		if len(diagnostic.BlockerDetail) > maxBlockerDetailBytes || !strings.Contains(diagnostic.BlockerDetail, "…#") {
+			t.Fatalf("bounded diagnostic detail = %q", diagnostic.BlockerDetail)
+		}
+	}
+}
+
+func TestBlockerDetailsAreNormalizedAndBounded(t *testing.T) {
+	blocker, detail, err := boundedBlocker("shell", "  pwsh\n"+strings.Repeat("界", maxBlockerDetailBytes))
+	if err != nil || blocker != "shell" || len(detail) > maxBlockerDetailBytes || !utf8.ValidString(detail) || !strings.HasPrefix(detail, "pwsh ") {
+		t.Fatalf("boundedBlocker() = %q, %q, %v", blocker, detail, err)
+	}
+	if _, _, err := boundedBlocker("customer-value", "detail"); err == nil {
+		t.Fatal("boundedBlocker() accepted an unknown blocker")
 	}
 }
 

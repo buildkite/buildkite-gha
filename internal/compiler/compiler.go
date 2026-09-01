@@ -44,13 +44,15 @@ type WorkflowConcurrencyGate struct {
 
 // Warning is one source-located, non-fatal compatibility diagnostic.
 type Warning struct {
-	Code    string `json:"code"`
-	Path    string `json:"path,omitempty"`
-	Line    int    `json:"line"`
-	Column  int    `json:"column"`
-	Job     string `json:"job,omitempty"`
-	Step    int    `json:"step,omitempty"`
-	Message string `json:"message"`
+	Code          string `json:"code"`
+	Blocker       string `json:"blocker,omitempty"`
+	BlockerDetail string `json:"blocker_detail,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Line          int    `json:"line"`
+	Column        int    `json:"column"`
+	Job           string `json:"job,omitempty"`
+	Step          int    `json:"step,omitempty"`
+	Message       string `json:"message"`
 }
 
 // ExecutionBoundary makes the compile-only boundary explicit.
@@ -108,6 +110,7 @@ type JobInstance struct {
 	SourcePath              string                    `json:"source_path"`
 	SourceDigest            string                    `json:"source_digest"`
 	RemoteWorkflow          *RemoteWorkflowSource     `json:"remote_workflow,omitempty"`
+	BlockerDetailUnsafe     bool                      `json:"blocker_detail_unsafe,omitempty"`
 	RepositoryRoot          string                    `json:"-"`
 	Source                  workflow.Span             `json:"source"`
 	secretAuthority         secretAuthority
@@ -442,10 +445,12 @@ func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warnin
 		}
 		message += fmt.Sprintf(" If you need %s, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.", trigger.Event)
 		warnings = append(warnings, Warning{
-			Code:    "W_TRIGGER_EVENT_UNSUPPORTED",
-			Line:    trigger.Position.Line,
-			Column:  trigger.Position.Column,
-			Message: message,
+			Code:          "W_TRIGGER_EVENT_UNSUPPORTED",
+			Blocker:       "trigger",
+			BlockerDetail: trigger.Event,
+			Line:          trigger.Position.Line,
+			Column:        trigger.Position.Column,
+			Message:       message,
 		})
 	}
 	if parsed.Concurrency != nil && cancelInProgress {
@@ -718,11 +723,13 @@ func supported(path string, job workflow.Job) error {
 	ids := make(map[string]struct{}, len(job.Steps))
 	for i, step := range job.Steps {
 		if step.Kind == "uses" && strings.HasPrefix(strings.ToLower(step.Uses), "docker://") {
-			return attributedProcessingFinding(
-				StageGraph, CodeGraphInvalid, "compatibility", path, step.Span.Start.Line, step.Span.Start.Column,
-				job.ID, "", step.Uses, i+1,
-				locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, actionsource.UnsupportedContainerActionReason),
-			)
+			return &ProcessingFinding{
+				Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
+				Blocker: "action_ref", BlockerDetail: step.Uses,
+				Path: path, Line: step.Span.Start.Line, Column: step.Span.Start.Column,
+				Job: job.ID, Action: step.Uses, Step: i + 1,
+				Err: locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, actionsource.UnsupportedContainerActionReason),
+			}
 		}
 		if step.ID != "" {
 			id := strings.ToLower(step.ID)
@@ -806,7 +813,7 @@ func validateConditions(path string, job workflow.Job, validate func(string, exp
 		if position.Line == 0 {
 			position = job.Span.Start
 		}
-		diagnostics = append(diagnostics, locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("job condition: %v", err)))
+		diagnostics = append(diagnostics, locatedJobWrappedError(path, job, position.Line, position.Column, "job condition", err))
 	}
 	for i, step := range job.Steps {
 		if err := validate(step.If, expression.StepCondition); err != nil {
@@ -818,7 +825,7 @@ func validateConditions(path string, job workflow.Job, validate func(string, exp
 			if step.ID != "" {
 				label = fmt.Sprintf("step %q", step.ID)
 			}
-			diagnostics = append(diagnostics, locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("%s condition: %v", label, err)))
+			diagnostics = append(diagnostics, locatedJobWrappedError(path, job, position.Line, position.Column, label+" condition", err))
 		}
 	}
 	return errors.Join(diagnostics...)
