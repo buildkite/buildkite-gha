@@ -44,13 +44,15 @@ type WorkflowConcurrencyGate struct {
 
 // Warning is one source-located, non-fatal compatibility diagnostic.
 type Warning struct {
-	Code    string `json:"code"`
-	Path    string `json:"path,omitempty"`
-	Line    int    `json:"line"`
-	Column  int    `json:"column"`
-	Job     string `json:"job,omitempty"`
-	Step    int    `json:"step,omitempty"`
-	Message string `json:"message"`
+	Code          string `json:"code"`
+	Blocker       string `json:"blocker,omitempty"`
+	BlockerDetail string `json:"blocker_detail,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Line          int    `json:"line"`
+	Column        int    `json:"column"`
+	Job           string `json:"job,omitempty"`
+	Step          int    `json:"step,omitempty"`
+	Message       string `json:"message"`
 }
 
 // ExecutionBoundary makes the compile-only boundary explicit.
@@ -443,10 +445,12 @@ func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warnin
 		}
 		message += fmt.Sprintf(" If you need %s, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.", trigger.Event)
 		warnings = append(warnings, Warning{
-			Code:    "W_TRIGGER_EVENT_UNSUPPORTED",
-			Line:    trigger.Position.Line,
-			Column:  trigger.Position.Column,
-			Message: message,
+			Code:          "W_TRIGGER_EVENT_UNSUPPORTED",
+			Blocker:       "trigger",
+			BlockerDetail: trigger.Event,
+			Line:          trigger.Position.Line,
+			Column:        trigger.Position.Column,
+			Message:       message,
 		})
 	}
 	if parsed.Concurrency != nil && cancelInProgress {

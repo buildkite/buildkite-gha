@@ -127,7 +127,7 @@ func (d *commandTelemetryDetails) observe(report compatibility.ProcessingReport)
 func (d *commandTelemetryDetails) addWarnings(warnings []compiler.Warning) {
 	for _, warning := range warnings {
 		if allowlistedTelemetryDiagnosticCode(warning.Code) {
-			d.addDiagnostic(warning.Code, telemetry.SeverityWarning, "", "")
+			d.addDiagnostic(warning.Code, telemetry.SeverityWarning, warning.Blocker, warning.BlockerDetail)
 		}
 	}
 }
@@ -206,7 +206,7 @@ func allowlistedTelemetryDiagnosticCode(code string) bool {
 		compiler.CodeMatrixInvalid, compiler.CodeExpressionInvalid, compiler.CodeActionDiscovery,
 		compiler.CodeActionResolution, compiler.CodePlanConstruction, compiler.CodePipelineGeneration,
 		compiler.CodeEnvironment, "E_PROFILE", "W_ACTION_RUNTIME_UNKNOWN",
-		"W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED":
+		"W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED":
 		return true
 	default:
 		return false

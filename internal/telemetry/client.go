@@ -340,7 +340,7 @@ func diagnosticSeverity(code string) (Severity, bool) {
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
 		string(FailureCodeEnvironment), string(FailureCodeProfile):
 		return SeverityError, true
-	case "W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED":
+	case "W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED":
 		return SeverityWarning, true
 	default:
 		return "", false

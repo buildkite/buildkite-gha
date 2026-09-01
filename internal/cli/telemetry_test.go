@@ -168,6 +168,21 @@ func TestTriggerFailureTelemetryIncludesTrigger(t *testing.T) {
 	}
 }
 
+func TestUnsupportedTriggerWarningTelemetryIncludesTrigger(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	details.addWarnings([]compiler.Warning{{
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Blocker: "trigger", BlockerDetail: "workflow_run",
+	}})
+	got := details.telemetryDetails()
+	want := []telemetry.Diagnostic{{
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Severity: telemetry.SeverityWarning,
+		Blocker: "trigger", BlockerDetail: "workflow_run",
+	}}
+	if !reflect.DeepEqual(got.Diagnostics, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
+	}
+}
+
 func TestUnprovenActionRuntimeIgnoresNativeAdapters(t *testing.T) {
 	bundleWith := func(locks ...plan.ActionLock) compiler.Bundle {
 		return compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{

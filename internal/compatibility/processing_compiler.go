@@ -102,6 +102,7 @@ func (r *ProcessingReport) ApplyWarnings(path string, warnings []compiler.Warnin
 			Level: "warning", Code: warning.Code, Category: "compatibility", Stage: stageExpressions,
 			Message:  fmt.Sprintf("%s:%d:%d: %s", warningPath, warning.Line, warning.Column, warning.Message),
 			Location: sourceLocation(warningPath, warning.Line, warning.Column), Job: warning.Job, Step: warning.Step,
+			Blocker: warning.Blocker, BlockerDetail: warning.BlockerDetail,
 		})
 	}
 }

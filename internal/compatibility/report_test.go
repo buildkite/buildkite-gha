@@ -275,13 +275,14 @@ func TestApplyWarningsPreservesCompilerAttribution(t *testing.T) {
 	report := NewProcessingReport(".github/workflows/caller.yml", "hosted")
 	report.ApplyWarnings(report.Workflow, []compiler.Warning{{
 		Code: "W_CHECKOUT_LEGACY_RELEASE", Path: ".github/workflows/reusable.yml", Line: 12, Column: 9,
-		Job: "call.build", Step: 2, Message: "actions/checkout v2.8.0 behaves like v2.",
+		Job: "call.build", Step: 2, Blocker: "trigger", BlockerDetail: "workflow_run",
+		Message: "actions/checkout v2.8.0 behaves like v2.",
 	}})
 	want := Diagnostic{
 		Level: "warning", Code: "W_CHECKOUT_LEGACY_RELEASE", Category: "compatibility", Stage: "expression-validation",
 		Message:  ".github/workflows/reusable.yml:12:9: actions/checkout v2.8.0 behaves like v2.",
 		Location: &SourceLocation{Path: ".github/workflows/reusable.yml", Line: 12, Column: 9},
-		Job:      "call.build", Step: 2,
+		Job:      "call.build", Step: 2, Blocker: "trigger", BlockerDetail: "workflow_run",
 	}
 	if len(report.Diagnostics) != 1 || !sameDiagnostic(report.Diagnostics[0], want) {
 		t.Fatalf("diagnostics = %#v, want %#v", report.Diagnostics, []Diagnostic{want})

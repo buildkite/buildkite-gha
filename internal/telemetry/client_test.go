@@ -264,7 +264,7 @@ func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
 		string(FailureCodeEnvironment), string(FailureCodeProfile),
 	}
-	warningCodes := []string{"W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED"}
+	warningCodes := []string{"W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED"}
 	input := make([]Diagnostic, 0, len(errorCodes)+len(warningCodes)+2)
 	for _, code := range errorCodes {
 		input = append(input, Diagnostic{Code: code, Severity: SeverityError})
