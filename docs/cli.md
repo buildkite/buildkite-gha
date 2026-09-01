@@ -458,8 +458,10 @@ for every Buildkite scheduled build.
 After all applicable workflows have been attempted, the command uploads the exact executable, content-addressed plans, and synthetic failure steps in one artifact batch with a concurrency limit of 8. It then runs one:
 
 ```sh
-buildkite-agent pipeline upload --no-interpolation --reject-secrets
+buildkite-agent pipeline upload --no-interpolation
 ```
+
+Buildkite Agent v4 rejects pipeline uploads containing secrets by default.
 
 ### Choose runners and runtimes
 
