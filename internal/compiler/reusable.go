@@ -42,6 +42,7 @@ type sourcedJob struct {
 	tokenPolicyNarrowed   bool
 	jobPermissionsIgnored bool
 	reusableCall          workflow.Position
+	blockerDetailUnsafe   bool
 	callGuards            []sourcedCallGuard
 	concurrencyGates      []WorkflowConcurrencyGate
 }
@@ -237,10 +238,12 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				job.Permissions.Scopes["id-token"] = idTokenPermission
 			}
 		}
+		originalJob := job
 		job, err = applyStaticInputs(path, job, inputs.values)
 		if err != nil {
 			return reusableResolution{}, err
 		}
+		blockerDetailUnsafe := blockerFieldsChanged(originalJob, job)
 		if parsed.Callable {
 			if err := rejectUnresolvedInputExpressions(path, job, inputs.deferred); err != nil {
 				return reusableResolution{}, err
@@ -275,8 +278,9 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				Job: job, path: path, digest: digest, root: resolver.workspaceRoot, remote: cloneRemoteWorkflowSource(current.remote), inputs: cloneReusableInputs(inputs),
 				secretAuthority: cloneSecretAuthority(secrets), needBindings: needBindings,
 				tokenPolicyNarrowed: jobTokenPolicyNarrowed, jobPermissionsIgnored: jobPermissionsIgnored, reusableCall: reusableCallPosition,
-				callGuards:       cloneSourcedCallGuards(callGuards),
-				concurrencyGates: append([]WorkflowConcurrencyGate(nil), concurrencyGates...),
+				blockerDetailUnsafe: blockerDetailUnsafe,
+				callGuards:          cloneSourcedCallGuards(callGuards),
+				concurrencyGates:    append([]WorkflowConcurrencyGate(nil), concurrencyGates...),
 			})
 			replacements[id] = needBinding{members: []string{job.ID}}
 			continue
@@ -290,10 +294,16 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			conditionContext.Matrix = nil
 			conditionContext.Strategy = nil
 			if err := validateCompileSite(job.If, expression.ProfileCompileCallCondition, expression.ResultBoolean); err != nil {
+				if blockerDetailUnsafe {
+					err = suppressBlockerDetail(err)
+				}
 				return reusableResolution{}, locatedJobWrappedError(path, job, job.Span.Start.Line, job.Span.Start.Column, "reusable-workflow call condition", err)
 			}
 			reduced, err := reduceCompileSite(job.If, expression.ProfileCompileCallCondition, expression.ResultBoolean, conditionContext)
 			if err != nil {
+				if blockerDetailUnsafe {
+					err = suppressBlockerDetail(err)
+				}
 				return reusableResolution{}, locatedJobWrappedError(path, job, job.Span.Start.Line, job.Span.Start.Column, "reduce reusable-workflow call condition", err)
 			}
 			condition := reduced.Source
@@ -301,6 +311,9 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				condition = fmt.Sprint(reduced.Value)
 			}
 			if err := validateCompileSite(condition, expression.ProfileCallCondition, expression.ResultBoolean); err != nil {
+				if blockerDetailUnsafe {
+					err = suppressBlockerDetail(err)
+				}
 				return reusableResolution{}, locatedJobWrappedError(path, job, job.Span.Start.Line, job.Span.Start.Column, "reusable-workflow call condition", err)
 			}
 			calleeGuards = append(cloneSourcedCallGuards(callGuards), sourcedCallGuard{
@@ -1076,6 +1089,25 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 		step.With = replaceMapInputs(step.With, inputs)
 	}
 	return job, nil
+}
+
+func blockerFieldsChanged(before, after workflow.Job) bool {
+	if before.If != after.If || before.DefaultShell != after.DefaultShell || !slices.Equal(before.RunsOn, after.RunsOn) || expressionText(before.RunsOnExpr) != expressionText(after.RunsOnExpr) {
+		return true
+	}
+	for i := range before.Steps {
+		if before.Steps[i].If != after.Steps[i].If || before.Steps[i].Uses != after.Steps[i].Uses || before.Steps[i].Shell != after.Steps[i].Shell {
+			return true
+		}
+	}
+	return false
+}
+
+func expressionText(value *expression.Expression) string {
+	if value == nil {
+		return ""
+	}
+	return value.Text
 }
 
 func staticTimeoutMinutes(value any) (float64, bool) {

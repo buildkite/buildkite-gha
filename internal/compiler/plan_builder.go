@@ -109,11 +109,17 @@ func reducePlanEventExpressions(ir IR) (IR, error) {
 	var diagnostics []error
 	for i, instance := range ir.Jobs {
 		if err := builder.validateShellCompatibility(instance, lowerWorkflowProgram(instance)); err != nil {
+			if len(instance.Inputs) != 0 {
+				err = suppressBlockerDetail(err)
+			}
 			diagnostics = append(diagnostics, planConstructionFinding(instance, err))
 			continue
 		}
 		reduced, err := builder.reducePlanInstanceEventExpressions(instance)
 		if err != nil {
+			if len(instance.Inputs) != 0 {
+				err = suppressBlockerDetail(err)
+			}
 			diagnostics = append(diagnostics, planConstructionFinding(instance, err))
 			continue
 		}

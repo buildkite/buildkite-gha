@@ -132,6 +132,47 @@ jobs:
 	}
 }
 
+func TestCompilePlansDoNotAttributeReusableInputShellValues(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      shell: ${{ github.event.shell }}
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      shell:
+        type: string
+        required: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: ${{ inputs.shell }}
+        run: Write-Output test
+`)
+	eventSource := pushEvent(t)
+	event := bytes.Replace(eventSource, []byte(`"payload": {`), []byte(`"payload": {"shell": "pwsh",`), 1)
+	if bytes.Equal(event, eventSource) {
+		t.Fatal("event payload was not updated")
+	}
+
+	_, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), event, "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err == nil {
+		t.Fatal("compileUntrustedPlans() succeeded")
+	}
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) {
+		t.Fatalf("compileUntrustedPlans() error = %T %v, want ProcessingFinding", err, err)
+	}
+	if finding.Blocker != "shell" || finding.BlockerDetail != "" {
+		t.Fatalf("finding blocker = %q / %q, want shell with no detail", finding.Blocker, finding.BlockerDetail)
+	}
+}
+
 func TestCompilePlansAcceptCustomShellTemplates(t *testing.T) {
 	workflow := []byte(`on: push
 jobs:

@@ -901,6 +901,35 @@ jobs:
 	}
 }
 
+func TestBlockerFieldsChangedTracksInputSubstitutionSurfaces(t *testing.T) {
+	base := workflow.Job{
+		If: "true", RunsOn: []string{"ubuntu-latest"}, DefaultShell: "bash",
+		Steps: []workflow.Step{{If: "true", Uses: "owner/action@v1", Shell: "bash", Run: "echo unchanged"}},
+	}
+	tests := []struct {
+		name   string
+		change func(*workflow.Job)
+		want   bool
+	}{
+		{name: "job condition", change: func(job *workflow.Job) { job.If = "false" }, want: true},
+		{name: "runner", change: func(job *workflow.Job) { job.RunsOn = []string{"private"} }, want: true},
+		{name: "action", change: func(job *workflow.Job) { job.Steps[0].Uses = "owner/other@v1" }, want: true},
+		{name: "shell", change: func(job *workflow.Job) { job.Steps[0].Shell = "pwsh" }, want: true},
+		{name: "unrelated run command", change: func(job *workflow.Job) { job.Steps[0].Run = "echo changed" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := base
+			changed.RunsOn = slices.Clone(base.RunsOn)
+			changed.Steps = slices.Clone(base.Steps)
+			test.change(&changed)
+			if got := blockerFieldsChanged(base, changed); got != test.want {
+				t.Fatalf("blockerFieldsChanged() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestCompileProjectsOnlyDeclaredReusableWorkflowOutputs(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
