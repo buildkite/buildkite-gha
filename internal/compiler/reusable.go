@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -1092,7 +1093,7 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 }
 
 func blockerFieldsChanged(before, after workflow.Job) bool {
-	if before.If != after.If || before.DefaultShell != after.DefaultShell || !slices.Equal(before.RunsOn, after.RunsOn) || expressionText(before.RunsOnExpr) != expressionText(after.RunsOnExpr) {
+	if before.If != after.If || before.DefaultShell != after.DefaultShell || !slices.Equal(before.RunsOn, after.RunsOn) || expressionText(before.RunsOnExpr) != expressionText(after.RunsOnExpr) || !reflect.DeepEqual(before.Matrix, after.Matrix) {
 		return true
 	}
 	for i := range before.Steps {
