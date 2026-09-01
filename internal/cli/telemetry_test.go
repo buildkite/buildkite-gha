@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
@@ -296,6 +297,56 @@ func TestCommandTelemetryCapturesBoundedErrorTailWithoutChangingOutput(t *testin
 	}
 	if success := details.forOutcome(telemetry.OutcomeSuccess); success.ErrorMessage != "" || success.ErrorMessageTruncated {
 		t.Fatalf("successful telemetry included error output: %#v", success)
+	}
+}
+
+func TestObservedFailureMessageSurvivesLaterErrorOutput(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	writer := details.captureErrors(io.Discard)
+	message := "GitHub environments and environment secrets are unsupported. Remove the environment key from job \"deploy\"."
+	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
+		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: message},
+	}})
+	if _, err := writer.Write([]byte(strings.Repeat("annotation and pipeline-upload chatter\n", 100))); err != nil {
+		t.Fatal(err)
+	}
+	got := details.forOutcome(telemetry.OutcomeFailure)
+	if got.ErrorMessage != message || got.ErrorMessageTruncated {
+		t.Fatalf("failure message = %q (truncated %t), want the attributing diagnostic message", got.ErrorMessage, got.ErrorMessageTruncated)
+	}
+	if got.FailureCode != telemetry.FailureCodeWorkflowSyntax {
+		t.Fatalf("failure code = %q", got.FailureCode)
+	}
+}
+
+func TestObservedFailureMessageIncludesDetail(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions), Message: "expression is unsupported", Detail: "github.workspace"},
+	}})
+	if got := details.forOutcome(telemetry.OutcomeFailure); got.ErrorMessage != "expression is unsupported github.workspace" {
+		t.Fatalf("failure message = %q, want message with detail", got.ErrorMessage)
+	}
+}
+
+func TestObservedFailureMessageKeepsItsHeadWithinTheTelemetryBound(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions),
+			Message: "expression is unsupported", Detail: strings.Repeat("界", telemetry.MaxErrorMessageBytes)},
+	}})
+	got := details.forOutcome(telemetry.OutcomeFailure)
+	if !got.ErrorMessageTruncated {
+		t.Fatal("over-long failure message was not marked truncated")
+	}
+	if len(got.ErrorMessage) > telemetry.MaxErrorMessageBytes {
+		t.Fatalf("failure message = %d bytes, want at most %d", len(got.ErrorMessage), telemetry.MaxErrorMessageBytes)
+	}
+	if !strings.HasPrefix(got.ErrorMessage, "expression is unsupported") {
+		t.Fatalf("failure message = %q, want the head naming the rejected feature", got.ErrorMessage[:64])
+	}
+	if !utf8.ValidString(got.ErrorMessage) {
+		t.Fatal("head-bounded failure message is not valid UTF-8")
 	}
 }
 

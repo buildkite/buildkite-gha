@@ -25,10 +25,14 @@ const (
 	defaultTimeout        = 1500 * time.Millisecond
 	responseDrainLimit    = 32 << 10
 	maxClientVersionBytes = 64
-	maxErrorMessageBytes  = 1024
 	maxBlockerDetailBytes = 1024
 	maxDurationMS         = int64(1<<31 - 1)
 	maxDiagnostics        = 20
+
+	// MaxErrorMessageBytes bounds the error message sent on unsuccessful
+	// commands. Over-long messages keep their final bytes, where a failing
+	// command's last error output lands.
+	MaxErrorMessageBytes = 1024
 )
 
 type Command string
@@ -383,10 +387,10 @@ func boundedErrorMessage(message string) (string, bool) {
 		return character
 	}, strings.ToValidUTF8(message, "�"))
 	message = strings.Join(strings.Fields(message), " ")
-	if len(message) <= maxErrorMessageBytes {
+	if len(message) <= MaxErrorMessageBytes {
 		return message, false
 	}
-	start := len(message) - maxErrorMessageBytes
+	start := len(message) - MaxErrorMessageBytes
 	for !utf8.RuneStart(message[start]) {
 		start++
 	}

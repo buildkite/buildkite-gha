@@ -227,13 +227,13 @@ func TestPropertiesAreBounded(t *testing.T) {
 }
 
 func TestErrorMessageIsNormalizedAndUTF8Bounded(t *testing.T) {
-	message := "earlier output\n\t" + strings.Repeat("界", maxErrorMessageBytes) + "\n immediate failure"
+	message := "earlier output\n\t" + strings.Repeat("界", MaxErrorMessageBytes) + "\n immediate failure"
 	bounded, truncated := boundedErrorMessage(message)
 	if !truncated {
 		t.Fatal("boundedErrorMessage() did not report truncation")
 	}
-	if len(bounded) > maxErrorMessageBytes {
-		t.Fatalf("boundedErrorMessage() returned %d bytes, want at most %d", len(bounded), maxErrorMessageBytes)
+	if len(bounded) > MaxErrorMessageBytes {
+		t.Fatalf("boundedErrorMessage() returned %d bytes, want at most %d", len(bounded), MaxErrorMessageBytes)
 	}
 	if !utf8.ValidString(bounded) {
 		t.Fatalf("boundedErrorMessage() returned invalid UTF-8: %q", bounded)
