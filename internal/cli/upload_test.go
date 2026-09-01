@@ -130,7 +130,7 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 		t.Fatalf("temporary artifact root still exists: %v", err)
 	}
 	pipelineCommand := runner.commands[1]
-	wantPipelineArgs := []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}
+	wantPipelineArgs := []string{"pipeline", "upload", "--no-interpolation"}
 	if strings.Join(pipelineCommand.args, " ") != strings.Join(wantPipelineArgs, " ") {
 		t.Fatalf("pipeline args = %#v, want %#v", pipelineCommand.args, wantPipelineArgs)
 	}
@@ -572,7 +572,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 		t.Fatalf("stdout/stderr/commands = %q / %q / %d", stdout.String(), stderr.String(), len(runner.commands))
 	}
 	pipelineCommand := runner.commands[len(runner.commands)-1]
-	if !slices.Equal(pipelineCommand.args, []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}) {
+	if !slices.Equal(pipelineCommand.args, []string{"pipeline", "upload", "--no-interpolation"}) {
 		t.Fatalf("aggregate pipeline command = %#v", pipelineCommand)
 	}
 	var pipeline struct {
@@ -1465,7 +1465,7 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 	var annotation *cliCommand
 	for i := range runner.commands {
 		command := &runner.commands[i]
-		if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}) {
+		if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation"}) {
 			pipelineSource = command.stdin
 		}
 		if len(command.args) > 0 && command.args[0] == "annotate" {
@@ -2399,7 +2399,7 @@ func TestRunUploadStoresRuntimeEventOnceForExactImporterJob(t *testing.T) {
 	}
 	var pipeline []byte
 	for _, command := range runner.commands {
-		if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}) {
+		if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation"}) {
 			pipeline = command.stdin
 		}
 	}

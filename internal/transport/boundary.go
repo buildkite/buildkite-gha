@@ -168,7 +168,7 @@ func (a Agent) GetMetadataBounded(ctx context.Context, key string, limit int) ([
 }
 
 func (a Agent) UploadPipeline(ctx context.Context, pipeline []byte) error {
-	_, err := a.run(ctx, []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}, pipeline)
+	_, err := a.run(ctx, []string{"pipeline", "upload", "--no-interpolation"}, pipeline)
 	return err
 }
 

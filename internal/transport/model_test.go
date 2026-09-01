@@ -224,7 +224,7 @@ func (r *captureRunner) Run(ctx context.Context, dir, name string, args []string
 	return nil, nil
 }
 
-func TestAgentUsesExactProducerAndSafeUploadFlags(t *testing.T) {
+func TestAgentUsesExactProducerAndUploadFlags(t *testing.T) {
 	runner := &captureRunner{}
 	agent := Agent{Runner: runner}
 	if err := agent.DownloadArtifact(t.Context(), "result.json", ".", "gha-producer"); err != nil {
@@ -235,7 +235,7 @@ func TestAgentUsesExactProducerAndSafeUploadFlags(t *testing.T) {
 	}
 	want := []capturedCommand{
 		{name: "buildkite-agent", args: []string{"artifact", "download", "result.json", ".", "--step", "gha-producer"}},
-		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}, stdin: "steps: []\n"},
+		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation"}, stdin: "steps: []\n"},
 	}
 	if !reflect.DeepEqual(runner.commands, want) {
 		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
@@ -299,7 +299,7 @@ func TestUploadArtifactsMaterializesContentBeforePipeline(t *testing.T) {
 	}
 	want := []capturedCommand{
 		{dir: resolvedRoot, name: "buildkite-agent", args: []string{"artifact", "upload", ".buildkite-gha/**/*", "--concurrency", "8"}},
-		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}, stdin: "steps: []\n"},
+		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation"}, stdin: "steps: []\n"},
 	}
 	if !reflect.DeepEqual(runner.commands, want) {
 		t.Fatalf("commands = %#v, want %#v", runner.commands, want)

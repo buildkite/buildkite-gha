@@ -54,7 +54,7 @@ steps:
       test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
       test -f "$$workflow"
 
-      cat <<YAML | buildkite-agent pipeline upload --no-interpolation --reject-secrets
+      cat <<YAML | buildkite-agent pipeline upload --no-interpolation
       agents:
         queue: "hosted"
 
