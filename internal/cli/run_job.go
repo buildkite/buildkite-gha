@@ -366,11 +366,11 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 // such as a test command exiting nonzero, are not counted as compatibility
 // gaps. Unattributed errors return "" and keep the unknown failure code.
 func runtimeFailureCode(err error) telemetry.FailureCode {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return ""
-	}
 	var secretError *gharuntime.SecretResolutionError
 	if errors.As(err, &secretError) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ""
+		}
 		return telemetry.FailureCodeSecretUnavailable
 	}
 	switch gharuntime.ClassifyFailure(err) {

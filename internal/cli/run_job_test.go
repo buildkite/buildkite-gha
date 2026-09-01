@@ -776,9 +776,12 @@ func TestRunJobValidateHostErrorsClassifyAsUnsupported(t *testing.T) {
 	if got := runtimeFailureCode(err); got != telemetry.FailureCodeUnsupportedFeature {
 		t.Fatalf("runtimeFailureCode() = %q, want %q for %v", got, telemetry.FailureCodeUnsupportedFeature, err)
 	}
+	if got := runtimeFailureCode(errors.Join(err, context.Canceled)); got != telemetry.FailureCodeUnsupportedFeature {
+		t.Fatalf("runtimeFailureCode() = %q, want %q when cancellation is joined with an unrelated failure", got, telemetry.FailureCodeUnsupportedFeature)
+	}
 }
 
-func TestRunJobCancellationDoesNotClassifySecretUnavailable(t *testing.T) {
+func TestRunJobCanceledSecretDoesNotClassifyUnavailable(t *testing.T) {
 	secretError := &gharuntime.SecretResolutionError{Name: "EXAMPLE_SECRET", Err: errors.New("request failed")}
 	for _, cancellation := range []error{context.Canceled, context.DeadlineExceeded} {
 		if got := runtimeFailureCode(errors.Join(secretError, cancellation)); got != "" {
