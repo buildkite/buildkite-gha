@@ -13,21 +13,12 @@ import (
 // contain event-derived values. Malformed templates remain ParseTemplate's
 // responsibility.
 func ValidateCompatibility(shell string) error {
-	command, ok := Command(shell)
-	if !ok {
-		return nil
-	}
-	return compatibilityError(command, command)
-}
-
-// Command returns the normalized executable from a shell value without
-// retaining its arguments.
-func Command(shell string) (string, bool) {
 	args, err := splitTemplate(shell)
 	if err != nil || len(args) == 0 || args[0] == "" {
-		return "", false
+		return nil
 	}
-	return normalizeCommand(args[0]), true
+	command := normalizeCommand(args[0])
+	return compatibilityError(command, command)
 }
 
 func compatibilityError(shell, command string) error {

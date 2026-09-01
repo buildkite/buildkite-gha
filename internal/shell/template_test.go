@@ -67,10 +67,3 @@ func TestValidateCompatibilityClassifiesUnsupportedCommands(t *testing.T) {
 		})
 	}
 }
-
-func TestCommandOmitsShellArguments(t *testing.T) {
-	command, ok := Command(`/usr/bin/Rscript --vanilla "event value"`)
-	if !ok || command != "rscript" {
-		t.Fatalf("Command() = %q, %t, want rscript, true", command, ok)
-	}
-}

@@ -91,11 +91,11 @@ func TestRunJobClassifiesUnsupportedShell(t *testing.T) {
 	}
 }
 
-func TestUnsupportedShellReportsOnlyExecutable(t *testing.T) {
+func TestUnsupportedShellOmitsUnprovenExecutable(t *testing.T) {
 	_, err := shellCommand(`Rscript --vanilla "event value"`, "true")
 	blocker, detail, ok := UnsupportedFeature(err)
-	if !ok || blocker != "shell" || detail != "rscript" {
-		t.Fatalf("UnsupportedFeature() = %q, %q, %t, want shell, rscript, true", blocker, detail, ok)
+	if !ok || blocker != "shell" || detail != "" {
+		t.Fatalf("UnsupportedFeature() = %q, %q, %t, want shell with no detail", blocker, detail, ok)
 	}
 }
 

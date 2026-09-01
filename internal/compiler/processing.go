@@ -36,10 +36,12 @@ const (
 // ProcessingFinding carries stable attribution independently of its rendered
 // error text. Err remains wrapped so errors.Is and errors.As keep working.
 type ProcessingFinding struct {
-	Stage         ProcessingStage
-	Code          string
-	Category      string
-	Blocker       string
+	Stage    ProcessingStage
+	Code     string
+	Category string
+	Blocker  string
+	// BlockerDetail is opt-in telemetry attribution. Set it only from original
+	// workflow syntax or values proven to depend solely on workflow literals.
 	BlockerDetail string
 	Path          string
 	Line          int

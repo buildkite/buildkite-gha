@@ -2,6 +2,7 @@ package expression
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -221,6 +222,20 @@ func TestEngineProfileScopesAreDistinctAndAuthoritative(t *testing.T) {
 	_, err = engine.Validate(Site{Source: "${{ hashFiles('file') }}", Profile: ProfilePartialTemplate, Result: ResultString, Purpose: PurposeExpression})
 	if err == nil || !strings.Contains(err.Error(), `expression function "hashFiles" is unavailable in this profile`) {
 		t.Fatalf("declarative function policy error = %v", err)
+	}
+}
+
+func TestEngineValidateConditionAttributesEarlySecretReferenceError(t *testing.T) {
+	const source = "secrets[env.NAME]"
+	_, err := (Engine{}).Validate(Site{Source: source, Profile: ProfileCompileJobCondition, Result: ResultBoolean})
+	var blocker interface {
+		CompatibilityBlocker() (string, string)
+	}
+	if !errors.As(err, &blocker) {
+		t.Fatalf("Validate() error = %v, want compatibility blocker", err)
+	}
+	if kind, detail := blocker.CompatibilityBlocker(); kind != "expression" || detail != source {
+		t.Fatalf("compatibility blocker = %q / %q", kind, detail)
 	}
 }
 

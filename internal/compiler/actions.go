@@ -118,6 +118,7 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 			message, detail, action := actionResolutionMessage(step.Uses, err)
 			diagnostics = append(diagnostics, &ProcessingFinding{
 				Stage: StageResolution, Code: CodeActionResolution, Category: "action-resolution",
+				Blocker: "action_ref", BlockerDetail: step.Uses,
 				Path: instance.SourcePath, Line: position.Line, Column: position.Column,
 				Job: instance.LogicalJobID, Instance: instance.Key, Action: action, Step: i + 1,
 				Message: message, Detail: detail,

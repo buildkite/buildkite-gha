@@ -2138,7 +2138,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Image: image, Entrypoint: action.Runs.Entrypoint, Args: dockerArgs, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})
 		return result, err
 	}
-	return result, errUnsupportedFeature("action_ref", step.Uses, "action %q uses unsupported runtime %q", step.Uses, actionRuntime)
+	return result, errUnsupportedFeature("action_ref", "", "action %q uses unsupported runtime %q", step.Uses, actionRuntime)
 }
 
 func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, actionProgram *executionprogram.Action, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionLock *plan.ActionLock, actionStack []string) (Result, error) {
@@ -2419,11 +2419,9 @@ func shellCommand(shell, script string) ([]string, error) {
 		return []string{"sh", "-e", "-c", script}, nil
 	default:
 		if err := shellcompat.ValidateCompatibility(shell); err != nil {
-			command, _ := shellcompat.UnsupportedCommand(err)
-			return nil, errUnsupportedFeature("shell", command, "%s", err)
+			return nil, errUnsupportedFeature("shell", "", "%s", err)
 		}
-		command, _ := shellcompat.Command(shell)
-		return nil, errUnsupportedFeature("shell", command, "shell %q is unsupported in the supported runtime subset", shell)
+		return nil, errUnsupportedFeature("shell", "", "shell %q is unsupported in the supported runtime subset", shell)
 	}
 }
 
@@ -2440,8 +2438,7 @@ func (r *jobRun) runShellProcess(ctx context.Context, processor *commandProcesso
 	args := []string{"python", "{0}"}
 	if shell != "python" {
 		if err := shellcompat.ValidateCompatibility(shell); err != nil {
-			command, _ := shellcompat.UnsupportedCommand(err)
-			return errUnsupportedFeature("shell", command, "%s", err)
+			return errUnsupportedFeature("shell", "", "%s", err)
 		}
 		var err error
 		args, err = shellcompat.ParseTemplate(shell)

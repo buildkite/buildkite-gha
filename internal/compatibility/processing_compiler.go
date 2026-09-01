@@ -341,10 +341,6 @@ func diagnosticFromError(defaultPath, stage, code, category string, err error) D
 			}
 		}
 	}
-	if diagnostic.Blocker == "" && diagnostic.Action != "" {
-		diagnostic.Blocker = "action_ref"
-		diagnostic.BlockerDetail = diagnostic.Action
-	}
 	if diagnostic.Blocker == "" {
 		var blocker interface {
 			CompatibilityBlocker() (string, string)

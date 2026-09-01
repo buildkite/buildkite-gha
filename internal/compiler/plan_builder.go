@@ -108,6 +108,10 @@ func reducePlanEventExpressions(ir IR) (IR, error) {
 	ir.Jobs = append([]JobInstance(nil), ir.Jobs...)
 	var diagnostics []error
 	for i, instance := range ir.Jobs {
+		if err := builder.validateShellCompatibility(instance, lowerWorkflowProgram(instance)); err != nil {
+			diagnostics = append(diagnostics, planConstructionFinding(instance, err))
+			continue
+		}
 		reduced, err := builder.reducePlanInstanceEventExpressions(instance)
 		if err != nil {
 			diagnostics = append(diagnostics, planConstructionFinding(instance, err))
@@ -123,9 +127,6 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
 	}
 	workflowProgram := lowerWorkflowProgram(instance)
-	if err := b.validateShellCompatibility(instance, workflowProgram); err != nil {
-		return plan.Job{}, PlanAuthorization{}, nil, err
-	}
 	actions, err := b.buildActions(instance, &workflowProgram)
 	if err != nil {
 		return plan.Job{}, PlanAuthorization{}, nil, err
@@ -187,6 +188,9 @@ func (b planBuilder) validateShellCompatibility(instance JobInstance, workflowPr
 		}
 		if err := shellcompat.ValidateCompatibility(resolved); err != nil {
 			command, _ := shellcompat.UnsupportedCommand(err)
+			if strings.Contains(site.Source, "${{") {
+				command = ""
+			}
 			owner := fmt.Sprintf("job %q", instance.LogicalJobID)
 			if step != 0 {
 				owner += fmt.Sprintf(" step %d", step)

@@ -335,6 +335,10 @@ func (Engine) Validate(site Site) (Validation, error) {
 		secrets, err = secretReferences(site.Source)
 	}
 	if err != nil {
+		switch profile.semantics {
+		case semanticsCompileCondition, semanticsCondition, semanticsActionLifecycle:
+			err = conditionBlocker(site.Source, err)
+		}
 		return Validation{}, siteError(site, err)
 	}
 	switch profile.semantics {

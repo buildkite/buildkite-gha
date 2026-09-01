@@ -718,11 +718,13 @@ func supported(path string, job workflow.Job) error {
 	ids := make(map[string]struct{}, len(job.Steps))
 	for i, step := range job.Steps {
 		if step.Kind == "uses" && strings.HasPrefix(strings.ToLower(step.Uses), "docker://") {
-			return attributedProcessingFinding(
-				StageGraph, CodeGraphInvalid, "compatibility", path, step.Span.Start.Line, step.Span.Start.Column,
-				job.ID, "", step.Uses, i+1,
-				locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, actionsource.UnsupportedContainerActionReason),
-			)
+			return &ProcessingFinding{
+				Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
+				Blocker: "action_ref", BlockerDetail: step.Uses,
+				Path: path, Line: step.Span.Start.Line, Column: step.Span.Start.Column,
+				Job: job.ID, Action: step.Uses, Step: i + 1,
+				Err: locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, actionsource.UnsupportedContainerActionReason),
+			}
 		}
 		if step.ID != "" {
 			id := strings.ToLower(step.ID)

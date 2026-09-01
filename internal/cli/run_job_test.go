@@ -758,7 +758,7 @@ func TestRunJobTelemetryClassifiesUnsupportedShell(t *testing.T) {
 	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeUnsupportedFeature {
 		t.Fatalf("telemetry = %#v", event)
 	}
-	if event.Blocker != "shell" || event.BlockerDetail != "pwsh" {
+	if event.Blocker != "shell" || event.BlockerDetail != "" {
 		t.Fatalf("telemetry blocker = %q / %q", event.Blocker, event.BlockerDetail)
 	}
 	if !strings.Contains(event.ErrorMessage, `shell "pwsh" is unsupported`) {

@@ -59,7 +59,7 @@ jobs:
       - shell: ${{ matrix.shell }}
         run: Write-Output test
 `,
-			wantReportedCommand: "powershell",
+			wantReportedCommand: "",
 			wantLine:            9,
 			wantStep:            1,
 		},
@@ -84,13 +84,15 @@ jobs:
 				t.Fatalf("finding blocker = %q / %q", finding.Blocker, finding.BlockerDetail)
 			}
 			for _, want := range []string{
-				`shell "` + test.wantReportedCommand + `" is unsupported`,
 				"Use bash, sh, python, or a valid custom shell template whose command is available on PATH",
 				"https://github.com/buildkite/buildkite-gha",
 			} {
 				if !strings.Contains(finding.Message, want) {
 					t.Fatalf("finding message = %q, want %q", finding.Message, want)
 				}
+			}
+			if !strings.Contains(finding.Message, "is unsupported") {
+				t.Fatalf("finding message = %q, want unsupported shell", finding.Message)
 			}
 		})
 	}
@@ -124,6 +126,9 @@ jobs:
 	}
 	if !strings.Contains(finding.Message, `shell "pwsh" is unsupported`) {
 		t.Fatalf("finding message = %q", finding.Message)
+	}
+	if finding.Blocker != "shell" || finding.BlockerDetail != "" {
+		t.Fatalf("finding blocker = %q / %q, want shell with no detail", finding.Blocker, finding.BlockerDetail)
 	}
 }
 
