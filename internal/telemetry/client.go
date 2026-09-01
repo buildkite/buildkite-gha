@@ -83,6 +83,7 @@ const (
 	FailureCodeStepProcessExit    FailureCode = "E_STEP_PROCESS_EXIT"
 	FailureCodeUnsupportedFeature FailureCode = "E_UNSUPPORTED_FEATURE"
 	FailureCodeRuntimeIntegrity   FailureCode = "E_RUNTIME_INTEGRITY"
+	FailureCodeSecretUnavailable  FailureCode = "E_SECRET_UNAVAILABLE"
 )
 
 type Severity string
@@ -270,7 +271,7 @@ func validFailureCode(code FailureCode) bool {
 		FailureCodeMatrixInvalid, FailureCodeExpressionInvalid, FailureCodeActionDiscovery,
 		FailureCodeActionResolution, FailureCodePlanConstruction, FailureCodePipelineGeneration,
 		FailureCodeEnvironment, FailureCodeProfile, FailureCodeStepProcessExit,
-		FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity:
+		FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable:
 		return true
 	default:
 		return false

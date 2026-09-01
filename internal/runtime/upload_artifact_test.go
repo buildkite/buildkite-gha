@@ -656,24 +656,29 @@ func TestUploadArtifactCancellationStopsAgentUpload(t *testing.T) {
 	}
 }
 
-func TestUploadArtifactSourceBounds(t *testing.T) {
+func TestUploadArtifactSourceCollectionHasNoSizePolicy(t *testing.T) {
 	t.Parallel()
 
 	workspace := t.TempDir()
-	tooLarge := filepath.Join(workspace, "too-large")
-	file, err := os.Create(tooLarge)
+	large := filepath.Join(workspace, "large")
+	file, err := os.Create(large)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := file.Truncate(transport.MaxResultArtifactSizeBytes + 1); err != nil {
+	if err := file.Truncate(6 << 30); err != nil {
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := collectUploadFiles(t.Context(), workspace, []string{"too-large"}, false); err == nil || !strings.Contains(err.Error(), "source bytes exceed") {
-		t.Fatalf("source-size bound error = %v", err)
+	files, err := collectUploadFiles(t.Context(), workspace, []string{"large"}, false)
+	if err != nil || len(files) != 1 || files[0].size != 6<<30 {
+		t.Fatalf("large source collection = %#v, %v", files, err)
 	}
+}
+
+func TestUploadArtifactSourceFileCountBound(t *testing.T) {
+	t.Parallel()
 
 	many := t.TempDir()
 	if err := os.Mkdir(filepath.Join(many, "files"), 0o755); err != nil {

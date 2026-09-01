@@ -368,6 +368,13 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 // such as a test command exiting nonzero, are not counted as compatibility
 // gaps. Unattributed errors return "" and keep the unknown failure code.
 func runtimeFailureCode(err error) telemetry.FailureCode {
+	var secretError *gharuntime.SecretResolutionError
+	if errors.As(err, &secretError) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ""
+		}
+		return telemetry.FailureCodeSecretUnavailable
+	}
 	switch gharuntime.ClassifyFailure(err) {
 	case gharuntime.FailureClassStepProcessExit:
 		return telemetry.FailureCodeStepProcessExit
@@ -513,12 +520,13 @@ func publishSecretResolutionAnnotation(parent context.Context, agent transport.A
 	if !errors.As(runErr, &secretError) {
 		return nil
 	}
-	body := fmt.Sprintf(`#### Missing secret
+	body := fmt.Sprintf(`#### Secret unavailable
 
 This job could not retrieve the Buildkite secret %s.
 
 1. <a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets" target="_blank">Create or migrate the secret into Buildkite</a>.
 1. If the secret already exists, <a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets/access-policies" target="_blank">grant this job access with its access policy</a>.
+1. If the secret and its access policy are correct, retry the job. The Buildkite secret service may be temporarily unavailable.
 
 > ℹ️ GitHub does not expose an existing secret's value after creation. Copy or rotate the value manually. GitHub repository and environment secrets are not available directly to this job.
 `, annotationCode(secretError.Name))

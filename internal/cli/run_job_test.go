@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -418,13 +419,18 @@ func TestRunJobAnnotatesUnavailableBuildkiteSecretWithMigrationGuidance(t *testi
 	}
 	t.Setenv("BUILDKITE_GHA_AGENT", agentPath)
 	runner := &cliCaptureRunner{}
+	events := captureCommandTelemetry(t)
 	var stdout, stderr bytes.Buffer
 
 	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 {
 		t.Fatalf("run() code = %d, stderr = %q, want 1", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), `resolve secret "EXAMPLE_SECRET": buildkite Agent secret request failed`) {
+	if !strings.Contains(stderr.String(), `resolve secret "EXAMPLE_SECRET": secret is unavailable; it may not exist, this job may not have access, or the Buildkite secret service may be temporarily unavailable`) {
 		t.Fatalf("stderr = %q, want secret resolution failure", stderr.String())
+	}
+	event := <-events
+	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeSecretUnavailable {
+		t.Fatalf("telemetry = %#v", event)
 	}
 	var annotations []cliCommand
 	for _, command := range runner.commands {
@@ -438,18 +444,16 @@ func TestRunJobAnnotatesUnavailableBuildkiteSecretWithMigrationGuidance(t *testi
 	}
 	body := string(annotations[0].stdin)
 	for _, want := range []string{
-		"#### Missing secret",
+		"#### Secret unavailable",
 		"Buildkite secret <code>EXAMPLE_SECRET</code>",
 		`<a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets" target="_blank">Create or migrate the secret into Buildkite</a>`,
 		`<a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets/access-policies" target="_blank">grant this job access with its access policy</a>`,
+		"retry the job. The Buildkite secret service may be temporarily unavailable",
 		"> ℹ️ GitHub does not expose an existing secret's value after creation",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("annotation = %q, want %q", body, want)
 		}
-	}
-	if strings.Contains(body, "Retry the job") {
-		t.Errorf("annotation = %q, does not want retry guidance", body)
 	}
 	if last := runner.commands[len(runner.commands)-1]; len(last.args) == 0 || last.args[0] != "annotate" {
 		t.Fatalf("last command = %#v, want guidance annotation after authoritative publication", last)
@@ -774,6 +778,18 @@ func TestRunJobValidateHostErrorsClassifyAsUnsupported(t *testing.T) {
 	}
 	if got := runtimeFailureCode(err); got != telemetry.FailureCodeUnsupportedFeature {
 		t.Fatalf("runtimeFailureCode() = %q, want %q for %v", got, telemetry.FailureCodeUnsupportedFeature, err)
+	}
+	if got := runtimeFailureCode(errors.Join(err, context.Canceled)); got != telemetry.FailureCodeUnsupportedFeature {
+		t.Fatalf("runtimeFailureCode() = %q, want %q when cancellation is joined with an unrelated failure", got, telemetry.FailureCodeUnsupportedFeature)
+	}
+}
+
+func TestRunJobCanceledSecretDoesNotClassifyUnavailable(t *testing.T) {
+	secretError := &gharuntime.SecretResolutionError{Name: "EXAMPLE_SECRET", Err: errors.New("request failed")}
+	for _, cancellation := range []error{context.Canceled, context.DeadlineExceeded} {
+		if got := runtimeFailureCode(errors.Join(secretError, cancellation)); got != "" {
+			t.Errorf("runtimeFailureCode(%v) = %q, want no failure code", cancellation, got)
+		}
 	}
 }
 

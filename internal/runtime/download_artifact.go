@@ -5,11 +5,11 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -134,8 +134,6 @@ func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProce
 		return matches[i].Path < matches[j].Path
 	})
 	remainingFiles := transport.MaxResultArtifactFileCount
-	remainingArchiveBytes := transport.MaxResultArtifactSizeBytes
-	remainingExpandedBytes := transport.MaxResultArtifactSizeBytes
 	staging, stagingRoot, err := openDownloadStaging(resolvedWorkspace)
 	if err != nil {
 		return result, err
@@ -150,16 +148,13 @@ func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProce
 		foldedNames: make(map[string]string),
 	}
 	for _, artifact := range matches {
-		if artifact.FileCount <= 0 || artifact.Size <= 0 || artifact.FileCount > remainingFiles || artifact.Size > remainingArchiveBytes {
+		if artifact.FileCount <= 0 || artifact.Size <= 0 || artifact.FileCount > remainingFiles {
 			return result, fmt.Errorf("matched artifacts exceed aggregate download limits")
 		}
-		expanded, err := r.downloadNeedArtifact(ctx, artifact, stage, remainingExpandedBytes)
-		if err != nil {
+		if err := r.downloadNeedArtifact(ctx, artifact, stage); err != nil {
 			return result, err
 		}
 		remainingFiles -= artifact.FileCount
-		remainingArchiveBytes -= artifact.Size
-		remainingExpandedBytes -= expanded
 	}
 	sort.Slice(stage.members, func(i, j int) bool { return downloadPathLess(stage.members[i].name, stage.members[j].name) })
 	if err := installDownloadMembers(ctx, resolvedWorkspace, stagingRoot, destinationRelative, stage.members); err != nil {
@@ -169,14 +164,14 @@ func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProce
 	return result, nil
 }
 
-func (r Runner) downloadNeedArtifact(ctx context.Context, artifact plan.NeedArtifact, stage *downloadStage, expandedLimit int64) (int64, error) {
+func (r Runner) downloadNeedArtifact(ctx context.Context, artifact plan.NeedArtifact, stage *downloadStage) error {
 	temporary, err := os.MkdirTemp("", "buildkite-gha-download-")
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer func() { _ = os.RemoveAll(temporary) }()
 	if err := r.Artifacts.DownloadArtifact(ctx, artifact.Path, temporary, artifact.Producer.JobID); err != nil {
-		return 0, fmt.Errorf("download native artifact: %w", err)
+		return fmt.Errorf("download native artifact: %w", err)
 	}
 	archivePath := filepath.Join(temporary, filepath.FromSlash(artifact.Path))
 	regular := 0
@@ -196,57 +191,35 @@ func (r Runner) downloadNeedArtifact(ctx context.Context, artifact plan.NeedArti
 		regular++
 		return nil
 	}); err != nil {
-		return 0, fmt.Errorf("download must contain exactly the expected archive: %w", err)
+		return fmt.Errorf("download must contain exactly the expected archive: %w", err)
 	}
 	if regular != 1 {
-		return 0, fmt.Errorf("download contained %d regular files, want exactly the expected archive", regular)
+		return fmt.Errorf("download contained %d regular files, want exactly the expected archive", regular)
 	}
 	temporaryRoot, err := openPinnedDownloadRoot(temporary)
 	if err != nil {
-		return 0, fmt.Errorf("open downloaded artifact root: %w", err)
+		return fmt.Errorf("open downloaded artifact root: %w", err)
 	}
 	defer func() { _ = temporaryRoot.Close() }()
 	archive, err := temporaryRoot.OpenFile(filepath.FromSlash(artifact.Path), os.O_RDONLY|nonBlockingOpenFlag, 0)
 	if err != nil {
-		return 0, fmt.Errorf("downloaded archive is not the expected regular file")
+		return fmt.Errorf("downloaded archive is not the expected regular file")
 	}
 	defer func() { _ = archive.Close() }()
 	info, err := archive.Stat()
 	if err != nil || !info.Mode().IsRegular() || !os.SameFile(archiveInfo, info) {
-		return 0, fmt.Errorf("downloaded archive is not the expected regular file")
+		return fmt.Errorf("downloaded archive is not the expected regular file")
 	}
 	if info.Size() != artifact.Size {
-		return 0, fmt.Errorf("downloaded archive size mismatch")
+		return fmt.Errorf("downloaded archive size mismatch")
 	}
 	if err := verifyDownloadDigestFile(ctx, archive, artifact.Digest, artifact.Size); err != nil {
-		return 0, err
-	}
-	expanded, err := downloadZIPExpandedSize(archive, artifact.Size, artifact.FileCount, expandedLimit)
-	if err != nil {
-		return 0, err
+		return err
 	}
 	if err := stageDownloadZIPFile(ctx, archive, artifact.Size, artifact.FileCount, stage); err != nil {
-		return 0, err
+		return err
 	}
-	return expanded, nil
-}
-
-func downloadZIPExpandedSize(reader io.ReaderAt, size int64, expectedCount int, limit int64) (int64, error) {
-	z, err := zip.NewReader(reader, size)
-	if err != nil {
-		return 0, fmt.Errorf("open artifact ZIP: %w", err)
-	}
-	if len(z.File) != expectedCount {
-		return 0, fmt.Errorf("artifact ZIP file count mismatch")
-	}
-	var expanded int64
-	for _, file := range z.File {
-		if file.UncompressedSize64 > uint64(limit) || expanded > limit-int64(file.UncompressedSize64) {
-			return 0, fmt.Errorf("matched artifacts exceed aggregate expanded-byte limit")
-		}
-		expanded += int64(file.UncompressedSize64)
-	}
-	return expanded, nil
+	return nil
 }
 
 func verifyDownloadDigestFile(ctx context.Context, f *os.File, digest string, size int64) error {
@@ -254,7 +227,7 @@ func verifyDownloadDigestFile(ctx context.Context, f *os.File, digest string, si
 		return err
 	}
 	h := sha256.New()
-	n, err := io.Copy(h, io.LimitReader(contextReader{ctx: ctx, reader: f}, transport.MaxResultArtifactSizeBytes+1))
+	n, err := io.Copy(h, contextReader{ctx: ctx, reader: f})
 	if err != nil {
 		return err
 	}
@@ -346,7 +319,6 @@ func stageDownloadZIPFile(ctx context.Context, f *os.File, size int64, expectedC
 	}
 	members := make([]downloadMember, 0, len(z.File))
 	foldedNames := make([]string, 0, len(z.File))
-	var expanded int64
 	for _, f := range z.File {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -358,10 +330,9 @@ func stageDownloadZIPFile(ctx context.Context, f *os.File, size int64, expectedC
 		if f.Method != zip.Store && f.Method != zip.Deflate || !f.Mode().IsRegular() || f.FileInfo().IsDir() {
 			return fmt.Errorf("artifact ZIP member %q is not a supported regular file", name)
 		}
-		if f.UncompressedSize64 > uint64(transport.MaxResultArtifactSizeBytes) || expanded > transport.MaxResultArtifactSizeBytes-int64(f.UncompressedSize64) {
-			return fmt.Errorf("artifact expanded bytes exceed 1 GiB")
+		if f.UncompressedSize64 > math.MaxInt64 {
+			return fmt.Errorf("artifact ZIP member %q size is not representable", name)
 		}
-		expanded += int64(f.UncompressedSize64)
 		foldedNames = append(foldedNames, strings.ToLower(name))
 		members = append(members, downloadMember{file: f, name: name, size: int64(f.UncompressedSize64)})
 	}
@@ -419,7 +390,7 @@ func stageDownloadZIPFile(ctx context.Context, f *os.File, size int64, expectedC
 		if err := out.Chmod(0o644); err != nil {
 			return errors.Join(err, out.Close(), in.Close())
 		}
-		n, copyErr := io.Copy(out, io.LimitReader(contextReader{ctx: ctx, reader: in}, member.size+1))
+		n, copyErr := io.Copy(out, contextReader{ctx: ctx, reader: in})
 		info, statErr := out.Stat()
 		err = errors.Join(copyErr, statErr, out.Close(), in.Close())
 		if err != nil {
@@ -470,171 +441,26 @@ func downloadPathLess(left, right string) bool {
 	return len(left) < len(right)
 }
 
+// preflightZIPDirectory relies on archive/zip for ordinary and ZIP64 directory
+// parsing, then applies format and resource guards that do not cap artifact bytes.
 func preflightZIPDirectory(reader io.ReaderAt, size int64) error {
-	const (
-		eocdSize      = 22
-		maxZIPComment = 1<<16 - 1
-		maxZIPExtra   = 64
-		centralHeader = 46
-		localHeader   = 30
-		eocdSignature = 0x06054b50
-		centralSig    = 0x02014b50
-		localSig      = 0x04034b50
-		zip16Sentinel = 1<<16 - 1
-		zip32Sentinel = 1<<32 - 1
-	)
-	if size < eocdSize || size > transport.MaxResultArtifactSizeBytes {
-		return fmt.Errorf("artifact ZIP size is out of bounds")
-	}
-	tailSize := min(size, int64(eocdSize+maxZIPComment))
-	tail := make([]byte, tailSize)
-	if _, err := reader.ReadAt(tail, size-tailSize); err != nil {
+	z, err := zip.NewReader(reader, size)
+	if err != nil {
 		return err
 	}
-	eocd := -1
-	for i := len(tail) - eocdSize; i >= 0; i-- {
-		if binary.LittleEndian.Uint32(tail[i:]) != eocdSignature {
-			continue
-		}
-		comment := int(binary.LittleEndian.Uint16(tail[i+20:]))
-		if i+eocdSize+comment == len(tail) {
-			eocd = i
-			break
-		}
-	}
-	if eocd < 0 {
-		return fmt.Errorf("artifact ZIP end record is missing")
-	}
-	for i := eocd + 1; i <= len(tail)-eocdSize; i++ {
-		if binary.LittleEndian.Uint32(tail[i:]) != eocdSignature {
-			continue
-		}
-		comment := int(binary.LittleEndian.Uint16(tail[i+20:]))
-		if i+eocdSize+comment <= len(tail) {
-			return fmt.Errorf("artifact ZIP has an ambiguous end record")
-		}
-	}
-	record := tail[eocd:]
-	entriesDisk := binary.LittleEndian.Uint16(record[8:])
-	entries := binary.LittleEndian.Uint16(record[10:])
-	centralSize := binary.LittleEndian.Uint32(record[12:])
-	centralOffset := binary.LittleEndian.Uint32(record[16:])
-	if binary.LittleEndian.Uint16(record[4:]) != 0 || binary.LittleEndian.Uint16(record[6:]) != 0 || entriesDisk != entries || entries == zip16Sentinel || centralSize == zip32Sentinel || centralOffset == zip32Sentinel {
-		return fmt.Errorf("multi-disk or ZIP64 artifact is unsupported")
-	}
-	if entries == 0 || int(entries) > transport.MaxResultArtifactFileCount {
+	if len(z.File) == 0 || len(z.File) > transport.MaxResultArtifactFileCount {
 		return fmt.Errorf("artifact ZIP file count is out of bounds")
 	}
-	position, end := int64(centralOffset), int64(centralOffset)+int64(centralSize)
-	eocdOffset := size - tailSize + int64(eocd)
-	if centralSize == zip16Sentinel {
-		if eocdOffset < 20 {
-			return fmt.Errorf("artifact ZIP end record is malformed")
-		}
-		var locator [20]byte
-		if _, err := reader.ReadAt(locator[:], eocdOffset-20); err != nil {
-			return err
-		}
-		if binary.LittleEndian.Uint32(locator[:]) == 0x07064b50 && binary.LittleEndian.Uint32(locator[4:]) == 0 && binary.LittleEndian.Uint32(locator[16:]) == 1 {
-			return fmt.Errorf("ZIP64 artifact is unsupported")
-		}
-	}
-	if position < 0 || end < position || end != eocdOffset {
-		return fmt.Errorf("artifact ZIP central directory is out of bounds")
-	}
-	count := 0
-	metadata := make([]byte, actionintegration.MaxUploadArtifactPathBytes+maxZIPExtra)
-	for position < end {
-		if end-position < centralHeader {
-			return fmt.Errorf("artifact ZIP central directory is malformed")
-		}
-		var header [centralHeader]byte
-		if _, err := reader.ReadAt(header[:], position); err != nil {
-			return err
-		}
-		if binary.LittleEndian.Uint32(header[:]) != centralSig {
-			return fmt.Errorf("artifact ZIP central directory is malformed")
-		}
-		if binary.LittleEndian.Uint32(header[20:]) == zip32Sentinel || binary.LittleEndian.Uint32(header[24:]) == zip32Sentinel || binary.LittleEndian.Uint16(header[34:]) != 0 || binary.LittleEndian.Uint32(header[42:]) == zip32Sentinel {
-			return fmt.Errorf("ZIP64 artifact member is unsupported")
-		}
-		nameSize := int64(binary.LittleEndian.Uint16(header[28:]))
-		extraSize := int64(binary.LittleEndian.Uint16(header[30:]))
-		commentSize := int64(binary.LittleEndian.Uint16(header[32:]))
-		if nameSize > actionintegration.MaxUploadArtifactPathBytes || extraSize > maxZIPExtra || commentSize != 0 {
-			return fmt.Errorf("artifact ZIP central directory metadata exceeds bounds")
-		}
-		metadataPosition, metadataEnd := position+centralHeader, position+centralHeader+nameSize+extraSize
-		if metadataPosition < position || metadataEnd < metadataPosition || metadataEnd > end {
-			return fmt.Errorf("artifact ZIP central directory exceeds bounds")
-		}
-		entryMetadata := metadata[:nameSize+extraSize]
-		if len(entryMetadata) > 0 {
-			if _, err := reader.ReadAt(entryMetadata, metadataPosition); err != nil {
-				return err
-			}
-		}
-		memberName := string(entryMetadata[:nameSize])
-		if !validArtifactMember(memberName) {
+	for _, file := range z.File {
+		if !validArtifactMember(file.Name) {
 			return fmt.Errorf("artifact ZIP member name is unsafe")
 		}
-		if err := preflightZIPExtraFields(entryMetadata[nameSize:]); err != nil {
-			return err
+		if file.Method != zip.Store && file.Method != zip.Deflate || !file.Mode().IsRegular() || file.FileInfo().IsDir() {
+			return fmt.Errorf("artifact ZIP member %q is not a supported regular file", file.Name)
 		}
-
-		localOffset := int64(binary.LittleEndian.Uint32(header[42:]))
-		if localOffset < 0 || int64(centralOffset)-localOffset < localHeader {
-			return fmt.Errorf("artifact ZIP local header is out of bounds")
+		if file.UncompressedSize64 > math.MaxInt64 {
+			return fmt.Errorf("artifact ZIP member %q size is not representable", file.Name)
 		}
-		var local [localHeader]byte
-		if _, err := reader.ReadAt(local[:], localOffset); err != nil {
-			return err
-		}
-		if binary.LittleEndian.Uint32(local[:]) != localSig || binary.LittleEndian.Uint32(local[18:]) == zip32Sentinel || binary.LittleEndian.Uint32(local[22:]) == zip32Sentinel {
-			return fmt.Errorf("ZIP64 or malformed artifact local header is unsupported")
-		}
-		localNameSize := int64(binary.LittleEndian.Uint16(local[26:]))
-		localExtraSize := int64(binary.LittleEndian.Uint16(local[28:]))
-		if localNameSize > actionintegration.MaxUploadArtifactPathBytes || localExtraSize > maxZIPExtra || int64(centralOffset)-localOffset-localHeader < localNameSize+localExtraSize {
-			return fmt.Errorf("artifact ZIP local header metadata exceeds bounds")
-		}
-		localMetadata := metadata[:localNameSize+localExtraSize]
-		if len(localMetadata) > 0 {
-			if _, err := reader.ReadAt(localMetadata, localOffset+localHeader); err != nil {
-				return err
-			}
-		}
-		if string(localMetadata[:localNameSize]) != memberName {
-			return fmt.Errorf("artifact ZIP local and central names differ")
-		}
-		if err := preflightZIPExtraFields(localMetadata[localNameSize:]); err != nil {
-			return err
-		}
-		position += centralHeader + nameSize + extraSize + commentSize
-		count++
-		if count > transport.MaxResultArtifactFileCount || position > end {
-			return fmt.Errorf("artifact ZIP central directory exceeds bounds")
-		}
-	}
-	if position != end || count != int(entries) {
-		return fmt.Errorf("artifact ZIP central directory count mismatch")
-	}
-	return nil
-}
-
-func preflightZIPExtraFields(fields []byte) error {
-	for len(fields) > 0 {
-		if len(fields) < 4 {
-			return fmt.Errorf("artifact ZIP extra field is malformed")
-		}
-		fieldSize := int(binary.LittleEndian.Uint16(fields[2:]))
-		if fieldSize > len(fields)-4 {
-			return fmt.Errorf("artifact ZIP extra field is malformed")
-		}
-		if binary.LittleEndian.Uint16(fields) == 0x0001 {
-			return fmt.Errorf("ZIP64 artifact member is unsupported")
-		}
-		fields = fields[4+fieldSize:]
 	}
 	return nil
 }

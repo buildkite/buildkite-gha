@@ -247,7 +247,7 @@ func TestErrorMessageIsNormalizedAndUTF8Bounded(t *testing.T) {
 }
 
 func TestRuntimeClassificationCodesAreFailureCodesOnly(t *testing.T) {
-	for _, code := range []FailureCode{FailureCodeStepProcessExit, FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity} {
+	for _, code := range []FailureCode{FailureCodeStepProcessExit, FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable} {
 		if !validFailureCode(code) {
 			t.Errorf("validFailureCode(%q) = false", code)
 		}
