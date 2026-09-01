@@ -1344,7 +1344,8 @@ The compiler records names, not values, in the destination job plan. At
 runtime, the job calls `buildkite-agent secret get NAME` and registers the value
 with both redactors before use. Missing or denied secrets fail without printing
 the secret or Agent error. The job annotation explains how to create or migrate
-the secret and check its access policy.
+the secret, check its access policy, or retry a temporarily unavailable secret
+service.
 
 These are Buildkite destination-job secrets, not GitHub repository,
 environment, event, or fork-scoped secrets. Buildkite Secret access policies
