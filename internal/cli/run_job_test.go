@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -774,6 +775,15 @@ func TestRunJobValidateHostErrorsClassifyAsUnsupported(t *testing.T) {
 	}
 	if got := runtimeFailureCode(err); got != telemetry.FailureCodeUnsupportedFeature {
 		t.Fatalf("runtimeFailureCode() = %q, want %q for %v", got, telemetry.FailureCodeUnsupportedFeature, err)
+	}
+}
+
+func TestRunJobCancellationDoesNotClassifySecretUnavailable(t *testing.T) {
+	secretError := &gharuntime.SecretResolutionError{Name: "EXAMPLE_SECRET", Err: errors.New("request failed")}
+	for _, cancellation := range []error{context.Canceled, context.DeadlineExceeded} {
+		if got := runtimeFailureCode(errors.Join(secretError, cancellation)); got != "" {
+			t.Errorf("runtimeFailureCode(%v) = %q, want no failure code", cancellation, got)
+		}
 	}
 }
 
