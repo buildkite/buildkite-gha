@@ -531,8 +531,8 @@ earlier output was omitted.
 Failed runs also carry a failure phase and a code from a fixed set. The code
 separates workflow-authored process exits (`E_STEP_PROCESS_EXIT`) from
 unsupported-feature rejections (`E_UNSUPPORTED_FEATURE`) and runtime integrity
-failures (`E_RUNTIME_INTEGRITY`), so a failing test suite is not counted as a
-compatibility gap.
+failures (`E_RUNTIME_INTEGRITY`). Secret resolution failures use
+`E_SECRET_UNAVAILABLE`, making secret availability independently measurable.
 
 Buildkite adds organization, pipeline, build, and job identifiers on the
 server. The client does not send workflow or event content, environment

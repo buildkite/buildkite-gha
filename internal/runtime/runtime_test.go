@@ -1490,7 +1490,7 @@ func TestAgentSecretsDoesNotReturnCommandOutputOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := (AgentSecrets{Executable: agent}).ResolveSecret(t.Context(), "DENIED")
-	if err == nil || strings.Contains(err.Error(), "stdout-secret") || strings.Contains(err.Error(), "stderr-secret") || !strings.Contains(err.Error(), "secret request failed") {
+	if err == nil || strings.Contains(err.Error(), "stdout-secret") || strings.Contains(err.Error(), "stderr-secret") || !strings.Contains(err.Error(), "secret is unavailable") {
 		t.Fatalf("ResolveSecret() error = %v", err)
 	}
 }
