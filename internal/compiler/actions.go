@@ -117,7 +117,7 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 			position := step.Span.Start
 			message, detail, action := actionResolutionMessage(step.Uses, err)
 			blockerDetail := step.Uses
-			if len(instance.Inputs) != 0 {
+			if instance.BlockerDetailUnsafe {
 				blockerDetail = ""
 			}
 			diagnostics = append(diagnostics, &ProcessingFinding{

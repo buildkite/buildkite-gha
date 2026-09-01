@@ -370,7 +370,8 @@ func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any
 		Outputs: cloneMap(job.Outputs), Container: job.Container, Services: services,
 		ConcurrencyGates:   append([]WorkflowConcurrencyGate(nil), sourced.concurrencyGates...),
 		ServicesExpression: job.ServicesExpression, SourcePath: sourced.path, SourceDigest: sourced.digest,
-		RemoteWorkflow: cloneRemoteWorkflowSource(sourced.remote), RepositoryRoot: sourced.root, Source: job.Span,
+		RemoteWorkflow: cloneRemoteWorkflowSource(sourced.remote), BlockerDetailUnsafe: sourced.blockerDetailUnsafe,
+		RepositoryRoot: sourced.root, Source: job.Span,
 		secretAuthority: sourced.secretAuthority, tokenPolicyNarrowed: sourced.tokenPolicyNarrowed,
 		jobPermissionsIgnored: sourced.jobPermissionsIgnored, reusableCall: sourced.reusableCall,
 	}

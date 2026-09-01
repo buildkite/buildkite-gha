@@ -108,6 +108,7 @@ type JobInstance struct {
 	SourcePath              string                    `json:"source_path"`
 	SourceDigest            string                    `json:"source_digest"`
 	RemoteWorkflow          *RemoteWorkflowSource     `json:"remote_workflow,omitempty"`
+	BlockerDetailUnsafe     bool                      `json:"blocker_detail_unsafe,omitempty"`
 	RepositoryRoot          string                    `json:"-"`
 	Source                  workflow.Span             `json:"source"`
 	secretAuthority         secretAuthority

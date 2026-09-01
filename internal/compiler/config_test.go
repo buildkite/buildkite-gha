@@ -377,6 +377,60 @@ func TestRunsOnPolicyFailsClosedWithLocatedDiagnostics(t *testing.T) {
 	}
 }
 
+func TestEventDerivedRunnerLabelsOmitBlockerDetail(t *testing.T) {
+	tests := []struct {
+		name     string
+		workflow []byte
+		event    []byte
+	}{
+		{
+			name: "workflow dispatch input",
+			workflow: []byte(`on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        type: string
+jobs:
+  test:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - run: true
+`),
+			event: bytes.Replace(readFile(t, smokePath("events", "workflow_dispatch.json")), []byte(`"inputs": {}`), []byte(`"inputs": {"runner": "windows-secret"}`), 1),
+		},
+		{
+			name: "matrix value",
+			workflow: []byte(`on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        runner:
+          - ${{ github.event.runner }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - run: true
+`),
+			event: bytes.Replace(pushEvent(t), []byte(`"payload": {`), []byte(`"payload": {"runner": "windows-secret",`), 1),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := CompileWithOptions("policy.yml", test.workflow, test.event, Options{
+				EventTrust: EventTrusted,
+				Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
+			})
+			if err == nil {
+				t.Fatal("CompileWithOptions() error = nil, want runner policy rejection")
+			}
+			var finding *ProcessingFinding
+			if !errors.As(err, &finding) || finding.Blocker != "runner_label" || finding.BlockerDetail != "" {
+				t.Fatalf("processing blocker = %#v, want runner_label with no detail", finding)
+			}
+		})
+	}
+}
+
 func TestValidateEventRetainsResolvedRunsOnWhenRunnerPolicyRejectsIt(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: macos-26\n    steps:\n      - run: true\n")
 	report, err := ValidateEventWithOptions("policy.yml", workflow, pushEvent(t), Options{
