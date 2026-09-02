@@ -6178,6 +6178,18 @@ func TestShellStepsMissingWorkingDirectoryFailClearly(t *testing.T) {
 	}
 }
 
+func TestCompositeShellWorkingDirectoryFailurePrecedesShellEvaluation(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "name: composite\nruns:\n  using: composite\n  steps:\n    - shell: ${{ fromJSON('invalid') }}\n      working-directory: missing\n      run: true\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
+	_, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), `working directory "missing" does not exist`) || strings.Contains(err.Error(), "fromJSON") {
+		t.Fatalf("RunJob() error = %v, want only the prior working-directory failure", err)
+	}
+}
+
 func TestNestedCompositeEvaluatesEnvironmentOnceAndIsolatesStepScopes(t *testing.T) {
 	workspace := canonicalTempDir(t)
 	workflowPath := ".github/workflows/test.yml"

@@ -42,7 +42,11 @@ func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandPro
 	if err != nil {
 		return result, err
 	}
-	err = r.runShellStep(ctx, processor, workspace, workingDirectory, env, &result, shell, script)
+	dir, err := r.shellWorkingDirectory(workspace, workingDirectory)
+	if err != nil {
+		return result, err
+	}
+	err = r.runShellProcess(ctx, processor, dir, env, &result, shell, script)
 	return result, err
 }
 
@@ -59,22 +63,22 @@ func (r *jobRun) runCompositeShellStep(ctx context.Context, processor *commandPr
 	if err != nil {
 		return err
 	}
+	dir, err := r.shellWorkingDirectory(workspace, workingDirectory)
+	if err != nil {
+		return err
+	}
 	shell, err := evaluateProgramString(step.Shell, eval)
 	if err != nil {
 		return err
 	}
-	return r.runShellStep(ctx, processor, workspace, workingDirectory, mergeStepEnvironment(jobEnv, env), result, shell, script)
+	return r.runShellProcess(ctx, processor, dir, mergeStepEnvironment(jobEnv, env), result, shell, script)
 }
 
-func (r *jobRun) runShellStep(ctx context.Context, processor *commandProcessor, workspace, workingDirectory string, env map[string]string, result *Result, shell, script string) error {
+func (r *jobRun) shellWorkingDirectory(workspace, workingDirectory string) (string, error) {
 	if r.jobContainer != nil {
 		workingDirectory = r.jobContainer.hostPath(workingDirectory)
 	}
-	dir, err := stepWorkingDirectory(workspace, workingDirectory)
-	if err != nil {
-		return err
-	}
-	return r.runShellProcess(ctx, processor, dir, env, result, shell, script)
+	return stepWorkingDirectory(workspace, workingDirectory)
 }
 
 func shellCommand(shell, script string) ([]string, error) {
