@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/buildkite/buildkite-gha/internal/git"
 )
 
 type mutableRefCache struct {
@@ -97,7 +99,7 @@ func (c *mutableRefCache) load(path string, ref Reference, now time.Time) (Resol
 	if decoder.Decode(&entry) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
 		entry.Schema != "buildkite-gha-action-ref-resolution/v1" ||
 		entry.Owner != strings.ToLower(ref.Owner) || entry.Repository != strings.ToLower(ref.Repository) ||
-		entry.Ref != ref.Ref || !shaRE.MatchString(entry.Commit) || entry.ResolvedAt.After(now) ||
+		entry.Ref != ref.Ref || !git.ValidObjectID(entry.Commit) || entry.ResolvedAt.After(now) ||
 		now.Sub(entry.ResolvedAt) >= c.freshness {
 		return Resolved{}, false
 	}

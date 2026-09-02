@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bmatcuk/doublestar/v4"
+	"github.com/buildkite/buildkite-gha/internal/git"
 )
 
 const (
@@ -75,7 +76,7 @@ func uploadArtifactGeneration(commit string) int {
 // UploadArtifactUsesFallbackContract reports whether an immutable commit is
 // outside the exact admission set and therefore uses the stable v7 contract.
 func UploadArtifactUsesFallbackContract(commit string) bool {
-	if !ValidCheckoutSHA(commit) || commit == uploadArtifactV322Commit {
+	if !git.ValidObjectID(commit) || commit == uploadArtifactV322Commit {
 		return false
 	}
 	_, exact := uploadArtifactCommits[commit]
@@ -112,7 +113,7 @@ func LegacyUploadArtifactRelease(commit string) (string, bool) {
 }
 
 func validateUploadArtifactCommit(commit string) error {
-	if _, ok := uploadArtifactCommits[commit]; !ok && (!ValidCheckoutSHA(commit) || commit == uploadArtifactV322Commit) {
+	if _, ok := uploadArtifactCommits[commit]; !ok && (!git.ValidObjectID(commit) || commit == uploadArtifactV322Commit) {
 		commits := make([]string, 0, len(uploadArtifactCommits))
 		for supported, version := range uploadArtifactCommits {
 			commits = append(commits, version+" ("+supported+")")

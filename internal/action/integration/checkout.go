@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/git"
 )
 
 const (
@@ -62,7 +64,7 @@ type checkoutInputRule struct {
 var checkoutInputRules = map[string]checkoutInputRule{
 	"repository": {strings.EqualFold},
 	"ref": {func(value, _ string) bool {
-		return value == "" || ValidCheckoutSHA(value) || validCheckoutBranch(value)
+		return value == "" || git.ValidObjectID(value) || validCheckoutBranch(value)
 	}},
 	"fetch-depth": {func(value, _ string) bool {
 		depth, err := strconv.ParseUint(value, 10, 31)
@@ -106,7 +108,7 @@ func checkoutContractForCommit(commit string) (checkoutContract, bool) {
 	if exact {
 		return contract, true
 	}
-	if !ValidCheckoutSHA(commit) {
+	if !git.ValidObjectID(commit) {
 		return checkoutContract{}, false
 	}
 	return checkoutCommitContracts[CheckoutV7Commit], false
@@ -115,7 +117,7 @@ func checkoutContractForCommit(commit string) (checkoutContract, bool) {
 // CheckoutUsesFallbackContract reports whether an immutable commit is absent
 // from the frozen snapshot and therefore uses the stable fallback contract.
 func CheckoutUsesFallbackContract(commit string) bool {
-	if !ValidCheckoutSHA(commit) {
+	if !git.ValidObjectID(commit) {
 		return false
 	}
 	_, exact := checkoutCommitContracts[commit]
@@ -149,7 +151,7 @@ func LegacyCheckoutRelease(commit string) (string, bool) {
 // frozen snapshots retain their exact contract; other valid SHAs use the
 // stable fallback contract.
 func validateCheckoutCommit(commit string) error {
-	if !ValidCheckoutSHA(commit) {
+	if !git.ValidObjectID(commit) {
 		return versionError("actions/checkout", "native adapter", commit, supportedCheckoutContracts())
 	}
 	return nil
@@ -174,7 +176,7 @@ func sortedCheckoutCommits() []string {
 // implemented by the tokenless event-repository checkout adapter.
 func ValidateCheckoutInputs(commit string, inputs map[string]string, repository, sha string) error {
 	contract, exact := checkoutContractForCommit(commit)
-	if !exact && !ValidCheckoutSHA(commit) {
+	if !exact && !git.ValidObjectID(commit) {
 		return versionError("actions/checkout", "native adapter", commit, supportedCheckoutContracts())
 	}
 	names := sortedNames(inputs)
@@ -225,19 +227,6 @@ func validCheckoutBranch(value string) bool {
 	}
 	for _, r := range value {
 		if r < 0x20 || r == 0x7f {
-			return false
-		}
-	}
-	return true
-}
-
-// ValidCheckoutSHA reports whether value is a lowercase 40-hex Git commit ID.
-func ValidCheckoutSHA(value string) bool {
-	if len(value) != 40 {
-		return false
-	}
-	for _, r := range value {
-		if r < '0' || r > '9' && (r < 'a' || r > 'f') {
 			return false
 		}
 	}

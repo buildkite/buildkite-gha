@@ -14,6 +14,7 @@ import (
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
@@ -109,10 +110,10 @@ func pushChangedPaths(event compiler.Event, workflows []workflowInput, checkoutP
 	if deleted || after == zeroGitCommit {
 		return nil, nil, fmt.Errorf("deleted-ref pushes cannot admit path-filtered workflows")
 	}
-	if !validBuildkiteCommit(after) || after != event.SHA {
+	if !git.ValidObjectID(after) || after != event.SHA {
 		return nil, nil, fmt.Errorf("webhook push after commit does not match the Buildkite build")
 	}
-	if created != (before == zeroGitCommit) || !created && !validBuildkiteCommit(before) {
+	if created != (before == zeroGitCommit) || !created && !git.ValidObjectID(before) {
 		return nil, nil, fmt.Errorf("webhook push before commit is inconsistent with ref creation")
 	}
 
@@ -226,7 +227,7 @@ func pushWebhookCommits(payload map[string]any) ([]string, error) {
 			return nil, fmt.Errorf("webhook push contains an invalid commit")
 		}
 		id, _ := commit["id"].(string)
-		if !validBuildkiteCommit(id) || seen[id] {
+		if !git.ValidObjectID(id) || seen[id] {
 			return nil, fmt.Errorf("webhook push contains an invalid or duplicate commit ID")
 		}
 		seen[id] = true
@@ -356,7 +357,7 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 	if mergeabilityKnown && !mergeable {
 		return nil, nil, fmt.Errorf("webhook pull request must report a mergeable synthetic merge")
 	}
-	if !validBuildkiteCommit(baseSHA) || !validBuildkiteCommit(headSHA) || !validBuildkiteCommit(mergeSHA) {
+	if !git.ValidObjectID(baseSHA) || !git.ValidObjectID(headSHA) || !git.ValidObjectID(mergeSHA) {
 		return nil, nil, fmt.Errorf("event snapshot requires full lowercase payload.pull_request base, head, and merge commit SHAs")
 	}
 	if headSHA != event.SHA {
@@ -495,7 +496,7 @@ func singleGitCommit(output []byte, label string) (string, error) {
 	if len(commits) != 1 {
 		return "", fmt.Errorf("git returned %d candidates for %s; exactly one is required", len(commits), label)
 	}
-	if !validBuildkiteCommit(commits[0]) {
+	if !git.ValidObjectID(commits[0]) {
 		return "", fmt.Errorf("git returned an invalid %s", label)
 	}
 	return commits[0], nil

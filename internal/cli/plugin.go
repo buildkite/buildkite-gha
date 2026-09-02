@@ -15,6 +15,7 @@ import (
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -259,7 +260,7 @@ func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(strin
 		}
 	}
 	workflowSHA := getenv(githubWorkflowSHAEnvironment)
-	if workflowSHA != "" && !validBuildkiteCommit(workflowSHA) {
+	if workflowSHA != "" && !git.ValidObjectID(workflowSHA) {
 		return nil, nil, fmt.Errorf("%s must be a full lowercase 40-hex commit", githubWorkflowSHAEnvironment)
 	}
 	return []string{selectedPath}, &pipelineTriggerWorkflow{Name: workflowName, SHA: workflowSHA}, nil
@@ -406,7 +407,7 @@ func pluginNonEmptyStringList(value any, field string) ([]string, error) {
 }
 
 func normalizePluginCommit(ctx context.Context, checkoutPath string, getenv func(string) string, setenv func(string, string) error, runner transport.Runner) error {
-	if validBuildkiteCommit(getenv("BUILDKITE_COMMIT")) {
+	if git.ValidObjectID(getenv("BUILDKITE_COMMIT")) {
 		return nil
 	}
 	output, err := runner.Run(ctx, checkoutPath, "git", []string{"rev-parse", "HEAD"}, nil)
@@ -414,7 +415,7 @@ func normalizePluginCommit(ctx context.Context, checkoutPath string, getenv func
 		return fmt.Errorf("resolve BUILDKITE_COMMIT from checked-out HEAD: %w", err)
 	}
 	commit := strings.TrimSpace(string(output))
-	if !validBuildkiteCommit(commit) {
+	if !git.ValidObjectID(commit) {
 		return fmt.Errorf("resolve BUILDKITE_COMMIT from checked-out HEAD: git returned an invalid commit")
 	}
 	if err := setenv("BUILDKITE_COMMIT", commit); err != nil {
