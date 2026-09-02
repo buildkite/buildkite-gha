@@ -107,15 +107,380 @@ func TestPluginTelemetryReportsUnprovenActionRuntime(t *testing.T) {
 
 func TestPluginRequiresConfigurationWithoutSideEffects(t *testing.T) {
 	requireImporterHost(t)
-	t.Setenv(pluginConfigurationEnvironment, "")
-	t.Setenv("BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW", "legacy.yml")
+	for _, name := range []string{pipelineTriggerWorkflowPathEnvironment, githubEventNameEnvironment, githubWorkflowEnvironment, githubWorkflowRefEnvironment, githubWorkflowSHAEnvironment} {
+		t.Setenv(name, "")
+	}
+	for _, test := range []struct {
+		name          string
+		configuration string
+		want          string
+	}{
+		{name: "missing plugin configuration", want: pluginConfigurationEnvironment + " is required"},
+		{name: "ordinary empty plugin configuration", configuration: `{}`, want: "workflow or workflows is required"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(pluginConfigurationEnvironment, test.configuration)
+			t.Setenv("BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW", "legacy.yml")
+			t.Setenv("BUILDKITE_GITHUB_EVENT", "push")
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 2 {
+				t.Fatalf("run() code = %d, want 2; stderr = %q", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), test.want) || stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+				t.Fatalf("stdout = %q, stderr = %q, commands = %#v, uploads = %#v", stdout.String(), stderr.String(), runner.commands, runner.uploaded)
+			}
+		})
+	}
+}
+
+func TestPluginUsesKeylessPipelineTriggerSelectedWorkflow(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"selected.yml": "on: push\njobs:\n  pipeline-trigger-importer:\n    runs-on: ubuntu-latest\n    steps:\n      - id: selector\n        run: echo 'key=ref' >> \"$GITHUB_OUTPUT\"\n      - run: echo '${{ github.event[steps.selector.outputs.key] }}'\n",
+	})
+	t.Chdir(t.TempDir())
+	t.Setenv(pluginConfigurationEnvironment, `{}`)
+	setCLIPluginBuildkiteEnvironment(t, "")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	t.Setenv("BUILDKITE_COMMIT", "HEAD")
+	setCLIPipelineTriggerEnvironment(t, ".github/workflows/selected.yml", ".github/workflows/selected.yml", "push", "buildkite/buildkite-gha/.github/workflows/selected.yml@refs/heads/main")
+	commit := "0123456789abcdef0123456789abcdef01234567"
+	t.Setenv(githubWorkflowSHAEnvironment, commit)
+
+	runner := &cliCaptureRunner{gitOutput: []byte(commit + "\n")}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, want 0; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Uploaded 1 job") || stderr.Len() != 0 || len(runner.commands) == 0 {
+		t.Fatalf("stdout/stderr/commands = %q / %q / %#v", stdout.String(), stderr.String(), runner.commands)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group     string     `yaml:"group"`
+			DependsOn *yaml.Node `yaml:"depends_on"`
+			Steps     []struct {
+				Key       string `yaml:"key"`
+				Command   string `yaml:"command"`
+				DependsOn any    `yaml:"depends_on"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	pipelineCommand := runner.commands[len(runner.commands)-1]
+	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · .github/workflows/selected.yml" || pipeline.Steps[0].DependsOn != nil || len(pipeline.Steps[0].Steps) != 1 || !strings.HasSuffix(pipeline.Steps[0].Steps[0].Key, "-pipeline-trigger-importer") || pipeline.Steps[0].Steps[0].DependsOn != nil {
+		t.Fatalf("pipeline steps = %#v", pipeline.Steps)
+	}
+	if command := pipeline.Steps[0].Steps[0].Command; strings.Count(command, "--step '"+cliTestJobID+"'") != 2 || !strings.Contains(command, "--artifact-producer '"+cliTestJobID+"'") || strings.Contains(command, "--step ''") {
+		t.Fatalf("keyless generated job does not scope artifacts to importer job %q:\n%s", cliTestJobID, command)
+	}
+	artifactUpload := -1
+	for index, command := range runner.commands {
+		if len(command.args) >= 2 && command.args[0] == "artifact" && command.args[1] == "upload" {
+			artifactUpload = index
+		}
+	}
+	if artifactUpload < 0 || artifactUpload+1 != len(runner.commands)-1 || len(pipelineCommand.args) < 2 || pipelineCommand.args[0] != "pipeline" || pipelineCommand.args[1] != "upload" {
+		t.Fatalf("commands = %#v, want artifact upload immediately before pipeline upload", runner.commands)
+	}
+	foundEventArtifact := false
+	foundPlanArtifact := false
+	for path, contents := range runner.uploaded {
+		if strings.HasPrefix(path, ".buildkite-gha/events/") && strings.HasSuffix(path, ".json") {
+			foundEventArtifact = true
+			continue
+		}
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") || !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.Workflow.Path != "./.github/workflows/selected.yml" || job.Workflow.LogicalJobID != "pipeline-trigger-importer" || !job.Event.PayloadArtifact {
+			t.Fatalf("selected workflow plan = %#v", job.Workflow)
+		}
+		foundPlanArtifact = true
+	}
+	if !foundPlanArtifact || !foundEventArtifact {
+		t.Fatalf("uploaded artifacts = %#v, want selected workflow job plan and event snapshot", runner.uploaded)
+	}
+}
+
+func TestPluginPrefersGitHubPipelineTriggerIdentity(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"preferred.yml":     "name: Preferred\non: push\njobs:\n  preferred:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		"compatibility.yml": "name: Compatibility\non: pull_request\njobs:\n  compatibility:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv(pluginConfigurationEnvironment, `{}`)
+	setCLIPluginBuildkiteEnvironment(t, "preferred-pipeline-trigger-importer")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	setCLIPipelineTriggerEnvironment(t, ".github/workflows/compatibility.yml", "Preferred", "push", "buildkite/buildkite-gha/.github/workflows/preferred.yml@refs/heads/main")
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "pull_request")
+
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 2 {
-		t.Fatalf("run() code = %d, want 2; stderr = %q", code, stderr.String())
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, want 0; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), pluginConfigurationEnvironment+" is required") || len(runner.commands) != 0 {
-		t.Fatalf("stderr = %q, commands = %#v", stderr.String(), runner.commands)
+	var pipeline struct {
+		Steps []struct {
+			Group     string `yaml:"group"`
+			Condition string `yaml:"if"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · Preferred" || !strings.Contains(pipeline.Steps[0].Condition, "GITHUB_EVENT_NAME") {
+		t.Fatalf("pipeline steps = %#v, want the GITHUB_* workflow and event", pipeline.Steps)
+	}
+}
+
+func TestPluginUsesPipelineTriggerPullRequestIdentity(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"ci.yml": "name: CI\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv(pluginConfigurationEnvironment, `{}`)
+	setCLIPluginBuildkiteEnvironment(t, "pull-request-pipeline-trigger-importer")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	t.Setenv("BUILDKITE_BRANCH", "feature")
+	t.Setenv("BUILDKITE_PULL_REQUEST", "42")
+	t.Setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
+	setCLIPipelineTriggerEnvironment(t, ".github/workflows/ci.yml", "CI", "pull_request", "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/pull/42/merge")
+	t.Setenv("BUILDKITE_GITHUB_ACTION", "closed")
+
+	headSHA := os.Getenv("BUILDKITE_COMMIT")
+	identities := make([]string, 0, 2)
+	for _, test := range []struct {
+		name    string
+		webhook []byte
+	}{
+		{name: "Buildkite environment fallback"},
+		{name: "linked webhook metadata", webhook: []byte(`{"action":"closed","number":42,"pull_request":{"head":{"ref":"feature","sha":"0123456789abcdef0123456789abcdef01234567"},"base":{"ref":"main"}}}`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &cliCaptureRunner{webhook: test.webhook}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 || !strings.Contains(stdout.String(), "Uploaded 1 job") {
+				t.Fatalf("run() code/stdout/stderr = %d / %q / %q, want an uploaded PR job", code, stdout.String(), stderr.String())
+			}
+			for path, contents := range runner.uploaded {
+				if !strings.HasSuffix(path, ".json") {
+					continue
+				}
+				job, err := plan.Decode(contents)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if job.Event.Name != "pull_request" || job.Event.Ref != "refs/pull/42/merge" || job.Event.SHA != headSHA {
+					t.Fatalf("pull request event = %#v", job.Event)
+				}
+				identities = append(identities, job.Event.Ref+"@"+job.Event.SHA)
+				return
+			}
+			t.Fatalf("uploaded artifacts = %#v, want pull request job plan", runner.uploaded)
+		})
+	}
+	if len(identities) != 2 || identities[0] != identities[1] {
+		t.Fatalf("fallback and linked-webhook identities = %#v, want agreement", identities)
+	}
+}
+
+func TestPluginUsesBuildkitePipelineTriggerCompatibilityIdentity(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"selected.yml": "name: Selected\non: push\njobs:\n  selected:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv(pluginConfigurationEnvironment, `{}`)
+	setCLIPluginBuildkiteEnvironment(t, "compatibility-pipeline-trigger-importer")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "push")
+	t.Setenv(pipelineTriggerWorkflowPathEnvironment, ".github/workflows/selected.yml")
+
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 || !strings.Contains(stdout.String(), "Uploaded 1 job") {
+		t.Fatalf("run() code/stdout/stderr = %d / %q / %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestPluginExplicitWorkflowOverridesPipelineTriggerSelection(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"configured.yml": "name: Configured\non: push\njobs:\n  configured:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		"selected.yml":   "name: Selected\non: push\njobs:\n  selected:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv(pluginConfigurationEnvironment, `{"workflow":".github/workflows/configured.yml"}`)
+	setCLIPluginBuildkiteEnvironment(t, "explicit-workflow-importer")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	setCLIPipelineTriggerEnvironment(t, ".github/workflows/selected.yml", "Selected", "push", "buildkite/buildkite-gha/.github/workflows/selected.yml@refs/heads/main")
+
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, want 0; stdout = %q; stderr = %q", code, stdout.String(), stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group string `yaml:"group"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · Configured" {
+		t.Fatalf("pipeline steps = %#v", pipeline.Steps)
+	}
+
+	t.Setenv("BUILDKITE_STEP_KEY", "")
+	runner = &cliCaptureRunner{}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 2 || !strings.Contains(stderr.String(), "BUILDKITE_STEP_KEY") {
+		t.Fatalf("keyless explicit-selector run() code/stderr = %d / %q, want key-required usage error", code, stderr.String())
+	}
+	if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+		t.Fatalf("keyless explicit selector reached side effects: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
+	}
+}
+
+func TestPluginRejectsMalformedPipelineTriggerEnvironment(t *testing.T) {
+	requireImporterHost(t)
+	for _, test := range []struct {
+		name       string
+		env        map[string]string
+		want       string
+		wantCode   int
+		fullPrefix bool
+	}{
+		{name: "workflow identity without selected path", env: map[string]string{githubWorkflowRefEnvironment: "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/heads/main"}, want: "missing BUILDKITE_GITHUB_WORKFLOW_PATH", wantCode: 2},
+		{name: "blank selected path", env: map[string]string{pipelineTriggerWorkflowPathEnvironment: "   "}, want: "BUILDKITE_GITHUB_WORKFLOW_PATH must be a non-empty workflow path", wantCode: 2},
+		{name: "missing event identity", env: map[string]string{pipelineTriggerWorkflowPathEnvironment: ".github/workflows/ci.yml"}, want: "GITHUB_EVENT_NAME or BUILDKITE_GITHUB_EVENT is required", wantCode: 2},
+		{name: "malformed preferred event", fullPrefix: true, env: map[string]string{githubEventNameEnvironment: " pull_request"}, want: "GITHUB_EVENT_NAME must be a lowercase GitHub event name", wantCode: 2},
+		{name: "blank preferred workflow name", fullPrefix: true, env: map[string]string{githubWorkflowEnvironment: "   "}, want: "GITHUB_WORKFLOW must be non-empty", wantCode: 2},
+		{name: "malformed preferred workflow ref", fullPrefix: true, env: map[string]string{githubWorkflowRefEnvironment: "buildkite/buildkite-gha/.github/workflows/ci.yml"}, want: "GITHUB_WORKFLOW_REF must have", wantCode: 2},
+		{name: "preferred workflow ref for another repository", fullPrefix: true, env: map[string]string{githubWorkflowRefEnvironment: "other/repository/.github/workflows/ci.yml@refs/heads/main"}, want: "GITHUB_WORKFLOW_REF repository", wantCode: 2},
+		{name: "preferred workflow ref with mismatched event ref", fullPrefix: true, env: map[string]string{githubWorkflowRefEnvironment: "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/pull/42/merge"}, want: "GITHUB_WORKFLOW_REF event ref", wantCode: 2},
+		{name: "malformed preferred workflow SHA", fullPrefix: true, env: map[string]string{githubWorkflowSHAEnvironment: "HEAD"}, want: "GITHUB_WORKFLOW_SHA must be a full lowercase 40-hex commit", wantCode: 2},
+		{name: "preferred workflow SHA does not match checkout", fullPrefix: true, env: map[string]string{githubWorkflowSHAEnvironment: strings.Repeat("a", 40)}, want: "GITHUB_WORKFLOW_SHA does not match BUILDKITE_COMMIT", wantCode: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(pluginConfigurationEnvironment, `{}`)
+			setCLIPluginBuildkiteEnvironment(t, "malformed-pipeline-trigger-importer")
+			if test.fullPrefix {
+				setCLIPipelineTriggerEnvironment(t, ".github/workflows/ci.yml", "CI", "push", "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/heads/main")
+			}
+			for name, value := range test.env {
+				t.Setenv(name, value)
+			}
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != test.wantCode || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("run() code/stderr = %d / %q, want %d / %q", code, stderr.String(), test.wantCode, test.want)
+			}
+			if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+				t.Fatalf("malformed trigger environment reached upload: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
+			}
+		})
+	}
+}
+
+func TestParsePipelineTriggerWorkflowRefPreservesDelimiterInEventRef(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		ref  string
+	}{
+		{name: "branch", ref: "refs/heads/foo@refs/bar"},
+		{name: "tag", ref: "refs/tags/v1@refs/stable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workflowRef := "acme/widgets/.github/workflows/ci.yml@" + test.ref
+			path, ref, err := parsePipelineTriggerWorkflowRef(workflowRef, "push", "https://github.com/acme/widgets.git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if path != ".github/workflows/ci.yml" || ref != test.ref {
+				t.Fatalf("workflow identity = %q / %q, want path and complete ref %q", path, ref, test.ref)
+			}
+		})
+	}
+}
+
+func TestPluginRejectsPipelineTriggerWorkflowNameMismatch(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"ci.yml": "name: Actual\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv(pluginConfigurationEnvironment, `{}`)
+	setCLIPluginBuildkiteEnvironment(t, "workflow-name-mismatch-importer")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	setCLIPipelineTriggerEnvironment(t, ".github/workflows/ci.yml", "Stale", "push", "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/heads/main")
+
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "GITHUB_WORKFLOW does not match the checked-out workflow") {
+		t.Fatalf("run() code/stdout/stderr = %d / %q / %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestPluginValidatesPipelineTriggerSelectedWorkflowPath(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"tracked.yml": "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	untracked := filepath.Join(repository, ".github", "workflows", "untracked.yml")
+	if err := os.WriteFile(untracked, []byte("on: push\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(repository, ".github", "workflows", "linked.yml")
+	if err := os.Symlink("tracked.yml", symlink); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", repository, "add", ".github/workflows/linked.yml").CombinedOutput(); err != nil {
+		t.Fatalf("git add symlink: %v: %s", err, output)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.yml")
+	if err := os.WriteFile(outside, []byte("on: push\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "outside checkout", path: outside, want: "outside the checked-out git repository"},
+		{name: "untracked", path: ".github/workflows/untracked.yml", want: "server-selected workflow path is missing or untracked"},
+		{name: "symlink", path: ".github/workflows/linked.yml", want: "is not a regular tracked file"},
+		{name: "glob", path: ".github/workflows/*.yml", want: "glob pattern"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Chdir(repository)
+			t.Setenv(pluginConfigurationEnvironment, `{}`)
+			setCLIPluginBuildkiteEnvironment(t, "unsafe-pipeline-trigger-importer")
+			t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+			setCLIPipelineTriggerEnvironment(t, test.path, "", "push", "buildkite/buildkite-gha/"+filepath.ToSlash(test.path)+"@refs/heads/main")
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("run() code/stderr = %d / %q, want 1 / %q", code, stderr.String(), test.want)
+			}
+			if stdout.Len() != 0 || len(runner.uploaded) != 0 {
+				t.Fatalf("unsafe selected path reached Buildkite: stdout %q, uploads %#v", stdout.String(), runner.uploaded)
+			}
+		})
 	}
 }
 
@@ -180,6 +545,10 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || !minimal.ExperimentalRunnerUser || len(minimal.runnerTargets) != 0 {
 		t.Fatalf("minimal configuration = %#v, %v", minimal, err)
 	}
+	empty, err := parsePluginConfiguration(`{}`)
+	if err != nil || len(empty.Workflows) != 0 || !empty.ExperimentalRunnerUser || len(empty.runnerTargets) != 0 {
+		t.Fatalf("empty configuration = %#v, %v", empty, err)
+	}
 	disabled, err := parsePluginConfiguration(`{"workflow":"workflow.yml","experimental-runner-user":false}`)
 	if err != nil || disabled.ExperimentalRunnerUser {
 		t.Fatalf("disabled runner user configuration = %#v, %v", disabled, err)
@@ -191,7 +560,6 @@ func TestParsePluginConfiguration(t *testing.T) {
 		want   string
 	}{
 		{name: "malformed", source: `{`, want: "decode"},
-		{name: "missing workflow selection", source: `{}`, want: "workflow or workflows is required"},
 		{name: "duplicate workflow", source: `{"workflow":"one.yml","workflow":"two.yml"}`, want: "duplicate object key"},
 		{name: "both workflow fields", source: `{"workflow":"one.yml","workflows":"two.yml"}`, want: "mutually exclusive"},
 		{name: "empty workflow", source: `{"workflow":""}`, want: "workflow must be a non-empty string"},
@@ -874,6 +1242,13 @@ func setCLIPluginBuildkiteEnvironment(t *testing.T, stepKey string) {
 	t.Helper()
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", "")
+	t.Setenv(pipelineTriggerWorkflowPathEnvironment, "")
+	t.Setenv(githubEventNameEnvironment, "")
+	t.Setenv(githubWorkflowEnvironment, "")
+	t.Setenv(githubWorkflowRefEnvironment, "")
+	t.Setenv(githubWorkflowSHAEnvironment, "")
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "")
+	t.Setenv("BUILDKITE_GITHUB_ACTION", "")
 	t.Setenv("BUILDKITE_STEP_KEY", stepKey)
 	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
 	t.Setenv("BUILDKITE_COMMIT", "0123456789abcdef0123456789abcdef01234567")
@@ -881,4 +1256,16 @@ func setCLIPluginBuildkiteEnvironment(t *testing.T, stepKey string) {
 	t.Setenv("BUILDKITE_TAG", "")
 	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
 	t.Setenv("BUILDKITE_SOURCE", "webhook")
+}
+
+func setCLIPipelineTriggerEnvironment(t *testing.T, compatibilityPath, workflow, event, workflowRef string) {
+	t.Helper()
+	t.Setenv(pipelineTriggerWorkflowPathEnvironment, compatibilityPath)
+	t.Setenv("BUILDKITE_GITHUB_EVENT", event)
+	t.Setenv(githubEventNameEnvironment, event)
+	if workflow != "" {
+		t.Setenv(githubWorkflowEnvironment, workflow)
+	}
+	t.Setenv(githubWorkflowRefEnvironment, workflowRef)
+	t.Setenv(githubWorkflowSHAEnvironment, os.Getenv("BUILDKITE_COMMIT"))
 }

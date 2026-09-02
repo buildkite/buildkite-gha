@@ -65,8 +65,12 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	workflowOperands, eventPath := uploadArguments.workflowOperands, uploadArguments.eventPath
 	importerStep := os.Getenv("BUILDKITE_STEP_KEY")
 	importerJobID := os.Getenv("BUILDKITE_JOB_ID")
-	if os.Getenv("BUILDKITE") != "true" || strings.TrimSpace(importerStep) == "" {
+	keylessPipelineTrigger := uploadArguments.serverSelectedWorkflow != nil && importerStep == ""
+	if os.Getenv("BUILDKITE") != "true" || (strings.TrimSpace(importerStep) == "" && !keylessPipelineTrigger) {
 		return usageError(stderr, "upload: BUILDKITE=true and BUILDKITE_STEP_KEY are required")
+	}
+	if keylessPipelineTrigger && importerJobID == "" {
+		return usageError(stderr, "upload: BUILDKITE_JOB_ID is required for a keyless Pipeline Trigger importer")
 	}
 	for _, retired := range []string{legacyTargetQueueEnvironment, legacyRuntimeImageEnvironment} {
 		if os.Getenv(retired) != "" {
@@ -107,6 +111,10 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: workflow path %q is not tracked by git\n", skippedWorkflowPaths[0])
 		return 1
 	}
+	if uploadArguments.serverSelectedWorkflow != nil && len(skippedWorkflowPaths) != 0 {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: server-selected workflow path is missing or untracked: %q\n", skippedWorkflowPaths[0])
+		return 1
+	}
 	for _, path := range skippedWorkflowPaths {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: warning: workflow path %q is missing or untracked; skipping\n", path)
 	}
@@ -129,6 +137,16 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if parseErr != nil {
 			_, _ = validatedProcessingReport(ctx, out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false)
 			return 1
+		}
+		if uploadArguments.serverSelectedWorkflow != nil && uploadArguments.serverSelectedWorkflow.Name != "" {
+			actualName := parsed.Name
+			if actualName == "" {
+				actualName = workflows[i].CanonicalPath
+			}
+			if actualName != uploadArguments.serverSelectedWorkflow.Name {
+				_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: GITHUB_WORKFLOW does not match the checked-out workflow: got %q, want %q\n", uploadArguments.serverSelectedWorkflow.Name, actualName)
+				return 1
+			}
 		}
 		workflows[i].ReusableOnly = parsed.ReusableOnly()
 		workflows[i].Name = parsed.Name
@@ -361,6 +379,12 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	var eventArtifact *transport.Artifact
 	failureArtifacts := make([]transport.Artifact, 0)
 	jobCount := 0
+	bundleCompilerStep := importerStep
+	if bundleCompilerStep == "" {
+		// Per-workflow pipeline bytes are discarded during aggregate upload. Use
+		// a valid non-generated key for that validation; final emission is keyless.
+		bundleCompilerStep = "pipeline-trigger-importer"
+	}
 	for i, input := range workflows {
 		if input.ReusableOnly {
 			continue
@@ -397,7 +421,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			failureArtifacts = append(failureArtifacts, artifacts...)
 			continue
 		}
-		preflight, err := compileHostedNamespacedWithActionCache(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, uploadArguments.runnerSelectors, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, "", repositorySource, authentication)
+		preflight, err := compileHostedNamespacedWithActionCache(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, bundleCompilerStep, "", uploadArguments.runnerTargets, uploadArguments.runnerSelectors, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, "", repositorySource, authentication)
 		applyHostedPreflight(&processingReports[i], preflight)
 		if err != nil {
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
@@ -790,6 +814,7 @@ func workflowInputs(matches []workflowInput, namespaceKeys bool) ([]workflowInpu
 type parsedUploadArgs struct {
 	workflowOperands         []string
 	explicitWorkflowPaths    bool
+	serverSelectedWorkflow   *pipelineTriggerWorkflow
 	checkoutPath             string
 	eventPath                string
 	clientVersion            string

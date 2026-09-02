@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,7 +20,13 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
-const pluginConfigurationEnvironment = "BUILDKITE_PLUGIN_CONFIGURATION"
+const (
+	pluginConfigurationEnvironment         = "BUILDKITE_PLUGIN_CONFIGURATION"
+	pipelineTriggerWorkflowPathEnvironment = "BUILDKITE_GITHUB_WORKFLOW_PATH"
+	githubWorkflowEnvironment              = "GITHUB_WORKFLOW"
+	githubWorkflowRefEnvironment           = "GITHUB_WORKFLOW_REF"
+	githubWorkflowSHAEnvironment           = "GITHUB_WORKFLOW_SHA"
+)
 
 func plugin(args []string, stdout, stderr io.Writer, version, clientVersion string, runner transport.Runner) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -48,14 +55,23 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	if err != nil {
 		return usageError(stderr, "plugin: %v", err)
 	}
+	workflowOperands, serverSelectedWorkflow, err := pluginWorkflowOperands(configuration, os.Getenv)
+	if err != nil {
+		return usageError(stderr, "plugin: %v", err)
+	}
 	checkoutPath := os.Getenv("BUILDKITE_BUILD_CHECKOUT_PATH")
 	if err := normalizePluginCommit(ctx, checkoutPath, os.Getenv, os.Setenv, runner); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", err)
 		return 1
 	}
+	if serverSelectedWorkflow != nil && serverSelectedWorkflow.SHA != "" && serverSelectedWorkflow.SHA != os.Getenv("BUILDKITE_COMMIT") {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %s does not match BUILDKITE_COMMIT after checkout: %q != %q\n", githubWorkflowSHAEnvironment, serverSelectedWorkflow.SHA, os.Getenv("BUILDKITE_COMMIT"))
+		return 1
+	}
 	return uploadParsedContext(ctx, parsedUploadArgs{
-		workflowOperands:       configuration.Workflows,
+		workflowOperands:       workflowOperands,
 		explicitWorkflowPaths:  true,
+		serverSelectedWorkflow: serverSelectedWorkflow,
 		checkoutPath:           checkoutPath,
 		clientVersion:          clientVersion,
 		runnerTargets:          configuration.runnerTargets,
@@ -120,7 +136,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			return pluginConfiguration{}, fmt.Errorf("%s workflow must be a non-empty string", pluginConfigurationEnvironment)
 		}
 		workflows = []string{workflow}
-	} else {
+	} else if hasWorkflows {
 		values, ok := workflowsValue.([]any)
 		if ok && len(values) != 0 {
 			workflows = make([]string, len(values))
@@ -195,6 +211,107 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 		}
 	}
 	return pluginConfiguration{Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, OIDC: oidc, runnerTargets: targets}, nil
+}
+
+type pipelineTriggerWorkflow struct {
+	Name string
+	SHA  string
+}
+
+func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(string) string) ([]string, *pipelineTriggerWorkflow, error) {
+	if len(configuration.Workflows) != 0 {
+		return configuration.Workflows, nil, nil
+	}
+	compatibilityPath := getenv(pipelineTriggerWorkflowPathEnvironment)
+	if compatibilityPath == "" {
+		for _, name := range []string{githubEventNameEnvironment, githubWorkflowEnvironment, githubWorkflowRefEnvironment, githubWorkflowSHAEnvironment} {
+			if getenv(name) != "" {
+				return nil, nil, fmt.Errorf("GitHub Actions Pipeline Trigger environment is missing %s", pipelineTriggerWorkflowPathEnvironment)
+			}
+		}
+		return nil, nil, fmt.Errorf("%s workflow or workflows is required; workflows must be a non-empty array of non-empty strings", pluginConfigurationEnvironment)
+	}
+	if strings.TrimSpace(compatibilityPath) == "" || strings.TrimSpace(compatibilityPath) != compatibilityPath {
+		return nil, nil, fmt.Errorf("%s must be a non-empty workflow path", pipelineTriggerWorkflowPathEnvironment)
+	}
+
+	event, err := buildkiteGitHubEventName(getenv)
+	if err != nil {
+		return nil, nil, err
+	}
+	if event == "" {
+		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT is required", githubEventNameEnvironment)
+	}
+	if event != "push" && event != "pull_request" {
+		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT must be push or pull_request", githubEventNameEnvironment)
+	}
+
+	workflowName := getenv(githubWorkflowEnvironment)
+	if workflowName != "" && strings.TrimSpace(workflowName) == "" {
+		return nil, nil, fmt.Errorf("%s must be non-empty", githubWorkflowEnvironment)
+	}
+	selectedPath := compatibilityPath
+	if workflowRef := getenv(githubWorkflowRefEnvironment); workflowRef != "" {
+		var err error
+		selectedPath, _, err = parsePipelineTriggerWorkflowRef(workflowRef, event, getenv("BUILDKITE_REPO"))
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	workflowSHA := getenv(githubWorkflowSHAEnvironment)
+	if workflowSHA != "" && !validBuildkiteCommit(workflowSHA) {
+		return nil, nil, fmt.Errorf("%s must be a full lowercase 40-hex commit", githubWorkflowSHAEnvironment)
+	}
+	return []string{selectedPath}, &pipelineTriggerWorkflow{Name: workflowName, SHA: workflowSHA}, nil
+}
+
+func parsePipelineTriggerWorkflowRef(workflowRef, event, repository string) (string, string, error) {
+	separator := strings.Index(workflowRef, "@refs/")
+	if separator <= 0 {
+		return "", "", fmt.Errorf("%s must have <owner>/<repo>/<workflow-path>@<event-ref> format", githubWorkflowRefEnvironment)
+	}
+	identity, eventRef := workflowRef[:separator], workflowRef[separator+1:]
+	parts := strings.SplitN(identity, "/", 3)
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return "", "", fmt.Errorf("%s must have <owner>/<repo>/<workflow-path>@<event-ref> format", githubWorkflowRefEnvironment)
+	}
+	provider, owner, name, _, err := parseBuildkiteRepository(repository)
+	if err != nil {
+		return "", "", fmt.Errorf("BUILDKITE_REPO: %w", err)
+	}
+	if provider != "github" {
+		return "", "", fmt.Errorf("%s requires a github.com BUILDKITE_REPO", githubWorkflowRefEnvironment)
+	}
+	if !strings.EqualFold(parts[0], owner) || !strings.EqualFold(parts[1], name) {
+		return "", "", fmt.Errorf("%s repository %q does not match BUILDKITE_REPO %q", githubWorkflowRefEnvironment, parts[0]+"/"+parts[1], owner+"/"+name)
+	}
+	if !pipelineTriggerEventRef(event, eventRef) {
+		return "", "", fmt.Errorf("%s event ref %q does not match %s %q", githubWorkflowRefEnvironment, eventRef, githubEventNameEnvironment, event)
+	}
+	return parts[2], eventRef, nil
+}
+
+func pipelineTriggerEventRef(event, ref string) bool {
+	if ref != strings.TrimSpace(ref) {
+		return false
+	}
+	switch event {
+	case "push":
+		for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
+			if value, ok := strings.CutPrefix(ref, prefix); ok {
+				return value != ""
+			}
+		}
+	case "pull_request":
+		number, ok := strings.CutPrefix(ref, "refs/pull/")
+		if !ok {
+			return false
+		}
+		number, ok = strings.CutSuffix(number, "/merge")
+		parsed, err := strconv.Atoi(number)
+		return ok && err == nil && parsed > 0 && strconv.Itoa(parsed) == number
+	}
+	return false
 }
 
 func parsePluginCacheVolume(value any) (*compiler.CacheVolume, error) {

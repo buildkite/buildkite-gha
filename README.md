@@ -25,7 +25,9 @@ Steps stay together because they share a workspace, environment changes, action 
 
 ## Run an existing workflow
 
-Add the [GitHub Actions Buildkite plugin](https://github.com/buildkite-plugins/github-actions-buildkite-plugin) to your pipeline:
+Configure the
+[GitHub Actions Buildkite plugin](https://github.com/buildkite-plugins/github-actions-buildkite-plugin)
+with one or more workflows:
 
 ```yaml
 steps:
@@ -40,7 +42,9 @@ steps:
     command: .buildkite/deploy.sh
 ```
 
-The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint. It uses mise to install and verify the selected CLI release, and defaults to the latest stable release. During the preview, leaving `version` unset means there is no CLI version to update as new stable releases ship. Set `workflow` to one explicit path or `workflows` to an explicit path list; plugin configuration does not accept directories or glob patterns.
+The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint. It uses mise to install and verify the selected CLI release, and defaults to the latest stable release. During the preview, leaving `version` unset means there is no CLI version to update as new stable releases ship. Ordinary plugin use requires `workflow` with one explicit path or `workflows` with an explicit path list; plugin configuration does not accept directories or glob patterns.
+
+GitHub Actions Pipeline Trigger integration is available only in private preview. When enabled, Buildkite can select the workflow without an explicit plugin selector. See [Private-preview Pipeline Trigger selection](docs/cli.md#private-preview-pipeline-trigger-selection).
 
 For `on.release`, open the pipeline's GitHub settings, select **Additional Webhooks** > **Releases**, and use **Code** trigger mode. Only explicit `types` containing `published`, `created`, and/or `released` are supported.
 
@@ -85,7 +89,7 @@ explicit mapping. The importer annotates heuristic fallback warnings. See the
 [cache-volume configuration](docs/cli.md#configure-generated-job-cache-volumes)
 and [compatibility guide](docs/compatibility.md#job-configuration).
 
-The imported workflows are a dynamic part of the Buildkite pipeline. The plugin creates one aggregate group per successfully compiled, explicitly listed workflow in a single transaction. Workflows that do not declare the selected event become top-level skipped steps. Groups and replacement steps depend on the importer. Each runnable job publishes a provider check named `<workflow> / <job> (<event>)`: a GitHub check for GitHub events or an Origin check for Origin events. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
+The imported workflows are a dynamic part of the Buildkite pipeline. The plugin creates one aggregate group per successfully compiled, selected workflow in a single transaction. Workflows that do not declare the selected event become top-level skipped steps. Explicit-selector groups and replacement steps depend on the keyed importer. Each runnable job publishes a provider check named `<workflow> / <job> (<event>)`: a GitHub check for GitHub events or an Origin check for Origin events. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
 
 Buildkite owns build creation and schedule configuration. Within that build, `buildkite-gha` maps push, pull request, merge queue, release, issue, manual/API, and scheduled builds to `push`, `pull_request`, `merge_group`, `release`, `issues`, `workflow_dispatch`, and `schedule`, then applies the matching `on:` branch, tag, base-branch, activity, and safely evidenced path filters. Cross-event workflows are excluded before event-dependent compilation and retained as top-level skipped steps.
 

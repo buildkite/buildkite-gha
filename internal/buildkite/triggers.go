@@ -357,17 +357,19 @@ func liveTriggerExpressions(event string) TriggerConditionExpressions {
 // LiveEventPredicate matches the original GitHub event when available and
 // preserves Buildkite's compatibility mapping for non-webhook builds.
 func LiveEventPredicate(event string) string {
-	githubEvent := "build.env(" + yamlScalar("BUILDKITE_GITHUB_EVENT") + ")"
-	predicate := githubEvent + " == " + yamlScalar(event)
-	fallbackEvent := "(" + githubEvent + " == null"
+	githubEvent := "build.env(" + yamlScalar("GITHUB_EVENT_NAME") + ")"
+	buildkiteGitHubEvent := "build.env(" + yamlScalar("BUILDKITE_GITHUB_EVENT") + ")"
+	githubEventMissing := "(" + githubEvent + " == null || " + githubEvent + " == " + yamlScalar("") + ")"
+	predicate := "(" + githubEvent + " == " + yamlScalar(event) + " || (" + githubEventMissing + " && " + buildkiteGitHubEvent + " == " + yamlScalar(event) + "))"
+	fallbackEvent := "(" + githubEventMissing + " && (" + buildkiteGitHubEvent + " == null"
 	unsupportedEvent := ""
 	for _, supported := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
 		if unsupportedEvent != "" {
 			unsupportedEvent += " && "
 		}
-		unsupportedEvent += githubEvent + " != " + yamlScalar(supported)
+		unsupportedEvent += buildkiteGitHubEvent + " != " + yamlScalar(supported)
 	}
-	fallbackEvent += " || (" + unsupportedEvent + "))"
+	fallbackEvent += " || (" + unsupportedEvent + ")))"
 	switch event {
 	case "push":
 		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source != "ui" && build.source != "api" && build.source != "schedule"))`

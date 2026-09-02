@@ -307,9 +307,54 @@ configuration from `BUILDKITE_PLUGIN_CONFIGURATION`. It accepts:
 - plugin-owned `version`, `source-ref`, and `minimum-release-age` fields
 - the Boolean `experimental-runner-user` field
 
-Missing or untracked workflow paths warn and are skipped. If every configured
-path is missing or untracked, the plugin succeeds without uploading a pipeline.
-Every present path must be a regular, tracked `.yml` or `.yaml` file inside the
+### Private-preview Pipeline Trigger selection
+
+Server-selected workflow imports are available only in private-preview GitHub
+Actions Pipeline Trigger builds. Most users should configure an explicit
+`workflow` or `workflows` selector.
+
+Without an explicit selector, `BUILDKITE_GITHUB_WORKFLOW_PATH` marks a GitHub
+Actions Pipeline Trigger selection. The server also supplies:
+
+- `GITHUB_EVENT_NAME`: `push` or `pull_request`
+- `GITHUB_WORKFLOW`: the workflow `name`, or its repository-relative path when
+  `name` is absent
+- `GITHUB_WORKFLOW_REF`:
+  `<owner>/<repo>/<repository-relative-path>@<event-ref>`
+- `GITHUB_WORKFLOW_SHA`: the full commit used to match the workflow
+- `BUILDKITE_GITHUB_EVENT`: a compatibility duplicate of `GITHUB_EVENT_NAME`
+- `BUILDKITE_GITHUB_ACTION`: the pull request action; push events omit it
+
+The `GITHUB_*` values take precedence when present. The plugin derives the
+selected path from `GITHUB_WORKFLOW_REF`, checks `GITHUB_WORKFLOW` against the
+checked-out file, and requires `GITHUB_WORKFLOW_SHA` to match the checkout
+commit. A malformed preferred value fails instead of falling back.
+For pull requests, `GITHUB_WORKFLOW_REF` and imported jobs' `GITHUB_REF` retain
+`refs/pull/<number>/merge`, while `GITHUB_WORKFLOW_SHA`, `GITHUB_SHA`, and the
+Buildkite checkout use the pull request head commit.
+`BUILDKITE_GITHUB_WORKFLOW_PATH` remains the path fallback because GitHub has no
+`GITHUB_WORKFLOW_PATH`. `BUILDKITE_GITHUB_ACTION` remains the action source
+because GitHub's `GITHUB_ACTION` has a different meaning. An explicit
+`workflow` or `workflows` value takes precedence over server workflow selection.
+
+Use the plugin shorthand to request server selection:
+
+```yaml
+steps:
+  - label: ":github:"
+    plugin: github-actions
+```
+
+This server-selected form does not require the importer step to have a `key`.
+The plugin uploads the event, runtime, and plan artifacts before uploading the
+dynamic pipeline, and scopes artifact reads to the importer job. It does not use
+the job ID as a dependency key. Explicit-selector importers still require a
+step `key` and generated workflow groups depend on it.
+
+Missing or untracked explicitly configured workflow paths warn and are skipped.
+If every configured path is missing or untracked, the plugin succeeds without
+uploading a pipeline. A missing or untracked server-selected path fails. Every
+present path must be a regular, tracked `.yml` or `.yaml` file inside the
 repository. Directories, tracked files missing from the checkout, symlinks, and
 globs are rejected. The optional `oidc` object accepts non-empty `claims`,
 `aws-session-tags`, and `subject-claim` values. Unknown fields and invalid values
