@@ -6144,13 +6144,37 @@ runs:
 	}
 }
 
-func TestRunStepMissingWorkingDirectoryFailsClearly(t *testing.T) {
-	workspace := t.TempDir()
-	workflowPath := ".github/workflows/test.yml"
-	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Shell: "sh", Command: "true", WorkingDirectory: "missing"}})
-	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `working directory "missing" does not exist`) {
-		t.Fatalf("RunJob() error = %v, want missing working directory diagnostic", err)
+func TestShellStepsMissingWorkingDirectoryFailClearly(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		steps []plan.Step
+		setup func(*testing.T, string)
+	}{
+		{
+			name:  "workflow",
+			steps: []plan.Step{{ID: "run", Kind: "run", Shell: "sh", Command: "true", WorkingDirectory: "missing"}},
+		},
+		{
+			name:  "composite",
+			steps: []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}},
+			setup: func(t *testing.T, workspace string) {
+				t.Helper()
+				writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "name: composite\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      working-directory: missing\n      run: true\n")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+			if test.setup != nil {
+				test.setup(t, workspace)
+			}
+			job := runtimePlan(t, workspace, workflowPath, test.steps)
+			if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `working directory "missing" does not exist`) {
+				t.Fatalf("RunJob() error = %v, want missing working directory diagnostic", err)
+			}
+		})
 	}
 }
 
