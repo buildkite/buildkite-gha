@@ -8,13 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
-	"time"
 
+	"github.com/buildkite/buildkite-gha/internal/agentapi"
 	"github.com/buildkite/buildkite-gha/internal/plan"
-	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const githubTokenResponseLimit = 64 << 10
@@ -54,40 +52,22 @@ type AgentGitHubTokens struct {
 	actionSourceURL    string
 	workflowURL        string
 	repositorySettings string
-	jobToken           string
-	userAgent          string
-	client             *http.Client
+	agent              *agentapi.Client
 }
 
 func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, error) {
-	actionSourceURL, err := agentGitHubTokenURL(config.Endpoint, config.JobID, "github_action_source_access_token")
+	agent, err := agentapi.New(agentapi.Config{
+		Endpoint: config.Endpoint, JobID: config.JobID, JobToken: config.JobToken,
+		ClientVersion: config.ClientVersion, HTTPClient: config.Client,
+	}, "GitHub token")
 	if err != nil {
 		return nil, err
-	}
-	workflowURL, err := agentGitHubTokenURL(config.Endpoint, config.JobID, "github_workflow_access_token")
-	if err != nil {
-		return nil, err
-	}
-	if config.JobToken == "" || strings.ContainsAny(config.JobToken, "\r\n") {
-		return nil, fmt.Errorf("GitHub token Agent job token is required")
-	}
-	client := config.Client
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
-	}
-	bounded := *client
-	bounded.Jar = nil
-	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	if bounded.Timeout == 0 {
-		bounded.Timeout = 15 * time.Second
 	}
 	return &AgentGitHubTokens{
-		actionSourceURL:    actionSourceURL,
-		workflowURL:        workflowURL,
+		actionSourceURL:    agent.URL("github_action_source_access_token"),
+		workflowURL:        agent.URL("github_workflow_access_token"),
 		repositorySettings: pipelineRepositorySettingsURL(config.OrganizationSlug, config.PipelineSlug),
-		jobToken:           config.JobToken,
-		userAgent:          useragent.FromVersion(config.ClientVersion),
-		client:             &bounded,
+		agent:              agent,
 	}, nil
 }
 
@@ -134,11 +114,8 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workf
 	if err != nil {
 		return "", fmt.Errorf("create GitHub %s token request: %w", purpose, err)
 	}
-	request.Header.Set("Authorization", "Token "+c.jobToken)
-	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", c.userAgent)
-	response, err := c.client.Do(request)
+	response, err := c.agent.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("request GitHub %s token: %w", purpose, err)
 	}
@@ -169,19 +146,6 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workf
 		return "", fmt.Errorf("GitHub %s token response contains an invalid token", purpose)
 	}
 	return decoded.Token, nil
-}
-
-func agentGitHubTokenURL(endpoint, jobID, endpointName string) (string, error) {
-	if !validBuildkiteJobID(jobID) {
-		return "", fmt.Errorf("GitHub token Agent job ID is required")
-	}
-	u, err := url.Parse(endpoint)
-	if err != nil || !validCredentialServiceURL(u) {
-		return "", fmt.Errorf("safe GitHub token Agent endpoint using HTTPS or loopback HTTP is required")
-	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/" + endpointName
-	u.RawPath = ""
-	return u.String(), nil
 }
 
 func pipelineRepositorySettingsURL(organization, pipeline string) string {

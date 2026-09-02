@@ -8,11 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
-	"time"
 
-	"github.com/buildkite/buildkite-gha/internal/useragent"
+	"github.com/buildkite/buildkite-gha/internal/agentapi"
 )
 
 const runnerResolutionResponseLimit = 64 << 10
@@ -46,32 +44,19 @@ type AgentRunnerResolverConfig struct {
 
 type AgentRunnerResolver struct {
 	resolveURL string
-	jobToken   string
-	userAgent  string
-	client     *http.Client
+	agent      *agentapi.Client
 }
 
 func NewAgentRunnerResolver(config AgentRunnerResolverConfig) (*AgentRunnerResolver, error) {
-	resolveURL, err := agentRunnerResolutionURL(config.Endpoint, config.JobID)
+	agent, err := agentapi.New(agentapi.Config{
+		Endpoint: config.Endpoint, JobID: config.JobID, JobToken: config.JobToken,
+		ClientVersion: config.ClientVersion, HTTPClient: config.Client,
+	}, "runner resolution")
 	if err != nil {
 		return nil, err
 	}
-	if config.JobToken == "" || strings.ContainsAny(config.JobToken, "\r\n") {
-		return nil, fmt.Errorf("runner resolution Agent job token is required")
-	}
-	client := config.Client
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
-	}
-	bounded := *client
-	bounded.Jar = nil
-	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	if bounded.Timeout == 0 {
-		bounded.Timeout = 15 * time.Second
-	}
 	return &AgentRunnerResolver{
-		resolveURL: resolveURL, jobToken: config.JobToken,
-		userAgent: useragent.FromVersion(config.ClientVersion), client: &bounded,
+		resolveURL: agent.URL("github-actions/runners"), agent: agent,
 	}, nil
 }
 
@@ -118,11 +103,8 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 	if err != nil {
 		return nil, fmt.Errorf("create runner resolution request: %w", err)
 	}
-	request.Header.Set("Authorization", "Token "+c.jobToken)
-	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", c.userAgent)
-	response, err := c.client.Do(request)
+	response, err := c.agent.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("request runner resolution: %w", err)
 	}
@@ -189,17 +171,4 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 		}
 	}
 	return suggestions, nil
-}
-
-func agentRunnerResolutionURL(endpoint, jobID string) (string, error) {
-	if !validBuildkiteJobID(jobID) {
-		return "", fmt.Errorf("runner resolution Agent job ID is required")
-	}
-	u, err := url.Parse(endpoint)
-	if err != nil || !validCredentialServiceURL(u) {
-		return "", fmt.Errorf("safe runner resolution Agent endpoint using HTTPS or loopback HTTP is required")
-	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/github-actions/runners"
-	u.RawPath = ""
-	return u.String(), nil
 }

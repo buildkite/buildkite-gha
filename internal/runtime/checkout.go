@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
+	"github.com/buildkite/buildkite-gha/internal/agentapi"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/program"
 )
@@ -37,7 +38,7 @@ func resolveAgentRepositoryCredentialsBeforeWorkflow(credentials *AgentRepositor
 	if credentials == nil {
 		return nil, nil
 	}
-	if !validBuildkiteJobID(credentials.JobID) {
+	if !agentapi.ValidJobID(credentials.JobID) {
 		return nil, fmt.Errorf("repository-provider credentials require the current Buildkite job ID")
 	}
 	if credentials.JobToken == "" || strings.ContainsAny(credentials.JobToken, "\r\n") {
