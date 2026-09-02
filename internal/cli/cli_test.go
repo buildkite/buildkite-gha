@@ -22,12 +22,12 @@ import (
 
 // Stable stage IDs asserted throughout the report expectations below.
 const (
-	stageWorkflowParsing = string(compiler.StageWorkflowParsing)
-	stageEventValidation = string(compiler.StageEventValidation)
-	stageGraph           = string(compiler.StageGraph)
-	stageMatrix          = string(compiler.StageMatrix)
-	stageExpressions     = string(compiler.StageExpressions)
-	stageResolution      = string(compiler.StageResolution)
+	stageWorkflowParsing = compiler.StageWorkflowParsing
+	stageEventValidation = compiler.StageEventValidation
+	stageGraph           = compiler.StageGraph
+	stageMatrix          = compiler.StageMatrix
+	stageExpressions     = compiler.StageExpressions
+	stageResolution      = compiler.StageResolution
 )
 
 func TestRunValidateAndCompile(t *testing.T) {
@@ -76,7 +76,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 				}
 				pipelineFailed := false
 				for _, stage := range report.Stages {
-					pipelineFailed = pipelineFailed || stage.ID == string(compiler.StagePipeline) && stage.Result == compatibility.Failed
+					pipelineFailed = pipelineFailed || stage.ID == compiler.StagePipeline && stage.Result == compatibility.Failed
 				}
 				var failures []compatibility.Diagnostic
 				for _, diagnostic := range report.Diagnostics {
@@ -84,7 +84,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 						failures = append(failures, diagnostic)
 					}
 				}
-				if report.Result != "incompatible" || !pipelineFailed || len(failures) != 1 || failures[0].Stage != string(compiler.StagePipeline) || !strings.Contains(failures[0].Message+failures[0].Detail, test.want) {
+				if report.Result != "incompatible" || !pipelineFailed || len(failures) != 1 || failures[0].Stage != compiler.StagePipeline || !strings.Contains(failures[0].Message+failures[0].Detail, test.want) {
 					t.Fatalf("report = %#v, want trigger failure containing %q", report, test.want)
 				}
 			})
@@ -939,7 +939,7 @@ jobs:
 	if report.Status != compatibility.Failed || len(report.Stages) != 10 || len(report.Diagnostics) < 3 {
 		t.Fatalf("processing report = %#v", report)
 	}
-	stageResults := map[string]string{}
+	stageResults := map[compiler.ProcessingStage]string{}
 	for _, stage := range report.Stages {
 		stageResults[stage.ID] = stage.Result
 	}
@@ -973,7 +973,7 @@ func TestProcessingReportStageAttributionDoesNotDependOnWorkflowPath(t *testing.
 			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 				t.Fatal(err)
 			}
-			results := map[string]string{}
+			results := map[compiler.ProcessingStage]string{}
 			for _, stage := range report.Stages {
 				results[stage.ID] = stage.Result
 			}
@@ -1002,7 +1002,7 @@ func TestCommandsEmitVersionedReportWhenEventInputCannotBeRead(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		stages := map[string]string{}
+		stages := map[compiler.ProcessingStage]string{}
 		for _, stage := range report.Stages {
 			stages[stage.ID] = stage.Result
 		}
@@ -1060,7 +1060,7 @@ jobs:
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	stages := map[string]string{}
+	stages := map[compiler.ProcessingStage]string{}
 	for _, stage := range report.Stages {
 		stages[stage.ID] = stage.Result
 	}
@@ -1925,7 +1925,7 @@ func TestAnnotationCodeEscapesHTML(t *testing.T) {
 func TestProcessingAnnotationPresentsActionFailureAsAConciseCard(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "hosted")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
-		Level: "error", Code: "E_ACTION_UNSUPPORTED", Stage: string(compiler.StageResolution),
+		Level: "error", Code: "E_ACTION_UNSUPPORTED", Stage: compiler.StageResolution,
 		Message: `Action "actions/setup-java@v4" is unsupported: action metadata uses unsupported field "deprecationMessage"`,
 		Job:     "test", Instance: "gha-test-a1b2", Action: "actions/setup-java@v4", Step: 2,
 	})
@@ -1996,7 +1996,7 @@ func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testin
 	report := compatibility.NewProcessingReport("ci.yml", "hosted")
 	for _, instance := range []string{"gha-test-a", "gha-test-b"} {
 		report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
-			Level: "error", Code: "E_PROFILE", Stage: string(compiler.StageAdmission),
+			Level: "error", Code: "E_PROFILE", Stage: compiler.StageAdmission,
 			Message: message, Detail: detail, Job: "test", Instance: instance,
 		})
 	}

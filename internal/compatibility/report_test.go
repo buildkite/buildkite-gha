@@ -10,11 +10,21 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	report := NewProcessingReport("ci.yml", "hosted")
+	definitions := workflowprocessing.StageDefinitions()
+	if len(report.Stages) != len(definitions) {
+		t.Fatalf("report has %d stages, want %d", len(report.Stages), len(definitions))
+	}
+	for i, definition := range definitions {
+		if report.Stages[i].ID != definition.ID || report.Stages[i].Name != definition.Name {
+			t.Fatalf("stage %d = %#v, want %#v", i, report.Stages[i], definition)
+		}
+	}
 	report.LogicalJobs = 1
 	report.Instances = 1
 	report.Compile.Result = "incompatible"
@@ -43,7 +53,7 @@ func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Schema != ProcessingSchema || len(decoded.Stages) != 10 || decoded.Status != Failed || decoded.Diagnostics[0].Detail != "unsupported runtime node12" {
+	if decoded.Schema != ProcessingSchema || len(decoded.Stages) != len(definitions) || decoded.Status != Failed || decoded.Diagnostics[0].Detail != "unsupported runtime node12" {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
 	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v2.schema.json"))
@@ -297,7 +307,7 @@ func (*nestedBlockerError) CompatibilityBlocker() (string, string) {
 }
 
 func TestDiagnosticPreservesExplicitWorkflowRootActionBlocker(t *testing.T) {
-	diagnostic := diagnosticFromError("ci.yml", stageResolution, compiler.CodeActionResolution, "action-resolution", &compiler.ProcessingFinding{
+	diagnostic := diagnosticFromError("ci.yml", workflowprocessing.StageResolution, compiler.CodeActionResolution, "action-resolution", &compiler.ProcessingFinding{
 		Stage: compiler.StageResolution, Code: compiler.CodeActionResolution, Category: "action-resolution",
 		Blocker: "action_ref", BlockerDetail: "actions/checkout@v99",
 		Action: "./downloaded-child", Err: &nestedBlockerError{},
@@ -306,7 +316,7 @@ func TestDiagnosticPreservesExplicitWorkflowRootActionBlocker(t *testing.T) {
 		t.Fatalf("diagnostic blocker = %q / %q", diagnostic.Blocker, diagnostic.BlockerDetail)
 	}
 
-	diagnostic = diagnosticFromError("ci.yml", stageExpressions, compiler.CodeExpressionInvalid, "compatibility", &compiler.ProcessingFinding{
+	diagnostic = diagnosticFromError("ci.yml", workflowprocessing.StageExpressions, compiler.CodeExpressionInvalid, "compatibility", &compiler.ProcessingFinding{
 		Stage: compiler.StageExpressions, Code: compiler.CodeExpressionInvalid, Category: "compatibility",
 		Blocker: "runner_label", BlockerDetail: "windows-latest", Err: fmt.Errorf("unsupported runner"),
 	})

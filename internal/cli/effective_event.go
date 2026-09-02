@@ -14,6 +14,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
 const maxWebhookMetadataBytes = 25 << 20
@@ -173,13 +174,13 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 			message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. Ensure the linked webhook and local checkout contain matching %s history, or remove the path filters.", upperFirst(pathFilters.Event), history)
 		}
 		err = &compiler.ProcessingFinding{
-			Stage: compiler.StagePipeline, Code: compiler.CodePipelineGeneration, Category: "compatibility",
+			Stage: workflowprocessing.StagePipeline, Code: workflowprocessing.CodePipelineGeneration, Category: "compatibility",
 			Path: input.Path, Line: 1, Column: 1,
 			Message: message,
 			Detail:  pathFilters.Error(), Err: err,
 		}
 	}
-	report.AddFailure(input.Path, string(compiler.StagePipeline), compiler.CodePipelineGeneration, "compatibility", err)
+	report.AddFailure(input.Path, workflowprocessing.StagePipeline, workflowprocessing.CodePipelineGeneration, "compatibility", err)
 	report.Result = "incompatible"
 	return report
 }
@@ -188,8 +189,8 @@ func triggerProcessingReport(path string, source []byte) compatibility.Processin
 	parsed, _ := compiler.ParseWorkflow(path, source)
 	report := compatibility.NewProcessingReport(path, hostedProfile)
 	report.LogicalJobs = parsed.LogicalJobs
-	report.SetStage(string(compiler.StageWorkflowParsing), compatibility.Passed)
-	report.SetStage(string(compiler.StageEventValidation), compatibility.Passed)
+	report.SetStage(workflowprocessing.StageWorkflowParsing, compatibility.Passed)
+	report.SetStage(workflowprocessing.StageEventValidation, compatibility.Passed)
 	report.ApplyWarnings(path, parsed.Warnings)
 	for _, job := range parsed.ParsedJobs {
 		report.Jobs = append(report.Jobs, compatibility.JobResult{

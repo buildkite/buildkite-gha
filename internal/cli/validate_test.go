@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
+	"github.com/buildkite/buildkite-gha/internal/compiler"
 )
 
 func TestValidateReportsIndependentWorkflowAndEventSyntaxFailures(t *testing.T) {
@@ -29,7 +30,7 @@ func TestValidateReportsIndependentWorkflowAndEventSyntaxFailures(t *testing.T) 
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	results := map[string]string{}
+	results := map[compiler.ProcessingStage]string{}
 	for _, stage := range report.Stages {
 		results[stage.ID] = stage.Result
 	}
@@ -49,7 +50,7 @@ func TestValidateReportsIndependentWorkflowAndEventSyntaxFailures(t *testing.T) 
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	results = map[string]string{}
+	results = map[compiler.ProcessingStage]string{}
 	for _, stage := range report.Stages {
 		results[stage.ID] = stage.Result
 	}

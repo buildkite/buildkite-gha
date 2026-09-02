@@ -12,6 +12,7 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/transport"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
 func compile(args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
@@ -73,7 +74,7 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 		warnings = bundle.IR.Warnings
 	}
 	if err != nil {
-		processingReport.AddFailure(workflowPath, string(compiler.StagePlans), compiler.CodePlanConstruction, "compatibility", err)
+		processingReport.AddFailure(workflowPath, workflowprocessing.StagePlans, workflowprocessing.CodePlanConstruction, "compatibility", err)
 		processingReport.Result = "incompatible"
 		_ = out.write(ctx, processingReport)
 		return 1

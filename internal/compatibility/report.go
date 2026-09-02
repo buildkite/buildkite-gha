@@ -7,6 +7,8 @@ import (
 	"io"
 	"sort"
 	"strings"
+
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
 // ProcessingSchema is the versioned, stage-oriented report shared by all
@@ -28,10 +30,10 @@ type SourceLocation struct {
 
 // Diagnostic is one actionable compatibility finding.
 type Diagnostic struct {
-	Level    string `json:"level"`
-	Code     string `json:"code"`
-	Category string `json:"category,omitempty"`
-	Stage    string `json:"stage,omitempty"`
+	Level    string                   `json:"level"`
+	Code     string                   `json:"code"`
+	Category string                   `json:"category,omitempty"`
+	Stage    workflowprocessing.Stage `json:"stage,omitempty"`
 	// Blocker attribution is forwarded to telemetry but excluded from the
 	// versioned processing-report schema.
 	Blocker       string          `json:"-"`
@@ -47,9 +49,9 @@ type Diagnostic struct {
 
 // ProcessingStage is one required workflow-processing boundary.
 type ProcessingStage struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Result string `json:"result"`
+	ID     workflowprocessing.Stage `json:"id"`
+	Name   string                   `json:"name"`
+	Result string                   `json:"result"`
 }
 
 // JobResult retains successfully discovered logical jobs and matrix instances.
@@ -87,24 +89,12 @@ type ProcessingReport struct {
 	Diagnostics []Diagnostic      `json:"diagnostics"`
 }
 
-var processingStages = []ProcessingStage{
-	{ID: "workflow-parsing", Name: "Workflow parsing"},
-	{ID: "event-validation", Name: "Event validation"},
-	{ID: "static-graph-construction", Name: "Static graph construction"},
-	{ID: "matrix-expansion", Name: "Matrix expansion"},
-	{ID: "expression-validation", Name: "Expression validation"},
-	{ID: "action-discovery", Name: "Local and public action discovery"},
-	{ID: "action-resolution", Name: "Immutable action resolution"},
-	{ID: "job-plan-construction", Name: "Job-plan construction"},
-	{ID: "hosted-profile-admission", Name: "Hosted-profile admission"},
-	{ID: "pipeline-generation", Name: "Pipeline generation"},
-}
-
 // NewProcessingReport returns a deterministic report with every stage present.
 func NewProcessingReport(workflow, profile string) ProcessingReport {
-	stages := append([]ProcessingStage(nil), processingStages...)
-	for i := range stages {
-		stages[i].Result = NotEvaluated
+	definitions := workflowprocessing.StageDefinitions()
+	stages := make([]ProcessingStage, len(definitions))
+	for i, definition := range definitions {
+		stages[i] = ProcessingStage{ID: definition.ID, Name: definition.Name, Result: NotEvaluated}
 	}
 	return ProcessingReport{
 		Schema: ProcessingSchema, Workflow: workflow, Profile: profile,
@@ -115,7 +105,7 @@ func NewProcessingReport(workflow, profile string) ProcessingReport {
 }
 
 // SetStage records a stage outcome by stable ID.
-func (r *ProcessingReport) SetStage(id, result string) {
+func (r *ProcessingReport) SetStage(id workflowprocessing.Stage, result string) {
 	for i := range r.Stages {
 		if r.Stages[i].ID == id {
 			r.Stages[i].Result = result
@@ -160,8 +150,9 @@ func (r *ProcessingReport) Finalize() {
 		}
 		return r.Actions[i].Reference < r.Actions[j].Reference
 	})
-	stageOrder := make(map[string]int, len(processingStages))
-	for i, stage := range processingStages {
+	definitions := workflowprocessing.StageDefinitions()
+	stageOrder := make(map[workflowprocessing.Stage]int, len(definitions))
+	for i, stage := range definitions {
 		stageOrder[stage.ID] = i
 	}
 	sort.SliceStable(r.Diagnostics, func(i, j int) bool {
@@ -213,7 +204,7 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 	for _, diagnostic := range diagnostics {
 		key := diagnosticKey{
 			level: diagnostic.Level, code: diagnostic.Code, category: diagnostic.Category,
-			stage: diagnostic.Stage, blocker: diagnostic.Blocker, blockerDetail: diagnostic.BlockerDetail,
+			stage: string(diagnostic.Stage), blocker: diagnostic.Blocker, blockerDetail: diagnostic.BlockerDetail,
 			message: diagnostic.Message, detail: diagnostic.Detail, job: diagnostic.Job,
 			action: diagnostic.Action, step: diagnostic.Step,
 		}
@@ -327,7 +318,7 @@ func textDiagnosticMetadata(diagnostic Diagnostic) string {
 		fields = append(fields, "category="+diagnostic.Category)
 	}
 	if diagnostic.Stage != "" {
-		fields = append(fields, "stage="+diagnostic.Stage)
+		fields = append(fields, "stage="+string(diagnostic.Stage))
 	}
 	if diagnostic.Job != "" {
 		fields = append(fields, "job="+diagnostic.Job)
