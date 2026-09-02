@@ -1,2 +1,2 @@
-// Package telemetry emits bounded, best-effort product events without workflow content.
+// Package telemetry emits bounded, best-effort product events.
 package telemetry
