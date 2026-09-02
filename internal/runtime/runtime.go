@@ -652,7 +652,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	return w.writer.Write(p)
 }
 
-func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, workspace, node string, action javaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
+func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, workspace, node string, action javaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) (runErr error) {
 	env := mergeStringMaps(result.Env, action.Env, actionInputEnv(action.Inputs))
 	if path, ok := result.Env["PATH"]; ok {
 		env["PATH"] = path
@@ -685,11 +685,16 @@ func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandProce
 		cacheToken = cacheEnv["ACTIONS_RUNTIME_TOKEN"]
 	}
 	if r.idTokenService != nil && r.jobContainer == nil {
-		idTokenEnv, revoke, err := r.idTokenService.actionEnvironment(ctx, env)
+		idTokenEnv, finish, err := r.idTokenService.actionEnvironment(ctx, env)
 		if err != nil {
 			return fmt.Errorf("configure actions ID-token service: %w", err)
 		}
-		defer revoke()
+		defer func() {
+			failure := finish()
+			if runErr != nil {
+				runErr = errors.Join(runErr, failure)
+			}
+		}()
 		env = mergeStringMaps(env, idTokenEnv)
 	}
 	entrypoint := filepath.Join(action.Path, entry)

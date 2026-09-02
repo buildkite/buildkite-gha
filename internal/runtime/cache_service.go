@@ -82,7 +82,8 @@ func NewAgentCacheCredentials(config AgentCacheConfig) (*AgentCacheCredentials, 
 	}, nil
 }
 
-func (c *AgentCacheCredentials) Credentials(ctx context.Context) (CacheCredentials, error) {
+func (c *AgentCacheCredentials) Credentials(ctx context.Context) (credentials CacheCredentials, err error) {
+	defer func() { err = markJobSetupFailure(FailureClassCacheCredential, err) }()
 	if c == nil {
 		return CacheCredentials{}, fmt.Errorf("cache credentials are not configured")
 	}
@@ -148,18 +149,20 @@ func validCredentialServiceURL(u *url.URL) bool {
 }
 
 func cacheCredentialStatusError(status int) error {
+	message := ""
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("cache credential request was denied")
+		message = "cache credential request was denied"
 	case http.StatusNotFound:
-		return fmt.Errorf("cache credential service is not enabled for this organization")
+		message = "cache credential service is not enabled for this organization"
 	case http.StatusUnprocessableEntity:
-		return fmt.Errorf("cache credential request rejected the current build provenance")
+		message = "cache credential request rejected the current build provenance"
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("cache credential service is rate limited")
+		message = "cache credential service is rate limited"
 	default:
-		return fmt.Errorf("cache credential service returned HTTP %d", status)
+		message = fmt.Sprintf("cache credential service returned HTTP %d", status)
 	}
+	return newJobSetupHTTPFailure(FailureClassCacheCredential, status, message)
 }
 
 func isCacheServiceEnvironment(name string) bool {
@@ -225,7 +228,7 @@ func (r Runner) cacheActionEnvironment(ctx context.Context, processor *commandPr
 	}
 	credentials, err := r.Cache.Credentials(ctx)
 	if err != nil {
-		return nil, err
+		return nil, markJobSetupFailure(FailureClassCacheCredential, err)
 	}
 	resultsURL, err := normalizeCacheResultsURL(credentials.ResultsURL)
 	if err != nil {

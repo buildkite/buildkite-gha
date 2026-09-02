@@ -69,7 +69,8 @@ func NewAgentOIDCTokens(config AgentOIDCTokenConfig) (*AgentOIDCTokens, error) {
 	}, nil
 }
 
-func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (string, error) {
+func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (token string, err error) {
+	defer func() { err = markJobSetupFailure(FailureClassOIDCToken, err) }()
 	if c == nil {
 		return "", fmt.Errorf("OIDC token provider is not configured")
 	}
@@ -123,13 +124,6 @@ func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (strin
 	return decoded.Token, nil
 }
 
-type oidcTokenHTTPError struct {
-	status  int
-	message string
-}
-
-func (e *oidcTokenHTTPError) Error() string { return e.message }
-
 func oidcTokenStatusError(status int) error {
 	message := ""
 	switch status {
@@ -144,7 +138,7 @@ func oidcTokenStatusError(status int) error {
 	default:
 		message = fmt.Sprintf("OIDC token service returned HTTP %d", status)
 	}
-	return &oidcTokenHTTPError{status: status, message: message}
+	return newJobSetupHTTPFailure(FailureClassOIDCToken, status, message)
 }
 
 func isIDTokenEnvironment(name string) bool {
@@ -165,7 +159,26 @@ type idTokenService struct {
 	redactor   Redactor
 	processor  *commandProcessor
 	mu         sync.RWMutex
-	authHashes map[[sha256.Size]byte]struct{}
+	authHashes map[[sha256.Size]byte]*idTokenInvocation
+}
+
+type idTokenInvocation struct {
+	mu      sync.Mutex
+	failure error
+}
+
+func (i *idTokenInvocation) recordFailure(err error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.failure == nil {
+		i.failure = err
+	}
+}
+
+func (i *idTokenInvocation) failureError() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.failure
 }
 
 func startIDTokenService(ctx context.Context, provider OIDCTokenProvider, redactor Redactor, processor *commandProcessor) (*idTokenService, error) {
@@ -173,7 +186,7 @@ func startIDTokenService(ctx context.Context, provider OIDCTokenProvider, redact
 	if err != nil {
 		return nil, fmt.Errorf("start actions ID-token service: %w", err)
 	}
-	service := &idTokenService{listener: listener, provider: provider, redactor: redactor, processor: processor, authHashes: map[[sha256.Size]byte]struct{}{}}
+	service := &idTokenService{listener: listener, provider: provider, redactor: redactor, processor: processor, authHashes: map[[sha256.Size]byte]*idTokenInvocation{}}
 	service.server = &http.Server{
 		Handler:           service,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -189,7 +202,7 @@ func (s *idTokenService) Close(parent context.Context) error {
 	return s.server.Shutdown(ctx)
 }
 
-func (s *idTokenService) actionEnvironment(ctx context.Context, baseEnv map[string]string) (map[string]string, func(), error) {
+func (s *idTokenService) actionEnvironment(ctx context.Context, baseEnv map[string]string) (map[string]string, func() error, error) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return nil, nil, fmt.Errorf("create actions ID-token request credential: %w", err)
@@ -201,12 +214,14 @@ func (s *idTokenService) actionEnvironment(ctx context.Context, baseEnv map[stri
 		return nil, nil, s.processor.scrubError(err)
 	}
 	s.mu.Lock()
-	s.authHashes[hash] = struct{}{}
+	invocation := &idTokenInvocation{}
+	s.authHashes[hash] = invocation
 	s.mu.Unlock()
-	revoke := func() {
+	revoke := func() error {
 		s.mu.Lock()
 		delete(s.authHashes, hash)
 		s.mu.Unlock()
+		return invocation.failureError()
 	}
 	env := map[string]string{
 		"ACTIONS_ID_TOKEN_REQUEST_URL":   "http://" + s.listener.Addr().String() + "/idtoken?api-version=2",
@@ -214,7 +229,7 @@ func (s *idTokenService) actionEnvironment(ctx context.Context, baseEnv map[stri
 	}
 	host, _, err := net.SplitHostPort(s.listener.Addr().String())
 	if err != nil {
-		revoke()
+		_ = revoke()
 		return nil, nil, fmt.Errorf("parse actions ID-token listener: %w", err)
 	}
 	for _, name := range []string{"NO_PROXY", "no_proxy"} {
@@ -235,8 +250,13 @@ func (s *idTokenService) ServeHTTP(w http.ResponseWriter, request *http.Request)
 	presentedHash := sha256.Sum256([]byte(presented))
 	s.mu.RLock()
 	matched := 0
-	for authHash := range s.authHashes {
-		matched |= subtle.ConstantTimeCompare(presentedHash[:], authHash[:])
+	var invocation *idTokenInvocation
+	for authHash, candidate := range s.authHashes {
+		match := subtle.ConstantTimeCompare(presentedHash[:], authHash[:])
+		matched |= match
+		if match == 1 {
+			invocation = candidate
+		}
 	}
 	s.mu.RUnlock()
 	if presented == "" || matched != 1 {
@@ -245,14 +265,15 @@ func (s *idTokenService) ServeHTTP(w http.ResponseWriter, request *http.Request)
 	}
 	token, err := s.provider.OIDCToken(request.Context(), request.URL.Query().Get("audience"))
 	if err != nil {
+		err = markJobSetupFailure(FailureClassOIDCToken, err)
 		status := http.StatusBadGateway
-		var statusErr *oidcTokenHTTPError
-		if errors.As(err, &statusErr) {
-			switch statusErr.status {
+		if upstreamStatus, ok := AgentAPIHTTPStatus(err); ok {
+			switch upstreamStatus {
 			case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
-				status = statusErr.status
+				status = upstreamStatus
 			}
 		}
+		invocation.recordFailure(err)
 		http.Error(w, "could not mint actions ID token", status)
 		return
 	}
