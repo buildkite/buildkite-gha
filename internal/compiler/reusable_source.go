@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
@@ -163,7 +164,7 @@ func (resolver *reusableResolver) loadRemoteReusableWorkflow(ctx context.Context
 	}
 	resolver.materialized = append(resolver.materialized, materialized)
 	commit := resolved.Commit
-	if len(commit) != 40 || strings.Trim(commit, "0123456789abcdef") != "" {
+	if !git.ValidObjectID(commit) {
 		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve public reusable workflow %q: source returned a non-immutable commit", uses)
 	}
 	if len(materialized.SourceDigest) != 71 || !strings.HasPrefix(materialized.SourceDigest, "sha256:") || strings.Trim(materialized.SourceDigest[7:], "0123456789abcdef") != "" {

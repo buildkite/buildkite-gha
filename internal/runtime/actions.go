@@ -14,6 +14,7 @@ import (
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
@@ -289,7 +290,7 @@ func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLock
 	}
 	// Parsing also enforces commit-like reference syntax only structurally, so
 	// insist on a lower-case full SHA independently of RequestedRef.
-	if len(lock.Commit) != 40 || strings.Trim(lock.Commit, "0123456789abcdef") != "" {
+	if !git.ValidObjectID(lock.Commit) {
 		return metadata.Metadata{}, fmt.Errorf("GitHub action commit is not an exact lower-case SHA")
 	}
 	resolved := source.Resolved{Reference: ref, Commit: lock.Commit, SourceDigest: lock.SourceDigest}
