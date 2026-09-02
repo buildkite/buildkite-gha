@@ -137,28 +137,9 @@ func ValidateEvaluatedUploadArtifactInputs(commit string, inputs map[string]stri
 }
 
 func validateUploadArtifactInputs(commit string, inputs map[string]string, evaluated bool) error {
-	if err := validateUploadArtifactCommit(commit); err != nil {
+	generation, err := validateUploadArtifactInputNames(commit, inputs)
+	if err != nil {
 		return err
-	}
-	contractCommit := uploadArtifactContractCommit(commit)
-	generation := uploadArtifactGeneration(contractCommit)
-	allowed := map[string]bool{"name": true, "path": true, "if-no-files-found": true, "include-hidden-files": true, "compression-level": true, "overwrite": true, "archive": true, "retention-days": true}
-	seen := map[string]bool{}
-	for _, name := range sortedNames(inputs) {
-		lower := strings.ToLower(name)
-		if seen[lower] {
-			return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
-		}
-		seen[lower] = true
-		if !allowed[lower] {
-			return fmt.Errorf("unknown input %q is unsupported by the bounded upload-artifact adapter", name)
-		}
-		if lower == "archive" && contractCommit != UploadArtifactV7Commit {
-			return fmt.Errorf("input %q exists only in actions/upload-artifact v7", name)
-		}
-		if uploadArtifactInputIntroduced[lower] > generation {
-			return fmt.Errorf("explicit input %q is unsupported by this actions/upload-artifact release", name)
-		}
 	}
 	pathValue, ok := inputFold(inputs, "path")
 	if !ok || strings.TrimSpace(pathValue) == "" {
@@ -179,6 +160,10 @@ func validateUploadArtifactInputs(commit string, inputs map[string]string, evalu
 			return fmt.Errorf("required input %q is missing", "name")
 		}
 	}
+	return validateUploadArtifactValues(inputs, evaluated)
+}
+
+func validateUploadArtifactValues(inputs map[string]string, evaluated bool) error {
 	if value, ok := inputFold(inputs, "name"); ok && (evaluated || !uploadArtifactExpression(value)) {
 		if err := ValidateUploadArtifactName(strings.TrimSpace(value)); err != nil {
 			return err
@@ -209,6 +194,33 @@ func validateUploadArtifactInputs(commit string, inputs map[string]string, evalu
 		return fmt.Errorf("input %q may only be omitted or true; raw uploads are unsupported", "archive")
 	}
 	return nil
+}
+
+func validateUploadArtifactInputNames(commit string, inputs map[string]string) (int, error) {
+	if err := validateUploadArtifactCommit(commit); err != nil {
+		return 0, err
+	}
+	contractCommit := uploadArtifactContractCommit(commit)
+	generation := uploadArtifactGeneration(contractCommit)
+	allowed := map[string]bool{"name": true, "path": true, "if-no-files-found": true, "include-hidden-files": true, "compression-level": true, "overwrite": true, "archive": true, "retention-days": true}
+	seen := map[string]bool{}
+	for _, name := range sortedNames(inputs) {
+		lower := strings.ToLower(name)
+		if seen[lower] {
+			return 0, fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
+		}
+		seen[lower] = true
+		if !allowed[lower] {
+			return 0, fmt.Errorf("unknown input %q is unsupported by the bounded upload-artifact adapter", name)
+		}
+		if lower == "archive" && contractCommit != UploadArtifactV7Commit {
+			return 0, fmt.Errorf("input %q exists only in actions/upload-artifact v7", name)
+		}
+		if uploadArtifactInputIntroduced[lower] > generation {
+			return 0, fmt.Errorf("explicit input %q is unsupported by this actions/upload-artifact release", name)
+		}
+	}
+	return generation, nil
 }
 
 func uploadArtifactExpression(value string) bool {
