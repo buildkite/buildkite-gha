@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -20,6 +21,7 @@ const githubTokenResponseLimit = 64 << 10
 var githubInstallationTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 var retryAfterSecondsPattern = regexp.MustCompile(`^[0-9]{1,10}$`)
 var buildkiteSlugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+var buildkiteBuildPathPattern = regexp.MustCompile(`^/[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*/builds/[1-9][0-9]*/?$`)
 
 // WorkflowTokenProvider mints one repository-scoped credential with the exact
 // plan-declared permissions accepted by the Buildkite backend.
@@ -42,6 +44,7 @@ type AgentGitHubTokenConfig struct {
 	JobToken         string
 	OrganizationSlug string
 	PipelineSlug     string
+	BuildURL         string
 	ClientVersion    string
 	Client           *http.Client
 }
@@ -52,6 +55,7 @@ type AgentGitHubTokens struct {
 	actionSourceURL    string
 	workflowURL        string
 	repositorySettings string
+	buildURL           string
 	agent              *agentapi.Client
 }
 
@@ -67,11 +71,13 @@ func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, er
 		actionSourceURL:    agent.URL("github_action_source_access_token"),
 		workflowURL:        agent.URL("github_workflow_access_token"),
 		repositorySettings: pipelineRepositorySettingsURL(config.OrganizationSlug, config.PipelineSlug),
+		buildURL:           safeBuildkiteBuildURL(config.BuildURL),
 		agent:              agent,
 	}, nil
 }
 
-func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository, workflow string, permissions map[string]string) (string, error) {
+func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository, workflow string, permissions map[string]string) (token string, err error) {
+	defer func() { err = markJobSetupFailure(FailureClassWorkflowToken, err) }()
 	if c == nil {
 		return "", fmt.Errorf("GitHub workflow token provider is not configured")
 	}
@@ -122,7 +128,7 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workf
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, githubTokenResponseLimit))
-		return "", githubTokenStatusError(response.StatusCode, response.Header.Get("Retry-After"), purpose, c.repositorySettings)
+		return "", githubTokenStatusError(response.StatusCode, response.Header.Get("Retry-After"), purpose, c.repositorySettings, c.buildURL)
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, githubTokenResponseLimit+1))
 	if err != nil {
@@ -155,12 +161,30 @@ func pipelineRepositorySettingsURL(organization, pipeline string) string {
 	return "https://buildkite.com/" + organization + "/" + pipeline + "/settings/repository"
 }
 
-func githubTokenStatusError(status int, retryAfter, purpose, repositorySettings string) error {
+func safeBuildkiteBuildURL(value string) string {
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme != "https" || u.Host != "buildkite.com" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || !buildkiteBuildPathPattern.MatchString(u.Path) {
+		return ""
+	}
+	return u.String()
+}
+
+func githubTokenStatusError(status int, retryAfter, purpose, repositorySettings, buildURL string) error {
 	credential := "GitHub " + purpose + " token"
 	switch status {
 	case http.StatusBadRequest:
+		if purpose == "workflow" {
+			message := "GitHub workflow token request was rejected. Check the workflow's top-level permissions and confirm that the Buildkite GitHub App can access the event repository. If both are correct, contact Buildkite support and include this build's URL"
+			if buildURL != "" {
+				message += ": " + buildURL
+			}
+			return newJobSetupHTTPFailure(FailureClassWorkflowToken, status, message)
+		}
 		return fmt.Errorf("%s request was rejected", credential)
 	case http.StatusUnauthorized, http.StatusForbidden:
+		if purpose == "workflow" {
+			return newJobSetupHTTPFailure(FailureClassWorkflowToken, status, credential+" request was denied")
+		}
 		return fmt.Errorf("%s request was denied", credential)
 	case http.StatusNotFound:
 		if purpose == "workflow" {
@@ -168,16 +192,28 @@ func githubTokenStatusError(status int, retryAfter, purpose, repositorySettings 
 			if repositorySettings != "" {
 				message += ": " + repositorySettings
 			}
-			return errors.New(message)
+			return newJobSetupHTTPFailure(FailureClassWorkflowToken, status, message)
 		}
 		return fmt.Errorf("GitHub action source access tokens are not enabled for this organization")
 	case http.StatusServiceUnavailable:
 		retryAfter = strings.TrimSpace(retryAfter)
 		if retryAfterSecondsPattern.MatchString(retryAfter) {
-			return fmt.Errorf("%s service is temporarily unavailable; retry after %s seconds", credential, retryAfter)
+			message := fmt.Sprintf("%s service is temporarily unavailable; retry after %s seconds", credential, retryAfter)
+			if purpose == "workflow" {
+				return newJobSetupHTTPFailure(FailureClassWorkflowToken, status, message)
+			}
+			return errors.New(message)
 		}
-		return fmt.Errorf("%s service is temporarily unavailable", credential)
+		message := credential + " service is temporarily unavailable"
+		if purpose == "workflow" {
+			return newJobSetupHTTPFailure(FailureClassWorkflowToken, status, message)
+		}
+		return errors.New(message)
 	default:
-		return fmt.Errorf("%s service returned HTTP %d", credential, status)
+		message := fmt.Sprintf("%s service returned HTTP %d", credential, status)
+		if purpose == "workflow" {
+			return newJobSetupHTTPFailure(FailureClassWorkflowToken, status, message)
+		}
+		return errors.New(message)
 	}
 }

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -24,12 +25,20 @@ const (
 	// FailureClassIntegrity means a runtime integrity or cleanup verification
 	// failed.
 	FailureClassIntegrity FailureClass = "integrity"
+	// FailureClassWorkflowToken means the runtime could not acquire the job's
+	// GitHub workflow token.
+	FailureClassWorkflowToken FailureClass = "workflow_token"
+	// FailureClassOIDCToken means an action could not acquire an OIDC token.
+	FailureClassOIDCToken FailureClass = "oidc_token"
+	// FailureClassCacheCredential means the runtime could not acquire an
+	// action's cache credential.
+	FailureClassCacheCredential FailureClass = "cache_credential"
 )
 
 // ClassifyFailure reports the most specific class found in a RunJob error
-// chain. Unsupported features outrank integrity failures, which outrank step
-// process exits, so a compatibility signal is never hidden by an ordinary
-// workflow failure joined into the same error.
+// chain. Unsupported features and setup failures outrank integrity failures
+// and step process exits, so a specific runtime signal is never hidden by an
+// ordinary workflow failure joined into the same error.
 func ClassifyFailure(err error) FailureClass {
 	var unsupported *unsupportedFeatureError
 	if errors.As(err, &unsupported) {
@@ -42,6 +51,10 @@ func ClassifyFailure(err error) FailureClass {
 	if errors.As(err, &unsupportedRuntime) {
 		return FailureClassUnsupportedFeature
 	}
+	var setup *jobSetupFailure
+	if errors.As(err, &setup) {
+		return setup.class
+	}
 	if isHardJobFailure(err) {
 		return FailureClassIntegrity
 	}
@@ -50,6 +63,40 @@ func ClassifyFailure(err error) FailureClass {
 		return FailureClassStepProcessExit
 	}
 	return FailureClassUnknown
+}
+
+type jobSetupFailure struct {
+	class      FailureClass
+	httpStatus int
+	err        error
+}
+
+func (e *jobSetupFailure) Error() string { return e.err.Error() }
+func (e *jobSetupFailure) Unwrap() error { return e.err }
+
+func markJobSetupFailure(class FailureClass, err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var marked *jobSetupFailure
+	if errors.As(err, &marked) {
+		return err
+	}
+	return &jobSetupFailure{class: class, err: err}
+}
+
+func newJobSetupHTTPFailure(class FailureClass, status int, message string) error {
+	return &jobSetupFailure{class: class, httpStatus: status, err: errors.New(message)}
+}
+
+// AgentAPIHTTPStatus returns the upstream Agent API status retained by a
+// classified runtime setup failure.
+func AgentAPIHTTPStatus(err error) (int, bool) {
+	var setup *jobSetupFailure
+	if !errors.As(err, &setup) || setup.httpStatus == 0 {
+		return 0, false
+	}
+	return setup.httpStatus, true
 }
 
 type stepProcessExitError struct {

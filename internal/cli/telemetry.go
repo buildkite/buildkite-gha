@@ -62,6 +62,7 @@ type commandTelemetryDetails struct {
 	failureMessage string
 	blocker        string
 	blockerDetail  string
+	agentAPIStatus int
 	diagnostics    []telemetry.Diagnostic
 	errorOutput    boundedTailBuffer
 }
@@ -88,6 +89,12 @@ func (d *commandTelemetryDetails) setFailurePhase(phase telemetry.FailurePhase) 
 func (d *commandTelemetryDetails) setFailureCode(code telemetry.FailureCode) {
 	if d.failureCode == "" && code != "" {
 		d.failureCode = code
+	}
+}
+
+func (d *commandTelemetryDetails) setAgentAPIHTTPStatus(status int) {
+	if d.agentAPIStatus == 0 {
+		d.agentAPIStatus = status
 	}
 }
 
@@ -194,11 +201,15 @@ func (d *commandTelemetryDetails) forOutcome(outcome telemetry.Outcome) telemetr
 		FailurePhase: phase, FailureCode: code, Diagnostics: slices.Clone(d.diagnostics),
 		Blocker: d.blocker, BlockerDetail: d.blockerDetail,
 		ErrorMessage: errorMessage, ErrorMessageTruncated: errorMessageTruncated,
+		AgentAPIHTTPStatus: d.agentAPIStatus,
 	}
 }
 
 func (d *commandTelemetryDetails) telemetryDetails() telemetry.Details {
-	return telemetry.Details{FailurePhase: d.failurePhase, FailureCode: d.failureCode, Diagnostics: slices.Clone(d.diagnostics), Blocker: d.blocker, BlockerDetail: d.blockerDetail}
+	return telemetry.Details{
+		FailurePhase: d.failurePhase, FailureCode: d.failureCode, Diagnostics: slices.Clone(d.diagnostics),
+		Blocker: d.blocker, BlockerDetail: d.blockerDetail, AgentAPIHTTPStatus: d.agentAPIStatus,
+	}
 }
 
 func telemetrySeverity(level string) (telemetry.Severity, bool) {
