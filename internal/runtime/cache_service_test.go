@@ -159,6 +159,17 @@ func TestAgentCacheCredentialsRejectsRedirectsAndUntrustedResponses(t *testing.T
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), secret) {
 				t.Fatalf("Credentials() error = %v, want %q without response body", err, test.want)
 			}
+			if ClassifyFailure(err) != FailureClassCacheCredential {
+				t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassCacheCredential)
+			}
+			status, ok := AgentAPIHTTPStatus(err)
+			if test.status >= 200 && test.status < 300 {
+				if ok || status != 0 {
+					t.Fatalf("AgentAPIHTTPStatus() = %d, %t for HTTP %d", status, ok, test.status)
+				}
+			} else if !ok || status != test.status {
+				t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want %d, true", status, ok, test.status)
+			}
 		})
 	}
 
@@ -195,6 +206,10 @@ func TestAgentCacheCredentialsHonorsCancellation(t *testing.T) {
 	}
 	if _, err := provider.Credentials(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Credentials() error = %v, want cancellation", err)
+	} else if ClassifyFailure(err) != FailureClassUnknown {
+		t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassUnknown)
+	} else if status, ok := AgentAPIHTTPStatus(err); ok || status != 0 {
+		t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want 0, false", status, ok)
 	}
 }
 
@@ -681,6 +696,26 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("strict cache action executed or marker stat failed: %v", err)
+	}
+}
+
+func TestCacheActionPreservesCredentialFailure(t *testing.T) {
+	provider := cacheCredentialProviderFunc(func(context.Context) (CacheCredentials, error) {
+		return CacheCredentials{}, cacheCredentialStatusError(http.StatusUnprocessableEntity)
+	})
+	result := newResult()
+	err := newJobRun(Runner{Cache: provider, Redactor: &testRedactor{}}).runJavaScriptPhase(
+		t.Context(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), "node",
+		javaScriptAction{Name: "cache", Main: "main.js", Cache: true}, "main.js", nil, nil, &result,
+	)
+	if err == nil || !strings.Contains(err.Error(), "current build provenance") {
+		t.Fatalf("runJavaScriptPhase() error = %v", err)
+	}
+	if ClassifyFailure(err) != FailureClassCacheCredential {
+		t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassCacheCredential)
+	}
+	if status, ok := AgentAPIHTTPStatus(err); !ok || status != http.StatusUnprocessableEntity {
+		t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want %d, true", status, ok, http.StatusUnprocessableEntity)
 	}
 }
 

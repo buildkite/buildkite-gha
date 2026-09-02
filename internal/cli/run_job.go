@@ -185,6 +185,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			JobToken:         os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
 			OrganizationSlug: os.Getenv("BUILDKITE_ORGANIZATION_SLUG"),
 			PipelineSlug:     os.Getenv("BUILDKITE_PIPELINE_SLUG"),
+			BuildURL:         os.Getenv("BUILDKITE_BUILD_URL"),
 			ClientVersion:    clientVersion,
 		})
 		if tokenErr != nil {
@@ -308,6 +309,9 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		if runErr != nil {
 			details.setFailurePhase(telemetry.FailurePhaseExecution)
 			details.setFailureCode(runtimeFailureCode(runErr))
+			if status, ok := gharuntime.AgentAPIHTTPStatus(runErr); ok {
+				details.setAgentAPIHTTPStatus(status)
+			}
 			setRuntimeBlocker(details, runErr)
 		}
 	}
@@ -382,6 +386,12 @@ func runtimeFailureCode(err error) telemetry.FailureCode {
 		return telemetry.FailureCodeUnsupportedFeature
 	case gharuntime.FailureClassIntegrity:
 		return telemetry.FailureCodeRuntimeIntegrity
+	case gharuntime.FailureClassWorkflowToken:
+		return telemetry.FailureCodeWorkflowToken
+	case gharuntime.FailureClassOIDCToken:
+		return telemetry.FailureCodeOIDCToken
+	case gharuntime.FailureClassCacheCredential:
+		return telemetry.FailureCodeCacheCredential
 	default:
 		return ""
 	}

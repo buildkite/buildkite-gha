@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -407,6 +408,81 @@ func TestRunJobDisabledWorkflowTokenLinksPipelineSettings(t *testing.T) {
 	}
 }
 
+func TestRunJobRejectedWorkflowTokenGuidanceAndTelemetry(t *testing.T) {
+	const (
+		jobToken     = "job-token-must-not-leak"
+		responseData = "provider-response-must-not-leak"
+		buildURL     = "https://buildkite.com/acme-inc/my-pipeline/builds/42"
+	)
+	events := make(chan telemetry.Properties, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Token "+jobToken {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/github_workflow_access_token"):
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, responseData)
+		case strings.HasSuffix(r.URL.Path, "/posthog/events"):
+			var received struct {
+				Properties telemetry.Properties `json:"properties"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+				t.Errorf("decode telemetry event: %v", err)
+			}
+			events <- received.Properties
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	job := cliRunJobPlan()
+	job.Workflow.Path = ".github/workflows/ci.yml"
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"provider-token-write"}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "ci.yml", Permissions: map[string]string{"contents": "read"}}
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", jobToken)
+	t.Setenv("BUILDKITE_GHA_AGENT", truePath)
+	t.Setenv("BUILDKITE_BUILD_URL", buildURL)
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, want := range []string{"top-level permissions", "Buildkite GitHub App", "contact Buildkite support", buildURL} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+	for _, secret := range []string{jobToken, responseData} {
+		if strings.Contains(stderr.String(), secret) {
+			t.Errorf("stderr contains secret %q", secret)
+		}
+	}
+	event := <-events
+	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeWorkflowToken || event.AgentAPIHTTPStatus != http.StatusBadRequest {
+		t.Fatalf("telemetry = %#v", event)
+	}
+	if !strings.Contains(event.ErrorMessage, "top-level permissions") || !strings.Contains(event.ErrorMessage, buildURL) {
+		t.Errorf("telemetry error message = %q", event.ErrorMessage)
+	}
+	for _, secret := range []string{jobToken, responseData} {
+		if strings.Contains(event.ErrorMessage, secret) {
+			t.Errorf("telemetry error message contains secret %q", secret)
+		}
+	}
+}
+
 func TestRunJobAnnotatesUnavailableBuildkiteSecretWithMigrationGuidance(t *testing.T) {
 	job := cliRunJobPlan()
 	job.RequiredCapabilities = []string{"secrets"}
@@ -781,6 +857,55 @@ func TestRunJobValidateHostErrorsClassifyAsUnsupported(t *testing.T) {
 	}
 	if got := runtimeFailureCode(errors.Join(err, context.Canceled)); got != telemetry.FailureCodeUnsupportedFeature {
 		t.Fatalf("runtimeFailureCode() = %q, want %q when cancellation is joined with an unrelated failure", got, telemetry.FailureCodeUnsupportedFeature)
+	}
+}
+
+func TestRuntimeFailureCodeClassifiesTokenAndCacheServices(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, "response data must not escape")
+	}))
+	defer server.Close()
+
+	githubTokens, err := gharuntime.NewAgentGitHubTokens(gharuntime.AgentGitHubTokenConfig{
+		Endpoint: server.URL, JobID: cliTestJobID, JobToken: "job-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, workflowErr := githubTokens.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
+	oidcTokens, err := gharuntime.NewAgentOIDCTokens(gharuntime.AgentOIDCTokenConfig{
+		Endpoint: server.URL, JobID: cliTestJobID, JobToken: "job-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, oidcErr := oidcTokens.OIDCToken(t.Context(), "audience")
+	cacheCredentials, err := gharuntime.NewAgentCacheCredentials(gharuntime.AgentCacheConfig{
+		Endpoint: server.URL, JobID: cliTestJobID, JobToken: "job-token", ResultsURL: server.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cacheErr := cacheCredentials.Credentials(t.Context())
+
+	for _, test := range []struct {
+		name string
+		err  error
+		want telemetry.FailureCode
+	}{
+		{name: "workflow token", err: workflowErr, want: telemetry.FailureCodeWorkflowToken},
+		{name: "OIDC token", err: oidcErr, want: telemetry.FailureCodeOIDCToken},
+		{name: "cache credential", err: cacheErr, want: telemetry.FailureCodeCacheCredential},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.err == nil {
+				t.Fatal("service request succeeded")
+			}
+			if got := runtimeFailureCode(test.err); got != test.want {
+				t.Fatalf("runtimeFailureCode() = %q, want %q for %v", got, test.want, test.err)
+			}
+		})
 	}
 }
 

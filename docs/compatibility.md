@@ -1302,6 +1302,11 @@ an Origin repository. Native adapters ignore upstream input defaults, so
 
 The top-level workflow's `permissions` set the scope. Token issuance needs a
 Buildkite organization feature and a pipeline setting; both are off by default.
+If either setting is off, the runtime links to the pipeline repository setting.
+If an enabled request is rejected, the runtime instead asks you to check the
+top-level permissions and the Buildkite GitHub App's access to the event
+repository. If those checks do not find the cause, contact Buildkite support
+and include the build URL shown in the error.
 
 Buildkite reads that policy from the pipeline repository at the immutable build
 commit. The workflow must be a simple `.yml` or `.yaml` file directly under

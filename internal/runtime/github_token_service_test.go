@@ -220,6 +220,17 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), secret) {
 				t.Fatalf("WorkflowToken() error = %v, want %q without response data", err, test.want)
 			}
+			if ClassifyFailure(err) != FailureClassWorkflowToken {
+				t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassWorkflowToken)
+			}
+			status, ok := AgentAPIHTTPStatus(err)
+			if test.status >= 200 && test.status < 300 {
+				if ok || status != 0 {
+					t.Fatalf("AgentAPIHTTPStatus() = %d, %t for HTTP %d", status, ok, test.status)
+				}
+			} else if !ok || status != test.status {
+				t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want %d, true", status, ok, test.status)
+			}
 		})
 	}
 
@@ -239,6 +250,71 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 	}
 	if _, err := provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"}); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
 		t.Fatalf("redirect WorkflowToken() error/redirected = %v / %v", err, redirected)
+	}
+}
+
+func TestAgentGitHubTokensRejectedWorkflowTokenGuidance(t *testing.T) {
+	const responseData = "provider response must not escape"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, responseData)
+	}))
+	defer server.Close()
+
+	for _, test := range []struct {
+		name     string
+		buildURL string
+		wantURL  bool
+	}{
+		{name: "safe build URL", buildURL: "https://buildkite.com/acme-inc/my-pipeline/builds/42", wantURL: true},
+		{name: "missing build URL"},
+		{name: "unsafe build URL", buildURL: "https://attacker.invalid/builds/job-token"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{
+				Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-token", BuildURL: test.buildURL,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
+			if err == nil {
+				t.Fatal("WorkflowToken() succeeded")
+			}
+			message := err.Error()
+			for _, want := range []string{"top-level permissions", "Buildkite GitHub App", "event repository", "contact Buildkite support", "this build's URL"} {
+				if !strings.Contains(message, want) {
+					t.Errorf("WorkflowToken() error = %q, want %q", message, want)
+				}
+			}
+			if strings.Contains(message, "enable") || strings.Contains(message, "pipeline's repository settings") || strings.Contains(message, responseData) {
+				t.Errorf("WorkflowToken() error contains unsafe or incorrect guidance: %q", message)
+			}
+			if got := strings.Contains(message, test.buildURL) && test.buildURL != ""; got != test.wantURL {
+				t.Errorf("WorkflowToken() error contains build URL = %t, want %t: %q", got, test.wantURL, message)
+			}
+		})
+	}
+}
+
+func TestAgentGitHubTokensKeepsActionSourceFailureUnclassified(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.ActionSourceToken(t.Context(), "actions/checkout")
+	if err == nil || err.Error() != "GitHub action source token request was rejected" {
+		t.Fatalf("ActionSourceToken() error = %v", err)
+	}
+	if ClassifyFailure(err) != FailureClassUnknown {
+		t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassUnknown)
+	}
+	if status, ok := AgentAPIHTTPStatus(err); ok || status != 0 {
+		t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want 0, false", status, ok)
 	}
 }
 
@@ -303,6 +379,10 @@ func TestAgentGitHubTokensHonorsCancellation(t *testing.T) {
 	}
 	if _, err := provider.WorkflowToken(ctx, "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("WorkflowToken() error = %v, want cancellation", err)
+	} else if ClassifyFailure(err) != FailureClassUnknown {
+		t.Fatalf("ClassifyFailure() = %q, want %q", ClassifyFailure(err), FailureClassUnknown)
+	} else if status, ok := AgentAPIHTTPStatus(err); ok || status != 0 {
+		t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want 0, false", status, ok)
 	}
 }
 

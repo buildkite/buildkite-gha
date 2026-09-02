@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -16,6 +17,9 @@ func TestClassifyFailurePrecedence(t *testing.T) {
 	stepExit := markStepProcessExit(fmt.Errorf("step %q: %w", "test", exit))
 	unsupported := errUnsupportedf("shell %q is unsupported in the supported runtime subset", "pwsh")
 	hard := markHardJobFailure(errors.New("owned Docker resources remain after cleanup"))
+	workflowToken := newJobSetupHTTPFailure(FailureClassWorkflowToken, 400, "workflow token rejected")
+	oidcToken := newJobSetupHTTPFailure(FailureClassOIDCToken, 403, "OIDC token denied")
+	cacheCredential := newJobSetupHTTPFailure(FailureClassCacheCredential, 422, "cache credential rejected")
 	cases := []struct {
 		name string
 		err  error
@@ -28,6 +32,10 @@ func TestClassifyFailurePrecedence(t *testing.T) {
 		{"tolerated step exit", &toleratedJobFailure{err: stepExit}, FailureClassStepProcessExit},
 		{"unsupported", unsupported, FailureClassUnsupportedFeature},
 		{"unsupported runtime", fmt.Errorf("action %q: %w", "./action", &metadata.UnsupportedRuntimeError{Runtime: "future"}), FailureClassUnsupportedFeature},
+		{"workflow token", workflowToken, FailureClassWorkflowToken},
+		{"OIDC token", oidcToken, FailureClassOIDCToken},
+		{"cache credential", cacheCredential, FailureClassCacheCredential},
+		{"setup failure outranks step exit", errors.Join(stepExit, oidcToken), FailureClassOIDCToken},
 		{"integrity", hard, FailureClassIntegrity},
 		{"integrity outranks step exit", errors.Join(stepExit, hard), FailureClassIntegrity},
 		{"unsupported outranks integrity", errors.Join(hard, unsupported), FailureClassUnsupportedFeature},
@@ -36,6 +44,25 @@ func TestClassifyFailurePrecedence(t *testing.T) {
 	for _, tc := range cases {
 		if got := ClassifyFailure(tc.err); got != tc.want {
 			t.Errorf("ClassifyFailure(%s) = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestJobSetupFailurePreservesStatusAndCancellation(t *testing.T) {
+	err := fmt.Errorf("prepare token: %w", newJobSetupHTTPFailure(FailureClassWorkflowToken, 404, "not enabled"))
+	if status, ok := AgentAPIHTTPStatus(err); !ok || status != 404 {
+		t.Fatalf("AgentAPIHTTPStatus() = %d, %t, want 404, true", status, ok)
+	}
+	if status, ok := AgentAPIHTTPStatus(errors.New("unrelated")); ok || status != 0 {
+		t.Fatalf("unrelated AgentAPIHTTPStatus() = %d, %t, want 0, false", status, ok)
+	}
+	for _, cancellation := range []error{context.Canceled, context.DeadlineExceeded} {
+		marked := markJobSetupFailure(FailureClassWorkflowToken, fmt.Errorf("request token: %w", cancellation))
+		if ClassifyFailure(marked) != FailureClassUnknown {
+			t.Errorf("cancellation classified as %q", ClassifyFailure(marked))
+		}
+		if status, ok := AgentAPIHTTPStatus(marked); ok || status != 0 {
+			t.Errorf("cancellation AgentAPIHTTPStatus() = %d, %t", status, ok)
 		}
 	}
 }
