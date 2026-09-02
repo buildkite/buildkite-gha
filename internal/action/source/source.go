@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
@@ -42,7 +43,6 @@ const (
 var (
 	ownerRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`)
 	repoRE  = regexp.MustCompile(`^(?:[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?|\.[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,97}[A-Za-z0-9])?)$`)
-	shaRE   = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
 // Reference is a parsed remote action reference.
@@ -300,7 +300,7 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 		return Resolved{}, err
 	}
 	ref = parsed
-	if shaRE.MatchString(ref.Ref) {
+	if git.ValidObjectID(ref.Ref) {
 		return Resolved{Reference: ref, Commit: ref.Ref}, nil
 	}
 	if r.cfg.resolutionSnapshot != nil {
@@ -358,14 +358,14 @@ func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, 
 	if err := r.get(ctx, repoParts(ref, "commits", ref.Ref), &v); err != nil {
 		return Resolved{}, err
 	}
-	if !shaRE.MatchString(v.SHA) {
+	if !git.ValidObjectID(v.SHA) {
 		return Resolved{}, fmt.Errorf("GitHub returned malformed commit SHA")
 	}
 	return Resolved{Reference: ref, Commit: v.SHA}, nil
 }
 func (r *Resolver) peel(ctx context.Context, ref Reference, typ, sha string) (string, error) {
 	for range 5 {
-		if !shaRE.MatchString(sha) {
+		if !git.ValidObjectID(sha) {
 			return "", fmt.Errorf("GitHub returned malformed object SHA")
 		}
 		if typ == "commit" {
@@ -544,7 +544,7 @@ func NewStoreContext(ctx context.Context, root string, client *http.Client, opts
 
 // Materialize returns the verified repository and selected action identity.
 func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialized, error) {
-	if !shaRE.MatchString(resolved.Commit) {
+	if !git.ValidObjectID(resolved.Commit) {
 		return Materialized{}, fmt.Errorf("commit must be lower-case full SHA")
 	}
 	parsed, err := Parse(resolved.Reference.Raw)

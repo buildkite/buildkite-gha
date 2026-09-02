@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/git"
 )
 
 const githubEventNameEnvironment = "GITHUB_EVENT_NAME"
@@ -29,7 +30,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		return nil, fmt.Errorf("BUILDKITE_REPO: %w", err)
 	}
 	sha := getenv("BUILDKITE_COMMIT")
-	if !validBuildkiteCommit(sha) {
+	if !git.ValidObjectID(sha) {
 		return nil, fmt.Errorf("BUILDKITE_COMMIT must be a full lowercase 40-hex commit, not a symbolic ref")
 	}
 	branch, tag, pullRequest := getenv("BUILDKITE_BRANCH"), getenv("BUILDKITE_TAG"), getenv("BUILDKITE_PULL_REQUEST")
@@ -152,11 +153,6 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	return result, nil
 }
 
-func validBuildkiteCommit(commit string) bool {
-	decoded, err := hex.DecodeString(commit)
-	return err == nil && len(decoded) == 20 && commit == strings.ToLower(commit)
-}
-
 // buildkiteWebhookEventSource overlays untrusted trigger data onto the
 // execution identity derived and validated by buildkiteEventSource.
 func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]byte, error) {
@@ -246,7 +242,7 @@ func validateBuildkiteMergeGroup(snapshot map[string]any, getenv func(string) st
 		return fmt.Errorf("merge_group webhook base_ref does not match BUILDKITE_MERGE_QUEUE_BASE_BRANCH")
 	}
 	baseCommit := getenv("BUILDKITE_MERGE_QUEUE_BASE_COMMIT")
-	if !validBuildkiteCommit(baseCommit) {
+	if !git.ValidObjectID(baseCommit) {
 		return fmt.Errorf("BUILDKITE_MERGE_QUEUE_BASE_COMMIT must be a full lowercase 40-hex commit")
 	}
 	if baseSHA, _ := mergeGroup["base_sha"].(string); baseSHA != baseCommit {

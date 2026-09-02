@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bmatcuk/doublestar/v4"
+	"github.com/buildkite/buildkite-gha/internal/git"
 )
 
 const (
@@ -32,7 +33,7 @@ const (
 )
 
 func validateDownloadArtifactCommit(commit string) error {
-	if slices.Contains(DownloadArtifactCommits(), commit) || ValidCheckoutSHA(commit) {
+	if slices.Contains(DownloadArtifactCommits(), commit) || git.ValidObjectID(commit) {
 		return nil
 	}
 	return versionError("actions/download-artifact", "native adapter", commit, DownloadArtifactCommits())
@@ -41,7 +42,7 @@ func validateDownloadArtifactCommit(commit string) error {
 // DownloadArtifactUsesFallbackContract reports whether an immutable commit is
 // outside the exact admission set and therefore uses the stable v8 contract.
 func DownloadArtifactUsesFallbackContract(commit string) bool {
-	return ValidCheckoutSHA(commit) && !slices.Contains(DownloadArtifactCommits(), commit)
+	return git.ValidObjectID(commit) && !slices.Contains(DownloadArtifactCommits(), commit)
 }
 
 // DownloadArtifactCommits returns the complete immutable admission set.

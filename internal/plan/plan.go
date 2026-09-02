@@ -17,6 +17,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
@@ -34,7 +35,6 @@ var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var logicalJobIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$`)
 var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var actionLockIDPattern = regexp.MustCompile(`^a-[0-9a-f]{16}$`)
-var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
 var serviceNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,254}$`)
@@ -1010,7 +1010,7 @@ func validateRemoteWorkflowSource(workflow Workflow) error {
 		return nil
 	}
 	remote := workflow.Remote
-	if remote.Repository == "" || remote.Repository != strings.ToLower(remote.Repository) || len(remote.Repository) > 140 || remote.RequestedRef == "" || len(remote.RequestedRef) > 1024 || !utf8.ValidString(remote.RequestedRef) || hasControl(remote.RequestedRef) || !commitPattern.MatchString(remote.Commit) || !digestPattern.MatchString(remote.SourceDigest) {
+	if remote.Repository == "" || remote.Repository != strings.ToLower(remote.Repository) || len(remote.Repository) > 140 || remote.RequestedRef == "" || len(remote.RequestedRef) > 1024 || !utf8.ValidString(remote.RequestedRef) || hasControl(remote.RequestedRef) || !git.ValidObjectID(remote.Commit) || !digestPattern.MatchString(remote.SourceDigest) {
 		return fmt.Errorf("job plan remote workflow has invalid immutable source provenance")
 	}
 	ref, err := source.Parse(workflow.Path)
@@ -1484,7 +1484,7 @@ func validateLockIdentity(lock ActionLock) error {
 			return fmt.Errorf("invalid workspace identity")
 		}
 	case "github":
-		if lock.Repository == "" || len(lock.Repository) > 140 || lock.Repository != strings.ToLower(lock.Repository) || lock.RequestedRef == "" || len(lock.RequestedRef) > 1024 || !utf8.ValidString(lock.RequestedRef) || hasControl(lock.RequestedRef) || !commitPattern.MatchString(lock.Commit) || lock.Path != "" && !cleanActionPath(lock.Path) {
+		if lock.Repository == "" || len(lock.Repository) > 140 || lock.Repository != strings.ToLower(lock.Repository) || lock.RequestedRef == "" || len(lock.RequestedRef) > 1024 || !utf8.ValidString(lock.RequestedRef) || hasControl(lock.RequestedRef) || !git.ValidObjectID(lock.Commit) || lock.Path != "" && !cleanActionPath(lock.Path) {
 			return fmt.Errorf("invalid GitHub identity")
 		}
 		r, err := source.Parse(lock.Repository + "@x")

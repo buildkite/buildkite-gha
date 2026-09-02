@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/buildkite/buildkite-gha/internal/git"
 )
 
 type cacheEntry struct {
@@ -271,7 +273,7 @@ func (s *Store) cacheEntries() ([]cacheEntry, []string, error) {
 					partials = append(partials, path)
 					continue
 				}
-				if !commit.IsDir() || !shaRE.MatchString(commit.Name()) {
+				if !commit.IsDir() || !git.ValidObjectID(commit.Name()) {
 					continue
 				}
 				size, sizeErr := cacheEntrySize(path)

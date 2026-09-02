@@ -13,6 +13,7 @@ import (
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/agentapi"
+	gitutil "github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/program"
 )
@@ -76,7 +77,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	const adapter = "checkout adapter"
 	credentialed := job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil
 	url, credentialHost, validProvider := checkoutRepositoryURL(job.Event.Provider, job.Event.Repository)
-	if !validProvider || !actionintegration.ValidCheckoutSHA(job.Event.SHA) {
+	if !validProvider || !gitutil.ValidObjectID(job.Event.SHA) {
 		return result, fmt.Errorf("%s requires a valid GitHub or Origin event repository and exact SHA; other event sources are unsupported", adapter)
 	}
 	if err := actionintegration.ValidateCheckoutInputs(commit, inputs, job.Event.Repository, job.Event.SHA); err != nil {
@@ -203,7 +204,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	}
 	head, err := os.ReadFile(filepath.Join(checkoutDirectory, ".git", "HEAD"))
 	headSHA := strings.TrimSpace(string(head))
-	if err != nil || !actionintegration.ValidCheckoutSHA(headSHA) || actionintegration.ValidCheckoutSHA(checkoutTarget) && headSHA != checkoutTarget {
+	if err != nil || !gitutil.ValidObjectID(headSHA) || gitutil.ValidObjectID(checkoutTarget) && headSHA != checkoutTarget {
 		return result, fmt.Errorf("%s did not produce the requested detached revision", adapter)
 	}
 	setCheckoutOutputs(result.Outputs, commit, checkoutRefOutput(inputs, job.Event.Ref), headSHA)
@@ -471,7 +472,7 @@ func checkoutRefOutput(inputs map[string]string, eventRef string) string {
 	if ref == "" {
 		return eventRef
 	}
-	if actionintegration.ValidCheckoutSHA(ref) {
+	if gitutil.ValidObjectID(ref) {
 		return ""
 	}
 	return ref
@@ -553,7 +554,7 @@ func checkoutSelectedRevision(inputs map[string]string, sha string) (revision st
 	if ref == "" || ref == sha {
 		return sha, false
 	}
-	if actionintegration.ValidCheckoutSHA(ref) {
+	if gitutil.ValidObjectID(ref) {
 		return ref, false
 	}
 	return strings.TrimPrefix(ref, "refs/heads/"), true
