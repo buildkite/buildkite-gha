@@ -1,4 +1,3 @@
-// Package telemetry emits bounded, best-effort buildkite-gha product events.
 package telemetry
 
 import (

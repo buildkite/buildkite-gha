@@ -1,4 +1,3 @@
-// Package shell owns shell-template parsing and compatibility classification.
 package shell
 
 import (

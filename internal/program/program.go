@@ -1,5 +1,3 @@
-// Package program defines the normalized workflow execution model shared by
-// compilation, authority planning, and runtime.
 package program
 
 import (

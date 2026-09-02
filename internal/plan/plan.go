@@ -1,4 +1,3 @@
-// Package plan owns the job-plan boundary between compilation and execution.
 package plan
 
 import (

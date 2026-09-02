@@ -1,5 +1,3 @@
-// Package integration classifies and admits actions with Buildkite-specific
-// execution or service requirements.
 package integration
 
 // Identity is the canonical, resolved portion of an action lock used for

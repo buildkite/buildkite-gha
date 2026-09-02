@@ -1,4 +1,3 @@
-// Package compiler expands an owned workflow into deterministic workflow JSON IR.
 package compiler
 
 import (

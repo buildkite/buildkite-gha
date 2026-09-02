@@ -1,5 +1,6 @@
 // Compile-time expression evaluation: graph-construction substitution and
 // evaluation against the snapshotted CompileContext.
+
 package expression
 
 import (

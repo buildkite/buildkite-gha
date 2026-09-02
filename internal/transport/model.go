@@ -1,6 +1,3 @@
-// Package transport owns the Buildkite artifact and dynamic-pipeline
-// contracts. It deliberately depends on a narrow command boundary instead of
-// the Buildkite API so its behavior can be proved without a live build.
 package transport
 
 import (

@@ -1,6 +1,7 @@
 // Static reference introspection over templates, complete expressions, and
 // conditions. Each predicate deliberately answers one narrow question with
 // an error for unsupported input.
+
 package expression
 
 import (
