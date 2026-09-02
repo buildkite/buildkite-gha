@@ -38,6 +38,16 @@ product but not the subsystem.
 | `Support unavailable action check run IDs` | `Allow actions when no GitHub check run ID exists` |
 | `Improve provider-token authority planning` | `Avoid requesting a GitHub token for branches that cannot run` |
 
+## Architecture
+
+- Read package documentation before assigning ownership. Name packages and
+  files for their full responsibility rather than generic activity.
+- Before changing expression evaluation, lifecycle ordering, or token
+  authority, read [Expression authority](docs/expression-authority.md). Define
+  each execution position once so planning and runtime cannot drift.
+- When a feature needs Buildkite server support, confirm the server contract
+  and rollout order before implementing the CLI side.
+
 ## Cursor Cloud specific instructions
 
 This is a single Go CLI product (`buildkite-gha`). There are **no long-running
