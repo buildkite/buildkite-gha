@@ -15,6 +15,10 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 )
 
+// A tally interprets the corpus validation reports and aggregates them into
+// deterministic repository outcomes, diagnostic counts, console summaries,
+// and JSON output. main.go owns corpus acquisition and materialization plus
+// sampling and validator orchestration.
 var supportedEvents = map[string]bool{
 	"push":              true,
 	"pull_request":      true,
