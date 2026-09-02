@@ -135,7 +135,8 @@ func (p *testOIDCTokenProvider) OIDCToken(ctx context.Context, audience string) 
 func TestIDTokenServiceWireContract(t *testing.T) {
 	provider := &testOIDCTokenProvider{token: "header.payload.signature", requireLiveContext: true}
 	redactor := &testRedactor{}
-	processor := newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{})
+	stderr := &bytes.Buffer{}
+	processor := newCommandProcessor(&bytes.Buffer{}, stderr)
 	service, err := startIDTokenService(t.Context(), provider, redactor, processor)
 	if err != nil {
 		t.Fatal(err)
@@ -154,15 +155,24 @@ func TestIDTokenServiceWireContract(t *testing.T) {
 	if unauthorized.StatusCode != http.StatusUnauthorized || len(provider.audiences) != 0 {
 		t.Fatalf("unauthorized request = %d, provider calls %#v", unauthorized.StatusCode, provider.audiences)
 	}
-	request, err := http.NewRequest(http.MethodGet, env["ACTIONS_ID_TOKEN_REQUEST_URL"]+"&audience=sts.amazonaws.com", nil)
-	if err != nil {
-		t.Fatal(err)
+	warnings, _, _, _ := processor.workflowCommandAnnotations()
+	if warnings != "" || stderr.Len() != 0 {
+		t.Fatalf("unauthorized request emitted guidance: annotation = %q, stderr = %q", warnings, stderr)
 	}
-	request.Header.Set("Authorization", "Bearer "+env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
+	authorizedRequest := func(audience string) *http.Response {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodGet, env["ACTIONS_ID_TOKEN_REQUEST_URL"]+"&audience="+audience, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
 	}
+	response := authorizedRequest("sts.amazonaws.com")
 	defer func() { _ = response.Body.Close() }()
 	var body struct {
 		Value string `json:"value"`
@@ -170,11 +180,28 @@ func TestIDTokenServiceWireContract(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || body.Value != provider.token || len(provider.audiences) != 1 || provider.audiences[0] != "sts.amazonaws.com" {
+	if response.StatusCode != http.StatusOK || body.Value != provider.token {
 		t.Fatalf("response/provider = %d %#v / %#v", response.StatusCode, body, provider.audiences)
 	}
-	if len(redactor.values) != 2 || redactor.values[0] != env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] || redactor.values[1] != provider.token {
+	second := authorizedRequest("second-audience")
+	_ = second.Body.Close()
+	if second.StatusCode != http.StatusOK || len(provider.audiences) != 2 || provider.audiences[0] != "sts.amazonaws.com" || provider.audiences[1] != "second-audience" {
+		t.Fatalf("second response/provider = %d / %#v", second.StatusCode, provider.audiences)
+	}
+	if len(redactor.values) != 3 || redactor.values[0] != env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] || redactor.values[1] != provider.token || redactor.values[2] != provider.token {
 		t.Fatalf("redactions = %#v", redactor.values)
+	}
+	warnings, truncated, _, _ := processor.workflowCommandAnnotations()
+	if truncated || strings.Count(warnings, "Buildkite issued this job an OIDC token") != 1 || !strings.Contains(warnings, "https://agent.buildkite.com") || !strings.Contains(warnings, "https://buildkite.com/docs/pipelines/security/oidc") {
+		t.Fatalf("OIDC guidance annotation = %q, truncated = %v", warnings, truncated)
+	}
+	if strings.Count(stderr.String(), oidcIssuerMigrationWarn) != 1 {
+		t.Fatalf("OIDC guidance log = %q", stderr)
+	}
+	for _, secret := range []string{env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"], provider.token} {
+		if strings.Contains(warnings, secret) || strings.Contains(stderr.String(), secret) {
+			t.Fatalf("OIDC guidance leaked secret %q", secret)
+		}
 	}
 }
 
@@ -182,7 +209,8 @@ func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			provider := &testOIDCTokenProvider{err: oidcTokenStatusError(status)}
-			service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{}))
+			processor := newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{})
+			service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, processor)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -204,6 +232,10 @@ func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
 			_ = response.Body.Close()
 			if response.StatusCode != status || len(provider.audiences) != 1 {
 				t.Fatalf("request = HTTP %d with %d mint calls, want HTTP %d with one call", response.StatusCode, len(provider.audiences), status)
+			}
+			warnings, _, _, _ := processor.workflowCommandAnnotations()
+			if warnings != "" {
+				t.Fatalf("failed mint emitted issued-token guidance: %q", warnings)
 			}
 		})
 	}
@@ -265,7 +297,11 @@ const endpoint = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
 if (!endpoint.search) throw new Error("ACTIONS_ID_TOKEN_REQUEST_URL must already contain a query string");
 if (process.env.NO_PROXY !== "upper.example,127.0.0.1") throw new Error("NO_PROXY does not preserve the proxy bypass list");
 if (process.env.no_proxy !== "lower.example,127.0.0.1") throw new Error("no_proxy does not preserve the proxy bypass list");
-(async () => fs.writeFileSync(process.env.MARKER, await core.getIDToken("sts.amazonaws.com")))().catch(error => { console.error(error); process.exitCode = 1; });
+(async () => {
+  const first = await core.getIDToken("sts.amazonaws.com");
+  const second = await core.getIDToken("second-audience");
+  fs.writeFileSync(process.env.MARKER, first + "\n" + second);
+})().catch(error => { console.error(error); process.exitCode = 1; });
 `)
 	marker := filepath.Join(workspace, "token")
 	lockID := "a-0123456789abcdef"
@@ -285,8 +321,14 @@ if (process.env.no_proxy !== "lower.example,127.0.0.1") throw new Error("no_prox
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(contents) != provider.token || len(provider.audiences) != 1 || provider.audiences[0] != "sts.amazonaws.com" {
+	if string(contents) != provider.token+"\n"+provider.token || len(provider.audiences) != 2 || provider.audiences[0] != "sts.amazonaws.com" || provider.audiences[1] != "second-audience" {
 		t.Fatalf("token/audiences = %q / %#v", contents, provider.audiences)
+	}
+	if strings.Count(result.WarningAnnotations, "Buildkite issued this job an OIDC token") != 1 || !strings.Contains(result.WarningAnnotations, "https://agent.buildkite.com") || !strings.Contains(result.WarningAnnotations, "https://buildkite.com/docs/pipelines/security/oidc") {
+		t.Fatalf("RunJob() OIDC guidance annotation = %q", result.WarningAnnotations)
+	}
+	if strings.Contains(result.WarningAnnotations, provider.token) {
+		t.Fatalf("RunJob() OIDC guidance annotation leaked token: %q", result.WarningAnnotations)
 	}
 }
 

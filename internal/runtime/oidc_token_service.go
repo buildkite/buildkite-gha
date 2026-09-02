@@ -23,7 +23,10 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
-const oidcTokenResponseLimit = 64 << 10
+const (
+	oidcTokenResponseLimit  = 64 << 10
+	oidcIssuerMigrationWarn = "Buildkite issued this job an OIDC token with issuer https://agent.buildkite.com, not GitHub's https://token.actions.githubusercontent.com. Update the target service's OIDC trust policy from GitHub's issuer and claims to Buildkite's issuer and claims. See https://buildkite.com/docs/pipelines/security/oidc."
+)
 
 var oidcTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
 
@@ -195,6 +198,7 @@ type idTokenService struct {
 	provider   OIDCTokenProvider
 	redactor   Redactor
 	processor  *commandProcessor
+	warning    sync.Once
 	mu         sync.RWMutex
 	authHashes map[[sha256.Size]byte]struct{}
 }
@@ -292,6 +296,7 @@ func (s *idTokenService) ServeHTTP(w http.ResponseWriter, request *http.Request)
 		http.Error(w, "could not protect actions ID token", http.StatusInternalServerError)
 		return
 	}
+	s.warning.Do(func() { s.processor.trustedWarning(oidcIssuerMigrationWarn) })
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		Value string `json:"value"`
