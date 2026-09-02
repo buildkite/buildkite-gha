@@ -13,9 +13,9 @@ import (
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
-	"github.com/buildkite/buildkite-gha/internal/processing"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
 const (
@@ -224,10 +224,10 @@ func telemetrySeverity(level string) (telemetry.Severity, bool) {
 
 func allowlistedTelemetryDiagnosticCode(code string) bool {
 	switch code {
-	case processing.CodeWorkflowSyntax, processing.CodeEventInvalid, processing.CodeGraphInvalid,
-		processing.CodeMatrixInvalid, processing.CodeExpressionInvalid, processing.CodeActionDiscovery,
-		processing.CodeActionResolution, processing.CodePlanConstruction, processing.CodePipelineGeneration,
-		processing.CodeEnvironment, "E_PROFILE", "W_ACTION_RUNTIME_UNKNOWN",
+	case workflowprocessing.CodeWorkflowSyntax, workflowprocessing.CodeEventInvalid, workflowprocessing.CodeGraphInvalid,
+		workflowprocessing.CodeMatrixInvalid, workflowprocessing.CodeExpressionInvalid, workflowprocessing.CodeActionDiscovery,
+		workflowprocessing.CodeActionResolution, workflowprocessing.CodePlanConstruction, workflowprocessing.CodePipelineGeneration,
+		workflowprocessing.CodeEnvironment, "E_PROFILE", "W_ACTION_RUNTIME_UNKNOWN",
 		"W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED":
 		return true
 	default:
@@ -235,17 +235,17 @@ func allowlistedTelemetryDiagnosticCode(code string) bool {
 	}
 }
 
-func telemetryPhase(stage processing.Stage) telemetry.FailurePhase {
+func telemetryPhase(stage workflowprocessing.Stage) telemetry.FailurePhase {
 	switch stage {
-	case processing.StageWorkflowParsing:
+	case workflowprocessing.StageWorkflowParsing:
 		return telemetry.FailurePhaseParsing
-	case processing.StageEventValidation, processing.StageGraph, processing.StageMatrix, processing.StageExpressions:
+	case workflowprocessing.StageEventValidation, workflowprocessing.StageGraph, workflowprocessing.StageMatrix, workflowprocessing.StageExpressions:
 		return telemetry.FailurePhaseEvaluation
-	case processing.StageDiscovery, processing.StageResolution:
+	case workflowprocessing.StageDiscovery, workflowprocessing.StageResolution:
 		return telemetry.FailurePhaseSourceResolution
-	case processing.StageAdmission:
+	case workflowprocessing.StageAdmission:
 		return telemetry.FailurePhaseAdmission
-	case processing.StagePlans, processing.StagePipeline:
+	case workflowprocessing.StagePlans, workflowprocessing.StagePipeline:
 		return telemetry.FailurePhaseCompilation
 	default:
 		return telemetry.FailurePhaseUnknown

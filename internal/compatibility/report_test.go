@@ -10,13 +10,13 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
-	"github.com/buildkite/buildkite-gha/internal/processing"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	report := NewProcessingReport("ci.yml", "hosted")
-	definitions := processing.StageDefinitions()
+	definitions := workflowprocessing.StageDefinitions()
 	if len(report.Stages) != len(definitions) {
 		t.Fatalf("report has %d stages, want %d", len(report.Stages), len(definitions))
 	}
@@ -307,7 +307,7 @@ func (*nestedBlockerError) CompatibilityBlocker() (string, string) {
 }
 
 func TestDiagnosticPreservesExplicitWorkflowRootActionBlocker(t *testing.T) {
-	diagnostic := diagnosticFromError("ci.yml", processing.StageResolution, compiler.CodeActionResolution, "action-resolution", &compiler.ProcessingFinding{
+	diagnostic := diagnosticFromError("ci.yml", workflowprocessing.StageResolution, compiler.CodeActionResolution, "action-resolution", &compiler.ProcessingFinding{
 		Stage: compiler.StageResolution, Code: compiler.CodeActionResolution, Category: "action-resolution",
 		Blocker: "action_ref", BlockerDetail: "actions/checkout@v99",
 		Action: "./downloaded-child", Err: &nestedBlockerError{},
@@ -316,7 +316,7 @@ func TestDiagnosticPreservesExplicitWorkflowRootActionBlocker(t *testing.T) {
 		t.Fatalf("diagnostic blocker = %q / %q", diagnostic.Blocker, diagnostic.BlockerDetail)
 	}
 
-	diagnostic = diagnosticFromError("ci.yml", processing.StageExpressions, compiler.CodeExpressionInvalid, "compatibility", &compiler.ProcessingFinding{
+	diagnostic = diagnosticFromError("ci.yml", workflowprocessing.StageExpressions, compiler.CodeExpressionInvalid, "compatibility", &compiler.ProcessingFinding{
 		Stage: compiler.StageExpressions, Code: compiler.CodeExpressionInvalid, Category: "compatibility",
 		Blocker: "runner_label", BlockerDetail: "windows-latest", Err: fmt.Errorf("unsupported runner"),
 	})

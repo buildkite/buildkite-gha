@@ -3,37 +3,37 @@ package compiler
 import (
 	"errors"
 
-	"github.com/buildkite/buildkite-gha/internal/processing"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
 // ProcessingStage identifies one stable workflow-processing boundary.
-type ProcessingStage = processing.Stage
+type ProcessingStage = workflowprocessing.Stage
 
 const (
-	StageWorkflowParsing = processing.StageWorkflowParsing
-	StageEventValidation = processing.StageEventValidation
-	StageGraph           = processing.StageGraph
-	StageMatrix          = processing.StageMatrix
-	StageExpressions     = processing.StageExpressions
-	StageDiscovery       = processing.StageDiscovery
-	StageResolution      = processing.StageResolution
-	StagePlans           = processing.StagePlans
-	StageAdmission       = processing.StageAdmission
-	StagePipeline        = processing.StagePipeline
+	StageWorkflowParsing = workflowprocessing.StageWorkflowParsing
+	StageEventValidation = workflowprocessing.StageEventValidation
+	StageGraph           = workflowprocessing.StageGraph
+	StageMatrix          = workflowprocessing.StageMatrix
+	StageExpressions     = workflowprocessing.StageExpressions
+	StageDiscovery       = workflowprocessing.StageDiscovery
+	StageResolution      = workflowprocessing.StageResolution
+	StagePlans           = workflowprocessing.StagePlans
+	StageAdmission       = workflowprocessing.StageAdmission
+	StagePipeline        = workflowprocessing.StagePipeline
 )
 
 const (
-	CodeWorkflowSyntax     = processing.CodeWorkflowSyntax
-	CodeEventInvalid       = processing.CodeEventInvalid
-	CodeGraphInvalid       = processing.CodeGraphInvalid
-	CodeMatrixInvalid      = processing.CodeMatrixInvalid
-	CodeExpressionInvalid  = processing.CodeExpressionInvalid
-	CodeActionDiscovery    = processing.CodeActionDiscovery
-	CodeActionResolution   = processing.CodeActionResolution
-	CodePlanConstruction   = processing.CodePlanConstruction
-	CodePipelineGeneration = processing.CodePipelineGeneration
-	CodeContextRequired    = processing.CodeContextRequired
-	CodeEnvironment        = processing.CodeEnvironment
+	CodeWorkflowSyntax     = workflowprocessing.CodeWorkflowSyntax
+	CodeEventInvalid       = workflowprocessing.CodeEventInvalid
+	CodeGraphInvalid       = workflowprocessing.CodeGraphInvalid
+	CodeMatrixInvalid      = workflowprocessing.CodeMatrixInvalid
+	CodeExpressionInvalid  = workflowprocessing.CodeExpressionInvalid
+	CodeActionDiscovery    = workflowprocessing.CodeActionDiscovery
+	CodeActionResolution   = workflowprocessing.CodeActionResolution
+	CodePlanConstruction   = workflowprocessing.CodePlanConstruction
+	CodePipelineGeneration = workflowprocessing.CodePipelineGeneration
+	CodeContextRequired    = workflowprocessing.CodeContextRequired
+	CodeEnvironment        = workflowprocessing.CodeEnvironment
 )
 
 // ProcessingFinding carries stable attribution independently of its rendered
@@ -150,32 +150,4 @@ func attributedProcessingFinding(stage ProcessingStage, code, category, path str
 		Path: path, Line: line, Column: column, Job: job, Instance: instance, Action: action, Step: step,
 		Err: err,
 	}
-}
-
-// ActionEvaluation records an attempted immutable resolution by invocation.
-// Skipped invocations are absent and remain not-evaluated in the report.
-type ActionEvaluation struct {
-	Instance  string
-	Job       string
-	Reference string
-	Step      int
-	Passed    bool
-}
-
-// JobEvaluation records whether plan construction ran for one instance.
-type JobEvaluation struct {
-	Instance  string
-	Job       string
-	Evaluated bool
-	Passed    bool
-}
-
-// ProcessingEvidence records facts learned before bundle construction stops.
-// It is returned on both success and failure.
-type ProcessingEvidence struct {
-	ActionResolutionComplete bool
-	Actions                  []ActionEvaluation
-	Plans                    []JobEvaluation
-	PlansConstructed         bool
-	PipelineGenerated        bool
 }

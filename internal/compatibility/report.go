@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/buildkite/buildkite-gha/internal/processing"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
 // ProcessingSchema is the versioned, stage-oriented report shared by all
@@ -30,10 +30,10 @@ type SourceLocation struct {
 
 // Diagnostic is one actionable compatibility finding.
 type Diagnostic struct {
-	Level    string           `json:"level"`
-	Code     string           `json:"code"`
-	Category string           `json:"category,omitempty"`
-	Stage    processing.Stage `json:"stage,omitempty"`
+	Level    string                   `json:"level"`
+	Code     string                   `json:"code"`
+	Category string                   `json:"category,omitempty"`
+	Stage    workflowprocessing.Stage `json:"stage,omitempty"`
 	// Blocker attribution is forwarded to telemetry but excluded from the
 	// versioned processing-report schema.
 	Blocker       string          `json:"-"`
@@ -49,9 +49,9 @@ type Diagnostic struct {
 
 // ProcessingStage is one required workflow-processing boundary.
 type ProcessingStage struct {
-	ID     processing.Stage `json:"id"`
-	Name   string           `json:"name"`
-	Result string           `json:"result"`
+	ID     workflowprocessing.Stage `json:"id"`
+	Name   string                   `json:"name"`
+	Result string                   `json:"result"`
 }
 
 // JobResult retains successfully discovered logical jobs and matrix instances.
@@ -91,7 +91,7 @@ type ProcessingReport struct {
 
 // NewProcessingReport returns a deterministic report with every stage present.
 func NewProcessingReport(workflow, profile string) ProcessingReport {
-	definitions := processing.StageDefinitions()
+	definitions := workflowprocessing.StageDefinitions()
 	stages := make([]ProcessingStage, len(definitions))
 	for i, definition := range definitions {
 		stages[i] = ProcessingStage{ID: definition.ID, Name: definition.Name, Result: NotEvaluated}
@@ -105,7 +105,7 @@ func NewProcessingReport(workflow, profile string) ProcessingReport {
 }
 
 // SetStage records a stage outcome by stable ID.
-func (r *ProcessingReport) SetStage(id processing.Stage, result string) {
+func (r *ProcessingReport) SetStage(id workflowprocessing.Stage, result string) {
 	for i := range r.Stages {
 		if r.Stages[i].ID == id {
 			r.Stages[i].Result = result
@@ -150,8 +150,8 @@ func (r *ProcessingReport) Finalize() {
 		}
 		return r.Actions[i].Reference < r.Actions[j].Reference
 	})
-	definitions := processing.StageDefinitions()
-	stageOrder := make(map[processing.Stage]int, len(definitions))
+	definitions := workflowprocessing.StageDefinitions()
+	stageOrder := make(map[workflowprocessing.Stage]int, len(definitions))
 	for i, stage := range definitions {
 		stageOrder[stage.ID] = i
 	}

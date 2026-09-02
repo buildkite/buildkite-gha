@@ -1,4 +1,4 @@
-package processing
+package workflowprocessing
 
 import "testing"
 
