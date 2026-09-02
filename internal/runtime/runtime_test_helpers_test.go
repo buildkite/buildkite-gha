@@ -21,7 +21,27 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
-func runtimePlan(t *testing.T, workspace, workflowPath string, steps []plan.Step) plan.Job {
+type runtimeTestStep struct {
+	ID                        string
+	Name                      string
+	Kind                      string
+	Background                bool
+	Targets                   []string
+	Command                   string
+	Uses                      string
+	Action                    *plan.ActionSelector
+	Shell                     string
+	WorkingDirectory          string
+	Env                       map[string]string
+	With                      map[string]string
+	Condition                 string
+	ContinueOnError           bool
+	ContinueOnErrorExpression string
+	TimeoutMinutes            float64
+	TimeoutMinutesExpression  string
+}
+
+func runtimePlan(t *testing.T, workspace, workflowPath string, steps []runtimeTestStep) plan.Job {
 	t.Helper()
 	source, err := os.ReadFile(filepath.Join(workspace, workflowPath))
 	if err != nil {
@@ -35,11 +55,59 @@ func runtimePlan(t *testing.T, workspace, workflowPath string, steps []plan.Step
 		Workflow:     plan.Workflow{Path: workflowPath, Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "fixture"},
 		Event:        plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
 		Target:       plan.Target{StepKey: "gha-fixture", Queue: "ubuntu-latest"},
-		Steps:        steps,
 		RequiresMise: &requiresMise,
 	}
 	attachTestProgram(&job)
+	job.Program.Job.Steps = normalizeRuntimeTestSteps(steps)
 	return job
+}
+
+func runtimeTestProgram(steps []runtimeTestStep) *executionprogram.Program {
+	return &executionprogram.Program{Version: executionprogram.Version, Job: executionprogram.Job{Steps: normalizeRuntimeTestSteps(steps)}}
+}
+
+func normalizeRuntimeTestSteps(steps []runtimeTestStep) []executionprogram.Step {
+	normalized := make([]executionprogram.Step, len(steps))
+	for i, step := range steps {
+		normalized[i] = normalizeRuntimeTestStep(step)
+	}
+	return normalized
+}
+
+func normalizeRuntimeTestStep(step runtimeTestStep) executionprogram.Step {
+	normalized := executionprogram.Step{
+		ID: step.ID, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...),
+		Env:             testProgramBindings(step.Env, executionprogram.SurfaceStepTemplate),
+		Condition:       testProgramSite(step.Condition, executionprogram.SurfaceStepCondition, executionprogram.ResultBoolean),
+		ContinueOnError: executionprogram.BoolControl{Literal: step.ContinueOnError},
+		TimeoutMinutes:  executionprogram.NumberControl{Literal: step.TimeoutMinutes},
+		Name:            testProgramSite(step.Name, executionprogram.SurfaceStepTemplate, executionprogram.ResultString),
+	}
+	if step.ContinueOnErrorExpression != "" {
+		site := testProgramSite(step.ContinueOnErrorExpression, executionprogram.SurfaceStepControl, executionprogram.ResultBoolean)
+		normalized.ContinueOnError.Expression = &site
+	}
+	if step.TimeoutMinutesExpression != "" {
+		site := testProgramSite(step.TimeoutMinutesExpression, executionprogram.SurfaceStepControl, executionprogram.ResultNumber)
+		normalized.TimeoutMinutes.Expression = &site
+	}
+	switch step.Kind {
+	case "run":
+		normalized.Run = &executionprogram.Run{
+			Command:          testProgramSite(step.Command, executionprogram.SurfaceStepTemplate, executionprogram.ResultString),
+			Shell:            testProgramSite(step.Shell, executionprogram.SurfaceStepTemplate, executionprogram.ResultString),
+			WorkingDirectory: testProgramSite(step.WorkingDirectory, executionprogram.SurfaceStepTemplate, executionprogram.ResultString),
+		}
+	case "uses":
+		normalized.Invocation = &executionprogram.Invocation{
+			Uses: testProgramSite(step.Uses, executionprogram.SurfaceRuntimeTemplate, executionprogram.ResultString),
+			With: testProgramBindingsPurpose(step.With, executionprogram.SurfaceStepTemplate, executionprogram.PurposeActionInput),
+		}
+		if step.Action != nil {
+			normalized.Invocation.Lock = step.Action.Lock
+		}
+	}
+	return normalized
 }
 
 func attachTestProgram(job *plan.Job) {
@@ -62,43 +130,8 @@ func attachTestProgram(job *plan.Job) {
 	for i, guard := range job.CallGuards {
 		program.Job.Guards[i].Condition = testProgramSite(guard.Condition, executionprogram.SurfaceCallCondition, executionprogram.ResultBoolean)
 	}
-	program.Job.Steps = make([]executionprogram.Step, len(job.Steps))
-	for i := range job.Steps {
-		step := &job.Steps[i]
-		normalized := executionprogram.Step{
-			ID: step.ID, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...),
-			Env:             testProgramBindings(step.Env, executionprogram.SurfaceStepTemplate),
-			Condition:       testProgramSite(step.Condition, executionprogram.SurfaceStepCondition, executionprogram.ResultBoolean),
-			ContinueOnError: executionprogram.BoolControl{Literal: step.ContinueOnError},
-			TimeoutMinutes:  executionprogram.NumberControl{Literal: step.TimeoutMinutes},
-			Name:            testProgramSite(step.Name, executionprogram.SurfaceStepTemplate, executionprogram.ResultString),
-		}
-		if step.ContinueOnErrorExpression != "" {
-			site := testProgramSite(step.ContinueOnErrorExpression, executionprogram.SurfaceStepControl, executionprogram.ResultBoolean)
-			normalized.ContinueOnError.Expression = &site
-		}
-		if step.TimeoutMinutesExpression != "" {
-			site := testProgramSite(step.TimeoutMinutesExpression, executionprogram.SurfaceStepControl, executionprogram.ResultNumber)
-			normalized.TimeoutMinutes.Expression = &site
-		}
-		switch step.Kind {
-		case "run":
-			normalized.Run = &executionprogram.Run{
-				Command:          testProgramSite(step.Command, executionprogram.SurfaceStepTemplate, executionprogram.ResultString),
-				Shell:            testProgramSite(step.Shell, executionprogram.SurfaceStepTemplate, executionprogram.ResultString),
-				WorkingDirectory: testProgramSite(step.WorkingDirectory, executionprogram.SurfaceStepTemplate, executionprogram.ResultString),
-			}
-		case "uses":
-			normalized.Invocation = &executionprogram.Invocation{
-				Uses: testProgramSite(step.Uses, executionprogram.SurfaceRuntimeTemplate, executionprogram.ResultString),
-				With: testProgramBindingsPurpose(step.With, executionprogram.SurfaceStepTemplate, executionprogram.PurposeActionInput),
-			}
-			if step.Action != nil {
-				normalized.Invocation.Lock = step.Action.Lock
-			}
-		}
-		program.Job.Steps[i] = normalized
-		step.Execution = &program.Job.Steps[i]
+	if job.Program != nil {
+		program.Job.Steps = job.Program.Job.Steps
 	}
 	if job.Container != nil {
 		program.Job.Container = &executionprogram.Container{
@@ -136,9 +169,8 @@ func attachTestProgram(job *plan.Job) {
 
 // runTestJob upgrades direct runtime fixtures to the normalized plan contract
 // at their execution boundary. Compiler-produced plans already contain these
-// programs; rebuilding their projection only incorporates deliberate fixture
+// programs; rebuilding the fixture program only incorporates deliberate
 // mutations made after compilation.
-
 func (runner Runner) runTestJob(ctx context.Context, job plan.Job, workspace string) (JobResult, error) {
 	if workspace != "" {
 		if err := verifyWorkflow(job, workspace); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -207,16 +239,17 @@ func synthesizeTestLocalActionLocks(job *plan.Job, workspace string) error {
 		}
 		return lockID, nil
 	}
-	for i := range job.Steps {
-		step := &job.Steps[i]
-		if step.Kind != "uses" || step.Action != nil || !strings.HasPrefix(step.Uses, "./") {
+	for i := range job.Program.Job.Steps {
+		step := &job.Program.Job.Steps[i]
+		if step.Invocation == nil || step.Invocation.Lock != "" || !strings.HasPrefix(step.Invocation.Uses.Source, "./") {
 			continue
 		}
-		lockID, err := ensure(step.Uses)
+		uses := step.Invocation.Uses.Source
+		lockID, err := ensure(uses)
 		if err != nil {
-			return fmt.Errorf("normalize test action %q: %w", step.Uses, err)
+			return fmt.Errorf("normalize test action %q: %w", uses, err)
 		}
-		step.Action = &plan.ActionSelector{Lock: lockID}
+		step.Invocation.Lock = lockID
 	}
 	return nil
 }

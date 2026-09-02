@@ -182,7 +182,7 @@ func TestRunJobPinsHashWorkspaceBeforePathReplacement(t *testing.T) {
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: pinned hash workspace\n")
 	writeFixtureFile(t, workspace, "value", "inside")
 	writeFixtureFile(t, outside, "value", "outside")
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{
 		{ID: "replace", Kind: "run", Shell: "sh", Env: map[string]string{"OUTSIDE": outside}, Command: `mv "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE-moved" && ln -s "$OUTSIDE" "$GITHUB_WORKSPACE"`},
 		{ID: "hash", Kind: "run", Shell: "sh", Env: map[string]string{"VALUE_HASH": "${{ hashFiles('value') }}"}, Command: "test \"$VALUE_HASH\" = " + githubHash("inside")},
 	})
@@ -197,7 +197,7 @@ func TestRunJobHashFilesArgumentsUseStepEnvironment(t *testing.T) {
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: hashFiles step environment\n")
 	writeFixtureFile(t, workspace, "value", "contents")
 	digest := githubHash("contents")
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{
 		ID:        "hash",
 		Kind:      "run",
 		Shell:     "sh",
@@ -223,7 +223,7 @@ func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
 		{name: "job default working directory", change: func(job *plan.Job) { job.DefaultWorkingDirectory = "${{ hashFiles('value') }}" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
+			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "run", Kind: "run", Command: "true"}})
 			test.change(&job)
 			if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `unsupported runtime function "hashFiles"`) {
 				t.Fatalf("RunJob() default hashFiles error = %v", err)
@@ -231,13 +231,13 @@ func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
 		})
 	}
 
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "name", Name: "${{ hashFiles('value') }}", Kind: "run", Shell: "sh", Command: "true"}})
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "name", Name: "${{ hashFiles('value') }}", Kind: "run", Shell: "sh", Command: "true"}})
 	if result, err := (Runner{}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("step name unexpectedly evaluated hashFiles: %#v, %v", result, err)
 	}
 
 	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "runs:\n  using: composite\n  steps:\n    - shell: sh\n      run: echo \"${{ hashFiles('value') }}\"\n")
-	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
+	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
 	if err := synthesizeTestLocalActionLocks(&job, workspace); err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
 
 	writeFixtureFile(t, workspace, ".github/actions/child/action.yml", "inputs:\n  value:\n    required: false\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: true\n")
 	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "runs:\n  using: composite\n  steps:\n    - shell: sh\n      run: printf 'TEMPLATE=$%s\\n' \"{{ false && hashFiles('value') || 'ok' }}\" >> \"$GITHUB_ENV\"\n    - uses: ./.github/actions/child\n      with:\n        value: ${{ env.TEMPLATE }}\n")
-	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
+	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
 	if result, err := (Runner{}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("nested composite input was evaluated twice: %#v, %v", result, err)
 	}
@@ -428,7 +428,7 @@ func TestHashFilesStepEnvironmentFailureUsesStepConclusion(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	marker := filepath.Join(workspace, "continued")
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{
 		{ID: "invalid", Kind: "run", Shell: "sh", ContinueOnError: true, Env: map[string]string{"HASH": "${{ hashFiles('link') }}"}, Command: "exit 99"},
 		{ID: "after", Kind: "run", Shell: "sh", Condition: "steps.invalid.outcome == 'failure' && steps.invalid.conclusion == 'success'", Command: "touch " + marker},
 	})
@@ -449,7 +449,7 @@ func TestHashFilesStepConditionFailureRunsFailureCleanup(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	marker := filepath.Join(workspace, "cleaned")
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{
 		{ID: "invalid", Kind: "run", Shell: "sh", Condition: "hashFiles('link') != ''", Command: "exit 99"},
 		{ID: "cleanup", Kind: "run", Shell: "sh", Condition: "failure()", Command: "touch " + marker},
 	})
@@ -472,7 +472,7 @@ func TestHashFilesSkippedStepsDoNotAccessWorkspace(t *testing.T) {
 	envMarker := filepath.Join(workspace, "env-ran")
 	conditionMarker := filepath.Join(workspace, "condition-ran")
 	cleanupMarker := filepath.Join(workspace, "cleaned")
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{
 		{ID: "fails", Kind: "run", Shell: "sh", Command: "exit 1"},
 		{ID: "env", Kind: "run", Shell: "sh", Env: map[string]string{"HASH": "${{ hashFiles('link') }}"}, Command: "touch " + envMarker},
 		{ID: "condition", Kind: "run", Shell: "sh", Condition: "hashFiles('link') != ''", Command: "touch " + conditionMarker},
@@ -507,7 +507,7 @@ func TestHashFilesRemotePreFailureUsesStepConclusion(t *testing.T) {
 	digest := digestTree(t, remote)
 	lockID := remoteLifecycleLockID(1)
 	marker := filepath.Join(workspace, "continued")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
 		{ID: "invalid", Kind: "uses", Uses: remoteLifecycleUses("action"), Action: &plan.ActionSelector{Lock: lockID}, ContinueOnError: true, Env: map[string]string{"HASH": "${{ hashFiles('link') }}"}},
 		{ID: "after", Kind: "run", Shell: "sh", Condition: "steps.invalid.outcome == 'failure' && steps.invalid.conclusion == 'success'", Command: "touch " + marker},
 	})
@@ -548,7 +548,7 @@ func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 			if err := file.Close(); err != nil {
 				t.Fatal(err)
 			}
-			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{
+			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{
 				ID:             "hash",
 				Kind:           "run",
 				Shell:          "sh",
@@ -590,7 +590,7 @@ func TestHashFilesPrePhaseUsesStepTimeoutContext(t *testing.T) {
 	writeFixtureFile(t, remote, "action/main.js", "")
 	digest := digestTree(t, remote)
 	lockID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID:             "hash",
 		Kind:           "uses",
 		Uses:           remoteLifecycleUses("action"),

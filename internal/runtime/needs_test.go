@@ -95,7 +95,7 @@ func TestDeferredReusableWorkflowInputFlowsFromVerifiedOutputToCalleeStep(t *tes
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/generator_generic_slsa3.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID:        "create-file",
 		Kind:      "run",
 		Env:       map[string]string{"UNTRUSTED_SUBJECTS": "${{ inputs.base64-subjects }}"},

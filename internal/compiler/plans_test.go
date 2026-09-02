@@ -4,7 +4,16 @@ import (
 	"context"
 
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
+
+func testBindingSources(bindings []program.Binding) map[string]string {
+	result := make(map[string]string, len(bindings))
+	for _, binding := range bindings {
+		result[binding.Name] = binding.Value.Source
+	}
+	return result
+}
 
 // compilePlansForTest compiles plans through the production
 // CompileBundlePlansContext path and unwraps the plan jobs, so tests exercise

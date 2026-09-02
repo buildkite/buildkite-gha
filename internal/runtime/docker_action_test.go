@@ -333,7 +333,7 @@ runs:
     - ${{ inputs.message }}
 `)
 	lockID := "a-0000000000000001"
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "prebuilt", Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID}}})
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "prebuilt", Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID}}})
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath)), DockerImage: image}}
 	result, err := (Runner{Docker: fake.path}).runTestJob(t.Context(), job, workspace)
@@ -368,7 +368,7 @@ runs:
   image: docker://`+image+`
 `)
 	secondLockID := "a-0000000000000002"
-	mismatched.Steps = append(mismatched.Steps, plan.Step{ID: "prebuilt-second", Kind: "uses", Uses: "./" + secondActionPath, Action: &plan.ActionSelector{Lock: secondLockID}})
+	mismatched.Program.Job.Steps = append(mismatched.Program.Job.Steps, normalizeRuntimeTestStep(runtimeTestStep{ID: "prebuilt-second", Kind: "uses", Uses: "./" + secondActionPath, Action: &plan.ActionSelector{Lock: secondLockID}}))
 	mismatched.Actions = append(mismatched.Actions, plan.ActionLock{ID: secondLockID, Source: "workspace", Path: secondActionPath, SourceDigest: digestTree(t, filepath.Join(workspace, secondActionPath)), DockerImage: image})
 	if _, err := (Runner{Docker: mismatchFake.path}).runTestJob(t.Context(), mismatched, workspace); err == nil || !strings.Contains(err.Error(), "Docker image does not match its immutable lock") {
 		t.Fatalf("RunJob() mismatched planned image error = %v", err)
@@ -468,7 +468,7 @@ runs:
     - "  "
 `)
 	writeFixtureFile(t, workspace, "action/Dockerfile", "FROM scratch\n")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID: "docker", Kind: "uses", Uses: "./action", With: map[string]string{"supplied": "--privileged"},
 	}})
 	job.RequiredCapabilities = []string{"docker", "network"}
@@ -504,7 +504,7 @@ func TestRunJobRevalidatesDockerArgsWithInputsOnly(t *testing.T) {
     - ${{ secrets.token }}
 `)
 	writeFixtureFile(t, workspace, "action/Dockerfile", "FROM scratch\n")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "docker", Kind: "uses", Uses: "./action"}})
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "docker", Kind: "uses", Uses: "./action"}})
 	job.RequiredCapabilities = []string{"docker", "network"}
 	_, err := (Runner{Docker: filepath.Join(t.TempDir(), "docker-must-not-run")}).runTestJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "docker action argument") || !strings.Contains(err.Error(), "only inputs.<name>") {
@@ -539,11 +539,11 @@ func TestRunDockerPreservesExplicitPath(t *testing.T) {
 			}
 			writeFixtureFile(t, workspace, ".github/actions/docker/action.yml", actionMetadata)
 			writeFixtureFile(t, workspace, ".github/actions/docker/Dockerfile", "FROM scratch\n")
-			step := plan.Step{ID: "docker", Kind: "uses", Uses: "./.github/actions/docker"}
+			step := runtimeTestStep{ID: "docker", Kind: "uses", Uses: "./.github/actions/docker"}
 			if test.stepPATH != "" {
 				step.Env = map[string]string{"PATH": test.stepPATH}
 			}
-			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{step})
+			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{step})
 			job.RequiredCapabilities = []string{"docker", "network"}
 			if test.jobPATH != "" {
 				job.Env = map[string]string{"PATH": test.jobPATH}
@@ -570,7 +570,7 @@ func TestRunDockerPreservesPathWrittenThroughGitHubEnv(t *testing.T) {
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: Docker dynamic PATH test\n")
 	writeFixtureFile(t, workspace, ".github/actions/docker/action.yml", "name: Docker dynamic PATH test\nruns:\n  using: docker\n  image: Dockerfile\n")
 	writeFixtureFile(t, workspace, ".github/actions/docker/Dockerfile", "FROM scratch\n")
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{
 		{ID: "path", Kind: "run", Command: `printf '%s\n' 'PATH=/dynamic/bin' >> "$GITHUB_ENV"`},
 		{ID: "docker", Kind: "uses", Uses: "./.github/actions/docker"},
 	})
@@ -603,7 +603,7 @@ runs:
     INPUT_VALUE: action
 `)
 	writeFixtureFile(t, workspace, ".github/actions/docker/Dockerfile", "FROM scratch\n")
-	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{
 		ID: "docker", Kind: "uses", Uses: "./.github/actions/docker",
 		With: map[string]string{"value": "caller-input"},
 		Env:  map[string]string{"MODE": "caller"},

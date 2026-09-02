@@ -31,7 +31,7 @@ func TestRunJobResolvesOriginalSecretOnceAndProjectsAliases(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/aliases.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: aliases\n")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID: "aliases", Kind: "run", Command: `test "${{ secrets.FIRST }}" = shared-value
 test "${{ secrets.SECOND }}" = shared-value
 test -z "${{ secrets.OPTIONAL }}"

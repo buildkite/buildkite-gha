@@ -2,9 +2,15 @@ package program
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
 )
+
+const maxStepTargets = 256
+
+var stepIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 
 // Surface selects the expression semantics for one execution site.
 type Surface string
@@ -220,20 +226,8 @@ func (p *Program) Validate() error {
 		return fmt.Errorf("execution program contains no steps")
 	}
 	engine := expression.NewEngine()
-	for _, step := range p.Job.Steps {
-		if step.ContinueOnError.Expression != nil {
-			if step.ContinueOnError.Literal {
-				return fmt.Errorf("step %q has literal and expression continue-on-error", step.ID)
-			}
-		}
-		if step.TimeoutMinutes.Expression != nil {
-			if step.TimeoutMinutes.Literal != 0 {
-				return fmt.Errorf("step %q has literal and expression timeout-minutes", step.ID)
-			}
-		}
-		if step.Run != nil && step.Invocation != nil {
-			return fmt.Errorf("step %q has both run and invocation operations", step.ID)
-		}
+	if err := validateSteps(p.Job.Steps); err != nil {
+		return err
 	}
 	for _, id := range SortedActionIDs(p.Actions) {
 		action := p.Actions[id]
@@ -249,6 +243,124 @@ func (p *Program) Validate() error {
 		_, err := engine.Validate(site.expressionSite())
 		return err
 	})
+}
+
+func validateSteps(steps []Step) error {
+	ids := make(map[string]struct{}, len(steps))
+	backgroundIDs := make(map[string]struct{})
+	for i, step := range steps {
+		if step.ID == "" {
+			return fmt.Errorf("job plan step %d has no deterministic id", i+1)
+		}
+		if len(step.ID) > 255 {
+			return fmt.Errorf("job plan step id %q exceeds 255 bytes", step.ID)
+		}
+		id := strings.ToLower(step.ID)
+		if _, exists := ids[id]; exists {
+			return fmt.Errorf("job plan contains duplicate step id %q", step.ID)
+		}
+		ids[id] = struct{}{}
+		if step.TimeoutMinutes.Literal < 0 || step.TimeoutMinutes.Literal > 360 {
+			return fmt.Errorf("job plan step %q timeout_minutes must be between 0 and 360", step.ID)
+		}
+		if step.TimeoutMinutes.Expression != nil && step.TimeoutMinutes.Literal != 0 {
+			return fmt.Errorf("job plan step %q has both literal and expression timeout_minutes", step.ID)
+		}
+		if step.ContinueOnError.Expression != nil && step.ContinueOnError.Literal {
+			return fmt.Errorf("job plan step %q has both literal and expression continue_on_error", step.ID)
+		}
+		if err := validateStepSiteLength(step.ID, "timeout_minutes", step.TimeoutMinutes.Expression); err != nil {
+			return err
+		}
+		if err := validateStepSiteLength(step.ID, "continue_on_error", step.ContinueOnError.Expression); err != nil {
+			return err
+		}
+		if len(step.Condition.Source) > 65536 {
+			return fmt.Errorf("job plan step %q condition exceeds 65536 bytes", step.ID)
+		}
+		switch step.Kind {
+		case "run":
+			if step.Run == nil || strings.TrimSpace(step.Run.Command.Source) == "" {
+				return fmt.Errorf("run step %q has no command", step.ID)
+			}
+			if step.Invocation != nil || len(step.Targets) != 0 {
+				return fmt.Errorf("run step %q contains incompatible action or control fields", step.ID)
+			}
+			if step.Background {
+				backgroundIDs[id] = struct{}{}
+			}
+		case "uses":
+			if step.Invocation == nil || strings.TrimSpace(step.Invocation.Uses.Source) == "" {
+				return fmt.Errorf("action step %q has no action reference", step.ID)
+			}
+			if len(step.Invocation.Uses.Source) > 1024 {
+				return fmt.Errorf("action step %q reference exceeds 1024 bytes", step.ID)
+			}
+			if step.Run != nil || len(step.Targets) != 0 {
+				return fmt.Errorf("action step %q contains incompatible run or control fields", step.ID)
+			}
+			if step.Background {
+				backgroundIDs[id] = struct{}{}
+			}
+		case "wait", "wait-all", "cancel":
+			if err := validateControlStep(step, backgroundIDs); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("step %q has unsupported kind %q", step.ID, step.Kind)
+		}
+	}
+	return nil
+}
+
+func validateStepSiteLength(stepID, name string, site *Site) error {
+	if site == nil {
+		return nil
+	}
+	if len(site.Source) > 65536 {
+		return fmt.Errorf("job plan step %q control expression exceeds 65536 bytes", stepID)
+	}
+	trimmed := strings.TrimSpace(site.Source)
+	if !strings.HasPrefix(trimmed, "${{") || !strings.HasSuffix(trimmed, "}}") {
+		return fmt.Errorf("job plan step %q %s expression must be complete", stepID, name)
+	}
+	return nil
+}
+
+func validateControlStep(step Step, backgroundIDs map[string]struct{}) error {
+	if step.Background || step.Run != nil || step.Invocation != nil || len(step.Env) != 0 || step.Condition.Source != "" || step.ContinueOnError.Literal || step.ContinueOnError.Expression != nil || step.TimeoutMinutes.Literal != 0 || step.TimeoutMinutes.Expression != nil || step.Name.Source != "" {
+		return fmt.Errorf("control step %q contains incompatible execution fields", step.ID)
+	}
+	switch step.Kind {
+	case "wait":
+		if len(step.Targets) == 0 || len(step.Targets) > maxStepTargets {
+			return fmt.Errorf("wait step %q must target between 1 and %d background steps", step.ID, maxStepTargets)
+		}
+	case "wait-all":
+		if len(step.Targets) != 0 {
+			return fmt.Errorf("wait-all step %q cannot target individual steps", step.ID)
+		}
+		return nil
+	case "cancel":
+		if len(step.Targets) != 1 {
+			return fmt.Errorf("cancel step %q must target exactly one background step", step.ID)
+		}
+	}
+	seen := make(map[string]struct{}, len(step.Targets))
+	for _, target := range step.Targets {
+		if !stepIDPattern.MatchString(target) {
+			return fmt.Errorf("control step %q has invalid target %q", step.ID, target)
+		}
+		key := strings.ToLower(target)
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("control step %q repeats target %q", step.ID, target)
+		}
+		seen[key] = struct{}{}
+		if _, exists := backgroundIDs[key]; !exists {
+			return fmt.Errorf("control step %q target %q is not a prior background step", step.ID, target)
+		}
+	}
+	return nil
 }
 
 // VisitSites walks every workflow-authored expression-bearing field once in

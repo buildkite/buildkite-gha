@@ -11,15 +11,14 @@ import (
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
-	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 func TestBackgroundSummariesAreBoundedInCommitOrder(t *testing.T) {
 	supervisor := newBackgroundSupervisor(2)
 	releaseFirst := make(chan struct{})
 	completionOrder := make(chan string, 2)
-	first := plan.Step{ID: "first"}
-	second := plan.Step{ID: "second"}
+	first := normalizeRuntimeTestStep(runtimeTestStep{ID: "first"})
+	second := normalizeRuntimeTestStep(runtimeTestStep{ID: "second"})
 	summaryBytes := maxJobSummaryBytes * 3 / 4
 
 	supervisor.start(t.Context(), first.ID,
@@ -28,7 +27,7 @@ func TestBackgroundSummariesAreBoundedInCommitOrder(t *testing.T) {
 			completionOrder <- first.ID
 			result := newResult()
 			result.Summary = strings.Repeat("a", summaryBytes)
-			return classifyStepExecution(ctx, ctx, first, result, nil)
+			return classifyStepExecution(ctx, ctx, first.ID, false, result, nil)
 		},
 		func(ctx context.Context) stepExecution {
 			return cancelledStepExecution(t.Context(), ctx, first)
@@ -40,7 +39,7 @@ func TestBackgroundSummariesAreBoundedInCommitOrder(t *testing.T) {
 			close(releaseFirst)
 			result := newResult()
 			result.Summary = strings.Repeat("b", summaryBytes)
-			return classifyStepExecution(ctx, ctx, second, result, nil)
+			return classifyStepExecution(ctx, ctx, second.ID, false, result, nil)
 		},
 		func(ctx context.Context) stepExecution {
 			return cancelledStepExecution(t.Context(), ctx, second)
@@ -152,7 +151,7 @@ func TestBackgroundSupervisorCommitsCompletedTaskExactlyOnceUnderContention(t *t
 	supervisor := newBackgroundSupervisor(1)
 	task := &backgroundTask{
 		done:      make(chan struct{}),
-		execution: stepExecution{step: plan.Step{ID: "only"}},
+		execution: stepExecution{id: "only"},
 		state:     backgroundTaskFinished,
 	}
 	close(task.done)
@@ -174,8 +173,8 @@ func TestBackgroundSupervisorCommitsCompletedTaskExactlyOnceUnderContention(t *t
 	commits := 0
 	for executions := range results {
 		commits += len(executions)
-		if len(executions) == 1 && executions[0].step.ID != "only" {
-			t.Fatalf("committed execution ID = %q, want only", executions[0].step.ID)
+		if len(executions) == 1 && executions[0].id != "only" {
+			t.Fatalf("committed execution ID = %q, want only", executions[0].id)
 		}
 	}
 	if commits != 1 {

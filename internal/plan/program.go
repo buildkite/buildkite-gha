@@ -29,42 +29,6 @@ func (job *Job) ProjectProgram() error {
 	job.DefaultShell = source.Defaults.Shell.Source
 	job.DefaultWorkingDirectory = source.Defaults.WorkingDirectory.Source
 	job.Outputs = bindingMap(source.Outputs)
-	job.Steps = make([]Step, len(source.Steps))
-	for i, step := range source.Steps {
-		execution := step
-		projected := Step{
-			ID: step.ID, Kind: step.Kind, Background: step.Background,
-			Targets: append([]string(nil), step.Targets...), Env: bindingMap(step.Env),
-			Condition: step.Condition.Source, ContinueOnError: step.ContinueOnError.Literal,
-			TimeoutMinutes: step.TimeoutMinutes.Literal, Name: step.Name.Source,
-			Execution: &execution,
-		}
-		if step.Source.Start.Line != 0 {
-			projected.Source = &Span{
-				Start: Position{Line: step.Source.Start.Line, Column: step.Source.Start.Column},
-				End:   Position{Line: step.Source.End.Line, Column: step.Source.End.Column},
-			}
-		}
-		if step.ContinueOnError.Expression != nil {
-			projected.ContinueOnErrorExpression = step.ContinueOnError.Expression.Source
-		}
-		if step.TimeoutMinutes.Expression != nil {
-			projected.TimeoutMinutesExpression = step.TimeoutMinutes.Expression.Source
-		}
-		if step.Run != nil {
-			projected.Command = step.Run.Command.Source
-			projected.Shell = step.Run.Shell.Source
-			projected.WorkingDirectory = step.Run.WorkingDirectory.Source
-		}
-		if step.Invocation != nil {
-			projected.Uses = step.Invocation.Uses.Source
-			projected.With = bindingMap(step.Invocation.With)
-			if step.Invocation.Lock != "" {
-				projected.Action = &ActionSelector{Lock: step.Invocation.Lock}
-			}
-		}
-		job.Steps[i] = projected
-	}
 	job.Container = nil
 	if source.Container != nil {
 		job.Container = &Container{Image: source.Container.Image.Source, Env: bindingMap(source.Container.Env), Ports: siteSources(source.Container.Ports)}

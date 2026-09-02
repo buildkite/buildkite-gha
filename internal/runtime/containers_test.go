@@ -613,10 +613,10 @@ func fakeJobDockerExec(root, scenario string, args []string) {
 	os.Exit(RunContainerProcessHelper(helper))
 }
 
-func jobContainerPlan(t *testing.T, workspace string, steps []plan.Step) plan.Job {
+func jobContainerPlan(t *testing.T, workspace string, steps []runtimeTestStep) plan.Job {
 	t.Helper()
 	if len(steps) == 0 {
-		steps = []plan.Step{{ID: "noop", Kind: "run", Shell: "sh", Command: "true"}}
+		steps = []runtimeTestStep{{ID: "noop", Kind: "run", Shell: "sh", Command: "true"}}
 	}
 	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "jobs: {}\n")
 	j := runtimePlan(t, workspace, ".github/workflows/container.yml", steps)
@@ -636,7 +636,7 @@ func TestRunJobContainerLifecycleAndEnvironment(t *testing.T) {
 	t.Setenv("DOCKER_CONTEXT", "bad")
 	t.Setenv("BUILDX_BUILDER", "bad")
 	t.Setenv("BUILDKIT_HOST", "bad")
-	j := jobContainerPlan(t, workspace, []plan.Step{{ID: "one", Kind: "run", Shell: "sh", WorkingDirectory: "nested", Env: map[string]string{"P": "step"}, Command: `test "$PATH" = /image/bin:/usr/bin; test "$P" = step; test "$PWD" = "$GITHUB_WORKSPACE/nested"; test "${{ runner.temp }}" = /__w/_temp; echo E=ok >> "$GITHUB_ENV"; echo O=out >> "$GITHUB_OUTPUT"; echo /extra >> "$GITHUB_PATH"; echo S=state >> "$GITHUB_STATE"; echo summary >> "$GITHUB_STEP_SUMMARY"`}, {ID: "two", Kind: "run", Shell: "sh", WorkingDirectory: "${{ github.workspace }}/nested", Command: `test "$PWD" = "$GITHUB_WORKSPACE/nested"; test "$E" = ok; case "$PATH" in /extra:*) ;; *) exit 8;; esac`}})
+	j := jobContainerPlan(t, workspace, []runtimeTestStep{{ID: "one", Kind: "run", Shell: "sh", WorkingDirectory: "nested", Env: map[string]string{"P": "step"}, Command: `test "$PATH" = /image/bin:/usr/bin; test "$P" = step; test "$PWD" = "$GITHUB_WORKSPACE/nested"; test "${{ runner.temp }}" = /__w/_temp; echo E=ok >> "$GITHUB_ENV"; echo O=out >> "$GITHUB_OUTPUT"; echo /extra >> "$GITHUB_PATH"; echo S=state >> "$GITHUB_STATE"; echo summary >> "$GITHUB_STEP_SUMMARY"`}, {ID: "two", Kind: "run", Shell: "sh", WorkingDirectory: "${{ github.workspace }}/nested", Command: `test "$PWD" = "$GITHUB_WORKSPACE/nested"; test "$E" = ok; case "$PATH" in /extra:*) ;; *) exit 8;; esac`}})
 	j.Env = map[string]string{"P": "job"}
 	j.Container.Env = map[string]string{"P": "container"}
 	j.Outputs = map[string]string{"observed": "${{ steps.one.outputs.O }}"}
@@ -693,7 +693,7 @@ func TestRunJobContainerUsesPlanSelectedImageWithoutRuntimeEvaluation(t *testing
 func TestRunJobContainerDefaultsRunStepsToSh(t *testing.T) {
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()
-	j := jobContainerPlan(t, workspace, []plan.Step{{ID: "default", Kind: "run", Command: "true"}})
+	j := jobContainerPlan(t, workspace, []runtimeTestStep{{ID: "default", Kind: "run", Command: "true"}})
 	if _, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), j, workspace); err != nil {
 		t.Fatal(err)
 	}
@@ -714,7 +714,7 @@ func TestRunJobContainerPythonShellUsesMountedScript(t *testing.T) {
 	installPythonShellTestCommand(t)
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()
-	j := jobContainerPlan(t, workspace, []plan.Step{
+	j := jobContainerPlan(t, workspace, []runtimeTestStep{
 		{
 			ID:    "python",
 			Kind:  "run",
@@ -756,7 +756,7 @@ func TestRunJobContainerCustomShellUsesMountedScript(t *testing.T) {
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()
 	arguments := filepath.Join(workspace, "arguments")
-	j := jobContainerPlan(t, workspace, []plan.Step{
+	j := jobContainerPlan(t, workspace, []runtimeTestStep{
 		{
 			ID:      "julia",
 			Kind:    "run",
@@ -1493,7 +1493,7 @@ func TestRunJobHostServicesLifecycle(t *testing.T) {
 	j.Container = nil
 	j.Services = map[string]plan.ServiceContainer{"db": {Image: "postgres", Ports: []string{"6379"}}}
 	j.ServiceOrder = []string{"db"}
-	j.Steps = []plan.Step{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 49152`}}
+	j.Program.Job.Steps = normalizeRuntimeTestSteps([]runtimeTestStep{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 49152`}})
 	if _, err := (Runner{Docker: f.path}).runTestJob(t.Context(), j, w); err != nil {
 		t.Fatal(err)
 	}
@@ -1508,7 +1508,7 @@ func TestRunHostJobServicesExposePortsAndNetworkToDockerActions(t *testing.T) {
 	f := newJobDocker(t, "")
 	workspace := fixturePath(t)
 	lockID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []runtimeTestStep{
 		{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.redis.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 49152`},
 		{ID: "docker", Kind: "uses", Uses: "./actions/docker", With: map[string]string{"expected_file": "${{ job.services.redis.ports[6379] }}"}, Env: map[string]string{"SERVICE_PORT": "${{ job.services.redis.ports['6379'] }}"}, Action: &plan.ActionSelector{Lock: lockID}},
 	})
@@ -1550,7 +1550,7 @@ func TestRunJobHostServicePortProtocolCollisionIsDeterministic(t *testing.T) {
 	j.Container = nil
 	j.Services = map[string]plan.ServiceContainer{"db": {Image: "postgres", Ports: []string{"41001:6379/tcp", "41002:6379/udp"}}}
 	j.ServiceOrder = []string{"db"}
-	j.Steps = []plan.Step{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 41002`}}
+	j.Program.Job.Steps = normalizeRuntimeTestSteps([]runtimeTestStep{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 41002`}})
 	if _, err := (Runner{Docker: f.path}).runTestJob(t.Context(), j, w); err != nil {
 		t.Fatal(err)
 	}
@@ -1632,7 +1632,7 @@ func TestRunJobContainerReportsLeftoverAndVerificationFailure(t *testing.T) {
 func TestRunJobContainerToleratesWorkflowFailureAfterSuccessfulCleanup(t *testing.T) {
 	f := newJobDocker(t, "")
 	w := t.TempDir()
-	j := jobContainerPlan(t, w, []plan.Step{{ID: "fail", Kind: "run", Shell: "sh", Command: "exit 7"}})
+	j := jobContainerPlan(t, w, []runtimeTestStep{{ID: "fail", Kind: "run", Shell: "sh", Command: "exit 7"}})
 	j.ContinueOnError = true
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), j, w)
 	if err == nil || !IsToleratedJobFailure(err) || result.Conclusion != "success" {
@@ -1746,7 +1746,7 @@ func TestRunJobContainerBarrierVisibility(t *testing.T) {
 
 	f := newJobDocker(t, "")
 	w := t.TempDir()
-	j := jobContainerPlan(t, w, []plan.Step{{ID: "bg", Kind: "run", Shell: "sh", Background: true, Command: `/bin/sleep .15; echo LATE=yes >> "$GITHUB_ENV"; echo value=x >> "$GITHUB_OUTPUT"; echo /late >> "$GITHUB_PATH"`}, {ID: "before", Kind: "run", Shell: "sh", Command: `test -z "${LATE-}"`}, {ID: "wait", Kind: "wait", Targets: []string{"bg"}}, {ID: "after", Kind: "run", Shell: "sh", Command: `test "$LATE" = yes; case "$PATH" in /late:*) ;; *) exit 9;; esac`}})
+	j := jobContainerPlan(t, w, []runtimeTestStep{{ID: "bg", Kind: "run", Shell: "sh", Background: true, Command: `/bin/sleep .15; echo LATE=yes >> "$GITHUB_ENV"; echo value=x >> "$GITHUB_OUTPUT"; echo /late >> "$GITHUB_PATH"`}, {ID: "before", Kind: "run", Shell: "sh", Command: `test -z "${LATE-}"`}, {ID: "wait", Kind: "wait", Targets: []string{"bg"}}, {ID: "after", Kind: "run", Shell: "sh", Command: `test "$LATE" = yes; case "$PATH" in /late:*) ;; *) exit 9;; esac`}})
 	if _, e := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), j, w); e != nil {
 		t.Fatal(e)
 	}
@@ -1760,7 +1760,7 @@ func TestRunJobContainerRejectsDeferredFeaturesBeforeDocker(t *testing.T) {
 			j := jobContainerPlan(t, w, nil)
 			m := &fakeActionMaterializer{}
 			if feature == "action" {
-				j.Steps = []plan.Step{{Kind: "uses", Uses: "x"}}
+				j.Program.Job.Steps = normalizeRuntimeTestSteps([]runtimeTestStep{{Kind: "uses", Uses: "x"}})
 			}
 			if _, e := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: m}).runTestJob(t.Context(), j, w); e == nil {
 				t.Fatal("accepted")
@@ -1858,7 +1858,7 @@ func TestRunJobContainerNodeProbeFailureCleansOwnedResources(t *testing.T) {
 			}
 			j := jobContainerPlan(t, w, nil)
 			lockID := remoteLifecycleLockID(1)
-			j.Steps = []plan.Step{{ID: "action", Kind: "uses", Uses: "./unused", Action: &plan.ActionSelector{Lock: lockID}}}
+			j.Program.Job.Steps = normalizeRuntimeTestSteps([]runtimeTestStep{{ID: "action", Kind: "uses", Uses: "./unused", Action: &plan.ActionSelector{Lock: lockID}}})
 			j.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "unused", SourceDigest: digestTree(t, filepath.Join(w, "unused"))}}
 			_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: node}).runTestJob(t.Context(), j, w)
 			if err == nil || (!strings.Contains(err.Error(), "exact major") && !strings.Contains(err.Error(), "incompatible")) {
@@ -1885,7 +1885,7 @@ func TestRunJobContainerDoesNotProbeConfiguredNodeWithoutActions(t *testing.T) {
 	if err := os.WriteFile(node, []byte("#!/bin/sh\necho v24.0.0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	j := jobContainerPlan(t, w, []plan.Step{{ID: "shell", Kind: "run", Shell: "sh", Command: "true"}})
+	j := jobContainerPlan(t, w, []runtimeTestStep{{ID: "shell", Kind: "run", Shell: "sh", Command: "true"}})
 	if _, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: node}).runTestJob(t.Context(), j, w); err != nil {
 		t.Fatal(err)
 	}
@@ -1902,7 +1902,7 @@ func TestRunJobContainerDoesNotProbeConfiguredNodeForCompositeOnlyActions(t *tes
 	writeFixtureFile(t, w, "composite/action.yml", "name: composite only\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: echo COMPOSITE_ONLY=seen >> \"$GITHUB_ENV\"\n")
 	node := filepath.Join(t.TempDir(), "missing-node")
 	lockID := remoteLifecycleLockID(1)
-	j := jobContainerPlan(t, w, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./composite", Action: &plan.ActionSelector{Lock: lockID}}})
+	j := jobContainerPlan(t, w, []runtimeTestStep{{ID: "composite", Kind: "uses", Uses: "./composite", Action: &plan.ActionSelector{Lock: lockID}}})
 	j.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "composite", SourceDigest: digestTree(t, filepath.Join(w, "composite"))}}
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: node}).runTestJob(t.Context(), j, w)
 	if err != nil || result.Env["COMPOSITE_ONLY"] != "seen" {
@@ -1922,7 +1922,7 @@ func TestActionContainerMountsNativeAdapterDoesNotResolveMise(t *testing.T) {
 	writeFixtureFile(t, remote, "index.js", "")
 	digest := digestTree(t, remote)
 	lockID := remoteLifecycleLockID(1)
-	job := jobContainerPlan(t, workspace, []plan.Step{{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v4", Action: &plan.ActionSelector{Lock: lockID}}})
+	job := jobContainerPlan(t, workspace, []runtimeTestStep{{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v4", Action: &plan.ActionSelector{Lock: lockID}}})
 	job.Actions = []plan.ActionLock{{
 		ID: lockID, Source: "github", Repository: "actions/checkout", RequestedRef: "v4",
 		Commit: actionintegration.CheckoutV4Commit, SourceDigest: digest,
@@ -1997,10 +1997,10 @@ esac
 		},
 		Target:               plan.Target{StepKey: "gha-container", Queue: "trusted"},
 		RequiredCapabilities: []string{"docker", "network"},
-		Steps: []plan.Step{
+		Program: runtimeTestProgram([]runtimeTestStep{
 			{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v4", Action: &plan.ActionSelector{Lock: checkoutID}},
 			{ID: "local", Kind: "uses", Uses: "./.github/actions/local", Action: &plan.ActionSelector{Lock: localID}},
-		},
+		}),
 		Actions: []plan.ActionLock{
 			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v4", Commit: actionintegration.CheckoutV4Commit, SourceDigest: remoteDigest},
 			{ID: localID, Source: "workspace", Path: ".github/actions/local", SourceDigest: digestTree(t, localFixture)},
@@ -2032,7 +2032,7 @@ func TestRunJobContainerReadOnlyMountProbeFailureCleansOwnedResources(t *testing
 	digest := digestTree(t, remote)
 	j := jobContainerPlan(t, w, nil)
 	lockID := remoteLifecycleLockID(1)
-	j.Steps = []plan.Step{{ID: "action", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID}}}
+	j.Program.Job.Steps = normalizeRuntimeTestSteps([]runtimeTestStep{{ID: "action", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID}}})
 	j.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "selected"), SourceDigest: digest}}
 	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).runTestJob(t.Context(), j, w)
@@ -2061,7 +2061,7 @@ func TestRunJobContainerSkippedRemoteJavaScriptDoesNotRequireNode(t *testing.T) 
 	writeFixtureFile(t, remote, "selected/post.js", "")
 	digest := digestTree(t, remote)
 	lockID := remoteLifecycleLockID(1)
-	j := jobContainerPlan(t, w, []plan.Step{{ID: "skipped", Kind: "uses", Uses: remoteLifecycleUses("selected"), Condition: "false", Action: &plan.ActionSelector{Lock: lockID}}})
+	j := jobContainerPlan(t, w, []runtimeTestStep{{ID: "skipped", Kind: "uses", Uses: remoteLifecycleUses("selected"), Condition: "false", Action: &plan.ActionSelector{Lock: lockID}}})
 	j.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "selected"), SourceDigest: digest}}
 	missingNode := filepath.Join(t.TempDir(), "missing-node")
@@ -2081,7 +2081,7 @@ func TestRunJobContainerJavaScriptLifecycle(t *testing.T) {
 	workspace := fixturePath(t)
 	node := requireNode24(t)
 	lockID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []runtimeTestStep{{
 		ID: "javascript", Kind: "uses", Uses: "./actions/javascript",
 		With:   map[string]string{"message": "container", "order": "single"},
 		Action: &plan.ActionSelector{Lock: lockID},
@@ -2173,7 +2173,7 @@ printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
 	}
 	lifecycle := filepath.Join(workspace, "lifecycle.log")
 	topID, compositeID, nestedID := remoteLifecycleLockID(1), remoteLifecycleLockID(2), remoteLifecycleLockID(3)
-	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{
 		{ID: "top", Kind: "uses", Uses: "./.github/actions/top", Action: &plan.ActionSelector{Lock: topID}},
 		{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", Action: &plan.ActionSelector{Lock: compositeID}},
 		{ID: "verify", Kind: "run", Shell: "sh", Command: `test "$COMPOSITE_SEEN" = yes`},
@@ -2214,7 +2214,7 @@ runs:
       run: test "${{ github.action_path }}" = "`+jobContainerWorkspace+`/.github/actions/composite"
 `)
 	compositeID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{
 		{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", Action: &plan.ActionSelector{Lock: compositeID}},
 	})
 	job.Schema = plan.Schema
@@ -2242,7 +2242,7 @@ func TestRunJobContainerRemoteActionsMountedReadOnly(t *testing.T) {
 `)
 	digest := digestTree(t, remote)
 	lockID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{{
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{{
 		ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID},
 	}})
 	job.Schema = plan.Schema
@@ -2284,7 +2284,7 @@ func TestRunJobContainerRemoteActionPreparationTimeoutIsCancelled(t *testing.T) 
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: remote container action timeout\n")
 	lockID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{{
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{{
 		ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID},
 	}})
 	job.Schema = plan.Schema
@@ -2340,7 +2340,7 @@ echo NESTED_REMOTE=seen >> "$GITHUB_ENV"
 
 	localID, remoteID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
 	digest := digestTree(t, remote)
-	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{{
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{{
 		ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", Action: &plan.ActionSelector{Lock: localID},
 	}})
 	job.Schema = plan.Schema
@@ -2386,7 +2386,7 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 	create := fmt.Sprintf("/bin/mkdir -p %s; printf '%%s' %s | base64 -d > %s/action.yml; printf '%%s' %s | base64 -d > %s/main.js",
 		lazyDir, base64.StdEncoding.EncodeToString([]byte(actionYAML)), lazyDir,
 		base64.StdEncoding.EncodeToString([]byte(mainJS)), lazyDir)
-	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{
 		{ID: "populate", Kind: "run", Shell: "sh", Command: create},
 		{ID: "lazy", Kind: "uses", Uses: "./" + lazyDir, Action: &plan.ActionSelector{Lock: lockID}},
 	})
@@ -2439,7 +2439,7 @@ func TestRunJobContainerRunsDockerActionsAsSiblings(t *testing.T) {
 		workspace := fixturePath(t)
 		var logs bytes.Buffer
 		lockID := remoteLifecycleLockID(1)
-		job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{
+		job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []runtimeTestStep{{
 			ID: "docker", Kind: "uses", Uses: "./actions/docker", Action: &plan.ActionSelector{Lock: lockID},
 		}})
 		job.Schema = plan.Schema
@@ -2494,7 +2494,7 @@ func TestRunJobContainerRunsDockerActionsAsSiblings(t *testing.T) {
 		writeFixtureFile(t, remote, "docker/Dockerfile", "FROM scratch\n")
 		digest := digestTree(t, remote)
 		lockID := remoteLifecycleLockID(1)
-		job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{{
+		job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{{
 			ID: "docker", Kind: "uses", Uses: remoteLifecycleUses("docker"), Action: &plan.ActionSelector{Lock: lockID},
 		}})
 		job.Schema = plan.Schema
@@ -2529,7 +2529,7 @@ func TestRunJobContainerSiblingDockerFailureCleansActionAndJobResources(t *testi
 	f := newJobDocker(t, "fail-action-run")
 	workspace := fixturePath(t)
 	lockID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []runtimeTestStep{{
 		ID: "docker", Kind: "uses", Uses: "./actions/docker", Action: &plan.ActionSelector{Lock: lockID},
 	}})
 	job.Schema = plan.Schema
@@ -2575,7 +2575,7 @@ func TestRunJobContainerJavaScriptCancellationRunsPost(t *testing.T) {
 `)
 	ready, postMarker := filepath.Join(workspace, "ready"), filepath.Join(workspace, "post-ran")
 	lockID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{
 		{ID: "background", Kind: "uses", Uses: "./.github/actions/cancel", Background: true, Action: &plan.ActionSelector{Lock: lockID}},
 		{ID: "await", Kind: "run", Shell: "sh", Command: `while [ ! -f "$READY" ]; do /bin/sleep .01; done`},
 		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
@@ -2626,7 +2626,7 @@ func TestValidateDockerMountFileRequiresExistingRegularExecutableSafeAbsoluteFil
 	}
 }
 
-func liveContainerJob(t *testing.T, docker string, steps []plan.Step) JobResult {
+func liveContainerJob(t *testing.T, docker string, steps []runtimeTestStep) JobResult {
 	t.Helper()
 	w := t.TempDir()
 	j := jobContainerPlan(t, w, steps)
@@ -2659,12 +2659,12 @@ func buildLiveContainerRuntime(t *testing.T) string {
 }
 func TestLiveJobContainerPersistsAcrossShellSteps(t *testing.T) {
 	d := requireDocker(t)
-	liveContainerJob(t, d, []plan.Step{{ID: "a", Kind: "run", Shell: "sh", Command: "touch persisted"}, {ID: "b", Kind: "run", Shell: "sh", Command: "test -f persisted"}})
+	liveContainerJob(t, d, []runtimeTestStep{{ID: "a", Kind: "run", Shell: "sh", Command: "touch persisted"}, {ID: "b", Kind: "run", Shell: "sh", Command: "test -f persisted"}})
 }
 func TestLiveJobContainerDefaultNonRootUser(t *testing.T) {
 	d := requireDocker(t)
 	w := t.TempDir()
-	j := jobContainerPlan(t, w, []plan.Step{{ID: "u", Kind: "run", Shell: "sh", Command: `test "$(id -u)" != 0`}})
+	j := jobContainerPlan(t, w, []runtimeTestStep{{ID: "u", Kind: "run", Shell: "sh", Command: `test "$(id -u)" != 0`}})
 	j.Container.Image = "nginxinc/nginx-unprivileged:stable-alpine"
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
@@ -2674,7 +2674,7 @@ func TestLiveJobContainerDefaultNonRootUser(t *testing.T) {
 }
 func TestLiveJobContainerCancellationKillsProcessTree(t *testing.T) {
 	d := requireDocker(t)
-	liveContainerJob(t, d, []plan.Step{
+	liveContainerJob(t, d, []runtimeTestStep{
 		{ID: "bg", Kind: "run", Shell: "sh", Background: true, Command: "sleep 30 & wait"},
 		{ID: "cancel", Kind: "cancel", Targets: []string{"bg"}},
 	})
@@ -2697,7 +2697,7 @@ runs:
       run: echo COMPOSITE_LIVE=yes >> "$GITHUB_ENV"
 `)
 	jsID, compositeID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
-	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{
 		{ID: "js", Kind: "uses", Uses: "./.github/actions/js", Action: &plan.ActionSelector{Lock: jsID}},
 		{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", Action: &plan.ActionSelector{Lock: compositeID}},
 		{ID: "verify", Kind: "run", Shell: "sh", Command: `test "$COMPOSITE_LIVE" = yes`},
@@ -2851,7 +2851,7 @@ func TestLiveAuthenticatedServiceRegistry(t *testing.T) {
 
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/authenticated.yml", "name: authenticated service\n")
-	job := runtimePlan(t, workspace, ".github/workflows/authenticated.yml", []plan.Step{{ID: "verify", Kind: "run", Shell: "sh", Command: "true"}})
+	job := runtimePlan(t, workspace, ".github/workflows/authenticated.yml", []runtimeTestStep{{ID: "verify", Kind: "run", Shell: "sh", Command: "true"}})
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Services = map[string]plan.ServiceContainer{"private": {Image: privateImage, Credentials: &plan.ContainerCredentials{Username: "service-user", Password: "service-password"}, Command: "sleep 300"}}
@@ -2984,7 +2984,7 @@ CMD ["sh", "-c", "echo container-runtime-health-diagnostic >&2; sleep 300"]
 	}
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/health.yml", "name: health diagnostics\n")
-	job := runtimePlan(t, workspace, ".github/workflows/health.yml", []plan.Step{{ID: "unreachable", Kind: "run", Shell: "sh", Command: "true"}})
+	job := runtimePlan(t, workspace, ".github/workflows/health.yml", []runtimeTestStep{{ID: "unreachable", Kind: "run", Shell: "sh", Command: "true"}})
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Services = map[string]plan.ServiceContainer{"unhealthy": {Image: image}}

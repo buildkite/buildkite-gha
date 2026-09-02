@@ -20,6 +20,7 @@ import (
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
@@ -718,7 +719,7 @@ func TestUploadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	lockID := "a-0000000000000001"
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID: "upload", Kind: "uses", Uses: "actions/upload-artifact@" + actionintegration.UploadArtifactCommit,
 		With:   map[string]string{"name": "payload", "path": "payload/result.txt", "if-no-files-found": "error"},
 		Action: &plan.ActionSelector{Lock: lockID},
@@ -744,10 +745,13 @@ func TestUploadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) {
 	}
 
 	maskedJob := job
-	maskedJob.Steps = append(append([]plan.Step(nil), job.Steps...), plan.Step{
+	maskedProgram := *job.Program
+	maskedProgram.Job = job.Program.Job
+	maskedJob.Program = &maskedProgram
+	maskedJob.Program.Job.Steps = append(append([]executionprogram.Step(nil), job.Program.Job.Steps...), normalizeRuntimeTestStep(runtimeTestStep{
 		ID: "mask-after-upload", Kind: "run", Shell: "bash",
 		Command: `echo "::add-mask::load"`,
-	})
+	}))
 	maskedResult, err := (Runner{Actions: materializer, Artifacts: &captureArtifactUploader{}}).runTestJob(t.Context(), maskedJob, workspace)
 	if err == nil || !strings.Contains(err.Error(), "artifact name contains a registered secret") || len(maskedResult.Artifacts) != 0 || maskedResult.Conclusion != "failure" {
 		t.Fatalf("late artifact-name mask result = %#v, error = %v", maskedResult, err)
@@ -793,7 +797,7 @@ func TestUploadArtifactLegacyManifestsUseNativeAdapter(t *testing.T) {
 				t.Fatal(err)
 			}
 			const lockID = "a-0000000000000001"
-			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 				ID: "upload", Kind: "uses", Uses: "actions/upload-artifact@" + test.commit,
 				With: test.inputs, Action: &plan.ActionSelector{Lock: lockID},
 			}})
@@ -826,7 +830,7 @@ func TestUploadArtifactV6ConditionalMatrixAndExpressionName(t *testing.T) {
 		t.Fatal(err)
 	}
 	const lockID = "a-0000000000000006"
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID: "upload", Kind: "uses", Uses: "actions/upload-artifact@" + actionintegration.UploadArtifactV6Commit,
 		Condition: "matrix.mode == 'test'",
 		With: map[string]string{

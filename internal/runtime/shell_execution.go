@@ -13,13 +13,13 @@ import (
 	shellcompat "github.com/buildkite/buildkite-gha/internal/shell"
 )
 
-func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, step plan.Step, env map[string]string, eval expression.Context) (Result, error) {
+func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, step executionprogram.Step, env map[string]string, eval expression.Context) (Result, error) {
 	result := newResult()
-	script, err := evaluateProgramTyped[string](step.Execution.Run.Command, executionprogram.EvaluationContext{Expression: eval})
+	script, err := evaluateProgramTyped[string](step.Run.Command, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {
 		return result, err
 	}
-	shellSite := step.Execution.Run.Shell
+	shellSite := step.Run.Shell
 	if shellSite.Source == "" {
 		shellSite = job.Program.Job.Defaults.Shell
 	}
@@ -34,7 +34,7 @@ func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandOut
 			shell = "bash"
 		}
 	}
-	workingDirectorySite := step.Execution.Run.WorkingDirectory
+	workingDirectorySite := step.Run.WorkingDirectory
 	if workingDirectorySite.Source == "" {
 		workingDirectorySite = job.Program.Job.Defaults.WorkingDirectory
 	}
