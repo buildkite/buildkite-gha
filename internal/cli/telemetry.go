@@ -13,6 +13,7 @@ import (
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/processing"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
@@ -223,10 +224,10 @@ func telemetrySeverity(level string) (telemetry.Severity, bool) {
 
 func allowlistedTelemetryDiagnosticCode(code string) bool {
 	switch code {
-	case compiler.CodeWorkflowSyntax, compiler.CodeEventInvalid, compiler.CodeGraphInvalid,
-		compiler.CodeMatrixInvalid, compiler.CodeExpressionInvalid, compiler.CodeActionDiscovery,
-		compiler.CodeActionResolution, compiler.CodePlanConstruction, compiler.CodePipelineGeneration,
-		compiler.CodeEnvironment, "E_PROFILE", "W_ACTION_RUNTIME_UNKNOWN",
+	case processing.CodeWorkflowSyntax, processing.CodeEventInvalid, processing.CodeGraphInvalid,
+		processing.CodeMatrixInvalid, processing.CodeExpressionInvalid, processing.CodeActionDiscovery,
+		processing.CodeActionResolution, processing.CodePlanConstruction, processing.CodePipelineGeneration,
+		processing.CodeEnvironment, "E_PROFILE", "W_ACTION_RUNTIME_UNKNOWN",
 		"W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED":
 		return true
 	default:
@@ -234,17 +235,17 @@ func allowlistedTelemetryDiagnosticCode(code string) bool {
 	}
 }
 
-func telemetryPhase(stage string) telemetry.FailurePhase {
-	switch compiler.ProcessingStage(stage) {
-	case compiler.StageWorkflowParsing:
+func telemetryPhase(stage processing.Stage) telemetry.FailurePhase {
+	switch stage {
+	case processing.StageWorkflowParsing:
 		return telemetry.FailurePhaseParsing
-	case compiler.StageEventValidation, compiler.StageGraph, compiler.StageMatrix, compiler.StageExpressions:
+	case processing.StageEventValidation, processing.StageGraph, processing.StageMatrix, processing.StageExpressions:
 		return telemetry.FailurePhaseEvaluation
-	case compiler.StageDiscovery, compiler.StageResolution:
+	case processing.StageDiscovery, processing.StageResolution:
 		return telemetry.FailurePhaseSourceResolution
-	case compiler.StageAdmission:
+	case processing.StageAdmission:
 		return telemetry.FailurePhaseAdmission
-	case compiler.StagePlans, compiler.StagePipeline:
+	case processing.StagePlans, processing.StagePipeline:
 		return telemetry.FailurePhaseCompilation
 	default:
 		return telemetry.FailurePhaseUnknown

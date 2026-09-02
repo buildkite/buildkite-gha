@@ -18,6 +18,7 @@ import (
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/processing"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 )
 
@@ -302,7 +303,7 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	var diagnostics []error
 	addFailure := func(artifact compiler.PlanArtifact, message, detail string, err error) {
 		finding := &compiler.ProcessingFinding{
-			Stage: compiler.StageAdmission, Code: "E_PROFILE", Category: "admission",
+			Stage: processing.StageAdmission, Code: "E_PROFILE", Category: "admission",
 			Job: artifact.Job.Workflow.LogicalJobID, Instance: artifact.Job.Target.StepKey,
 			Message: message, Detail: detail, Err: err,
 		}

@@ -1,36 +1,39 @@
 package compiler
 
-import "errors"
+import (
+	"errors"
 
-// ProcessingStage identifies one stable workflow-processing boundary without
-// coupling the compiler to the compatibility report wire format.
-type ProcessingStage string
+	"github.com/buildkite/buildkite-gha/internal/processing"
+)
+
+// ProcessingStage identifies one stable workflow-processing boundary.
+type ProcessingStage = processing.Stage
 
 const (
-	StageWorkflowParsing ProcessingStage = "workflow-parsing"
-	StageEventValidation ProcessingStage = "event-validation"
-	StageGraph           ProcessingStage = "static-graph-construction"
-	StageMatrix          ProcessingStage = "matrix-expansion"
-	StageExpressions     ProcessingStage = "expression-validation"
-	StageDiscovery       ProcessingStage = "action-discovery"
-	StageResolution      ProcessingStage = "action-resolution"
-	StagePlans           ProcessingStage = "job-plan-construction"
-	StageAdmission       ProcessingStage = "hosted-profile-admission"
-	StagePipeline        ProcessingStage = "pipeline-generation"
+	StageWorkflowParsing = processing.StageWorkflowParsing
+	StageEventValidation = processing.StageEventValidation
+	StageGraph           = processing.StageGraph
+	StageMatrix          = processing.StageMatrix
+	StageExpressions     = processing.StageExpressions
+	StageDiscovery       = processing.StageDiscovery
+	StageResolution      = processing.StageResolution
+	StagePlans           = processing.StagePlans
+	StageAdmission       = processing.StageAdmission
+	StagePipeline        = processing.StagePipeline
 )
 
 const (
-	CodeWorkflowSyntax     = "E_WORKFLOW_SYNTAX"
-	CodeEventInvalid       = "E_EVENT_INVALID"
-	CodeGraphInvalid       = "E_GRAPH_INVALID"
-	CodeMatrixInvalid      = "E_MATRIX_INVALID"
-	CodeExpressionInvalid  = "E_EXPRESSION_INVALID"
-	CodeActionDiscovery    = "E_ACTION_DISCOVERY"
-	CodeActionResolution   = "E_ACTION_RESOLUTION"
-	CodePlanConstruction   = "E_PLAN_CONSTRUCTION"
-	CodePipelineGeneration = "E_PIPELINE_GENERATION"
-	CodeContextRequired    = "E_CONTEXT_REQUIRED"
-	CodeEnvironment        = "E_ENVIRONMENT"
+	CodeWorkflowSyntax     = processing.CodeWorkflowSyntax
+	CodeEventInvalid       = processing.CodeEventInvalid
+	CodeGraphInvalid       = processing.CodeGraphInvalid
+	CodeMatrixInvalid      = processing.CodeMatrixInvalid
+	CodeExpressionInvalid  = processing.CodeExpressionInvalid
+	CodeActionDiscovery    = processing.CodeActionDiscovery
+	CodeActionResolution   = processing.CodeActionResolution
+	CodePlanConstruction   = processing.CodePlanConstruction
+	CodePipelineGeneration = processing.CodePipelineGeneration
+	CodeContextRequired    = processing.CodeContextRequired
+	CodeEnvironment        = processing.CodeEnvironment
 )
 
 // ProcessingFinding carries stable attribution independently of its rendered

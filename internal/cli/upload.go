@@ -23,6 +23,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/processing"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
@@ -255,7 +256,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 				if len(processingReports[i].Stages) == 0 {
 					processingReports[i] = triggerProcessingReport(workflows[i].Path, workflows[i].Source)
 				}
-				processingReports[i].AddFailure(workflows[i].Path, string(compiler.StageExpressions), compiler.CodeExpressionInvalid, "compatibility", runNameErr)
+				processingReports[i].AddFailure(workflows[i].Path, processing.StageExpressions, processing.CodeExpressionInvalid, "compatibility", runNameErr)
 				processingReports[i].Result = "incompatible"
 			}
 			continue
@@ -465,7 +466,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			eventArtifact = &artifact
 		}
 		jobCount += len(bundle.Plans)
-		processingReports[i].SetStage(string(compiler.StageAdmission), compatibility.Passed)
+		processingReports[i].SetStage(processing.StageAdmission, compatibility.Passed)
 		processingReports[i].Admission.Result = "admitted"
 		processingReports[i].Result = "admitted"
 		writeCompilerWarnings(stderr, "upload", input.CanonicalPath, bundle.IR.Warnings)

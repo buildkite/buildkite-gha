@@ -130,12 +130,12 @@ func TestCommandCompletionTelemetryFailureDoesNotChangeExit(t *testing.T) {
 func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
 	details := &commandTelemetryDetails{}
 	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
-		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: "must not be uploaded"},
-		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: "different sensitive text"},
-		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions), Blocker: "runner_label", BlockerDetail: "windows-latest", Message: "must not be uploaded"},
-		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions), Blocker: "runner_label", BlockerDetail: "macos-10", Message: "must not be uploaded"},
-		{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Stage: string(compiler.StageAdmission), Message: "must not be uploaded"},
-		{Level: "error", Code: "E_FUTURE_UNALLOWLISTED", Stage: string(compiler.StageGraph), Message: "must not be uploaded"},
+		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: compiler.StageWorkflowParsing, Message: "must not be uploaded"},
+		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: compiler.StageWorkflowParsing, Message: "different sensitive text"},
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions, Blocker: "runner_label", BlockerDetail: "windows-latest", Message: "must not be uploaded"},
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions, Blocker: "runner_label", BlockerDetail: "macos-10", Message: "must not be uploaded"},
+		{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Stage: compiler.StageAdmission, Message: "must not be uploaded"},
+		{Level: "error", Code: "E_FUTURE_UNALLOWLISTED", Stage: compiler.StageGraph, Message: "must not be uploaded"},
 	}})
 	got := details.telemetryDetails()
 	if got.FailurePhase != "parsing" || got.FailureCode != "E_WORKFLOW_SYNTAX" {
@@ -219,7 +219,7 @@ func TestUnprovenActionRuntimeIgnoresNativeAdapters(t *testing.T) {
 func TestHandledReportErrorsDoNotAttributeCommandFailure(t *testing.T) {
 	details := &commandTelemetryDetails{}
 	details.addReportDiagnostics(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
-		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions), Message: "emitted as a failing step"},
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions, Message: "emitted as a failing step"},
 	}})
 	got := details.forOutcome(telemetry.OutcomeFailure)
 	if got.FailurePhase != telemetry.FailurePhaseUnknown || got.FailureCode != telemetry.FailureCodeUnknown {
@@ -305,7 +305,7 @@ func TestObservedFailureMessageSurvivesLaterErrorOutput(t *testing.T) {
 	writer := details.captureErrors(io.Discard)
 	message := "GitHub environments and environment secrets are unsupported. Remove the environment key from job \"deploy\"."
 	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
-		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: message},
+		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: compiler.StageWorkflowParsing, Message: message},
 	}})
 	if _, err := writer.Write([]byte(strings.Repeat("annotation and pipeline-upload chatter\n", 100))); err != nil {
 		t.Fatal(err)
@@ -322,7 +322,7 @@ func TestObservedFailureMessageSurvivesLaterErrorOutput(t *testing.T) {
 func TestObservedFailureMessageIncludesDetail(t *testing.T) {
 	details := &commandTelemetryDetails{}
 	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
-		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions), Message: "expression is unsupported", Detail: "github.workspace"},
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions, Message: "expression is unsupported", Detail: "github.workspace"},
 	}})
 	if got := details.forOutcome(telemetry.OutcomeFailure); got.ErrorMessage != "expression is unsupported github.workspace" {
 		t.Fatalf("failure message = %q, want message with detail", got.ErrorMessage)
@@ -332,7 +332,7 @@ func TestObservedFailureMessageIncludesDetail(t *testing.T) {
 func TestObservedFailureMessageKeepsItsHeadWithinTheTelemetryBound(t *testing.T) {
 	details := &commandTelemetryDetails{}
 	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
-		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions),
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions,
 			Message: "expression is unsupported", Detail: strings.Repeat("界", telemetry.MaxErrorMessageBytes)},
 	}})
 	got := details.forOutcome(telemetry.OutcomeFailure)

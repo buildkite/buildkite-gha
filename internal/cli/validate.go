@@ -16,6 +16,7 @@ import (
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/processing"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
@@ -166,15 +167,15 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		}
 		if preflight.HasActions {
 			processingReport.Diagnostics = append(processingReport.Diagnostics, compatibility.Diagnostic{
-				Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Category: "compatibility", Stage: string(compiler.StageAdmission),
+				Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Category: "compatibility", Stage: processing.StageAdmission,
 				Message: "Action runtime behavior was not evaluated. The action source, metadata, declared runtime, entrypoints, inputs, and nested actions were validated, but the action code was not executed and may depend on GitHub-only services. No action is required for admission; test the action on Buildkite if runtime compatibility is important.",
 			})
 		}
 		if contextRequired {
-			processingReport.SetStage(string(compiler.StageAdmission), compatibility.NotEvaluated)
+			processingReport.SetStage(processing.StageAdmission, compatibility.NotEvaluated)
 			processingReport.Admission.Result = compatibility.NotEvaluated
 			processingReport.Diagnostics = append(processingReport.Diagnostics, compatibility.Diagnostic{
-				Level: "error", Code: compiler.CodeContextRequired, Category: "context", Stage: string(compiler.StageAdmission),
+				Level: "error", Code: processing.CodeContextRequired, Category: "context", Stage: processing.StageAdmission,
 				Message: "Push and pull request path filters require linked Buildkite webhook data and a verified local git diff before admission can be determined.",
 			})
 			processingReport.Result = "context-required"
@@ -183,7 +184,7 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 			}
 			return 1
 		}
-		processingReport.SetStage(string(compiler.StageAdmission), compatibility.Passed)
+		processingReport.SetStage(processing.StageAdmission, compatibility.Passed)
 		processingReport.Admission.Result = "admitted"
 		processingReport.Result = "admitted"
 		if out.write(ctx, processingReport) != nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/processing"
 	"github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
@@ -146,7 +147,7 @@ func writePluginProcessing(w io.Writer, report compatibility.ProcessingReport) e
 			}
 			metadata := []string{"workflow=" + workflow}
 			if diagnostic.Stage != "" {
-				metadata = append(metadata, "stage="+diagnostic.Stage)
+				metadata = append(metadata, "stage="+string(diagnostic.Stage))
 			}
 			if diagnostic.Job != "" {
 				metadata = append(metadata, "job="+diagnostic.Job)
@@ -599,7 +600,7 @@ func applyHostedPreflight(report *compatibility.ProcessingReport, preflight host
 	report.ApplyEvidence(preflight.Bundle.Processing)
 	report.ApplyWarnings(report.Workflow, preflight.Bundle.IR.Warnings)
 	if preflight.Admitted {
-		report.SetStage(string(compiler.StageAdmission), compatibility.Passed)
+		report.SetStage(processing.StageAdmission, compatibility.Passed)
 		report.Admission.Result = "admitted"
 	}
 }
@@ -609,14 +610,14 @@ func applyHostedPreflight(report *compatibility.ProcessingReport, preflight host
 func classifyHostedFailure(report *compatibility.ProcessingReport, workflowPath string, err error) string {
 	var failure *hostedFailure
 	if errors.As(err, &failure) && failure.Kind == hostedAdmissionFailure {
-		report.AddFailure(workflowPath, string(compiler.StageAdmission), "E_PROFILE", "admission", err)
+		report.AddFailure(workflowPath, processing.StageAdmission, "E_PROFILE", "admission", err)
 		report.Admission.Result = "not-admitted"
 		return "not-admitted"
 	}
 	if errors.As(err, &failure) && failure.Kind == hostedEnvironmentFailure {
 		report.AddEnvironmentFailure("hosted workflow-processing environment could not be initialized")
 	} else {
-		report.AddFailure(workflowPath, string(compiler.StageResolution), compiler.CodeActionResolution, "action-resolution", err)
+		report.AddFailure(workflowPath, processing.StageResolution, processing.CodeActionResolution, "action-resolution", err)
 	}
 	return "indeterminate"
 }

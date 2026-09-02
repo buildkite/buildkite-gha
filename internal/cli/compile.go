@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/processing"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
@@ -73,7 +74,7 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 		warnings = bundle.IR.Warnings
 	}
 	if err != nil {
-		processingReport.AddFailure(workflowPath, string(compiler.StagePlans), compiler.CodePlanConstruction, "compatibility", err)
+		processingReport.AddFailure(workflowPath, processing.StagePlans, processing.CodePlanConstruction, "compatibility", err)
 		processingReport.Result = "incompatible"
 		_ = out.write(ctx, processingReport)
 		return 1
