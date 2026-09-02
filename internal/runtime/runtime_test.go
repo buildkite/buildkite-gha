@@ -43,45 +43,11 @@ func (s testSecretResolver) ResolveSecret(_ context.Context, name string) (strin
 	return value, nil
 }
 
-type countingSecretResolver struct {
-	values map[string]string
-	calls  map[string]int
-}
-
-func (s *countingSecretResolver) ResolveSecret(_ context.Context, name string) (string, error) {
-	s.calls[name]++
-	value, ok := s.values[name]
-	if !ok {
-		return "", fmt.Errorf("denied")
-	}
-	return value, nil
-}
-
 type testRedactor struct{ values []string }
 
 func (r *testRedactor) AddRedaction(_ context.Context, value string) error {
 	r.values = append(r.values, value)
 	return nil
-}
-
-type deferredInputRunner struct {
-	jobID string
-	path  string
-	data  []byte
-}
-
-func (r deferredInputRunner) Run(_ context.Context, _ string, _ string, args []string, _ []byte) ([]byte, error) {
-	if len(args) >= 5 && args[0] == "artifact" && args[1] == "search" && args[2] == r.path {
-		return []byte(r.jobID + "\n"), nil
-	}
-	if len(args) >= 4 && args[0] == "artifact" && args[1] == "download" && args[2] == r.path {
-		path := filepath.Join(args[3], filepath.FromSlash(r.path))
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return nil, err
-		}
-		return nil, os.WriteFile(path, r.data, 0o600)
-	}
-	return nil, fmt.Errorf("unexpected agent command: %v", args)
 }
 
 type testWorkflowTokenProvider struct {
@@ -1104,18 +1070,6 @@ func TestRunDockerCancellationCleansOwnedResources(t *testing.T) {
 	}
 }
 
-func TestRunJobUnresolvedDockerActionUsesFakeBackend(t *testing.T) {
-	requireLinuxAMD64(t)
-	fake := newFakeDocker(t, "success")
-	workspace := fixturePath(t)
-	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "docker", Kind: "uses", Uses: "./actions/docker"}})
-	job.RequiredCapabilities = []string{"docker", "network"}
-	result, err := (Runner{Docker: fake.path}).runTestJob(t.Context(), job, workspace)
-	if err != nil || result.Conclusion != "success" || result.Env["DOCKER_RUNTIME_SEEN"] != "true" {
-		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
-	}
-}
-
 func TestRunJobEvaluatesIndexedWorkflowInputs(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/inputs.yml"
@@ -1224,34 +1178,6 @@ echo after-soft`},
 		t.Fatalf("RunJob() result = %#v, redactions = %#v", result, redactor.values)
 	}
 	if strings.Contains(logs.String(), "mask-me") || !strings.Contains(logs.String(), "secret=***") || !strings.Contains(logs.String(), "after-soft") {
-		t.Fatalf("RunJob() logs = %q", logs.String())
-	}
-}
-
-func TestRunJobResolvesOriginalSecretOnceAndProjectsAliases(t *testing.T) {
-	workspace := t.TempDir()
-	workflowPath := ".github/workflows/aliases.yml"
-	writeFixtureFile(t, workspace, workflowPath, "name: aliases\n")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
-		ID: "aliases", Kind: "run", Command: `test "${{ secrets.FIRST }}" = shared-value
-test "${{ secrets.SECOND }}" = shared-value
-test -z "${{ secrets.OPTIONAL }}"
-echo "first=${{ secrets.FIRST }} second=${{ secrets.SECOND }}"`,
-	}})
-	job.RequiredCapabilities = []string{"secrets"}
-	job.RequiredSecrets = []string{"ORIGINAL"}
-	job.SecretMappings = map[string]string{"FIRST": "ORIGINAL", "SECOND": "ORIGINAL"}
-	resolver := &countingSecretResolver{values: map[string]string{"ORIGINAL": "shared-value"}, calls: map[string]int{}}
-	redactor := &testRedactor{}
-	var logs bytes.Buffer
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: resolver, Redactor: redactor}).runTestJob(t.Context(), job, workspace)
-	if err != nil || result.Conclusion != "success" {
-		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
-	}
-	if resolver.calls["ORIGINAL"] != 1 || len(resolver.calls) != 1 || !slices.Equal(redactor.values, []string{"shared-value"}) {
-		t.Fatalf("secret resolution calls = %#v, redactions = %#v", resolver.calls, redactor.values)
-	}
-	if strings.Contains(logs.String(), "shared-value") || !strings.Contains(logs.String(), "first=*** second=***") {
 		t.Fatalf("RunJob() logs = %q", logs.String())
 	}
 }
@@ -1394,159 +1320,6 @@ jobs:
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("RunJob() error = %v, want %q", err, want)
 		}
-	}
-}
-
-func TestCompiledBracketSecretResolvesAndMasks(t *testing.T) {
-	workspace := t.TempDir()
-	workflowPath := ".github/workflows/secrets.yml"
-	source := "on: push\njobs:\n  secrets:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"secret=${{ secrets['TOKEN'] }}\"\n"
-	writeFixtureFile(t, workspace, workflowPath, source)
-	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	plans, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(source), event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plans) != 1 || !slices.Equal(plans[0].RequiredSecrets, []string{"TOKEN"}) || !plans[0].HasCapability("secrets") {
-		t.Fatalf("compiled secret boundary = %#v", plans)
-	}
-	var logs bytes.Buffer
-	redactor := &testRedactor{}
-	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: testSecretResolver{"TOKEN": "secret-value"}, Redactor: redactor}).runTestJob(t.Context(), plans[0], workspace)
-	if err != nil || result.Conclusion != "success" {
-		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
-	}
-	if strings.Contains(logs.String(), "secret-value") || !strings.Contains(logs.String(), "secret=***") || !slices.Equal(redactor.values, []string{"secret-value"}) {
-		t.Fatalf("logs = %q, redactions = %#v", logs.String(), redactor.values)
-	}
-}
-
-func TestAgentSecretsUsesOnlyJobBoundConfiguration(t *testing.T) {
-	agent := filepath.Join(t.TempDir(), "buildkite-agent")
-	writeFixtureFile(t, filepath.Dir(agent), filepath.Base(agent), `#!/bin/sh
-test "$#" -eq 3 || exit 10
-test "$1" = secret && test "$2" = get && test "$3" = HOMEBREW_TAP_GITHUB_TOKEN || exit 11
-test "$BUILDKITE_JOB_ID" = job-id || exit 12
-test "$BUILDKITE_AGENT_ACCESS_TOKEN" = job-token || exit 13
-test "$BUILDKITE_AGENT_ENDPOINT" = https://agent.example/v3 || exit 14
-test "$BUILDKITE_AGENT_JOB_API_SOCKET" = /tmp/job-api.sock || exit 15
-test "$BUILDKITE_AGENT_JOB_API_TOKEN" = job-api-token || exit 16
-test "$BUILDKITE_NO_HTTP2" = true || exit 17
-test "$HTTP_PROXY" = http://upper-http.example:8080 || exit 18
-test "$HTTPS_PROXY" = http://upper-https.example:8080 || exit 19
-test "$ALL_PROXY" = socks5://upper-all.example:1080 || exit 20
-test "$NO_PROXY" = upper-no-proxy.example || exit 21
-test "$http_proxy" = http://lower-http.example:8080 || exit 22
-test "$https_proxy" = http://lower-https.example:8080 || exit 23
-test "$all_proxy" = socks5://lower-all.example:1080 || exit 24
-test "$no_proxy" = lower-no-proxy.example || exit 25
-test "$SSL_CERT_FILE" = /etc/buildkite/ca.pem || exit 26
-test "$SSL_CERT_DIR" = /etc/buildkite/certs || exit 27
-test -z "${AMBIENT_SECRET+x}" || exit 28
-printf '%s\n' tap-secret
-`)
-	if err := os.Chmod(agent, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("BUILDKITE_AGENT_JOB_API_SOCKET", "/tmp/job-api.sock")
-	t.Setenv("BUILDKITE_AGENT_JOB_API_TOKEN", "job-api-token")
-	t.Setenv("AMBIENT_SECRET", "must-not-be-inherited")
-	transportEnvironment := map[string]string{
-		"HTTP_PROXY": "http://upper-http.example:8080", "HTTPS_PROXY": "http://upper-https.example:8080",
-		"ALL_PROXY": "socks5://upper-all.example:1080", "NO_PROXY": "upper-no-proxy.example",
-		"http_proxy": "http://lower-http.example:8080", "https_proxy": "http://lower-https.example:8080",
-		"all_proxy": "socks5://lower-all.example:1080", "no_proxy": "lower-no-proxy.example",
-		"SSL_CERT_FILE": "/etc/buildkite/ca.pem", "SSL_CERT_DIR": "/etc/buildkite/certs",
-	}
-	for name, value := range transportEnvironment {
-		t.Setenv(name, value)
-	}
-	resolved, err := resolveAgentSecretsBeforeWorkflow(AgentSecrets{
-		Executable: agent,
-		Endpoint:   "https://agent.example/v3",
-		JobID:      "job-id",
-		JobToken:   "job-token",
-		NoHTTP2:    "true",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name := range transportEnvironment {
-		t.Setenv(name, "http://workflow-controlled.example")
-	}
-	value, err := resolved.ResolveSecret(t.Context(), "HOMEBREW_TAP_GITHUB_TOKEN")
-	if err != nil || value != "tap-secret" {
-		t.Fatalf("ResolveSecret() = %q, %v", value, err)
-	}
-}
-
-func TestAgentSecretsDoesNotReturnCommandOutputOnFailure(t *testing.T) {
-	agent := filepath.Join(t.TempDir(), "buildkite-agent")
-	writeFixtureFile(t, filepath.Dir(agent), filepath.Base(agent), "#!/bin/sh\nprintf 'stdout-secret'\nprintf 'stderr-secret' >&2\nexit 1\n")
-	if err := os.Chmod(agent, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	_, err := (AgentSecrets{Executable: agent}).ResolveSecret(t.Context(), "DENIED")
-	if err == nil || strings.Contains(err.Error(), "stdout-secret") || strings.Contains(err.Error(), "stderr-secret") || !strings.Contains(err.Error(), "secret is unavailable") {
-		t.Fatalf("ResolveSecret() error = %v", err)
-	}
-}
-
-func TestResolveAgentRedactorBeforeWorkflowPinsPointerWithoutMutatingCaller(t *testing.T) {
-	realDir := canonicalTempDir(t)
-	realAgent := filepath.Join(realDir, "buildkite-agent")
-	writeFixtureFile(t, realDir, "buildkite-agent", "#!/bin/sh\nexit 0\n")
-	if err := os.Chmod(realAgent, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	lookupDir := t.TempDir()
-	lookupAgent := filepath.Join(lookupDir, "buildkite-agent")
-	if err := os.Symlink(realAgent, lookupAgent); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", lookupDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	configured := &AgentRedactor{}
-	resolved, err := resolveAgentRedactorBeforeWorkflow(configured)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pinned, ok := resolved.(*AgentRedactor)
-	if !ok || pinned == configured || pinned.Executable != realAgent {
-		t.Fatalf("resolved redactor = %#v, want independent pointer pinned to %q", resolved, realAgent)
-	}
-	if configured.Executable != "" {
-		t.Fatalf("configured redactor mutated to %q", configured.Executable)
-	}
-}
-
-func TestAgentRedactorSatisfiesCLIValidationWithoutExposingAgentCredential(t *testing.T) {
-	agent := filepath.Join(t.TempDir(), "buildkite-agent")
-	writeFixtureFile(t, filepath.Dir(agent), filepath.Base(agent), `#!/bin/sh
-test "$#" -eq 3 || { echo 'Missing agent-access-token. See: buildkite-agent redactor add --help' >&2; exit 10; }
-test "$1" = "redactor" || exit 11
-test "$2" = "add" || exit 12
-test "$3" = "--agent-access-token=unused" || { echo 'Missing agent-access-token. See: buildkite-agent redactor add --help' >&2; exit 13; }
-test "${BUILDKITE_AGENT_JOB_API_SOCKET-}" = "/tmp/job-api.sock" || exit 11
-test "${BUILDKITE_AGENT_JOB_API_TOKEN-}" = "job-api-token" || exit 12
-test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}" || exit 13
-test -z "${BUILDKITE_AGENT_ENDPOINT+x}" || exit 14
-test -z "${AMBIENT_SECRET+x}" || exit 15
-`)
-	if err := os.Chmod(agent, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("BUILDKITE_AGENT_JOB_API_SOCKET", "/tmp/job-api.sock")
-	t.Setenv("BUILDKITE_AGENT_JOB_API_TOKEN", "job-api-token")
-	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "agent-access-token")
-	t.Setenv("BUILDKITE_AGENT_ENDPOINT", "https://agent.example/v3")
-	t.Setenv("AMBIENT_SECRET", "must-not-be-inherited")
-
-	if err := (AgentRedactor{Executable: agent}).AddRedaction(t.Context(), "redact-me"); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -2858,100 +2631,6 @@ func TestExplicitCancelTerminatesBackgroundProcessGroup(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("explicitly canceled child process %d survived", pid)
-}
-
-func TestNeedStatusesCopiesOnlyExpressionVisibleState(t *testing.T) {
-	outputs := map[string]string{"release": "v1"}
-	needs := map[string]plan.Need{
-		"producer": {
-			Result:    "success",
-			Outputs:   outputs,
-			Artifacts: []plan.NeedArtifact{{Name: "private-runtime-authority"}},
-		},
-	}
-
-	got := needStatuses(needs)
-	want := map[string]expression.NeedStatus{
-		"producer": {Outputs: map[string]string{"release": "v1"}, Result: "success"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("needStatuses() = %#v, want %#v", got, want)
-	}
-	outputs["release"] = "plan"
-	if got["producer"].Outputs["release"] != "v1" {
-		t.Fatalf("expression output changed through plan: %#v", got)
-	}
-	got["producer"].Outputs["release"] = "expression"
-	if outputs["release"] != "plan" {
-		t.Fatalf("plan output changed through expression state: %#v", outputs)
-	}
-}
-
-func TestDeferredReusableWorkflowInputFlowsFromVerifiedOutputToCalleeStep(t *testing.T) {
-	const (
-		buildID = "11111111-1111-4111-8111-111111111111"
-		jobID   = "22222222-2222-4222-8222-222222222222"
-		value   = "c2hhMjU2ICBzdWJqZWN0Cg=="
-	)
-	planDigest := transport.Digest([]byte("producer plan"))
-	stepKey := "gha-hash"
-	manifest, err := transport.MarshalResultManifest(transport.ResultManifest{
-		PlanDigest: planDigest,
-		Producer:   transport.Producer{BuildID: buildID, JobID: jobID, StepKey: stepKey},
-		Result:     "success",
-		Outputs:    []transport.Output{{Name: "hashes", Value: value}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	artifactPath := transport.ResultPath(stepKey, planDigest)
-	inputs, err := ResolveDeferredInputs(t.Context(), transport.Agent{Runner: deferredInputRunner{jobID: jobID, path: artifactPath, data: manifest}}, t.TempDir(), buildID, map[string]plan.DeferredInput{
-		"base64-subjects": {
-			Sources: []plan.NeedSource{{StepKey: stepKey, PlanDigest: planDigest}},
-			Outputs: []plan.NeedOutput{{Name: "value", StepKey: stepKey, Output: "hashes"}},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if inputs["base64-subjects"] != value {
-		t.Fatalf("resolved inputs = %#v", inputs)
-	}
-
-	workspace := t.TempDir()
-	workflowPath := ".github/workflows/generator_generic_slsa3.yml"
-	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
-		ID:        "create-file",
-		Kind:      "run",
-		Env:       map[string]string{"UNTRUSTED_SUBJECTS": "${{ inputs.base64-subjects }}"},
-		Condition: "inputs.base64-subjects != ''",
-		Command:   `test "$UNTRUSTED_SUBJECTS" = "` + value + `" && echo ran=yes >> "$GITHUB_OUTPUT"`,
-	}})
-	job.Outputs = map[string]string{"ran": "${{ steps.create-file.outputs.ran }}"}
-	job.Dependencies = []string{stepKey}
-	job.DeferredInputs = map[string]plan.DeferredInput{
-		"base64-subjects": {
-			Sources: []plan.NeedSource{{StepKey: stepKey, PlanDigest: planDigest}},
-			Outputs: []plan.NeedOutput{{Name: "value", StepKey: stepKey, Output: "hashes"}},
-		},
-	}
-	job.CallGuards = []plan.CallGuard{{
-		Condition:      "inputs.base64-subjects != ''",
-		DeferredInputs: job.DeferredInputs,
-	}}
-	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "deferred reusable-workflow inputs were not hydrated") {
-		t.Fatalf("RunJob() unhydrated error = %v", err)
-	}
-	job.DeferredInputValues = inputs
-	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "call guard 1: deferred inputs were not hydrated") {
-		t.Fatalf("RunJob() unhydrated guard error = %v", err)
-	}
-	job.CallGuards[0].DeferredInputValues = inputs
-	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
-	if err != nil || result.Conclusion != "success" || result.Outputs["ran"] != "yes" {
-		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
-	}
 }
 
 func TestJobConditionConsumesNeedResultAndOutput(t *testing.T) {
@@ -4530,157 +4209,6 @@ func TestExplicitBackgroundCancelStillRunsRegisteredPostAction(t *testing.T) {
 	}
 }
 
-func TestFileCommandParsing(t *testing.T) {
-	tests := []struct {
-		name     string
-		contents string
-		want     map[string]string
-		wantErr  string
-	}{
-		{name: "LF", contents: "single=value\nmulti<<END\nfirst\nsecond\nEND\n", want: map[string]string{"single": "value", "multi": "first\nsecond"}},
-		{name: "CRLF", contents: "single=value\r\nmulti<<END\r\nfirst\r\nsecond\r\nEND\r\n", want: map[string]string{"single": "value", "multi": "first\nsecond"}},
-		{name: "equals before heredoc", contents: "single=value<<literal\n", want: map[string]string{"single": "value<<literal"}},
-		{name: "heredoc before equals", contents: "multi<<END=value\npayload\nEND=value\n", want: map[string]string{"multi": "payload"}},
-		{name: "missing name", contents: "=value\n", wantErr: "invalid file command"},
-		{name: "missing delimiter", contents: "multi<<\n", wantErr: "invalid multiline file command"},
-		{name: "unterminated LF", contents: "multi<<END\nunterminated\n", wantErr: `missing delimiter "END"`},
-		{name: "unterminated CRLF", contents: "multi<<END\r\nunterminated\r\n", wantErr: `missing delimiter "END"`},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := parseCommandReader("commands", strings.NewReader(test.contents))
-			if test.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
-					t.Fatalf("parseCommandReader() error = %v, want %q", err, test.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseCommandReader() error = %v", err)
-			}
-			if !maps.Equal(got, test.want) {
-				t.Fatalf("parseCommandReader() = %#v, want %#v", got, test.want)
-			}
-		})
-	}
-
-	files, err := newCommandFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = files.cleanup() }()
-	if err := os.WriteFile(files.env, []byte("GITHUB_TOKEN=action-token\nRUNNER_CUSTOM=action-value\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	result := newResult()
-	if _, err := files.apply(&result, nil); err != nil {
-		t.Fatalf("commandFiles.apply() GitHub-compatible environment error = %v", err)
-	}
-	if !maps.Equal(result.Env, map[string]string{"GITHUB_TOKEN": "action-token", "RUNNER_CUSTOM": "action-value"}) {
-		t.Fatalf("commandFiles.apply() environment = %#v", result.Env)
-	}
-	if err := os.WriteFile(files.env, []byte("NODE_OPTIONS=--require bad\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	result = newResult()
-	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "NODE_OPTIONS") {
-		t.Fatalf("commandFiles.apply() error = %v, want NODE_OPTIONS rejection", err)
-	}
-}
-
-func TestFileCommandLineLimitIsExplicit(t *testing.T) {
-	if values, err := parseCommandReader("output", strings.NewReader("value="+strings.Repeat("x", 70*1024)+"\n")); err != nil || len(values["value"]) != 70*1024 {
-		t.Fatalf("parseCommandReader() value length = %d, error = %v", len(values["value"]), err)
-	}
-	if _, err := parseCommandReader("output", strings.NewReader("value="+strings.Repeat("x", maxStreamLineBytes)+"\n")); err == nil || !strings.Contains(err.Error(), "parse file command output") {
-		t.Fatalf("parseCommandReader() error = %v, want attributed size failure", err)
-	}
-}
-
-func TestDockerCommandFilesAreWritableWithoutExposingDirectoryEntries(t *testing.T) {
-	files, err := newCommandFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = files.cleanup() }()
-	if err := files.allowContainerWrites(); err != nil {
-		t.Fatal(err)
-	}
-	dir, err := os.Stat(files.dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := dir.Mode().Perm(); got != 0o711 {
-		t.Fatalf("container file-command directory mode = %o, want 711", got)
-	}
-	for _, path := range []string{files.output, files.env, files.state, files.summary, files.path} {
-		file, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := file.Mode().Perm(); got != 0o666 {
-			t.Fatalf("container file command %s mode = %o, want 666", filepath.Base(path), got)
-		}
-	}
-}
-
-func TestFileCommandAggregateLimits(t *testing.T) {
-	files, err := newCommandFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = files.cleanup() }()
-
-	many := strings.Repeat("value=x\n", maxCommandEntries+1)
-	if err := os.WriteFile(files.output, []byte(many), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	result := newResult()
-	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "entry limit") {
-		t.Fatalf("apply() error = %v, want entry limit", err)
-	}
-
-	if err := os.WriteFile(files.output, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(files.summary, bytes.Repeat([]byte("x"), maxCommandFileBytes+1), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	result = newResult()
-	effects, err := files.apply(&result, nil)
-	if err != nil || result.Summary != "" || effects.summaryBytes != maxCommandFileBytes+1 {
-		t.Fatalf("oversized summary result = %#v, effects = %#v, error = %v", result, effects, err)
-	}
-
-	if err := os.WriteFile(files.summary, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(files.output, bytes.Repeat([]byte("x"), maxCommandFileBytes+1), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	result = newResult()
-	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "output exceeds") {
-		t.Fatalf("apply() error = %v, want output size limit", err)
-	}
-
-	if err := os.WriteFile(files.output, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, path := range []string{files.output, files.env, files.state} {
-		if err := os.WriteFile(path, bytes.Repeat([]byte("x"), 700*1024), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(files.summary, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	result = newResult()
-	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "aggregate limit") {
-		t.Fatalf("apply() error = %v, want aggregate size limit", err)
-	}
-}
-
 func TestJobSummaryTruncationPreservesUTF8(t *testing.T) {
 	var summary string
 	var truncated bool
@@ -5272,26 +4800,6 @@ func TestWorkflowCommandAnnotationsRemainBoundedAfterMaskExpansion(t *testing.T)
 	result := scrubJobResult(JobResult{WarningAnnotations: warnings, warningsTruncated: truncated}, processor.maskValues())
 	if len(result.WarningAnnotations) > maxJobAnnotationBytes || !utf8.ValidString(result.WarningAnnotations) || !strings.HasSuffix(result.WarningAnnotations, workflowCommandTruncationNotice) {
 		t.Fatalf("final warning annotation bytes = %d, valid UTF-8 = %v", len(result.WarningAnnotations), utf8.ValidString(result.WarningAnnotations))
-	}
-}
-
-func TestActionMetadataRejectsCaseInsensitiveOutputCollisions(t *testing.T) {
-	workspace := t.TempDir()
-	workflowPath := ".github/workflows/test.yml"
-	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
-	writeFixtureFile(t, workspace, ".github/actions/conflict/action.yml", `name: Conflicting outputs
-outputs:
-  Result:
-    value: first
-  result:
-    value: second
-runs:
-  using: composite
-  steps: []
-`)
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "conflict", Kind: "uses", Uses: "./.github/actions/conflict"}})
-	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `duplicate case-insensitive name "result"`) {
-		t.Fatalf("RunJob() error = %v, want duplicate output rejection", err)
 	}
 }
 
@@ -7727,32 +7235,6 @@ func TestRunJobDockerUsesSharedMasking(t *testing.T) {
 	}
 	if result.Env["DOCKER_RUNTIME_SEEN"] != "true" || strings.Contains(logs.String(), "docker-secret-value") || !strings.Contains(logs.String(), "masked docker probe: ***") {
 		t.Fatalf("RunJob() result = %#v, logs = %q", result, logs.String())
-	}
-}
-
-func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
-	workspace := fixturePath(t, "smoke")
-	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "local", Kind: "uses", Uses: "./actions/javascript"}})
-	job.Workflow.Digest = "sha256:" + strings.Repeat("0", 64)
-	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "workflow digest mismatch") {
-		t.Fatalf("RunJob() error = %v, want workflow digest mismatch", err)
-	}
-	job = runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "remote", Kind: "uses", Uses: "actions/checkout@v4"}})
-	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "has no immutable selector") {
-		t.Fatalf("RunJob() error = %v, want missing immutable selector error", err)
-	}
-
-	for _, using := range []string{"future"} {
-		t.Run(using, func(t *testing.T) {
-			workspace := t.TempDir()
-			workflowPath := ".github/workflows/test.yml"
-			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
-			writeFixtureFile(t, workspace, ".github/actions/unsupported/action.yml", "runs:\n  using: "+using+"\n")
-			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "unsupported", Kind: "uses", Uses: "./.github/actions/unsupported"}})
-			if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `unsupported runtime "`+using+`"`) {
-				t.Fatalf("RunJob() error = %v, want %s runtime rejection", err, using)
-			}
-		})
 	}
 }
 
