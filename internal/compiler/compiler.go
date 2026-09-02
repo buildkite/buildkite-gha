@@ -135,14 +135,10 @@ type DeferredInput struct {
 	Outputs []NeedOutput `json:"outputs,omitempty"`
 }
 
-// NeedOutput selects one caller-visible output from a concrete prerequisite.
-// An empty output list explicitly prevents an aggregate need from exposing its
-// producers' internal outputs.
-type NeedOutput struct {
-	Name    string `json:"name"`
-	StepKey string `json:"step_key"`
-	Output  string `json:"output"`
-}
+// NeedOutput is the plan-boundary projection of one caller-visible output from
+// a concrete prerequisite. An empty output list explicitly prevents an
+// aggregate need from exposing its producers' internal outputs.
+type NeedOutput = plan.NeedOutput
 
 // Report summarizes successful workflow validation.
 type Report struct {
