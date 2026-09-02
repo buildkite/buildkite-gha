@@ -1,5 +1,3 @@
-// Package workflowprocessing defines the stable workflow-processing contract shared by
-// compilation, compatibility reporting, and command telemetry.
 package workflowprocessing
 
 // Stage identifies one stable workflow-processing boundary.

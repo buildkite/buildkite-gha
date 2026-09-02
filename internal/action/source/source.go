@@ -1,4 +1,3 @@
-// Package source fetches immutable, public GitHub Action source archives.
 package source
 
 import (

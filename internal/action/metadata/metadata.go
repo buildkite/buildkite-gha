@@ -1,4 +1,3 @@
-// Package metadata owns the supported local GitHub Action metadata model.
 package metadata
 
 import (

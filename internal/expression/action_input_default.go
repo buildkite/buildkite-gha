@@ -1,6 +1,7 @@
 // Action input default validation and evaluation with GitHub's loose
 // coercion semantics. Deliberately separate from the strict condition
 // family in condition.go.
+
 package expression
 
 import (

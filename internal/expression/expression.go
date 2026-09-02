@@ -1,4 +1,3 @@
-// Package expression adapts actionlint's expression parser into owned values.
 package expression
 
 import (

@@ -1,4 +1,3 @@
-// Package runtime executes explicitly resolved GitHub Actions action steps.
 package runtime
 
 import (

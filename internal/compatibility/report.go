@@ -1,4 +1,3 @@
-// Package compatibility renders stable human and machine-readable validation reports.
 package compatibility
 
 import (

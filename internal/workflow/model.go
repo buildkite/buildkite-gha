@@ -1,4 +1,3 @@
-// Package workflow owns the parsed workflow model used by the compiler.
 package workflow
 
 import "github.com/buildkite/buildkite-gha/internal/expression"

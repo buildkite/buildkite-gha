@@ -1,5 +1,3 @@
-// Package buildkite emits deterministic Buildkite pipeline YAML from validated,
-// integration-neutral job descriptions.
 package buildkite
 
 import (

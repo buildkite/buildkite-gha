@@ -1,5 +1,6 @@
 // Condition validation and strict runtime condition evaluation. The
 // condition* value helpers reject mixed-type comparisons.
+
 package expression
 
 import (
