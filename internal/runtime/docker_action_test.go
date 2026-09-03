@@ -359,6 +359,10 @@ runs:
 
 	mismatchFake := newFakeDocker(t, "success")
 	mismatched := job
+	mismatchedProgram := *job.Program
+	mismatchedProgram.Job = *job.ExecutionJob()
+	mismatchedProgram.Job.Steps = slices.Clone(job.ExecutionJob().Steps)
+	mismatched.Program = &mismatchedProgram
 	mismatched.Actions = append([]plan.ActionLock(nil), job.Actions...)
 	mismatched.Actions[0].DockerImage = "alpine:3.20"
 	secondActionPath := ".github/actions/prebuilt-second"
@@ -368,7 +372,7 @@ runs:
   image: docker://`+image+`
 `)
 	secondLockID := "a-0000000000000002"
-	mismatched.Program.Job.Steps = append(mismatched.Program.Job.Steps, normalizeRuntimeTestStep(runtimeTestStep{ID: "prebuilt-second", Kind: "uses", Uses: "./" + secondActionPath, Action: &plan.ActionSelector{Lock: secondLockID}}))
+	mismatched.ExecutionJob().Steps = append(mismatched.ExecutionJob().Steps, normalizeRuntimeTestStep(runtimeTestStep{ID: "prebuilt-second", Kind: "uses", Uses: "./" + secondActionPath, Action: &plan.ActionSelector{Lock: secondLockID}}))
 	mismatched.Actions = append(mismatched.Actions, plan.ActionLock{ID: secondLockID, Source: "workspace", Path: secondActionPath, SourceDigest: digestTree(t, filepath.Join(workspace, secondActionPath)), DockerImage: image})
 	if _, err := (Runner{Docker: mismatchFake.path}).runTestJob(t.Context(), mismatched, workspace); err == nil || !strings.Contains(err.Error(), "Docker image does not match its immutable lock") {
 		t.Fatalf("RunJob() mismatched planned image error = %v", err)

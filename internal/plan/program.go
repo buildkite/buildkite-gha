@@ -6,6 +6,15 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
+// ExecutionJob returns the normalized job owned by the execution program.
+// The surrounding Job remains the immutable plan envelope.
+func (job Job) ExecutionJob() *program.Job {
+	if job.Program == nil {
+		return nil
+	}
+	return &job.Program.Job
+}
+
 // ProjectProgram populates the executor-only job fields from the normalized
 // execution program.
 func (job *Job) ProjectProgram() error {
@@ -15,7 +24,7 @@ func (job *Job) ProjectProgram() error {
 	if err := job.Program.Validate(); err != nil {
 		return err
 	}
-	source := job.Program.Job
+	source := *job.ExecutionJob()
 	if len(job.CallGuards) != len(source.Guards) {
 		return fmt.Errorf("call guard projection has %d entries, normalized program has %d", len(job.CallGuards), len(source.Guards))
 	}

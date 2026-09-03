@@ -61,6 +61,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	if err := job.Validate(); err != nil {
 		return jobResult, err
 	}
+	executionJob := job.ExecutionJob()
 	if err := ValidateHost(job, goruntime.GOOS, goruntime.GOARCH); err != nil {
 		return JobResult{}, err
 	}
@@ -168,7 +169,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	eval := expression.Context{
 		WorkflowInputs: job.Inputs,
 		Matrix:         job.Matrix,
-		Steps:          make(map[string]expression.StepStatus, len(job.Program.Job.Steps)),
+		Steps:          make(map[string]expression.StepStatus, len(executionJob.Steps)),
 		Needs:          needStatuses(job.Needs),
 		Vars:           job.Vars,
 		GitHub:         githubContext(job),
@@ -195,7 +196,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		jobCondition.Cancelled = jobCondition.Cancelled || need.Result == "cancelled"
 		jobCondition.Unsuccessful = jobCondition.Unsuccessful || need.Result != "success"
 	}
-	run, err := evaluateProgramTyped[bool](job.Program.Job.Condition, executionprogram.EvaluationContext{Expression: eval, Condition: jobCondition})
+	run, err := evaluateProgramTyped[bool](executionJob.Condition, executionprogram.EvaluationContext{Expression: eval, Condition: jobCondition})
 	if err != nil {
 		return jobResult, fmt.Errorf("evaluate job condition: %w", err)
 	}
@@ -325,19 +326,19 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			}()
 		}
 	}
-	jobEnv, err := executionprogram.EvaluateBindings(job.Program.Job.Env, executionprogram.EvaluationContext{Expression: eval})
+	jobEnv, err := executionprogram.EvaluateBindings(executionJob.Env, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {
 		return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate job environment: %w", err))
 	}
 	serviceEval := eval
 	serviceEval.Env = jobEnv
-	services, evaluatedServiceOrder, err := evaluateProgramServices(job.Program.Job.Services, serviceEval)
+	services, evaluatedServiceOrder, err := evaluateProgramServices(executionJob.Services, serviceEval)
 	if err != nil {
 		return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate services: %w", err))
 	}
 	var containerSpec *plan.Container
-	if job.Program.Job.Container != nil {
-		containerSpec, err = evaluateProgramContainer(*job.Program.Job.Container, serviceEval)
+	if executionJob.Container != nil {
+		containerSpec, err = evaluateProgramContainer(*executionJob.Container, serviceEval)
 		if err != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate job container: %w", err))
 		}
@@ -414,7 +415,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 				return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, entrypointErr))
 			}
 		}
-		for _, step := range job.Program.Job.Steps {
+		for _, step := range executionJob.Steps {
 			selector, ok := stepActionSelector(step)
 			if step.Kind != "uses" || !ok {
 				continue
@@ -495,6 +496,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 
 func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 	job := r.job
+	executionJob := job.ExecutionJob()
 	workspace := r.workspace
 	processor := r.processor
 	eval := r.eval
@@ -508,7 +510,7 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 	preStatus := remotePreparationStatus{}
 	preFailures := r.preFailures
 	if len(job.Actions) != 0 {
-		for stepIndex, step := range job.Program.Job.Steps {
+		for stepIndex, step := range executionJob.Steps {
 			eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
 			if step.Kind != "uses" {
 				continue
@@ -579,6 +581,7 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 
 func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 	job := r.job
+	executionJob := job.ExecutionJob()
 	workspace := r.workspace
 	processor := r.processor
 	eval := r.eval
@@ -590,7 +593,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 	prepared := r.prepared
 	preFailures := r.preFailures
 	runErr := r.runErr
-	for stepIndex, step := range job.Program.Job.Steps {
+	for stepIndex, step := range executionJob.Steps {
 		eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
 		if step.Kind == "cancel" {
 			for _, execution := range supervisor.cancel(step.Targets[0]) {
@@ -804,7 +807,7 @@ func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
 		}
 	}
 	eval.Env = jobResult.Env
-	outputBindings := job.Program.Job.Outputs
+	outputBindings := job.ExecutionJob().Outputs
 	for _, output := range outputBindings {
 		name := output.Name
 		value, err := evaluateProgramTyped[string](output.Value, executionprogram.EvaluationContext{Expression: eval})
@@ -834,7 +837,8 @@ func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
 }
 
 func evaluateCallGuards(job plan.Job) (bool, error) {
-	if job.Program == nil || len(job.CallGuards) != len(job.Program.Job.Guards) {
+	executionJob := job.ExecutionJob()
+	if executionJob == nil || len(job.CallGuards) != len(executionJob.Guards) {
 		return false, fmt.Errorf("evaluate reusable-workflow call guards: plan projection does not match normalized program")
 	}
 	github := githubContext(job)
@@ -859,7 +863,7 @@ func evaluateCallGuards(job plan.Job) (bool, error) {
 			condition.Cancelled = condition.Cancelled || need.Result == "cancelled"
 			condition.Unsuccessful = condition.Unsuccessful || need.Result != "success"
 		}
-		run, err := evaluateProgramTyped[bool](job.Program.Job.Guards[i].Condition, executionprogram.EvaluationContext{Condition: condition})
+		run, err := evaluateProgramTyped[bool](executionJob.Guards[i].Condition, executionprogram.EvaluationContext{Condition: condition})
 		if err != nil {
 			return false, fmt.Errorf("evaluate reusable-workflow call guard %d: %w", i+1, err)
 		}

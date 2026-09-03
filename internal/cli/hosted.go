@@ -488,7 +488,7 @@ func bundleUsesActions(bundle compiler.Bundle) bool {
 		if artifact.Job.Program == nil {
 			continue
 		}
-		for _, step := range artifact.Job.Program.Job.Steps {
+		for _, step := range artifact.Job.ExecutionJob().Steps {
 			if step.Invocation != nil || step.Kind == "uses" {
 				return true
 			}

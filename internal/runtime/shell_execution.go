@@ -21,7 +21,7 @@ func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandOut
 	}
 	shellSite := step.Run.Shell
 	if shellSite.Source == "" {
-		shellSite = job.Program.Job.Defaults.Shell
+		shellSite = job.ExecutionJob().Defaults.Shell
 	}
 	shell, err := evaluateProgramTyped[string](shellSite, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {
@@ -36,7 +36,7 @@ func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandOut
 	}
 	workingDirectorySite := step.Run.WorkingDirectory
 	if workingDirectorySite.Source == "" {
-		workingDirectorySite = job.Program.Job.Defaults.WorkingDirectory
+		workingDirectorySite = job.ExecutionJob().Defaults.WorkingDirectory
 	}
 	workingDirectory, err := evaluateProgramTyped[string](workingDirectorySite, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {

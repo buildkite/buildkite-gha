@@ -333,8 +333,8 @@ type Job struct {
 // NeedsMise reports whether a generated job needs the managed action runtime.
 func (job Job) NeedsMise() bool {
 	usesActions := len(job.Actions) != 0
-	if job.Program != nil {
-		for _, step := range job.Program.Job.Steps {
+	if executionJob := job.ExecutionJob(); executionJob != nil {
+		for _, step := range executionJob.Steps {
 			usesActions = usesActions || step.Invocation != nil || step.Kind == "uses"
 		}
 	}
@@ -562,6 +562,7 @@ func (job Job) Validate() error {
 	if err := job.Program.Validate(); err != nil {
 		return fmt.Errorf("normalized execution program: %w", err)
 	}
+	executionJob := job.ExecutionJob()
 	if job.RequiresMise == nil {
 		return fmt.Errorf("job plan requires an explicit requires_mise decision")
 	}
@@ -569,7 +570,7 @@ func (job Job) Validate() error {
 		return fmt.Errorf("job plan runtime distribution digest is required")
 	}
 	if job.RequiresMise != nil && !*job.RequiresMise {
-		for _, step := range job.Program.Job.Steps {
+		for _, step := range executionJob.Steps {
 			if step.Invocation != nil && step.Invocation.Lock == "" {
 				return fmt.Errorf("job plan requires_mise may be false only when every action has an immutable selector")
 			}
@@ -863,7 +864,7 @@ func (job Job) Validate() error {
 	if len(job.CallGuards) > MaxCallGuards {
 		return fmt.Errorf("job plan has more than %d reusable-workflow call guards", MaxCallGuards)
 	}
-	if len(job.CallGuards) != len(job.Program.Job.Guards) {
+	if len(job.CallGuards) != len(executionJob.Guards) {
 		return fmt.Errorf("job plan call guard projection does not match normalized program")
 	}
 	for i, guard := range job.CallGuards {
@@ -891,7 +892,7 @@ func (job Job) Validate() error {
 	if len(sourcedDependencies) != len(dependencies) {
 		return fmt.Errorf("job plan dependencies and prerequisite producers differ")
 	}
-	if len(job.Actions) != 0 || hasStepActions(job.Program.Job.Steps) {
+	if len(job.Actions) != 0 || hasStepActions(executionJob.Steps) {
 		for _, lock := range job.Actions {
 			if lock.DockerImage == "" {
 				continue
@@ -1319,7 +1320,7 @@ func validateActionLocks(job Job) error {
 		heights[id] = height
 		return height, nil
 	}
-	for _, step := range job.Program.Job.Steps {
+	for _, step := range job.ExecutionJob().Steps {
 		if step.Kind != "uses" {
 			if step.Invocation != nil && step.Invocation.Lock != "" {
 				return fmt.Errorf("non-action step %q has an action selector", step.ID)

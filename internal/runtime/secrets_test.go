@@ -9,8 +9,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 type countingSecretResolver struct {

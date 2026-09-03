@@ -145,7 +145,7 @@ func validateJobCheckoutAdapters(job plan.Job) (bool, error) {
 		locks[lock.ID] = lock
 	}
 	found := false
-	for _, step := range job.Program.Job.Steps {
+	for _, step := range job.ExecutionJob().Steps {
 		if step.Invocation == nil || step.Invocation.Lock == "" {
 			continue
 		}

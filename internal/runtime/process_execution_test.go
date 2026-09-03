@@ -13,8 +13,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 func TestCancellationTerminatesChildProcessGroup(t *testing.T) {

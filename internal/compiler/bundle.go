@@ -109,7 +109,7 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		for _, lock := range job.Actions {
 			locks[lock.ID] = lock
 		}
-		for stepIndex, step := range job.Program.Job.Steps {
+		for stepIndex, step := range job.ExecutionJob().Steps {
 			if step.Invocation == nil || step.Invocation.Lock == "" || stepIndex >= len(ir.Jobs[i].Steps) {
 				continue
 			}
