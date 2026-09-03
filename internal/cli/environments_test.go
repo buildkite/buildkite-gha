@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 )
 
@@ -78,6 +80,10 @@ func TestRunCompileResolvesEnvironmentsThroughAgent(t *testing.T) {
 			t.Fatalf("pipeline missing %q:\n%s", want, pipeline)
 		}
 	}
+	// Variable values belong to job plans, never to the pipeline or report.
+	if strings.Contains(pipeline, stubEnvironmentRegion) || strings.Contains(stderr.String(), stubEnvironmentRegion) {
+		t.Fatalf("environment variable value leaked into compile output:\n%s\n%s", pipeline, stderr.String())
+	}
 
 	rejecting, _ := agentEnvironmentsStub(t, "job-secret", http.StatusBadRequest)
 	setAgentResolutionEnvironment(t, rejecting.URL)
@@ -94,7 +100,8 @@ func TestRunCompileResolvesEnvironmentsThroughAgent(t *testing.T) {
 // runner resolution, which reports every requirement unmapped, and
 // github-actions/environments, which rejects requests without the job token,
 // counts resolution requests, and answers each requested environment with a
-// required-reviewers snapshot naming one DEPLOY_KEY secret.
+// required-reviewers snapshot naming one DEPLOY_KEY secret. The production
+// environment also defines the AWS_REGION variable.
 func agentEnvironmentsStub(t *testing.T, jobToken string, status int) (*httptest.Server, *int) {
 	t.Helper()
 	requests := new(int)
@@ -125,11 +132,12 @@ func agentEnvironmentsStub(t *testing.T, jobToken string, status int) (*httptest
 		var body struct {
 			RepositoryURL    string   `json:"repo_url"`
 			EnvironmentNames []string `json:"environment_names"`
+			IncludeVariables *bool    `json:"include_variables"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode resolution request: %v", err)
 		}
-		if body.RepositoryURL != "https://github.com/buildkite/buildkite-gha" || len(body.EnvironmentNames) == 0 {
+		if body.RepositoryURL != "https://github.com/buildkite/buildkite-gha" || len(body.EnvironmentNames) == 0 || body.IncludeVariables == nil || !*body.IncludeVariables {
 			t.Errorf("resolution request = %#v", body)
 		}
 		if status != http.StatusOK {
@@ -146,6 +154,10 @@ func agentEnvironmentsStub(t *testing.T, jobToken string, status int) (*httptest
 				"branch_policy":       false,
 				"unsupported_rules":   []string{},
 				"secret_names":        []string{"DEPLOY_KEY"},
+				"variables":           []map[string]string{},
+			}
+			if strings.EqualFold(name, "production") {
+				environments[i]["variables"] = []map[string]string{{"name": "AWS_REGION", "value": stubEnvironmentRegion}}
 			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"environments": environments})
@@ -162,13 +174,17 @@ func setAgentResolutionEnvironment(t *testing.T, agentEndpoint string) {
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-secret")
 }
 
+// stubEnvironmentRegion is the production environment's AWS_REGION value. It
+// is distinctive so tests can prove where it does and does not appear.
+const stubEnvironmentRegion = "eu-west-1-stub-value"
+
 const environmentUploadWorkflow = `on: push
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - run: echo "$DEPLOY_KEY"
+      - run: echo "$DEPLOY_KEY" "${{ vars.AWS_REGION }}"
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
 `
@@ -206,6 +222,9 @@ func TestRunUploadResolvesEnvironmentsThroughAgent(t *testing.T) {
 		if !strings.Contains(string(content), `"PRODUCTION_DEPLOY_KEY"`) {
 			t.Fatalf("plan %s missing environment-scoped secret name:\n%s", path, content)
 		}
+		if got := uploadedPlanVars(t, content); !maps.Equal(got, map[string]string{"AWS_REGION": stubEnvironmentRegion}) {
+			t.Fatalf("plan %s vars = %#v, want production variables", path, got)
+		}
 	}
 	if plans != 1 {
 		t.Fatalf("uploaded plans = %d, want 1", plans)
@@ -218,6 +237,10 @@ func TestRunUploadResolvesEnvironmentsThroughAgent(t *testing.T) {
 		if !strings.Contains(pipeline, want) {
 			t.Fatalf("uploaded pipeline missing %q:\n%s", want, pipeline)
 		}
+	}
+	// Variable values reach the job only through its plan artifact.
+	if strings.Contains(pipeline, stubEnvironmentRegion) || strings.Contains(stdout.String(), stubEnvironmentRegion) || strings.Contains(stderr.String(), stubEnvironmentRegion) {
+		t.Fatalf("environment variable value leaked outside job plans:\n%s\n%s\n%s", pipeline, stdout.String(), stderr.String())
 	}
 }
 
@@ -311,7 +334,7 @@ jobs:
   promote-again:
     runs-on: ubuntu-latest
     environment: Production
-    steps: [{run: true}]
+    steps: [{run: 'echo "${{ vars.aws_region }}"'}]
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -340,6 +363,39 @@ jobs:
 			t.Fatalf("uploaded pipeline missing %q:\n%s", want, pipeline)
 		}
 	}
+	// Both spellings of the production environment share one resolution, and
+	// only jobs declaring it carry its variables.
+	withVariables := 0
+	for path, content := range runner.uploaded {
+		if !strings.Contains(path, "/plans/") {
+			continue
+		}
+		if !strings.Contains(string(content), stubEnvironmentRegion) {
+			continue
+		}
+		withVariables++
+		if got := uploadedPlanVars(t, content); !maps.Equal(got, map[string]string{"AWS_REGION": stubEnvironmentRegion}) {
+			t.Fatalf("plan %s vars = %#v, want production variables", path, got)
+		}
+		// The value appears exactly once: in the vars context.
+		if strings.Count(string(content), stubEnvironmentRegion) != 1 {
+			t.Fatalf("plan %s carries the variable outside the vars context:\n%s", path, content)
+		}
+	}
+	if withVariables != 2 {
+		t.Fatalf("plans carrying production variables = %d, want 2 (deploy and promote-again)", withVariables)
+	}
+}
+
+// uploadedPlanVars decodes one uploaded plan artifact and returns its vars
+// context.
+func uploadedPlanVars(t *testing.T, content []byte) map[string]string {
+	t.Helper()
+	job, err := plan.Decode(content)
+	if err != nil {
+		t.Fatalf("decode uploaded plan: %v", err)
+	}
+	return job.EnvironmentVars
 }
 
 // TestRunUploadAgentResolutionFailureFailsClosed proves a disabled or failing

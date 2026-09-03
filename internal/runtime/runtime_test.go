@@ -266,7 +266,7 @@ jobs:
 		"sha256:"+strings.Repeat("2", 64),
 		compiler.Options{
 			EventTrust: compiler.EventUntrusted,
-			Vars: compiler.VariableSources{Bridge: map[string]string{
+			Vars: compiler.VariableSources{Repository: map[string]string{
 				"DEFAULT_SHELL": "bash",
 				"DEFAULT_DIR":   "vars",
 				"OVERRIDE_DIR":  "override",
@@ -1286,7 +1286,7 @@ func TestJobRuntimeFieldsEvaluateCompoundExpressions(t *testing.T) {
 		Command: `test "$VALUE" = "release-linux-v1" && printf 'value=done\n' >> "$GITHUB_OUTPUT"`,
 	}})
 	job.Matrix = map[string]any{"os": "linux", "directory": "src"}
-	job.Vars = map[string]string{"PREFIX": "release"}
+	job.RepositoryVars = map[string]string{"PREFIX": "release"}
 	job.Needs = map[string]plan.Need{"producer": {Result: "success", Outputs: map[string]string{"tag": "v1"}}}
 	job.Env = map[string]string{
 		"ROOT":  workspace,
@@ -1303,6 +1303,82 @@ func TestJobRuntimeFieldsEvaluateCompoundExpressions(t *testing.T) {
 	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Outputs["result"] != "done-success" || result.Outputs["environment"] != "job" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+// TestDecodedPlanVarsDriveRuntimeEvaluation proves a job's scoped variables,
+// as carried by its plan, are the only variable source at runtime: environment
+// variables override repository variables, which override organization
+// variables, names match case-insensitively in every runner-evaluated
+// position, and a name no scope defines evaluates to an empty string, as on
+// GitHub.
+func TestDecodedPlanVarsDriveRuntimeEvaluation(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "region", Kind: "run", Condition: "vars.tier == 'gold' && vars.MISSING == '' && vars.ORG_ONLY == 'org'", Env: map[string]string{"REGION": "${{ vars.aws_region }}"}, Command: `test "$REGION" = "eu-west-1" && test "${{ vars.AWS_REGION }}" = "eu-west-1" && test -z "${{ vars.MISSING }}" && test "${{ vars[format('{0}_ONLY', 'REPO')] }}" = "repo" && printf 'region=%s\n' "$REGION" >> "$GITHUB_OUTPUT"`},
+		{ID: "skipped", Kind: "run", Condition: "vars.MISSING", Command: "exit 1"},
+	})
+	job.OrganizationVars = map[string]string{"AWS_REGION": "us-east-1", "ORG_ONLY": "org", "TIER": "bronze"}
+	job.RepositoryVars = map[string]string{"aws_region": "eu-central-1", "REPO_ONLY": "repo"}
+	job.EnvironmentVars = map[string]string{"Aws_Region": "eu-west-1", "Tier": "gold"}
+	job.Env = map[string]string{"TIER": "${{ vars.TIER }}"}
+	job.Outputs = map[string]string{"region": "${{ steps.region.outputs.region }}-${{ env.TIER }}"}
+	attachTestProgram(&job)
+
+	encoded, err := plan.Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := plan.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (Runner{}).runTestJob(t.Context(), decoded, workspace)
+	if err != nil || result.Conclusion != "success" || result.Outputs["region"] != "eu-west-1-gold" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+// TestJobConditionAndCallGuardsIgnoreEnvironmentVars proves the runtime
+// evaluates jobs.<id>.if and reusable-workflow call guards with repository
+// and organization variables only, as GitHub does before a job's environment
+// applies, while steps see the environment's values.
+func TestJobConditionAndCallGuardsIgnoreEnvironmentVars(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	newJob := func() plan.Job {
+		job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Condition: "vars.ENABLED == 'yes'", Command: "true"}})
+		job.OrganizationVars = map[string]string{"ENABLED": "org"}
+		job.RepositoryVars = map[string]string{"enabled": "no"}
+		job.EnvironmentVars = map[string]string{"Enabled": "yes"}
+		return job
+	}
+
+	job := newJob()
+	job.Condition = "vars.ENABLED == 'yes'"
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "skipped" {
+		t.Fatalf("job condition with environment value result = %#v, error = %v, want the repository value to skip the job", result, err)
+	}
+	job.Condition = "vars.enabled == 'no'"
+	result, err = (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("job condition with repository value result = %#v, error = %v, want the job to run and its step to see the environment value", result, err)
+	}
+
+	job = newJob()
+	job.CallGuards = []plan.CallGuard{{Condition: "vars.ENABLED == 'yes'"}}
+	result, err = (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "skipped" {
+		t.Fatalf("call guard with environment value result = %#v, error = %v, want the repository value to skip the job", result, err)
+	}
+	job.CallGuards[0].Condition = "vars.ENABLED == 'no'"
+	result, err = (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("call guard with repository value result = %#v, error = %v", result, err)
 	}
 }
 

@@ -449,7 +449,7 @@ jobs:
     steps: [{run: true}]
 `)
 	options := defaultOptions()
-	options.Vars.Bridge = map[string]string{
+	options.Vars.Repository = map[string]string{
 		"OSES":    `["linux","darwin"]`,
 		"EXCLUDE": `[{"os":"darwin"}]`,
 		"INCLUDE": `[{"os":"linux","arch":"amd64"},{"os":"darwin","arch":"arm64"}]`,

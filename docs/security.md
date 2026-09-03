@@ -20,6 +20,7 @@ access by itself.
 | `permissions` and `GITHUB_TOKEN` | Top-level workflow permissions and Buildkite's workflow-token policy determine whether Buildkite issues a scoped token. GitHub repository and organization defaults are not inherited. |
 | Repository and environment secrets | Static secret names resolve through Buildkite Secrets when the destination job's identity and Secret access policy allow them. Environment-defined secret names resolve to `<ENVIRONMENT>_<NAME>` Buildkite secrets; event and fork scoping are not inherited. |
 | Environment protection rules | Required reviewers become a Buildkite block step that any user who can unblock the pipeline may approve. Reviewer lists, self-review prevention, wait timers, branch policies, and custom rules are not enforced; unsupported rules fail the compile. |
+| Environment variables | Values are copied into the job plan artifact as `environment_vars`. They are configuration, not secrets: anyone who can read build artifacts can read them. Repository and organization variables are never read. |
 | OIDC | Actions use Buildkite-issued tokens and claims. Cloud trust policies must trust Buildkite rather than GitHub. |
 
 The [compatibility reference](compatibility.md) says what works. This page says
@@ -190,6 +191,21 @@ same job identity can also run `buildkite-agent secret get`.
 `GITHUB_TOKEN` stays on its separate workflow-token boundary. Forwarding it to
 a declared alias preserves that scoped token boundary; it never requests an
 ordinary Buildkite secret.
+
+### Environment variables
+
+GitHub environment variables (`${{ vars.NAME }}`) are configuration values,
+not secrets. The Buildkite backend reads them from GitHub with its own
+credentials, and the importer copies each declared environment's variables
+into the plans of the jobs that declare it. A plan artifact
+(`.buildkite-gha/plans/<digest>.json`) therefore contains plaintext values,
+readable by anyone who can read the build's artifacts. Store sensitive values
+as environment secrets instead. Values never appear in pipeline YAML, compile
+diagnostics, or processing reports; those name variables only. Repository and
+organization variables are never read, so a job sees only its environment's
+variables, and a name outside them evaluates as empty rather than exposing
+another scope's value. See [deployment
+environments](compatibility.md#deployment-environments).
 
 ### OIDC
 

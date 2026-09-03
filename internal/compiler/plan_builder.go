@@ -198,8 +198,11 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	return job, actions.authorization, encoded, nil
 }
 
+// validateShellCompatibility checks shells that resolve during compilation.
+// Shells are runner-evaluated, so vars stay residual: the pre-environment map
+// could name a different shell than the environment override the runtime uses.
 func (b planBuilder) validateShellCompatibility(instance JobInstance, workflowProgram program.Program) error {
-	context := compileContext(b.ir.Event, b.ir.Vars, instance.SourcePath, b.workflowName)
+	context := compileContext(b.ir.Event, nil, instance.SourcePath, b.workflowName)
 	context.Inputs = instance.Inputs
 	context.Matrix = instance.Matrix
 	var diagnostics []error
@@ -238,8 +241,13 @@ func (b planBuilder) validateShellCompatibility(instance JobInstance, workflowPr
 	return errors.Join(diagnostics...)
 }
 
+// reducePlanInstanceEventExpressions resolves event values in the job's
+// runtime program. It keeps vars residual: the runtime evaluates each position
+// with its own vars context (plan.Job.VarsBeforeEnvironment or plan.Job.Vars),
+// and reducing here with the pre-environment map would let a repository
+// variable shadow the environment variable that overrides it at runtime.
 func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (JobInstance, error) {
-	context := compileContext(b.ir.Event, b.ir.Vars, instance.SourcePath, b.workflowName)
+	context := compileContext(b.ir.Event, nil, instance.SourcePath, b.workflowName)
 	context.Inputs = instance.Inputs
 	context.Matrix = instance.Matrix
 	reduceTemplate := func(value string, profile expression.ProfileID) (string, error) {
@@ -539,12 +547,17 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 	return built, nil
 }
 
+// authorityReferences are the values token and secret authority planning may
+// resolve. Planning never resolves vars: GitHub evaluates jobs.<id>.if with
+// repository and organization variables but steps with the environment laid
+// over them, so a single map would be wrong in one of the two positions.
+// Unknown vars keep planning conservative: an expression that may reference
+// github.token still requests the token.
 func (b planBuilder) authorityReferences(instance JobInstance) map[string]any {
 	return map[string]any{
 		"github.server_url": plan.EventServerURL(b.ir.Event.Provider),
 		"inputs":            instance.Inputs,
 		"matrix":            instance.Matrix,
-		"vars":              b.ir.Vars,
 	}
 }
 
@@ -681,7 +694,9 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		Matrix:               instance.Matrix,
 		Inputs:               cloneAnyMap(instance.Inputs),
 		DeferredInputs:       deferredInputs,
-		Vars:                 cloneMap(b.ir.Vars),
+		OrganizationVars:     cloneMap(b.ir.OrganizationVars),
+		RepositoryVars:       cloneMap(b.ir.RepositoryVars),
+		EnvironmentVars:      cloneMap(instance.environmentVariables),
 		Dependencies:         append([]string(nil), instance.Needs...),
 		NeedSources:          needSources,
 		NeedOutputs:          needOutputs,
