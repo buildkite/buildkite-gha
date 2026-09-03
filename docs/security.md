@@ -18,7 +18,8 @@ access by itself.
 | Runner or runner group | The Buildkite queue selects the agent environment. Use a disposable host or equivalent whole-job isolation. |
 | Job | A native Buildkite command job. All workflow steps share its workspace and Buildkite identity. |
 | `permissions` and `GITHUB_TOKEN` | Top-level workflow permissions and Buildkite's workflow-token policy determine whether Buildkite issues a scoped token. GitHub repository and organization defaults are not inherited. |
-| Repository and environment secrets | Static secret names resolve through Buildkite Secrets when the destination job's identity and Secret access policy allow them. GitHub environment, event, and fork scoping are not inherited. |
+| Repository and environment secrets | Static secret names resolve through Buildkite Secrets when the destination job's identity and Secret access policy allow them. Environment-defined secret names resolve to `<ENVIRONMENT>_<NAME>` Buildkite secrets; event and fork scoping are not inherited. |
+| Environment protection rules | Required reviewers become a Buildkite block step that any user who can unblock the pipeline may approve. Reviewer lists, self-review prevention, wait timers, branch policies, and custom rules are not enforced; unsupported rules fail the compile. |
 | OIDC | Actions use Buildkite-issued tokens and claims. Cloud trust policies must trust Buildkite rather than GitHub. |
 
 The [compatibility reference](compatibility.md) says what works. This page says
@@ -164,7 +165,11 @@ tokens only when those build-creation paths are trusted.
 ### Workflow secrets
 
 Workflow secrets are Buildkite secrets available to the destination job. They
-are not GitHub repository, environment, event, or fork-scoped secrets.
+are not GitHub repository, environment, event, or fork-scoped secrets. Jobs
+with a GitHub environment resolve environment-defined secret names to
+`<ENVIRONMENT>_<NAME>` Buildkite secrets; Buildkite Secret access policies
+remain the authorization boundary. See [deployment
+environments](compatibility.md#deployment-environments).
 
 `secrets: inherit` lets a local reusable-workflow call place that callee job's
 statically referenced secret names in its plan. It is one hop, and every nested

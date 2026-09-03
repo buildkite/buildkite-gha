@@ -287,6 +287,14 @@ buildkite-gha compile \
   .github/workflows/ci.yml
 ```
 
+Workflows whose jobs declare a GitHub
+[`environment`](compatibility.md#deployment-environments) need GitHub
+environment access at compile time. Inside a Buildkite job, `upload` and
+`compile` resolve environments automatically through the job-scoped Agent API;
+no GitHub token reaches the importer. Outside a job, `compile` fails for such
+workflows with an error naming the job and its environment; there is no token
+option.
+
 `compile` does not upload the executable, plans, or pipeline, so piping its YAML directly to `buildkite-agent pipeline upload` is incomplete.
 
 ## Upload from a custom importer
