@@ -274,27 +274,31 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		validationOptions.RepositorySource = repositorySource
 		validations[i], validationErrs[i] = compiler.ValidateEventWithOptionsContext(ctx, input.Path, input.Source, effectiveEvent.Source, validationOptions)
 	}
-	runnerSelectors, runnerWarnings, err := suggestedRunnerTargets(ctx, validations, uploadArguments.runnerTargets, uploadArguments.clientVersion)
+	runnerResolution, err := suggestedRunnerTargets(ctx, validations, uploadArguments.runnerTargets, uploadArguments.clientVersion)
 	if err != nil {
 		if ctx.Err() != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", ctx.Err())
 			return 1
 		}
+		// The built-in presets keep the import moving, but they may target a
+		// queue this cluster lacks, so the degradation must be visible.
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: warning: runner resolution unavailable (%v); using built-in runner presets\n", err)
+		out.annotateRunnerResolutionUnavailable(ctx, err)
 	}
-	if len(runnerSelectors) != 0 {
-		uploadArguments.runnerSelectors = runnerSelectors
+	if !runnerResolution.empty() {
+		uploadArguments.runnerResolution = runnerResolution
 		for i, input := range workflows {
 			if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 				continue
 			}
 			validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
-			applyRunnerSelectors(&validationOptions, runnerSelectors)
+			applyRunnerResolution(&validationOptions, runnerResolution)
 			validationOptions.StepKeyNamespace = input.StepKeyNamespace
 			validationOptions.RepositorySource = repositorySource
 			validations[i], validationErrs[i] = compiler.ValidateEventWithOptionsContext(ctx, input.Path, input.Source, effectiveEvent.Source, validationOptions)
 		}
 	}
-	out.annotateRunnerResolutionWarnings(ctx, runnerWarnings)
+	out.annotateRunnerResolutionWarnings(ctx, runnerResolution.warnings)
 	for i, input := range workflows {
 		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 			continue
@@ -322,7 +326,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 			continue
 		}
-		platforms, platformErr := requiredRuntimePlatforms(ctx, input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets, uploadArguments.runnerSelectors, repositorySource)
+		platforms, platformErr := requiredRuntimePlatforms(ctx, input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets, uploadArguments.runnerResolution, repositorySource)
 		if platformErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", platformErr)
 			return 1
@@ -422,7 +426,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			failureArtifacts = append(failureArtifacts, artifacts...)
 			continue
 		}
-		preflight, err := compileHostedNamespacedWithActionCache(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, bundleCompilerStep, "", uploadArguments.runnerTargets, uploadArguments.runnerSelectors, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, "", repositorySource, authentication)
+		preflight, err := compileHostedNamespacedWithActionCache(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, bundleCompilerStep, "", uploadArguments.runnerTargets, uploadArguments.runnerResolution, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, "", repositorySource, authentication)
 		applyHostedPreflight(&processingReports[i], preflight)
 		if err != nil {
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
@@ -649,9 +653,9 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 	return transport.Artifact{Path: path, Digest: digest, Contents: encoded}
 }
 
-func requiredRuntimePlatforms(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerSelectors []compiler.RunnerSelector, repositorySource compiler.RepositorySource) (map[compiler.Platform]bool, error) {
+func requiredRuntimePlatforms(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerResolution agentRunnerResolution, repositorySource compiler.RepositorySource) (map[compiler.Platform]bool, error) {
 	options := hostedOptions(groupLabel, configuredTargets, nil)
-	applyRunnerSelectors(&options, runnerSelectors)
+	applyRunnerResolution(&options, runnerResolution)
 	options.RepositorySource = repositorySource
 	preflight, err := compiler.CompileWithOptionsContext(ctx, workflowPath, workflowSource, eventSource, options)
 	if err != nil {
@@ -821,7 +825,7 @@ type parsedUploadArgs struct {
 	clientVersion            string
 	runtimeDistributionPaths map[compiler.Platform]string
 	runnerTargets            map[string]compiler.RunnerTarget
-	runnerSelectors          []compiler.RunnerSelector
+	runnerResolution         agentRunnerResolution
 	oidc                     *plan.OIDCConfiguration
 	experimentalRunnerUser   bool
 	pluginAcquisition        *pluginRuntimeAcquisition

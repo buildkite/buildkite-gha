@@ -594,8 +594,25 @@ declares that the selector runs on Linux x86-64, except for the known macOS
 labels, which select Darwin arm64 and reject images. For every other selector,
 the job-scoped Agent API owns compatibility and returns the complete queue,
 platform, and immutable Linux image. The importer applies that target verbatim
-and publishes returned fallback warnings as annotations. The server rejects
-selectors that require an incompatible operating system or architecture.
+and publishes returned fallback warnings as annotations.
+
+When the Agent API rejects a selector, the importer reports the server's
+reason at the job's `runs-on` in the workflow diagnostics annotation instead
+of falling back to a built-in preset, so a cluster without the expected hosted
+queue fails before pipeline upload with the cluster and queue named:
+
+| Rejection | Meaning |
+| --- | --- |
+| `missing_queue` | The labels are compatible, but the job's cluster has none of the hosted queues they need. Create the named queue or configure an explicit runner mapping. |
+| `incompatible_labels` | The labels require an operating system or architecture hosted agents do not provide. |
+| `no_cluster` | The job is not in a cluster, so no hosted queue can be selected. |
+
+Windows labels keep the local Windows guidance. Unknown rejection codes render
+the server message with generic mapping guidance. Explicit mappings are not
+checked against the cluster yet.
+
+If the Agent API cannot be reached, the importer warns on stderr, adds a
+warning annotation, and falls back to the built-in presets.
 
 Explicit mappings can also attach one [Buildkite Hosted cache
 volume](cli.md#configure-generated-job-cache-volumes) to generated jobs. This

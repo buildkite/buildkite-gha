@@ -178,9 +178,10 @@ func hostedOptions(groupLabel string, configuredTargets map[string]compiler.Runn
 	return options
 }
 
-func applyRunnerSelectors(options *compiler.Options, selectors []compiler.RunnerSelector) {
-	options.Runners.Selectors = selectors
-	for _, selector := range selectors {
+func applyRunnerResolution(options *compiler.Options, resolution agentRunnerResolution) {
+	options.Runners.Selectors = resolution.selectors
+	options.Runners.Rejections = resolution.rejections
+	for _, selector := range resolution.selectors {
 		if selector.Target.Queue != "" && !slices.Contains(options.Runners.UntrustedQueues, selector.Target.Queue) {
 			options.Runners.UntrustedQueues = append(options.Runners.UntrustedQueues, selector.Target.Queue)
 		}
@@ -204,16 +205,16 @@ func compileHosted(ctx context.Context, workflowPath string, workflowSource, eve
 }
 
 func compileHostedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, nil, runtimeDistributions, "", nil, actionCacheDir, sharedActionSource, actionAuthentication)
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, agentRunnerResolution{}, runtimeDistributions, "", nil, actionCacheDir, sharedActionSource, actionAuthentication)
 }
 
 func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, nil, runtimeDistributions, stepKeyNamespace, oidc, "", nil, actionAuthentication)
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, agentRunnerResolution{}, runtimeDistributions, stepKeyNamespace, oidc, "", nil, actionAuthentication)
 }
 
-func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerSelectors []compiler.RunnerSelector, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerResolution agentRunnerResolution, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
-	applyRunnerSelectors(&options, runnerSelectors)
+	applyRunnerResolution(&options, runnerResolution)
 	options.StepKeyNamespace = stepKeyNamespace
 	options.OIDC = oidc
 	repositorySource := sharedActionSource
