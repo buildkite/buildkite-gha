@@ -95,6 +95,7 @@ type Pipeline struct {
 	GroupLabel         string
 	EventProvider      string
 	ConcurrencyGate    *ConcurrencyGate
+	ApprovalGates      []ApprovalGate
 	DisableRunnerUser  bool
 	Jobs               []Job
 	Workflows          []Workflow
@@ -110,8 +111,17 @@ type Workflow struct {
 	Condition       string
 	SkipReason      string
 	ConcurrencyGate *ConcurrencyGate
+	ApprovalGates   []ApprovalGate
 	Failure         *Failure
 	Jobs            []Job
+}
+
+// ApprovalGate is one manual approval block step emitted before the generated
+// jobs that deploy to a protected GitHub environment. Any Buildkite user with
+// permission to unblock the pipeline can approve it.
+type ApprovalGate struct {
+	Key         string
+	Environment string
 }
 
 // Failure replaces a failed aggregate workflow with one synthetic command step.
@@ -160,6 +170,7 @@ type Job struct {
 	PlanDigest         string
 	EventPayload       bool
 	Dependencies       []string
+	ApprovalGate       string
 	RequiresMise       bool
 	Cache              *CacheVolume
 	SoftFail           bool
@@ -200,7 +211,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	}
 	workflows := pipeline.Workflows
 	if aggregate {
-		if len(pipeline.Jobs) != 0 || pipeline.GroupLabel != "" || pipeline.ConcurrencyGate != nil {
+		if len(pipeline.Jobs) != 0 || pipeline.GroupLabel != "" || pipeline.ConcurrencyGate != nil || len(pipeline.ApprovalGates) != 0 {
 			return nil, fmt.Errorf("aggregate pipeline cannot mix legacy workflow fields")
 		}
 		if pipeline.EventProvider != "github" && pipeline.EventProvider != "cursor-origin" {
@@ -210,6 +221,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		workflows = []Workflow{{
 			GroupLabel:      pipeline.GroupLabel,
 			ConcurrencyGate: pipeline.ConcurrencyGate,
+			ApprovalGates:   pipeline.ApprovalGates,
 			Jobs:            pipeline.Jobs,
 		}}
 	}
@@ -269,6 +281,34 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		checkLabels := make(map[string]string, len(jobs))
 		if err := validateConcurrencyGate(workflow.ConcurrencyGate); err != nil {
 			return nil, err
+		}
+		approvalGates := make(map[string]bool, len(workflow.ApprovalGates))
+		for _, gate := range workflow.ApprovalGates {
+			if !validStepKey(gate.Key) {
+				return nil, fmt.Errorf("invalid approval gate key %q", gate.Key)
+			}
+			if gate.Environment == "" {
+				return nil, fmt.Errorf("approval gate %q requires an environment name", gate.Key)
+			}
+			if owner, exists := usedKeys[gate.Key]; exists {
+				return nil, fmt.Errorf("approval gate key %q collides with %s", gate.Key, owner)
+			}
+			usedKeys[gate.Key] = "approval gate"
+			approvalGates[gate.Key] = false
+		}
+		for _, job := range jobs {
+			if job.ApprovalGate == "" {
+				continue
+			}
+			if _, declared := approvalGates[job.ApprovalGate]; !declared {
+				return nil, fmt.Errorf("job %q references undeclared approval gate %q", job.Key, job.ApprovalGate)
+			}
+			approvalGates[job.ApprovalGate] = true
+		}
+		for _, gate := range workflow.ApprovalGates {
+			if !approvalGates[gate.Key] {
+				return nil, fmt.Errorf("approval gate %q has no dependent jobs", gate.Key)
+			}
 		}
 		for _, job := range jobs {
 			if owner, exists := usedKeys[job.Key]; exists {
@@ -560,6 +600,11 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
 		}
 		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
+		if job.ApprovalGate != "" {
+			// A manual retry would rerun the deployment job without a fresh
+			// approval, so gated jobs cannot be retried.
+			_, _ = fmt.Fprintf(out, "%sretry:\n%s  manual:\n%s    allowed: false\n", attributeIndent, attributeIndent, attributeIndent)
+		}
 		cache := mergedCacheVolume(job.Cache, job.RequiresMise, platform, experimentalRunnerUser)
 		if cache != nil {
 			_, _ = fmt.Fprintf(out, "%scache:\n", attributeIndent)
@@ -588,7 +633,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if !workflow.Aggregate {
 			_, _ = fmt.Fprintf(out, "%sdepends_on:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(pipeline.CompilerStep), attributeIndent)
-		} else if workflow.GateOpenKey != "" || len(job.Dependencies) != 0 || len(job.ConcurrencyGates) != 0 {
+		} else if workflow.GateOpenKey != "" || len(job.Dependencies) != 0 || len(job.ConcurrencyGates) != 0 || job.ApprovalGate != "" {
 			_, _ = fmt.Fprintf(out, "%sdepends_on:\n", attributeIndent)
 		}
 		if workflow.GateOpenKey != "" {
@@ -600,6 +645,28 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		for _, gate := range job.ConcurrencyGates {
 			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(gateOpenKeys[gate.ID]), attributeIndent)
 		}
+		if job.ApprovalGate != "" {
+			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(job.ApprovalGate), attributeIndent)
+		}
+	}
+	// Approval gates are emitted after the jobs so no generated step follows a
+	// block step. A block step implicitly holds every later step that lacks an
+	// explicit dependency; gated jobs opt in through depends_on instead. The
+	// explicit compiler-step dependency severs the block step's own implicit
+	// dependency on the sibling jobs that depend on it. A keyless Pipeline
+	// Trigger upload has no importer step key, so it uses Buildkite's explicit
+	// empty dependency list, which also removes implicit dependencies.
+	for _, gate := range workflow.ApprovalGates {
+		_, _ = fmt.Fprintf(out, "%s- block: %s\n", stepIndent, yamlScalar(":github: approval · "+gate.Environment))
+		_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(gate.Key))
+		_, _ = fmt.Fprintf(out, "%sprompt: %s\n", attributeIndent, yamlScalar("Approve deployment to GitHub environment "+gate.Environment+"."))
+		out.WriteString(attributeIndent + "blocked_state: running\n")
+		if pipeline.CompilerStep == "" {
+			out.WriteString(attributeIndent + "depends_on: []\n")
+			continue
+		}
+		_, _ = fmt.Fprintf(out, "%sdepends_on:\n", attributeIndent)
+		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(pipeline.CompilerStep), attributeIndent)
 	}
 	return nil
 }
@@ -915,6 +982,9 @@ func validateJob(compilerStep string, job Job) error {
 		if !validStepKey(dependency) || dependency == compilerStep || dependency == job.Key {
 			return fmt.Errorf("job %q has invalid dependency %q", job.Key, dependency)
 		}
+	}
+	if job.ApprovalGate != "" && (!validStepKey(job.ApprovalGate) || job.ApprovalGate == compilerStep || job.ApprovalGate == job.Key) {
+		return fmt.Errorf("job %q has invalid approval gate %q", job.Key, job.ApprovalGate)
 	}
 	return nil
 }

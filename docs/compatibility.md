@@ -46,7 +46,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Reusable-workflow jobs use the top-level workflow permissions. |
 | [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs and locally inherited or explicitly mapped reusable jobs resolve through the destination job's Buildkite secret authority. |
 | [Job and service containers](#containers-and-services) | 🟡 Supported subset | Linux job containers and broadly compatible service definitions, including explicit registry credentials. |
-| [Environments and snapshots](#job-configuration) | 🟡 Supported subset | Environments are rejected. Snapshots are accepted with no effect. |
+| [Environments and snapshots](#deployment-environments) | 🟡 Supported subset | Literal environments on top-level jobs, with required-reviewer approval gates and environment-scoped secret names. Wait timers, branch policies, and custom rules are rejected. Snapshots are accepted with no effect. |
 | [OIDC](#other-secrets-and-oidc) | 🟡 Supported subset | Host JavaScript and composite actions can request Buildkite OIDC tokens in jobs with `id-token: write`. |
 | [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers are outside the initial release. |
 | [Other GitHub services](#github-services) | ❌ Unsupported | No general emulation for Releases, Packages, Checks, deployments, or GitHub artifact APIs. |
@@ -527,7 +527,7 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 | `env`, `defaults.run` | 🟡 Supported subset | Uses the [workflow-level behavior](#environment-and-defaults). |
 | `timeout-minutes` | 🟡 Supported subset | Accepts literal timeouts up to 360 minutes. Expressions are rejected. |
 | `continue-on-error` | 🟡 Supported subset | Accepts literal booleans. Expressions are rejected. A tolerated failure remains visible as a Buildkite soft failure and reports `success` through downstream `needs`. |
-| `environment` | ❌ Unsupported | Environment approvals, secrets, deployment records, and protection rules are unavailable. |
+| `environment` | 🟡 Supported subset | Requires GitHub environment access at compile time. See [Deployment environments](#deployment-environments). |
 | `snapshot` | ➖ Accepted, no effect | Custom image creation is not implemented. |
 
 Job names can interpolate matrix values:
@@ -604,6 +604,61 @@ syntax or action inputs.
 
 `validate --profile hosted` has no job-scoped API and admits only the local
 `macos-latest` preset.
+
+### Deployment environments
+
+A job-level `environment` needs GitHub environment configuration at compile
+time. Inside a Buildkite job, `upload` and `compile` resolve each declared
+environment automatically through the job-scoped Agent API
+(`github-actions/environments`; rollout status in
+[docs/plans/environment-resolution-backend.md](plans/environment-resolution-backend.md)).
+The Buildkite backend reads the environment's protection rules and secret
+names from GitHub with its own credentials, restricted to the pipeline's
+configured repository, and returns only that snapshot: no GitHub token and no
+secret value ever reaches the importer. This is the only environment access
+path; there is no GitHub token option. Resolution is GitHub.com-only, so
+GitHub Enterprise Server repositories cannot declare environments. Any
+resolution failure fails the compile instead of degrading to an unprotected
+default, and environments are only resolved when a workflow declares them.
+One upload resolves all of its distinct environments in one batched request.
+The backend owns the resolution limits — at most 20 environments per request
+plus per-job and per-App-installation hourly budgets — and its rejection
+fails the compile with the backend's error.
+
+Outside a Buildkite job, `compile` has no environment access, so workflows
+that declare environments fail to compile with an error naming the job.
+`validate --profile hosted` reports the same failure as a diagnostic.
+
+| Environment feature | Behavior |
+| --- | --- |
+| Literal `environment` name, with or without `url` | ✅ Supported on top-level workflow jobs. Expression names and reusable-workflow jobs are rejected. |
+| Required reviewers | 🟡 One Buildkite block step per workflow and environment gates the affected jobs. Any user who can unblock the pipeline can approve; GitHub reviewer lists, `prevent_self_review`, and administrator bypass are not enforced. |
+| Environment secrets | 🟡 Referenced secret names defined in the environment resolve to the Buildkite secret `<ENVIRONMENT>_<NAME>`. Other names resolve unchanged. Values stay in Buildkite Secrets; only names are read from GitHub. |
+| Environment variables | ❌ Unsupported. GitHub exposes them only as `vars.<NAME>` expression values, never as process environment variables, so `${{ vars.X }}` fails at compile time like every other `vars` reference. The snapshot does not read them. |
+| Wait timers | ❌ Rejected at compile time. |
+| Deployment branch policies | ❌ Rejected at compile time. |
+| Custom deployment protection rules | ❌ Rejected at compile time. |
+| `environment.url`, deployment records | ➖ Accepted, no effect. Builds do not create GitHub deployments or deployment statuses. |
+
+Secret `DEPLOY_KEY` in environment `production` resolves to Buildkite secret
+`PRODUCTION_DEPLOY_KEY`: the prefix is the upper-cased environment name with
+every character outside `A-Z`, `0-9`, and `_` replaced by `_`, and a leading
+`_` added when the name starts with a digit (environment `1st` gives
+`_1ST_DEPLOY_KEY`). Distinct environments keep distinct values under Buildkite
+Secret access policies.
+Generated keys must be storable in Buildkite Secrets: compilation fails when a
+key would exceed 255 characters or begin with `BK` or `BUILDKITE`, so rename
+such environments or secrets.
+
+The approval gate is a block step with `blocked_state: running`, so ungated
+jobs keep running while approval is pending. The gate appears whenever the
+workflow compiles, even if the gated job's own condition would skip it. Matrix
+instances of one job share one gate. Gated jobs cannot be retried manually; run
+a new build for a fresh approval.
+
+Environment configuration is read once per compile, so changes on GitHub apply
+to the next build. Buildkite OIDC tokens do not carry a GitHub `environment`
+claim.
 
 ### Matrix strategies
 
@@ -1368,7 +1423,10 @@ service.
 These are Buildkite destination-job secrets, not GitHub repository,
 environment, event, or fork-scoped secrets. Buildkite Secret access policies
 are the authorization boundary. Code in the same job can also call
-`buildkite-agent secret get`.
+`buildkite-agent secret get`. Jobs with a [GitHub
+environment](#deployment-environments) resolve environment-defined secret names
+through the `<ENVIRONMENT>_<NAME>` naming convention; the values remain
+ordinary Buildkite secrets.
 
 `GITHUB_TOKEN` stays on its separate workflow-token contract and cannot be
 replaced by an ordinary Buildkite secret.
@@ -1377,7 +1435,6 @@ Unsupported secret uses include:
 
 - dynamic, whole-context, filtered, or projected access
 - conditions and other compile-time expressions
-- GitHub environments and environment secrets
 - remote reusable-workflow secret forwarding
 - literals, compound expressions, or references through `needs`, `vars`, `env`,
   `inputs`, or arbitrary `github` properties in explicit mappings

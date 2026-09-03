@@ -94,6 +94,8 @@ type JobInstance struct {
 	MaxParallel             *int                      `json:"max_parallel,omitempty"`
 	ConcurrencyGroup        string                    `json:"concurrency_group,omitempty"`
 	ConcurrencyGates        []WorkflowConcurrencyGate `json:"workflow_concurrency_gates,omitempty"`
+	Environment             string                    `json:"environment,omitempty"`
+	EnvironmentApproval     bool                      `json:"environment_approval,omitempty"`
 	Steps                   []workflow.Step           `json:"steps"`
 	Env                     map[string]string         `json:"env,omitempty"`
 	Permissions             map[string]string         `json:"permissions,omitempty"`
@@ -112,6 +114,7 @@ type JobInstance struct {
 	BlockerDetailUnsafe     bool                      `json:"blocker_detail_unsafe,omitempty"`
 	RepositoryRoot          string                    `json:"-"`
 	Source                  workflow.Span             `json:"source"`
+	environmentSecrets      []string
 	secretAuthority         secretAuthority
 	tokenPolicyNarrowed     bool
 	jobPermissionsIgnored   bool
@@ -327,6 +330,9 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
 	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
+	if expandErr == nil {
+		expandErr = resolveJobEnvironments(ctx, expanded.instances, event, options)
+	}
 	digest := sha256.Sum256(source)
 	ir := IR{
 		Schema: schema,

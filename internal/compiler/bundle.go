@@ -326,6 +326,24 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 			jobs[i].ConcurrencyGroup = "buildkite-gha/" + workflowScope + "/" + ir.Jobs[i].LogicalJobID
 		}
 	}
+	var approvalGates []buildkitepipeline.ApprovalGate
+	gateKeys := make(map[string]string)
+	for i := range ir.Jobs {
+		if !ir.Jobs[i].EnvironmentApproval {
+			continue
+		}
+		environment := ir.Jobs[i].Environment
+		// GitHub environment names are case-insensitive, so case variants
+		// share one gate; the label keeps the first authored spelling.
+		identity := strings.ToLower(environment)
+		key, exists := gateKeys[identity]
+		if !exists {
+			key = environmentGateKey(options.StepKeyNamespace, environment)
+			gateKeys[identity] = key
+			approvalGates = append(approvalGates, buildkitepipeline.ApprovalGate{Key: key, Environment: environment})
+		}
+		jobs[i].ApprovalGate = key
+	}
 	var concurrencyGate *buildkitepipeline.ConcurrencyGate
 	if ir.Workflow.ConcurrencyGroup != "" {
 		concurrencyGate = &buildkitepipeline.ConcurrencyGate{
@@ -335,12 +353,14 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 	}
 	generatedWorkflow := buildkitepipeline.Workflow{
 		ConcurrencyGate: concurrencyGate,
+		ApprovalGates:   approvalGates,
 		Jobs:            jobs,
 	}
 	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep:    compilerStep,
 		GroupLabel:      options.GroupLabel,
 		ConcurrencyGate: generatedWorkflow.ConcurrencyGate,
+		ApprovalGates:   generatedWorkflow.ApprovalGates,
 		Jobs:            generatedWorkflow.Jobs,
 	})
 	if err != nil {

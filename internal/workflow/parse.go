@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -493,14 +494,11 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurrency map[Position]stepConcurrency, serviceContainers map[string]rawServiceContainer) (Job, error) {
 	out := Job{ID: in.ID.Value, Span: pointSpan(in.Pos)}
 	if in.Environment != nil {
-		detail := ""
-		if in.Environment.Name != nil && !strings.Contains(in.Environment.Name.Value, "${{") {
-			detail = in.Environment.Name.Value
+		environment, err := adaptEnvironment(path, in)
+		if err != nil {
+			return Job{}, err
 		}
-		return Job{}, &unsupportedEnvironmentError{
-			detail: detail,
-			err:    fmt.Errorf("%s:%d:%d: GitHub environments and environment secrets are unsupported. Remove the environment key from job %q. Approvals, deployment records, and protection rules are unavailable. Move environment secrets into Buildkite secrets and reference them by name. If you need GitHub environments, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support", path, in.Environment.Pos.Line, in.Environment.Pos.Col, in.ID.Value),
-		}
+		out.Environment = environment
 	}
 	ownedConcurrency, err := adaptConcurrency(path, in.ID.Value, in.Concurrency)
 	if err != nil {
@@ -766,15 +764,26 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 	return out, nil
 }
 
-type unsupportedEnvironmentError struct {
-	detail string
-	err    error
-}
-
-func (e *unsupportedEnvironmentError) Error() string { return e.err.Error() }
-func (e *unsupportedEnvironmentError) Unwrap() error { return e.err }
-func (e *unsupportedEnvironmentError) CompatibilityBlocker() (string, string) {
-	return "environment", e.detail
+// adaptEnvironment owns the statically supported subset of the GitHub
+// environment key: one literal environment name. The optional url is used only
+// for GitHub deployment records, which buildkite-gha never creates, so it is
+// accepted and ignored.
+func adaptEnvironment(path string, in *actionlint.Job) (string, error) {
+	environment := in.Environment
+	if in.WorkflowCall != nil {
+		return "", locatedError(path, environment.Pos, in.ID.Value, "environment cannot be combined with a reusable workflow call")
+	}
+	if environment.Name == nil || strings.TrimSpace(environment.Name.Value) == "" {
+		return "", locatedError(path, environment.Pos, in.ID.Value, "environment requires a literal name")
+	}
+	name := environment.Name
+	if name.ContainsExpression() {
+		return "", locatedError(path, name.Pos, in.ID.Value, "environment names that use expressions are unsupported; use a literal environment name")
+	}
+	if utf8.RuneCountInString(name.Value) > 255 || strings.ContainsAny(name.Value, "\x00\r\n") {
+		return "", locatedError(path, name.Pos, in.ID.Value, "environment name must be at most 255 characters without control characters")
+	}
+	return name.Value, nil
 }
 
 func adaptPermissions(path string, in *actionlint.Permissions, jobID string) (*Permissions, error) {
