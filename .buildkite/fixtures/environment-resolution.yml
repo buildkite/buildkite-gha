@@ -1,0 +1,17 @@
+name: Environment secret runtime proof
+
+on: push
+
+jobs:
+  environment-secret:
+    name: Environment secret delivery
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - name: Verify environment secret delivery
+        env:
+          ENVIRONMENT_SECRET_VALUE: ${{ secrets.__ENVIRONMENT_SECRET_NAME__ }}
+        run: |
+          set -euo pipefail
+          test -n "$ENVIRONMENT_SECRET_VALUE"
+          echo 'The environment secret was delivered without disclosure.'
