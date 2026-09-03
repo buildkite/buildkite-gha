@@ -1,4 +1,3 @@
-// Package program defines the immutable normalized instructions consumed while
-// executing one workflow job, including its steps, expressions, controls,
-// containers, services, and resolved actions.
+// Package program defines the immutable normalized executable form of GitHub
+// Actions workflow jobs and the resolved actions they may invoke.
 package program

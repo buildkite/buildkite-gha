@@ -285,8 +285,9 @@ type OIDCConfiguration struct {
 	SubjectClaim   string   `json:"subject_claim,omitempty"`
 }
 
-// Job is the serialized runtime envelope for one compiler-selected workflow job
-// instance. It contains the normalized Program plus instance metadata and the
+// Job is the serialized execution envelope for one generated Buildkite command
+// job, not a Buildkite API object. It contains the normalized GitHub Actions
+// workflow job assigned to that command job plus its instance metadata and the
 // transport, authority, and runtime configuration needed to execute it.
 type Job struct {
 	Schema               string                   `json:"schema"`

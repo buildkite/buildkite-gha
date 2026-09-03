@@ -6,8 +6,8 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
-// ExecutionJob returns the immutable normalized executable job contained in
-// this serialized runtime envelope.
+// ExecutionJob returns the normalized GitHub Actions workflow job assigned to
+// this Buildkite command job envelope.
 func (job Job) ExecutionJob() *program.Job {
 	if job.Program == nil {
 		return nil
