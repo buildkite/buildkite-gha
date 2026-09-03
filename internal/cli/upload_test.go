@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1331,6 +1334,158 @@ jobs:
 	message := failureArtifactForStep(step.Plugins, runner.uploaded, "messages")
 	if step.Group != "" || step.Label != ":github: workflow · Rebase needed" || !isGeneratedFailureCommand(step.Command) || !strings.Contains(string(message), `job "label-rebase-needed": concurrency cancel-in-progress is unsupported`) || !step.Checkout.Skip {
 		t.Fatalf("job cancellation failure step = %#v", step)
+	}
+}
+
+// runnerResolutionServer serves the Agent API runner resolution endpoint with a
+// fixed verdict per selector; unlisted selectors get a legacy unmapped_labels
+// rejection. It also accepts telemetry posts so the CLI can run unchanged.
+func runnerResolutionServer(t *testing.T, status int, verdicts map[string]map[string]any) (*httptest.Server, *int) {
+	t.Helper()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/github-actions/runners") {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		requests++
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+			return
+		}
+		var body struct {
+			Requirements []struct {
+				ID       string `json:"id"`
+				Selector struct {
+					Labels []string `json:"labels"`
+				} `json:"selector"`
+			} `json:"requirements"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode runner requirements: %v", err)
+		}
+		resolutions := make([]map[string]any, len(body.Requirements))
+		for i, requirement := range body.Requirements {
+			resolution := map[string]any{"id": requirement.ID}
+			if verdict, ok := verdicts[strings.Join(requirement.Selector.Labels, ",")]; ok {
+				maps.Copy(resolution, verdict)
+			} else {
+				resolution["error"] = map[string]string{"code": "unmapped_labels", "message": "No compatible runner is configured."}
+			}
+			resolutions[i] = resolution
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"resolutions": resolutions})
+	}))
+	t.Cleanup(server.Close)
+	return server, &requests
+}
+
+func TestRunUploadReportsServerRunnerRejectionsInsteadOfLocalPresets(t *testing.T) {
+	requireImporterHost(t)
+	const missingQueueMessage = "The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-medium in the cluster, or configure an explicit runner mapping to an existing queue: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md"
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"runners.yml": "name: Runners\non: push\njobs:\n  mac:\n    runs-on: macos-latest\n    steps: [{run: true}]\n  arm:\n    runs-on: ubuntu-24.04-arm\n    steps: [{run: true}]\n  windows:\n    runs-on: windows-latest\n    steps: [{run: true}]\n  linux:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, requests := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+		"macos-latest":     {"error": map[string]any{"code": "missing_queue", "message": missingQueueMessage, "cluster": "Default", "platform": "darwin/arm64", "required_queues": []string{"macos-medium"}}},
+		"ubuntu-24.04-arm": {"error": map[string]any{"code": "incompatible_labels", "message": "No compatible runner is configured."}},
+		"windows-latest":   {"error": map[string]any{"code": "incompatible_labels", "message": "No compatible runner is configured."}},
+		"ubuntu-latest":    {"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}},
+	})
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_KEY", "server-rejection-importer")
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "true")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/runners.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if *requests != 1 || strings.Contains(stderr.String(), "runner resolution unavailable") {
+		t.Fatalf("runner resolution requests = %d, stderr = %q", *requests, stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Label   string             `yaml:"label"`
+			Command string             `yaml:"command"`
+			Plugins failureStepPlugins `yaml:"plugins"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Label != ":github: workflow · Runners" || !isGeneratedFailureCommand(pipeline.Steps[0].Command) {
+		t.Fatalf("pipeline = %#v", pipeline.Steps)
+	}
+	message := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
+	if !strings.Contains(message, `Buildkite could not resolve runner label "macos-latest". `+missingQueueMessage) {
+		t.Fatalf("missing_queue rejection was not rendered: %q", message)
+	}
+	if !strings.Contains(message, `Buildkite could not resolve runner label "ubuntu-24.04-arm". No compatible runner is configured. Change runs-on to a Linux or macOS runner label that Buildkite hosted agents support.`) {
+		t.Fatalf("incompatible_labels rejection was not rendered: %q", message)
+	}
+	if !strings.Contains(message, `Windows runners aren't currently supported.`) {
+		t.Fatalf("local Windows guidance was replaced by the server rejection: %q", message)
+	}
+	if strings.Contains(message, "has no runner-target mapping") || strings.Contains(message, `job "linux"`) {
+		t.Fatalf("unexpected failure content: %q", message)
+	}
+	annotation := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "annotations"))
+	if !strings.Contains(annotation, "no hosted macOS queue") || !strings.Contains(annotation, "macos-medium") {
+		t.Fatalf("failure annotation = %q", annotation)
+	}
+}
+
+func TestRunUploadWarnsWhenRunnerResolutionIsUnavailable(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"mac.yml": "name: Mac\non: push\njobs:\n  mac:\n    runs-on: macos-latest\n    steps: [{run: true}]\n",
+	})
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, requests := runnerResolutionServer(t, http.StatusServiceUnavailable, nil)
+	darwinPath := filepath.Join(t.TempDir(), "buildkite-gha-darwin")
+	if err := os.WriteFile(darwinPath, []byte{0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_KEY", "resolver-unavailable-importer")
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "true")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-distribution", "darwin/arm64=" + darwinPath, ".github/workflows/mac.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if *requests != 1 || !strings.Contains(stderr.String(), "buildkite-gha: upload: warning: runner resolution unavailable (runner resolution service returned HTTP 503); using built-in runner presets") {
+		t.Fatalf("runner resolution requests = %d, stderr = %q", *requests, stderr.String())
+	}
+	var annotation *cliCommand
+	for i := range runner.commands {
+		command := &runner.commands[i]
+		if len(command.args) >= 9 && command.args[0] == "annotate" && command.args[6] == runnerResolutionContext {
+			annotation = command
+			break
+		}
+	}
+	if annotation == nil || annotation.args[8] != "warning" || !strings.Contains(string(annotation.stdin), "Runner resolution was unavailable") || !strings.Contains(string(annotation.stdin), "HTTP 503") || !strings.Contains(string(annotation.stdin), "built-in runner presets") {
+		t.Fatalf("runner resolution annotation = %#v", annotation)
+	}
+	pipeline := string(runner.commands[len(runner.commands)-1].stdin)
+	if !strings.Contains(pipeline, `queue: "macos-medium"`) || strings.Contains(pipeline, "buildkite-gha-failure") {
+		t.Fatalf("pipeline did not fall back to the macos-medium preset: %s", pipeline)
 	}
 }
 

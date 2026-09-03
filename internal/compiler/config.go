@@ -101,18 +101,40 @@ type RunnerSelector struct {
 	Target RunnerTarget
 }
 
+// RunnerRejection records that the Buildkite Agent API refused one complete
+// runs-on selector. Code is server-owned and open-ended; Message is the
+// server's explanation and never quotes runner labels.
+type RunnerRejection struct {
+	Labels  []string
+	Code    string
+	Message string
+}
+
+// Agent API rejection codes the compiler renders with dedicated guidance.
+// Unknown codes render the server message with generic mapping guidance.
+const (
+	RunnerRejectionIncompatibleLabels = "incompatible_labels"
+	RunnerRejectionMissingQueue       = "missing_queue"
+	RunnerRejectionNoCluster          = "no_cluster"
+	RunnerRejectionUnmappedLabels     = "unmapped_labels"
+)
+
 // RunnerPolicy maps every accepted runner label to a Buildkite queue and
 // execution platform. An empty Linux queue uses Buildkite's default agent
 // targeting. Darwin always requires an explicit queue. Multi-label targets are
-// resolved by Selectors first, then accepted only when every label maps to the
-// same complete target. Untrusted events are additionally restricted to
-// UntrustedQueues unless the default is explicitly allowed.
+// resolved by Selectors first, refused by Rejections second, then accepted
+// only when every label maps to the same complete target. A Rejection wins
+// over per-label presets so a server-side cause such as a missing hosted
+// queue is reported instead of a target that cannot be scheduled. Untrusted
+// events are additionally restricted to UntrustedQueues unless the default is
+// explicitly allowed.
 type RunnerPolicy struct {
 	// Labels retains the Linux/amd64 label-to-queue shorthand used by direct
 	// compiler callers. New multi-platform policy should use Targets.
 	Labels                     map[string]string
 	Targets                    map[string]RunnerTarget
 	Selectors                  []RunnerSelector
+	Rejections                 []RunnerRejection
 	UntrustedQueues            []string
 	AllowUntrustedDefaultQueue bool
 }
@@ -204,6 +226,18 @@ func (options Options) validate() error {
 			return fmt.Errorf("runner selector has conflicting target mappings")
 		}
 		selectors[key] = selector.Target
+	}
+	for _, rejection := range options.Runners.Rejections {
+		key, err := runnerSelectorKey(rejection.Labels)
+		if err != nil {
+			return err
+		}
+		if _, ok := selectors[key]; ok {
+			return fmt.Errorf("runner selector is both resolved and rejected")
+		}
+		if strings.TrimSpace(rejection.Code) == "" || strings.TrimSpace(rejection.Message) == "" {
+			return fmt.Errorf("runner rejection requires a code and message")
+		}
 	}
 	for _, queue := range options.Runners.UntrustedQueues {
 		if !queuePattern.MatchString(queue) {
@@ -307,14 +341,17 @@ const (
 	reasonConflictingTarget = "labels resolve to conflicting targets"
 	reasonUntrustedDefault  = "untrusted event cannot use Buildkite default agent targeting"
 	reasonUntrustedQueue    = "untrusted event cannot target the resolved queue"
+	reasonServerRejected    = "runner selector was rejected by the Buildkite Agent API"
 )
 
 // runnerPolicyRejection pairs a rejected runs-on resolution with its reason.
 // Reports may render reason but never the detailed error, which quotes the
-// resolved label.
+// resolved label. server is set when the Agent API refused the selector; its
+// message is server-authored and safe to render.
 type runnerPolicyRejection struct {
 	reason string
 	label  string
+	server *RunnerRejection
 	err    error
 }
 
@@ -327,6 +364,13 @@ func rejectRunner(reason, format string, args ...any) error {
 
 func rejectRunnerLabel(reason, label, format string, args ...any) error {
 	return &runnerPolicyRejection{reason: reason, label: label, err: fmt.Errorf(format, args...)}
+}
+
+func rejectRunnerByServer(rejection RunnerRejection) error {
+	return &runnerPolicyRejection{
+		reason: reasonServerRejected, server: &rejection,
+		err: fmt.Errorf("runner selector %q was rejected by the Buildkite Agent API (%s): %s", strings.Join(rejection.Labels, ", "), rejection.Code, rejection.Message),
+	}
 }
 
 // Resolve returns the target selected by labels under this policy and trust
@@ -354,6 +398,17 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 		key, err := runnerSelectorKey(selector.Labels)
 		if err == nil && key == selectorKey {
 			return policy.enforceRunnerTrust(selector.Target, trust)
+		}
+	}
+	for _, rejection := range policy.Rejections {
+		key, err := runnerSelectorKey(rejection.Labels)
+		if err != nil || key != selectorKey {
+			continue
+		}
+		// The local Windows guidance is more specific than a server
+		// incompatibility message, so let the per-label loop report it.
+		if !slices.ContainsFunc(normalizedLabels, unsupportedOS) {
+			return RunnerTarget{}, rejectRunnerByServer(rejection)
 		}
 	}
 	var target RunnerTarget
@@ -458,6 +513,11 @@ func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []s
 		return "Windows runners aren't currently supported. Imported jobs run on Linux or macOS Buildkite hosted agents. " + linuxGuidance + " If it requires Windows, open an issue in https://github.com/buildkite/buildkite-gha to help us prioritize Windows support.", ""
 	case reasonUnmappedLabel:
 		return fmt.Sprintf("Runner label%s has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.", label), detail
+	case reasonServerRejected:
+		if rejection.server != nil {
+			return serverRunnerRejectionDiagnostic(*rejection.server, label, detail)
+		}
+		return "Runner target is unsupported. Use a configured Linux or macOS runner target.", detail
 	case reasonConflictingQueues, reasonConflictingTarget:
 		return "runs-on labels map to conflicting runner targets. Use labels that map to one runner target.", detail
 	case reasonUntrustedDefault:
@@ -472,6 +532,37 @@ func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []s
 	default:
 		return "Runner target is unsupported. Use a configured Linux or macOS runner target.", detail
 	}
+}
+
+// serverRunnerRejectionDiagnostic renders an Agent API rejection. The server
+// message is rendered verbatim because it names the cause the workflow author
+// cannot see locally, such as the cluster and the missing hosted queue. Codes
+// whose message already carries a remedy add no local guidance; unknown codes
+// keep the generic mapping guidance so newer servers degrade gracefully.
+func serverRunnerRejectionDiagnostic(rejection RunnerRejection, label, supportedDetail string) (message, detail string) {
+	subject := "the runs-on labels"
+	if label != "" {
+		subject = "runner label" + label
+	}
+	message = fmt.Sprintf("Buildkite could not resolve %s. ", subject)
+	switch rejection.Code {
+	case RunnerRejectionMissingQueue, RunnerRejectionNoCluster:
+		// The server message may end with a documentation URL; leave it intact.
+		return message + strings.Join(strings.Fields(rejection.Message), " "), ""
+	case RunnerRejectionIncompatibleLabels:
+		return message + sentence(rejection.Message) + " Change runs-on to a Linux or macOS runner label that Buildkite hosted agents support.", supportedDetail
+	default:
+		return message + sentence(rejection.Message) + " Configure a mapping for this selector or use a mapped runner label.", supportedDetail
+	}
+}
+
+// sentence normalizes server prose so local guidance can follow it.
+func sentence(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" || strings.HasSuffix(text, ".") || strings.HasSuffix(text, "!") || strings.HasSuffix(text, "?") {
+		return text
+	}
+	return text + "."
 }
 
 func runnerRejectionBlockerDetail(err error, reportableLabels []string) string {

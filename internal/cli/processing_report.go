@@ -226,6 +226,24 @@ func (o processingOutput) annotateRunnerResolutionWarnings(parent context.Contex
 	}
 }
 
+// annotateRunnerResolutionUnavailable reports that the Agent API could not
+// resolve runner labels, so this import used the built-in presets. Those
+// presets can target a queue the cluster lacks, and the resulting pipeline
+// upload failure would otherwise have no visible cause.
+func (o processingOutput) annotateRunnerResolutionUnavailable(parent context.Context, cause error) {
+	if o.annotationJob == "" || cause == nil {
+		return
+	}
+	body := "#### Runner resolution was unavailable\n\n" +
+		"Buildkite could not resolve <code>runs-on</code> labels against this cluster's hosted queues (" + annotationHTML(cause.Error()) + "). " +
+		"This build used the built-in runner presets instead. If a job fails to upload because its queue does not exist, retry the build or configure an explicit runner mapping.\n"
+	ctx, cancel := context.WithTimeout(parent, processingAnnotationTimeout)
+	defer cancel()
+	if err := o.agent.AnnotateJob(ctx, o.annotationJob, runnerResolutionContext, "warning", body); err != nil {
+		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: warning: runner resolution annotation: %v\n", o.command, err)
+	}
+}
+
 func skippedWorkflowsAnnotation(event, buildSource string, allSkipped bool, workflows []skippedWorkflow, buildURL string) string {
 	if len(workflows) == 0 || buildURL == "" {
 		return ""
