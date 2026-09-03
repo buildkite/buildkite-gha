@@ -1,5 +1,4 @@
-// Package plan defines Job, the serialized handoff from compiler to runtime. A
-// Job contains a program.Program plus the workflow and event identity,
-// dependencies, permissions, action locks, and runtime version needed to
-// validate and run it.
+// Package plan defines the serialized per-job runtime envelope passed from the
+// compiler to the runtime. A Job contains a normalized program plus instance,
+// transport, authority, and runtime configuration needed to validate and run it.
 package plan

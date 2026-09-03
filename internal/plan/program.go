@@ -6,8 +6,8 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
-// ExecutionJob returns the normalized job owned by the execution program.
-// The surrounding Job remains the immutable plan envelope.
+// ExecutionJob returns the immutable normalized executable job contained in
+// this serialized runtime envelope.
 func (job Job) ExecutionJob() *program.Job {
 	if job.Program == nil {
 		return nil

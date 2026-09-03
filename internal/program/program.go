@@ -194,6 +194,9 @@ type Guard struct {
 	Condition Site `json:"condition"`
 }
 
+// Job is the immutable normalized executable workflow job consumed during
+// execution. It owns the workflow steps and their expressions and controls,
+// along with job-level environment, defaults, containers, services, and outputs.
 type Job struct {
 	Guards          []Guard    `json:"guards,omitempty"`
 	Condition       Site       `json:"condition"`
@@ -209,6 +212,8 @@ type Job struct {
 
 const Version = 1
 
+// Program is the versioned normalized execution contract for one workflow job
+// and the resolved actions it may invoke.
 type Program struct {
 	Version int               `json:"version"`
 	Job     Job               `json:"job"`
