@@ -3907,9 +3907,12 @@ jobs:
         run: echo second
         background: true
         continue-on-error: true
-      - wait: [first, second]
-      - wait-all:
-      - cancel: first
+      - name: Join selected workers
+        wait: [first, second]
+      - name: Join all workers
+        wait-all:
+      - name: Stop first worker
+        cancel: first
       - parallel:
           - run: echo ${{ secrets.PARALLEL_TOKEN }}
             env:
@@ -3931,7 +3934,7 @@ jobs:
 	if !steps[1].ContinueOnError.Literal || steps[2].Kind != "wait" || !reflect.DeepEqual(steps[2].Targets, []string{"first", "second"}) || steps[2].ContinueOnError.Literal {
 		t.Fatalf("targeted plan barrier = %#v", steps[2])
 	}
-	if steps[3].Kind != "wait-all" || steps[4].Kind != "cancel" || !reflect.DeepEqual(steps[4].Targets, []string{"first"}) {
+	if steps[2].Name.Source != "Join selected workers" || steps[3].Kind != "wait-all" || steps[3].Name.Source != "Join all workers" || steps[4].Kind != "cancel" || steps[4].Name.Source != "Stop first worker" || !reflect.DeepEqual(steps[4].Targets, []string{"first"}) {
 		t.Fatalf("plan controls = %#v", steps[3:])
 	}
 	if !steps[5].Background || !steps[6].Background || steps[5].ID == "" || steps[6].ID != "named-parallel" {

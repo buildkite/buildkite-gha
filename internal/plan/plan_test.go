@@ -484,9 +484,9 @@ func TestValidateConcurrentStepTopology(t *testing.T) {
 	job := validJob()
 	setTestSteps(&job, []testStep{
 		{ID: "producer", Kind: "run", Command: "true", Background: true},
-		{ID: "barrier", Kind: "wait", Targets: []string{"PRODUCER"}},
-		{ID: "all", Kind: "wait-all"},
-		{ID: "stop", Kind: "cancel", Targets: []string{"producer"}},
+		{ID: "barrier", Name: "Join producer", Kind: "wait", Targets: []string{"PRODUCER"}},
+		{ID: "all", Name: "Join all", Kind: "wait-all"},
+		{ID: "stop", Name: "Stop producer", Kind: "cancel", Targets: []string{"producer"}},
 	})
 	if err := job.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)

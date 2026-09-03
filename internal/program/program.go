@@ -328,7 +328,7 @@ func validateStepSiteLength(stepID, name string, site *Site) error {
 }
 
 func validateControlStep(step Step, backgroundIDs map[string]struct{}) error {
-	if step.Background || step.Run != nil || step.Invocation != nil || len(step.Env) != 0 || step.Condition.Source != "" || step.ContinueOnError.Literal || step.ContinueOnError.Expression != nil || step.TimeoutMinutes.Literal != 0 || step.TimeoutMinutes.Expression != nil || step.Name.Source != "" {
+	if step.Background || step.Run != nil || step.Invocation != nil || len(step.Env) != 0 || step.Condition.Source != "" || step.ContinueOnError.Literal || step.ContinueOnError.Expression != nil || step.TimeoutMinutes.Literal != 0 || step.TimeoutMinutes.Expression != nil {
 		return fmt.Errorf("control step %q contains incompatible execution fields", step.ID)
 	}
 	switch step.Kind {
