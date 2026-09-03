@@ -162,6 +162,25 @@ func TestPushWebhookCommitsEnforcesGitHubBound(t *testing.T) {
 	}
 }
 
+func TestPopulateChangedPathsDoesNotBypassServerSelectedPathFilters(t *testing.T) {
+	workflows := []workflowInput{{
+		Triggers: []workflow.Trigger{{Event: "pull_request", Paths: []string{"src/**"}}},
+	}}
+	snapshot := buildkitepipeline.TriggerEventSnapshot{}
+	t.Setenv("BUILDKITE_PULL_REQUEST", "42")
+	t.Setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
+	populateChangedPaths(&snapshot, compiler.Event{
+		Event: "pull_request",
+		Payload: map[string]any{
+			"number":       42,
+			"pull_request": map[string]any{"base": map[string]any{"ref": "main"}},
+		},
+	}, effectiveEventFromWebhook, workflows, "", true)
+	if !strings.Contains(workflows[0].PathFiltersError, "base repository does not match") {
+		t.Fatalf("server-selected filtered workflow path error = %q", workflows[0].PathFiltersError)
+	}
+}
+
 func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 	filteredWorkflow := []byte("name: CI\non:\n  pull_request:\n    paths: [\"src/**\"]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 	repository := t.TempDir()
@@ -358,7 +377,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	}}
 	snapshot := buildkitepipeline.TriggerEventSnapshot{}
-	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, closedWorkflows, "")
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, closedWorkflows, "", false)
 	if closedWorkflows[0].PathFiltersError != "" {
 		t.Fatalf("unfiltered closed workflow provenance error = %q", closedWorkflows[0].PathFiltersError)
 	}
@@ -368,7 +387,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	})
 	snapshot = buildkitepipeline.TriggerEventSnapshot{}
-	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, closedWorkflows, "")
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, closedWorkflows, "", false)
 	if !strings.Contains(closedWorkflows[0].PathFiltersError, "does not bind the event base and head") {
 		t.Fatalf("filtered closed workflow provenance error = %q", closedWorkflows[0].PathFiltersError)
 	}
@@ -383,7 +402,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	}}
 	snapshot = buildkitepipeline.TriggerEventSnapshot{}
-	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, customWorkflows, "")
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, customWorkflows, "", false)
 	if customWorkflows[0].PathFiltersError != "" {
 		t.Fatalf("unfiltered custom workflow provenance error = %q", customWorkflows[0].PathFiltersError)
 	}
@@ -394,7 +413,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	}}
 	snapshot = buildkitepipeline.TriggerEventSnapshot{}
-	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, workflows, "")
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, workflows, "", false)
 	if !strings.Contains(workflows[0].PathFiltersError, "merge commit SHAs") {
 		t.Fatalf("missing merge commit workflow error = %q", workflows[0].PathFiltersError)
 	}
@@ -403,7 +422,7 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 	pullRequest["head"].(map[string]any)["sha"] = ""
 	workflows[0].PathFiltersError = ""
 	snapshot = buildkitepipeline.TriggerEventSnapshot{}
-	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, workflows, "")
+	populateChangedPaths(&snapshot, event, effectiveEventFromWebhook, workflows, "", false)
 	if !strings.Contains(workflows[0].PathFiltersError, "base, head, and merge commit SHAs") {
 		t.Fatalf("missing base and head workflow error = %q", workflows[0].PathFiltersError)
 	}
@@ -460,7 +479,7 @@ func TestPopulateChangedPathsRequiresLinkedWebhook(t *testing.T) {
 			snapshot := buildkitepipeline.TriggerEventSnapshot{}
 			populateChangedPaths(&snapshot, compiler.Event{Event: event}, effectiveEventFromPath, []workflowInput{{
 				Triggers: []workflow.Trigger{{Event: event, Paths: []string{"src/**"}}},
-			}}, "")
+			}}, "", false)
 			if snapshot.ChangedPaths.Paths != nil || !strings.Contains(snapshot.ChangedPaths.UnavailableReason, event+" path filters require linked Buildkite webhook") {
 				t.Fatalf("changed-path snapshot = %#v", snapshot)
 			}

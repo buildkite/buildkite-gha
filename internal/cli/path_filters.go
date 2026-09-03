@@ -32,7 +32,7 @@ func gitRootCommand(checkoutPath string) *exec.Cmd {
 	return exec.Command("git", "rev-parse", "--show-toplevel")
 }
 
-func populateChangedPaths(snapshot *buildkitepipeline.TriggerEventSnapshot, event compiler.Event, origin effectiveEventOrigin, workflows []workflowInput, checkoutPath string) {
+func populateChangedPaths(snapshot *buildkitepipeline.TriggerEventSnapshot, event compiler.Event, origin effectiveEventOrigin, workflows []workflowInput, checkoutPath string, serverSelectedAtEventSHA bool) {
 	if event.Event != "pull_request" && event.Event != "push" {
 		return
 	}
@@ -45,6 +45,11 @@ func populateChangedPaths(snapshot *buildkitepipeline.TriggerEventSnapshot, even
 				UnavailableReason: event.Event + " path filters require linked Buildkite webhook data",
 			}
 		}
+		return
+	}
+	// Pipeline Triggers match an unfiltered workflow at an exact checked-out
+	// head commit. Synthetic merge provenance is not part of that contract.
+	if serverSelectedAtEventSHA && !workflowsUsePathFilters(workflows, event.Event) {
 		return
 	}
 	if event.Event == "push" {

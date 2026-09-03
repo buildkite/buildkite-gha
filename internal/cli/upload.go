@@ -226,7 +226,10 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	}
 	defer cleanupSource()
 	sourceSwitch.set(authenticatedSource)
-	populateChangedPaths(&effectiveEvent.TriggerSnapshot, effectiveEvent.Event, effectiveEvent.Origin, workflows, uploadArguments.checkoutPath)
+	serverSelectedAtEventSHA := uploadArguments.serverSelectedWorkflow != nil &&
+		uploadArguments.serverSelectedWorkflow.SHA != "" &&
+		uploadArguments.serverSelectedWorkflow.SHA == effectiveEvent.Event.SHA
+	populateChangedPaths(&effectiveEvent.TriggerSnapshot, effectiveEvent.Event, effectiveEvent.Origin, workflows, uploadArguments.checkoutPath, serverSelectedAtEventSHA)
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i := range workflows {
 		if workflows[i].ReusableOnly {
