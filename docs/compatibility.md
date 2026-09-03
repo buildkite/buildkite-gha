@@ -642,8 +642,10 @@ that declare environments fail to compile with an error naming the job.
 
 Secret `DEPLOY_KEY` in environment `production` resolves to Buildkite secret
 `PRODUCTION_DEPLOY_KEY`: the prefix is the upper-cased environment name with
-every character outside `A-Z`, `0-9`, and `_` replaced by `_`. Distinct
-environments keep distinct values under Buildkite Secret access policies.
+every character outside `A-Z`, `0-9`, and `_` replaced by `_`, and a leading
+`_` added when the name starts with a digit (environment `1st` gives
+`_1ST_DEPLOY_KEY`). Distinct environments keep distinct values under Buildkite
+Secret access policies.
 Generated keys must be storable in Buildkite Secrets: compilation fails when a
 key would exceed 255 characters or begin with `BK` or `BUILDKITE`, so rename
 such environments or secrets.

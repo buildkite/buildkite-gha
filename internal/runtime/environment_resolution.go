@@ -8,13 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/buildkite/buildkite-gha/internal/useragent"
+	"github.com/buildkite/buildkite-gha/internal/agentapi"
 )
 
 const environmentResolutionResponseLimit = 64 << 10
@@ -48,34 +47,25 @@ type AgentEnvironmentResolverConfig struct {
 // restricts resolution to the pipeline's configured GitHub.com repository.
 type AgentEnvironmentResolver struct {
 	resolveURL string
-	jobToken   string
-	userAgent  string
-	client     *http.Client
+	agent      *agentapi.Client
 }
 
 // NewAgentEnvironmentResolver validates the Agent connection configuration.
 func NewAgentEnvironmentResolver(config AgentEnvironmentResolverConfig) (*AgentEnvironmentResolver, error) {
-	resolveURL, err := agentEnvironmentResolutionURL(config.Endpoint, config.JobID)
+	client := config.Client
+	if client == nil {
+		// Resolution waits on the backend's serial GitHub reads for the whole
+		// batch, so allow longer than the default Agent API request timeout.
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	agent, err := agentapi.New(agentapi.Config{
+		Endpoint: config.Endpoint, JobID: config.JobID, JobToken: config.JobToken,
+		ClientVersion: config.ClientVersion, HTTPClient: client,
+	}, "environment resolution")
 	if err != nil {
 		return nil, err
 	}
-	if config.JobToken == "" || strings.ContainsAny(config.JobToken, "\r\n") {
-		return nil, fmt.Errorf("environment resolution Agent job token is required")
-	}
-	client := config.Client
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
-	}
-	bounded := *client
-	bounded.Jar = nil
-	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	if bounded.Timeout == 0 {
-		bounded.Timeout = 30 * time.Second
-	}
-	return &AgentEnvironmentResolver{
-		resolveURL: resolveURL, jobToken: config.JobToken,
-		userAgent: useragent.FromVersion(config.ClientVersion), client: &bounded,
-	}, nil
+	return &AgentEnvironmentResolver{resolveURL: agent.URL("github-actions/environments"), agent: agent}, nil
 }
 
 // ResolveEnvironments resolves the given distinct environments by name on the
@@ -119,11 +109,8 @@ func (c *AgentEnvironmentResolver) ResolveEnvironments(ctx context.Context, repo
 	if err != nil {
 		return nil, fmt.Errorf("create environment resolution request: %w", err)
 	}
-	request.Header.Set("Authorization", "Token "+c.jobToken)
-	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", c.userAgent)
-	response, err := c.client.Do(request)
+	response, err := c.agent.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("request environment resolution: %w", err)
 	}
@@ -262,17 +249,4 @@ func errorBodyMessage(body []byte) string {
 		}
 		return r
 	}, message)
-}
-
-func agentEnvironmentResolutionURL(endpoint, jobID string) (string, error) {
-	if !validBuildkiteJobID(jobID) {
-		return "", fmt.Errorf("environment resolution Agent job ID is required")
-	}
-	u, err := url.Parse(endpoint)
-	if err != nil || !validCredentialServiceURL(u) {
-		return "", fmt.Errorf("safe environment resolution Agent endpoint using HTTPS or loopback HTTP is required")
-	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/github-actions/environments"
-	u.RawPath = ""
-	return u.String(), nil
 }
