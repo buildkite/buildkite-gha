@@ -72,7 +72,7 @@ func validCheckoutRepository(repository string) bool {
 	return parts[0] != "." && parts[0] != ".." && parts[1] != "." && parts[1] != ".."
 }
 
-func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, commit string, inputs map[string]string) (Result, error) {
+func (r Runner) runCheckout(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, commit string, inputs map[string]string) (Result, error) {
 	result := newResult()
 	const adapter = "checkout adapter"
 	credentialed := job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil
@@ -352,7 +352,7 @@ func (w *checkoutSubmoduleStatusWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (r Runner) runCheckoutSubmodules(ctx context.Context, processor *commandProcessor, workspace string, git string, env map[string]string, base []string, depth string, recursive, credentialed bool, credentialHost string) error {
+func (r Runner) runCheckoutSubmodules(ctx context.Context, processor *commandOutputProcessor, workspace string, git string, env map[string]string, base []string, depth string, recursive, credentialed bool, credentialHost string) error {
 	policy := append(append([]string{}, base...), "-c", "url.https://github.com/.insteadOf=git@github.com:")
 	run := func(withCredentials bool, args ...string) error {
 		if withCredentials {
@@ -386,7 +386,7 @@ func (r Runner) runCheckoutSubmodules(ctx context.Context, processor *commandPro
 	}
 
 	status := &checkoutSubmoduleStatusWriter{}
-	statusProcessor := newCommandProcessor(status, processor.stderr)
+	statusProcessor := newCommandOutputProcessor(status, processor.stderr)
 	if err := r.runStreaming(ctx, statusProcessor, workspace, env, git, append(policy, statusArgs...)...); err != nil {
 		return fmt.Errorf("git submodule status: %w", err)
 	}
@@ -581,7 +581,7 @@ func repositoryProviderCheckoutCredentialArgs(base []string, agent, host string)
 	)
 }
 
-func (r Runner) runRepositoryProviderCheckoutGit(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, git string, base, commandArgs []string, credentialHost string) error {
+func (r Runner) runRepositoryProviderCheckoutGit(ctx context.Context, processor *commandOutputProcessor, workspace string, env map[string]string, git string, base, commandArgs []string, credentialHost string) error {
 	credentialEnv, err := r.repositoryProviderCheckoutCredentialEnvironment(processor, env, credentialHost)
 	if err != nil {
 		return err
@@ -593,7 +593,7 @@ func (r Runner) runRepositoryProviderCheckoutGit(ctx context.Context, processor 
 	return processor.scrubError(r.runStreamingCommand(ctx, processor, cmd))
 }
 
-func (r Runner) runRepositoryProviderCheckoutLFS(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, gitLFS string, commandArgs []string, credentialHost string) error {
+func (r Runner) runRepositoryProviderCheckoutLFS(ctx context.Context, processor *commandOutputProcessor, workspace string, env map[string]string, gitLFS string, commandArgs []string, credentialHost string) error {
 	credentialEnv, err := r.repositoryProviderCheckoutCredentialEnvironment(processor, env, credentialHost)
 	if err != nil {
 		return err
@@ -606,7 +606,7 @@ func (r Runner) runRepositoryProviderCheckoutLFS(ctx context.Context, processor 
 	return processor.scrubError(r.runStreamingCommand(ctx, processor, cmd))
 }
 
-func (r Runner) repositoryProviderCheckoutCredentialEnvironment(processor *commandProcessor, env map[string]string, credentialHost string) (map[string]string, error) {
+func (r Runner) repositoryProviderCheckoutCredentialEnvironment(processor *commandOutputProcessor, env map[string]string, credentialHost string) (map[string]string, error) {
 	credentials := r.RepositoryCredentials
 	if credentials == nil || credentials.Agent == "" || !filepath.IsAbs(credentials.Agent) {
 		return nil, fmt.Errorf("repository-provider credentials were not resolved before workflow execution")

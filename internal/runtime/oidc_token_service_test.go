@@ -135,7 +135,7 @@ func (p *testOIDCTokenProvider) OIDCToken(ctx context.Context, audience string) 
 func TestIDTokenServiceWireContract(t *testing.T) {
 	provider := &testOIDCTokenProvider{token: "header.payload.signature", requireLiveContext: true}
 	redactor := &testRedactor{}
-	processor := newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{})
+	processor := newCommandOutputProcessor(&bytes.Buffer{}, &bytes.Buffer{})
 	service, err := startIDTokenService(t.Context(), provider, redactor, processor)
 	if err != nil {
 		t.Fatal(err)
@@ -182,7 +182,7 @@ func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			provider := &testOIDCTokenProvider{err: oidcTokenStatusError(status)}
-			service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{}))
+			service, err := startIDTokenService(t.Context(), provider, &testRedactor{}, newCommandOutputProcessor(&bytes.Buffer{}, &bytes.Buffer{}))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -135,7 +135,7 @@ type archiveFile struct {
 	info       os.FileInfo
 }
 
-func (r *jobRun) runUploadArtifactCommit(ctx context.Context, processor *commandProcessor, workspace, commit string, inputs map[string]string) (result Result, returnErr error) {
+func (r *jobRun) runUploadArtifactCommit(ctx context.Context, processor *commandOutputProcessor, workspace, commit string, inputs map[string]string) (result Result, returnErr error) {
 	result = newResult()
 	defer func() { returnErr = processor.scrubError(returnErr) }()
 	if err := ctx.Err(); err != nil {

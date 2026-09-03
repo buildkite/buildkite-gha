@@ -219,7 +219,7 @@ func applyGitHubServerURLOverride(env map[string]string) {
 	}
 }
 
-func (r Runner) cacheActionEnvironment(ctx context.Context, processor *commandProcessor) (map[string]string, error) {
+func (r Runner) cacheActionEnvironment(ctx context.Context, processor *commandOutputProcessor) (map[string]string, error) {
 	if r.Cache == nil {
 		return nil, fmt.Errorf("cache credential provider is not configured")
 	}

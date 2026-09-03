@@ -163,12 +163,12 @@ type idTokenService struct {
 	listener   net.Listener
 	provider   OIDCTokenProvider
 	redactor   Redactor
-	processor  *commandProcessor
+	processor  *commandOutputProcessor
 	mu         sync.RWMutex
 	authHashes map[[sha256.Size]byte]struct{}
 }
 
-func startIDTokenService(ctx context.Context, provider OIDCTokenProvider, redactor Redactor, processor *commandProcessor) (*idTokenService, error) {
+func startIDTokenService(ctx context.Context, provider OIDCTokenProvider, redactor Redactor, processor *commandOutputProcessor) (*idTokenService, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("start actions ID-token service: %w", err)

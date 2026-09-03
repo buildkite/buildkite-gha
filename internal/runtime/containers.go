@@ -43,7 +43,7 @@ type serviceContainer struct {
 
 type jobContainerBackend struct {
 	runner                    Runner
-	processor                 *commandProcessor
+	processor                 *commandOutputProcessor
 	docker                    string
 	env                       map[string]string
 	config                    string
@@ -79,7 +79,7 @@ func privateDocker(r Runner) (string, string, map[string]string, error) {
 	return docker, config, map[string]string{"DOCKER_CONFIG": config}, nil
 }
 
-func (r Runner) startJobContainerOrdered(ctx context.Context, processor *commandProcessor, workspace, temp string, spec *plan.Container, services map[string]plan.ServiceContainer, serviceOrder []string, extra ...containerMount) (_ *jobContainerBackend, err error) {
+func (r Runner) startJobContainerOrdered(ctx context.Context, processor *commandOutputProcessor, workspace, temp string, spec *plan.Container, services map[string]plan.ServiceContainer, serviceOrder []string, extra ...containerMount) (_ *jobContainerBackend, err error) {
 	if spec != nil {
 		if err := validateEnvironmentNames(spec.Env); err != nil {
 			return nil, fmt.Errorf("job container environment: %w", err)
@@ -375,7 +375,7 @@ func dockerLogin(ctx context.Context, env map[string]string, docker, registry, u
 	return errors.New("docker login failed")
 }
 
-func (r Runner) pullContainerImage(ctx context.Context, processor *commandProcessor, env map[string]string, docker, image string) error {
+func (r Runner) pullContainerImage(ctx context.Context, processor *commandOutputProcessor, env map[string]string, docker, image string) error {
 	var err error
 	for attempt := range 3 {
 		if err = r.runStreaming(ctx, processor, "", env, docker, "pull", image); err == nil {
@@ -542,7 +542,7 @@ func appendPublishedPorts(args, ports []string) []string {
 	return args
 }
 
-func (b *jobContainerBackend) waitForService(ctx context.Context, processor *commandProcessor, serviceID, name string) error {
+func (b *jobContainerBackend) waitForService(ctx context.Context, processor *commandOutputProcessor, serviceID, name string) error {
 	const format = `{{if .State.Health}}{{.State.Health.Status}}{{end}}`
 	delay := 2 * time.Second
 	for {
@@ -579,7 +579,7 @@ func (b *jobContainerBackend) waitForService(ctx context.Context, processor *com
 	}
 }
 
-func (b *jobContainerBackend) serviceDiagnostics(parent context.Context, processor *commandProcessor, name string) {
+func (b *jobContainerBackend) serviceDiagnostics(parent context.Context, processor *commandOutputProcessor, name string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), serviceDiagnosticTimeout)
 	defer cancel()
 	b.emitServiceLogOutput(processor, b.serviceLogOutput(ctx, name))
@@ -590,7 +590,7 @@ func (b *jobContainerBackend) serviceLogOutput(ctx context.Context, name string)
 	return output
 }
 
-func (b *jobContainerBackend) emitServiceLogOutput(processor *commandProcessor, output string) {
+func (b *jobContainerBackend) emitServiceLogOutput(processor *commandOutputProcessor, output string) {
 	for line := range strings.SplitSeq(strings.TrimSuffix(strings.ReplaceAll(output, "\r\n", "\n"), "\n"), "\n") {
 		if line != "" {
 			processor.writeLiteral(processor.stderr, line)
@@ -645,7 +645,7 @@ func (b *jobContainerBackend) hostPath(path string) string {
 	return best
 }
 
-func (b *jobContainerBackend) exec(ctx context.Context, r Runner, processor *commandProcessor, dir string, env map[string]string, name string, argv ...string) error {
+func (b *jobContainerBackend) exec(ctx context.Context, r Runner, processor *commandOutputProcessor, dir string, env map[string]string, name string, argv ...string) error {
 	if err := validateEnvironmentNames(env); err != nil {
 		return err
 	}

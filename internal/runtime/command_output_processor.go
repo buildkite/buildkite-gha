@@ -20,10 +20,10 @@ const (
 	workflowCommandListEnd           = "</div>\n"
 )
 
-// A command processor turns process output into masked logs and bounded
-// Buildkite annotations. It applies GitHub workflow commands after parsing
-// them in workflow_command.go and keeps masking consistent across streams.
-type commandProcessor struct {
+// A command output processor consumes process output and runner messages. It
+// masks logs, interprets GitHub workflow commands parsed in workflow_command.go,
+// and collects bounded Buildkite annotations consistently across streams.
+type commandOutputProcessor struct {
 	mu              sync.Mutex
 	stdout          io.Writer
 	stderr          io.Writer
@@ -54,13 +54,13 @@ type parsedWorkflowCommand struct {
 	message    string
 }
 
-func newCommandProcessor(stdout, stderr io.Writer) *commandProcessor {
-	return &commandProcessor{stdout: stdout, stderr: stderr}
+func newCommandOutputProcessor(stdout, stderr io.Writer) *commandOutputProcessor {
+	return &commandOutputProcessor{stdout: stdout, stderr: stderr}
 }
 
 var errInvalidWorkflowCommandStopToken = errors.New("invalid ::stop-commands workflow command")
 
-func (p *commandProcessor) process(target io.Writer, line string) error {
+func (p *commandOutputProcessor) process(target io.Writer, line string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.discard {
@@ -117,19 +117,19 @@ func (p *commandProcessor) process(target io.Writer, line string) error {
 	return nil
 }
 
-func (p *commandProcessor) logSection(name string) {
+func (p *commandOutputProcessor) logSection(name string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.writeLogSectionLocked(p.stdout, name)
 }
 
-func (p *commandProcessor) expandCurrentSection() {
+func (p *commandOutputProcessor) expandCurrentSection() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	_, _ = fmt.Fprintln(p.stdout, "^^^ +++")
 }
 
-func (p *commandProcessor) writeLogSectionLocked(target io.Writer, name string) {
+func (p *commandOutputProcessor) writeLogSectionLocked(target io.Writer, name string) {
 	name = sanitizeLogSectionText(p.maskTextLocked(name))
 	if name != "" {
 		_, _ = fmt.Fprintln(target, "--- "+name)
@@ -172,7 +172,7 @@ func validWorkflowCommandStopToken(token string) bool {
 	return true
 }
 
-func (p *commandProcessor) writeWorkflowCommandMessageLocked(target io.Writer, severity, message string) {
+func (p *commandOutputProcessor) writeWorkflowCommandMessageLocked(target io.Writer, severity, message string) {
 	if message == "" {
 		return
 	}
@@ -181,18 +181,18 @@ func (p *commandProcessor) writeWorkflowCommandMessageLocked(target io.Writer, s
 
 // trustedWarning records a runner-owned warning even after untrusted action
 // output has been suppressed, while preserving the job's registered masks.
-func (p *commandProcessor) trustedWarning(message string) {
+func (p *commandOutputProcessor) trustedWarning(message string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.appendWorkflowCommandLocked(&p.trustedWarnings, workflowWarningAnnotationHeading, parsedWorkflowCommand{message: message})
 	p.writeWorkflowCommandMessageLocked(p.stderr, "warning", message)
 }
 
-func (p *commandProcessor) writeMaskedLineLocked(target io.Writer, line string) {
+func (p *commandOutputProcessor) writeMaskedLineLocked(target io.Writer, line string) {
 	_, _ = fmt.Fprintln(target, p.maskTextLocked(line))
 }
 
-func (p *commandProcessor) writeLiteral(target io.Writer, line string) {
+func (p *commandOutputProcessor) writeLiteral(target io.Writer, line string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.discard {
@@ -200,14 +200,14 @@ func (p *commandProcessor) writeLiteral(target io.Writer, line string) {
 	}
 }
 
-func (p *commandProcessor) maskTextLocked(text string) string {
+func (p *commandOutputProcessor) maskTextLocked(text string) string {
 	for _, mask := range p.masks {
 		text = strings.ReplaceAll(text, mask, "***")
 	}
 	return text
 }
 
-func (p *commandProcessor) appendWorkflowCommandLocked(buffer *workflowCommandAnnotationBuffer, heading string, command parsedWorkflowCommand) {
+func (p *commandOutputProcessor) appendWorkflowCommandLocked(buffer *workflowCommandAnnotationBuffer, heading string, command parsedWorkflowCommand) {
 	annotation := workflowCommandAnnotation{
 		file:     strings.Clone(commandText(command.properties["file"])),
 		title:    strings.Clone(commandText(command.properties["title"])),
@@ -217,7 +217,7 @@ func (p *commandProcessor) appendWorkflowCommandLocked(buffer *workflowCommandAn
 	p.appendWorkflowCommandAnnotationLocked(buffer, heading, annotation)
 }
 
-func (p *commandProcessor) appendWorkflowCommandAnnotationLocked(buffer *workflowCommandAnnotationBuffer, heading string, command workflowCommandAnnotation) {
+func (p *commandOutputProcessor) appendWorkflowCommandAnnotationLocked(buffer *workflowCommandAnnotationBuffer, heading string, command workflowCommandAnnotation) {
 	if buffer.truncated {
 		return
 	}
@@ -233,19 +233,19 @@ func (p *commandProcessor) appendWorkflowCommandAnnotationLocked(buffer *workflo
 	buffer.commands = append(buffer.commands, command)
 }
 
-func (p *commandProcessor) suppress() {
+func (p *commandOutputProcessor) suppress() {
 	p.mu.Lock()
 	p.discard = true
 	p.mu.Unlock()
 }
 
-func (p *commandProcessor) addMask(value string) {
+func (p *commandOutputProcessor) addMask(value string) {
 	p.mu.Lock()
 	p.addMaskLocked(value)
 	p.mu.Unlock()
 }
 
-func (p *commandProcessor) maskValues() []string {
+func (p *commandOutputProcessor) maskValues() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.masks...)
@@ -259,7 +259,7 @@ type scrubbedCommandError struct {
 func (e scrubbedCommandError) Error() string { return e.message }
 func (e scrubbedCommandError) Unwrap() error { return e.cause }
 
-func (p *commandProcessor) scrubError(err error) error {
+func (p *commandOutputProcessor) scrubError(err error) error {
 	if err == nil {
 		return nil
 	}
@@ -292,7 +292,7 @@ func (p *commandProcessor) scrubError(err error) error {
 	return scrubbedCommandError{cause: err, message: message}
 }
 
-func (p *commandProcessor) workflowCommandAnnotations() (warnings string, warningsTruncated bool, errors string, errorsTruncated bool) {
+func (p *commandOutputProcessor) workflowCommandAnnotations() (warnings string, warningsTruncated bool, errors string, errorsTruncated bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	masks := normalizedMasks(p.masks)
@@ -314,7 +314,7 @@ func (p *commandProcessor) workflowCommandAnnotations() (warnings string, warnin
 	return warnings, warningsTruncated, errors, errorsTruncated
 }
 
-func (p *commandProcessor) addMaskLocked(value string) {
+func (p *commandOutputProcessor) addMaskLocked(value string) {
 	if value == "" {
 		return
 	}
@@ -332,7 +332,7 @@ func (p *commandProcessor) addMaskLocked(value string) {
 	})
 }
 
-func (p *commandProcessor) addMaskValueLocked(value string) {
+func (p *commandOutputProcessor) addMaskValueLocked(value string) {
 	if slices.Contains(p.masks, value) {
 		return
 	}

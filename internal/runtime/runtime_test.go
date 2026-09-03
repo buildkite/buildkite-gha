@@ -2659,7 +2659,7 @@ func TestCancellationTerminatesChildProcessGroup(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
-	err := (Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}).runStreaming(ctx, newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"PID_FILE": pidFile}, "sh", "-c", `(trap '' INT TERM; sleep 30) & echo $! > "$PID_FILE"; wait`)
+	err := (Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}).runStreaming(ctx, newCommandOutputProcessor(io.Discard, io.Discard), "", map[string]string{"PID_FILE": pidFile}, "sh", "-c", `(trap '' INT TERM; sleep 30) & echo $! > "$PID_FILE"; wait`)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("runStreaming() error = %v, want deadline", err)
 	}
@@ -2706,7 +2706,7 @@ func TestCancellationEscalatesFromInterruptToTermination(t *testing.T) {
 		cancel()
 	}()
 	runner := Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 500 * time.Millisecond}
-	err := runner.runStreaming(ctx, newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"READY": ready, "SIGNALS": signals}, "bash", "-c", `
+	err := runner.runStreaming(ctx, newCommandOutputProcessor(io.Discard, io.Discard), "", map[string]string{"READY": ready, "SIGNALS": signals}, "bash", "-c", `
 trap 'printf "INT\n" >> "$SIGNALS"' INT
 trap 'printf "TERM\n" >> "$SIGNALS"; exit 0' TERM
 touch "$READY"
@@ -2748,7 +2748,7 @@ func TestCancellationPreservesInterruptGraceForDescendants(t *testing.T) {
 		cancel()
 	}()
 	runner := Runner{InterruptGrace: 2 * time.Second, TerminateGrace: 50 * time.Millisecond}
-	err := runner.runStreaming(ctx, newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"READY": ready, "CHILD_READY": childReady, "CLEANED": cleaned}, "bash", "-c", `
+	err := runner.runStreaming(ctx, newCommandOutputProcessor(io.Discard, io.Discard), "", map[string]string{"READY": ready, "CHILD_READY": childReady, "CLEANED": cleaned}, "bash", "-c", `
 (
   trap 'sleep 0.3; touch "$CLEANED"; exit 0' INT
   touch "$CHILD_READY"
@@ -2790,7 +2790,7 @@ func TestCancellationWaitsForProcessGroupCleanupAfterOutputCloses(t *testing.T) 
 	}()
 	started := time.Now()
 	runner := Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}
-	err := runner.runStreaming(ctx, newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"PID_FILE": pidFile, "READY": ready}, "bash", "-c", `
+	err := runner.runStreaming(ctx, newCommandOutputProcessor(io.Discard, io.Discard), "", map[string]string{"PID_FILE": pidFile, "READY": ready}, "bash", "-c", `
 (trap '' INT TERM; exec >/dev/null 2>&1; while :; do sleep 1; done) &
 echo $! > "$PID_FILE"
 trap 'exit 0' INT
@@ -3870,7 +3870,7 @@ func TestConditionInspectionFailureAfterMainFailureStillRunsPostPhase(t *testing
 		Steps:   []plan.Step{{ID: "inspect", Kind: "run", Execution: &executionprogram.Step{Condition: invalidStepCondition}}},
 		Program: &executionprogram.Program{Version: executionprogram.Version},
 	}
-	run.processor = newCommandProcessor(io.Discard, io.Discard)
+	run.processor = newCommandOutputProcessor(io.Discard, io.Discard)
 	run.eval = expression.Context{Env: map[string]string{}, Steps: map[string]expression.StepStatus{}}
 	run.result = JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}}
 	run.runtimeEnv = map[string]string{}
@@ -4738,7 +4738,7 @@ func TestLiveLogMaskingPrefersLongestMatchInEitherRegistrationOrder(t *testing.T
 		{"credential-with-suffix\nsecond-line", "credential"},
 	} {
 		var logs bytes.Buffer
-		processor := newCommandProcessor(&logs, &logs)
+		processor := newCommandOutputProcessor(&logs, &logs)
 		for _, mask := range masks {
 			processor.addMask(mask)
 		}
@@ -4770,7 +4770,7 @@ func TestRunStreamingDrainsOversizedLineAndPreservesMasking(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	processor := newCommandProcessor(&logs, &logs)
+	processor := newCommandOutputProcessor(&logs, &logs)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	err = (Runner{}).runStreaming(ctx, processor, "", map[string]string{"GO_WANT_RUNTIME_LONG_LINE": "1"}, executable, "-test.run=^TestLongLineChildProcess$")
@@ -4824,7 +4824,7 @@ func TestProcessEnvironmentIsExplicitAndUsable(t *testing.T) {
 		t.Setenv(name, "http://must-not-leak.invalid")
 	}
 	var logs bytes.Buffer
-	processor := newCommandProcessor(&logs, &logs)
+	processor := newCommandOutputProcessor(&logs, &logs)
 	command := `
 test -n "$PATH" && test -n "$HOME" && test -n "$TMPDIR"
 test "$DECLARED" = visible
@@ -4850,7 +4850,7 @@ func TestRunStreamingRejectsInvalidEnvironmentNamesBeforeExecution(t *testing.T)
 	for _, name := range []string{"", "ALIAS=OTHER", "NUL\x00NAME"} {
 		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "ran")
-			err := (Runner{}).runStreaming(t.Context(), newCommandProcessor(io.Discard, io.Discard), "", map[string]string{name: "value"}, "sh", "-c", `touch "$1"`, "sh", marker)
+			err := (Runner{}).runStreaming(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), "", map[string]string{name: "value"}, "sh", "-c", `touch "$1"`, "sh", marker)
 			if err == nil || !strings.Contains(err.Error(), "invalid environment variable name") {
 				t.Fatalf("runStreaming() error = %v, want invalid environment name", err)
 			}
@@ -4860,7 +4860,7 @@ func TestRunStreamingRejectsInvalidEnvironmentNamesBeforeExecution(t *testing.T)
 		})
 	}
 
-	if err := (Runner{}).runStreaming(t.Context(), newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"GITHUB-ACTIONS_NAME.1": "valid"}, "true"); err != nil {
+	if err := (Runner{}).runStreaming(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), "", map[string]string{"GITHUB-ACTIONS_NAME.1": "valid"}, "true"); err != nil {
 		t.Fatalf("valid GitHub Actions environment name was rejected: %v", err)
 	}
 }
@@ -4876,7 +4876,7 @@ func TestRunDockerRejectsInvalidEnvironmentNamesBeforeDocker(t *testing.T) {
 			action := fakeDockerAction(t)
 			action.runnerTemp = t.TempDir()
 			action.Env = map[string]string{name: "value"}
-			_, err := newJobRun(Runner{Docker: docker}).runDocker(t.Context(), newCommandProcessor(io.Discard, io.Discard), action)
+			_, err := newJobRun(Runner{Docker: docker}).runDocker(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), action)
 			if err == nil || !strings.Contains(err.Error(), "invalid environment variable name") {
 				t.Fatalf("runDocker() error = %v, want invalid environment name", err)
 			}
@@ -4889,7 +4889,7 @@ func TestRunDockerRejectsInvalidEnvironmentNamesBeforeDocker(t *testing.T) {
 
 func TestWorkflowCommandsProduceBoundedMaskedJobAnnotations(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	processor := newCommandProcessor(&stdout, &stderr)
+	processor := newCommandOutputProcessor(&stdout, &stderr)
 	_ = processor.process(&stdout, "::warning title=Unsafe <title>,file=cmd%2Cmain.go,line=12,endLine=12,col=3,endColumn=5::late-secret <late-secret-tag> <warning>")
 	_ = processor.process(&stdout, "::add-mask::late-secret")
 	_ = processor.process(&stdout, "::add-mask::<late-secret-tag>")
@@ -4933,7 +4933,7 @@ func TestWorkflowCommandsProduceBoundedMaskedJobAnnotations(t *testing.T) {
 }
 
 func TestWorkflowCommandAnnotationsGroupRowsByFile(t *testing.T) {
-	processor := newCommandProcessor(io.Discard, io.Discard)
+	processor := newCommandOutputProcessor(io.Discard, io.Discard)
 	for _, command := range []string{
 		"::warning file=path/to/first.go,line=2,title=First::first message",
 		"::warning file=second.go,line=7,col=3::second message",
@@ -4963,7 +4963,7 @@ func TestWorkflowCommandAnnotationsGroupRowsByFile(t *testing.T) {
 }
 
 func TestWorkflowCommandAnnotationRetainsOnlyOwnedRenderedFields(t *testing.T) {
-	processor := newCommandProcessor(io.Discard, io.Discard)
+	processor := newCommandOutputProcessor(io.Discard, io.Discard)
 	properties := map[string]string{
 		"file": "main.go", "title": "Lint", "line": "7", "unknown": strings.Repeat("unused", 100_000),
 	}
@@ -5009,7 +5009,7 @@ func TestWorkflowCommandLocationLabels(t *testing.T) {
 
 func TestWorkflowPresentationCommandsUseBuildkiteSections(t *testing.T) {
 	var logs bytes.Buffer
-	processor := newCommandProcessor(&logs, &logs)
+	processor := newCommandOutputProcessor(&logs, &logs)
 	for _, line := range []string{
 		"::add-mask::---",
 		"::add-mask::+++",
@@ -5065,7 +5065,7 @@ func TestRunJobLogsSynchronousStepSectionsAndExpandsFailures(t *testing.T) {
 
 func TestWorkflowCommandStopTokenPreventsAccidentalAnnotations(t *testing.T) {
 	var logs bytes.Buffer
-	processor := newCommandProcessor(&logs, &logs)
+	processor := newCommandOutputProcessor(&logs, &logs)
 	_ = processor.process(&logs, "::stop-commands::workflow-stop-token")
 	_ = processor.process(&logs, "::warning::untrusted warning-shaped output")
 	_ = processor.process(&logs, "::workflow-stop-token::")
@@ -5082,7 +5082,7 @@ func TestWorkflowCommandStopTokenPreventsAccidentalAnnotations(t *testing.T) {
 
 func TestWorkflowCommandStopTokenHandlesCRLFStreams(t *testing.T) {
 	var logs bytes.Buffer
-	processor := newCommandProcessor(&logs, &logs)
+	processor := newCommandOutputProcessor(&logs, &logs)
 	command := `printf '::stop-commands::crlf-stop-token\r\n'
 printf '::warning::untrusted warning-shaped output\r\n'
 printf '::crlf-stop-token::\r\n'
@@ -5105,7 +5105,7 @@ printf 'masked after resume: crlf-secret\r\n'`
 }
 
 func TestRunStreamingScopesWorkflowCommandFailuresToInvocation(t *testing.T) {
-	processor := newCommandProcessor(io.Discard, io.Discard)
+	processor := newCommandOutputProcessor(io.Discard, io.Discard)
 	ready := filepath.Join(t.TempDir(), "clean-ready")
 	release := filepath.Join(t.TempDir(), "release-clean")
 	cleanDone := make(chan error, 1)
@@ -5186,7 +5186,7 @@ func TestRunJobCollectsWarningAndErrorCommandsWithoutChangingConclusion(t *testi
 }
 
 func TestWorkflowCommandAnnotationsAreConcurrentAndUTF8Bounded(t *testing.T) {
-	processor := newCommandProcessor(io.Discard, io.Discard)
+	processor := newCommandOutputProcessor(io.Discard, io.Discard)
 	var group sync.WaitGroup
 	for worker := range 2 {
 		group.Add(1)
@@ -5203,7 +5203,7 @@ func TestWorkflowCommandAnnotationsAreConcurrentAndUTF8Bounded(t *testing.T) {
 		t.Fatalf("concurrent warning annotation count = %d, truncated = %v", strings.Count(warnings, `class="border-top border-gray py2"`), truncated)
 	}
 
-	processor = newCommandProcessor(io.Discard, io.Discard)
+	processor = newCommandOutputProcessor(io.Discard, io.Discard)
 	_ = processor.process(io.Discard, "::warning::"+strings.Repeat("€", maxJobAnnotationBytes))
 	warnings, truncated, _, _ = processor.workflowCommandAnnotations()
 	result := scrubJobResult(JobResult{WarningAnnotations: warnings, warningsTruncated: truncated}, nil)
@@ -5213,7 +5213,7 @@ func TestWorkflowCommandAnnotationsAreConcurrentAndUTF8Bounded(t *testing.T) {
 }
 
 func TestWorkflowCommandAnnotationsNormalizeInvalidUTF8(t *testing.T) {
-	processor := newCommandProcessor(io.Discard, io.Discard)
+	processor := newCommandOutputProcessor(io.Discard, io.Discard)
 	command := `printf '::warning title=bad\377,file=bad\376.go::bad\375\n'`
 	if err := (Runner{}).runStreaming(t.Context(), processor, "", nil, "sh", "-c", command); err != nil {
 		t.Fatalf("runStreaming() error = %v", err)
@@ -5231,7 +5231,7 @@ func TestWorkflowCommandAnnotationsNormalizeInvalidUTF8(t *testing.T) {
 }
 
 func TestWorkflowCommandAnnotationScrubbingPreservesUTF8(t *testing.T) {
-	processor := newCommandProcessor(io.Discard, io.Discard)
+	processor := newCommandOutputProcessor(io.Discard, io.Discard)
 	_ = processor.process(io.Discard, "::warning::café")
 	_ = processor.process(io.Discard, "::warning::masked "+string([]byte{0xC3}))
 	_ = processor.process(io.Discard, "::add-mask::"+string([]byte{0xC3}))
@@ -5244,7 +5244,7 @@ func TestWorkflowCommandAnnotationScrubbingPreservesUTF8(t *testing.T) {
 }
 
 func TestWorkflowCommandMasksCannotCorruptAnnotationMarkup(t *testing.T) {
-	processor := newCommandProcessor(io.Discard, io.Discard)
+	processor := newCommandOutputProcessor(io.Discard, io.Discard)
 	_ = processor.process(io.Discard, "::warning file=table.go,title=tr::structured table text")
 	_ = processor.process(io.Discard, "::add-mask::tr")
 	_ = processor.process(io.Discard, "::add-mask::table")
@@ -5259,7 +5259,7 @@ func TestWorkflowCommandMasksCannotCorruptAnnotationMarkup(t *testing.T) {
 }
 
 func TestWorkflowCommandAnnotationsRemainBoundedAfterMaskExpansion(t *testing.T) {
-	processor := newCommandProcessor(io.Discard, io.Discard)
+	processor := newCommandOutputProcessor(io.Discard, io.Discard)
 	for range 5000 {
 		_ = processor.process(io.Discard, "::warning file=main.go::"+strings.Repeat("x", 100))
 	}
@@ -5535,7 +5535,7 @@ func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testin
 	}
 	result := newResult()
 	action := javaScriptAction{Name: "mise", Path: root, Main: "main.js", Env: map[string]string{"MISE_DATA_DIR": "/workflow-controlled"}, nodeMajor: 24}
-	if err := runner.runJavaScriptPhase(t.Context(), newCommandProcessor(io.Discard, io.Discard), root, resolvedNode, action, action.Main, nil, nil, &result); err != nil {
+	if err := runner.runJavaScriptPhase(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), root, resolvedNode, action, action.Main, nil, nil, &result); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(log)

@@ -56,7 +56,7 @@ type prebuiltDockerBackend struct {
 	images map[string]string
 }
 
-func (r *jobRun) preparePrebuiltDockerActions(ctx context.Context, processor *commandProcessor, actions *actionLockResolver) (_ *prebuiltDockerBackend, err error) {
+func (r *jobRun) preparePrebuiltDockerActions(ctx context.Context, processor *commandOutputProcessor, actions *actionLockResolver) (_ *prebuiltDockerBackend, err error) {
 	images := map[string]string{}
 	for _, lock := range actions.job.Actions {
 		if lock.DockerImage != "" {
