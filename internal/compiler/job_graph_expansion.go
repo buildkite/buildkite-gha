@@ -364,7 +364,7 @@ func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any
 	candidate := JobInstance{
 		Key: key, LogicalJobID: job.ID, Matrix: matrix, Inputs: cloneAnyMap(sourced.inputs.values),
 		FailFast: job.FailFast, MaxParallel: job.MaxParallel, Steps: append([]workflow.Step(nil), job.Steps...),
-		Env: cloneMap(job.Env), Permissions: permissionScopes(job.Permissions), If: job.If,
+		Env: cloneMap(job.Env), Permissions: permissionScopes(job.Permissions), If: job.If, Environment: job.Environment,
 		ContinueOnError: job.ContinueOnError, TimeoutMinutes: job.TimeoutMinutes,
 		DefaultShell: job.DefaultShell, DefaultWorkingDirectory: job.DefaultWorkingDirectory,
 		Outputs: cloneMap(job.Outputs), Container: job.Container, Services: services,

@@ -102,7 +102,8 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 | Linux x86-64 and native macOS arm64 jobs using `bash`, `sh`, `python`, or an installed custom shell | Windows, Linux arm64, or macOS x86-64 |
 | Local and public JavaScript and composite actions; verified Dockerfile and public prebuilt-image actions on Linux | Private actions, private reusable workflows, private container images, and Docker actions on macOS |
 | Static matrices, `needs`, outputs, and local or literal public reusable workflows | Dynamic reusable calls, matrices, and expressions outside the documented subset |
-| Exact-commit checkout, including managed private repository access | GitHub environment secrets, GitHub-issued OIDC claims, or protected queues |
+| Exact-commit checkout, including managed private repository access | GitHub-issued OIDC claims or protected queues |
+| Deployment environments with required-reviewer approval gates and environment secret names | Environment wait timers, branch policies, custom protection rules, or deployment records |
 | Static Buildkite job-accessible secrets, including declared aliases in local reusable workflows | Dynamic secret access or remote reusable-workflow secret forwarding |
 | Scoped `GITHUB_TOKEN` and step `github.token` use allowed by Buildkite policy | Ambient token injection or dynamic token access |
 | Buildkite OIDC tokens through host JavaScript and composite actions | OIDC in Docker actions or job containers |

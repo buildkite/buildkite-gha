@@ -615,6 +615,12 @@ func (b planBuilder) authorizePlanSecrets(instance JobInstance, workflowProgram 
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}
+	if instance.Environment != "" && len(instance.environmentSecrets) != 0 {
+		secrets, mappings, err = environmentScopedSecrets(instance.Environment, instance.environmentSecrets, secrets, mappings)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+		}
+	}
 	actions.requiresEventPayload = actions.requiresEventPayload || referencesEventPayload
 	referencesGitHubTokenSecret := len(tokenAliases) != 0
 	tokenAliases = slices.DeleteFunc(tokenAliases, func(name string) bool { return name == "GITHUB_TOKEN" })

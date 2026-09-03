@@ -128,6 +128,10 @@ type Options struct {
 	// reusable-workflow calls. Callers should share one memoized source for the
 	// complete validate, compile, and upload operation.
 	RepositorySource RepositorySource
+	// EnvironmentSource resolves GitHub deployment environments declared by
+	// workflow jobs. Compilation of a workflow that declares an environment
+	// fails without one.
+	EnvironmentSource EnvironmentSource
 	// ResolveActions enables immutable remote action locking independently of
 	// event trust. Workspace-local actions are always locked without network
 	// access. ActionSource is required only when a workflow uses remote actions.

@@ -43,6 +43,10 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 	defer cleanup()
 	options := compiler.DefaultOptions()
 	options.RepositorySource = repositorySource
+	// Environments resolve only through the job-scoped Agent API, so compile
+	// resolves them when it runs inside a Buildkite job and otherwise leaves
+	// workflows that declare environments to fail at compile time.
+	options.EnvironmentSource = environmentSourceFromAgent(clientVersion)
 	processingReport, ok := validatedProcessingReportWithOptions(ctx, out, workflowPath, "", source, event, true, &options)
 	if !ok {
 		return 1
