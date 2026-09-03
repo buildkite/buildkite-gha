@@ -204,7 +204,7 @@ bk build create --pipeline buildkite/buildkite-gha \
 
 This suite covers shell jobs, concurrent steps, public and Docker actions, container runtime behavior, summaries, annotations, artifact upload, and artifact roundtrip. Use `COMPATIBILITY_PROOF=<target>` with `COMPATIBILITY_PROOF_COMMIT=<commit>` only when diagnosing one target. The available target names are in [`.buildkite/pipeline.yml`](../.buildkite/pipeline.yml).
 
-Run the deployed GitHub environment snapshot proof separately:
+Run the deployed GitHub environment secret proof separately:
 
 ```sh
 commit=$(git rev-parse HEAD)
@@ -216,11 +216,27 @@ bk build create --pipeline buildkite/buildkite-gha \
 
 The pipeline's GitHub Code Access App installation must have **Actions: read**
 and **Environments: read**, and the repository must have an unprotected
-environment named `test`. The proof resolves its live snapshot and compiles
-one job plan without an approval block. It does not read or assert environment
-variables; `${{ vars.* }}` needs separate client support. The proof never
-uploads the generated pipeline, and its temporary binary and output are
-removed, so no workflow job, approval block, deployment, or cleanup remains.
+environment named `test` with exactly one environment secret. A non-empty
+Buildkite secret named `TEST_<UPPERCASE_NAME>` must contain the value for that
+GitHub secret name, and its access policy must include the generated hosted job.
+
+The proof first requires an unprotected snapshot, then uploads and runs one
+generated job. It checks that the immutable plan requests
+`TEST_<UPPERCASE_NAME>` and maps it to the workflow secret before requiring the
+workflow's non-empty-value check to pass. The workflow prints only a fixed
+success marker; it never prints, hashes, or transforms the value. The runtime
+retrieves the plan-declared key through `buildkite-agent secret get` and
+registers the value with the Buildkite redactor before running the workflow.
+
+The proof remains on-demand and does not join the consolidated smoke suite. It
+does not read or assert environment variables; `${{ vars.* }}` needs separate
+client support. Proof steps remove the temporary binary, snapshot, workflow,
+and downloaded plan. Buildkite retains the plan and distribution artifacts and
+the environment secret name as build metadata under the pipeline's retention
+policy; none contains the secret value. The unprotected environment emits no
+approval block, and environment compilation does not create GitHub deployments.
+If the environment becomes protected, the discovery step fails before upload;
+cancel the build if protection changes after discovery and a block appears.
 
 Some Buildkite APIs are advisory, so a passing job does not prove that the result was persisted. Check those results independently after the build:
 

@@ -2,8 +2,62 @@ agents:
   queue: "hosted"
 
 steps:
-  - label: ":github: Environment snapshot compile proof"
-    key: "environment-resolution"
+  - label: ":github: Discover environment secret"
+    key: "environment-resolution-discovery"
+    timeout_in_minutes: 10
+    retry:
+      automatic: false
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      commit="$${COMPATIBILITY_PROOF_COMMIT:?COMPATIBILITY_PROOF_COMMIT is required}"
+      scripts/verify-source-checkout "$$commit"
+      snapshot="$$(mktemp "$${TMPDIR:-/tmp}/buildkite-gha-environment-snapshot.XXXXXXXX.json")"
+      trap 'rm -f -- "$$snapshot"' EXIT
+      endpoint="$${BUILDKITE_AGENT_ENDPOINT:?BUILDKITE_AGENT_ENDPOINT is required}"
+      job_id="$${BUILDKITE_JOB_ID:?BUILDKITE_JOB_ID is required}"
+      token="$${BUILDKITE_AGENT_ACCESS_TOKEN:?BUILDKITE_AGENT_ACCESS_TOKEN is required}"
+      printf 'header = "Authorization: Token %s"\n' "$$token" |
+        curl --config - --fail --silent --show-error --max-time 30 \
+          --header 'Accept: application/json' \
+          --header 'Content-Type: application/json' \
+          --data '{"repo_url":"https://github.com/buildkite/buildkite-gha","environment_names":["test"]}' \
+          --output "$$snapshot" \
+          "$${endpoint%/}/jobs/$$job_id/github-actions/environments"
+      unset token
+      mise exec -- jq -e '
+        (.environments | type) == "array" and
+        (.environments | length) == 1 and
+        (.environments[0].name | ascii_downcase) == "test" and
+        .environments[0].required_reviewers == false and
+        .environments[0].prevent_self_review == false and
+        .environments[0].wait_timer_minutes == 0 and
+        .environments[0].branch_policy == false and
+        .environments[0].unsupported_rules == [] and
+        (.environments[0].secret_names | type) == "array"
+      ' "$$snapshot" >/dev/null || {
+        echo 'The test environment snapshot is malformed or has protection that would make this runtime proof unsafe' >&2
+        exit 1
+      }
+      secret_count="$$(mise exec -- jq -r '.environments[0].secret_names | length' "$$snapshot")"
+      if [[ "$$secret_count" != 1 ]]; then
+        echo "Prerequisite missing: GitHub environment test must define exactly one environment secret; found $$secret_count" >&2
+        exit 1
+      fi
+      secret_name="$$(mise exec -- jq -r '.environments[0].secret_names[0]' "$$snapshot")"
+      if [[ ! "$$secret_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$$ ]]; then
+        echo 'The test environment returned an invalid secret name' >&2
+        exit 1
+      fi
+      buildkite-agent meta-data set environment-resolution-secret-name "$$secret_name"
+      secret_key="TEST_$${secret_name^^}"
+      echo "The live test environment is unprotected; the runtime job will request Buildkite secret $$secret_key"
+
+  - label: ":pipeline: Environment secret runtime proof importer"
+    key: "environment-resolution-importer"
+    depends_on: "environment-resolution-discovery"
     timeout_in_minutes: 10
     retry:
       automatic: false
@@ -16,17 +70,25 @@ steps:
       scripts/verify-source-checkout "$$commit"
       test -z "$$(git status --porcelain --untracked-files=all)"
       distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-environment-resolution.XXXXXXXX")"
-      trap 'rm -rf -- "$$distribution_root"' EXIT
+      proof_workflow=
+      trap 'rm -rf -- "$$distribution_root"; [[ -z "$$proof_workflow" ]] || rm -f -- "$$proof_workflow"' EXIT
       runtime_version="0.0.0-environment-resolution.$$commit"
       CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version" -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
-      pipeline="$$distribution_root/pipeline.yml"
-      "$$distribution_root/buildkite-gha" compile \
-        --event-path testdata/smoke/events/push.json \
-        .buildkite/fixtures/environment-resolution.yml > "$$pipeline"
-      grep -Fq 'key: "gha-environment-snapshot"' "$$pipeline"
-      grep -Eq '\.buildkite-gha/plans/[0-9a-f]{64}\.json' "$$pipeline"
-      if grep -Fq 'block:' "$$pipeline"; then
-        echo 'The unprotected test environment unexpectedly emitted an approval block' >&2
+      secret_name="$$(buildkite-agent meta-data get environment-resolution-secret-name)"
+      if [[ ! "$$secret_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$$ ]]; then
+        echo 'The environment secret discovery result is invalid' >&2
         exit 1
       fi
-      echo 'The live test environment resolved and compiled one ungated job plan'
+      proof_workflow="$$(mktemp .buildkite/fixtures/.environment-resolution.XXXXXXXX.yml)"
+      sed "s/__ENVIRONMENT_SECRET_NAME__/$$secret_name/g" .buildkite/fixtures/environment-resolution.yml > "$$proof_workflow"
+      ! grep -q '__ENVIRONMENT_SECRET_NAME__' "$$proof_workflow"
+      "$$distribution_root/buildkite-gha" upload \
+        --event-path testdata/smoke/events/push.json \
+        --runner-queue ubuntu-latest=hosted \
+        "$$proof_workflow"
+
+  - label: ":pipeline: Environment secret proof continuation loader"
+    key: "environment-resolution-continuation-loader"
+    depends_on: "environment-resolution-importer"
+    allow_dependency_failure: true
+    command: "buildkite-agent pipeline upload .buildkite/environment-resolution-continuation.yml"
