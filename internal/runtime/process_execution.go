@@ -25,8 +25,8 @@ const (
 
 // Process execution bridges action invocations to host or container processes.
 // It supplies the explicit environment and file-command paths, streams output
-// through the command processor, and owns cancellation of the process group.
-func (r *jobRun) runProcess(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, result *Result, state map[string]string, name string, args ...string) error {
+// through the command output processor, and owns cancellation of the process group.
+func (r *jobRun) runProcess(ctx context.Context, processor *commandOutputProcessor, dir string, env map[string]string, result *Result, state map[string]string, name string, args ...string) error {
 	var files commandFiles
 	var err error
 	if r.jobContainer != nil {
@@ -68,14 +68,14 @@ func (r *jobRun) runProcess(ctx context.Context, processor *commandProcessor, di
 	return errors.Join(runErr, fileErr)
 }
 
-func (effects fileCommandEffects) reportSummaryUploadFailure(processor *commandProcessor) {
+func (effects fileCommandEffects) reportSummaryUploadFailure(processor *commandOutputProcessor) {
 	if effects.summaryBytes <= maxCommandFileBytes {
 		return
 	}
 	_ = processor.process(processor.stderr, fmt.Sprintf("GITHUB_STEP_SUMMARY upload skipped: content is %d bytes; maximum is %d bytes", effects.summaryBytes, maxCommandFileBytes))
 }
 
-func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, name string, args ...string) error {
+func (r Runner) runStreaming(ctx context.Context, processor *commandOutputProcessor, dir string, env map[string]string, name string, args ...string) error {
 	if err := validateEnvironmentNames(env); err != nil {
 		return err
 	}
@@ -102,7 +102,7 @@ func resolveExecutableInPath(name, path string) (string, error) {
 	return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
 }
 
-func (r Runner) runStreamingCommand(ctx context.Context, processor *commandProcessor, cmd *exec.Cmd) error {
+func (r Runner) runStreamingCommand(ctx context.Context, processor *commandOutputProcessor, cmd *exec.Cmd) error {
 	configureProcessGroup(cmd)
 	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {

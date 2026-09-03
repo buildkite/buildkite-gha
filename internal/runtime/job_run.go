@@ -16,7 +16,7 @@ type jobRun struct {
 	job             plan.Job
 	workspace       string
 	callerWorkspace bool
-	processor       *commandProcessor
+	processor       *commandOutputProcessor
 	eval            expression.Context
 	result          JobResult
 	runtimeEnv      map[string]string

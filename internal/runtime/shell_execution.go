@@ -13,7 +13,7 @@ import (
 	shellcompat "github.com/buildkite/buildkite-gha/internal/shell"
 )
 
-func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, env map[string]string, eval expression.Context) (Result, error) {
+func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, step plan.Step, env map[string]string, eval expression.Context) (Result, error) {
 	result := newResult()
 	script, err := evaluateProgramTyped[string](step.Execution.Run.Command, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {
@@ -50,7 +50,7 @@ func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandPro
 	return result, err
 }
 
-func (r *jobRun) runCompositeShellStep(ctx context.Context, processor *commandProcessor, workspace string, step *executionprogram.ActionStep, jobEnv map[string]string, eval expression.Context, result *Result) error {
+func (r *jobRun) runCompositeShellStep(ctx context.Context, processor *commandOutputProcessor, workspace string, step *executionprogram.ActionStep, jobEnv map[string]string, eval expression.Context, result *Result) error {
 	env, err := executionprogram.EvaluateBindings(step.Env, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {
 		return err
@@ -95,7 +95,7 @@ func shellCommand(shell, script string) ([]string, error) {
 	}
 }
 
-func (r *jobRun) runShellProcess(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, result *Result, shell, script string) error {
+func (r *jobRun) runShellProcess(ctx context.Context, processor *commandOutputProcessor, dir string, env map[string]string, result *Result, shell, script string) error {
 	shell = strings.TrimSpace(shell)
 	if shell != "python" && !strings.Contains(shell, "{0}") {
 		args, err := shellCommand(shell, script)

@@ -90,7 +90,7 @@ func (w *node16DeprecationWarnings) record(reference string) {
 	w.actions[reference] = struct{}{}
 }
 
-func (w *node16DeprecationWarnings) emit(processor *commandProcessor) {
+func (w *node16DeprecationWarnings) emit(processor *commandOutputProcessor) {
 	if w == nil || processor == nil {
 		return
 	}

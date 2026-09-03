@@ -164,7 +164,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	if len(job.NeedSources) != 0 && len(job.Needs) == 0 {
 		return jobResult, fmt.Errorf("job has prerequisite sources but no hydrated prerequisite results")
 	}
-	processor := newCommandProcessor(r.stdout(), r.stderr())
+	processor := newCommandOutputProcessor(r.stdout(), r.stderr())
 	eval := expression.Context{
 		WorkflowInputs: job.Inputs,
 		Matrix:         job.Matrix,
@@ -1231,7 +1231,7 @@ func trimSensitiveSuffix(value string, sensitiveValues []string) string {
 	}
 }
 
-func (r Runner) resolveSecrets(ctx context.Context, processor *commandProcessor, names []string) (map[string]string, error) {
+func (r Runner) resolveSecrets(ctx context.Context, processor *commandOutputProcessor, names []string) (map[string]string, error) {
 	if len(names) == 0 {
 		return nil, nil
 	}
@@ -1255,7 +1255,7 @@ func (r Runner) resolveSecrets(ctx context.Context, processor *commandProcessor,
 	return values, nil
 }
 
-func (r Runner) resolveWorkflowToken(ctx context.Context, processor *commandProcessor, repository, workflow string, permissions map[string]string) (string, error) {
+func (r Runner) resolveWorkflowToken(ctx context.Context, processor *commandOutputProcessor, repository, workflow string, permissions map[string]string) (string, error) {
 	if r.WorkflowToken == nil {
 		return "", fmt.Errorf("GitHub workflow token provider is not configured")
 	}
@@ -1587,7 +1587,7 @@ func isRuntimeContextEnvironment(name string) bool {
 	}
 }
 
-func (r *jobRun) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) (Result, error) {
+func (r *jobRun) runJobStep(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) (Result, error) {
 	return r.runActionStep(ctx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, nil, eval, posts, actions, prepared, nil, nil)
 }
 
@@ -1723,7 +1723,7 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 	return out, nil
 }
 
-func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandProcessor, workspace string, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error, inheritedTimeout *remotePreparationTimeout, inheritedEnvOverlay map[string]string) (Result, error) {
+func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutputProcessor, workspace string, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error, inheritedTimeout *remotePreparationTimeout, inheritedEnvOverlay map[string]string) (Result, error) {
 	result := newResult()
 	eval.JobStatus = jobStatusValue(status.unsuccessful, ctx.Err() != nil)
 	if !workflowStep {
@@ -1920,7 +1920,7 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandProc
 	}
 }
 
-func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv, evaluatedWith map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string, inheritedEnvOverlay map[string]string) (Result, error) {
+func (r *jobRun) runActionStep(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv, evaluatedWith map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string, inheritedEnvOverlay map[string]string) (Result, error) {
 	if stepEnv == nil {
 		var err error
 		stepEnv, err = executionprogram.EvaluateBindings(step.Execution.Env, executionprogram.EvaluationContext{Expression: eval})
@@ -2127,7 +2127,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandProcessor,
 	return result, errUnsupportedFeature("action_ref", "", "action %q uses unsupported runtime %q", step.Uses, actionRuntime)
 }
 
-func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, actionProgram *executionprogram.Action, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionLock *plan.ActionLock, actionStack []string) (Result, error) {
+func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, actionProgram *executionprogram.Action, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionLock *plan.ActionLock, actionStack []string) (Result, error) {
 	result := newResult()
 	// Keep hashFiles unavailable to composite step metadata while retaining the
 	// context binder for nested JavaScript lifecycle conditions.

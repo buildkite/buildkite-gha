@@ -257,10 +257,10 @@ func (r Runner) runDockerAction(ctx context.Context, action dockerAction) (resul
 		return newResult(), fmt.Errorf("make Docker runner temp writable: %w", e)
 	}
 	action.runnerTemp = temp
-	return newJobRun(r).runDocker(ctx, newCommandProcessor(r.stdout(), r.stderr()), action)
+	return newJobRun(r).runDocker(ctx, newCommandOutputProcessor(r.stdout(), r.stderr()), action)
 }
 
-func (r *jobRun) runDocker(ctx context.Context, processor *commandProcessor, action dockerAction) (result Result, err error) {
+func (r *jobRun) runDocker(ctx context.Context, processor *commandOutputProcessor, action dockerAction) (result Result, err error) {
 	result = newResult()
 	if err := validateEnvironmentNames(action.Env); err != nil {
 		return result, err
@@ -637,7 +637,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	return w.writer.Write(p)
 }
 
-func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, workspace, node string, action javaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
+func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandOutputProcessor, workspace, node string, action javaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
 	env := mergeStringMaps(result.Env, action.Env, actionInputEnv(action.Inputs))
 	if path, ok := result.Env["PATH"]; ok {
 		env["PATH"] = path
