@@ -7,7 +7,8 @@ import (
 )
 
 // ExecutionJob returns the normalized GitHub Actions workflow job assigned to
-// this Buildkite command job envelope.
+// this Buildkite command job envelope. The program package owns its executable
+// semantics; plan exposes it only as part of the serialized handoff.
 func (job Job) ExecutionJob() *program.Job {
 	if job.Program == nil {
 		return nil
@@ -15,8 +16,9 @@ func (job Job) ExecutionJob() *program.Job {
 	return &job.Program.Job
 }
 
-// ProjectProgram populates the executor-only job fields from the normalized
-// execution program.
+// ProjectProgram validates Program and refreshes the compatibility projections
+// retained by the plan envelope. Job-level executor fields are not serialized;
+// CallGuards.Condition remains duplicated only to preserve the v2 wire format.
 func (job *Job) ProjectProgram() error {
 	if job.Program == nil {
 		return fmt.Errorf("execution program is required")
