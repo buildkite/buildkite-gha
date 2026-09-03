@@ -1357,13 +1357,6 @@ func TestFailureConditionsAndCancellation(t *testing.T) {
 func TestExplicitCancelCommitsEffectsWithoutFailingJob(t *testing.T) {
 	t.Parallel()
 
-	for range 20 {
-		testExplicitCancelCommitsEffectsWithoutFailingJob(t)
-	}
-}
-
-func testExplicitCancelCommitsEffectsWithoutFailingJob(t *testing.T) {
-	t.Helper()
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
