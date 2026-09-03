@@ -581,9 +581,9 @@ func TestRunnerRejectionDiagnosticRendersServerRejections(t *testing.T) {
 	}{
 		{
 			name:        "missing queue names the cluster and remedy without altering the trailing URL",
-			rejection:   RunnerRejection{Labels: []string{"macos-latest"}, Code: RunnerRejectionMissingQueue, Message: "The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-14-medium or macos-medium in the cluster, or configure an explicit runner mapping to an existing queue: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md"},
+			rejection:   RunnerRejection{Labels: []string{"macos-latest"}, Code: RunnerRejectionMissingQueue, Message: "The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-14-medium or macos-medium, or map this runner label to an existing queue: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md"},
 			labels:      []string{"macos-latest"},
-			wantMessage: `Buildkite could not resolve runner label "macos-latest". The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-14-medium or macos-medium in the cluster, or configure an explicit runner mapping to an existing queue: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md`,
+			wantMessage: `Buildkite could not resolve runner label "macos-latest". The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-14-medium or macos-medium, or map this runner label to an existing queue: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md`,
 		},
 		{
 			name:        "no cluster without reportable labels",

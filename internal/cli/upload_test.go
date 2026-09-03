@@ -1382,7 +1382,7 @@ func runnerResolutionServer(t *testing.T, status int, verdicts map[string]map[st
 
 func TestRunUploadReportsServerRunnerRejectionsInsteadOfLocalPresets(t *testing.T) {
 	requireImporterHost(t)
-	const missingQueueMessage = "The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-medium in the cluster, or configure an explicit runner mapping to an existing queue: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md"
+	const missingQueueMessage = "The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-medium, or map this runner label to an existing queue: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md"
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"runners.yml": "name: Runners\non: push\njobs:\n  mac:\n    runs-on: macos-latest\n    steps: [{run: true}]\n  arm:\n    runs-on: ubuntu-24.04-arm\n    steps: [{run: true}]\n  windows:\n    runs-on: windows-latest\n    steps: [{run: true}]\n  linux:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 	})
@@ -1391,7 +1391,7 @@ func TestRunUploadReportsServerRunnerRejectionsInsteadOfLocalPresets(t *testing.
 		t.Fatal(err)
 	}
 	server, requests := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
-		"macos-latest":     {"error": map[string]any{"code": "missing_queue", "message": missingQueueMessage, "cluster": "Default", "platform": "darwin/arm64", "required_queues": []string{"macos-medium"}}},
+		"macos-latest":     {"error": map[string]any{"code": "missing_queue", "message": missingQueueMessage, "platform": "darwin/arm64", "required_queues": []string{"macos-medium"}}},
 		"ubuntu-24.04-arm": {"error": map[string]any{"code": "incompatible_labels", "message": "No compatible runner is configured."}},
 		"windows-latest":   {"error": map[string]any{"code": "incompatible_labels", "message": "No compatible runner is configured."}},
 		"ubuntu-latest":    {"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}},

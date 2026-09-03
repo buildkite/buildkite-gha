@@ -76,7 +76,7 @@ func TestAgentRunnerResolverRetainsServerRejectionsAndRejectsMalformedErrors(t *
 	}{
 		{
 			name:  "missing queue with unknown fields",
-			error: map[string]any{"code": "missing_queue", "message": "Cluster 'Default' has no hosted macOS queue.", "cluster": "Default", "platform": "darwin/arm64", "required_queues": []string{"macos-medium"}},
+			error: map[string]any{"code": "missing_queue", "message": "Cluster 'Default' has no hosted macOS queue.", "platform": "darwin/arm64", "required_queues": []string{"macos-medium"}},
 			want:  RunnerRejection{ID: "r1", Code: "missing_queue", Message: "Cluster 'Default' has no hosted macOS queue."},
 		},
 		{

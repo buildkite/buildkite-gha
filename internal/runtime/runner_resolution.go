@@ -13,7 +13,10 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/agentapi"
 )
 
-const runnerResolutionResponseLimit = 64 << 10
+// A maximum batch of 100 missing_queue rejections whose messages each name a
+// long cluster name stays far below this cap, so oversized responses indicate
+// a misbehaving server rather than a legitimately verbose diagnostic.
+const runnerResolutionResponseLimit = 1 << 20
 const runnerResolutionBatchLimit = 100
 
 type RunnerRequirement struct {
