@@ -139,6 +139,7 @@ func (a *agentEnvironmentSource) ResolveEnvironments(ctx context.Context, owner,
 					BranchPolicy:      snapshot.BranchPolicy,
 					UnsupportedRules:  snapshot.UnsupportedRules,
 					SecretNames:       snapshot.SecretNames,
+					Variables:         snapshot.Variables,
 				}}
 			}
 			a.resolved[repo+"\x00"+strings.ToLower(name)] = result

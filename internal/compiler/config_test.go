@@ -26,9 +26,8 @@ jobs:
 	options := Options{
 		EventTrust: EventTrusted,
 		Vars: VariableSources{
-			Bridge:    map[string]string{"runner": "ubuntu-22.04", "versions": `["bridge"]`, "SOURCE": "bridge"},
-			Provider:  map[string]string{"RUNNER": "ubuntu-24.04", "VERSIONS": `["provider"]`, "source": "provider"},
-			Buildkite: map[string]string{"VERSIONS": `[12,"14"]`, "SOURCE": "buildkite"},
+			Organization: map[string]string{"runner": "ubuntu-22.04", "versions": `["organization"]`, "SOURCE": "organization"},
+			Repository:   map[string]string{"RUNNER": "ubuntu-24.04", "VERSIONS": `[12,"14"]`, "source": "repository"},
 		},
 		Runners: RunnerPolicy{Labels: map[string]string{"ubuntu-24.04": "linux-trusted"}},
 	}
@@ -47,9 +46,11 @@ jobs:
 	if err := json.Unmarshal(first, &ir); err != nil {
 		t.Fatal(err)
 	}
-	wantVars := map[string]string{"RUNNER": "ubuntu-24.04", "VERSIONS": `[12,"14"]`, "SOURCE": "buildkite"}
-	if !reflect.DeepEqual(ir.Vars, wantVars) {
-		t.Fatalf("vars snapshot = %#v, want %#v", ir.Vars, wantVars)
+	// Repository variables override organization variables spelled
+	// differently, and the IR keeps each scope for the job plans.
+	wantVars := map[string]string{"RUNNER": "ubuntu-24.04", "VERSIONS": `[12,"14"]`, "source": "repository"}
+	if !reflect.DeepEqual(ir.VarsBeforeEnvironment(), wantVars) || !reflect.DeepEqual(ir.OrganizationVars, options.Vars.Organization) || !reflect.DeepEqual(ir.RepositoryVars, options.Vars.Repository) {
+		t.Fatalf("vars snapshot = %#v (organization %#v, repository %#v), want %#v", ir.VarsBeforeEnvironment(), ir.OrganizationVars, ir.RepositoryVars, wantVars)
 	}
 	if len(ir.Jobs) != 2 || ir.Jobs[0].Queue != "linux-trusted" || ir.Jobs[0].Matrix["version"] != float64(12) || ir.Jobs[1].Matrix["version"] != "14" {
 		t.Fatalf("compiled jobs = %#v", ir.Jobs)
@@ -168,10 +169,10 @@ func TestCompileOptionsRejectCaseCollisionsWithinOneVarsSource(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n")
 	_, err := CompileWithOptions("vars.yml", workflow, pushEvent(t), Options{
 		EventTrust: EventTrusted,
-		Vars:       VariableSources{Bridge: map[string]string{"Deploy_Env": "one", "DEPLOY_ENV": "two"}},
+		Vars:       VariableSources{Repository: map[string]string{"Deploy_Env": "one", "DEPLOY_ENV": "two"}},
 		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-24.04": "linux"}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "bridge vars source contains case-colliding names") {
+	if err == nil || !strings.Contains(err.Error(), "repository vars source contains case-colliding names") {
 		t.Fatalf("CompileWithOptions() error = %v, want vars collision", err)
 	}
 }
@@ -285,7 +286,7 @@ jobs:
 	event := strings.Replace(string(pushEvent(t)), `"payload": {`, `"payload": {"channel":"stable",`, 1)
 	options := Options{
 		EventTrust: EventTrusted,
-		Vars:       VariableSources{Bridge: map[string]string{"MATRIX": `{"os":["ubuntu-22.04","ubuntu-24.04"]}`}},
+		Vars:       VariableSources{Repository: map[string]string{"MATRIX": `{"os":["ubuntu-22.04","ubuntu-24.04"]}`}},
 		Runners: RunnerPolicy{Labels: map[string]string{
 			"ubuntu-22.04":       "linux",
 			"ubuntu-24.04":       "linux",
@@ -323,7 +324,7 @@ jobs:
 	}
 	compiled, err := CompileWithOptions("expression-runner.yml", workflow, pushEvent(t), Options{
 		EventTrust: EventTrusted,
-		Vars:       VariableSources{Bridge: map[string]string{"RUNNER_LABELS": `["self-hosted","custom-linux"]`}},
+		Vars:       VariableSources{Repository: map[string]string{"RUNNER_LABELS": `["self-hosted","custom-linux"]`}},
 		Runners: RunnerPolicy{Selectors: []RunnerSelector{{
 			Labels: []string{"self-hosted", "custom-linux"},
 			Target: target,
@@ -361,7 +362,7 @@ func TestRunsOnPolicyFailsClosedWithLocatedDiagnostics(t *testing.T) {
 			workflow := []byte("on: push\njobs:\n  test:\n    runs-on: " + test.runsOn + "\n    steps:\n      - run: true\n")
 			_, err := CompileWithOptions("policy.yml", workflow, pushEvent(t), Options{
 				EventTrust: EventTrusted,
-				Vars:       VariableSources{Bridge: test.vars},
+				Vars:       VariableSources{Repository: test.vars},
 				Runners:    RunnerPolicy{Labels: test.labels},
 			})
 			if err == nil || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), "policy.yml:") {
@@ -607,14 +608,14 @@ func TestCompilePlansUsePolicyQueueAndContainOnlyNonSecretVars(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo '${{ secrets.TOKEN }}'\n")
 	options := Options{
 		EventTrust: EventTrusted,
-		Vars:       VariableSources{Bridge: map[string]string{"PUBLIC": "snapshotted"}},
+		Vars:       VariableSources{Repository: map[string]string{"PUBLIC": "snapshotted"}},
 		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-24.04": "linux"}},
 	}
 	plans, err := compilePlansForTest(t.Context(), "plan.yml", workflow, pushEvent(t), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Target.Queue != "linux" || plans[0].Vars["PUBLIC"] != "snapshotted" {
+	if len(plans) != 1 || plans[0].Target.Queue != "linux" || plans[0].RepositoryVars["PUBLIC"] != "snapshotted" {
 		t.Fatalf("compiled plans = %#v", plans)
 	}
 	encoded, err := json.Marshal(plans)

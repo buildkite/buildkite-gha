@@ -73,13 +73,14 @@ const (
 	EventUntrusted EventTrust = "untrusted"
 )
 
-// VariableSources are explicit non-secret inputs to the vars context.
-// Precedence is Bridge < Provider < Buildkite, so the build-specific snapshot
-// wins over repository defaults without reading arbitrary process environment.
+// VariableSources are the GitHub Actions configuration variables known before
+// any job's environment applies: organization variables, then repository
+// variables, which override them. Environment variables come from
+// Options.EnvironmentSource per job. No caller supplies these sources yet, so
+// the vars context of compile-time fields and jobs.<id>.if is empty.
 type VariableSources struct {
-	Bridge    map[string]string
-	Provider  map[string]string
-	Buildkite map[string]string
+	Organization map[string]string
+	Repository   map[string]string
 }
 
 // CacheVolume is one Buildkite Hosted cache volume attached to a runner target.
@@ -226,9 +227,8 @@ func (options Options) validate() error {
 		name   string
 		values map[string]string
 	}{
-		{name: "bridge", values: options.Vars.Bridge},
-		{name: "provider", values: options.Vars.Provider},
-		{name: "buildkite", values: options.Vars.Buildkite},
+		{name: "organization", values: options.Vars.Organization},
+		{name: "repository", values: options.Vars.Repository},
 	} {
 		sourceName, source := varsSource.name, varsSource.values
 		names := make(map[string]string, len(source))
@@ -284,19 +284,6 @@ func RunnerTargetsEqual(first, second RunnerTarget) bool {
 		return false
 	}
 	return cachesEqual(first.Cache, second.Cache)
-}
-
-func (sources VariableSources) snapshot() map[string]string {
-	vars := make(map[string]string, len(sources.Bridge)+len(sources.Provider)+len(sources.Buildkite))
-	for _, source := range []map[string]string{sources.Bridge, sources.Provider, sources.Buildkite} {
-		for name, value := range source {
-			vars[strings.ToUpper(name)] = value
-		}
-	}
-	if len(vars) == 0 {
-		return nil
-	}
-	return vars
 }
 
 // Every runs-on rejection reason a processing report may render. Resolved

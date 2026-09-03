@@ -32,6 +32,10 @@ type EnvironmentProtection struct {
 	UnsupportedRules []string
 	// SecretNames are the environment's secret names.
 	SecretNames []string
+	// Variables are the environment's variables by name with their plaintext
+	// values. They are configuration, not secrets, but compile diagnostics
+	// must still name variables without printing values.
+	Variables map[string]string
 }
 
 // EnvironmentSource resolves one GitHub deployment environment by name.
@@ -109,6 +113,7 @@ func resolveJobEnvironments(ctx context.Context, instances []JobInstance, event 
 		}
 		instance.EnvironmentApproval = result.protection.RequiredReviewers
 		instance.environmentSecrets = append([]string(nil), result.protection.SecretNames...)
+		instance.environmentVariables = cloneMap(result.protection.Variables)
 	}
 	return errors.Join(errs...)
 }
