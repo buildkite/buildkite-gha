@@ -1,7 +1,12 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -11,6 +16,7 @@ import (
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 func TestBackgroundSummariesAreBoundedInCommitOrder(t *testing.T) {
@@ -244,5 +250,399 @@ func TestBackgroundSupervisorBoundsActiveWorkAndQueuesFIFO(t *testing.T) {
 	mu.Unlock()
 	if gotOrder != "first,second,third" {
 		t.Fatalf("start order = %q, want FIFO", gotOrder)
+	}
+}
+
+func TestExplicitCancelCommitsEffectsWithoutFailingJob(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	ready := filepath.Join(workspace, "background.ready")
+	terminated := filepath.Join(workspace, "background.terminated")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "background", Kind: "run", Background: true, Command: `
+echo "CANCEL_EFFECT=visible" >> "$GITHUB_ENV"
+trap 'touch "$TERMINATED"; exit 0' INT
+touch "$READY"
+while :; do sleep 1; done`},
+		{ID: "await-start", Kind: "run", Command: `while [ ! -f "$READY" ]; do sleep 0.01; done`},
+		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
+		{ID: "cancel-again", Kind: "cancel", Targets: []string{"background"}},
+		{ID: "after-cancel", Kind: "run", Condition: "steps.background.outcome == 'cancelled' && steps.cancel.conclusion == 'success' && steps.cancel-again.conclusion == 'success'", Command: `test "$CANCEL_EFFECT" = visible; test -f "$TERMINATED"; echo after-cancel`},
+	})
+	job.Env = map[string]string{"READY": ready, "TERMINATED": terminated}
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" || result.Env["CANCEL_EFFECT"] != "visible" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if !strings.Contains(logs.String(), "after-cancel") {
+		t.Fatalf("RunJob() logs = %q", logs.String())
+	}
+}
+
+func TestCancelQueuedBackgroundNeverStartsIt(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	release := filepath.Join(workspace, "release")
+	queuedMarker := filepath.Join(workspace, "queued-started")
+	steps := make([]runtimeTestStep, 0, maxActiveBackgroundSteps+4)
+	for i := range maxActiveBackgroundSteps {
+		steps = append(steps, runtimeTestStep{ID: fmt.Sprintf("blocker-%d", i), Kind: "run", Background: true, Command: `while [ ! -f "$RELEASE" ]; do sleep 0.01; done`})
+	}
+	steps = append(steps,
+		runtimeTestStep{ID: "queued", Kind: "run", Background: true, Command: `touch "$QUEUED_MARKER"`},
+		runtimeTestStep{ID: "cancel-queued", Kind: "cancel", Targets: []string{"queued"}},
+		runtimeTestStep{ID: "release", Kind: "run", Command: `test ! -e "$QUEUED_MARKER"; touch "$RELEASE"`},
+		runtimeTestStep{ID: "wait", Kind: "wait-all"},
+	)
+	job := runtimePlan(t, workspace, workflowPath, steps)
+	job.Env = map[string]string{"RELEASE": release, "QUEUED_MARKER": queuedMarker}
+
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, statErr := os.Stat(queuedMarker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("queued canceled step ran: %v", statErr)
+	}
+}
+
+func TestQueuedBackgroundTimeoutStartsAtDispatch(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: background timeout dispatch\n")
+	release := filepath.Join(workspace, "release")
+	queuedMarker := filepath.Join(workspace, "queued-started")
+	steps := make([]runtimeTestStep, 0, maxActiveBackgroundSteps+3)
+	for i := range maxActiveBackgroundSteps {
+		steps = append(steps, runtimeTestStep{ID: fmt.Sprintf("blocker-%d", i), Kind: "run", Background: true, Command: `while [ ! -f "$RELEASE" ]; do sleep 0.01; done`})
+	}
+	steps = append(steps,
+		runtimeTestStep{ID: "queued", Kind: "run", Background: true, TimeoutMinutes: 0.001, Command: `touch "$QUEUED_MARKER"`},
+		runtimeTestStep{ID: "release", Kind: "run", Command: `sleep 0.2; touch "$RELEASE"`},
+		runtimeTestStep{ID: "wait", Kind: "wait-all"},
+	)
+	job := runtimePlan(t, workspace, workflowPath, steps)
+	job.Env = map[string]string{"RELEASE": release, "QUEUED_MARKER": queuedMarker}
+
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(queuedMarker); err != nil {
+		t.Fatalf("queued timed step did not run: %v", err)
+	}
+}
+
+func TestCancelQueuedBackgroundNeverRegistersPostAction(t *testing.T) {
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/queued/action.yml", "name: Queued lifecycle\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/queued/main.js", "console.log('queued-main-must-not-run')\n")
+	writeFixtureFile(t, workspace, ".github/actions/queued/post.js", "console.log('queued-post-must-not-run')\n")
+	release := filepath.Join(workspace, "release")
+	steps := make([]runtimeTestStep, 0, maxActiveBackgroundSteps+4)
+	for i := range maxActiveBackgroundSteps {
+		steps = append(steps, runtimeTestStep{ID: fmt.Sprintf("blocker-%d", i), Kind: "run", Background: true, Command: `while [ ! -f "$RELEASE" ]; do sleep 0.01; done`})
+	}
+	steps = append(steps,
+		runtimeTestStep{ID: "queued", Kind: "uses", Uses: "./.github/actions/queued", Background: true},
+		runtimeTestStep{ID: "cancel-queued", Kind: "cancel", Targets: []string{"queued"}},
+		runtimeTestStep{ID: "release", Kind: "run", Command: `touch "$RELEASE"`},
+		runtimeTestStep{ID: "wait", Kind: "wait-all"},
+	)
+	job := runtimePlan(t, workspace, workflowPath, steps)
+	job.Env = map[string]string{"RELEASE": release}
+	var logs bytes.Buffer
+
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if strings.Contains(logs.String(), "queued-main-must-not-run") || strings.Contains(logs.String(), "queued-post-must-not-run") {
+		t.Fatalf("queued cancelled action ran lifecycle phase: %q", logs.String())
+	}
+}
+
+func TestFailureBeforeCancelStillFailsJob(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	failedPID := filepath.Join(workspace, "failed.pid")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "background", Kind: "run", Background: true, Command: `echo $$ > "$FAILED_PID"; exit 7`},
+		{ID: "await-failure", Kind: "run", Command: `while [ ! -f "$FAILED_PID" ]; do sleep 0.01; done; while kill -0 "$(cat "$FAILED_PID")" 2>/dev/null; do sleep 0.01; done; sleep 0.05`},
+		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
+		{ID: "default-after-cancel", Kind: "run", Command: "echo must-not-run"},
+		{ID: "recover", Kind: "run", Condition: "failure()", Command: "echo recovered"},
+	})
+	job.Env = map[string]string{"FAILED_PID": failedPID}
+
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+	if err == nil || result.Conclusion != "failure" || !strings.Contains(logs.String(), "recovered") || strings.Contains(logs.String(), "must-not-run") {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+}
+
+func TestBackgroundEffectsCommitAtCoveringBarriers(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	oneDone := filepath.Join(workspace, "one.done")
+	twoDone := filepath.Join(workspace, "two.done")
+	pathEntry := filepath.Join(workspace, "from-background")
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "one", Kind: "run", Background: true, Command: `
+echo "ONE=committed-one" >> "$GITHUB_ENV"
+echo "value=output-one" >> "$GITHUB_OUTPUT"
+echo "$PATH_ENTRY" >> "$GITHUB_PATH"
+echo one-summary >> "$GITHUB_STEP_SUMMARY"
+touch "$ONE_DONE"`},
+		{ID: "two", Kind: "run", Background: true, Command: `
+echo "TWO=committed-two" >> "$GITHUB_ENV"
+echo "value=output-two" >> "$GITHUB_OUTPUT"
+touch "$TWO_DONE"`},
+		{ID: "before-wait", Kind: "run", Command: `
+while [ ! -f "$ONE_DONE" ] || [ ! -f "$TWO_DONE" ]; do sleep 0.01; done
+test -z "$ONE"
+test -z "$TWO"
+case "$PATH" in "$PATH_ENTRY"*) exit 1 ;; esac`},
+		{ID: "wait-one", Kind: "wait", Targets: []string{"one"}},
+		{ID: "after-targeted-wait", Kind: "run", Command: `
+test "$ONE" = committed-one
+test -z "$TWO"
+test "${{ steps.one.outputs.value }}" = output-one
+case "$PATH" in "$PATH_ENTRY"*) ;; *) exit 1 ;; esac`},
+		{ID: "wait-all", Kind: "wait-all"},
+		{ID: "after-wait-all", Kind: "run", Command: `
+test "$ONE" = committed-one
+test "$TWO" = committed-two
+test "${{ steps.two.outputs.value }}" = output-two`},
+	})
+	job.Env = map[string]string{"ONE_DONE": oneDone, "TWO_DONE": twoDone, "PATH_ENTRY": pathEntry}
+	job.Outputs = map[string]string{"one": "${{ steps.one.outputs.value }}", "two": "${{ steps.two.outputs.value }}"}
+
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	if result.Conclusion != "success" || result.Outputs["one"] != "output-one" || result.Outputs["two"] != "output-two" {
+		t.Fatalf("RunJob() result = %#v", result)
+	}
+	if result.Summary != "one-summary\n" {
+		t.Fatalf("RunJob() summary = %q", result.Summary)
+	}
+}
+
+func TestConcurrentPathEffectsComposeWithLiveBarrierState(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	oneDone := filepath.Join(workspace, "one.done")
+	twoDone := filepath.Join(workspace, "two.done")
+	onePath := filepath.Join(workspace, "background-one")
+	twoPath := filepath.Join(workspace, "background-two")
+	foregroundPath := filepath.Join(workspace, "foreground")
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "one", Kind: "run", Background: true, Command: `echo "$ONE_PATH" >> "$GITHUB_PATH"; touch "$ONE_DONE"`},
+		{ID: "two", Kind: "run", Background: true, Command: `echo "$TWO_PATH" >> "$GITHUB_PATH"; touch "$TWO_DONE"`},
+		{ID: "foreground", Kind: "run", Command: `
+while [ ! -f "$ONE_DONE" ] || [ ! -f "$TWO_DONE" ]; do sleep 0.01; done
+echo "$FOREGROUND_PATH" >> "$GITHUB_PATH"`},
+		{ID: "wait-all", Kind: "wait-all"},
+		{ID: "verify", Kind: "run", Command: `
+want="$TWO_PATH:$ONE_PATH:$FOREGROUND_PATH:"
+case "$PATH" in "$want"*) ;; *) exit 1 ;; esac
+test "$(printf '%s' "$PATH" | tr ':' '\n' | grep -Fxc "$ONE_PATH")" -eq 1
+test "$(printf '%s' "$PATH" | tr ':' '\n' | grep -Fxc "$TWO_PATH")" -eq 1
+test "$(printf '%s' "$PATH" | tr ':' '\n' | grep -Fxc "$FOREGROUND_PATH")" -eq 1`},
+	})
+	job.Env = map[string]string{
+		"ONE_DONE": oneDone, "TWO_DONE": twoDone,
+		"ONE_PATH": onePath, "TWO_PATH": twoPath, "FOREGROUND_PATH": foregroundPath,
+	}
+
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	if result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v", result)
+	}
+}
+
+func TestBackgroundCompositePathEffectsComposeAtBarrier(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/path/action.yml", `name: Path writer
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "$COMPOSITE_PATH" >> "$GITHUB_PATH"
+`)
+	compositePath := filepath.Join(workspace, "composite")
+	foregroundPath := filepath.Join(workspace, "foreground")
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "composite", Kind: "uses", Uses: "./.github/actions/path", Background: true},
+		{ID: "foreground", Kind: "run", Command: `echo "$FOREGROUND_PATH" >> "$GITHUB_PATH"`},
+		{ID: "wait", Kind: "wait", Targets: []string{"composite"}},
+		{ID: "verify", Kind: "run", Command: `case "$PATH" in "$COMPOSITE_PATH:$FOREGROUND_PATH:"*) ;; *) exit 1 ;; esac`},
+	})
+	job.Env = map[string]string{"COMPOSITE_PATH": compositePath, "FOREGROUND_PATH": foregroundPath}
+
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	if result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v", result)
+	}
+}
+
+func TestBackgroundFailureSurfacesAtWait(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	marker := filepath.Join(workspace, "failed.done")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "failure", Kind: "run", Background: true, Command: `echo "FAILED_EFFECT=visible" >> "$GITHUB_ENV"; touch "$FAILURE_DONE"; exit 9`},
+		{ID: "before-wait", Kind: "run", Command: `while [ ! -f "$FAILURE_DONE" ]; do sleep 0.01; done; test -z "$FAILED_EFFECT"; echo before-barrier`},
+		{ID: "wait", Kind: "wait", Targets: []string{"failure"}},
+		{ID: "default-after-wait", Kind: "run", Command: "echo must-not-run"},
+		{ID: "recover", Kind: "run", Condition: "failure() && steps.failure.outcome == 'failure'", Command: `test "$FAILED_EFFECT" = visible; echo recovered`},
+	})
+	job.Env = map[string]string{"FAILURE_DONE": marker}
+
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+	if err == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if !strings.Contains(logs.String(), "before-barrier") || !strings.Contains(logs.String(), "recovered") || strings.Contains(logs.String(), "must-not-run") {
+		t.Fatalf("RunJob() logs = %q", logs.String())
+	}
+}
+
+func TestBackgroundContinueOnError(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "soft-background", Kind: "run", Background: true, ContinueOnError: true, Command: "exit 7"},
+		{ID: "wait-soft", Kind: "wait", Targets: []string{"soft-background"}},
+		{ID: "after-soft", Kind: "run", Condition: "steps.soft-background.outcome == 'failure' && steps.soft-background.conclusion == 'success'", Command: "echo after-soft"},
+	})
+
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if !strings.Contains(logs.String(), "after-soft") {
+		t.Fatalf("RunJob() logs = %q", logs.String())
+	}
+}
+
+func TestSkippedBackgroundAndRepeatedWaitAreCommittedAtMostOnce(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "skipped", Kind: "run", Background: true, Condition: "false", Command: "exit 1"},
+		{ID: "cancel-skipped", Kind: "cancel", Targets: []string{"skipped"}},
+		{ID: "wait-skipped", Kind: "wait", Targets: []string{"skipped"}},
+		{ID: "completed", Kind: "run", Background: true, Command: `echo once >> "$GITHUB_STEP_SUMMARY"`},
+		{ID: "first-wait", Kind: "wait", Targets: []string{"completed"}},
+		{ID: "cancel-completed", Kind: "cancel", Targets: []string{"completed"}},
+		{ID: "second-wait", Kind: "wait", Targets: []string{"completed"}},
+		{ID: "verify", Kind: "run", Condition: "steps.skipped.conclusion == 'skipped' && steps.skipped.outputs.missing == '' && steps.cancel-skipped.conclusion == 'success' && steps.cancel-skipped.outputs.missing == '' && steps.wait-skipped.conclusion == 'success' && steps.wait-skipped.outputs.missing == '' && steps.first-wait.outputs.missing == '' && steps.cancel-completed.conclusion == 'success' && steps.cancel-completed.outputs.missing == '' && steps.second-wait.outputs.missing == ''", Command: "true"},
+	})
+
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" || result.Summary != "once\n" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestBackgroundOutputsReturnErrorBeforeBarrier(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "background", Kind: "run", Background: true, Command: `echo "value=private" >> "$GITHUB_OUTPUT"`},
+		{ID: "premature-reader", Kind: "run", Command: `echo "${{ steps.background.outputs.value }}"`},
+	})
+
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), "unavailable step") {
+		t.Fatalf("RunJob() result = %#v, error = %v, want unavailable background output", result, err)
+	}
+}
+
+func TestConcurrentStreamsShareMaskRegistration(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	marker := filepath.Join(workspace, "mask.ready")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "masker", Kind: "run", Background: true, Command: `echo '::add-mask::cross-stream-secret'; sleep 0.05; touch "$MASK_READY"`},
+		{ID: "other-stream", Kind: "run", Command: `while [ ! -f "$MASK_READY" ]; do sleep 0.01; done; echo 'probe cross-stream-secret'`},
+		{ID: "wait", Kind: "wait-all"},
+	})
+	job.Env = map[string]string{"MASK_READY": marker}
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if strings.Contains(logs.String(), "cross-stream-secret") || !strings.Contains(logs.String(), "probe ***") {
+		t.Fatalf("RunJob() logs = %q", logs.String())
+	}
+}
+
+func TestConcurrentSmokeWorkflowEndToEnd(t *testing.T) {
+	workspace := fixturePath(t, "smoke")
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "concurrent.yml")
+	source, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := os.ReadFile(filepath.Join(workspace, "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(workflowPath, source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %#v, want concurrent and observer", plans)
+	}
+	var logs bytes.Buffer
+	runner := Runner{Stdout: &logs, Stderr: &logs}
+	concurrent, err := runner.runTestJob(t.Context(), plans[0], workspace)
+	if err != nil || concurrent.Conclusion != "success" {
+		t.Fatalf("concurrent result = %#v, error = %v, logs = %q", concurrent, err, logs.String())
+	}
+	plans[1].Needs = map[string]plan.Need{"concurrent": {Result: concurrent.Conclusion, Outputs: concurrent.Outputs}}
+	observer, err := runner.runTestJob(t.Context(), plans[1], workspace)
+	if err != nil || observer.Conclusion != "success" {
+		t.Fatalf("observer result = %#v, error = %v, logs = %q", observer, err, logs.String())
+	}
+	if strings.Contains(logs.String(), "concurrent-cross-stream-secret") || !strings.Contains(logs.String(), "CONCURRENT_MASK_PROBE=***") {
+		t.Fatalf("concurrent masking logs = %q", logs.String())
+	}
+	want := `CONCURRENT_OBSERVATION={"cancel":"graceful","failure":"failure-at-wait","implicit":"implicit-wait-all","parallel":"parallel","queue_max":10,"targeted":"targeted-and-full"}`
+	if !strings.Contains(logs.String(), want) {
+		t.Fatalf("concurrent observation missing from logs = %q", logs.String())
 	}
 }
