@@ -204,6 +204,24 @@ bk build create --pipeline buildkite/buildkite-gha \
 
 This suite covers shell jobs, concurrent steps, public and Docker actions, container runtime behavior, summaries, annotations, artifact upload, and artifact roundtrip. Use `COMPATIBILITY_PROOF=<target>` with `COMPATIBILITY_PROOF_COMMIT=<commit>` only when diagnosing one target. The available target names are in [`.buildkite/pipeline.yml`](../.buildkite/pipeline.yml).
 
+Run the deployed GitHub environment snapshot proof separately:
+
+```sh
+commit=$(git rev-parse HEAD)
+bk build create --pipeline buildkite/buildkite-gha \
+  --branch "$(git branch --show-current)" --commit "$commit" \
+  --env COMPATIBILITY_PROOF=environment-resolution \
+  --env COMPATIBILITY_PROOF_COMMIT="$commit" --yes
+```
+
+The pipeline's GitHub Code Access App installation must have **Actions: read**
+and **Environments: read**, and the repository must have an unprotected
+environment named `test`. The proof resolves its live snapshot and compiles
+one job plan without an approval block. It does not read or assert environment
+variables; `${{ vars.* }}` needs separate client support. The proof never
+uploads the generated pipeline, and its temporary binary and output are
+removed, so no workflow job, approval block, deployment, or cleanup remains.
+
 Some Buildkite APIs are advisory, so a passing job does not prove that the result was persisted. Check those results independently after the build:
 
 ```sh

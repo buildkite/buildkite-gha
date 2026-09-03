@@ -1,0 +1,11 @@
+name: Environment resolution proof
+
+on: push
+
+jobs:
+  environment-snapshot:
+    name: Environment snapshot
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - run: echo 'This compile-only job is never uploaded.'

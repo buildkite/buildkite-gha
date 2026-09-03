@@ -610,8 +610,7 @@ syntax or action inputs.
 A job-level `environment` needs GitHub environment configuration at compile
 time. Inside a Buildkite job, `upload` and `compile` resolve each declared
 environment automatically through the job-scoped Agent API
-(`github-actions/environments`; rollout status in
-[docs/plans/environment-resolution-backend.md](plans/environment-resolution-backend.md)).
+(`github-actions/environments`).
 The Buildkite backend reads the environment's protection rules and secret
 names from GitHub with its own credentials, restricted to the pipeline's
 configured repository, and returns only that snapshot: no GitHub token and no
