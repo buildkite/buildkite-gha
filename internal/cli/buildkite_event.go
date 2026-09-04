@@ -43,8 +43,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	}
 
 	event, ref := "push", ""
-	switch getenv("BUILDKITE_SOURCE") {
-	case "schedule":
+	if getenv("BUILDKITE_SOURCE") == "schedule" {
 		event = "schedule"
 	}
 	payload := map[string]any{}
