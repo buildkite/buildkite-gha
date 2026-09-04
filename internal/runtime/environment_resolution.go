@@ -16,13 +16,33 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/agentapi"
 )
 
-const environmentResolutionResponseLimit = 64 << 10
+const (
+	// environmentResolutionResponseLimit bounds one environment's share of a
+	// successful response. The backend caps each environment's variables at
+	// 256 KiB of raw names and values, and JSON escaping expands a byte to at
+	// most six, so 2 MiB per environment holds any response it can send.
+	environmentResolutionResponseLimit = 2 << 20
+	// environmentResolutionErrorLimit bounds an error body, which carries at
+	// most a short message.
+	environmentResolutionErrorLimit = 64 << 10
+
+	// environmentVariableCountLimit is GitHub's maximum number of variables per
+	// environment.
+	environmentVariableCountLimit = 100
+	// environmentVariableValueLimit is GitHub's 48 KB maximum variable value.
+	environmentVariableValueLimit = 48 << 10
+	// environmentVariablesByteLimit is the backend's bound on the UTF-8 bytes of
+	// one environment's variable names and values combined.
+	environmentVariablesByteLimit = 256 << 10
+)
 
 var environmentSecretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // EnvironmentSnapshot is the Buildkite backend's fail-closed snapshot of one
 // GitHub deployment environment. The backend performs the GitHub reads with
 // its own credentials; no GitHub token or secret value reaches the importer.
+// Variable values are not secrets, but they are plaintext configuration:
+// callers must keep them out of logs and diagnostics.
 type EnvironmentSnapshot struct {
 	RequiredReviewers bool
 	PreventSelfReview bool
@@ -30,6 +50,10 @@ type EnvironmentSnapshot struct {
 	BranchPolicy      bool
 	UnsupportedRules  []string
 	SecretNames       []string
+	// Variables are the environment's variables by name, as GitHub spells
+	// them. GitHub variable names are case-insensitive and the backend
+	// rejects case-colliding names, so at most one key matches any lookup.
+	Variables map[string]string
 }
 
 // AgentEnvironmentResolverConfig carries the current Buildkite job's Agent
@@ -95,12 +119,16 @@ func (c *AgentEnvironmentResolver) ResolveEnvironments(ctx context.Context, repo
 		}
 		identities[identity] = true
 	}
+	// Variables are opt-in on the wire so older importers keep their smaller
+	// response bound; this importer always needs them to resolve vars.NAME.
 	body, err := json.Marshal(struct {
 		RepositoryURL    string   `json:"repo_url"`
 		EnvironmentNames []string `json:"environment_names"`
+		IncludeVariables bool     `json:"include_variables"`
 	}{
 		RepositoryURL:    "https://github.com/" + repository,
 		EnvironmentNames: names,
+		IncludeVariables: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode environment resolution request: %w", err)
@@ -117,7 +145,7 @@ func (c *AgentEnvironmentResolver) ResolveEnvironments(ctx context.Context, repo
 	defer func() { _ = response.Body.Close() }()
 	limit := environmentResolutionResponseLimit * len(names)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		errorBody, _ := io.ReadAll(io.LimitReader(response.Body, environmentResolutionResponseLimit))
+		errorBody, _ := io.ReadAll(io.LimitReader(response.Body, environmentResolutionErrorLimit))
 		return nil, environmentResolutionStatusError(response.StatusCode, response.Header.Get("Retry-After"), errorBody)
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
@@ -141,6 +169,10 @@ func (c *AgentEnvironmentResolver) ResolveEnvironments(ctx context.Context, repo
 			BranchPolicy      *bool     `json:"branch_policy"`
 			UnsupportedRules  *[]string `json:"unsupported_rules"`
 			SecretNames       *[]string `json:"secret_names"`
+			Variables         *[]struct {
+				Name  *string `json:"name"`
+				Value *string `json:"value"`
+			} `json:"variables"`
 		} `json:"environments"`
 	}
 	if err := decoder.Decode(&decoded); err != nil {
@@ -167,6 +199,7 @@ func (c *AgentEnvironmentResolver) ResolveEnvironments(ctx context.Context, repo
 			"branch_policy":       environment.BranchPolicy != nil,
 			"unsupported_rules":   environment.UnsupportedRules != nil,
 			"secret_names":        environment.SecretNames != nil,
+			"variables":           environment.Variables != nil,
 		} {
 			if !present {
 				return nil, fmt.Errorf("environment resolution response for %q omits %s", names[i], field)
@@ -185,6 +218,35 @@ func (c *AgentEnvironmentResolver) ResolveEnvironments(ctx context.Context, repo
 				return nil, fmt.Errorf("environment resolution response contains an invalid secret name")
 			}
 		}
+		// Variable errors name the environment and, at most, a variable name.
+		// Values never join an error message.
+		if len(*environment.Variables) > environmentVariableCountLimit {
+			return nil, fmt.Errorf("environment resolution response for %q contains %d variables; GitHub environments hold at most %d", names[i], len(*environment.Variables), environmentVariableCountLimit)
+		}
+		variables := make(map[string]string, len(*environment.Variables))
+		identities := make(map[string]string, len(*environment.Variables))
+		total := 0
+		for _, variable := range *environment.Variables {
+			if variable.Name == nil || variable.Value == nil {
+				return nil, fmt.Errorf("environment resolution response for %q omits a variable name or value", names[i])
+			}
+			if !environmentSecretNamePattern.MatchString(*variable.Name) {
+				return nil, fmt.Errorf("environment resolution response for %q contains an invalid variable name", names[i])
+			}
+			identity := strings.ToUpper(*variable.Name)
+			if previous, exists := identities[identity]; exists {
+				return nil, fmt.Errorf("environment resolution response for %q repeats variable %q as %q; GitHub variable names are case-insensitive", names[i], previous, *variable.Name)
+			}
+			identities[identity] = *variable.Name
+			if len(*variable.Value) > environmentVariableValueLimit {
+				return nil, fmt.Errorf("environment %q variable %q exceeds GitHub's %d-byte value limit", names[i], *variable.Name, environmentVariableValueLimit)
+			}
+			total += len(*variable.Name) + len(*variable.Value)
+			variables[*variable.Name] = *variable.Value
+		}
+		if total > environmentVariablesByteLimit {
+			return nil, fmt.Errorf("environment %q variables exceed %d bytes; remove or shrink environment variables", names[i], environmentVariablesByteLimit)
+		}
 		snapshot := EnvironmentSnapshot{
 			RequiredReviewers: *environment.RequiredReviewers,
 			PreventSelfReview: *environment.PreventSelfReview,
@@ -192,6 +254,7 @@ func (c *AgentEnvironmentResolver) ResolveEnvironments(ctx context.Context, repo
 			BranchPolicy:      *environment.BranchPolicy,
 			UnsupportedRules:  append([]string(nil), *environment.UnsupportedRules...),
 			SecretNames:       append([]string(nil), *environment.SecretNames...),
+			Variables:         variables,
 		}
 		sort.Strings(snapshot.UnsupportedRules)
 		sort.Strings(snapshot.SecretNames)

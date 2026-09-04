@@ -192,9 +192,12 @@ non-dispatch event, declared dispatch inputs use their typed zero values rather
 than dispatch-only defaults. A skipped workflow does not synthesize dispatch
 inputs.
 
-GitHub also documents `vars` in its context-availability reference. The
-production importer has no authenticated GitHub variable snapshot, so `vars`
-fails with a source-located diagnostic instead of resolving as empty.
+GitHub also documents `vars` in its context-availability reference. Only
+[environment variables](#deployment-environments) have a source. Repository
+and organization variables are not read, so a `vars` reference outside a
+declared environment's variables evaluates to an empty string at runtime, and
+compile-time positions such as `runs-on`, `strategy`, `concurrency`, container
+images, and reusable-workflow inputs have no `vars` source at all.
 
 Buildkite controls when a build starts. The trigger declaration controls whether and under which condition the workflow group participates in that existing build:
 
@@ -326,16 +329,16 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Local `./.github/workflows/...` paths.
 - Literal public references to a `.yml` or `.yaml` file directly under `owner/repository/.github/workflows/`.
 - `boolean`, `number`, and `string` inputs.
-- Static input values. Caller values may use graph-time `github`, `vars`, matrix, and parent reusable-workflow inputs with the supported operators and pure functions.
+- Static input values. Caller values may use graph-time `github`, matrix, and parent reusable-workflow inputs with the supported operators and pure functions.
 - String inputs passed as exactly `${{ needs.<job>.outputs.<name> }}`. The call must list the job in `needs`. Buildkite resolves the verified output before each flattened callee job runs.
-- Literal defaults and expression defaults over graph-time `github` and `vars` values.
+- Literal defaults and expression defaults over graph-time `github` values.
 - Nested calls up to four levels.
 - `secrets: inherit` for repository-local calls. Each nested edge must repeat it.
 - Explicit repository-local mappings from a declared callee alias to one direct `${{ secrets.NAME }}` or `${{ secrets['NAME'] }}` caller reference.
 - Required and optional `on.workflow_call.secrets` declarations.
 - Caller-visible aggregate results.
 - Outputs mapped directly from `jobs.<job>.outputs.<name>`.
-- Call-level `if` over caller `github`, `vars`, `inputs`, direct `needs`, and status functions.
+- Call-level `if` over caller `github`, `inputs`, direct `needs`, and status functions.
 - Workflow-level concurrency in local and public called workflows. Groups may use the called workflow's static inputs. Each static call-matrix instance gets its own workflow gate.
 
 **❌ Unsupported:**
@@ -454,7 +457,7 @@ defaults:
 
 ### Concurrency
 
-**🟡 Supported subset with different queue behavior.** A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use `vars`, supported `github` fields, static reusable-workflow inputs, and concrete matrix values at job level. Core operators, `fromJSON`, and the case-insensitive string functions `startsWith`, `contains`, and `endsWith` are supported when the whole expression resolves during compilation. Runtime `needs` and `strategy` values remain unsupported.
+**🟡 Supported subset with different queue behavior.** A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use supported `github` fields, static reusable-workflow inputs, and concrete matrix values at job level. Core operators, `fromJSON`, and the case-insensitive string functions `startsWith`, `contains`, and `endsWith` are supported when the whole expression resolves during compilation. Runtime `needs` and `strategy` values remain unsupported.
 
 A workflow can set a group and cancellation expression while a job uses a matrix-derived group:
 
@@ -518,7 +521,7 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 
 | Key | Status | Behavior |
 | --- | --- | --- |
-| `name` | ✅ Supported | Labels may use static `github`, `vars`, reusable-workflow `inputs`, and matrix values. |
+| `name` | ✅ Supported | Labels may use static `github`, reusable-workflow `inputs`, and matrix values. |
 | `needs` | ✅ Supported | Accepts a string or list of static job IDs. Matrix fan-out and fan-in are automatic. |
 | `runs-on` | 🟡 Supported subset | Explicit mappings are authoritative. The Agent API returns a complete target for every other selector and can return a fallback warning annotation. The local preset accepts `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04`, and `macos-latest`. Labels are case-insensitive. Static expressions may resolve to an accepted label or label list. |
 | `if` | 🟡 Supported subset | Runs before the job starts. See [Conditions](#conditions). |
@@ -611,10 +614,10 @@ time. Inside a Buildkite job, `upload` and `compile` resolve each declared
 environment automatically through the job-scoped Agent API
 (`github-actions/environments`; rollout status in
 [docs/plans/environment-resolution-backend.md](plans/environment-resolution-backend.md)).
-The Buildkite backend reads the environment's protection rules and secret
-names from GitHub with its own credentials, restricted to the pipeline's
-configured repository, and returns only that snapshot: no GitHub token and no
-secret value ever reaches the importer. This is the only environment access
+The Buildkite backend reads the environment's protection rules, secret
+names, and variables from GitHub with its own credentials, restricted to the
+pipeline's configured repository, and returns only that snapshot: no GitHub
+token and no secret value ever reaches the importer. This is the only environment access
 path; there is no GitHub token option. Resolution is GitHub.com-only, so
 GitHub Enterprise Server repositories cannot declare environments. Any
 resolution failure fails the compile instead of degrading to an unprotected
@@ -633,7 +636,7 @@ that declare environments fail to compile with an error naming the job.
 | Literal `environment` name, with or without `url` | ✅ Supported on top-level workflow jobs. Expression names and reusable-workflow jobs are rejected. |
 | Required reviewers | 🟡 One Buildkite block step per workflow and environment gates the affected jobs. Any user who can unblock the pipeline can approve; GitHub reviewer lists, `prevent_self_review`, and administrator bypass are not enforced. |
 | Environment secrets | 🟡 Referenced secret names defined in the environment resolve to the Buildkite secret `<ENVIRONMENT>_<NAME>`. Other names resolve unchanged. Values stay in Buildkite Secrets; only names are read from GitHub. |
-| Environment variables | ❌ Unsupported. GitHub exposes them only as `vars.<NAME>` expression values, never as process environment variables, so `${{ vars.X }}` fails at compile time like every other `vars` reference. The snapshot does not read them. |
+| Environment variables | 🟡 `${{ vars.NAME }}` resolves in runner-evaluated fields of jobs that declare the environment. Job `if` and compile-time fields never see environment variables, and other names evaluate as empty. See below. |
 | Wait timers | ❌ Rejected at compile time. |
 | Deployment branch policies | ❌ Rejected at compile time. |
 | Custom deployment protection rules | ❌ Rejected at compile time. |
@@ -649,6 +652,44 @@ Generated keys must be storable in Buildkite Secrets: compilation fails when a
 key would exceed 255 characters or begin with `BK` or `BUILDKITE`, so rename
 such environments or secrets.
 
+Environment variables follow GitHub's scoping. Each job's plan carries its
+declared environment's variables as `environment_vars`, separate from the
+`repository_vars` and `organization_vars` scopes, which stay empty because
+repository and organization variables are not read. The runtime builds the
+`vars` context per position the way GitHub does:
+
+| Position | `vars` context |
+| --- | --- |
+| `jobs.<id>.if` and reusable-workflow call `if` | Repository over organization variables. GitHub evaluates these before the job's environment applies, so environment variables are never visible here and such references currently evaluate as empty. Check environment variables in a step `if`. |
+| Job `env`, `defaults.run`, `outputs`, service credentials, every step field, and action input defaults | Environment over repository over organization variables. |
+| Compile-time fields (`runs-on`, `strategy`, `concurrency`, container images, `environment` names, reusable-workflow inputs) | Repository over organization variables; currently no source, so a reference fails to compile. See [Compile-time expressions](#compile-time-expressions). |
+
+Names match case-insensitively, and a higher scope replaces a lower scope's
+name spelled differently. A name no scope defines evaluates to an empty
+string, as on GitHub; it is not a compile error. Dynamic access such as
+`vars[matrix.name]`, `vars.*`, and `toJSON(vars)` reads the same per-position
+context. Matrix instances share their job's environment variables. Jobs
+without an environment, including every reusable-workflow job, see no
+variables. `GITHUB_TOKEN` and secret authority planning never resolves `vars`:
+a step input such as `${{ vars.ENABLED == 'yes' && github.token || '' }}`
+requests the token whatever the variable's value, and fails under
+`permissions: {}` as it does without variables.
+
+```yaml
+deploy:
+  runs-on: ubuntu-latest
+  environment: production
+  env:
+    AWS_REGION: ${{ vars.AWS_REGION }}
+  steps:
+    - if: vars.TIER == 'gold'
+      run: echo "$AWS_REGION"
+```
+
+Values are plain configuration, not secrets: they are stored in the build's
+job plan artifacts and are visible to anyone who can read build artifacts.
+See [Environment variables](security.md#environment-variables) in the security guide.
+
 The approval gate is a block step with `blocked_state: running`, so ungated
 jobs keep running while approval is pending. The gate appears whenever the
 workflow compiles, even if the gated job's own condition would skip it. Matrix
@@ -663,7 +704,7 @@ claim.
 
 | Key | Status | Behavior |
 | --- | --- | --- |
-| `matrix` | 🟡 Supported subset | Literal rows. Authored values and expression-valued definitions can use compile-time `github`, `event`, `vars`, reusable-workflow `inputs`, and `fromJSON` values. |
+| `matrix` | 🟡 Supported subset | Literal rows. Authored values and expression-valued definitions can use compile-time `github`, `event`, reusable-workflow `inputs`, and `fromJSON` values. |
 | `include`, `exclude` | 🟡 Supported subset | Literal combinations or expressions that resolve to arrays of objects during compilation. |
 | `max-parallel` | 🟡 Supported subset | Literal value on ordinary job matrices. Reusable-workflow call matrices with more than one instance are rejected because flattening cannot preserve invocation-level parallelism. |
 | `fail-fast` | ➖ Accepted, no effect | A failed matrix entry does not cancel its siblings. |
@@ -686,8 +727,8 @@ Whole matrices, dimensions, and `include` or `exclude` lists can use static JSON
 ```yaml
 strategy:
   matrix:
-    os: ${{ fromJSON(vars.OPERATING_SYSTEMS) }}
-    include: ${{ fromJSON(inputs.EXTRA_JOBS) }}
+    os: ${{ fromJSON(inputs.OPERATING_SYSTEMS) }}
+    include: ${{ fromJSON(github.event.inputs.extra_jobs) }}
     exclude: ${{ fromJSON(github.event.matrix_exclusions) }}
 ```
 
@@ -727,8 +768,8 @@ services:
 
 Services support `image`, `credentials`, `env`, `ports`, `volumes`, `options`, `command`, and `entrypoint`.
 
-- Job container images can use compile-time `github`, `inputs`, `vars`, `strategy`, and `matrix` values. The complete image must resolve to a non-empty string and a valid image reference during compilation. Secrets, `needs`, step outputs, and whole or dynamic contexts are unsupported.
-- Service fields can use compile-time `github`, `inputs`, `vars`, `strategy`, and `matrix` values or runtime `needs` outputs. An empty evaluated image skips the service.
+- Job container images can use compile-time `github`, `inputs`, `strategy`, and `matrix` values. The complete image must resolve to a non-empty string and a valid image reference during compilation. Secrets, `needs`, step outputs, and whole or dynamic contexts are unsupported.
+- Service fields can use compile-time `github`, `inputs`, `strategy`, and `matrix` values or runtime `needs` outputs. An empty evaluated image skips the service.
 - A complete non-credential service map can use `${{ fromJSON(needs.<job>.outputs.<name>) }}`. Declare credentials statically so the compiler can prove their secret authority.
 - Credentials accept direct values and `github`, `vars`, `secrets`, or `env` expressions. Passwords pass to `docker login` through standard input. Authentication uses a private per-job Docker configuration and never reads ambient Docker credentials.
 - Docker options pass through except `--network` and its `--net` aliases, which GitHub Actions does not support. Options can grant privileges, mount host paths, publish ports, and change resource settings.
@@ -900,7 +941,8 @@ Conditions support computed object indexes, numeric array indexes, whole
 | `runner.os`, `runner.arch` | ✅ Yes | ✅ Yes |
 | `runner.temp` | ❌ No | ✅ Yes |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
-| `vars.<name>`, `matrix.<name>` | ✅ Yes | ✅ Yes |
+| `matrix.<name>` | ✅ Yes | ✅ Yes |
+| `vars.<name>` | 🟡 Evaluates as empty: repository and organization variables are not read | ✅ Yes, for [environment variables](#deployment-environments) |
 | `inputs.<name>` and computed input indexes | ✅ Yes | ✅ Yes |
 | `steps.<id>.outcome`, `steps.<id>.conclusion`, `steps.<id>.outputs.<name>` | ❌ No | ✅ Yes |
 | `env.<name>` | ❌ No | ✅ Yes |
@@ -926,10 +968,10 @@ These step fields support the operators and pure functions listed above:
 - explicit `shell` and `working-directory`
 - `continue-on-error` and `timeout-minutes`
 
-They support computed indexes and projections over available `matrix`, `vars`,
-`inputs`, `env`, and `runner` values. Computed, whole, and projected `steps` or
-`needs` access is unsupported. Reading an unavailable background output is an
-error.
+They support computed indexes and projections over available `matrix`,
+`inputs`, `env`, `vars`, and `runner` values. Computed, whole, and projected
+`steps` or `needs` access is unsupported. Reading an unavailable background
+output is an error.
 
 Before creating a job plan, the compiler resolves scalar `github.event.*`
 values and event-dependent parts of otherwise runtime expressions.
@@ -1036,8 +1078,8 @@ mode. This runtime deliberately does neither.
 ### Compile-time expressions
 
 Matrices, runner labels, names, concurrency groups, retained runtime templates,
-and event-backed conditions can use statically known `github`, `event`, `vars`,
-and matrix values.
+and event-backed conditions can use statically known `github`, `event`, and
+matrix values.
 
 Compile-time `github` fields are `actor`, `base_ref`, `event_name`, `head_ref`,
 `ref`, `ref_name`, `ref_type`, `repository`, `repository_owner`, `sha`, and

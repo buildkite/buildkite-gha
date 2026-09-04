@@ -17,8 +17,10 @@ stable 400 message that the client surfaces unchanged. The
 backend performs the GitHub reads with its own credentials and
 answers with a non-secret JSON snapshot — required reviewers present,
 `prevent_self_review`, wait timer minutes, branch policy present, unsupported
-rule descriptions, and secret names. No GitHub token and no secret value
-reaches the importer. This client consumes the endpoint automatically in
+rule descriptions, secret names, and, when the request sets
+`include_variables`, the environment's variables with plaintext values
+([buildkite/buildkite#33692](https://github.com/buildkite/buildkite/pull/33692)).
+No GitHub token and no secret value reaches the importer. This client consumes the endpoint automatically in
 `upload` and in `compile` when it runs inside a Buildkite job. It is the only
 environment access path: there is no GitHub token option, so environments are
 unsupported outside a Buildkite job and on GitHub Enterprise Server.
@@ -32,9 +34,14 @@ output to exactly the fields the compiler consumes.
 
 Remaining before removing this plan:
 
-- Backend endpoint merged and rolled out, including adding Actions: read and
-  Environments: read to the code-access GitHub App and installation
-  administrator approvals.
+- Backend endpoint and its `include_variables` extension merged and rolled
+  out, including adding Actions: read and Environments: read to the
+  code-access GitHub App and installation administrator approvals. Variable
+  listing is covered by Environments: read; repository and organization
+  variables would need Variables: read, which is not requested. The job plan
+  already carries separate `organization_vars` and `repository_vars` scopes
+  (empty today) so that a future source can populate `jobs.<id>.if` and
+  compile-time `vars` without a plan format change.
 - A hosted end-to-end proof of an `upload` resolving an environment and gating
   a deploy job.
 
@@ -102,7 +109,10 @@ from the job's Agent connection. Each workflow's declared environments
 resolve together in one batched request — results, including failures, are
 memoized case-insensitively, so an upload of many workflows sharing
 environments typically consumes one request — and every resolution failure
-fails the compile, never degrading to an unprotected deployment. When the
+fails the compile, never degrading to an unprotected deployment. The client
+always requests variables and requires the `variables` field, so a backend
+without the extension fails the compile with a decode error rather than
+letting `vars` references resolve as empty. When the
 backend rollout completes and the hosted proof passes, move lasting facts into
 [deployment environments](../compatibility.md#deployment-environments) and
 remove this plan.

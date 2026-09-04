@@ -25,13 +25,23 @@ const schema = "buildkite-gha/compiler-ir/v1"
 
 // IR is the deterministic, actionlint-independent workflow compiler output.
 type IR struct {
-	Schema    string            `json:"schema"`
-	Workflow  WorkflowSource    `json:"workflow"`
-	Warnings  []Warning         `json:"warnings,omitempty"`
-	Event     Event             `json:"event"`
-	Vars      map[string]string `json:"vars,omitempty"`
-	Execution ExecutionBoundary `json:"execution"`
-	Jobs      []JobInstance     `json:"jobs"`
+	Schema   string         `json:"schema"`
+	Workflow WorkflowSource `json:"workflow"`
+	Warnings []Warning      `json:"warnings,omitempty"`
+	Event    Event          `json:"event"`
+	// OrganizationVars and RepositoryVars are the snapshots of
+	// Options.Vars. VarsBeforeEnvironment merges them for compile-time fields.
+	OrganizationVars map[string]string `json:"organization_vars,omitempty"`
+	RepositoryVars   map[string]string `json:"repository_vars,omitempty"`
+	Execution        ExecutionBoundary `json:"execution"`
+	Jobs             []JobInstance     `json:"jobs"`
+}
+
+// VarsBeforeEnvironment is the vars context GitHub evaluates before any job's
+// environment applies: compile-time fields such as runs-on, strategy, and
+// concurrency, plus jobs.<id>.if and reusable-workflow call guards.
+func (ir IR) VarsBeforeEnvironment() map[string]string {
+	return plan.MergeVars(ir.OrganizationVars, ir.RepositoryVars)
 }
 
 // WorkflowConcurrencyGate is one statically resolved called-workflow
@@ -115,6 +125,7 @@ type JobInstance struct {
 	RepositoryRoot          string                    `json:"-"`
 	Source                  workflow.Span             `json:"source"`
 	environmentSecrets      []string
+	environmentVariables    map[string]string
 	secretAuthority         secretAuthority
 	tokenPolicyNarrowed     bool
 	jobPermissionsIgnored   bool
@@ -261,7 +272,7 @@ func ValidateEventWithOptionsContext(ctx context.Context, path string, source, e
 		}, errors.Join(parseErr, eventErr, optionsErr)
 	}
 	event.Trust = options.EventTrust
-	context := compileContext(event, options.Vars.snapshot(), path, parsed.Name)
+	context := compileContext(event, plan.MergeVars(options.Vars.Organization, options.Vars.Repository), path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	_, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
@@ -321,8 +332,8 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 		return IR{}, processingFinding(StageEventValidation, CodeEventInvalid, "environment", err)
 	}
 	event.Trust = options.EventTrust
-	vars := options.Vars.snapshot()
-	context := compileContext(event, vars, path, parsed.Name)
+	organizationVars, repositoryVars := cloneMap(options.Vars.Organization), cloneMap(options.Vars.Repository)
+	context := compileContext(event, plan.MergeVars(organizationVars, repositoryVars), path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	runName, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
@@ -340,9 +351,10 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 			Path: path, Name: parsed.Name, RunName: runName, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
 			WorkflowTokenPolicyFilename: workflowTokenPolicyFilename, WorkflowTokenPermissions: workflowTokenPermissions, WorkflowTokenPolicyDiagnostic: workflowTokenPolicyDiagnostic,
 		},
-		Event:    event,
-		Vars:     vars,
-		Warnings: append(compilerWarnings(parsed, cancelInProgress), expanded.warnings...),
+		Event:            event,
+		OrganizationVars: organizationVars,
+		RepositoryVars:   repositoryVars,
+		Warnings:         append(compilerWarnings(parsed, cancelInProgress), expanded.warnings...),
 		Execution: ExecutionBoundary{
 			Supported: true,
 			Reason:    "run-job rejects unsupported shells and local actions",
@@ -748,10 +760,15 @@ func resolveCompileTimeConditions(job workflow.Job, context expression.CompileCo
 	if resolved, ok := resolveCompileTimeCondition(job.If, expression.ProfileCompileJobCondition, context); ok {
 		job.If = resolved
 	}
+	// Step conditions run after the job's environment applies, so their vars
+	// context is not known here. Keep vars residual so the runtime evaluates
+	// them with environment variables laid over the pre-environment scopes.
+	stepContext := context
+	stepContext.Vars = nil
 	job.Steps = append([]workflow.Step(nil), job.Steps...)
 	for i := range job.Steps {
 		step := &job.Steps[i]
-		if resolved, ok := resolveCompileTimeCondition(step.If, expression.ProfileCompileStepCondition, context); ok {
+		if resolved, ok := resolveCompileTimeCondition(step.If, expression.ProfileCompileStepCondition, stepContext); ok {
 			step.If = resolved
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -21,12 +22,12 @@ func TestAgentEnvironmentResolverResolvesEnvironmentBatch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(body) != `{"repo_url":"https://github.com/buildkite/buildkite-gha","environment_names":["production","staging"]}` {
+		if string(body) != `{"repo_url":"https://github.com/buildkite/buildkite-gha","environment_names":["production","staging"],"include_variables":true}` {
 			t.Errorf("request body = %s", body)
 		}
 		_, _ = io.WriteString(w, `{"environments":[`+
-			`{"name":"production","required_reviewers":true,"prevent_self_review":true,"wait_timer_minutes":15,"branch_policy":false,"unsupported_rules":["custom deployment protection rule \"datadog\""],"secret_names":["DEPLOY_KEY","API_KEY"]},`+
-			`{"name":"staging","required_reviewers":false,"prevent_self_review":false,"wait_timer_minutes":0,"branch_policy":false,"unsupported_rules":[],"secret_names":[]}]}`)
+			`{"name":"production","required_reviewers":true,"prevent_self_review":true,"wait_timer_minutes":15,"branch_policy":false,"unsupported_rules":["custom deployment protection rule \"datadog\""],"secret_names":["DEPLOY_KEY","API_KEY"],"variables":[{"name":"AWS_REGION","value":"eu-west-1"},{"name":"cert_pem","value":"-----BEGIN-----\nline\n"},{"name":"EMPTY","value":""}]},`+
+			`{"name":"staging","required_reviewers":false,"prevent_self_review":false,"wait_timer_minutes":0,"branch_policy":false,"unsupported_rules":[],"secret_names":[],"variables":[]}]}`)
 	}))
 	defer server.Close()
 	resolver, err := NewAgentEnvironmentResolver(AgentEnvironmentResolverConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret", ClientVersion: "1.2.3"})
@@ -45,8 +46,9 @@ func TestAgentEnvironmentResolverResolvesEnvironmentBatch(t *testing.T) {
 			BranchPolicy:      false,
 			UnsupportedRules:  []string{`custom deployment protection rule "datadog"`},
 			SecretNames:       []string{"API_KEY", "DEPLOY_KEY"},
+			Variables:         map[string]string{"AWS_REGION": "eu-west-1", "cert_pem": "-----BEGIN-----\nline\n", "EMPTY": ""},
 		},
-		{},
+		{Variables: map[string]string{}},
 	}
 	if !reflect.DeepEqual(snapshots, want) {
 		t.Fatalf("ResolveEnvironments() = %#v, want %#v", snapshots, want)
@@ -174,6 +176,18 @@ func TestAgentEnvironmentResolverRejectsUntrustedResponses(t *testing.T) {
 		{"missing unsupported_rules", `{"environments":[` + environmentWithout("production", "unsupported_rules") + `]}`, `omits unsupported_rules`},
 		{"missing secret_names", `{"environments":[` + environmentWithout("production", "secret_names") + `]}`, `omits secret_names`},
 		{"null secret_names", `{"environments":[` + environmentWith("production", `"secret_names":null`) + `]}`, `omits secret_names`},
+		// Variables were requested, so an absent list must not decode as an
+		// environment without variables: vars.NAME would fail closed with a
+		// misleading "not defined" diagnostic instead of a contract error.
+		{"missing variables", `{"environments":[` + environmentWithout("production", "variables") + `]}`, `omits variables`},
+		{"null variables", `{"environments":[` + environmentWith("production", `"variables":null`) + `]}`, `omits variables`},
+		{"variable without value", `{"environments":[` + environmentWith("production", `"variables":[{"name":"AWS_REGION"}]`) + `]}`, `omits a variable name or value`},
+		{"variable without name", `{"environments":[` + environmentWith("production", `"variables":[{"value":"eu-west-1"}]`) + `]}`, `omits a variable name or value`},
+		{"invalid variable name", `{"environments":[` + environmentWith("production", `"variables":[{"name":"not a name","value":"x"}]`) + `]}`, `invalid variable name`},
+		{"case-colliding variable names", `{"environments":[` + environmentWith("production", `"variables":[{"name":"Region","value":"a"},{"name":"REGION","value":"b"}]`) + `]}`, `repeats variable "Region" as "REGION"`},
+		{"too many variables", `{"environments":[` + environmentWith("production", `"variables":[`+repeatedVariables(environmentVariableCountLimit+1, 1)+`]`) + `]}`, `contains 101 variables`},
+		{"oversized variable value", `{"environments":[` + environmentWith("production", `"variables":[{"name":"BIG","value":"`+strings.Repeat("x", environmentVariableValueLimit+1)+`"}]`) + `]}`, `variable "BIG" exceeds`},
+		{"oversized variables", `{"environments":[` + environmentWith("production", `"variables":[`+repeatedVariables(6, environmentVariableValueLimit)+`]`) + `]}`, `variables exceed 262144 bytes`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -227,6 +241,35 @@ func TestAgentEnvironmentResolverScalesResponseLimitWithBatchSize(t *testing.T) 
 	}
 }
 
+// TestAgentEnvironmentResolverDecodesMaximalEscapedVariables proves the
+// response budget holds the backend's largest permitted variable payload even
+// when JSON escaping expands every value byte to six.
+func TestAgentEnvironmentResolverDecodesMaximalEscapedVariables(t *testing.T) {
+	variables := make([]string, 0, environmentVariableCountLimit)
+	for i := range environmentVariableCountLimit {
+		variables = append(variables, `{"name":"V`+strconv.Itoa(i)+`","value":"`+strings.Repeat(`\u0001`, 2560)+`"}`)
+	}
+	body := `{"environments":[` + environmentWith("production", `"variables":[`+strings.Join(variables, ",")+`]`) + `]}`
+	if len(body) <= 6*256000 {
+		t.Fatalf("test body is %d bytes; want every value byte escaped to six", len(body))
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, body)
+	}))
+	defer server.Close()
+	resolver, err := NewAgentEnvironmentResolver(AgentEnvironmentResolverConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := resolver.ResolveEnvironments(t.Context(), "buildkite/buildkite-gha", []string{"production"})
+	if err != nil {
+		t.Fatalf("ResolveEnvironments() = %v", err)
+	}
+	if len(snapshots[0].Variables) != environmentVariableCountLimit || snapshots[0].Variables["V0"] != strings.Repeat("\x01", 2560) {
+		t.Fatalf("variables = %d entries", len(snapshots[0].Variables))
+	}
+}
+
 // completeEnvironmentFields are the snapshot fields the backend contract
 // requires on every environment object, with their default JSON values.
 var completeEnvironmentFields = []string{
@@ -236,6 +279,17 @@ var completeEnvironmentFields = []string{
 	`"branch_policy":false`,
 	`"unsupported_rules":[]`,
 	`"secret_names":[]`,
+	`"variables":[]`,
+}
+
+// repeatedVariables returns count distinct variable objects whose values are
+// size bytes each.
+func repeatedVariables(count, size int) string {
+	variables := make([]string, 0, count)
+	for i := range count {
+		variables = append(variables, `{"name":"V`+strconv.Itoa(i)+`","value":"`+strings.Repeat("x", size)+`"}`)
+	}
+	return strings.Join(variables, ",")
 }
 
 // completeEnvironment returns one contract-complete environment object.

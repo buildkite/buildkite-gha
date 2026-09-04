@@ -165,12 +165,13 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		return jobResult, fmt.Errorf("job has prerequisite sources but no hydrated prerequisite results")
 	}
 	processor := newCommandOutputProcessor(r.stdout(), r.stderr())
+	vars := job.Vars()
 	eval := expression.Context{
 		WorkflowInputs: job.Inputs,
 		Matrix:         job.Matrix,
 		Steps:          make(map[string]expression.StepStatus, len(job.Steps)),
 		Needs:          needStatuses(job.Needs),
-		Vars:           job.Vars,
+		Vars:           vars,
 		GitHub:         githubContext(job),
 		JobStatus:      "success",
 		Runner:         runnerContext,
@@ -189,7 +190,9 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			return jobResult, fmt.Errorf("prerequisite %q has invalid result %q", name, need.Result)
 		}
 	}
-	jobCondition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, Matrix: job.Matrix, Vars: job.Vars, GitHub: eval.GitHub, Runner: eval.Runner}
+	// GitHub evaluates jobs.<id>.if before the job's environment applies, so
+	// its vars context excludes environment variables.
+	jobCondition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, Matrix: job.Matrix, Vars: job.VarsBeforeEnvironment(), GitHub: eval.GitHub, Runner: eval.Runner}
 	for _, need := range job.Needs {
 		jobCondition.Failure = jobCondition.Failure || need.Result == "failure"
 		jobCondition.Cancelled = jobCondition.Cancelled || need.Result == "cancelled"
@@ -203,11 +206,12 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		jobResult.Conclusion = "skipped"
 		return jobResult, nil
 	}
+	// Reachability never resolves vars: jobs.<id>.if and step conditions see
+	// different vars scopes, so unknown vars keep every step reachable.
 	reachability, err := executionprogram.WorkflowReachability(*job.Program, expression.AbstractValues{References: map[string]any{
 		"github.server_url": plan.EventServerURL(job.Event.Provider),
 		"inputs":            planningInputs,
 		"matrix":            job.Matrix,
-		"vars":              job.Vars,
 	}})
 	if err != nil {
 		return jobResult, fmt.Errorf("analyze workflow reachability: %w", err)
@@ -651,7 +655,7 @@ func (r *jobRun) runSteps(ctx, runCtx context.Context) (JobResult, error) {
 			continue
 		}
 		stepEval.Env = mergeStringMaps(stepEval.Env, stepEnv)
-		condition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, Steps: eval.Steps, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
+		condition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, Steps: eval.Steps, Env: stepEval.Env, Vars: eval.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
 		run, err := evaluateProgramTyped[bool](step.Execution.Condition, executionprogram.EvaluationContext{Expression: stepEval, Condition: condition})
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("condition: %w", err), stepEval)
@@ -843,7 +847,10 @@ func evaluateCallGuards(job plan.Job) (bool, error) {
 		if len(guard.NeedSources) != 0 && len(guard.Needs) == 0 {
 			return false, fmt.Errorf("evaluate reusable-workflow call guard %d: prerequisite results are missing", i+1)
 		}
-		condition := expression.ConditionContext{Inputs: mergeWorkflowInputs(guard.Inputs, guard.DeferredInputValues), Needs: needStatuses(guard.Needs), Vars: job.Vars, GitHub: github}
+		// Call guards are caller-evaluated like jobs.<id>.if, before the called
+		// job's environment applies, so their vars context excludes environment
+		// variables.
+		condition := expression.ConditionContext{Inputs: mergeWorkflowInputs(guard.Inputs, guard.DeferredInputValues), Needs: needStatuses(guard.Needs), Vars: job.VarsBeforeEnvironment(), GitHub: github}
 		for name, need := range guard.Needs {
 			if need.Result == "" {
 				return false, fmt.Errorf("evaluate reusable-workflow call guard %d: prerequisite result %q is missing", i+1, name)
