@@ -789,8 +789,8 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 		{name: "merge group webhook metadata", source: "webhook", githubEvent: "merge_group", webhook: []byte(`{"action":"checks_requested","merge_group":{"head_ref":"refs/heads/gh-readonly-queue/main/pr-1-deadbeef","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_ref":"refs/heads/main","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`), wantEvent: "merge_group", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "merge_group"`},
 		{name: "release webhook metadata", source: "webhook", githubEvent: "release", webhook: []byte(`{"action":"published","release":{"tag_name":"v1.2.3","draft":false,"prerelease":false}}`), wantEvent: "release", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "release"`},
 		{name: "issues webhook metadata", source: "webhook", githubEvent: "issues", webhook: []byte(`{"action":"typed","issue":{"number":1}}`), wantEvent: "issues", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "issues"`},
-		{name: "UI fallback", source: "ui", wantEvent: "workflow_dispatch", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "workflow_dispatch"`, wantFallback: `build.source == "ui"`},
-		{name: "API fallback", source: "api", wantEvent: "workflow_dispatch", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "workflow_dispatch"`, wantFallback: `build.source == "api"`},
+		{name: "UI fallback", source: "ui", wantEvent: "push", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "push"`, wantFallback: `build.source != "schedule"`},
+		{name: "API fallback", source: "api", wantEvent: "push", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "push"`, wantFallback: `build.source != "schedule"`},
 		{name: "schedule fallback", source: "schedule", wantEvent: "schedule", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "schedule"`, wantFallback: `build.source == "schedule"`},
 		{name: "explicit event path precedence", source: "schedule", githubEvent: "pull_request", eventPath: eventPath, wantEvent: "push", wantCondition: "true"},
 	} {
@@ -1028,8 +1028,8 @@ func TestRunUploadAlignsBuildkiteFallbackWithEffectiveEvent(t *testing.T) {
 		{name: "trigger job push", source: "trigger_job", event: "push", workflow: "Push"},
 		{name: "trigger job pull request", source: "trigger_job", event: "pull_request", workflow: "Pull request", pullRequest: true},
 		{name: "rebuilt push", source: "ui", githubEvent: "push", event: "push", workflow: "Push"},
-		{name: "UI dispatch", source: "ui", event: "workflow_dispatch", workflow: "Dispatch"},
-		{name: "API dispatch", source: "api", event: "workflow_dispatch", workflow: "Dispatch"},
+		{name: "UI push", source: "ui", event: "push", workflow: "Push"},
+		{name: "API push", source: "api", event: "push", workflow: "Push"},
 		{name: "schedule", source: "schedule", event: "schedule", workflow: "Schedule"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1481,7 +1481,7 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 	}
 	wantAnnotationArgs := []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", skippedWorkflowsContext, "--style", "info"}
 	wantWorkflows := []skippedWorkflow{{label: wantLabel, key: pipeline.Steps[0].Key, reason: "This workflow is not triggered by a `push` event", events: []string{"pull_request"}}}
-	if annotation == nil || !slices.Equal(annotation.args, wantAnnotationArgs) || string(annotation.stdin) != skippedWorkflowsAnnotation("push", "", true, wantWorkflows, "https://buildkite.com/acme/widgets/builds/42") {
+	if annotation == nil || !slices.Equal(annotation.args, wantAnnotationArgs) || string(annotation.stdin) != skippedWorkflowsAnnotation("push", true, wantWorkflows, "https://buildkite.com/acme/widgets/builds/42") {
 		t.Fatalf("skipped workflow annotation = %#v", annotation)
 	}
 	for path := range runner.uploaded {
@@ -1522,12 +1522,11 @@ func TestRunUploadExplainsWhenWorkflowTriggerFiltersDoNotMatch(t *testing.T) {
 
 func TestSkippedWorkflowsAnnotation(t *testing.T) {
 	for _, test := range []struct {
-		name        string
-		event       string
-		buildSource string
-		allSkipped  bool
-		workflows   []skippedWorkflow
-		want        string
+		name       string
+		event      string
+		allSkipped bool
+		workflows  []skippedWorkflow
+		want       string
 	}{
 		{
 			name:      "singular",
@@ -1550,23 +1549,20 @@ func TestSkippedWorkflowsAnnotation(t *testing.T) {
 				"* [:github: Release \\[production\\]](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-release%3Fproduction&open=false) — This workflow is triggered on: <code>release</code>\n",
 		},
 		{
-			name:        "manual build with no matching workflows",
-			event:       "workflow_dispatch",
-			buildSource: "ui",
-			allSkipped:  true,
+			name:       "UI build with no matching workflows",
+			event:      "push",
+			allSkipped: true,
 			workflows: []skippedWorkflow{
-				{label: "CI", key: "gha-workflow-ci", reason: "This workflow is not triggered by a `workflow_dispatch` event", events: []string{"push", "pull_request"}},
+				{label: "Deploy", key: "gha-workflow-deploy", reason: "This workflow is not triggered by a `push` event", events: []string{"workflow_dispatch"}},
 			},
 			want: "#### 1 workflow was skipped, so this build ran nothing\n\n" +
-				"You started this build from the Buildkite UI, which is a manual run. In GitHub Actions terms, this maps to a <code>workflow_dispatch</code> event, and these workflows don't accept it:\n\n" +
-				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) — This workflow is triggered on: <code>push</code>, <code>pull_request</code>\n\n" +
-				"Push a commit or open a pull request to run workflows configured for those events. Or add <code>workflow_dispatch:</code> to the <code>on:</code> block to make a workflow runnable from here. [Learn about event mapping →](https://github.com/buildkite/buildkite-gha/blob/main/docs/cli.md#select-the-effective-event)\n",
+				"The current <code>push</code> event does not match the following workflows:\n\n" +
+				"* [:github: Deploy](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-deploy&open=false) — This workflow is triggered on: <code>workflow_dispatch</code>\n",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			body := skippedWorkflowsAnnotation(
 				test.event,
-				test.buildSource,
 				test.allSkipped,
 				test.workflows,
 				"https://buildkite.com/acme/widgets/builds/42",

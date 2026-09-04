@@ -372,11 +372,11 @@ func LiveEventPredicate(event string) string {
 	fallbackEvent += " || (" + unsupportedEvent + ")))"
 	switch event {
 	case "push":
-		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source != "ui" && build.source != "api" && build.source != "schedule"))`
+		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source != "schedule"))`
 	case "pull_request":
 		return "(" + predicate + " || (" + fallbackEvent + " && build.pull_request.id != null))"
 	case "workflow_dispatch":
-		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && (build.source == "ui" || build.source == "api")))`
+		return predicate
 	case "schedule":
 		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source == "schedule"))`
 	case "merge_group", "release", "issues":

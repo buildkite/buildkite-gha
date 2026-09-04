@@ -145,14 +145,15 @@ func TestBuildkiteEventSourceMappings(t *testing.T) {
 	}{
 		{name: "branch without preferred workflow ref", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main"}},
 		{name: "preferred workflow branch ref", event: "push", ref: "refs/heads/triggered", env: map[string]string{"BUILDKITE_BRANCH": "built", githubEventNameEnvironment: "push", githubWorkflowRefEnvironment: "acme/widgets/.github/workflows/ci.yml@refs/heads/triggered"}},
-		{name: "UI", event: "workflow_dispatch", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "ui"}},
-		{name: "API", event: "workflow_dispatch", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "api"}},
+		{name: "UI", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "ui"}},
+		{name: "API", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "api"}},
 		{name: "schedule", event: "schedule", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "schedule"}},
 		{name: "empty source fallback", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": ""}},
 		{name: "unknown source fallback", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "unknown"}},
 		{name: "webhook source fallback", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "webhook"}},
 		{name: "trigger job source fallback", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "trigger_job"}},
 		{name: "rebuilt push preserves GitHub event", event: "push", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "ui", "BUILDKITE_GITHUB_EVENT": "push"}},
+		{name: "authoritative dispatch overrides UI fallback", event: "workflow_dispatch", ref: "refs/heads/main", env: map[string]string{"BUILDKITE_BRANCH": "main", "BUILDKITE_SOURCE": "ui", "BUILDKITE_GITHUB_EVENT": "workflow_dispatch"}},
 		{name: "tag without preferred workflow ref", event: "push", ref: "refs/tags/v1.2.3", env: map[string]string{"BUILDKITE_TAG": "v1.2.3"}},
 		{name: "preferred workflow tag ref", event: "push", ref: "refs/tags/v2.0.0", env: map[string]string{"BUILDKITE_TAG": "built-tag", githubEventNameEnvironment: "push", githubWorkflowRefEnvironment: "acme/widgets/.github/workflows/release.yml@refs/tags/v2.0.0"}},
 		{name: "pull request without preferred workflow ref", event: "pull_request", ref: "refs/pull/42/head", env: map[string]string{"BUILDKITE_PULL_REQUEST": "42", "BUILDKITE_BRANCH": "contributor:feature", "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "main", "BUILDKITE_PULL_REQUEST_REPO": "https://github.com/contributor/widgets.git"}, check: func(t *testing.T, snapshot map[string]any) {
