@@ -309,8 +309,10 @@ pull requests. It does not call GitHub or use Buildkite `if_changed`.
 
 A local non-match is rejected because GitHub does not report whether its diff
 timed out and ran the workflow anyway. Unfiltered `closed` workflows remain
-supported. Filtered `closed` workflows are rejected when GitHub provides an
-actual merge, squash, or rebase commit instead of a synthetic merge.
+supported. Unfiltered Pipeline Trigger workflows use the server-selected head
+workflow and do not require synthetic merge provenance. Filtered `closed`
+workflows are rejected when GitHub provides an actual merge, squash, or rebase
+commit instead of a synthetic merge.
 
 An unsupported or inexact filter replaces only the affected workflow with a
 failing step. It never broadens when the workflow runs.
