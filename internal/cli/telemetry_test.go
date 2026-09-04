@@ -18,6 +18,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
@@ -188,7 +189,7 @@ func TestUnprovenActionRuntimeIgnoresNativeAdapters(t *testing.T) {
 	bundleWith := func(locks ...plan.ActionLock) compiler.Bundle {
 		return compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Actions: locks,
-			Steps:   []plan.Step{{Kind: "uses", Uses: "actions/checkout@v4"}},
+			Program: &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{{Kind: "uses", Invocation: &program.Invocation{Uses: program.Site{Source: "actions/checkout@v4"}}}}}},
 		}}}}
 	}
 	checkout := plan.ActionLock{Source: "github", Repository: "actions/checkout", Commit: actionintegration.CheckoutV7Commit}

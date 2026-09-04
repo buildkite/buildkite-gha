@@ -286,8 +286,9 @@ jobs:
 	if len(callee.Dependencies) != 1 || callee.Dependencies[0] != producer.Target.StepKey || len(callee.NeedSources["hash"]) != 1 || len(callee.NeedOutputs["hash"]) != 0 {
 		t.Fatalf("callee dependencies = %#v, needs = %#v / %#v", callee.Dependencies, callee.NeedSources, callee.NeedOutputs)
 	}
-	if _, exists := callee.Inputs["base64-subjects"]; exists || callee.Steps[0].Env["UNTRUSTED_SUBJECTS"] != "${{ inputs.base64-subjects }}" {
-		t.Fatalf("callee deferred input boundary = inputs %#v, step %#v", callee.Inputs, callee.Steps[0])
+	step := callee.Program.Job.Steps[0]
+	if _, exists := callee.Inputs["base64-subjects"]; exists || testBindingSources(step.Env)["UNTRUSTED_SUBJECTS"] != "${{ inputs.base64-subjects }}" {
+		t.Fatalf("callee deferred input boundary = inputs %#v, step %#v", callee.Inputs, step)
 	}
 	if callee.Workflow.Remote == nil || callee.Workflow.Remote.Repository != "slsa-framework/slsa-github-generator" || callee.Workflow.Remote.RequestedRef != "v2.1.0" {
 		t.Fatalf("remote provenance = %#v", callee.Workflow.Remote)

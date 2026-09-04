@@ -8,7 +8,6 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/expression"
-	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
 
@@ -46,7 +45,7 @@ type remotePreparationStatus struct {
 }
 
 type remotePreparationTimeout struct {
-	step     plan.Step
+	step     executionprogram.Step
 	eval     expression.Context
 	resolved bool
 	bounded  context.Context
@@ -55,11 +54,11 @@ type remotePreparationTimeout struct {
 
 func (t *remotePreparationTimeout) context(parent context.Context) (context.Context, error) {
 	if !t.resolved {
-		step, err := evaluateStepTimeout(t.step, t.eval)
+		timeoutMinutes, err := evaluateStepTimeout(t.step, t.eval)
 		if err != nil {
 			return nil, fmt.Errorf("controls: %w", err)
 		}
-		t.bounded, t.cancel = stepContext(parent, step.TimeoutMinutes)
+		t.bounded, t.cancel = stepContext(parent, timeoutMinutes)
 		t.resolved = true
 	}
 	return t.bounded, nil

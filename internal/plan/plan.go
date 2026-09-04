@@ -26,7 +26,6 @@ const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.j
 const MaxNeedProducers = 1024
 const MaxNeedOutputs = 64
 const MaxCallGuards = 4
-const maxStepTargets = 256
 const MaxEventPayloadBytes = 25 << 20
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -240,28 +239,6 @@ type Span struct {
 	End   Position `json:"end"`
 }
 
-type Step struct {
-	ID                        string            `json:"id"`
-	Name                      string            `json:"name,omitempty"`
-	Kind                      string            `json:"kind"`
-	Background                bool              `json:"background,omitempty"`
-	Targets                   []string          `json:"targets,omitempty"`
-	Command                   string            `json:"command,omitempty"`
-	Uses                      string            `json:"uses,omitempty"`
-	Action                    *ActionSelector   `json:"action,omitempty"`
-	Shell                     string            `json:"shell,omitempty"`
-	WorkingDirectory          string            `json:"working_directory,omitempty"`
-	Env                       map[string]string `json:"env,omitempty"`
-	With                      map[string]string `json:"with,omitempty"`
-	Condition                 string            `json:"condition,omitempty"`
-	ContinueOnError           bool              `json:"continue_on_error,omitempty"`
-	ContinueOnErrorExpression string            `json:"continue_on_error_expression,omitempty"`
-	TimeoutMinutes            float64           `json:"timeout_minutes,omitempty"`
-	TimeoutMinutesExpression  string            `json:"timeout_minutes_expression,omitempty"`
-	Source                    *Span             `json:"source,omitempty"`
-	Execution                 *program.Step     `json:"-"`
-}
-
 type Container struct {
 	Image string            `json:"image"`
 	Env   map[string]string `json:"env,omitempty"`
@@ -308,7 +285,10 @@ type OIDCConfiguration struct {
 	SubjectClaim   string   `json:"subject_claim,omitempty"`
 }
 
-// Job is one immutable, compiler-selected workflow job instance.
+// Job is the serialized execution envelope for one generated Buildkite command
+// job, not a Buildkite API object. It contains the normalized GitHub Actions
+// workflow job assigned to that command job plus its instance metadata and the
+// transport, authority, and runtime configuration needed to execute it.
 type Job struct {
 	Schema               string                   `json:"schema"`
 	Compiler             Compiler                 `json:"compiler"`
@@ -344,7 +324,6 @@ type Job struct {
 	DefaultShell            string            `json:"-"`
 	DefaultWorkingDirectory string            `json:"-"`
 	Outputs                 map[string]string `json:"-"`
-	Steps                   []Step            `json:"-"`
 	Actions                 []ActionLock      `json:"actions,omitempty"`
 	// RequiresMise is the compiler's explicit action-runtime decision.
 	RequiresMise       *bool                       `json:"requires_mise,omitempty"`
@@ -357,8 +336,10 @@ type Job struct {
 // NeedsMise reports whether a generated job needs the managed action runtime.
 func (job Job) NeedsMise() bool {
 	usesActions := len(job.Actions) != 0
-	for _, step := range job.Steps {
-		usesActions = usesActions || step.Uses != "" || step.Action != nil || step.Kind == "uses"
+	if executionJob := job.ExecutionJob(); executionJob != nil {
+		for _, step := range executionJob.Steps {
+			usesActions = usesActions || step.Invocation != nil || step.Kind == "uses"
+		}
 	}
 	if !usesActions {
 		return false
@@ -584,6 +565,7 @@ func (job Job) Validate() error {
 	if err := job.Program.Validate(); err != nil {
 		return fmt.Errorf("normalized execution program: %w", err)
 	}
+	executionJob := job.ExecutionJob()
 	if job.RequiresMise == nil {
 		return fmt.Errorf("job plan requires an explicit requires_mise decision")
 	}
@@ -591,8 +573,8 @@ func (job Job) Validate() error {
 		return fmt.Errorf("job plan runtime distribution digest is required")
 	}
 	if job.RequiresMise != nil && !*job.RequiresMise {
-		for _, step := range job.Steps {
-			if (step.Kind == "uses" || step.Uses != "") && step.Action == nil {
+		for _, step := range executionJob.Steps {
+			if step.Invocation != nil && step.Invocation.Lock == "" {
 				return fmt.Errorf("job plan requires_mise may be false only when every action has an immutable selector")
 			}
 		}
@@ -885,7 +867,7 @@ func (job Job) Validate() error {
 	if len(job.CallGuards) > MaxCallGuards {
 		return fmt.Errorf("job plan has more than %d reusable-workflow call guards", MaxCallGuards)
 	}
-	if len(job.CallGuards) != len(job.Program.Job.Guards) {
+	if len(job.CallGuards) != len(executionJob.Guards) {
 		return fmt.Errorf("job plan call guard projection does not match normalized program")
 	}
 	for i, guard := range job.CallGuards {
@@ -913,80 +895,7 @@ func (job Job) Validate() error {
 	if len(sourcedDependencies) != len(dependencies) {
 		return fmt.Errorf("job plan dependencies and prerequisite producers differ")
 	}
-	if len(job.Steps) == 0 {
-		return fmt.Errorf("job plan contains no steps")
-	}
-	ids := make(map[string]struct{}, len(job.Steps))
-	backgroundIDs := make(map[string]struct{})
-	for i, step := range job.Steps {
-		if step.ID == "" {
-			return fmt.Errorf("job plan step %d has no deterministic id", i+1)
-		}
-		if len(step.ID) > 255 {
-			return fmt.Errorf("job plan step id %q exceeds 255 bytes", step.ID)
-		}
-		id := strings.ToLower(step.ID)
-		if _, exists := ids[id]; exists {
-			return fmt.Errorf("job plan contains duplicate step id %q", step.ID)
-		}
-		ids[id] = struct{}{}
-		if step.TimeoutMinutes < 0 || step.TimeoutMinutes > 360 {
-			return fmt.Errorf("job plan step %q timeout_minutes must be between 0 and 360", step.ID)
-		}
-		if step.TimeoutMinutesExpression != "" && step.TimeoutMinutes != 0 {
-			return fmt.Errorf("job plan step %q has both literal and expression timeout_minutes", step.ID)
-		}
-		if step.ContinueOnErrorExpression != "" && step.ContinueOnError {
-			return fmt.Errorf("job plan step %q has both literal and expression continue_on_error", step.ID)
-		}
-		if len(step.TimeoutMinutesExpression) > 65536 || len(step.ContinueOnErrorExpression) > 65536 {
-			return fmt.Errorf("job plan step %q control expression exceeds 65536 bytes", step.ID)
-		}
-		for _, control := range []struct{ name, value string }{
-			{name: "continue_on_error", value: step.ContinueOnErrorExpression},
-			{name: "timeout_minutes", value: step.TimeoutMinutesExpression},
-		} {
-			trimmed := strings.TrimSpace(control.value)
-			if control.value != "" && (!strings.HasPrefix(trimmed, "${{") || !strings.HasSuffix(trimmed, "}}")) {
-				return fmt.Errorf("job plan step %q %s expression must be complete", step.ID, control.name)
-			}
-		}
-		if len(step.Condition) > 65536 {
-			return fmt.Errorf("job plan step %q condition exceeds 65536 bytes", step.ID)
-		}
-		switch step.Kind {
-		case "run":
-			if strings.TrimSpace(step.Command) == "" {
-				return fmt.Errorf("run step %q has no command", step.ID)
-			}
-			if step.Uses != "" || step.Action != nil || len(step.Targets) != 0 {
-				return fmt.Errorf("run step %q contains incompatible action or control fields", step.ID)
-			}
-			if step.Background {
-				backgroundIDs[id] = struct{}{}
-			}
-		case "uses":
-			if strings.TrimSpace(step.Uses) == "" {
-				return fmt.Errorf("action step %q has no action reference", step.ID)
-			}
-			if len(step.Uses) > 1024 {
-				return fmt.Errorf("action step %q reference exceeds 1024 bytes", step.ID)
-			}
-			if step.Command != "" || len(step.Targets) != 0 {
-				return fmt.Errorf("action step %q contains incompatible run or control fields", step.ID)
-			}
-			if step.Background {
-				backgroundIDs[id] = struct{}{}
-			}
-		case "wait", "wait-all", "cancel":
-			if err := validateControlStep(step, backgroundIDs); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("step %q has unsupported kind %q", step.ID, step.Kind)
-		}
-	}
-	if len(job.Actions) != 0 || hasStepActions(job.Steps) {
+	if len(job.Actions) != 0 || hasStepActions(executionJob.Steps) {
 		for _, lock := range job.Actions {
 			if lock.DockerImage == "" {
 				continue
@@ -1335,9 +1244,9 @@ func validateContainerImageEnv(image string, env map[string]string) error {
 	return nil
 }
 
-func hasStepActions(steps []Step) bool {
+func hasStepActions(steps []program.Step) bool {
 	for _, step := range steps {
-		if step.Action != nil {
+		if step.Invocation != nil && step.Invocation.Lock != "" {
 			return true
 		}
 	}
@@ -1414,24 +1323,24 @@ func validateActionLocks(job Job) error {
 		heights[id] = height
 		return height, nil
 	}
-	for _, step := range job.Steps {
+	for _, step := range job.ExecutionJob().Steps {
 		if step.Kind != "uses" {
-			if step.Action != nil {
+			if step.Invocation != nil && step.Invocation.Lock != "" {
 				return fmt.Errorf("non-action step %q has an action selector", step.ID)
 			}
 			continue
 		}
-		if step.Action == nil {
+		if step.Invocation == nil || step.Invocation.Lock == "" {
 			return fmt.Errorf("action step %q has no action selector", step.ID)
 		}
-		if !actionLockIDPattern.MatchString(step.Action.Lock) {
-			return fmt.Errorf("action step %q has malformed action selector lock %q", step.ID, step.Action.Lock)
+		if !actionLockIDPattern.MatchString(step.Invocation.Lock) {
+			return fmt.Errorf("action step %q has malformed action selector lock %q", step.ID, step.Invocation.Lock)
 		}
-		lock, ok := locks[step.Action.Lock]
+		lock, ok := locks[step.Invocation.Lock]
 		if !ok {
-			return fmt.Errorf("action selector references missing lock %q", step.Action.Lock)
+			return fmt.Errorf("action selector references missing lock %q", step.Invocation.Lock)
 		}
-		if err := validateTopLevelIdentity(step.Uses, lock); err != nil {
+		if err := validateTopLevelIdentity(step.Invocation.Uses.Source, lock); err != nil {
 			return fmt.Errorf("action step %q: %w", step.ID, err)
 		}
 		if _, err := visit(lock.ID, 1); err != nil {
@@ -1546,42 +1455,6 @@ func hasControl(value string) bool {
 		}
 	}
 	return false
-}
-
-func validateControlStep(step Step, backgroundIDs map[string]struct{}) error {
-	if step.Background || step.Command != "" || step.Uses != "" || step.Action != nil || step.Shell != "" || step.WorkingDirectory != "" || len(step.Env) != 0 || len(step.With) != 0 || step.Condition != "" || step.ContinueOnError || step.ContinueOnErrorExpression != "" || step.TimeoutMinutes != 0 || step.TimeoutMinutesExpression != "" {
-		return fmt.Errorf("control step %q contains incompatible execution fields", step.ID)
-	}
-	switch step.Kind {
-	case "wait":
-		if len(step.Targets) == 0 || len(step.Targets) > maxStepTargets {
-			return fmt.Errorf("wait step %q must target between 1 and %d background steps", step.ID, maxStepTargets)
-		}
-	case "wait-all":
-		if len(step.Targets) != 0 {
-			return fmt.Errorf("wait-all step %q cannot target individual steps", step.ID)
-		}
-		return nil
-	case "cancel":
-		if len(step.Targets) != 1 {
-			return fmt.Errorf("cancel step %q must target exactly one background step", step.ID)
-		}
-	}
-	seen := make(map[string]struct{}, len(step.Targets))
-	for _, target := range step.Targets {
-		if !targetPattern.MatchString(target) {
-			return fmt.Errorf("control step %q has invalid target %q", step.ID, target)
-		}
-		key := strings.ToLower(target)
-		if _, exists := seen[key]; exists {
-			return fmt.Errorf("control step %q repeats target %q", step.ID, target)
-		}
-		seen[key] = struct{}{}
-		if _, exists := backgroundIDs[key]; !exists {
-			return fmt.Errorf("control step %q target %q is not a prior background step", step.ID, target)
-		}
-	}
-	return nil
 }
 
 func (job Job) HasCapability(name string) bool {

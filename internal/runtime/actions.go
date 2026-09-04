@@ -145,11 +145,11 @@ func validateJobCheckoutAdapters(job plan.Job) (bool, error) {
 		locks[lock.ID] = lock
 	}
 	found := false
-	for _, step := range job.Steps {
-		if step.Action == nil {
+	for _, step := range job.ExecutionJob().Steps {
+		if step.Invocation == nil || step.Invocation.Lock == "" {
 			continue
 		}
-		if lock, ok := locks[step.Action.Lock]; ok && usesCheckoutAdapter(lock) {
+		if lock, ok := locks[step.Invocation.Lock]; ok && usesCheckoutAdapter(lock) {
 			found = true
 		}
 	}

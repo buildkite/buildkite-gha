@@ -485,7 +485,8 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 2 || plans[1].Condition != "always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref && github.head_ref == ''" || plans[1].Steps[0].Condition != "success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready && github.head_ref == ''" || plans[1].Steps[1].Condition != "failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && job.services.redis.ports[6379]" {
+	steps := plans[1].Program.Job.Steps
+	if len(plans) != 2 || plans[1].Condition != "always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref && github.head_ref == ''" || steps[0].Condition.Source != "success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready && github.head_ref == ''" || steps[1].Condition.Source != "failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && job.services.redis.ports[6379]" {
 		t.Fatalf("runtime conditions were not retained: %#v", plans)
 	}
 }
@@ -894,8 +895,8 @@ jobs:
 	if plans[1].Schema != plan.Schema || !reflect.DeepEqual(plans[1].NeedOutputs, map[string][]plan.NeedOutput{"prepare": {}}) {
 		t.Fatalf("callee root caller prerequisite projection = %q / %#v", plans[1].Schema, plans[1].NeedOutputs)
 	}
-	if plans[3].Condition != "always() && needs.delegated.result == 'success'" || plans[3].Steps[0].Command != `test "${{ needs.delegated.result }}" = success` {
-		t.Fatalf("downstream reusable-workflow result expressions = %q / %q", plans[3].Condition, plans[3].Steps[0].Command)
+	if plans[3].Condition != "always() && needs.delegated.result == 'success'" || plans[3].Program.Job.Steps[0].Run.Command.Source != `test "${{ needs.delegated.result }}" = success` {
+		t.Fatalf("downstream reusable-workflow result expressions = %q / %q", plans[3].Condition, plans[3].Program.Job.Steps[0].Run.Command.Source)
 	}
 	if !reflect.DeepEqual(plans[3].NeedSources, map[string][]plan.NeedSource{
 		"delegated": {
@@ -1466,8 +1467,8 @@ jobs:
 	conditions := make(map[string][2]string, len(plans))
 	for _, job := range plans {
 		stepCondition := ""
-		if len(job.Steps) != 0 {
-			stepCondition = job.Steps[0].Condition
+		if len(job.Program.Job.Steps) != 0 {
+			stepCondition = job.Program.Job.Steps[0].Condition.Source
 		}
 		conditions[job.Workflow.LogicalJobID] = [2]string{job.Condition, stepCondition}
 	}
@@ -1546,7 +1547,8 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "release" || plans[0].Outputs["label"] != "release" || len(plans[0].Steps) != 3 || plans[0].Steps[0].Command != "echo true ${{ github.ref }}" || plans[0].Steps[1].Condition != "${{ true && github.ref }}" || plans[0].Steps[2].Condition != "'release'" {
+	steps := plans[0].Program.Job.Steps
+	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "release" || plans[0].Outputs["label"] != "release" || len(steps) != 3 || steps[0].Run.Command.Source != "echo true ${{ github.ref }}" || steps[1].Condition.Source != "${{ true && github.ref }}" || steps[2].Condition.Source != "'release'" {
 		t.Fatalf("reusable condition = %#v", plans)
 	}
 }
@@ -1743,7 +1745,9 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Inputs["target"] != "release" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Env["VALUE_ENV"] != "${{ inputs[env.KEY] }}" || plans[0].Steps[0].Env["VALUE_INPUT"] != "release" {
+	steps := plans[0].Program.Job.Steps
+	env := testBindingSources(steps[0].Env)
+	if len(plans) != 1 || plans[0].Inputs["target"] != "release" || len(steps) != 1 || env["VALUE_ENV"] != "${{ inputs[env.KEY] }}" || env["VALUE_INPUT"] != "release" {
 		t.Fatalf("computed reusable input plan = %#v", plans)
 	}
 }
@@ -3858,11 +3862,12 @@ jobs:
 	if producer.Target.StepKey != "gha-producer" || producer.Workflow.LogicalJobID != "producer" {
 		t.Fatalf("producer target = %#v, workflow = %#v", producer.Target, producer.Workflow)
 	}
-	if producer.Steps[0].ID != "step-1-2" || producer.Steps[1].ID != "step-1" {
-		t.Fatalf("deterministic step ids = %q, %q", producer.Steps[0].ID, producer.Steps[1].ID)
+	steps := producer.Program.Job.Steps
+	if steps[0].ID != "step-1-2" || steps[1].ID != "step-1" {
+		t.Fatalf("deterministic step ids = %q, %q", steps[0].ID, steps[1].ID)
 	}
-	if producer.Steps[2].With["message"] != "${{ steps.step-1.outputs.result }}" {
-		t.Fatalf("JavaScript inputs = %#v", producer.Steps[2].With)
+	if testBindingSources(steps[2].Invocation.With)["message"] != "${{ steps.step-1.outputs.result }}" {
+		t.Fatalf("JavaScript inputs = %#v", steps[2].Invocation.With)
 	}
 	if producer.Outputs["result"] != "${{ steps.composite.outputs.result }}" {
 		t.Fatalf("job outputs = %#v", producer.Outputs)
@@ -3902,9 +3907,12 @@ jobs:
         run: echo second
         background: true
         continue-on-error: true
-      - wait: [first, second]
-      - wait-all:
-      - cancel: first
+      - name: Join selected workers
+        wait: [first, second]
+      - name: Join all workers
+        wait-all:
+      - name: Stop first worker
+        cancel: first
       - parallel:
           - run: echo ${{ secrets.PARALLEL_TOKEN }}
             env:
@@ -3919,14 +3927,14 @@ jobs:
 	if len(plans) != 1 || plans[0].Schema != plan.Schema {
 		t.Fatalf("plans = %#v, want one current plan", plans)
 	}
-	steps := plans[0].Steps
+	steps := plans[0].Program.Job.Steps
 	if len(steps) != 8 || !steps[0].Background || !steps[1].Background {
 		t.Fatalf("background plan steps = %#v", steps)
 	}
-	if !steps[1].ContinueOnError || steps[2].Kind != "wait" || !reflect.DeepEqual(steps[2].Targets, []string{"first", "second"}) || steps[2].ContinueOnError {
+	if !steps[1].ContinueOnError.Literal || steps[2].Kind != "wait" || !reflect.DeepEqual(steps[2].Targets, []string{"first", "second"}) || steps[2].ContinueOnError.Literal {
 		t.Fatalf("targeted plan barrier = %#v", steps[2])
 	}
-	if steps[3].Kind != "wait-all" || steps[4].Kind != "cancel" || !reflect.DeepEqual(steps[4].Targets, []string{"first"}) {
+	if steps[2].Name.Source != "Join selected workers" || steps[3].Kind != "wait-all" || steps[3].Name.Source != "Join all workers" || steps[4].Kind != "cancel" || steps[4].Name.Source != "Stop first worker" || !reflect.DeepEqual(steps[4].Targets, []string{"first"}) {
 		t.Fatalf("plan controls = %#v", steps[3:])
 	}
 	if !steps[5].Background || !steps[6].Background || steps[5].ID == "" || steps[6].ID != "named-parallel" {
@@ -4614,7 +4622,8 @@ jobs:
 		t.Fatalf("compiled plans = %d, want 1", len(plans))
 	}
 	job := plans[0]
-	if job.Env["LABEL"] != "bash" || job.Env["INDEXED_LABEL"] != "bash" || job.Inputs["label"] != "bash" || job.Inputs["timeout"] != json.Number("7") || job.DefaultShell != "bash" || job.Outputs["label"] != "bash" || job.Steps[0].TimeoutMinutes != 7 || job.Steps[0].TimeoutMinutesExpression != "" {
+	step := job.Program.Job.Steps[0]
+	if job.Env["LABEL"] != "bash" || job.Env["INDEXED_LABEL"] != "bash" || job.Inputs["label"] != "bash" || job.Inputs["timeout"] != json.Number("7") || job.DefaultShell != "bash" || job.Outputs["label"] != "bash" || step.TimeoutMinutes.Literal != 7 || step.TimeoutMinutes.Expression != nil {
 		t.Fatalf("compiled dispatch input surfaces = %#v", job)
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
@@ -94,26 +93,21 @@ func TestWorkflowProgramInventoriesEveryExecutionField(t *testing.T) {
 	}
 }
 
-func TestWorkflowProgramProjectsLegacyPlanSteps(t *testing.T) {
+func TestWorkflowProgramNormalizesExecutionSteps(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 3, Column: 5}, End: workflow.Position{Line: 8, Column: 1}}
 	instance := JobInstance{SourcePath: "workflow.yml", Steps: []workflow.Step{
 		{Kind: "run", Name: "name", Run: "echo hi", Shell: "bash", WorkingDirectory: "src", Env: map[string]string{}, If: "success()", ContinueOnErrorExpression: "${{ matrix.experimental }}", TimeoutMinutes: 5, Span: span},
 		{Kind: "uses", Uses: "owner/action@v1", With: map[string]string{"name": "value"}, Span: span},
 	}}
-	workflowProgram := lowerWorkflowProgram(instance)
-	job := plan.Job{Program: &workflowProgram}
-	if err := job.ProjectProgram(); err != nil {
-		t.Fatal(err)
+	steps := lowerWorkflowProgram(instance).Job.Steps
+	if len(steps) != 2 || steps[0].ID != "step-1" || steps[0].Run.Command.Source != "echo hi" || steps[0].Run.Shell.Source != "bash" || steps[0].Run.WorkingDirectory.Source != "src" || steps[0].Condition.Source != "success()" || steps[0].ContinueOnError.Expression.Source != "${{ matrix.experimental }}" || steps[0].TimeoutMinutes.Literal != 5 {
+		t.Fatalf("normalized run step = %#v", steps[0])
 	}
-	steps := job.Steps
-	if len(steps) != 2 || steps[0].ID != "step-1" || steps[0].Command != "echo hi" || steps[0].Shell != "bash" || steps[0].WorkingDirectory != "src" || steps[0].Condition != "success()" || steps[0].ContinueOnErrorExpression != "${{ matrix.experimental }}" || steps[0].TimeoutMinutes != 5 {
-		t.Fatalf("projected run step = %#v", steps[0])
+	if steps[1].Invocation == nil || steps[1].Invocation.Uses.Source != "owner/action@v1" || !reflect.DeepEqual(testBindingSources(steps[1].Invocation.With), map[string]string{"name": "value"}) {
+		t.Fatalf("normalized invocation = %#v", steps[1])
 	}
-	if steps[1].Execution.Invocation == nil || steps[1].Execution.Invocation.Uses.Source != "owner/action@v1" || !reflect.DeepEqual(steps[1].With, map[string]string{"name": "value"}) {
-		t.Fatalf("projected invocation = %#v", steps[1])
-	}
-	if steps[0].Env == nil || steps[1].With["name"] != "value" || steps[0].Source.Start.Line != 3 {
-		t.Fatalf("projected step details = %#v", steps)
+	if steps[0].Env == nil || testBindingSources(steps[1].Invocation.With)["name"] != "value" || steps[0].Source.Start.Line != 3 {
+		t.Fatalf("normalized step details = %#v", steps)
 	}
 }
 

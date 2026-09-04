@@ -20,6 +20,7 @@ import (
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
@@ -942,7 +943,7 @@ func TestDownloadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) 
 		t.Fatal(err)
 	}
 	lockID := "a-0000000000000002"
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID: "download", Kind: "uses", Uses: "actions/download-artifact@" + actionintegration.DownloadArtifactCommit,
 		With:   map[string]string{"name": "payload", "path": "downloaded"},
 		Action: &plan.ActionSelector{Lock: lockID},
@@ -974,7 +975,7 @@ func TestDownloadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) 
 	}
 
 	job.Actions[0].Commit = strings.Repeat("b", 40)
-	job.Steps[0].With = map[string]string{"name": "payload", "path": "fallback-downloaded", "skip-decompress": "false", "digest-mismatch": "error"}
+	job.Program.Job.Steps[0].Invocation.With = testProgramBindingsPurpose(map[string]string{"name": "payload", "path": "fallback-downloaded", "skip-decompress": "false", "digest-mismatch": "error"}, executionprogram.SurfaceStepTemplate, executionprogram.PurposeActionInput)
 	fallbackResult, err := (Runner{Actions: materializer, Artifacts: store}).runTestJob(t.Context(), job, workspace)
 	if err != nil || fallbackResult.Conclusion != "success" || fallbackResult.Outputs["download_path"] != filepath.Join(workspace, "fallback-downloaded") || store.jobID != artifact.Producer.JobID {
 		t.Fatalf("unknown commit fallback result = %#v, error = %v", fallbackResult, err)
@@ -1009,7 +1010,7 @@ func TestDownloadArtifactMatrixConsumersEvaluateNameAndNormalizeRootPath(t *test
 			workflowPath := ".github/workflows/download.yml"
 			writeFixtureFile(t, workspace, workflowPath, "name: matrix download proof\n")
 			lockID := "a-0000000000000002"
-			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 				ID: "download", Kind: "uses", Uses: "actions/download-artifact@" + actionintegration.DownloadArtifactV7Commit,
 				With: map[string]string{"name": "${{ github.sha }}", "path": "./"}, Action: &plan.ActionSelector{Lock: lockID},
 			}})

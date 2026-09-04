@@ -302,7 +302,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 		"http_proxy": "http://attacker", "https_proxy": "http://attacker", "all_proxy": "http://attacker", "no_proxy": "cache.example",
 		"BUILDKITE_AGENT_ACCESS_TOKEN": "workflow-agent-token", "BUILDKITE_JOB_ID": testCacheJobID, "FAKE_TAR_MARKER": fakeTarMarker,
 	}
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
 		{ID: "shell-before", Kind: "run", Command: `test -z "${ACTIONS_RUNTIME_TOKEN:-}" && test -z "${ACTIONS_RESULTS_URL:-}" && test -z "${ACTIONS_CACHE_SERVICE_V2:-}"`},
 		{ID: "poison-path", Kind: "run", Command: `printf '%s\n' "$ATTACKER_BIN" >> "$GITHUB_PATH"`},
 		{ID: "ordinary", Kind: "uses", Uses: "owner/repo/ordinary@v1", Env: map[string]string{
@@ -487,7 +487,7 @@ fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "\n");
 			writeFixtureFile(t, workspace, workflowPath, "name: setup action override\n")
 			lifecycle := filepath.Join(workspace, "lifecycle.log")
 			lockID := remoteLifecycleLockID(1)
-			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 				ID: "setup", Kind: "uses", Uses: setup.repository + "@" + setup.ref, Action: &plan.ActionSelector{Lock: lockID},
 			}})
 			job.Schema = plan.Schema
@@ -550,7 +550,7 @@ func TestActionCacheRedactorIsPinnedBeforeWorkflowExecution(t *testing.T) {
 	t.Setenv("PATH", lookupDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	lockID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
 		{ID: "poison", Kind: "run", Command: `rm -f "$LOOKUP_AGENT" && ln -s "$POISON_AGENT" "$LOOKUP_AGENT"`},
 		{ID: "generic", Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID}},
 	})
@@ -585,7 +585,7 @@ func TestGenericActionCacheDisablesWhenRedactorCannotBePinned(t *testing.T) {
 	writeFixtureFile(t, workspace, actionPath+"/action.yml", "name: generic\nruns:\n  using: node24\n  main: main.js\n")
 	writeFixtureFile(t, workspace, actionPath+"/main.js", `for (const name of ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN"]) if (process.env[name]) throw new Error(name + " leaked");`)
 	lockID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "generic", Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID}}})
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "generic", Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID}}})
 	job.Schema = plan.Schema
 	job.Actions = []plan.ActionLock{{
 		ID: lockID, Source: "workspace", Path: actionPath,
@@ -613,7 +613,7 @@ func TestExplicitCacheRequiresPinnedRedactorBeforeWorkflowExecution(t *testing.T
 	writeFixtureFile(t, remote, "action.yml", "name: cache\nruns:\n  using: node24\n  main: main.js\n")
 	writeFixtureFile(t, remote, "main.js", "")
 	lockID := remoteLifecycleLockID(1)
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
 		{ID: "run", Kind: "run", Command: `: > "$MARKER"`},
 		{ID: "cache", Kind: "uses", Uses: "actions/cache@" + actionintegration.CacheCommit, Action: &plan.ActionSelector{Lock: lockID}},
 	})

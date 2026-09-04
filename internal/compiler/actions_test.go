@@ -1418,8 +1418,9 @@ jobs:
 		t.Fatalf("plan schemas = %#v, want current plans", []string{first[0].Schema, first[1].Schema, first[2].Schema})
 	}
 	actionJob := first[0]
-	if len(actionJob.Actions) != 3 || actionJob.Steps[0].Action == nil || actionJob.Steps[1].Action == nil || actionJob.Steps[2].Action == nil || *actionJob.Steps[1].Action != *actionJob.Steps[2].Action {
-		t.Fatalf("action locks/selectors = %#v / %#v", actionJob.Actions, actionJob.Steps)
+	steps := actionJob.Program.Job.Steps
+	if len(actionJob.Actions) != 3 || steps[0].Invocation.Lock == "" || steps[1].Invocation.Lock == "" || steps[2].Invocation.Lock == "" || steps[1].Invocation.Lock != steps[2].Invocation.Lock {
+		t.Fatalf("action locks/selectors = %#v / %#v", actionJob.Actions, steps)
 	}
 	if fake.calls["Owner/Repo@v1"] != 2 {
 		t.Fatalf("remote calls = %d, want one per independent compilation", fake.calls["Owner/Repo@v1"])
@@ -1478,7 +1479,7 @@ jobs:
 	if !reflect.DeepEqual(first, second) {
 		t.Fatal("workspace action plans are not deterministic")
 	}
-	if len(first) != 1 || first[0].Schema != plan.Schema || len(first[0].Actions) != 1 || first[0].Actions[0].Source != "workspace" || first[0].Steps[0].Action == nil {
+	if len(first) != 1 || first[0].Schema != plan.Schema || len(first[0].Actions) != 1 || first[0].Actions[0].Source != "workspace" || first[0].Program.Job.Steps[0].Invocation.Lock == "" {
 		t.Fatalf("workspace action plan = %#v", first)
 	}
 }
@@ -2129,7 +2130,9 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		t.Fatalf("conditional v6 matrix produced %d plans, want 2", len(plans))
 	}
 	for _, job := range plans {
-		if job.Steps[0].Condition != "matrix.mode == 'test'" || job.Steps[0].With["name"] != "${{ github.sha }}" || job.Steps[0].With["path"] != "./artifacts.tar.gz" || job.Actions[0].Commit != actionintegration.UploadArtifactV6Commit {
+		step := job.Program.Job.Steps[0]
+		with := testBindingSources(step.Invocation.With)
+		if step.Condition.Source != "matrix.mode == 'test'" || with["name"] != "${{ github.sha }}" || with["path"] != "./artifacts.tar.gz" || job.Actions[0].Commit != actionintegration.UploadArtifactV6Commit {
 			t.Fatalf("conditional v6 matrix plan = %#v", job)
 		}
 	}
@@ -2176,7 +2179,7 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 		t.Fatalf("download-artifact v5 pattern plans = %#v, %v", plans, err)
 	}
 	plans, err = compile(actionintegration.DownloadArtifactV5Commit, "    needs: producer\n", "        with:\n          pattern: '{junit-results-backend,product-junit-results}-*'\n          path: out\n          merge-multiple: true\n")
-	if err != nil || len(plans) != 2 || plans[1].Steps[0].With["pattern"] != "{junit-results-backend,product-junit-results}-*" {
+	if err != nil || len(plans) != 2 || testBindingSources(plans[1].Program.Job.Steps[0].Invocation.With)["pattern"] != "{junit-results-backend,product-junit-results}-*" {
 		t.Fatalf("download-artifact PostHog pattern plans = %#v, %v", plans, err)
 	}
 
@@ -2267,7 +2270,8 @@ jobs:
 		t.Fatalf("plans = %d, want two producers and two consumers", len(plans))
 	}
 	for i, producer := range plans[:2] {
-		if producer.Workflow.LogicalJobID != "producer" || len(producer.Steps) != 1 || producer.Steps[0].Condition != "matrix.publish" || producer.Matrix["publish"] != (i == 0) {
+		steps := producer.Program.Job.Steps
+		if producer.Workflow.LogicalJobID != "producer" || len(steps) != 1 || steps[0].Condition.Source != "matrix.publish" || producer.Matrix["publish"] != (i == 0) {
 			t.Fatalf("producer %d = %#v", i, producer)
 		}
 	}
@@ -2275,7 +2279,9 @@ jobs:
 		if consumer.Workflow.LogicalJobID != "consumer" || consumer.Matrix["shard"] != []string{"one", "two"}[i] || len(consumer.NeedSources["producer"]) != 2 {
 			t.Fatalf("consumer %d fan-in = %#v", i, consumer)
 		}
-		if len(consumer.Steps) != 1 || consumer.Steps[0].With["name"] != "${{ github.sha }}" || consumer.Steps[0].With["path"] != "./" || len(consumer.Actions) != 1 || consumer.Actions[0].Commit != actionintegration.DownloadArtifactV7Commit {
+		steps := consumer.Program.Job.Steps
+		with := testBindingSources(steps[0].Invocation.With)
+		if len(steps) != 1 || with["name"] != "${{ github.sha }}" || with["path"] != "./" || len(consumer.Actions) != 1 || consumer.Actions[0].Commit != actionintegration.DownloadArtifactV7Commit {
 			t.Fatalf("consumer %d download = %#v", i, consumer)
 		}
 	}
