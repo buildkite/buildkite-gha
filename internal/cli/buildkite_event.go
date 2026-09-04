@@ -46,8 +46,6 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	switch getenv("BUILDKITE_SOURCE") {
 	case "schedule":
 		event = "schedule"
-	case "ui", "api":
-		event = "workflow_dispatch"
 	}
 	payload := map[string]any{}
 	switch {
