@@ -167,6 +167,8 @@ action execution. In particular:
   prove every supported release activity.
 - Generated issues validation uses `opened`. It does not prove every supported
   issue activity.
+- Generated issue-comment validation uses `created`. It does not prove every
+  supported comment activity or payload shape.
 - Bare and broader release triggers remain incompatible.
 - The action-resolution snapshot pins action revisions only.
 

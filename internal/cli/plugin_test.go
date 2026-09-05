@@ -295,6 +295,90 @@ func TestPluginUsesPipelineTriggerPullRequestIdentity(t *testing.T) {
 	}
 }
 
+func TestPluginUsesPipelineTriggerIssueAndCommentIdentity(t *testing.T) {
+	requireImporterHost(t)
+	tests := []struct {
+		name, event, action, payload string
+	}{
+		{
+			name: "issue", event: "issues", action: "typed",
+			payload: `{"action":"typed","issue":{"number":42,"title":"Issue"},"repository":{"id":12345,"full_name":"buildkite/buildkite-gha"},"sender":{"id":7,"login":"octocat"}}`,
+		},
+		{
+			name: "issue comment", event: "issue_comment", action: "edited",
+			payload: `{"action":"edited","issue":{"number":42},"comment":{"id":123456,"body":"updated"},"repository":{"id":12345,"full_name":"buildkite/buildkite-gha"},"sender":{"id":7,"login":"octocat"}}`,
+		},
+		{
+			name: "pull request conversation comment", event: "issue_comment", action: "created",
+			payload: `{"action":"created","issue":{"number":43,"pull_request":{"url":"https://api.github.com/repos/buildkite/buildkite-gha/pulls/43"}},"comment":{"id":123457,"body":"created"},"repository":{"id":12345,"full_name":"buildkite/buildkite-gha"},"sender":{"id":7,"login":"octocat"}}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workflow := "name: Selected\non: " + test.event + "\njobs:\n  selected:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ toJSON(github.event) }}'\n"
+			repository := writeUploadWorkflowRepository(t, map[string]string{
+				"selected.yml": workflow,
+				"other.yml":    strings.Replace(workflow, "name: Selected", "name: Other", 1),
+			})
+			t.Chdir(repository)
+			t.Setenv(pluginConfigurationEnvironment, `{}`)
+			setCLIPluginBuildkiteEnvironment(t, "default-branch-pipeline-trigger-importer")
+			t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+			t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+			t.Setenv("BUILDKITE_GITHUB_ACTION", test.action)
+			setCLIPipelineTriggerEnvironment(t, ".github/workflows/selected.yml", "Selected", test.event, "buildkite/buildkite-gha/.github/workflows/selected.yml@refs/heads/main")
+
+			runner := &cliCaptureRunner{webhook: []byte(test.payload)}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+				t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+
+			var pipeline struct {
+				Steps []struct {
+					Group string `yaml:"group"`
+				} `yaml:"steps"`
+			}
+			if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+				t.Fatal(err)
+			}
+			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · Selected" {
+				t.Fatalf("pipeline steps = %#v, want only the server-selected workflow", pipeline.Steps)
+			}
+
+			var foundPlan, foundPayload bool
+			for path, source := range runner.uploaded {
+				switch {
+				case strings.HasPrefix(path, ".buildkite-gha/plans/") && strings.HasSuffix(path, ".json"):
+					job, err := plan.Decode(source)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if job.Event.Name != test.event || job.Event.Ref != "refs/heads/main" || job.Event.SHA != os.Getenv("BUILDKITE_COMMIT") || job.Event.Actor != "octocat" || !job.Event.PayloadArtifact {
+						t.Fatalf("default-branch plan event = %#v", job.Event)
+					}
+					foundPlan = true
+				case strings.HasPrefix(path, ".buildkite-gha/events/") && strings.HasSuffix(path, ".json"):
+					var got, want map[string]any
+					if err := json.Unmarshal(source, &got); err != nil {
+						t.Fatal(err)
+					}
+					if err := json.Unmarshal([]byte(test.payload), &want); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("event payload = %#v, want %#v", got, want)
+					}
+					foundPayload = true
+				}
+			}
+			if !foundPlan || !foundPayload {
+				t.Fatalf("uploaded artifacts = %#v, want one plan and exact event payload", runner.uploaded)
+			}
+		})
+	}
+}
+
 func TestPluginUsesBuildkitePipelineTriggerCompatibilityIdentity(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
@@ -374,6 +458,8 @@ func TestPluginRejectsMalformedPipelineTriggerEnvironment(t *testing.T) {
 		{name: "preferred workflow ref with mismatched event ref", fullPrefix: true, env: map[string]string{githubWorkflowRefEnvironment: "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/pull/42/merge"}, want: "GITHUB_WORKFLOW_REF event ref", wantCode: 2},
 		{name: "malformed preferred workflow SHA", fullPrefix: true, env: map[string]string{githubWorkflowSHAEnvironment: "HEAD"}, want: "GITHUB_WORKFLOW_SHA must be a full lowercase 40-hex commit", wantCode: 2},
 		{name: "preferred workflow SHA does not match checkout", fullPrefix: true, env: map[string]string{githubWorkflowSHAEnvironment: strings.Repeat("a", 40)}, want: "GITHUB_WORKFLOW_SHA does not match BUILDKITE_COMMIT", wantCode: 1},
+		{name: "issues without preferred workflow ref", fullPrefix: true, env: map[string]string{githubEventNameEnvironment: "issues", githubWorkflowRefEnvironment: ""}, want: "GITHUB_WORKFLOW_REF and GITHUB_WORKFLOW_SHA are required for issues", wantCode: 2},
+		{name: "issue comment without preferred workflow SHA", fullPrefix: true, env: map[string]string{githubEventNameEnvironment: "issue_comment", githubWorkflowSHAEnvironment: ""}, want: "GITHUB_WORKFLOW_REF and GITHUB_WORKFLOW_SHA are required for issue_comment", wantCode: 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv(pluginConfigurationEnvironment, `{}`)

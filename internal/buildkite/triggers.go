@@ -26,6 +26,7 @@ type TriggerConditionExpressions struct {
 	MergeGroupAction      string
 	ReleaseAction         string
 	IssuesAction          string
+	IssueCommentAction    string
 }
 
 // ChangedPathEvaluation records either the available changed paths or why
@@ -50,6 +51,7 @@ type TriggerEventSnapshot struct {
 	MergeGroupAction      *string
 	ReleaseAction         *string
 	IssuesAction          *string
+	IssueCommentAction    *string
 	ChangedPaths          ChangedPathEvaluation
 }
 
@@ -64,6 +66,7 @@ var supportedTriggerEvents = map[string]bool{
 	"merge_group":       true,
 	"release":           true,
 	"issues":            true,
+	"issue_comment":     true,
 }
 
 var supportedIssuesAction = map[string]bool{
@@ -73,6 +76,10 @@ var supportedIssuesAction = map[string]bool{
 	"assigned": true, "unassigned": true, "labeled": true, "unlabeled": true,
 	"locked": true, "unlocked": true, "milestoned": true, "demilestoned": true,
 	"typed": true, "untyped": true,
+}
+
+var supportedIssueCommentAction = map[string]bool{
+	"created": true, "edited": true, "deleted": true,
 }
 
 // SupportedTriggerEvent reports whether the GitHub trigger event maps to a
@@ -132,6 +139,7 @@ func LiveTriggerConditionExpressions(eventPredicate string) TriggerConditionExpr
 		MergeGroupAction:      "build.source_action",
 		ReleaseAction:         "build.source_action",
 		IssuesAction:          "build.source_action",
+		IssueCommentAction:    "build.source_action",
 	}
 }
 
@@ -337,6 +345,10 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 			if snapshot.IssuesAction != nil && trigger.Types != nil && !slices.Contains(trigger.Types, *snapshot.IssuesAction) {
 				return fmt.Sprintf("Issue activity %q does not match this workflow's issues activity filters.", *snapshot.IssuesAction), nil
 			}
+		case "issue_comment":
+			if snapshot.IssueCommentAction != nil && trigger.Types != nil && !slices.Contains(trigger.Types, *snapshot.IssueCommentAction) {
+				return fmt.Sprintf("Issue comment activity %q does not match this workflow's issue_comment activity filters.", *snapshot.IssueCommentAction), nil
+			}
 		}
 		return "", nil
 	}
@@ -379,7 +391,7 @@ func LiveEventPredicate(event string) string {
 		return predicate
 	case "schedule":
 		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source == "schedule"))`
-	case "merge_group", "release", "issues":
+	case "merge_group", "release", "issues", "issue_comment":
 		return predicate
 	default:
 		return ""
@@ -616,6 +628,30 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 				return "", false, fmt.Errorf("issues activity type %q cannot be mapped exactly", action)
 			}
 			actions = append(actions, expressions.IssuesAction+` == `+yamlScalar(action))
+		}
+		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
+	case "issue_comment":
+		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+			return "", false, fmt.Errorf("issue_comment has unsupported filters")
+		}
+		if expressions.EventPredicate == "" || expressions.IssueCommentAction == "" {
+			return "", false, fmt.Errorf("issue_comment requires effective event and action expressions")
+		}
+		if expressions.IssueCommentAction == "null" {
+			return "", false, fmt.Errorf("issue_comment event snapshot requires payload.action")
+		}
+		if t.Types == nil {
+			return expressions.EventPredicate, true, nil
+		}
+		if len(t.Types) == 0 {
+			return "", false, fmt.Errorf("issue_comment types is explicitly empty")
+		}
+		actions := make([]string, 0, len(t.Types))
+		for _, action := range t.Types {
+			if !supportedIssueCommentAction[action] {
+				return "", false, fmt.Errorf("issue_comment activity type %q cannot be mapped exactly", action)
+			}
+			actions = append(actions, expressions.IssueCommentAction+` == `+yamlScalar(action))
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	default:
