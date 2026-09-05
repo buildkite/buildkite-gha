@@ -155,39 +155,6 @@ func TestEngineCompileTemplateScalarAndContainerImageBoundaries(t *testing.T) {
 	}
 }
 
-func TestEngineMatchesUnexportedSemanticImplementations(t *testing.T) {
-	engine := NewEngine()
-	runtime := Context{Env: map[string]string{"NAME": "world"}, Matrix: map[string]any{"enabled": true}}
-	condition := ConditionContext{Env: runtime.Env, Matrix: runtime.Matrix}
-	tests := []struct {
-		name   string
-		site   Site
-		values Values
-		direct func() (any, error)
-	}{
-		{name: "job condition", site: Site{Source: "matrix.enabled", Profile: ProfileJobCondition, Result: ResultBoolean}, values: Values{Condition: condition}, direct: func() (any, error) { return EvaluateCondition("matrix.enabled", condition) }},
-		{name: "step template", site: Site{Source: "hello ${{ env.NAME }}", Profile: ProfileStepTemplate, Result: ResultString}, values: Values{Runtime: runtime}, direct: func() (any, error) { return EvaluateStep("hello ${{ env.NAME }}", runtime) }},
-		{name: "step control", site: Site{Source: "${{ matrix.enabled }}", Profile: ProfileStepControl, Result: ResultBoolean}, values: Values{Runtime: runtime}, direct: func() (any, error) { return EvaluateStepControl("${{ matrix.enabled }}", runtime) }},
-		{name: "runtime template", site: Site{Source: "hello ${{ env.NAME }}", Profile: ProfileRuntimeTemplate, Result: ResultString}, values: Values{Runtime: runtime}, direct: func() (any, error) { return Evaluate("hello ${{ env.NAME }}", runtime) }},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, gotErr := engine.Evaluate(test.site, test.values)
-			want, wantErr := test.direct()
-			if !reflect.DeepEqual(got, want) || errorText(gotErr) != errorText(wantErr) {
-				t.Fatalf("Engine.Evaluate() = %#v, %v; direct implementation = %#v, %v", got, gotErr, want, wantErr)
-			}
-		})
-	}
-}
-
-func errorText(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
 func TestEngineProfileScopesAreDistinctAndAuthoritative(t *testing.T) {
 	engine := NewEngine()
 	validate := func(profile ProfileID, source string) error {

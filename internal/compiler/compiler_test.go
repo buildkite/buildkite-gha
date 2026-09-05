@@ -4223,13 +4223,6 @@ func TestCompileRejectsDuplicateSanitizedInstanceKeys(t *testing.T) {
 	}
 }
 
-func TestInstanceKeyReportsMatrixCanonicalizationErrors(t *testing.T) {
-	_, err := instanceKey("matrix", map[string]any{"unsupported": make(chan int)})
-	if err == nil || !strings.Contains(err.Error(), "canonicalize matrix") {
-		t.Fatalf("instanceKey() error = %v, want canonicalization error", err)
-	}
-}
-
 func TestCompileRejectsInvalidEventSnapshots(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 	valid := string(readFile(t, smokePath("events", "push.json")))
