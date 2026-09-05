@@ -1505,7 +1505,7 @@ hosted-toolchains images provide. macOS images are unsupported.
 | Matrix instances per job | 256 |
 | Reusable workflow nesting | 4 levels |
 | Workflow file | 1 MiB |
-| Jobs after reusable workflow expansion | 1,024 |
+| Jobs in a workflow after reusable workflow expansion | 1,024 |
 | Nested local action depth | 10 levels |
 | Background steps active at once | 10 |
 | Job outputs | 64 |
