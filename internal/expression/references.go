@@ -159,13 +159,6 @@ func collectSecretReferences(expression actionlint.ExprNode, found map[string]st
 	return referenceErr
 }
 
-// validateServiceRuntimeTemplate permits only needs.<job>.outputs.<name>
-// references after compile-time service evaluation. Other documented service
-// contexts must already have been resolved by the compiler.
-func validateServiceRuntimeTemplate(template string) error {
-	return visitTemplateExpressions(template, validateServiceRuntimeNode)
-}
-
 func validateServiceRuntimeNode(node actionlint.ExprNode) error {
 	root, path, err := referencePath(node)
 	if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") {
@@ -421,33 +414,6 @@ func conditionReferencesCompileEvent(source string) (bool, error) {
 		return false, err
 	}
 	return nodeReferencesCompileGitHubEvent(node), nil
-}
-
-// conditionReferencesEventPayload reports whether a condition reads the
-// event payload, excluding event-derived identity fields folded by the compiler.
-func conditionReferencesEventPayload(source string) (bool, error) {
-	node, empty, err := parseCondition(source)
-	if err != nil || empty {
-		return false, err
-	}
-	return nodeReferencesGitHubEventPayload(node), nil
-}
-
-// templateReferencesEventPayload reports whether an interpolated template
-// retains the compile-time-only event payload.
-func templateReferencesEventPayload(template string) (bool, error) {
-	found := false
-	err := visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
-		actionlint.VisitExprNode(node, func(candidate, _ actionlint.ExprNode, entering bool) {
-			if entering {
-				call, ok := candidate.(*actionlint.FuncCallNode)
-				found = found || ok && isToJSONGitHubCall(call)
-			}
-		})
-		found = found || nodeReferencesGitHubEventPayload(node)
-		return nil
-	})
-	return found, err
 }
 
 func nodeReferencesCompileGitHubEvent(node actionlint.ExprNode) bool {

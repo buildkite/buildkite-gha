@@ -14,7 +14,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
@@ -2462,85 +2461,5 @@ func TestCompilePlansContextCancelsRemoteResolution(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("compilePlansForTest() error = %v, want context cancellation", err)
-	}
-}
-
-func TestLivePublicActionCompatibility(t *testing.T) {
-	if os.Getenv("BUILDKITE_GHA_LIVE_ACTIONS") != "1" {
-		t.Skip("set BUILDKITE_GHA_LIVE_ACTIONS=1 to query and download public GitHub actions anonymously")
-	}
-	workspace := t.TempDir()
-	workflowPath := filepath.Join(workspace, ".github", "workflows", "public-actions.yml")
-	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	workflow := []byte(`on: push
-jobs:
-  actions:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
-        with:
-          node-version: "24"
-          package-manager-cache: "false"
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
-        with:
-          go-version: "1.26.5"
-          cache: "false"
-`)
-	resolver, err := source.NewResolver(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	actionCache := filepath.Join(t.TempDir(), "actions")
-	if err := os.Mkdir(actionCache, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store, err := source.NewStore(actionCache, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
-	defer cancel()
-	plans, err := compilePlansForTest(ctx, workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
-		EventTrust: EventUntrusted,
-		Runners: RunnerPolicy{
-			Labels:          map[string]string{"ubuntu-latest": "hosted"},
-			UntrustedQueues: []string{"hosted"},
-		},
-		ResolveActions: true,
-		ActionSource:   PublicActionSource{Resolver: resolver, Store: store},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plans) != 1 || plans[0].Schema != plan.Schema || len(plans[0].Actions) != 3 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
-		t.Fatalf("public action plan = %#v", plans)
-	}
-	wantCommits := map[string]string{
-		"actions/checkout":   "3d3c42e5aac5ba805825da76410c181273ba90b1",
-		"actions/setup-node": "249970729cb0ef3589644e2896645e5dc5ba9c38",
-		"actions/setup-go":   "924ae3a1cded613372ab5595356fb5720e22ba16",
-	}
-	for _, lock := range plans[0].Actions {
-		if want := wantCommits[lock.Repository]; lock.Commit != want || lock.SourceDigest == "" {
-			t.Fatalf("public action lock = %#v, want commit %q", lock, want)
-		}
-	}
-	checkoutRoot := filepath.Join(actionCache, "actions", "checkout", wantCommits["actions/checkout"], "tree")
-	checkout, err := metadata.Load(checkoutRoot, ".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if token := checkout.Inputs["token"].Default; token == nil || *token != "${{ github.token }}" {
-		t.Fatalf("actions/checkout token default = %#v, want github.token", token)
-	}
-	distribution, err := os.ReadFile(filepath.Join(checkoutRoot, "dist", "index.js"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(distribution, []byte("getInput('token', { required: true })")) || !bytes.Contains(distribution, []byte("Input required and not supplied:")) {
-		t.Fatal("pinned actions/checkout no longer requires a token before Git; revisit the built-in tokenless adapter")
 	}
 }

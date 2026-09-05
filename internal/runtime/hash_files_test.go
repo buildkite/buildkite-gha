@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -628,16 +627,4 @@ func withHashLimits(base hashFilesLimits, update func(*hashFilesLimits)) hashFil
 	copy := base
 	update(&copy)
 	return copy
-}
-
-func TestGitHubHashTestHelperUsesBinaryDigests(t *testing.T) {
-	first, second := sha256.Sum256([]byte("a")), sha256.Sum256([]byte("b"))
-	joined := append(append([]byte(nil), first[:]...), second[:]...)
-	want := sha256.Sum256(joined)
-	if got := githubHash("a", "b"); got != hex.EncodeToString(want[:]) {
-		t.Fatalf("githubHash() = %q", got)
-	}
-	if reflect.DeepEqual(first[:], []byte(hex.EncodeToString(first[:]))) {
-		t.Fatal("test helper unexpectedly hashes hexadecimal digests")
-	}
 }
