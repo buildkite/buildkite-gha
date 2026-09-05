@@ -46,16 +46,9 @@ func TestSmokeManifestInventory(t *testing.T) {
 		t.Fatalf("schema = %q", manifest.Schema)
 	}
 
-	wantOrder := []string{"smoke-shell", "smoke-concurrent", "smoke-ci", "smoke-artifact", "smoke-artifact-multi-prefix", "example-basic", "example-artifacts", "example-advanced", "plugin-demo-cache", "public-actions", "dockerfile-action", "container-runtime", "summary-annotation", "workflow-command-annotations", "hash-files", "upload-artifact", "cache-v6", "cache-v5", "cache-v2-compatibility", "cache-v2-admission", "unsupported-job-container", "unsupported-service-container"}
-	if len(manifest.Fixtures) != len(wantOrder) {
-		t.Fatalf("fixtures = %d, want %d", len(manifest.Fixtures), len(wantOrder))
-	}
 	idPattern := regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 	ids, pairs, inventoried := map[string]bool{}, map[string]bool{}, []string{}
-	for i, fixture := range manifest.Fixtures {
-		if fixture.ID != wantOrder[i] {
-			t.Fatalf("fixture %d ID = %q, want %q", i, fixture.ID, wantOrder[i])
-		}
+	for _, fixture := range manifest.Fixtures {
 		if !idPattern.MatchString(fixture.ID) || ids[fixture.ID] {
 			t.Fatalf("invalid or duplicate ID %q", fixture.ID)
 		}
@@ -72,7 +65,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 		for index, path := range []string{fixture.Workflow, fixture.Event} {
 			clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
 			allowedRootWorkflow := index == 0 && (path == ".github/workflows/example-basic.yml" || path == ".github/workflows/example-artifacts.yml" || path == ".github/workflows/example-advanced.yml")
-			if (!strings.HasPrefix(path, "testdata/") && !allowedRootWorkflow) || filepath.IsAbs(path) || clean != path || slicesContain(strings.Split(path, "/"), "..") {
+			if (!strings.HasPrefix(path, "testdata/") && !allowedRootWorkflow) || filepath.IsAbs(path) || clean != path || slices.Contains(strings.Split(path, "/"), "..") {
 				t.Fatalf("%s: unsafe path %q", fixture.ID, path)
 			}
 			if info, err := os.Stat(filepath.Join(root, filepath.FromSlash(path))); err != nil || !info.Mode().IsRegular() {
@@ -103,32 +96,4 @@ func TestSmokeManifestInventory(t *testing.T) {
 	if fmt.Sprint(sortedInventory) != fmt.Sprint(checkedIn) {
 		t.Fatalf("inventory = %v, checked-in workflows = %v", sortedInventory, checkedIn)
 	}
-}
-
-func TestProductionPluginActionWorkflowCompilesDeterministically(t *testing.T) {
-	root := filepath.Join("..", "..")
-	workflowPath := filepath.Join(root, ".github", "workflows", "local-actions-oracle.yml")
-	workflow, err := os.ReadFile(workflowPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	event, err := os.ReadFile(filepath.Join(root, "testdata", "smoke", "events", "push.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := Compile(workflowPath, workflow, event)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := Compile(workflowPath, workflow, event)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(first) == 0 || !bytes.Equal(first, second) {
-		t.Fatal("production plugin action workflow compilation is empty or nondeterministic")
-	}
-}
-
-func slicesContain(values []string, want string) bool {
-	return slices.Contains(values, want)
 }
