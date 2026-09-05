@@ -263,7 +263,7 @@ func validateAllEventsSource(ctx context.Context, out processingOutput, workflow
 		declared[trigger.Event] = true
 	}
 	failed := false
-	for _, event := range []string{"push", "pull_request", "merge_group", "release", "issues", "workflow_dispatch", "schedule"} {
+	for _, event := range []string{"push", "pull_request", "merge_group", "release", "issues", "issue_comment", "workflow_dispatch", "schedule"} {
 		if !declared[event] {
 			continue
 		}
@@ -382,8 +382,8 @@ func validateArgs(args []string) (workflowPath, eventPath, eventName, format, pr
 	if eventSeen && profile == "" {
 		return "", "", "", "", "", false, fmt.Errorf("--event requires --profile hosted")
 	}
-	if eventSeen && !slices.Contains([]string{"push", "pull_request", "merge_group", "release", "issues", "workflow_dispatch", "schedule"}, eventName) {
-		return "", "", "", "", "", false, fmt.Errorf("unsupported --event %q; supported events are push, pull_request, merge_group, release, issues, workflow_dispatch, and schedule", eventName)
+	if eventSeen && !slices.Contains([]string{"push", "pull_request", "merge_group", "release", "issues", "issue_comment", "workflow_dispatch", "schedule"}, eventName) {
+		return "", "", "", "", "", false, fmt.Errorf("unsupported --event %q; supported events are push, pull_request, merge_group, release, issues, issue_comment, workflow_dispatch, and schedule", eventName)
 	}
 	if allEvents && (eventPathSeen || eventSeen) {
 		return "", "", "", "", "", false, fmt.Errorf("--all-events is mutually exclusive with --event and --event-path")
@@ -440,11 +440,15 @@ func generatedEventSnapshot(name string) ([]byte, error) {
 	case "issues":
 		event.Payload["action"] = "opened"
 		event.Payload["issue"] = map[string]any{"number": 1}
+	case "issue_comment":
+		event.Payload["action"] = "created"
+		event.Payload["issue"] = map[string]any{"number": 1}
+		event.Payload["comment"] = map[string]any{"id": 1}
 	case "schedule":
 		event.Payload["schedule"] = "0 0 * * *"
 	case "workflow_dispatch":
 	default:
-		return nil, fmt.Errorf("unsupported generated event %q; supported events are push, pull_request, merge_group, release, issues, workflow_dispatch, and schedule", name)
+		return nil, fmt.Errorf("unsupported generated event %q; supported events are push, pull_request, merge_group, release, issues, issue_comment, workflow_dispatch, and schedule", name)
 	}
 	return json.Marshal(event)
 }

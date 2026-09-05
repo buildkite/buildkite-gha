@@ -86,6 +86,7 @@ func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerCondit
 		MergeGroupAction:      "null",
 		ReleaseAction:         "null",
 		IssuesAction:          "null",
+		IssueCommentAction:    "null",
 	}
 	snapshot := buildkitepipeline.TriggerEventSnapshot{}
 	if branch, ok := strings.CutPrefix(event.Ref, "refs/heads/"); ok {
@@ -105,6 +106,8 @@ func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerCondit
 		snapshot.ReleaseAction = &action
 		expressions.IssuesAction = triggerConditionLiteral(action)
 		snapshot.IssuesAction = &action
+		expressions.IssueCommentAction = triggerConditionLiteral(action)
+		snapshot.IssueCommentAction = &action
 	}
 	if pullRequest, ok := event.Payload["pull_request"].(map[string]any); ok {
 		if base, ok := pullRequest["base"].(map[string]any); ok {

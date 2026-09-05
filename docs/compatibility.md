@@ -90,7 +90,7 @@ workflow name or fallback path from `GITHUB_WORKFLOW`; the event from
 `GITHUB_EVENT_NAME`; and the commit from `GITHUB_WORKFLOW_SHA`. These values
 must match the repository and checked-out workflow. The Buildkite-prefixed path
 and event remain compatibility fallbacks, while `BUILDKITE_GITHUB_ACTION`
-supplies the pull request action. Explicit plugin selection takes precedence
+supplies the pull request, issue, or comment action. Explicit plugin selection takes precedence
 over server workflow selection. Without either selection, the plugin fails.
 The server-selected importer does not need a step key. The plugin uploads its
 artifacts before the dynamic pipeline and scopes retrieval to the importer job
@@ -212,7 +212,8 @@ Upload selects one effective event, in this order:
 
 The fallback prefers `GITHUB_EVENT_NAME`, then preserves `push`, `pull_request`,
 `workflow_dispatch`, and `schedule` from `BUILDKITE_GITHUB_EVENT` across
-rebuilds. Otherwise:
+rebuilds. It preserves `issues` and `issue_comment` only with complete GitHub
+Actions Pipeline Trigger workflow path, ref, and SHA identity. Otherwise:
 
 | Buildkite source | Effective event |
 | --- | --- |
@@ -223,13 +224,15 @@ rebuilds. Otherwise:
 
 An explicit snapshot does not consult contradictory live event fields. Linked
 merge-group data must match the queue refs and commits. Linked release data must
-match the Buildkite event, action, branch, and tag. Linked issues data provides
-the issue activity and payload.
+match the Buildkite event, action, branch, and tag. Linked issue and comment data
+must match the Buildkite action, default-branch ref, and repository. Comment
+payloads may describe either issue or pull request conversations.
 
 With the GitHub Code Access App, Buildkite resolves a release tag to its peeled
 commit before creating the build. Without it, the plugin resolves Buildkite's
 symbolic `HEAD` from the checkout as a compatibility fallback. The fallback
-cannot infer a merge group, release, or issues event without linked-webhook data.
+cannot infer a merge group, release, issues, or issue-comment event without
+linked-webhook data.
 
 The selected event then controls applicability, event-dependent compilation,
 the group condition, and the provider-check suffix.
@@ -240,7 +243,8 @@ the group condition, and the provider-check suffix.
 | `pull_request` | `branches` and `branches-ignore` match the base branch. Omitted `types` defaults to `opened`, `synchronize`, and `reopened`; explicitly listed activity types must map exactly to a supported Buildkite source action. Matching `paths` and `paths-ignore` can be admitted when the bounded local-diff requirements below are met. |
 | `merge_group` | Native Buildkite merge queue builds only. Enable merge queue builds and Merge groups webhook delivery in the pipeline's GitHub settings. `branches` and `branches-ignore` match the target branch. The only supported activity is `checks_requested`; other types and tag and workflow filters are rejected. `paths` and `paths-ignore` are ignored with a warning, matching GitHub, which does not evaluate path filters for `merge_group` events. The merge group ref and SHA identify the speculative queue commit. |
 | `release` | Native Buildkite release builds only. In the pipeline's GitHub settings, enable **Additional Webhooks** > **Releases** and use **Code** trigger mode. Connect the GitHub Code Access App for immutable server provenance and hosted release `GITHUB_TOKEN` issuance. `types` is required and may contain only `published`, `created`, and `released`; bare `release`, all other activity types, and branch, tag, path, and workflow filters are rejected. Draft `created` deliveries are rejected. The ref is `refs/tags/<tag_name>`. The SHA is the server-resolved peeled commit, or the checked-out commit for the compatibility fallback. |
-| `issues` | Native Buildkite GitHub issue builds only. A bare trigger accepts every GitHub Actions issue activity. Explicit `types` may contain `opened`, `edited`, `deleted`, `transferred`, `pinned`, `unpinned`, `closed`, `reopened`, `assigned`, `unassigned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `milestoned`, `demilestoned`, `typed`, `untyped`, `field_added`, and `field_removed`. Empty or unknown types and branch, tag, path, or workflow filters are rejected. |
+| `issues` | A bare trigger accepts every GitHub Actions issue activity. Explicit `types` may contain `opened`, `edited`, `deleted`, `transferred`, `pinned`, `unpinned`, `closed`, `reopened`, `assigned`, `unassigned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `milestoned`, `demilestoned`, `typed`, `untyped`, `field_added`, and `field_removed`. Empty or unknown types and branch, tag, path, or workflow filters are rejected. In a GitHub Actions Pipeline Trigger build, Buildkite selects workflows and the checkout from the latest verified default-branch SHA; native issue-build settings, branch/path filters, and comment gating do not participate. Existing native Buildkite issue builds remain supported through linked webhook data and retain their own build-creation settings. |
+| `issue_comment` | A bare trigger accepts `created`, `edited`, and `deleted`; explicit `types` may contain those activities. Both issue and pull request conversation comments are supported. Empty or unknown types and branch, tag, path, or workflow filters are rejected. GitHub Actions Pipeline Trigger builds select workflows and the checkout from the latest verified default-branch SHA and do not inherit native command-word, trusted-commenter, PR-only, branch, or path gating. |
 | `workflow_dispatch` | Selected only by an explicit snapshot or authoritative `GITHUB_EVENT_NAME` or `BUILDKITE_GITHUB_EVENT` value. Webhook-style branch, tag, type, and workflow filters are unsupported. |
 | `schedule` | Selected for Buildkite scheduled builds. Buildkite owns cron configuration and does not expose which schedule started a build, so every `on.schedule` workflow is eligible for every Buildkite scheduled build. |
 | `workflow_call` | Defines a reusable-workflow interface. A reusable-only local file is available to callers but does not become a top-level group. |
@@ -1539,7 +1543,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-Use `--event push`, `--event pull_request`, `--event merge_group`, `--event release`, `--event issues`, `--event workflow_dispatch`, or `--event schedule` instead of `--event-path` to evaluate the hosted profile with a generated minimal snapshot. The generated release event is a stable `published` event, and the generated issues event is `opened`. Generated snapshots are representative compatibility test inputs, not proof of every activity or equivalents to real payloads. The options are mutually exclusive.
+Use `--event push`, `--event pull_request`, `--event merge_group`, `--event release`, `--event issues`, `--event issue_comment`, `--event workflow_dispatch`, or `--event schedule` instead of `--event-path` to evaluate the hosted profile with a generated minimal snapshot. The generated release event is a stable `published` event, the generated issues event is `opened`, and the generated issue-comment event is `created`. Generated snapshots are representative compatibility test inputs, not proof of every activity or equivalents to real payloads. The options are mutually exclusive.
 
 Use `--all-events` to evaluate every declared supported event separately. Its `processing-report/v3` output preserves the event-independent result and each generated event's v2 report. Aggregate admission means every generated snapshot was admitted; it does not cover other payload shapes. A `context-required` result means compilation and hosted-policy checks passed, but generated inputs cannot measure a supported admission path, such as push or pull-request path filters without linked webhook and local diff evidence. It does not claim admission.
 

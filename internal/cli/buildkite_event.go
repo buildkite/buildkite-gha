@@ -121,6 +121,20 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 				}
 				payload = map[string]any{"ref": ref}
 			}
+		case "issues", "issue_comment":
+			if githubEvent == "issues" && getenv(pipelineTriggerWorkflowPathEnvironment) == "" &&
+				getenv(githubWorkflowRefEnvironment) == "" && getenv(githubWorkflowSHAEnvironment) == "" {
+				break
+			}
+			if getenv(pipelineTriggerWorkflowPathEnvironment) == "" ||
+				getenv(githubWorkflowRefEnvironment) == "" ||
+				getenv(githubWorkflowSHAEnvironment) == "" {
+				return nil, fmt.Errorf("%s requires GitHub Actions Pipeline Trigger workflow path, ref, and SHA identity", githubEvent)
+			}
+			if getenv(githubWorkflowSHAEnvironment) != sha {
+				return nil, fmt.Errorf("%s does not match BUILDKITE_COMMIT", githubWorkflowSHAEnvironment)
+			}
+			event = githubEvent
 		}
 	}
 	if workflowRef := getenv(githubWorkflowRefEnvironment); workflowRef != "" {
@@ -190,6 +204,11 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 	}
 	if snapshot["event"] == "release" {
 		if err := validateBuildkiteRelease(snapshot, getenv); err != nil {
+			return nil, err
+		}
+	}
+	if snapshot["event"] == "issues" || snapshot["event"] == "issue_comment" {
+		if err := validateBuildkiteIssueEvent(snapshot, getenv); err != nil {
 			return nil, err
 		}
 	}
@@ -281,6 +300,62 @@ func validateBuildkiteRelease(snapshot map[string]any, getenv func(string) strin
 	}
 	snapshot["ref"] = "refs/tags/" + tag
 	return nil
+}
+
+func validateBuildkiteIssueEvent(snapshot map[string]any, getenv func(string) string) error {
+	event := snapshot["event"].(string)
+	if snapshot["provider"] != "github" {
+		return fmt.Errorf("%s webhook requires a GitHub repository", event)
+	}
+	payload := snapshot["payload"].(map[string]any)
+	action, _ := payload["action"].(string)
+	if action == "" || action != strings.TrimSpace(getenv("BUILDKITE_GITHUB_ACTION")) {
+		return fmt.Errorf("%s webhook payload.action does not match BUILDKITE_GITHUB_ACTION", event)
+	}
+	supported := map[string]bool{
+		"opened": true, "edited": true, "deleted": true, "transferred": true,
+		"field_added": true, "field_removed": true,
+		"pinned": true, "unpinned": true, "closed": true, "reopened": true,
+		"assigned": true, "unassigned": true, "labeled": true, "unlabeled": true,
+		"locked": true, "unlocked": true, "milestoned": true, "demilestoned": true,
+		"typed": true, "untyped": true,
+	}
+	if event == "issue_comment" {
+		supported = map[string]bool{"created": true, "edited": true, "deleted": true}
+	}
+	if !supported[action] {
+		return fmt.Errorf("%s webhook action %q is unsupported", event, action)
+	}
+	issue, ok := payload["issue"].(map[string]any)
+	if !ok || !positiveJSONInteger(issue["number"]) {
+		return fmt.Errorf("%s webhook requires payload.issue.number", event)
+	}
+	if event == "issue_comment" {
+		comment, ok := payload["comment"].(map[string]any)
+		if !ok || !positiveJSONInteger(comment["id"]) {
+			return fmt.Errorf("issue_comment webhook requires payload.comment.id")
+		}
+	}
+	repository, _ := payload["repository"].(map[string]any)
+	fullName, _ := repository["full_name"].(string)
+	provider, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+	if err != nil || provider != "github" || !strings.EqualFold(fullName, owner+"/"+name) || !positiveJSONInteger(repository["id"]) {
+		return fmt.Errorf("%s webhook repository does not match BUILDKITE_REPO", event)
+	}
+	ref, _ := snapshot["ref"].(string)
+	if ref != "refs/heads/"+getenv("BUILDKITE_BRANCH") {
+		return fmt.Errorf("%s webhook ref does not match the Buildkite build branch", event)
+	}
+	return nil
+}
+
+func positiveJSONInteger(value any) bool {
+	number, ok := value.(json.Number)
+	if !ok {
+		return false
+	}
+	parsed, err := strconv.ParseInt(number.String(), 10, 64)
+	return err == nil && parsed > 0
 }
 
 func parseWebhookPayload(source []byte) (map[string]any, error) {
