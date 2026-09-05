@@ -94,7 +94,6 @@ type reusableResolution struct {
 type reusableResolver struct {
 	workspaceRoot         string
 	repositorySource      RepositorySource
-	stack                 []reusableSourceIdentity
 	materialized          []actionsource.Materialized
 	context               expression.CompileContext
 	rootPermissions       *workflow.Permissions
@@ -104,54 +103,219 @@ type reusableResolver struct {
 	warnedCancellation    map[workflow.Position]bool
 }
 
-func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource) ([]sourcedJob, []Warning, bool, error) {
-	digest := "sha256:" + sha256Sum(source)
-	runtimeMatrixBoundary := hasRuntimeMatrixBoundary(parsed)
-	if !hasReusableCall(parsed) {
-		sourcePath := path
-		root := ""
-		if isRepositoryWorkflowPath(path) {
-			repositoryRoot, canonicalPath, err := workflowRepository(path)
-			if err != nil {
-				return nil, nil, runtimeMatrixBoundary, err
-			}
-			root = repositoryRoot
-			sourcePath, err = repositoryWorkflowPath(repositoryRoot, canonicalPath)
-			if err != nil {
-				return nil, nil, runtimeMatrixBoundary, err
-			}
-		}
-		jobs := make([]sourcedJob, len(parsed.Jobs))
-		workflowJobs := make(map[string]workflow.Job, len(parsed.Jobs))
-		replacements := make(map[string]needBinding, len(parsed.Jobs))
-		for i, job := range parsed.Jobs {
-			originalJob := job
-			resolvedJob, err := applyStaticInputs(sourcePath, job, context.Inputs)
-			if err != nil {
-				return nil, nil, runtimeMatrixBoundary, err
-			}
-			job = resolvedJob
-			job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, nil, false)
-			bindings := make(map[string]needBinding, len(job.Needs))
-			for _, need := range job.Needs {
-				bindings[need] = needBinding{members: []string{need}}
-			}
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, inputs: reusableInputs{values: cloneAnyMap(context.Inputs)}, secretAuthority: secretAuthority{unrestricted: true}, needBindings: bindings, blockerDetailUnsafe: blockerFieldsChanged(originalJob, job) || matrixContainsExpressions(job.Matrix)}
-			workflowJobs[job.ID] = job
-			replacements[job.ID] = needBinding{members: []string{job.ID}}
-		}
-		if _, err := resolveWorkflowCallOutputs(sourcePath, parsed.CallOutputs, workflowJobs, replacements); err != nil {
-			return nil, nil, runtimeMatrixBoundary, err
-		}
-		return jobs, nil, runtimeMatrixBoundary, nil
-	}
+// callFrame is one workflow in the reusable-workflow call tree together with
+// everything it inherits from the chain of calls that reached it. The root
+// frame is the requested workflow; every other frame is derived from its
+// caller by child. Root and callee semantics differ only through frame methods
+// so a root workflow can never be treated as a callee.
+type callFrame struct {
+	source   reusableWorkflowSource
+	digest   string
+	workflow *workflow.Workflow
+	// chain lists the source identities from the root frame to this frame and
+	// detects call cycles.
+	chain []reusableSourceIdentity
+	// namespace prefixes flattened job IDs; label prefixes flattened job names.
+	namespace string
+	label     string
+	inputs    reusableInputs
+	// needs are the calling job's prerequisites. Callee jobs without needs
+	// depend on them so a called workflow starts after the call's needs.
+	needs map[string]needBinding
+	// permissionCeiling bounds callee permissions to the calling job's. It is
+	// nil only for the root frame.
+	permissionCeiling   *workflow.Permissions
+	secrets             secretAuthority
+	tokenPolicyNarrowed bool
+	// callPosition is the outermost call in the root workflow, used to
+	// attribute warnings for every job the call expands to.
+	callPosition workflow.Position
+	guards       []sourcedCallGuard
+	gates        []WorkflowConcurrencyGate
+	depth        int
+}
 
-	rootSource, err := localReusableWorkflowSource(path)
+// rootFrame is the requested workflow. It has unrestricted secret authority,
+// no permission ceiling, and inherits nothing from a caller.
+func rootFrame(source reusableWorkflowSource, digest string, parsed *workflow.Workflow, inputs map[string]any) callFrame {
+	return callFrame{
+		source: source, digest: digest, workflow: parsed,
+		chain:   []reusableSourceIdentity{source.identity},
+		inputs:  reusableInputs{values: inputs},
+		secrets: secretAuthority{unrestricted: true},
+	}
+}
+
+func (f callFrame) isRoot() bool { return f.depth == 0 }
+
+// path is the display path used in diagnostics and emitted jobs.
+func (f callFrame) path() string { return f.source.displayPath }
+
+// callSite is one call of a reusable workflow from a job in this frame: the
+// caller job after its permissions were resolved, one expanded matrix
+// combination, and the loaded callee. A caller job with a matrix produces one
+// site per combination.
+type callSite struct {
+	job       workflow.Job
+	call      *workflow.ReusableWorkflowCall
+	matrix    map[string]any
+	instances int
+	// needs are the caller job's need bindings after replacement, or the
+	// frame's inherited needs when the caller job has none.
+	needs               map[string]needBinding
+	guards              []sourcedCallGuard
+	tokenPolicyNarrowed bool
+	callee              reusableWorkflowSource
+	calleeDigest        string
+	calleeWorkflow      *workflow.Workflow
+	inputs              reusableInputs
+	secrets             secretAuthority
+}
+
+// child derives the frame for one call site. The callee's permission ceiling
+// is the calling job's effective permissions, or an empty map when the job has
+// none; the call position is the outermost call; namespace and label extend
+// the caller's with the calling job and its matrix combination.
+func (f callFrame) child(site callSite) (callFrame, error) {
+	component := site.job.ID
+	if site.instances > 1 {
+		suffix, err := matrixDigest(site.matrix)
+		if err != nil {
+			return callFrame{}, jobError(f.path(), site.job, fmt.Sprintf("namespace reusable-workflow matrix: %v", err))
+		}
+		component += "-" + suffix
+	}
+	label := site.job.Name
+	if label == "" {
+		label = site.job.ID
+	}
+	if len(site.matrix) != 0 {
+		label = instanceLabel(site.job, site.matrix, expression.CompileContext{})
+	}
+	if f.label != "" {
+		label = f.label + " / " + label
+	}
+	ceiling := site.job.Permissions
+	if ceiling == nil {
+		ceiling = &workflow.Permissions{Scopes: map[string]string{}, Span: site.call.Span}
+	}
+	position := f.callPosition
+	if f.isRoot() {
+		position = site.call.Span.Start
+	}
+	return callFrame{
+		source: site.callee, digest: site.calleeDigest, workflow: site.calleeWorkflow,
+		chain:               append(slices.Clone(f.chain), site.callee.identity),
+		namespace:           namespacedJobID(f.namespace, component),
+		label:               label,
+		inputs:              site.inputs,
+		needs:               site.needs,
+		permissionCeiling:   ceiling,
+		secrets:             site.secrets,
+		tokenPolicyNarrowed: site.tokenPolicyNarrowed,
+		callPosition:        position,
+		guards:              site.guards,
+		gates:               slices.Clone(f.gates),
+		depth:               f.depth + 1,
+	}, nil
+}
+
+// cycle reports the call chain that returns to source, or "" when source is
+// not already being resolved.
+func (f callFrame) cycle(source reusableWorkflowSource) string {
+	for i, existing := range f.chain {
+		if existing.key() == source.identity.key() {
+			identities := append(slices.Clone(f.chain[i:]), source.identity)
+			chain := make([]string, len(identities))
+			for j, identity := range identities {
+				chain[j] = reusableSourceIdentityDisplay(identity)
+			}
+			return strings.Join(chain, " -> ")
+		}
+	}
+	return ""
+}
+
+// jobPermissions resolves one job's permissions within this frame. Root jobs
+// keep their declared or workflow-default permissions. Callee jobs are bounded
+// by the frame's ceiling for id-token only; their repository permissions are
+// the root workflow's because only that map is enforced server-side, and the
+// result records whether the token would have been narrowed. Either kind of
+// job records whether a declared map differs from the root workflow's so
+// callers can warn once for a call whose permissions were ignored.
+type jobPermissions struct {
+	permissions           *workflow.Permissions
+	tokenPolicyNarrowed   bool
+	jobPermissionsIgnored bool
+}
+
+func (f callFrame) jobPermissions(declared, rootPermissions *workflow.Permissions) jobPermissions {
+	effective := effectivePermissions(declared, f.workflow.Permissions, f.permissionCeiling, !f.isRoot())
+	resolved := jobPermissions{
+		permissions:           effective,
+		tokenPolicyNarrowed:   f.tokenPolicyNarrowed,
+		jobPermissionsIgnored: declared != nil && repositoryPermissionsDiffer(rootPermissions, declared),
+	}
+	if f.isRoot() {
+		return resolved
+	}
+	resolved.tokenPolicyNarrowed = resolved.tokenPolicyNarrowed || repositoryPermissionsNarrowed(rootPermissions, effective)
+	idTokenPermission, hasIDTokenPermission := effective.Scopes["id-token"]
+	resolved.permissions = clonePermissions(rootPermissions)
+	delete(resolved.permissions.Scopes, "id-token")
+	if hasIDTokenPermission {
+		resolved.permissions.Scopes["id-token"] = idTokenPermission
+	}
+	return resolved
+}
+
+// jobNeeds binds one job's prerequisites. A job without needs inherits the
+// frame's needs as status-only dependencies so the called workflow starts
+// after the call's prerequisites.
+func (f callFrame) jobNeeds(job workflow.Job, replacements map[string]needBinding) (own, effective map[string]needBinding) {
+	own = replacementNeeds(job.Needs, replacements)
+	if len(job.Needs) != 0 {
+		return own, own
+	}
+	effective = cloneNeedBindings(f.needs)
+	for name, binding := range effective {
+		binding.projectOutputs = true
+		binding.outputs = nil
+		effective[name] = binding
+	}
+	return own, effective
+}
+
+// sourcedJob is the single place a flattened job is constructed from a frame.
+func (f callFrame) sourcedJob(job workflow.Job, workspaceRoot string, permissions jobPermissions, needBindings map[string]needBinding, blockerDetailUnsafe bool) sourcedJob {
+	id := job.ID
+	job.ID = namespacedJobID(f.namespace, id)
+	job.Needs = bindingMembers(needBindings)
+	if f.label != "" {
+		name := job.Name
+		if name == "" {
+			name = id
+		}
+		job.Name = f.label + " / " + name
+	}
+	return sourcedJob{
+		Job: job, path: f.path(), digest: f.digest, root: workspaceRoot, remote: cloneRemoteWorkflowSource(f.source.remote), inputs: cloneReusableInputs(f.inputs),
+		secretAuthority: cloneSecretAuthority(f.secrets), needBindings: needBindings,
+		tokenPolicyNarrowed: permissions.tokenPolicyNarrowed, jobPermissionsIgnored: permissions.jobPermissionsIgnored, reusableCall: f.callPosition,
+		blockerDetailUnsafe: blockerDetailUnsafe,
+		callGuards:          cloneSourcedCallGuards(f.guards),
+		concurrencyGates:    slices.Clone(f.gates),
+	}
+}
+
+func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource) ([]sourcedJob, []Warning, bool, error) {
+	runtimeMatrixBoundary := hasRuntimeMatrixBoundary(parsed)
+	rootSource, err := rootWorkflowSource(path)
 	if err != nil {
 		return nil, nil, runtimeMatrixBoundary, err
 	}
 	resolver := reusableResolver{
-		workspaceRoot: rootSource.repositoryRoot, repositorySource: newMemoizedActionSource(repositorySource), stack: []reusableSourceIdentity{rootSource.identity}, context: context,
+		workspaceRoot: rootSource.repositoryRoot, repositorySource: newMemoizedActionSource(repositorySource), context: context,
 		rootPermissions: effectivePermissions(nil, parsed.Permissions, nil, false), runtimeMatrixBoundary: runtimeMatrixBoundary,
 		warnedCancellation: make(map[workflow.Position]bool),
 	}
@@ -161,7 +325,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 		}
 	}()
 	resolver.discoverRuntimeMatrixBoundaries(ctx, rootSource, parsed, 0, map[string]int{rootSource.identity.key(): 0})
-	resolution, err := resolver.resolve(ctx, rootSource, digest, parsed, "", "", reusableInputs{values: context.Inputs}, nil, nil, secretAuthority{unrestricted: true}, false, workflow.Position{}, nil, nil, 0)
+	resolution, err := resolver.resolve(ctx, rootFrame(rootSource, "sha256:"+sha256Sum(source), parsed, context.Inputs))
 	return resolution.jobs, resolver.warnings, resolver.runtimeMatrixBoundary, err
 }
 
@@ -178,6 +342,11 @@ func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(ctx context.Co
 	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
 	if depth >= MaxReusableWorkflowDepth {
 		resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasReusableCall(parsed)
+		return
+	}
+	if current.repositoryRoot == "" {
+		// A workflow outside .github/workflows cannot load callees; resolve
+		// reports that as an error rather than a runtime matrix boundary.
 		return
 	}
 	for _, job := range parsed.Jobs {
@@ -211,8 +380,9 @@ func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(ctx context.Co
 	}
 }
 
-func (resolver *reusableResolver) resolve(ctx context.Context, current reusableWorkflowSource, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs reusableInputs, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secrets secretAuthority, tokenPolicyNarrowed bool, reusableCallPosition workflow.Position, callGuards []sourcedCallGuard, concurrencyGates []WorkflowConcurrencyGate, depth int) (reusableResolution, error) {
-	path := current.displayPath
+func (resolver *reusableResolver) resolve(ctx context.Context, frame callFrame) (reusableResolution, error) {
+	path := frame.path()
+	parsed := frame.workflow
 	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
 	for _, job := range parsed.Jobs {
@@ -227,72 +397,39 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 	var resolved []sourcedJob
 	for _, id := range order {
 		job := jobs[id]
-		declaredJobPermissions := job.Permissions
-		job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, permissionCeiling, depth != 0)
-		jobPermissionsIgnored := declaredJobPermissions != nil && repositoryPermissionsDiffer(resolver.rootPermissions, declaredJobPermissions)
-		jobTokenPolicyNarrowed := tokenPolicyNarrowed
-		if depth != 0 {
-			jobTokenPolicyNarrowed = jobTokenPolicyNarrowed || repositoryPermissionsNarrowed(resolver.rootPermissions, job.Permissions)
-			idTokenPermission, hasIDTokenPermission := job.Permissions.Scopes["id-token"]
-			job.Permissions = clonePermissions(resolver.rootPermissions)
-			delete(job.Permissions.Scopes, "id-token")
-			if hasIDTokenPermission {
-				job.Permissions.Scopes["id-token"] = idTokenPermission
-			}
-		}
+		permissions := frame.jobPermissions(job.Permissions, resolver.rootPermissions)
+		job.Permissions = permissions.permissions
 		originalJob := job
-		job, err = applyStaticInputs(path, job, inputs.values)
+		job, err = applyStaticInputs(path, job, frame.inputs.values)
 		if err != nil {
 			return reusableResolution{}, err
 		}
 		blockerDetailUnsafe := blockerFieldsChanged(originalJob, job) || matrixContainsExpressions(job.Matrix)
-		if parsed.Callable {
-			if err := rejectUnresolvedInputExpressions(path, job, inputs.deferred); err != nil {
+		// Root inputs come from the triggering event; expressions that remain
+		// after static replacement are evaluated at runtime. Callee inputs
+		// must resolve statically or defer to a caller need.
+		if !frame.isRoot() {
+			if err := rejectUnresolvedInputExpressions(path, job, frame.inputs.deferred); err != nil {
 				return reusableResolution{}, err
 			}
 		}
-		callNeedBindings := replacementNeeds(job.Needs, replacements)
-		needBindings := callNeedBindings
-		if len(job.Needs) == 0 {
-			needBindings = cloneNeedBindings(externalNeeds)
-			for name, binding := range needBindings {
-				binding.projectOutputs = true
-				binding.outputs = nil
-				needBindings[name] = binding
-			}
-		}
-		needs := bindingMembers(needBindings)
+		callNeedBindings, needBindings := frame.jobNeeds(job, replacements)
 		if job.Reusable == nil {
-			job.ID = namespacedJobID(namespace, job.ID)
-			job.Needs = needs
-			if labelPrefix != "" {
-				name := job.Name
-				if name == "" {
-					name = id
-				}
-				job.Name = labelPrefix + " / " + name
-			}
 			resolver.expanded++
 			if resolver.expanded > maxFlattenedJobs {
-				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow graph expands beyond %d jobs", maxFlattenedJobs))
+				return reusableResolution{}, jobError(path, job, fmt.Sprintf("workflow job graph expands beyond %d jobs", maxFlattenedJobs))
 			}
-			resolved = append(resolved, sourcedJob{
-				Job: job, path: path, digest: digest, root: resolver.workspaceRoot, remote: cloneRemoteWorkflowSource(current.remote), inputs: cloneReusableInputs(inputs),
-				secretAuthority: cloneSecretAuthority(secrets), needBindings: needBindings,
-				tokenPolicyNarrowed: jobTokenPolicyNarrowed, jobPermissionsIgnored: jobPermissionsIgnored, reusableCall: reusableCallPosition,
-				blockerDetailUnsafe: blockerDetailUnsafe,
-				callGuards:          cloneSourcedCallGuards(callGuards),
-				concurrencyGates:    append([]WorkflowConcurrencyGate(nil), concurrencyGates...),
-			})
-			replacements[id] = needBinding{members: []string{job.ID}}
+			flattened := frame.sourcedJob(job, resolver.workspaceRoot, permissions, needBindings, blockerDetailUnsafe)
+			resolved = append(resolved, flattened)
+			replacements[id] = needBinding{members: []string{flattened.ID}}
 			continue
 		}
 
 		call := job.Reusable
-		calleeGuards := callGuards
+		calleeGuards := frame.guards
 		if strings.TrimSpace(job.If) != "" {
 			conditionContext := resolver.context
-			conditionContext.Inputs = inputs.values
+			conditionContext.Inputs = frame.inputs.values
 			conditionContext.Matrix = nil
 			conditionContext.Strategy = nil
 			if err := validateCompileSite(job.If, expression.ProfileCompileCallCondition, expression.ResultBoolean); err != nil {
@@ -318,14 +455,14 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				}
 				return reusableResolution{}, locatedJobWrappedError(path, job, job.Span.Start.Line, job.Span.Start.Column, "reusable-workflow call condition", err)
 			}
-			calleeGuards = append(cloneSourcedCallGuards(callGuards), sourcedCallGuard{
-				condition: condition, inputs: cloneReusableInputs(inputs), needBindings: cloneNeedBindings(callNeedBindings),
+			calleeGuards = append(cloneSourcedCallGuards(frame.guards), sourcedCallGuard{
+				condition: condition, inputs: cloneReusableInputs(frame.inputs), needBindings: cloneNeedBindings(callNeedBindings),
 			})
 		}
-		if depth >= MaxReusableWorkflowDepth {
+		if frame.depth >= MaxReusableWorkflowDepth {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow nesting exceeds maximum depth %d", MaxReusableWorkflowDepth))
 		}
-		calleeSource, source, err := resolver.loadReusableWorkflow(ctx, current, call.Uses)
+		calleeSource, source, err := resolver.loadReusableWorkflow(ctx, frame.source, call.Uses)
 		if err != nil {
 			var finding *ProcessingFinding
 			if errors.As(err, &finding) {
@@ -348,7 +485,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				Err:     locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, message),
 			}
 		}
-		if cycle := resolver.cycle(calleeSource); cycle != "" {
+		if cycle := frame.cycle(calleeSource); cycle != "" {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow cycle detected: "+cycle)
 		}
 		callee, err := parseReusableWorkflow(calleeSource.displayPath, source)
@@ -359,14 +496,14 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		if !callee.Callable {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable workflow %q does not declare on.workflow_call", call.Uses))
 		}
-		calleeSecrets, err := resolveCallSecretAuthority(path, job, call, callee, secrets)
+		calleeSecrets, err := resolveCallSecretAuthority(path, job, call, callee, frame.secrets)
 		if err != nil {
 			return reusableResolution{}, err
 		}
 		calleeDigest := "sha256:" + sha256Sum(source)
 
 		matrixContext := resolver.context
-		matrixContext.Inputs = inputs.values
+		matrixContext.Inputs = frame.inputs.values
 		matrixContext.Matrix = nil
 		matrixContext.Strategy = nil
 		matrices, err := expandMatrix(path, job, matrixContext)
@@ -380,43 +517,23 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		var callOutputs []needOutputBinding
 		callNamespaces := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
-			callInputs, err := resolveCallInputs(path, job, call, callee, inputs, callNeedBindings, matrix, resolver.context)
+			callInputs, err := resolveCallInputs(path, job, call, callee, frame.inputs, callNeedBindings, matrix, resolver.context)
 			if err != nil {
 				return reusableResolution{}, err
 			}
-			component := job.ID
-			if len(matrices) > 1 {
-				suffix, err := matrixDigest(matrix)
-				if err != nil {
-					return reusableResolution{}, jobError(path, job, fmt.Sprintf("namespace reusable-workflow matrix: %v", err))
-				}
-				component += "-" + suffix
+			child, err := frame.child(callSite{
+				job: job, call: call, matrix: matrix, instances: len(matrices),
+				needs: needBindings, guards: calleeGuards, tokenPolicyNarrowed: permissions.tokenPolicyNarrowed,
+				callee: calleeSource, calleeDigest: calleeDigest, calleeWorkflow: callee,
+				inputs: callInputs, secrets: calleeSecrets,
+			})
+			if err != nil {
+				return reusableResolution{}, err
 			}
-			callNamespace := namespacedJobID(namespace, component)
-			if _, exists := callNamespaces[callNamespace]; exists {
-				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow matrix produces duplicate namespace %q", callNamespace))
+			if _, exists := callNamespaces[child.namespace]; exists {
+				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow matrix produces duplicate namespace %q", child.namespace))
 			}
-			callNamespaces[callNamespace] = struct{}{}
-			callLabel := job.Name
-			if callLabel == "" {
-				callLabel = job.ID
-			}
-			if len(matrix) != 0 {
-				callLabel = instanceLabel(job, matrix, expression.CompileContext{})
-			}
-			if labelPrefix != "" {
-				callLabel = labelPrefix + " / " + callLabel
-			}
-
-			calleePermissionCeiling := job.Permissions
-			if calleePermissionCeiling == nil {
-				calleePermissionCeiling = &workflow.Permissions{Scopes: map[string]string{}, Span: call.Span}
-			}
-			calleeCallPosition := reusableCallPosition
-			if depth == 0 {
-				calleeCallPosition = call.Span.Start
-			}
-			calleeConcurrencyGates := concurrencyGates
+			callNamespaces[child.namespace] = struct{}{}
 			if callee.Concurrency != nil {
 				if len(calleeGuards) != 0 {
 					return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "called-workflow concurrency is unsupported for guarded reusable-workflow calls")
@@ -433,20 +550,18 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				if err != nil {
 					return reusableResolution{}, err
 				}
-				if len(needs) != 0 {
+				if len(bindingMembers(needBindings)) != 0 {
 					return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "called-workflow concurrency is unsupported for reusable-workflow calls with prerequisites")
 				}
-				calleeConcurrencyGates = append(append([]WorkflowConcurrencyGate(nil), concurrencyGates...), WorkflowConcurrencyGate{ID: callNamespace, Group: group})
-				if cancelInProgress && !resolver.warnedCancellation[calleeCallPosition] {
-					resolver.warnedCancellation[calleeCallPosition] = true
-					warning := workflowCancellationWarning(calleeCallPosition)
+				child.gates = append(child.gates, WorkflowConcurrencyGate{ID: child.namespace, Group: group})
+				if cancelInProgress && !resolver.warnedCancellation[child.callPosition] {
+					resolver.warnedCancellation[child.callPosition] = true
+					warning := workflowCancellationWarning(child.callPosition)
 					warning.Job = job.ID
 					resolver.warnings = append(resolver.warnings, warning)
 				}
 			}
-			resolver.stack = append(resolver.stack, calleeSource.identity)
-			calleeResolution, err := resolver.resolve(ctx, calleeSource, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, calleeSecrets, jobTokenPolicyNarrowed, calleeCallPosition, calleeGuards, calleeConcurrencyGates, depth+1)
-			resolver.stack = resolver.stack[:len(resolver.stack)-1]
+			calleeResolution, err := resolver.resolve(ctx, child)
 			if err != nil {
 				message := "reusable workflow could not be resolved"
 				detail := ""
@@ -463,7 +578,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 						fmt.Sprintf("resolve reusable workflow %q", call.Uses), err),
 				}
 			}
-			if jobPermissionsIgnored {
+			if permissions.jobPermissionsIgnored {
 				for i := range calleeResolution.jobs {
 					calleeResolution.jobs[i].jobPermissionsIgnored = true
 				}
@@ -1472,20 +1587,6 @@ func requireWithinRepository(root, path string) error {
 		return fmt.Errorf("resolved path %q escapes repository root %q", path, root)
 	}
 	return nil
-}
-
-func (resolver *reusableResolver) cycle(source reusableWorkflowSource) string {
-	for i, existing := range resolver.stack {
-		if existing.key() == source.identity.key() {
-			identities := append(append([]reusableSourceIdentity(nil), resolver.stack[i:]...), source.identity)
-			chain := make([]string, len(identities))
-			for j, identity := range identities {
-				chain[j] = reusableSourceIdentityDisplay(identity)
-			}
-			return strings.Join(chain, " -> ")
-		}
-	}
-	return ""
 }
 
 func matrixDigest(matrix map[string]any) (string, error) {

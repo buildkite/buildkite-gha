@@ -81,7 +81,24 @@ func localReusableWorkflowSource(workflowPath string) (reusableWorkflowSource, e
 	}, nil
 }
 
+// rootWorkflowSource describes the requested workflow. A workflow under
+// .github/workflows is addressed relative to its repository so it can call
+// local reusable workflows; any other path compiles on its own and cannot
+// call reusable workflows.
+func rootWorkflowSource(workflowPath string) (reusableWorkflowSource, error) {
+	if isRepositoryWorkflowPath(workflowPath) {
+		return localReusableWorkflowSource(workflowPath)
+	}
+	return reusableWorkflowSource{
+		identity:    reusableSourceIdentity{kind: "workspace", path: workflowPath},
+		displayPath: workflowPath,
+	}, nil
+}
+
 func (resolver *reusableResolver) loadReusableWorkflow(ctx context.Context, parent reusableWorkflowSource, uses string) (reusableWorkflowSource, []byte, error) {
+	if parent.repositoryRoot == "" {
+		return reusableWorkflowSource{}, nil, errors.New("reusable workflows require the caller under .github/workflows")
+	}
 	if strings.Contains(uses, "${{") {
 		return reusableWorkflowSource{}, nil, &ProcessingFinding{
 			Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
