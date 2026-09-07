@@ -326,7 +326,9 @@ type Job struct {
 	Inputs               map[string]any           `json:"inputs,omitempty"`
 	DeferredInputs       map[string]DeferredInput `json:"deferred_inputs,omitempty"`
 	DeferredInputValues  map[string]any           `json:"-"`
-	Vars                 map[string]string        `json:"vars,omitempty"`
+	OrganizationVars     map[string]string        `json:"organization_vars,omitempty"`
+	RepositoryVars       map[string]string        `json:"repository_vars,omitempty"`
+	EnvironmentVars      map[string]string        `json:"environment_vars,omitempty"`
 	Dependencies         []string                 `json:"dependencies,omitempty"`
 	NeedSources          map[string][]NeedSource  `json:"need_sources,omitempty"`
 	NeedOutputs          map[string][]NeedOutput  `json:"need_outputs,omitempty"`
@@ -645,6 +647,19 @@ func (job Job) Validate() error {
 	}
 	if err := validateInputs(job.Inputs); err != nil {
 		return err
+	}
+	for _, scope := range []struct {
+		name  string
+		vars  map[string]string
+		limit int
+	}{
+		{"organization", job.OrganizationVars, organizationVarsLimit},
+		{"repository", job.RepositoryVars, repositoryVarsLimit},
+		{"environment", job.EnvironmentVars, environmentVarsLimit},
+	} {
+		if err := validateVars(scope.name, scope.vars, scope.limit); err != nil {
+			return err
+		}
 	}
 	capabilities := make(map[string]struct{}, len(job.RequiredCapabilities))
 	if !sort.StringsAreSorted(job.RequiredCapabilities) {
@@ -1043,6 +1058,83 @@ func validateInputs(inputs map[string]any) error {
 		}
 	}
 	return nil
+}
+
+// GitHub's documented variable limits: variables per scope, bytes per value,
+// and bytes of names and values per scope.
+const (
+	organizationVarsLimit = 1000
+	repositoryVarsLimit   = 500
+	environmentVarsLimit  = 100
+	varValueByteLimit     = 48 << 10
+	varsByteLimit         = 256 << 10
+)
+
+// validateVars bounds one scope of the job's variables by GitHub's limits.
+// Names follow GitHub's case-insensitive identifier rules, and the runtime
+// matches names case-insensitively, so case-colliding names are invalid here.
+func validateVars(scope string, vars map[string]string, limit int) error {
+	if len(vars) > limit {
+		return fmt.Errorf("job plan %s vars exceed their size limit", scope)
+	}
+	names := make(map[string]struct{}, len(vars))
+	total := 0
+	for name, value := range vars {
+		if !secretNamePattern.MatchString(name) {
+			return fmt.Errorf("job plan has invalid %s variable name %q", scope, name)
+		}
+		normalized := strings.ToUpper(name)
+		if _, exists := names[normalized]; exists {
+			return fmt.Errorf("job plan repeats case-insensitive %s variable %q", scope, name)
+		}
+		names[normalized] = struct{}{}
+		if len(value) > varValueByteLimit {
+			return fmt.Errorf("job plan %s variable %q exceeds its size limit", scope, name)
+		}
+		total += len(name) + len(value)
+	}
+	if total > varsByteLimit {
+		return fmt.Errorf("job plan %s vars exceed their size limit", scope)
+	}
+	return nil
+}
+
+// OrganizationVars, RepositoryVars, and EnvironmentVars hold the job's GitHub
+// Actions configuration variables by scope. VarsBeforeEnvironment is the vars
+// context of positions GitHub evaluates before the job's environment applies:
+// reusable-workflow call guards and jobs.<id>.if. Repository variables
+// override organization variables.
+func (job Job) VarsBeforeEnvironment() map[string]string {
+	return MergeVars(job.OrganizationVars, job.RepositoryVars)
+}
+
+// Vars is the vars context of every runner-evaluated position: job env,
+// defaults, outputs, services, steps, and action inputs. Environment
+// variables override repository variables, which override organization
+// variables.
+func (job Job) Vars() map[string]string {
+	return MergeVars(job.OrganizationVars, job.RepositoryVars, job.EnvironmentVars)
+}
+
+// MergeVars lays each later scope over the earlier ones. GitHub variable
+// names are case-insensitive, so an overriding variable replaces a name
+// spelled differently. The result is nil when no scope defines a variable.
+func MergeVars(scopes ...map[string]string) map[string]string {
+	var merged map[string]string
+	for _, scope := range scopes {
+		for name, value := range scope {
+			if merged == nil {
+				merged = map[string]string{}
+			}
+			for existing := range merged {
+				if strings.EqualFold(existing, name) {
+					delete(merged, existing)
+				}
+			}
+			merged[name] = value
+		}
+	}
+	return merged
 }
 
 func validateDeferredInputs(inputs map[string]any, deferred map[string]DeferredInput, dependencies map[string]struct{}) (map[string]struct{}, error) {

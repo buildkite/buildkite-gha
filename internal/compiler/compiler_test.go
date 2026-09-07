@@ -571,7 +571,7 @@ jobs:
       - run: true
 `)
 	options := defaultOptions()
-	options.Vars.Bridge = map[string]string{
+	options.Vars.Repository = map[string]string{
 		"EXCLUDE": `[{"os":"macos-latest"}]`,
 		"INCLUDE": `[{"os":"ubuntu-latest","version":24},{"os":"macos-14","version":14}]`,
 	}
@@ -611,7 +611,7 @@ jobs:
     steps: [{run: true}]
 `)
 	options := defaultOptions()
-	options.Vars.Bridge = map[string]string{"MATRIX": `{"value":[` + strings.Join(values, ",") + `]}`}
+	options.Vars.Repository = map[string]string{"MATRIX": `{"value":[` + strings.Join(values, ",") + `]}`}
 	_, err := CompileWithOptions("bounded-matrix.yml", source, readFile(t, smokePath("events", "push.json")), options)
 	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("matrix expands beyond %d instances", maxMatrixInstances)) {
 		t.Fatalf("Compile() error = %v, want static matrix instance limit", err)
@@ -747,7 +747,7 @@ jobs:
 `)
 	compiled, err := CompileWithOptions("numeric-matrix.yml", source, readFile(t, smokePath("events", "push.json")), Options{
 		EventTrust: EventTrusted,
-		Vars:       VariableSources{Bridge: map[string]string{"VERSIONS": `[12,14]`}},
+		Vars:       VariableSources{Repository: map[string]string{"VERSIONS": `[12,14]`}},
 		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
 	})
 	if err != nil {
@@ -2182,7 +2182,7 @@ jobs:
       - run: echo ${{ inputs.target }}
 `)
 	options := defaultOptions()
-	options.Vars.Bridge = map[string]string{"CALLS": `{"target":["linux","darwin"]}`}
+	options.Vars.Repository = map[string]string{"CALLS": `{"target":["linux","darwin"]}`}
 	result, err := CompileWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), options)
 	if err != nil {
 		t.Fatal(err)
@@ -3109,7 +3109,7 @@ jobs:
 `)
 	result, err := CompileWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), Options{
 		EventTrust: EventTrusted,
-		Vars:       VariableSources{Bridge: map[string]string{"COUNT": "3", "SUFFIX": "release"}},
+		Vars:       VariableSources{Repository: map[string]string{"COUNT": "3", "SUFFIX": "release"}},
 		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
 	})
 	if err != nil {
@@ -3285,7 +3285,7 @@ jobs:
 `)
 	result, err := CompileWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), Options{
 		EventTrust: EventTrusted,
-		Vars:       VariableSources{Bridge: map[string]string{"PREFIX": "release"}},
+		Vars:       VariableSources{Repository: map[string]string{"PREFIX": "release"}},
 		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
 	})
 	if err != nil {
@@ -4347,7 +4347,7 @@ jobs:
     steps: [{run: true}]
 `)
 	options := defaultOptions()
-	options.Vars.Buildkite = map[string]string{"IMAGE": "tool"}
+	options.Vars.Repository = map[string]string{"IMAGE": "tool"}
 	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), options)
 	if err != nil {
 		t.Fatal(err)
@@ -4451,7 +4451,7 @@ jobs:
     steps: [{run: true}]
 `)
 	options := defaultOptions()
-	options.Vars.Buildkite = map[string]string{"SERVICE_PORT": "5432", "REGISTRY_USER": "registry-user"}
+	options.Vars.Repository = map[string]string{"SERVICE_PORT": "5432", "REGISTRY_USER": "registry-user"}
 	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), options)
 	if err != nil {
 		t.Fatal(err)

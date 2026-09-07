@@ -17,8 +17,10 @@ stable 400 message that the client surfaces unchanged. The
 backend performs the GitHub reads with its own credentials and
 answers with a non-secret JSON snapshot — required reviewers present,
 `prevent_self_review`, wait timer minutes, branch policy present, unsupported
-rule descriptions, and secret names. No GitHub token and no secret value
-reaches the importer. This client consumes the endpoint automatically in
+rule descriptions, secret names, and, when the request sets
+`include_variables`, the environment's variables with plaintext values
+([buildkite/buildkite#33692](https://github.com/buildkite/buildkite/pull/33692)).
+No GitHub token and no secret value reaches the importer. This client consumes the endpoint automatically in
 `upload` and in `compile` when it runs inside a Buildkite job. It is the only
 environment access path: there is no GitHub token option, so environments are
 unsupported outside a Buildkite job and on GitHub Enterprise Server.
@@ -32,9 +34,32 @@ output to exactly the fields the compiler consumes.
 
 Remaining before removing this plan:
 
-- Backend endpoint merged and rolled out, including adding Actions: read and
-  Environments: read to the code-access GitHub App and installation
-  administrator approvals.
+- Backend endpoint and its `include_variables` extension merged and rolled
+  out, including adding Actions: read and Environments: read to the
+  code-access GitHub App and installation administrator approvals. Environment
+  variable listing is covered by Environments: read. The environments
+  endpoint carries environment-scoped variables only and will not grow
+  repository or organization fields.
+- Repository and organization variables come from a separate job-scoped
+  endpoint, `POST /jobs/{job_id}/github-actions/variables`, which
+  [buildkite/buildkite#33752](https://github.com/buildkite/buildkite/pull/33752)
+  is being reworked to provide in place of its first draft, which extended the
+  environments response with top-level `repository_variables` and
+  `organization_variables` and allowed an empty `environment_names`. That draft
+  is withdrawn; this client never consumed those fields. The agreed contract:
+  request `{"repo_url": "https://github.com/owner/repo"}`; response
+  `{"repository_variables": [{"name", "value"}], "organization_variables":
+  [{"name", "value"}]}`, each sorted by name and never merged server-side
+  (client precedence environment > repository > organization); bounds 500
+  repository and 1000 organization names, 48 KiB per value, 256 KiB combined,
+  failing closed as 400; token minted with Variables: read only. The client
+  will call it at most once per upload when static analysis finds any `vars`
+  reference, whether or not a workflow declares an environment, and fill
+  `compiler.VariableSources` before compiling so `jobs.<id>.if` and
+  compile-time `vars` positions resolve. The job plan already carries separate
+  `organization_vars` and `repository_vars` scopes (empty today), so this needs
+  no plan format change. Environment resolution stays limited to declared
+  environments.
 - A hosted end-to-end proof of an `upload` resolving an environment and gating
   a deploy job.
 
@@ -102,7 +127,10 @@ from the job's Agent connection. Each workflow's declared environments
 resolve together in one batched request — results, including failures, are
 memoized case-insensitively, so an upload of many workflows sharing
 environments typically consumes one request — and every resolution failure
-fails the compile, never degrading to an unprotected deployment. When the
+fails the compile, never degrading to an unprotected deployment. The client
+always requests variables and requires the `variables` field, so a backend
+without the extension fails the compile with a decode error rather than
+letting `vars` references resolve as empty. When the
 backend rollout completes and the hosted proof passes, move lasting facts into
 [deployment environments](../compatibility.md#deployment-environments) and
 remove this plan.
