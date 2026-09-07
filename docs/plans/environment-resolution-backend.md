@@ -52,7 +52,12 @@ Remaining before removing this plan:
   [{"name", "value"}]}`, each sorted by name and never merged server-side
   (client precedence environment > repository > organization); bounds 500
   repository and 1000 organization names, 48 KiB per value, 256 KiB combined,
-  failing closed as 400; token minted with Variables: read only. The client
+  failing closed as 400; token minted with Variables: read only; a separate
+  budget of 10 requests per job per hour (429 with `Retry-After`); 503 with
+  `Retry-After` when GitHub is unavailable. A 404 means the backend lacks the
+  endpoint or the organization opted out of environment resolution, which the
+  client treats as "scopes unavailable": `vars` names no scope defines keep
+  evaluating as empty strings, never as a client-introduced error. The client
   will call it at most once per upload when static analysis finds any `vars`
   reference, whether or not a workflow declares an environment, and fill
   `compiler.VariableSources` before compiling so `jobs.<id>.if` and
