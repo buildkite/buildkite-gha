@@ -838,7 +838,7 @@ func TestGitRepositorySourceUsesExistingConfigurationOnlyForRepositoryRoots(t *t
 	})
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()
-	option := withGitFixtureSource(git)
+	option := withGitFixtureSource(git, remote)
 	endpoint := WithTestEndpoints(server.URL, server.URL)
 	resolver, err := NewResolver(server.Client(), endpoint, option)
 	if err != nil {
@@ -893,13 +893,13 @@ func TestGitRepositorySourceUsesExistingConfigurationOnlyForRepositoryRoots(t *t
 }
 
 func TestGitRepositorySourceReauthorizesAuthenticatedCacheEntries(t *testing.T) {
-	git, _, _, _ := configureGitRepositorySource(t, map[string]string{
+	git, _, remote, _ := configureGitRepositorySource(t, map[string]string{
 		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
 	})
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()
 	endpoint := WithTestEndpoints(server.URL, server.URL)
-	option := withGitFixtureSource(git)
+	option := withGitFixtureSource(git, remote)
 	resolver, err := NewResolver(server.Client(), endpoint, option)
 	if err != nil {
 		t.Fatal(err)
@@ -939,12 +939,12 @@ func TestGitRepositorySourceReauthorizesAuthenticatedCacheEntries(t *testing.T) 
 }
 
 func TestGitRepositorySourceRejectsMutableRefDrift(t *testing.T) {
-	git, work, _, first := configureGitRepositorySource(t, map[string]string{
+	git, work, remote, first := configureGitRepositorySource(t, map[string]string{
 		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
 	})
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()
-	option := withGitFixtureSource(git)
+	option := withGitFixtureSource(git, remote)
 	endpoint := WithTestEndpoints(server.URL, server.URL)
 	resolver, err := NewResolver(server.Client(), endpoint, option)
 	if err != nil {
@@ -1021,12 +1021,12 @@ func TestGitRepositorySourceEnvironmentDisablesInteractionAndTracing(t *testing.
 }
 
 func TestGitRepositorySourcePreservesArchiveLimits(t *testing.T) {
-	git, _, _, _ := configureGitRepositorySource(t, map[string]string{
+	git, _, remote, _ := configureGitRepositorySource(t, map[string]string{
 		".github/workflows/ci.yml": strings.Repeat("x", 256),
 	})
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()
-	option := withGitFixtureSource(git)
+	option := withGitFixtureSource(git, remote)
 	limits := WithLimits(1<<20, 128, 128, 100)
 	endpoint := WithTestEndpoints(server.URL, server.URL)
 	resolver, err := NewResolver(server.Client(), endpoint, option, limits)
@@ -1088,7 +1088,7 @@ func TestGitRepositorySourceRejectsRefspecBeforeFetch(t *testing.T) {
 }
 
 func TestGitRepositorySourceBoundsFetchPackInput(t *testing.T) {
-	git, _, _, _ := configureGitRepositorySource(t, map[string]string{
+	git, _, remote, _ := configureGitRepositorySource(t, map[string]string{
 		".github/workflows/ci.yml": strings.Repeat("x", 256),
 	})
 	root := t.TempDir()
@@ -1101,7 +1101,7 @@ func TestGitRepositorySourceBoundsFetchPackInput(t *testing.T) {
 	}
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()
-	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), withGitFixtureSource(wrapper), WithLimits(100, 1<<20, 1<<20, 100))
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), withGitFixtureSource(wrapper, remote), WithLimits(100, 1<<20, 1<<20, 100))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1119,12 +1119,14 @@ func TestGitRepositorySourceBoundsFetchPackInput(t *testing.T) {
 	}
 }
 
-// withGitFixtureSource enables Git fallback and reopens the file transport
-// that the production policy denies, so fixtures served through the global
-// url.<file>.insteadOf rewrite remain reachable.
-func withGitFixtureSource(executable string) Option {
+// withGitFixtureSource enables Git fallback against the local bare fixture
+// remote and reopens the file transport that the production policy denies.
+func withGitFixtureSource(executable, remote string) Option {
 	return func(c *config) error {
 		if err := WithGitRepositorySource(executable)(c); err != nil {
+			return err
+		}
+		if err := withGitFixtureRemote(remote)(c); err != nil {
 			return err
 		}
 		c.gitTestArgs = []string{"-c", "protocol.file.allow=always"}
@@ -1132,13 +1134,23 @@ func withGitFixtureSource(executable string) Option {
 	}
 }
 
+// withGitFixtureRemote points fetches at the fixture's file:// remote root
+// instead of github.com without changing the transport policy.
+func withGitFixtureRemote(remote string) Option {
+	return func(c *config) error {
+		c.gitTestRemoteBase = "file://" + filepath.ToSlash(filepath.Dir(filepath.Dir(remote))) + "/"
+		return nil
+	}
+}
+
 func TestGitRepositorySourceDeniesNonHTTPSTransports(t *testing.T) {
-	git, _, _, _ := configureGitRepositorySource(t, map[string]string{
+	git, _, remote, _ := configureGitRepositorySource(t, map[string]string{
 		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
 	})
+	runSourceGit(t, git, "", "config", "--global", "protocol.file.allow", "always")
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()
-	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git))
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git), withGitFixtureRemote(remote))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1147,7 +1159,41 @@ func TestGitRepositorySourceDeniesNonHTTPSTransports(t *testing.T) {
 	_, err = resolver.Resolve(t.Context(), ref)
 	var notPublic *NotPublicError
 	if !errors.As(err, &notPublic) {
-		t.Fatalf("Resolve() error = %v, want denial when the inherited URL rewrite selects a non-HTTPS transport", err)
+		t.Fatalf("Resolve() error = %v, want denial of a non-HTTPS transport even when inherited configuration allows it", err)
+	}
+}
+
+func TestGitRepositorySourceRefusesInheritedURLRewrites(t *testing.T) {
+	git, _, _, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	runSourceGit(t, git, "", "config", "--global", "url.https://mirror.example/.insteadOf", "https://github.com/")
+	root := t.TempDir()
+	invocations := filepath.Join(root, "invocations")
+	t.Setenv("GIT_INVOCATIONS", invocations)
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GIT_INVOCATIONS\"\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	if err == nil || !strings.Contains(err.Error(), "rewritten by inherited Git configuration") || strings.Contains(err.Error(), "mirror.example") {
+		t.Fatalf("Resolve() error = %v, want rewrite refusal without the rewritten URL", err)
+	}
+	log, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), " fetch ") {
+		t.Fatalf("rewritten URL reached Git fetch: %s", log)
 	}
 }
 
@@ -1186,8 +1232,6 @@ func configureGitRepositorySource(t *testing.T, files map[string]string) (git, w
 	runSourceGit(t, git, "", "init", "--bare", "--quiet", remote)
 	runSourceGit(t, git, work, "remote", "add", "origin", remote)
 	runSourceGit(t, git, work, "push", "--quiet", "origin", "HEAD:refs/heads/main")
-	runSourceGit(t, git, "", "config", "--global", "protocol.file.allow", "always")
-	runSourceGit(t, git, "", "config", "--global", "url.file://"+filepath.ToSlash(remoteRoot)+"/.insteadOf", "https://github.com/")
 	commit = strings.TrimSpace(runSourceGit(t, git, work, "rev-parse", "HEAD"))
 	return git, work, remote, commit
 }

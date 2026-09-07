@@ -63,11 +63,13 @@ credentials the job can receive.
 
 Private reusable workflows use the separate, default-off
 `private-reusable-workflows` importer setting. After anonymous access fails,
-the importer passes Git a canonical credential-free HTTPS URL for the called
-repository. Git inherits the importer's credential helpers, configuration, and
-environment, but each invocation allows only the HTTPS transport, refuses
-redirects, and checks received objects, so an inherited URL rewrite cannot move
-the request to another transport or host. The Buildkite Agent
+the importer passes Git a canonical credential-free `https://github.com/` URL
+for the called repository. Git inherits the importer's credential helpers,
+configuration, and environment. Each invocation allows only the HTTPS
+transport, refuses redirects, and checks received objects. The importer expands
+the URL with `git ls-remote --get-url` before fetching and stops if an
+inherited `url.<base>.insteadOf` rewrite changed it, so the request and the
+credential helper lookup stay on `github.com`. The Buildkite Agent
 repository-provider helper requests access for the exact repository; operators
 can also configure broader credentials. Denied repositories, refs, paths, and
 tenants remain indistinguishable from missing sources. Private action source

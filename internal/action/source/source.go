@@ -170,6 +170,7 @@ type config struct {
 	credential                          *actionSourceCredential
 	git                                 string
 	gitTestArgs                         []string
+	gitTestRemoteBase                   string
 	mutableRefs                         *mutableRefCache
 	resolutionSnapshot                  *actionResolutionSnapshot
 	cacheMaxBytes                       int64
@@ -576,7 +577,23 @@ func fetchWithGit(ctx context.Context, cfg config, ref Reference, requestedRef s
 		}
 		return "", func() {}, fmt.Errorf("configure bounded Git repository source")
 	}
-	remote := "https://github.com/" + ref.Owner + "/" + ref.Repository + ".git"
+	remoteBase := "https://github.com/"
+	if cfg.gitTestRemoteBase != "" {
+		remoteBase = cfg.gitTestRemoteBase
+	}
+	remote := remoteBase + ref.Owner + "/" + ref.Repository + ".git"
+	// Inherited url.<base>.insteadOf rewrites could send the request, and the
+	// credential helper lookup, to another host. Expand the URL without
+	// contacting the remote and refuse any rewrite. The rewritten URL is not
+	// reported because it may embed credentials.
+	var expanded bytes.Buffer
+	if err := runGit(ctx, cfg.git, repository, &expanded, "ls-remote", "--get-url", "--", remote); err != nil || strings.TrimSpace(expanded.String()) != remote {
+		cleanup()
+		if ctx.Err() != nil {
+			return "", func() {}, ctx.Err()
+		}
+		return "", func() {}, fmt.Errorf("git repository source URL is rewritten by inherited Git configuration")
+	}
 	refs := []string{"refs/tags/" + requestedRef, "refs/heads/" + requestedRef, requestedRef}
 	fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -584,7 +601,8 @@ func fetchWithGit(ctx context.Context, cfg config, ref Reference, requestedRef s
 	for _, candidate := range refs {
 		limitError := &containsWriter{needle: []byte("pack exceeds maximum allowed size")}
 		// cfg.gitTestArgs follows gitBaseArgs so tests can reopen the file
-		// transport for local fixtures; production configurations leave it empty.
+		// transport for local fixtures; production configurations leave it and
+		// cfg.gitTestRemoteBase empty.
 		fetchArgs := append(append([]string{}, cfg.gitTestArgs...),
 			"-c", "fetch.unpackLimit=1", "fetch", "--quiet", "--force", "--no-tags", "--depth=1", "--no-recurse-submodules", "--no-auto-maintenance", "--", remote, candidate)
 		err = runGitEnvironment(fetchCtx, cfg.git, repository, io.Discard, limitError, boundedEnvironment, fetchArgs...)
