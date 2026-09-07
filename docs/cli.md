@@ -287,6 +287,10 @@ buildkite-gha compile \
   .github/workflows/ci.yml
 ```
 
+Inside a Buildkite job, the IR includes the resolved
+[repository and organization variables](compatibility.md#repository-and-organization-variables)
+when the workflow references `vars`.
+
 Workflows whose jobs declare a GitHub
 [`environment`](compatibility.md#deployment-environments) need GitHub
 environment access at compile time. Inside a Buildkite job, `upload` and

@@ -47,6 +47,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs and locally inherited or explicitly mapped reusable jobs resolve through the destination job's Buildkite secret authority. |
 | [Job and service containers](#containers-and-services) | 🟡 Supported subset | Linux job containers and broadly compatible service definitions, including explicit registry credentials. |
 | [Environments and snapshots](#deployment-environments) | 🟡 Supported subset | Literal environments on top-level jobs, with required-reviewer approval gates and environment-scoped secret names. Wait timers, branch policies, and custom rules are rejected. Snapshots are accepted with no effect. |
+| [Variables](#repository-and-organization-variables) | 🟡 Supported subset | Repository, organization, and environment `vars` resolve inside a Buildkite job with GitHub's per-position scoping. `run-name` rejects `vars`. |
 | [OIDC](#other-secrets-and-oidc) | 🟡 Supported subset | Host JavaScript and composite actions can request Buildkite OIDC tokens in jobs with `id-token: write`. |
 | [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers are outside the initial release. |
 | [Other GitHub services](#github-services) | ❌ Unsupported | No general emulation for Releases, Packages, Checks, deployments, or GitHub artifact APIs. |
@@ -192,12 +193,10 @@ non-dispatch event, declared dispatch inputs use their typed zero values rather
 than dispatch-only defaults. A skipped workflow does not synthesize dispatch
 inputs.
 
-GitHub also documents `vars` in its context-availability reference. Only
-[environment variables](#deployment-environments) have a source. Repository
-and organization variables are not read, so a `vars` reference outside a
-declared environment's variables evaluates to an empty string at runtime, and
-compile-time positions such as `runs-on`, `strategy`, `concurrency`, container
-images, and reusable-workflow inputs have no `vars` source at all.
+GitHub also documents `vars` in its context-availability reference, but
+`run-name` has no `vars` source here and a reference is rejected. See
+[Repository and organization variables](#repository-and-organization-variables)
+for every other position.
 
 Buildkite controls when a build starts. The trigger declaration controls whether and under which condition the workflow group participates in that existing build:
 
@@ -636,7 +635,7 @@ that declare environments fail to compile with an error naming the job.
 | Literal `environment` name, with or without `url` | ✅ Supported on top-level workflow jobs. Expression names and reusable-workflow jobs are rejected. |
 | Required reviewers | 🟡 One Buildkite block step per workflow and environment gates the affected jobs. Any user who can unblock the pipeline can approve; GitHub reviewer lists, `prevent_self_review`, and administrator bypass are not enforced. |
 | Environment secrets | 🟡 Referenced secret names defined in the environment resolve to the Buildkite secret `<ENVIRONMENT>_<NAME>`. Other names resolve unchanged. Values stay in Buildkite Secrets; only names are read from GitHub. |
-| Environment variables | 🟡 `${{ vars.NAME }}` resolves in runner-evaluated fields of jobs that declare the environment. Job `if` and compile-time fields never see environment variables, and other names evaluate as empty. See below. |
+| Environment variables | 🟡 `${{ vars.NAME }}` resolves in runner-evaluated fields of jobs that declare the environment, over repository and organization variables. Job `if` and compile-time fields never see environment variables. See [Repository and organization variables](#repository-and-organization-variables). |
 | Wait timers | ❌ Rejected at compile time. |
 | Deployment branch policies | ❌ Rejected at compile time. |
 | Custom deployment protection rules | ❌ Rejected at compile time. |
@@ -652,44 +651,6 @@ Generated keys must be storable in Buildkite Secrets: compilation fails when a
 key would exceed 255 characters or begin with `BK` or `BUILDKITE`, so rename
 such environments or secrets.
 
-Environment variables follow GitHub's scoping. Each job's plan carries its
-declared environment's variables as `environment_vars`, separate from the
-`repository_vars` and `organization_vars` scopes, which stay empty because
-repository and organization variables are not read. The runtime builds the
-`vars` context per position the way GitHub does:
-
-| Position | `vars` context |
-| --- | --- |
-| `jobs.<id>.if` and reusable-workflow call `if` | Repository over organization variables. GitHub evaluates these before the job's environment applies, so environment variables are never visible here and such references currently evaluate as empty. Check environment variables in a step `if`. |
-| Job `env`, `defaults.run`, `outputs`, service credentials, every step field, and action input defaults | Environment over repository over organization variables. |
-| Compile-time fields (`runs-on`, `strategy`, `concurrency`, container images, `environment` names, reusable-workflow inputs) | Repository over organization variables; currently no source, so a reference fails to compile. See [Compile-time expressions](#compile-time-expressions). |
-
-Names match case-insensitively, and a higher scope replaces a lower scope's
-name spelled differently. A name no scope defines evaluates to an empty
-string, as on GitHub; it is not a compile error. Dynamic access such as
-`vars[matrix.name]`, `vars.*`, and `toJSON(vars)` reads the same per-position
-context. Matrix instances share their job's environment variables. Jobs
-without an environment, including every reusable-workflow job, see no
-variables. `GITHUB_TOKEN` and secret authority planning never resolves `vars`:
-a step input such as `${{ vars.ENABLED == 'yes' && github.token || '' }}`
-requests the token whatever the variable's value, and fails under
-`permissions: {}` as it does without variables.
-
-```yaml
-deploy:
-  runs-on: ubuntu-latest
-  environment: production
-  env:
-    AWS_REGION: ${{ vars.AWS_REGION }}
-  steps:
-    - if: vars.TIER == 'gold'
-      run: echo "$AWS_REGION"
-```
-
-Values are plain configuration, not secrets: they are stored in the build's
-job plan artifacts and are visible to anyone who can read build artifacts.
-See [Environment variables](security.md#environment-variables) in the security guide.
-
 The approval gate is a block step with `blocked_state: running`, so ungated
 jobs keep running while approval is pending. The gate appears whenever the
 workflow compiles, even if the gated job's own condition would skip it. Matrix
@@ -699,6 +660,72 @@ a new build for a fresh approval.
 Environment configuration is read once per compile, so changes on GitHub apply
 to the next build. Buildkite OIDC tokens do not carry a GitHub `environment`
 claim.
+
+### Repository and organization variables
+
+`${{ vars.NAME }}` follows GitHub's scoping. Inside a Buildkite job, `upload`
+and `compile` read the event repository's repository and organization
+variables through the job-scoped Agent API (`github-actions/variables`) when
+any applicable workflow, a reusable workflow it calls, or an input default of
+an action it uses references `vars`; workflows without a `vars` reference
+make no request, and neither do events from providers other than GitHub.com.
+One upload makes at most one request, whether or not a workflow declares an
+environment. The
+Buildkite backend reads the variables from GitHub with its own credentials,
+restricted to the pipeline's configured repository, and bounds the response
+(500 repository and 1000 organization names, 48 KiB per value, 256 KiB
+combined). Its rejection, rate limit (10 requests per job per hour), or
+GitHub outage fails the compile of every workflow that references `vars` with
+the backend's error and any `Retry-After` delay; other workflows still upload.
+A backend without the endpoint, or an organization that has opted out,
+returns 404, which leaves both scopes empty rather than failing the compile.
+Outside a Buildkite job, `compile` has no variable source, so the scopes are
+empty.
+
+Each job's plan carries the scopes as `organization_vars`, `repository_vars`,
+and, for jobs that declare an environment, `environment_vars`. The compiler
+and runtime build the `vars` context per position the way GitHub does:
+
+| Position | `vars` context |
+| --- | --- |
+| `jobs.<id>.if` and reusable-workflow call `if` | Repository over organization variables. GitHub evaluates these before the job's environment applies, so environment variables are never visible here. Check environment variables in a step `if`. |
+| Job `env`, `defaults.run`, `outputs`, service credentials, every step field, and action input defaults | Environment over repository over organization variables. |
+| Compile-time fields (`runs-on`, `strategy`, `concurrency`, job names, container images, reusable-workflow inputs) | Repository over organization variables. Without a source, such as `compile` outside a Buildkite job, a reference fails to compile. `environment` names must stay literal. See [Compile-time expressions](#compile-time-expressions). |
+
+Names match case-insensitively, and a higher scope replaces a lower scope's
+name spelled differently. A name no scope defines evaluates to an empty
+string, as on GitHub; it is not a compile error. Dynamic access such as
+`vars[matrix.name]`, `vars.*`, and `toJSON(vars)` reads the same per-position
+context. Matrix instances share their job's environment variables; jobs
+without an environment, including every reusable-workflow job, see repository
+and organization variables only. `GITHUB_TOKEN` and secret authority planning
+never resolves `vars`: a job or step gated by `if: vars.PUBLISH == 'true'`
+keeps its token and secret requests whatever the variable's value, because
+every condition keeps `vars` for the runtime to evaluate, and a step input
+such as `${{ vars.ENABLED == 'yes' && github.token || '' }}` requests the
+token and fails under `permissions: {}` as it does without variables.
+
+```yaml
+deploy:
+  runs-on: ${{ vars.RUNNER }}
+  if: vars.DEPLOY_ENABLED == 'true'
+  environment: production
+  env:
+    AWS_REGION: ${{ vars.AWS_REGION }}
+  steps:
+    - if: vars.TIER == 'gold'
+      run: echo "$AWS_REGION"
+```
+
+Values are plain configuration, not secrets: they are stored in the build's
+job plan artifacts and are visible to anyone who can read build artifacts, and
+`compile --format ir-json` prints both scopes in the IR whenever the workflow
+references `vars`. A value a compile-time field uses also appears wherever
+that field does: a job name or matrix value becomes a step label in the
+pipeline YAML, and a runner label that cannot be mapped is quoted in the
+compile diagnostic. Runtime references, processing reports, and resolution
+errors never carry values. See
+[Variables](security.md#variables) in the security guide.
 
 ### Matrix strategies
 
@@ -942,7 +969,7 @@ Conditions support computed object indexes, numeric array indexes, whole
 | `runner.temp` | ❌ No | ✅ Yes |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
 | `matrix.<name>` | ✅ Yes | ✅ Yes |
-| `vars.<name>` | 🟡 Evaluates as empty: repository and organization variables are not read | ✅ Yes, for [environment variables](#deployment-environments) |
+| `vars.<name>` | ✅ Yes, [repository and organization variables](#repository-and-organization-variables) | ✅ Yes, environment over repository over organization variables |
 | `inputs.<name>` and computed input indexes | ✅ Yes | ✅ Yes |
 | `steps.<id>.outcome`, `steps.<id>.conclusion`, `steps.<id>.outputs.<name>` | ❌ No | ✅ Yes |
 | `env.<name>` | ❌ No | ✅ Yes |

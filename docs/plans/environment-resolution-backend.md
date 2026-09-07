@@ -4,9 +4,8 @@ Importer jobs resolve
 [deployment environments](../compatibility.md#deployment-environments) through
 Buildkite, which already holds the GitHub App installation. The chosen design
 is option 2 below: a dedicated Agent API snapshot endpoint,
-`POST /jobs/{job_id}/github-actions/environments`, implemented in
-[buildkite/buildkite#33480](https://github.com/buildkite/buildkite/pull/33480).
-There is no feature flag: the endpoint returns no credential or secret value,
+`POST /jobs/{job_id}/github-actions/environments`, implemented on the
+Buildkite backend. There is no feature flag: the endpoint returns no credential or secret value,
 missing GitHub App permissions already fail closed as 400, and an unavailable
 endpoint fails closed as 404. The
 importer posts one batched request per upload naming every distinct
@@ -18,8 +17,7 @@ backend performs the GitHub reads with its own credentials and
 answers with a non-secret JSON snapshot — required reviewers present,
 `prevent_self_review`, wait timer minutes, branch policy present, unsupported
 rule descriptions, secret names, and, when the request sets
-`include_variables`, the environment's variables with plaintext values
-([buildkite/buildkite#33692](https://github.com/buildkite/buildkite/pull/33692)).
+`include_variables`, the environment's variables with plaintext values.
 No GitHub token and no secret value reaches the importer. This client consumes the endpoint automatically in
 `upload` and in `compile` when it runs inside a Buildkite job. It is the only
 environment access path: there is no GitHub token option, so environments are
@@ -41,30 +39,13 @@ Remaining before removing this plan:
   endpoint carries environment-scoped variables only and will not grow
   repository or organization fields.
 - Repository and organization variables come from a separate job-scoped
-  endpoint, `POST /jobs/{job_id}/github-actions/variables`, which
-  [buildkite/buildkite#33752](https://github.com/buildkite/buildkite/pull/33752)
-  is being reworked to provide in place of its first draft, which extended the
-  environments response with top-level `repository_variables` and
-  `organization_variables` and allowed an empty `environment_names`. That draft
-  is withdrawn; this client never consumed those fields. The agreed contract:
-  request `{"repo_url": "https://github.com/owner/repo"}`; response
-  `{"repository_variables": [{"name", "value"}], "organization_variables":
-  [{"name", "value"}]}`, each sorted by name and never merged server-side
-  (client precedence environment > repository > organization); bounds 500
-  repository and 1000 organization names, 48 KiB per value, 256 KiB combined,
-  failing closed as 400; token minted with Variables: read only; a separate
-  budget of 10 requests per job per hour (429 with `Retry-After`); 503 with
-  `Retry-After` when GitHub is unavailable. A 404 means the backend lacks the
-  endpoint or the organization opted out of environment resolution, which the
-  client treats as "scopes unavailable": `vars` names no scope defines keep
-  evaluating as empty strings, never as a client-introduced error. The client
-  will call it at most once per upload when static analysis finds any `vars`
-  reference, whether or not a workflow declares an environment, and fill
-  `compiler.VariableSources` before compiling so `jobs.<id>.if` and
-  compile-time `vars` positions resolve. The job plan already carries separate
-  `organization_vars` and `repository_vars` scopes (empty today), so this needs
-  no plan format change. Environment resolution stays limited to declared
-  environments.
+  endpoint, `POST /jobs/{job_id}/github-actions/variables`, which replaced a
+  withdrawn draft that extended the environments response; this client never
+  consumed those draft fields. The client side is done (see below).
+  Remaining: merge and roll out the backend endpoint, including its
+  Variables: read token scope and the 10-requests-per-job-per-hour budget.
+  Until then the endpoint returns 404 and the client leaves both scopes
+  empty, so `vars` names no scope defines keep evaluating as empty strings.
 - A hosted end-to-end proof of an `upload` resolving an environment and gating
   a deploy job.
 
@@ -135,7 +116,27 @@ environments typically consumes one request — and every resolution failure
 fails the compile, never degrading to an unprotected deployment. The client
 always requests variables and requires the `variables` field, so a backend
 without the extension fails the compile with a decode error rather than
-letting `vars` references resolve as empty. When the
-backend rollout completes and the hosted proof passes, move lasting facts into
+letting `vars` references resolve as empty.
+
+Repository and organization variables use a separate source
+([internal/cli/variables.go](../../internal/cli/variables.go)) over the
+variables endpoint
+([internal/runtime/variable_resolution.go](../../internal/runtime/variable_resolution.go)).
+Static analysis (`compiler.Report.ReferencesVars`) finds `vars` references
+across each workflow and the reusable workflows it calls; when any applicable
+GitHub.com workflow references `vars`, one memoized request per upload sends
+`{"repo_url": "https://github.com/owner/repo"}` and fills
+`compiler.VariableSources` before validation, so `jobs.<id>.if` and
+compile-time fields resolve and every job plan carries `repository_vars` and
+`organization_vars`. A reference that lives only in a resolved action's input
+default (`compiler.ActionsReferenceVars`) is discovered after compilation;
+the same memoized request then runs and the workflow compiles again so its
+plans carry the scopes. The client enforces the contract's bounds (500 and 1000
+names, 48 KiB per value, 256 KiB combined, name syntax, case-insensitive
+uniqueness per scope), treats 404 as empty scopes, and fails the referencing
+workflows on 400, 429, and 503 with the backend message and `Retry-After`
+delay, never echoing a value. Token-authority planning ignores resolved
+values. When the backend rollout completes and the hosted proof passes, move
+lasting facts into
 [deployment environments](../compatibility.md#deployment-environments) and
 remove this plan.

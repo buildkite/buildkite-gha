@@ -75,9 +75,12 @@ const (
 
 // VariableSources are the GitHub Actions configuration variables known before
 // any job's environment applies: organization variables, then repository
-// variables, which override them. Environment variables come from
-// Options.EnvironmentSource per job. No caller supplies these sources yet, so
-// the vars context of compile-time fields and jobs.<id>.if is empty.
+// variables, which override them. They form the vars context of compile-time
+// fields and jobs.<id>.if, and every job plan carries them as its
+// organization_vars and repository_vars scopes. Environment variables come
+// from Options.EnvironmentSource per job. Inside a Buildkite job, upload and
+// compile fill these scopes from the job-scoped Agent API; an empty source
+// leaves undefined names evaluating as empty strings.
 type VariableSources struct {
 	Organization map[string]string
 	Repository   map[string]string

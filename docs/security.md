@@ -20,7 +20,7 @@ access by itself.
 | `permissions` and `GITHUB_TOKEN` | Top-level workflow permissions and Buildkite's workflow-token policy determine whether Buildkite issues a scoped token. GitHub repository and organization defaults are not inherited. |
 | Repository and environment secrets | Static secret names resolve through Buildkite Secrets when the destination job's identity and Secret access policy allow them. Environment-defined secret names resolve to `<ENVIRONMENT>_<NAME>` Buildkite secrets; event and fork scoping are not inherited. |
 | Environment protection rules | Required reviewers become a Buildkite block step that any user who can unblock the pipeline may approve. Reviewer lists, self-review prevention, wait timers, branch policies, and custom rules are not enforced; unsupported rules fail the compile. |
-| Environment variables | Values are copied into the job plan artifact as `environment_vars`. They are configuration, not secrets: anyone who can read build artifacts can read them. Repository and organization variables are never read. |
+| Repository, organization, and environment variables | The Buildkite backend reads them from GitHub with its own credentials; values are copied into the job plan artifact as `organization_vars`, `repository_vars`, and `environment_vars`. They are configuration, not secrets: anyone who can read build artifacts can read them. |
 | OIDC | Actions use Buildkite-issued tokens and claims. Cloud trust policies must trust Buildkite rather than GitHub. |
 
 The [compatibility reference](compatibility.md) says what works. This page says
@@ -192,20 +192,26 @@ same job identity can also run `buildkite-agent secret get`.
 a declared alias preserves that scoped token boundary; it never requests an
 ordinary Buildkite secret.
 
-### Environment variables
+### Variables
 
-GitHub environment variables (`${{ vars.NAME }}`) are configuration values,
-not secrets. The Buildkite backend reads them from GitHub with its own
-credentials, and the importer copies each declared environment's variables
-into the plans of the jobs that declare it. A plan artifact
-(`.buildkite-gha/plans/<digest>.json`) therefore contains plaintext values,
-readable by anyone who can read the build's artifacts. Store sensitive values
-as environment secrets instead. Values never appear in pipeline YAML, compile
-diagnostics, or processing reports; those name variables only. Repository and
-organization variables are never read, so a job sees only its environment's
-variables, and a name outside them evaluates as empty rather than exposing
-another scope's value. See [deployment
-environments](compatibility.md#deployment-environments).
+GitHub Actions variables (`${{ vars.NAME }}`) are configuration values, not
+secrets. The Buildkite backend reads them from GitHub with its own
+credentials, restricted to the pipeline's configured repository, and the
+importer copies the repository and organization scopes into every job plan
+and each declared environment's variables into the plans of the jobs that
+declare it. A plan artifact (`.buildkite-gha/plans/<digest>.json`) therefore
+contains plaintext values, readable by anyone who can read the build's
+artifacts, and `compile --format ir-json` run inside a job prints both scopes
+to stdout, and so to the job log, whenever the workflow references `vars`.
+Store sensitive values as secrets instead. A value used in a compile-time
+field, such as a job name, matrix
+value, or runner label, also appears where that field does: in the pipeline
+YAML and in a compile diagnostic that quotes the field. Runtime references,
+processing reports, and resolution errors never carry values; they name
+variables only. A job
+sees the scopes GitHub gives each position, and a name no scope defines
+evaluates as empty rather than exposing another repository's value. See [repository and organization
+variables](compatibility.md#repository-and-organization-variables).
 
 ### OIDC
 
