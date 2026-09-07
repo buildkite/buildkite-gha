@@ -8,7 +8,10 @@ import (
 func TestUploadArtifactCommitContracts(t *testing.T) {
 	commits := []string{
 		UploadArtifactV1Commit, UploadArtifactV2Commit, UploadArtifactV3Commit,
-		UploadArtifactCommit, UploadArtifactV5Commit, UploadArtifactV6Commit, UploadArtifactV7Commit,
+		UploadArtifactV460Commit, UploadArtifactCommit, UploadArtifactV5Commit, UploadArtifactV6Commit, UploadArtifactV7Commit,
+		"c7d193f32edcb7bfad88892161225aeda64e9392", // v4.0.0
+		"694cdabd8bdb0f10b2cea11669e1bf5453eed0a6", // v4.2.0
+		"50769540e7f4bd5e21e526ee35c689e35e0d6874", // v4.4.0
 	}
 	for _, commit := range commits {
 		if err := validateUploadArtifactCommit(commit); err != nil {
@@ -19,18 +22,51 @@ func TestUploadArtifactCommitContracts(t *testing.T) {
 	if err := validateUploadArtifactCommit(unknown); err != nil || !UploadArtifactUsesFallbackContract(unknown) {
 		t.Fatalf("unknown immutable commit fallback = %v, %t", err, UploadArtifactUsesFallbackContract(unknown))
 	}
-	if UploadArtifactUsesFallbackContract(UploadArtifactV7Commit) {
-		t.Fatal("known v7 commit uses fallback contract")
+	for _, commit := range []string{UploadArtifactV460Commit, UploadArtifactV7Commit} {
+		if UploadArtifactUsesFallbackContract(commit) {
+			t.Fatalf("known commit %s uses fallback contract", commit)
+		}
 	}
-	for _, commit := range []string{uploadArtifactV322Commit, "v7", strings.Repeat("A", 40), strings.Repeat("0", 39)} {
+	for _, commit := range []string{"c6a366c94c3e0affe28c06c8df20a878f24da3cf", "c6a3b2bd78b3985e4b2f15397fec357f0fd808de", "v7", strings.Repeat("A", 40), strings.Repeat("0", 39)} {
 		err := validateUploadArtifactCommit(commit)
 		if err == nil {
 			t.Fatalf("unsupported commit %s accepted", commit)
 		}
-		for _, supported := range commits {
+		for supported := range uploadArtifactCommits {
 			if !strings.Contains(err.Error(), supported) {
-				t.Fatalf("unrecognized commit %s error = %v, want audited commit %s", commit, err, supported)
+				t.Fatalf("unsupported commit %s error = %v, want principal commit %s", commit, err, supported)
 			}
+		}
+	}
+}
+
+func TestUploadArtifactSnapshotContracts(t *testing.T) {
+	if len(uploadArtifactCommitContracts) < 306 {
+		t.Fatalf("snapshotted upload-artifact commits = %d, want at least 306", len(uploadArtifactCommitContracts))
+	}
+	for branch, tip := range uploadArtifactSnapshotTips {
+		if _, ok := uploadArtifactCommitContracts[tip]; !ok {
+			t.Errorf("snapshot branch %s tip %s has no admitted contract", branch, tip)
+		}
+	}
+	for commit, contract := range uploadArtifactCommitContracts {
+		if contract.inputs == "" || !contract.declaresInput("name") || !contract.declaresInput("path") {
+			t.Errorf("snapshotted commit %s lacks required adapter inputs", commit)
+		}
+		for _, names := range []string{contract.inputs, contract.outputs} {
+			if names == "" {
+				continue
+			}
+			parts := strings.Split(names, ",")
+			for i, name := range parts {
+				if name != strings.ToLower(name) || i > 0 && parts[i-1] >= name {
+					t.Errorf("snapshotted commit %s has noncanonical names %q", commit, names)
+					break
+				}
+			}
+		}
+		if contract.nameRequired != contract.v1 {
+			t.Errorf("snapshotted commit %s has inconsistent v1 name requirement", commit)
 		}
 	}
 }
@@ -43,7 +79,7 @@ func TestUploadArtifactFallbackUsesBoundedV7Contract(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("fallback rejected bounded v7 inputs: %v", err)
 	}
-	if !UploadArtifactSupportsOutputs(unknown) || UploadArtifactIncludesHiddenByDefault(unknown) {
+	if !UploadArtifactSupportsOutput(unknown, "artifact-id") || !UploadArtifactSupportsOutput(unknown, "artifact-digest") || UploadArtifactIncludesHiddenByDefault(unknown) {
 		t.Fatal("fallback did not use v7 outputs and hidden-file default")
 	}
 	for _, inputs := range []map[string]string{
@@ -55,6 +91,35 @@ func TestUploadArtifactFallbackUsesBoundedV7Contract(t *testing.T) {
 		if err := ValidateUploadArtifactInputs(unknown, inputs); err == nil {
 			t.Fatalf("fallback accepted unsafe inputs %#v", inputs)
 		}
+	}
+}
+
+func TestUploadArtifactSnapshotPreservesManifestContracts(t *testing.T) {
+	const (
+		v400 = "c7d193f32edcb7bfad88892161225aeda64e9392"
+		v420 = "694cdabd8bdb0f10b2cea11669e1bf5453eed0a6"
+		v440 = "50769540e7f4bd5e21e526ee35c689e35e0d6874"
+	)
+	if !UploadArtifactIncludesHiddenByDefault(v400) || !UploadArtifactSupportsOutput(v400, "artifact-id") || UploadArtifactSupportsOutput(v400, "artifact-digest") {
+		t.Fatal("v4.0.0 snapshot contract does not preserve hidden-file default and outputs")
+	}
+	if err := ValidateUploadArtifactInputs(v400, map[string]string{"path": "payload", "overwrite": "false"}); err == nil || !strings.Contains(err.Error(), "unsupported by this actions/upload-artifact release") {
+		t.Fatalf("v4.0.0 accepted later overwrite input: %v", err)
+	}
+	if err := ValidateUploadArtifactInputs(v420, map[string]string{"path": "payload", "overwrite": "false"}); err != nil {
+		t.Fatalf("v4.2.0 rejected declared overwrite input: %v", err)
+	}
+	if err := ValidateUploadArtifactInputs(v420, map[string]string{"path": "payload", "include-hidden-files": "true"}); err == nil || !strings.Contains(err.Error(), "unsupported by this actions/upload-artifact release") {
+		t.Fatalf("v4.2.0 accepted later hidden-file input: %v", err)
+	}
+	if err := ValidateUploadArtifactInputs(v440, map[string]string{"path": "payload", "include-hidden-files": "true"}); err != nil {
+		t.Fatalf("v4.4.0 rejected declared hidden-file input: %v", err)
+	}
+	if UploadArtifactIncludesHiddenByDefault(v440) || UploadArtifactSupportsOutput(v440, "artifact-digest") {
+		t.Fatal("v4.4.0 snapshot contract does not preserve hidden-file default and outputs")
+	}
+	if !UploadArtifactSupportsOutput(UploadArtifactV460Commit, "artifact-digest") {
+		t.Fatal("v4.6.0 snapshot contract omits artifact-digest")
 	}
 }
 
@@ -111,8 +176,10 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 			}
 		})
 	}
-	if err := ValidateUploadArtifactInputs(UploadArtifactCommit, map[string]string{"path": "payload", "archive": "true"}); err == nil || !strings.Contains(err.Error(), "only in actions/upload-artifact v7") {
-		t.Fatalf("v4 archive input error = %v", err)
+	for _, commit := range []string{UploadArtifactV460Commit, UploadArtifactCommit} {
+		if err := ValidateUploadArtifactInputs(commit, map[string]string{"path": "payload", "archive": "true"}); err == nil || !strings.Contains(err.Error(), "only in actions/upload-artifact v7") {
+			t.Fatalf("v4 commit %s archive input error = %v", commit, err)
+		}
 	}
 	for _, test := range []struct {
 		name   string

@@ -1787,6 +1787,8 @@ func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
 		actionintegration.UploadArtifactV1Commit,
 		actionintegration.UploadArtifactV2Commit,
 		actionintegration.UploadArtifactV3Commit,
+		"c7d193f32edcb7bfad88892161225aeda64e9392", // v4.0.0
+		actionintegration.UploadArtifactV460Commit,
 		actionintegration.UploadArtifactCommit,
 	} {
 		root := t.TempDir()
@@ -1829,7 +1831,11 @@ func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
 		t.Fatalf("legacy upload-artifact warnings = %#v", bundle.IR.Warnings)
 	}
 
-	bundle = compile("      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactCommit + "\n" +
+	bundle = compile("      - uses: actions/upload-artifact@c7d193f32edcb7bfad88892161225aeda64e9392\n" +
+		"        with:\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV460Commit + "\n" +
+		"        with:\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactCommit + "\n" +
 		"        with:\n          path: payload\n")
 	if len(bundle.IR.Warnings) != 0 {
 		t.Fatalf("warnings = %#v, want none", bundle.IR.Warnings)
@@ -2063,6 +2069,8 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		t.Fatalf("upload-artifact v7 plans = %#v", plans)
 	}
 	for version, commit := range map[string]string{
+		"v4.0.0": "c7d193f32edcb7bfad88892161225aeda64e9392",
+		"v4.6.0": actionintegration.UploadArtifactV460Commit,
 		"v5.0.0": actionintegration.UploadArtifactV5Commit,
 		"v6.0.0": actionintegration.UploadArtifactV6Commit,
 	} {
