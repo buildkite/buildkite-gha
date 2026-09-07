@@ -4461,7 +4461,7 @@ jobs:
 	}
 	for i, image := range []string{"postgres:16", "postgres:17"} {
 		service := plans[i].Services["database"]
-		if service.Image != image || service.Credentials == nil || service.Credentials.Username != "registry-user" || service.Credentials.Password != "${{ secrets.REGISTRY_PASSWORD }}" || service.Env["INSTANCE"] != strconv.Itoa(i) || !slices.Equal(service.Ports, []string{"5432"}) || len(service.Volumes) != 1 || service.Options == "" || service.Command == "" || service.Entrypoint == "" {
+		if service.Image != image || service.Credentials == nil || service.Credentials.Username != "${{ vars.REGISTRY_USER }}" || service.Credentials.Password != "${{ secrets.REGISTRY_PASSWORD }}" || service.Env["INSTANCE"] != strconv.Itoa(i) || !slices.Equal(service.Ports, []string{"5432"}) || len(service.Volumes) != 1 || service.Options == "" || service.Command == "" || service.Entrypoint == "" {
 			t.Fatalf("compiled service %d = %#v", i, service)
 		}
 		if !slices.Equal(plans[i].ServiceOrder, []string{"database"}) {
@@ -4479,18 +4479,35 @@ jobs:
 
 func TestResolveCompileServicesRejectsVariableIntroducedExpressionSyntax(t *testing.T) {
 	services := []workflow.Service{{
+		Name:      "database",
+		Container: workflow.ServiceContainer{Image: "${{ vars.image }}"},
+	}}
+	_, err := resolveCompileServices(services, expression.CompileContext{Vars: map[string]string{"image": "${{ secrets.ADMIN }}"}})
+	if err == nil || !strings.Contains(err.Error(), "compile-time expression result contains expression syntax") {
+		t.Fatalf("resolveCompileServices() error = %v", err)
+	}
+}
+
+// TestResolveCompileServicesKeepsCredentialVariablesResidual proves service
+// credentials are not reduced with the pre-environment vars: the runtime
+// evaluates them after the job's environment applies.
+func TestResolveCompileServicesKeepsCredentialVariablesResidual(t *testing.T) {
+	services := []workflow.Service{{
 		Name: "database",
 		Container: workflow.ServiceContainer{
-			Image: "postgres:16",
+			Image: "postgres:${{ vars.tag }}",
 			Credentials: &workflow.ContainerCredentials{
-				Username: "registry-user",
-				Password: "${{ vars.password }}",
+				Username: "${{ vars.user }}",
+				Password: "${{ secrets.REGISTRY_PASSWORD }}",
 			},
 		},
 	}}
-	_, err := resolveCompileServices(services, expression.CompileContext{Vars: map[string]string{"password": "${{ secrets.ADMIN }}"}})
-	if err == nil || !strings.Contains(err.Error(), "compile-time expression result contains expression syntax") {
-		t.Fatalf("resolveCompileServices() error = %v", err)
+	resolved, err := resolveCompileServices(services, expression.CompileContext{Vars: map[string]string{"tag": "16", "user": "registry-user"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if container := resolved[0].Container; container.Image != "postgres:16" || container.Credentials.Username != "${{ vars.user }}" {
+		t.Fatalf("resolved service = %#v", container)
 	}
 }
 

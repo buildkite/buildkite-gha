@@ -599,6 +599,12 @@ func resolveCompileContainer(container *workflow.Container, context expression.C
 }
 
 func resolveCompileServices(services []workflow.Service, context expression.CompileContext) ([]workflow.Service, error) {
+	// Credentials are runner-evaluated after the job's environment applies, so
+	// their vars context is not known here. Keep vars residual so the runtime
+	// evaluates them with environment variables laid over the pre-environment
+	// scopes. Every other service field is compile-time and keeps the context.
+	credentialContext := context
+	credentialContext.Vars = nil
 	resolved := make([]workflow.Service, 0, len(services))
 	for _, service := range services {
 		container := service.Container
@@ -612,7 +618,7 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 				if err := validateCompileSite(*field, expression.ProfileServiceCredential, expression.ResultString); err != nil {
 					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
 				}
-				value, err := reducePartialTemplateString(*field, expression.ProfileServiceCredential, context)
+				value, err := reducePartialTemplateString(*field, expression.ProfileServiceCredential, credentialContext)
 				if err != nil {
 					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
 				}

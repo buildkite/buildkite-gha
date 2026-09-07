@@ -111,6 +111,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     if: github.event.ref == 'refs/heads/main' && vars.REGION == 'base'
+    services:
+      registry:
+        image: registry:${{ vars.SHARED }}
+        credentials:
+          username: ${{ vars.REGION }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
     steps:
       - run: 'echo ${{ vars.region }} ${{ vars.SHARED }}'
       - run: echo ${{ format('{0}-{1}', github.event.ref, vars.REGION) }}
@@ -142,6 +148,11 @@ jobs:
 	}
 	if mixed := deploy.Steps[1]; mixed.Command != "echo ${{ format('{0}-{1}', 'refs/heads/main', vars.region) }}" || mixed.Condition != "(true && (vars.region == 'base'))" {
 		t.Fatalf("mixed event and vars expressions were reduced with repository values: command=%q condition=%q", mixed.Command, mixed.Condition)
+	}
+	// Service credentials are runner-evaluated too, while the other service
+	// fields are compile-time and do reduce with the repository value.
+	if registry := deploy.Services["registry"]; registry.Image != "registry:shared" || registry.Credentials == nil || registry.Credentials.Username != "${{ vars.REGION }}" {
+		t.Fatalf("service = %#v, want compile-time image and residual credential vars", registry)
 	}
 	// jobs.<id>.if is evaluated before the environment applies, so the same
 	// expression there does reduce with the repository value.
