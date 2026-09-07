@@ -317,8 +317,7 @@ func TestHashWorkspaceFilesPrunesUnrelatedEntries(t *testing.T) {
 	for _, patterns := range [][]string{
 		{"packages/service/value"},
 		{"packages/service/*"},
-		{"packages/s*/value"},
-		{"packages/s*/**"},
+		{"packages/service/**"},
 		{"packages/service/", "!packages/**", "packages/service/value"},
 	} {
 		limits := defaultHashFilesLimits
@@ -353,7 +352,7 @@ func TestHashWorkspaceFilesPruningPreservesMatches(t *testing.T) {
 	for _, name := range []string{"root", "a/value", "a/nested/value", "b/value", "b/deep/c/value", "c/other", ".hidden/value", "literal/{name}"} {
 		writeFixtureFile(t, workspace, name, name)
 	}
-	for _, pattern := range []string{"a", "a/", "a/*", "*/value", "[ab]/value", "**/value", "a/**/value", "*/**/c/*", ".hidden", "literal/{name}", "A/VALUE", `a\/value`} {
+	for _, pattern := range []string{"a", "a/", "a/*", "*/value", "[ab]/value", "**/value", "a/**/value", "*/**/c/*", ".hidden", "literal/{name}", "A/VALUE", `a\/value`, "a[/]value", "a[!x]value", "a[.-0]value"} {
 		for _, insensitive := range []bool{false, true} {
 			got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{pattern}, defaultHashFilesLimits, insensitive)
 			// An excluded broad positive forces a full walk while leaving the
@@ -363,6 +362,21 @@ func TestHashWorkspaceFilesPruningPreservesMatches(t *testing.T) {
 				t.Fatalf("pattern %q (insensitive %v): %q, %v; full walk %q, %v", pattern, insensitive, got, err, want, wantErr)
 			}
 		}
+	}
+}
+
+func TestHashWorkspaceFilesCharacterClassesAcrossDirectories(t *testing.T) {
+	for _, prefix := range []string{"", "packages/", "literal{}/"} {
+		t.Run(prefix, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeFixtureFile(t, workspace, prefix+"a/value", "value")
+			for _, pattern := range []string{"a[/]value", "a[!x]value", "a[.-0]value"} {
+				got, err := hashWorkspaceFiles(t.Context(), workspace, []string{prefix + pattern})
+				if err != nil || got != githubHash("value") {
+					t.Fatalf("hashFiles(%q) = %q, %v; want %q", prefix+pattern, got, err, githubHash("value"))
+				}
+			}
+		})
 	}
 }
 

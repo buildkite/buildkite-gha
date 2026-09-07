@@ -223,53 +223,56 @@ func hashWorkspaceFile(ctx context.Context, root *os.Root, directoryInfo fs.File
 	return fileHash.Sum(nil), read, nil
 }
 
-// hashFileSearchChildren returns literal children to inspect, or requests directory
-// enumeration when a positive pattern needs a wildcard. Negations cannot prune:
-// a later positive pattern may re-include an excluded descendant.
-func hashFileSearchChildren(patterns []hashFilePattern, directory string, caseInsensitive bool) ([]string, bool) {
-	var parts []string
-	if directory != "." {
-		parts = strings.Split(directory, "/")
-	}
-	names := make(map[string]bool)
+// hashFileSearchPrefixes derives literal search paths using the same library as
+// matching. Below the first wildcard, traverse conservatively: character classes
+// can consume separators, so matching individual components is not equivalent.
+func hashFileSearchPrefixes(patterns []hashFilePattern, caseInsensitive bool) []string {
+	var prefixes []string
 	for _, pattern := range patterns {
 		if pattern.negative {
 			continue
 		}
-		if strings.Contains(pattern.pattern, `\/`) {
-			return nil, true // Escaped separators need whole-pattern matching.
+		base, rest := doublestar.SplitPattern(pattern.pattern)
+		if !strings.ContainsAny(rest, "*?[\\") {
+			base = path.Join(base, rest)
 		}
-		segments := strings.Split(pattern.pattern, "/")
-		possible := true
-		for i, part := range parts {
-			if i >= len(segments) || segments[i] == "**" {
-				// Directory matches include descendants. Keep globstar traversal
-				// conservative rather than guessing which depth will match.
-				return nil, true
-			}
-			segment := segments[i]
-			if caseInsensitive {
-				segment, part = strings.ToLower(segment), strings.ToLower(part)
-			}
-			if matched, _ := doublestar.Match(segment, part); !matched {
-				possible = false
-				break
-			}
+		// SplitPattern unescapes metacharacters in the base, but leaves other
+		// escapes intact. Let whole-pattern matching handle those paths.
+		if base == "." || strings.Contains(base, `\`) {
+			return []string{"."}
 		}
-		if !possible {
-			continue
+		if caseInsensitive {
+			base = strings.ToLower(base)
 		}
-		if len(parts) >= len(segments) {
+		prefixes = append(prefixes, base)
+	}
+	return prefixes
+}
+
+func hashFileSearchChildren(prefixes []string, directory string, caseInsensitive bool) ([]string, bool) {
+	if caseInsensitive {
+		directory = strings.ToLower(directory)
+	}
+	names := make(map[string]bool)
+	for _, prefix := range prefixes {
+		if prefix == "." || directory == prefix || strings.HasPrefix(directory, prefix+"/") {
 			return nil, true
 		}
-		segment := segments[len(parts)]
-		// Enumerate escaped patterns too: matching remains owned by doublestar.
+		rest := prefix
+		if directory != "." {
+			var ok bool
+			rest, ok = strings.CutPrefix(prefix, directory+"/")
+			if !ok {
+				continue
+			}
+		}
 		// macOS volumes commonly fold case even though hashFiles matching does
 		// not. Enumerate to retain the actual spelling on those filesystems.
-		if caseInsensitive || runtime.GOOS == "darwin" || runtime.GOOS == "windows" || strings.ContainsAny(segment, "*?[\\") {
+		if caseInsensitive || runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 			return nil, true
 		}
-		names[segment] = true
+		name, _, _ := strings.Cut(rest, "/")
+		names[name] = true
 	}
 	result := make([]string, 0, len(names))
 	for name := range names {
@@ -281,18 +284,18 @@ func hashFileSearchChildren(patterns []hashFilePattern, directory string, caseIn
 
 func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen func(string), directories map[string]fs.FileInfo, patterns []hashFilePattern, caseInsensitive bool, visit func(string, fs.DirEntry) error) error {
 	const readBatch = 256
+	prefixes := hashFileSearchPrefixes(patterns, caseInsensitive)
 	entriesRead := 0
 	rootInfo, err := root.Lstat(".")
 	if err != nil {
 		return fmt.Errorf("inspect hashFiles workspace: %w", err)
 	}
 	directories["."] = rootInfo
-	var walk func(string, *os.Root, fs.FileInfo) error
-	walk = func(directory string, current *os.Root, currentInfo fs.FileInfo) error {
+	var walk func(string, *os.Root, fs.FileInfo, []string, bool) error
+	walk = func(directory string, current *os.Root, currentInfo fs.FileInfo, names []string, enumerate bool) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		names, enumerate := hashFileSearchChildren(patterns, directory, caseInsensitive)
 		if !enumerate && len(names) == 0 {
 			return nil
 		}
@@ -358,7 +361,7 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen
 				return err
 			}
 			if entry.IsDir() {
-				children, scan := hashFileSearchChildren(patterns, name, caseInsensitive)
+				children, scan := hashFileSearchChildren(prefixes, name, caseInsensitive)
 				if !scan && len(children) == 0 {
 					continue
 				}
@@ -379,7 +382,7 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen
 					return fmt.Errorf("hashFiles directory %q changed before traversal", name)
 				}
 				directories[name] = before
-				walkErr := walk(name, childRoot, before)
+				walkErr := walk(name, childRoot, before, children, scan)
 				if closeErr := childRoot.Close(); walkErr != nil || closeErr != nil {
 					return errors.Join(walkErr, closeErr)
 				}
@@ -387,7 +390,8 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen
 		}
 		return nil
 	}
-	return walk(".", root, rootInfo)
+	names, enumerate := hashFileSearchChildren(prefixes, ".", caseInsensitive)
+	return walk(".", root, rootInfo, names, enumerate)
 }
 
 func verifyHashFileDirectories(ctx context.Context, root *os.Root, directories map[string]fs.FileInfo, name string) error {

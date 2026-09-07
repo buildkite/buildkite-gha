@@ -1091,11 +1091,13 @@ and overlapping patterns hash each path once. Matching is case-insensitive only
 on Windows. An empty match returns an empty string.
 
 On Linux, literal paths use direct lookups. macOS and Windows enumerate directory
-names to preserve platform-specific matching. Wildcard patterns skip directories
-that cannot match a positive pattern; `**` searches recursively below its prefix. Negative
-patterns filter matches but do not prune traversal, since later patterns can
-re-include files. The entry limit counts inspected entries, including nonmatches,
-rather than the size of the workspace.
+names to preserve platform-specific matching. Each positive pattern searches
+below its literal directory prefix, then walks recursively from its first
+wildcard. For example, `packages/service/*.go` searches under `packages/service`,
+while `packages/s*/value` searches under `packages`. Negative patterns filter
+matches but do not prune traversal, since later patterns can re-include files.
+The entry limit counts inspected entries, including nonmatches, rather than the
+size of the workspace.
 
 Each call has an execution budget covering traversal, matching, sorting, hashing,
 and verification. An earlier step or job deadline still applies. Cancellation is
