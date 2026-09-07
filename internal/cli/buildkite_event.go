@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,7 +11,11 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/git"
 )
+
+const githubEventNameEnvironment = "GITHUB_EVENT_NAME"
 
 var githubEventNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,99}$`)
 
@@ -22,15 +25,12 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	if getenv("BUILDKITE") != "true" {
 		return nil, fmt.Errorf("BUILDKITE must be true")
 	}
-	if strings.TrimSpace(getenv("BUILDKITE_STEP_KEY")) == "" {
-		return nil, fmt.Errorf("BUILDKITE_STEP_KEY is required")
-	}
 	provider, owner, name, cloneURL, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
 	if err != nil {
 		return nil, fmt.Errorf("BUILDKITE_REPO: %w", err)
 	}
 	sha := getenv("BUILDKITE_COMMIT")
-	if !validBuildkiteCommit(sha) {
+	if !git.ValidObjectID(sha) {
 		return nil, fmt.Errorf("BUILDKITE_COMMIT must be a full lowercase 40-hex commit, not a symbolic ref")
 	}
 	branch, tag, pullRequest := getenv("BUILDKITE_BRANCH"), getenv("BUILDKITE_TAG"), getenv("BUILDKITE_PULL_REQUEST")
@@ -43,11 +43,8 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	}
 
 	event, ref := "push", ""
-	switch getenv("BUILDKITE_SOURCE") {
-	case "schedule":
+	if getenv("BUILDKITE_SOURCE") == "schedule" {
 		event = "schedule"
-	case "ui", "api":
-		event = "workflow_dispatch"
 	}
 	payload := map[string]any{}
 	switch {
@@ -86,10 +83,15 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		if base := getenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH"); base != "" {
 			pr["base"].(map[string]any)["ref"] = base
 		}
-		// A Buildkite environment fallback represents a build of the current PR
-		// head rather than a distinct GitHub delivery. Use synchronize to give
-		// that compatibility snapshot deterministic head-update semantics.
-		payload["action"], payload["number"], payload["pull_request"] = "synchronize", number, pr
+		// Pipeline Triggers provide the selected GitHub action. Other Buildkite
+		// PR builds retain deterministic head-update semantics.
+		action := "synchronize"
+		if getenv(pipelineTriggerWorkflowPathEnvironment) != "" {
+			if selectedAction := strings.TrimSpace(getenv("BUILDKITE_GITHUB_ACTION")); selectedAction != "" {
+				action = selectedAction
+			}
+		}
+		payload["action"], payload["number"], payload["pull_request"] = action, number, pr
 	case strings.TrimSpace(tag) != "":
 		ref = "refs/tags/" + tag
 		payload["ref"] = ref
@@ -99,6 +101,33 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		}
 		ref = "refs/heads/" + branch
 		payload["ref"] = ref
+	}
+	githubEvent, err := buildkiteGitHubEventName(getenv)
+	if err != nil {
+		return nil, err
+	}
+	if githubEvent != "" {
+		switch githubEvent {
+		case "push", "pull_request", "workflow_dispatch", "schedule":
+			event = githubEvent
+			// Rebuilds retain the original GitHub event even though Buildkite reports
+			// their source as UI. A push may also be associated with an open pull
+			// request, so restore its authoritative branch or tag ref.
+			if event == "push" {
+				if strings.TrimSpace(tag) != "" {
+					ref = "refs/tags/" + tag
+				} else if strings.TrimSpace(branch) != "" {
+					ref = "refs/heads/" + branch
+				}
+				payload = map[string]any{"ref": ref}
+			}
+		}
+	}
+	if workflowRef := getenv(githubWorkflowRefEnvironment); workflowRef != "" {
+		_, ref, err = parsePipelineTriggerWorkflowRef(workflowRef, event, getenv("BUILDKITE_REPO"))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	repository := map[string]any{"owner": owner, "name": name, "clone_url": cloneURL}
@@ -121,11 +150,6 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	return result, nil
 }
 
-func validBuildkiteCommit(commit string) bool {
-	decoded, err := hex.DecodeString(commit)
-	return err == nil && len(decoded) == 20 && commit == strings.ToLower(commit)
-}
-
 // buildkiteWebhookEventSource overlays untrusted trigger data onto the
 // execution identity derived and validated by buildkiteEventSource.
 func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]byte, error) {
@@ -144,18 +168,12 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 		return nil, fmt.Errorf("decode Buildkite compatibility snapshot: %w", err)
 	}
 	snapshot["payload"] = payload
-	if event := strings.TrimSpace(getenv("BUILDKITE_GITHUB_EVENT")); githubEventNamePattern.MatchString(event) {
+	event, err := buildkiteGitHubEventName(getenv)
+	if err != nil {
+		return nil, err
+	}
+	if event != "" {
 		snapshot["event"] = event
-		// Buildkite can associate a push-created build with an open pull
-		// request. Keep the authoritative execution ref consistent with the
-		// linked webhook event rather than retaining refs/pull/<n>/head.
-		if event == "push" {
-			if tag := strings.TrimSpace(getenv("BUILDKITE_TAG")); tag != "" {
-				snapshot["ref"] = "refs/tags/" + tag
-			} else if branch := strings.TrimSpace(getenv("BUILDKITE_BRANCH")); branch != "" {
-				snapshot["ref"] = "refs/heads/" + branch
-			}
-		}
 	}
 	if sender, ok := payload["sender"].(map[string]any); ok {
 		if login, ok := sender["login"].(string); ok && safeGitHubLogin(login) {
@@ -180,6 +198,20 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 		return nil, fmt.Errorf("encode Buildkite webhook snapshot: %w", err)
 	}
 	return result, nil
+}
+
+func buildkiteGitHubEventName(getenv func(string) string) (string, error) {
+	if event := getenv(githubEventNameEnvironment); event != "" {
+		if event != strings.TrimSpace(event) || !githubEventNamePattern.MatchString(event) {
+			return "", fmt.Errorf("%s must be a lowercase GitHub event name", githubEventNameEnvironment)
+		}
+		return event, nil
+	}
+	event := strings.TrimSpace(getenv("BUILDKITE_GITHUB_EVENT"))
+	if githubEventNamePattern.MatchString(event) {
+		return event, nil
+	}
+	return "", nil
 }
 
 func validateBuildkiteMergeGroup(snapshot map[string]any, getenv func(string) string) error {
@@ -207,7 +239,7 @@ func validateBuildkiteMergeGroup(snapshot map[string]any, getenv func(string) st
 		return fmt.Errorf("merge_group webhook base_ref does not match BUILDKITE_MERGE_QUEUE_BASE_BRANCH")
 	}
 	baseCommit := getenv("BUILDKITE_MERGE_QUEUE_BASE_COMMIT")
-	if !validBuildkiteCommit(baseCommit) {
+	if !git.ValidObjectID(baseCommit) {
 		return fmt.Errorf("BUILDKITE_MERGE_QUEUE_BASE_COMMIT must be a full lowercase 40-hex commit")
 	}
 	if baseSHA, _ := mergeGroup["base_sha"].(string); baseSHA != baseCommit {
@@ -342,8 +374,8 @@ func parseBuildkiteRepository(raw string) (provider, owner, name, cloneURL strin
 		return "", "", "", "", fmt.Errorf("is required")
 	}
 	path := ""
-	if strings.HasPrefix(raw, "git@github.com:") {
-		path = strings.TrimPrefix(raw, "git@github.com:")
+	if after, ok := strings.CutPrefix(raw, "git@github.com:"); ok {
+		path = after
 		provider = "github"
 	} else {
 		u, parseErr := url.Parse(raw)

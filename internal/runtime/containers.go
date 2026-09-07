@@ -43,7 +43,7 @@ type serviceContainer struct {
 
 type jobContainerBackend struct {
 	runner                    Runner
-	processor                 *commandProcessor
+	processor                 *commandOutputProcessor
 	docker                    string
 	env                       map[string]string
 	config                    string
@@ -79,11 +79,7 @@ func privateDocker(r Runner) (string, string, map[string]string, error) {
 	return docker, config, map[string]string{"DOCKER_CONFIG": config}, nil
 }
 
-func (r Runner) startJobContainer(ctx context.Context, processor *commandProcessor, workspace, temp string, spec *plan.Container, services map[string]plan.ServiceContainer, extra ...containerMount) (_ *jobContainerBackend, err error) {
-	return r.startJobContainerOrdered(ctx, processor, workspace, temp, spec, services, sortedKeys(services), extra...)
-}
-
-func (r Runner) startJobContainerOrdered(ctx context.Context, processor *commandProcessor, workspace, temp string, spec *plan.Container, services map[string]plan.ServiceContainer, serviceOrder []string, extra ...containerMount) (_ *jobContainerBackend, err error) {
+func (r Runner) startJobContainerOrdered(ctx context.Context, processor *commandOutputProcessor, workspace, temp string, spec *plan.Container, services map[string]plan.ServiceContainer, serviceOrder []string, extra ...containerMount) (_ *jobContainerBackend, err error) {
 	if spec != nil {
 		if err := validateEnvironmentNames(spec.Env); err != nil {
 			return nil, fmt.Errorf("job container environment: %w", err)
@@ -379,7 +375,7 @@ func dockerLogin(ctx context.Context, env map[string]string, docker, registry, u
 	return errors.New("docker login failed")
 }
 
-func (r Runner) pullContainerImage(ctx context.Context, processor *commandProcessor, env map[string]string, docker, image string) error {
+func (r Runner) pullContainerImage(ctx context.Context, processor *commandOutputProcessor, env map[string]string, docker, image string) error {
 	var err error
 	for attempt := range 3 {
 		if err = r.runStreaming(ctx, processor, "", env, docker, "pull", image); err == nil {
@@ -403,7 +399,7 @@ func (r Runner) pullContainerImage(ctx context.Context, processor *commandProces
 
 func lineSet(output string) map[string]bool {
 	result := map[string]bool{}
-	for _, line := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			result[line] = true
 		}
@@ -518,7 +514,7 @@ func (b *jobContainerBackend) readServicePorts(ctx context.Context, id, name str
 		return nil, fmt.Errorf("query service %q ports: %w", id, err)
 	}
 	result := map[string]string{}
-	for _, line := range strings.Split(strings.TrimSuffix(strings.ReplaceAll(out, "\r\n", "\n"), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSuffix(strings.ReplaceAll(out, "\r\n", "\n"), "\n"), "\n") {
 		if line == "" && out == "" {
 			continue
 		}
@@ -546,7 +542,7 @@ func appendPublishedPorts(args, ports []string) []string {
 	return args
 }
 
-func (b *jobContainerBackend) waitForService(ctx context.Context, processor *commandProcessor, serviceID, name string) error {
+func (b *jobContainerBackend) waitForService(ctx context.Context, processor *commandOutputProcessor, serviceID, name string) error {
 	const format = `{{if .State.Health}}{{.State.Health.Status}}{{end}}`
 	delay := 2 * time.Second
 	for {
@@ -583,7 +579,7 @@ func (b *jobContainerBackend) waitForService(ctx context.Context, processor *com
 	}
 }
 
-func (b *jobContainerBackend) serviceDiagnostics(parent context.Context, processor *commandProcessor, name string) {
+func (b *jobContainerBackend) serviceDiagnostics(parent context.Context, processor *commandOutputProcessor, name string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), serviceDiagnosticTimeout)
 	defer cancel()
 	b.emitServiceLogOutput(processor, b.serviceLogOutput(ctx, name))
@@ -594,8 +590,8 @@ func (b *jobContainerBackend) serviceLogOutput(ctx context.Context, name string)
 	return output
 }
 
-func (b *jobContainerBackend) emitServiceLogOutput(processor *commandProcessor, output string) {
-	for _, line := range strings.Split(strings.TrimSuffix(strings.ReplaceAll(output, "\r\n", "\n"), "\n"), "\n") {
+func (b *jobContainerBackend) emitServiceLogOutput(processor *commandOutputProcessor, output string) {
+	for line := range strings.SplitSeq(strings.TrimSuffix(strings.ReplaceAll(output, "\r\n", "\n"), "\n"), "\n") {
 		if line != "" {
 			processor.writeLiteral(processor.stderr, line)
 		}
@@ -637,7 +633,19 @@ func (b *jobContainerBackend) containerPath(path string) string {
 	return best
 }
 
-func (b *jobContainerBackend) exec(ctx context.Context, r Runner, processor *commandProcessor, dir string, env map[string]string, name string, argv ...string) error {
+// hostPath reverses containerPath, mapping a job-container path back to its
+// host equivalent so host-side validation can resolve it.
+func (b *jobContainerBackend) hostPath(path string) string {
+	best, bestLen := path, -1
+	for _, m := range b.mounts {
+		if rel, err := filepath.Rel(m.target, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && len(m.target) > bestLen {
+			best, bestLen = filepath.Join(m.host, filepath.FromSlash(rel)), len(m.target)
+		}
+	}
+	return best
+}
+
+func (b *jobContainerBackend) exec(ctx context.Context, r Runner, processor *commandOutputProcessor, dir string, env map[string]string, name string, argv ...string) error {
 	if err := validateEnvironmentNames(env); err != nil {
 		return err
 	}

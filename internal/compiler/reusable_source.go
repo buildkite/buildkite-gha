@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
@@ -82,7 +83,11 @@ func localReusableWorkflowSource(workflowPath string) (reusableWorkflowSource, e
 
 func (resolver *reusableResolver) loadReusableWorkflow(ctx context.Context, parent reusableWorkflowSource, uses string) (reusableWorkflowSource, []byte, error) {
 	if strings.Contains(uses, "${{") {
-		return reusableWorkflowSource{}, nil, fmt.Errorf("reusable workflow %q is runtime-dependent; only literal local or GitHub references are supported", uses)
+		return reusableWorkflowSource{}, nil, &ProcessingFinding{
+			Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
+			Message: fmt.Sprintf("Reusable workflow path cannot be an expression. %q is only known once the build is running, and the workflow file has to be read before that. Name the file directly, for example ./.github/workflows/ci.yml, or org/shared/.github/workflows/ci.yml@v1. If you need a computed workflow path, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.", uses),
+			Err:     fmt.Errorf("reusable workflow path cannot be an expression: %q", uses),
+		}
 	}
 	if strings.HasPrefix(uses, "./") {
 		return resolver.loadLocalReusableWorkflow(parent, uses)
@@ -149,13 +154,13 @@ func (resolver *reusableResolver) loadRemoteReusableWorkflow(ctx context.Context
 	if err != nil {
 		var notPublic *actionsource.NotPublicError
 		if errors.As(err, &notPublic) {
-			return reusableWorkflowSource{}, nil, fmt.Errorf("reusable workflow %q was not found or access was denied", uses)
+			return reusableWorkflowSource{}, nil, unavailableReusableWorkflowError(uses)
 		}
 		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: %w", uses, err)
 	}
 	resolver.materialized = append(resolver.materialized, materialized)
 	commit := resolved.Commit
-	if len(commit) != 40 || strings.Trim(commit, "0123456789abcdef") != "" {
+	if !git.ValidObjectID(commit) {
 		return reusableWorkflowSource{}, nil, fmt.Errorf("resolve reusable workflow %q: source returned a non-immutable commit", uses)
 	}
 	if len(materialized.SourceDigest) != 71 || !strings.HasPrefix(materialized.SourceDigest, "sha256:") || strings.Trim(materialized.SourceDigest[7:], "0123456789abcdef") != "" {
@@ -171,7 +176,10 @@ func (resolver *reusableResolver) loadRemoteReusableWorkflow(ctx context.Context
 	}
 	info, err := os.Lstat(filePath)
 	if err != nil || !info.Mode().IsRegular() {
-		return reusableWorkflowSource{}, nil, fmt.Errorf("reusable workflow %q was not found or access was denied", uses)
+		// A missing, non-regular, or unreadable selection is reported exactly
+		// like a denied or nonexistent repository so callers cannot enumerate
+		// private repository contents.
+		return reusableWorkflowSource{}, nil, unavailableReusableWorkflowError(uses)
 	}
 	source, err := readReusableWorkflowFile(filePath)
 	if err != nil {
@@ -187,6 +195,18 @@ func (resolver *reusableResolver) loadRemoteReusableWorkflow(ctx context.Context
 		displayPath:    repository + "/" + workflowPath + "@" + ref.Ref,
 		remote:         remote,
 	}, source, nil
+}
+
+// unavailableReusableWorkflowError reports every missing or denied remote
+// workflow identically. Missing repositories, refs, and files, private
+// repositories, and repositories Buildkite has not approved for this pipeline
+// must remain indistinguishable to the caller.
+func unavailableReusableWorkflowError(uses string) error {
+	return &ProcessingFinding{
+		Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
+		Message: fmt.Sprintf("Reusable workflow could not be read. %q is private, is not accessible to this pipeline, or does not exist. Check the path. Public workflows can be called across repositories. Private workflows also need the plugin's private-reusable-workflows setting and Buildkite code access to that repository. Otherwise copy the workflow into this repository's .github/workflows and call it with a ./ path.", uses),
+		Err:     fmt.Errorf("remote reusable workflow %q could not be read", uses),
+	}
 }
 
 func reusableWorkflowPath(value string, requireYAML bool) (string, error) {

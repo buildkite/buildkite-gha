@@ -17,11 +17,9 @@ func TestLockFileUnlockIsIdempotent(t *testing.T) {
 	lock.release = func(*os.File) { releases.Add(1) }
 	var callers sync.WaitGroup
 	for range 8 {
-		callers.Add(1)
-		go func() {
-			defer callers.Done()
+		callers.Go(func() {
 			lock.unlock()
-		}()
+		})
 	}
 	callers.Wait()
 	if releases.Load() != 1 {

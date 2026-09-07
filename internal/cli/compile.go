@@ -10,11 +10,14 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/transport"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
-func compile(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+func compile(args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
+	version := commandVersion(clientVersion)
 	workflowPath, eventPath, format, err := compileArgs(args)
 	if err != nil {
 		return usageError(stderr, "compile: %v", err)
@@ -33,7 +36,7 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 	if !ok {
 		return 1
 	}
-	repositorySource, cleanup, sourceErr := newHostedActionSource(ctx, "", nil, nil)
+	repositorySource, cleanup, sourceErr := newHostedActionSource(ctx, "", clientVersion, nil, nil)
 	if sourceErr != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: configure public repository source: %v\n", sourceErr)
 		return 1
@@ -41,6 +44,25 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 	defer cleanup()
 	options := compiler.DefaultOptions()
 	options.RepositorySource = repositorySource
+	// Environments resolve only through the job-scoped Agent API, so compile
+	// resolves them when it runs inside a Buildkite job and otherwise leaves
+	// workflows that declare environments to fail at compile time.
+	options.EnvironmentSource = environmentSourceFromAgent(clientVersion)
+	// Repository and organization variables likewise resolve only through the
+	// job-scoped Agent API, and only when the workflow references vars.
+	// Compile-time fields read them, so they must be known before validation.
+	variables := variableSourceFromAgent(clientVersion)
+	parsedEvent, parsedEventErr := compiler.ParseEvent(event)
+	workflowReferencesVars := false
+	if variables != nil && parsedEventErr == nil {
+		staticValidation, _ := compiler.ValidateWithOptionsContext(ctx, workflowPath, source, options)
+		workflowReferencesVars = staticValidation.ReferencesVars
+		vars, varsErr := resolveVariableSources(ctx, variables, parsedEvent, workflowReferencesVars)
+		if varsErr != nil {
+			return out.fail(ctx, compatibility.EnvironmentProcessingReport(workflowPath, "", varsErr.Error()), varsErr)
+		}
+		options.Vars = vars
+	}
 	processingReport, ok := validatedProcessingReportWithOptions(ctx, out, workflowPath, "", source, event, true, &options)
 	if !ok {
 		return 1
@@ -66,13 +88,25 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 			return 1
 		}
 		bundle, compileErr := compiler.CompileBundleContext(ctx, workflowPath, source, event, version, digest, "gha-importer", options)
+		if compileErr == nil && parsedEventErr == nil {
+			actionVars, again, varsErr := resolveActionVariables(ctx, variables, parsedEvent, workflowReferencesVars, bundle)
+			if varsErr != nil {
+				processingReport.AddEnvironmentFailure(varsErr.Error())
+				processingReport.Result = "indeterminate"
+				return out.fail(ctx, processingReport, varsErr)
+			}
+			if again {
+				options.Vars = actionVars
+				bundle, compileErr = compiler.CompileBundleContext(ctx, workflowPath, source, event, version, digest, "gha-importer", options)
+			}
+		}
 		processingReport.ApplyEvidence(bundle.Processing)
 		err = compileErr
 		result = bundle.Pipeline
 		warnings = bundle.IR.Warnings
 	}
 	if err != nil {
-		processingReport.AddFailure(workflowPath, string(compiler.StagePlans), compiler.CodePlanConstruction, "compatibility", err)
+		processingReport.AddFailure(workflowPath, workflowprocessing.StagePlans, workflowprocessing.CodePlanConstruction, "compatibility", err)
 		processingReport.Result = "incompatible"
 		_ = out.write(ctx, processingReport)
 		return 1
@@ -89,7 +123,11 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 
 func writeCompilerWarnings(stderr io.Writer, command, path string, warnings []compiler.Warning) {
 	for _, warning := range warnings {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: %s: warning: %s:%d:%d: [%s] %s\n", command, path, warning.Line, warning.Column, warning.Code, warning.Message)
+		warningPath := warning.Path
+		if warningPath == "" {
+			warningPath = path
+		}
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: %s: warning: %s:%d:%d: [%s] %s\n", command, warningPath, warning.Line, warning.Column, warning.Code, warning.Message)
 	}
 }
 

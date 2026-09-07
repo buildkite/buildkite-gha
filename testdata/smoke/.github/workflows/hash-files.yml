@@ -1,0 +1,33 @@
+name: hashFiles proof
+
+on:
+  push:
+
+permissions: {}
+
+jobs:
+  hash-files:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create hash inputs
+        shell: bash
+        run: |
+          mkdir -p hash-files/ignored
+          printf alpha > hash-files/a.lock
+          printf bravo > hash-files/b.lock
+          printf ignored > hash-files/ignored/c.lock
+
+      - name: Verify hashFiles
+        if: hashFiles('hash-files/**/*.lock', '!hash-files/ignored/**') != ''
+        shell: bash
+        env:
+          MATCHED_HASH: ${{ hashFiles('hash-files/**/*.lock', '!hash-files/ignored/**') }}
+          MISSING_HASH: ${{ hashFiles('hash-files/**/*.missing') }}
+        run: |
+          test "$MATCHED_HASH" = 90d39555bb3c223e12f5a375c3011d2462fe2e1e36b8416a0b623d5831a9b4f3
+          test -z "$MISSING_HASH"
+          touch hash-files/verified
+
+      - name: Require condition match
+        shell: bash
+        run: test -f hash-files/verified

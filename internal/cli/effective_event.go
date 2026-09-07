@@ -14,6 +14,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
 const maxWebhookMetadataBytes = 25 << 20
@@ -56,7 +57,7 @@ func loadEffectiveEventSource(ctx context.Context, eventPath string, agent trans
 	}
 }
 
-func newEffectiveEvent(source []byte, origin effectiveEventOrigin, getenv func(string) string) (effectiveEventSelection, error) {
+func newEffectiveEvent(source []byte, origin effectiveEventOrigin) (effectiveEventSelection, error) {
 	event, err := compiler.ParseEvent(source)
 	if err != nil {
 		return effectiveEventSelection{}, err
@@ -70,11 +71,7 @@ func newEffectiveEvent(source []byte, origin effectiveEventOrigin, getenv func(s
 	if origin == effectiveEventFromPath {
 		return effective, nil
 	}
-	predicate := "true"
-	if buildSource := strings.TrimSpace(getenv("BUILDKITE_SOURCE")); buildSource != "" {
-		predicate = "build.source == " + triggerConditionLiteral(buildSource)
-	}
-	effective.TriggerExpressions.EventPredicate = predicate
+	effective.TriggerExpressions.EventPredicate = buildkitepipeline.LiveEventPredicate(event.Event)
 	return effective, nil
 }
 
@@ -88,6 +85,7 @@ func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerCondit
 		MergeGroupBaseBranch:  "null",
 		MergeGroupAction:      "null",
 		ReleaseAction:         "null",
+		IssuesAction:          "null",
 	}
 	snapshot := buildkitepipeline.TriggerEventSnapshot{}
 	if branch, ok := strings.CutPrefix(event.Ref, "refs/heads/"); ok {
@@ -105,6 +103,8 @@ func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerCondit
 		snapshot.MergeGroupAction = &action
 		expressions.ReleaseAction = triggerConditionLiteral(action)
 		snapshot.ReleaseAction = &action
+		expressions.IssuesAction = triggerConditionLiteral(action)
+		snapshot.IssuesAction = &action
 	}
 	if pullRequest, ok := event.Payload["pull_request"].(map[string]any); ok {
 		if base, ok := pullRequest["base"].(map[string]any); ok {
@@ -170,13 +170,13 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 			message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. Ensure the linked webhook and local checkout contain matching %s history, or remove the path filters.", upperFirst(pathFilters.Event), history)
 		}
 		err = &compiler.ProcessingFinding{
-			Stage: compiler.StagePipeline, Code: compiler.CodePipelineGeneration, Category: "compatibility",
+			Stage: workflowprocessing.StagePipeline, Code: workflowprocessing.CodePipelineGeneration, Category: "compatibility",
 			Path: input.Path, Line: 1, Column: 1,
 			Message: message,
 			Detail:  pathFilters.Error(), Err: err,
 		}
 	}
-	report.AddFailure(input.Path, string(compiler.StagePipeline), compiler.CodePipelineGeneration, "compatibility", err)
+	report.AddFailure(input.Path, workflowprocessing.StagePipeline, workflowprocessing.CodePipelineGeneration, "compatibility", err)
 	report.Result = "incompatible"
 	return report
 }
@@ -185,8 +185,9 @@ func triggerProcessingReport(path string, source []byte) compatibility.Processin
 	parsed, _ := compiler.ParseWorkflow(path, source)
 	report := compatibility.NewProcessingReport(path, hostedProfile)
 	report.LogicalJobs = parsed.LogicalJobs
-	report.SetStage(string(compiler.StageWorkflowParsing), compatibility.Passed)
-	report.SetStage(string(compiler.StageEventValidation), compatibility.Passed)
+	report.SetStage(workflowprocessing.StageWorkflowParsing, compatibility.Passed)
+	report.SetStage(workflowprocessing.StageEventValidation, compatibility.Passed)
+	report.ApplyWarnings(path, parsed.Warnings)
 	for _, job := range parsed.ParsedJobs {
 		report.Jobs = append(report.Jobs, compatibility.JobResult{
 			ID: job.ID, Result: compatibility.NotEvaluated,

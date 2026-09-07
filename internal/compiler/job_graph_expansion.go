@@ -16,10 +16,12 @@ type jobGraphExpansionResult struct {
 	instances             []JobInstance
 	candidates            []JobInstance
 	runtimeMatrixBoundary bool
+	referencesVars        bool
 	runtimeMatrices       []RuntimeMatrixDescriptor
 	jobs                  []ParsedJob
 	notEvaluatedJobs      map[string]bool
 	notEvaluatedInstances map[string]bool
+	warnings              []Warning
 }
 
 // jobGraphExpansion carries state while a flattened logical job graph is
@@ -68,8 +70,8 @@ func processingJobs(path string, parsed *workflow.Workflow, resolved []sourcedJo
 func jobGraphExpansionReport(expanded jobGraphExpansionResult, warnings []Warning) Report {
 	return Report{
 		LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates),
-		Jobs: expanded.candidates, RuntimeMatrixBoundary: expanded.runtimeMatrixBoundary,
-		RuntimeMatrices: expanded.runtimeMatrices, ParsedJobs: expanded.jobs, Warnings: warnings,
+		Jobs: expanded.candidates, RuntimeMatrixBoundary: expanded.runtimeMatrixBoundary, ReferencesVars: expanded.referencesVars,
+		RuntimeMatrices: expanded.runtimeMatrices, ParsedJobs: expanded.jobs, Warnings: append(warnings, expanded.warnings...),
 		NotEvaluatedJobs: expanded.notEvaluatedJobs, NotEvaluatedInstances: expanded.notEvaluatedInstances,
 	}
 }
@@ -77,18 +79,18 @@ func jobGraphExpansionReport(expanded jobGraphExpansionResult, warnings []Warnin
 // expandJobGraph resolves reusable workflow calls, then turns the parsed
 // logical job graph into deterministic JobInstance values and report data.
 func expandJobGraph(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (jobGraphExpansionResult, error) {
-	resolved, runtimeMatrixBoundary, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource)
+	resolved, warnings, scan, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource)
 	if err != nil {
 		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
 		for _, job := range parsed.Jobs {
 			notEvaluatedJobs[job.ID] = true
 		}
-		return jobGraphExpansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs, runtimeMatrixBoundary: runtimeMatrixBoundary}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
+		return jobGraphExpansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs, runtimeMatrixBoundary: scan.runtimeMatrixBoundary, referencesVars: scan.referencesVars, warnings: warnings}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
 	}
 	expansion := jobGraphExpansion{
 		path: path, context: context, options: options,
 		result: jobGraphExpansionResult{
-			jobs: processingJobs(path, parsed, resolved), runtimeMatrixBoundary: runtimeMatrixBoundary,
+			jobs: processingJobs(path, parsed, resolved), runtimeMatrixBoundary: scan.runtimeMatrixBoundary, referencesVars: scan.referencesVars, warnings: warnings,
 			notEvaluatedJobs: make(map[string]bool), notEvaluatedInstances: make(map[string]bool),
 		},
 		acceptedIndex:  make(map[string]int, len(resolved)),
@@ -114,6 +116,9 @@ func (e *jobGraphExpansion) acceptJobs(resolved []sourcedJob) {
 		e.acceptedIndex[job.ID] = len(e.accepted)
 		e.accepted = append(e.accepted, sourced)
 		if err := supported(sourced.path, job); err != nil {
+			if sourced.blockerDetailUnsafe {
+				err = suppressBlockerDetail(err)
+			}
 			e.diagnostics = append(e.diagnostics, err)
 			e.failedJobs[job.ID] = true
 		}
@@ -150,22 +155,21 @@ func (e *jobGraphExpansion) expandMatrices() {
 		var matrices []map[string]any
 		if deferred {
 			e.result.runtimeMatrixBoundary = true
-			position := job.Matrix.Span.Start
-			if job.Matrix.Expression != nil {
-				position = workflow.Position{Line: job.Matrix.Expression.Span.Start.Line, Column: job.Matrix.Expression.Span.Start.Column}
-			} else if job.Matrix.IncludeExpression != nil {
-				position = workflow.Position{Line: job.Matrix.IncludeExpression.Span.Start.Line, Column: job.Matrix.IncludeExpression.Span.Start.Column}
-			}
+			line, column := matrixErrorPosition(job, err)
 			if err == nil {
 				e.result.runtimeMatrices = append(e.result.runtimeMatrices, descriptor)
 				err = errors.New("runtime matrix source is valid, but continuation upload is disabled because Buildkite transport has no authoritative current-attempt fence and durable idempotency boundary")
 			}
-			err = locatedJobError(sourced.path, job, position.Line, position.Column, err.Error())
+			err = locatedJobError(sourced.path, job, line, column, err.Error())
 		} else {
-			matrices, err = expandMatrix(sourced.path, job, e.context)
+			matrixContext := e.context
+			matrixContext.Inputs = sourced.inputs.values
+			matrixContext.Matrix = nil
+			matrixContext.Strategy = nil
+			matrices, err = expandMatrix(sourced.path, job, matrixContext)
 		}
 		if err != nil {
-			line, column := matrixErrorPosition(job)
+			line, column := matrixErrorPosition(job, err)
 			e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
 				Path: sourced.path, Line: line, Column: column, Job: job.ID,
@@ -179,10 +183,14 @@ func (e *jobGraphExpansion) expandMatrices() {
 	}
 }
 
-func matrixErrorPosition(job workflow.Job) (int, int) {
+func matrixErrorPosition(job workflow.Job, err error) (int, int) {
 	line, column := job.Span.Start.Line, job.Span.Start.Column
 	if job.Matrix == nil {
 		return line, column
+	}
+	var positioned matrixPositionError
+	if errors.As(err, &positioned) {
+		return positioned.line, positioned.column
 	}
 	line, column = job.Matrix.Span.Start.Line, job.Matrix.Span.Start.Column
 	if job.Matrix.Expression != nil {
@@ -190,6 +198,9 @@ func matrixErrorPosition(job workflow.Job) (int, int) {
 	}
 	if job.Matrix.IncludeExpression != nil {
 		return job.Matrix.IncludeExpression.Span.Start.Line, job.Matrix.IncludeExpression.Span.Start.Column
+	}
+	if job.Matrix.ExcludeExpression != nil {
+		return job.Matrix.ExcludeExpression.Span.Start.Line, job.Matrix.ExcludeExpression.Span.Start.Column
 	}
 	return line, column
 }
@@ -222,14 +233,18 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		instanceContext := jobContext
 		instanceContext.Matrix = matrix
 		instanceContext.Strategy = strategy
-		compileConditionErr := supportedCompileTimeConditions(jobPath, job, jobContext, matrix)
-		instanceJob := resolveCompileTimeConditions(job, jobContext, matrix)
-		conditionValidationJob := instanceJob
+		// Conditions keep vars residual; see resolveCompileTimeConditions.
 		conditionContext := jobContext
+		conditionContext.Vars = nil
+		compileConditionErr := supportedCompileTimeConditions(jobPath, job, conditionContext)
+		if sourced.blockerDetailUnsafe {
+			compileConditionErr = suppressBlockerDetail(compileConditionErr)
+		}
+		instanceJob := resolveCompileTimeConditions(job, conditionContext, matrix)
+		conditionValidationJob := instanceJob
 		conditionContext.Matrix = matrix
-		if resolved, err := expression.EvaluateCompileCondition(instanceJob.If, conditionContext); err == nil && !resolved {
+		if value, err := evaluateCompileSite(instanceJob.If, expression.ProfileCompileJobCondition, expression.ResultBoolean, conditionContext); err == nil && !value.(bool) {
 			instanceJob.If = "false"
-			instanceJob.Steps = []workflow.Step{{Name: "Statically disabled job", Kind: "run", Run: ":", If: "false", Span: job.Span}}
 		}
 		key, err := namespacedInstanceKey(e.options.StepKeyNamespace, job.ID, matrix)
 		if err != nil {
@@ -243,17 +258,25 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			continue
 		}
 		e.instanceKeys[key] = job.ID
+		resolvedContainer, containerErr := resolveCompileContainer(instanceJob.Container, instanceContext)
+		instanceJob.Container = resolvedContainer
 		resolvedServices, serviceErr := resolveCompileServices(instanceJob.Services, instanceContext)
 		candidate := newJobCandidate(sourced, instanceJob, matrix, key, resolvedServices)
 
 		valid := true
-		if serviceErr != nil {
+		if containerErr != nil {
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, job.Span.Start.Line, job.Span.Start.Column, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve job container: %v", containerErr))))
+			valid = false
+		} else if serviceErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, job.Span.Start.Line, job.Span.Start.Column, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve service containers: %v", serviceErr))))
 			valid = false
 		} else if compileConditionErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, compileConditionErr))
 			valid = false
-		} else if err := supportedConditions(jobPath, conditionValidationJob, matrix, true); err != nil {
+		} else if err := supportedConditions(jobPath, conditionValidationJob); err != nil {
+			if sourced.blockerDetailUnsafe {
+				err = suppressBlockerDetail(err)
+			}
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, err))
 			valid = false
 		}
@@ -268,13 +291,21 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		if runsOnErr == nil {
 			target, err = e.options.Runners.resolve(labels, e.options.EventTrust)
 			if err != nil {
-				message, detail := runnerRejectionDiagnostic(err, reportableRunnerLabels(job, labels), e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
+				reportableLabels := reportableRunnerLabels(job, labels)
+				if sourced.blockerDetailUnsafe {
+					reportableLabels = nil
+				}
+				message, detail := runnerRejectionDiagnostic(err, reportableLabels, e.options.Runners.supportedLabels(), e.options.Runners.UntrustedQueues)
 				e.diagnostics = append(e.diagnostics, &ProcessingFinding{
 					Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
+					Blocker: "runner_label", BlockerDetail: runnerRejectionBlockerDetail(err, reportableLabels),
 					Path: jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
 					Job: job.ID, Instance: key, Message: message, Detail: detail,
 					Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
 				})
+				valid = false
+			} else if target.Cache != nil && instanceJob.Container != nil {
+				e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, job.Span.Start.Line, job.Span.Start.Column, job.ID, key, "", 0, jobError(jobPath, job, "runner cache volumes are unsupported for jobs with a container")))
 				valid = false
 			}
 		}
@@ -305,6 +336,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		instance.Queue = target.Queue
 		instance.Platform = target.Platform
 		instance.RuntimeImage = target.Image
+		instance.Cache = target.Cache
 		instance.ConcurrencyGroup = concurrencyGroup
 		if e.bindInstanceDependencies(sourced, job, key, &instance) {
 			jobFailed = true
@@ -335,12 +367,14 @@ func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any
 	candidate := JobInstance{
 		Key: key, LogicalJobID: job.ID, Matrix: matrix, Inputs: cloneAnyMap(sourced.inputs.values),
 		FailFast: job.FailFast, MaxParallel: job.MaxParallel, Steps: append([]workflow.Step(nil), job.Steps...),
-		Env: cloneMap(job.Env), Permissions: permissionScopes(job.Permissions), If: job.If,
+		Env: cloneMap(job.Env), Permissions: permissionScopes(job.Permissions), If: job.If, Environment: job.Environment,
 		ContinueOnError: job.ContinueOnError, TimeoutMinutes: job.TimeoutMinutes,
 		DefaultShell: job.DefaultShell, DefaultWorkingDirectory: job.DefaultWorkingDirectory,
 		Outputs: cloneMap(job.Outputs), Container: job.Container, Services: services,
+		ConcurrencyGates:   append([]WorkflowConcurrencyGate(nil), sourced.concurrencyGates...),
 		ServicesExpression: job.ServicesExpression, SourcePath: sourced.path, SourceDigest: sourced.digest,
-		RemoteWorkflow: cloneRemoteWorkflowSource(sourced.remote), RepositoryRoot: sourced.root, Source: job.Span,
+		RemoteWorkflow: cloneRemoteWorkflowSource(sourced.remote), BlockerDetailUnsafe: sourced.blockerDetailUnsafe,
+		RepositoryRoot: sourced.root, Source: job.Span,
 		secretAuthority: sourced.secretAuthority, tokenPolicyNarrowed: sourced.tokenPolicyNarrowed,
 		jobPermissionsIgnored: sourced.jobPermissionsIgnored, reusableCall: sourced.reusableCall,
 	}

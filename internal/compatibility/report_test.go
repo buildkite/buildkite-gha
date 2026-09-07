@@ -3,16 +3,28 @@ package compatibility
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	report := NewProcessingReport("ci.yml", "hosted")
+	definitions := workflowprocessing.StageDefinitions()
+	if len(report.Stages) != len(definitions) {
+		t.Fatalf("report has %d stages, want %d", len(report.Stages), len(definitions))
+	}
+	for i, definition := range definitions {
+		if report.Stages[i].ID != definition.ID || report.Stages[i].Name != definition.Name {
+			t.Fatalf("stage %d = %#v, want %#v", i, report.Stages[i], definition)
+		}
+	}
 	report.LogicalJobs = 1
 	report.Instances = 1
 	report.Compile.Result = "incompatible"
@@ -41,7 +53,7 @@ func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Schema != ProcessingSchema || len(decoded.Stages) != 10 || decoded.Status != Failed || decoded.Diagnostics[0].Detail != "unsupported runtime node12" {
+	if decoded.Schema != ProcessingSchema || len(decoded.Stages) != len(definitions) || decoded.Status != Failed || decoded.Diagnostics[0].Detail != "unsupported runtime node12" {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
 	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v2.schema.json"))
@@ -117,6 +129,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 	report.Evaluations = append(report.Evaluations,
 		EventEvaluation{Event: "push", Source: "generated", Report: push},
 		EventEvaluation{Event: "pull_request", Source: "generated", Report: pullRequest},
+		EventEvaluation{Event: "issues", Source: "generated", Report: push},
 	)
 
 	var encoded bytes.Buffer
@@ -127,7 +140,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Schema != ProcessingSchemaV3 || decoded.Result != "incompatible" || decoded.Status != Failed || len(decoded.Evaluations) != 2 || decoded.Evaluations[0].Report.Result != "admitted" || decoded.Evaluations[1].Report.Result != "incompatible" {
+	if decoded.Schema != ProcessingSchemaV3 || decoded.Result != "incompatible" || decoded.Status != Failed || len(decoded.Evaluations) != 3 || decoded.Evaluations[0].Report.Result != "admitted" || decoded.Evaluations[1].Report.Result != "incompatible" {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
 	v2Source, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v2.schema.json"))
@@ -168,7 +181,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 	if err := WriteProcessingV3(&rendered, "text", report); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"processing-report/v3", "Event-independent validation:", "Generated event push:", "Generated event pull_request:", "Result: incompatible"} {
+	for _, want := range []string{"processing-report/v3", "Event-independent validation:", "Generated event push:", "Generated event pull_request:", "Generated event issues:", "Result: incompatible"} {
 		if !strings.Contains(rendered.String(), want) {
 			t.Fatalf("text report = %q, want %q", rendered.String(), want)
 		}
@@ -265,5 +278,71 @@ func TestProcessingReportAggregatesIdenticalMatrixDiagnostics(t *testing.T) {
 	report.Finalize()
 	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Instance != "" || report.Diagnostics[0].Job != "test" {
 		t.Fatalf("aggregated diagnostics = %#v", report.Diagnostics)
+	}
+}
+
+func TestApplyWarningsPreservesCompilerAttribution(t *testing.T) {
+	report := NewProcessingReport(".github/workflows/caller.yml", "hosted")
+	report.ApplyWarnings(report.Workflow, []compiler.Warning{{
+		Code: "W_CHECKOUT_LEGACY_RELEASE", Path: ".github/workflows/reusable.yml", Line: 12, Column: 9,
+		Job: "call.build", Step: 2, Blocker: "trigger", BlockerDetail: "workflow_run",
+		Message: "actions/checkout v2.8.0 behaves like v2.",
+	}})
+	want := Diagnostic{
+		Level: "warning", Code: "W_CHECKOUT_LEGACY_RELEASE", Category: "compatibility", Stage: "expression-validation",
+		Message:  ".github/workflows/reusable.yml:12:9: actions/checkout v2.8.0 behaves like v2.",
+		Location: &SourceLocation{Path: ".github/workflows/reusable.yml", Line: 12, Column: 9},
+		Job:      "call.build", Step: 2, Blocker: "trigger", BlockerDetail: "workflow_run",
+	}
+	if len(report.Diagnostics) != 1 || !sameDiagnostic(report.Diagnostics[0], want) {
+		t.Fatalf("diagnostics = %#v, want %#v", report.Diagnostics, []Diagnostic{want})
+	}
+}
+
+type nestedBlockerError struct{}
+
+func (*nestedBlockerError) Error() string { return "unsupported action lifecycle condition" }
+func (*nestedBlockerError) CompatibilityBlocker() (string, string) {
+	return "expression", "secrets.TOKEN"
+}
+
+func TestDiagnosticPreservesExplicitWorkflowRootActionBlocker(t *testing.T) {
+	diagnostic := diagnosticFromError("ci.yml", workflowprocessing.StageResolution, compiler.CodeActionResolution, "action-resolution", &compiler.ProcessingFinding{
+		Stage: compiler.StageResolution, Code: compiler.CodeActionResolution, Category: "action-resolution",
+		Blocker: "action_ref", BlockerDetail: "actions/checkout@v99",
+		Action: "./downloaded-child", Err: &nestedBlockerError{},
+	})
+	if diagnostic.Blocker != "action_ref" || diagnostic.BlockerDetail != "actions/checkout@v99" {
+		t.Fatalf("diagnostic blocker = %q / %q", diagnostic.Blocker, diagnostic.BlockerDetail)
+	}
+
+	diagnostic = diagnosticFromError("ci.yml", workflowprocessing.StageExpressions, compiler.CodeExpressionInvalid, "compatibility", &compiler.ProcessingFinding{
+		Stage: compiler.StageExpressions, Code: compiler.CodeExpressionInvalid, Category: "compatibility",
+		Blocker: "runner_label", BlockerDetail: "windows-latest", Err: fmt.Errorf("unsupported runner"),
+	})
+	if diagnostic.Blocker != "runner_label" || diagnostic.BlockerDetail != "windows-latest" {
+		t.Fatalf("diagnostic blocker = %q / %q", diagnostic.Blocker, diagnostic.BlockerDetail)
+	}
+}
+
+func TestProcessingReportPreservesReusableCallConditionBlocker(t *testing.T) {
+	repository := t.TempDir()
+	workflows := filepath.Join(repository, ".github", "workflows")
+	if err := os.MkdirAll(workflows, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	callerPath := filepath.Join(workflows, "caller.yml")
+	caller := []byte("on: push\njobs:\n  delegated:\n    if: secrets.TOKEN\n    uses: ./.github/workflows/reusable.yml\n")
+	if err := os.WriteFile(callerPath, caller, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workflows, "reusable.yml"), []byte("on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	compilerReport, processingErr := compiler.Validate(callerPath, caller)
+	report := InitialProcessingReport(callerPath, "hosted", false, compilerReport, processingErr)
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Blocker != "expression" || report.Diagnostics[0].BlockerDetail != "secrets.TOKEN" {
+		t.Fatalf("reusable call diagnostics = %#v", report.Diagnostics)
 	}
 }

@@ -3,6 +3,7 @@ package compiler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -128,6 +129,41 @@ func checkoutTestManifest(commit string) string {
 	}
 }
 
+// These manifests mirror the admitted legacy upload-artifact releases. v1's
+// runner plugin and v2's retired node12 runtime don't pass generic metadata
+// admission, but their execution is replaced entirely by the native adapter.
+const uploadArtifactV1LegacyManifest = `name: 'Upload a Build Artifact'
+inputs:
+  name:
+    required: true
+  path:
+    required: true
+runs:
+  plugin: publish
+`
+
+const uploadArtifactV2LegacyManifest = `name: 'Upload a Build Artifact'
+inputs:
+  name:
+    default: artifact
+  path:
+    required: true
+runs:
+  using: node12
+  main: dist/index.js
+`
+
+func uploadArtifactTestManifest(commit string) string {
+	switch commit {
+	case actionintegration.UploadArtifactV1Commit:
+		return uploadArtifactV1LegacyManifest
+	case actionintegration.UploadArtifactV2Commit:
+		return uploadArtifactV2LegacyManifest
+	default:
+		return "name: upload artifact\nruns:\n  using: node24\n  main: index.js\n"
+	}
+}
+
 type commitActionSource struct{ roots map[string]string }
 
 func (s commitActionSource) Fetch(_ context.Context, r source.Reference) (source.Resolved, source.Materialized, error) {
@@ -176,6 +212,15 @@ func TestActionResolutionMessageDistinguishesResolutionFailure(t *testing.T) {
 	want := `Action "owner/action@v1" could not be resolved: tag v1 was not found`
 	if got, detail, action := actionResolutionMessage("owner/action@v1", err); got != want || detail != "" || action != "owner/action@v1" {
 		t.Fatalf("actionResolutionMessage() = %q, %q, %q; want %q, empty detail, %q", got, detail, action, want, "owner/action@v1")
+	}
+}
+
+func TestActionResolutionMessageExplainsUnsupportedContainerAction(t *testing.T) {
+	reference := "docker://alpine:3.20"
+	_, err := source.Parse(reference)
+	want := `Action "docker://alpine:3.20" is unsupported: docker:// container actions are unsupported; use a Dockerfile action or replace the action with a run step`
+	if got, detail, action := actionResolutionMessage(reference, err); got != want || detail != "" || action != reference {
+		t.Fatalf("actionResolutionMessage() = %q, %q, %q; want %q, empty detail, %q", got, detail, action, want, reference)
 	}
 }
 
@@ -400,6 +445,28 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsAcceptsUnavailableCheckRunIDDefaultWithoutAuthority(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "check-run", `name: check run
+inputs:
+  check-run-id:
+    default: ${{ job.check_run_id }}
+  token:
+    default: ${{ job.check_run_id && github.token || '' }}
+runs:
+  using: node24
+  main: index.js
+`)
+
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./check-run"}, []map[string]string{{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken || len(compiled.requiredSecrets) != 0 {
+		t.Fatalf("check-run default authority = token %t, secrets %#v; want none", compiled.requiresGitHubToken, compiled.requiredSecrets)
+	}
+}
+
 func TestCompileActionInvocationsScopesWorkflowAuthoredSecretsByInputContract(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "secrets", `name: secret inputs
@@ -452,7 +519,60 @@ runs:
 	}
 }
 
-func TestCompileActionInvocationsRejectsRetainedEventPayload(t *testing.T) {
+func TestCompileActionInvocationsAllowsSerializedGitHubContextInCompositeChildInputWithoutGrantingAuthority(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  context:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        context: ${{ ToJson(GitHub) }}
+`)
+
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("composite-authored toJSON(github) granted token authority")
+	}
+}
+
+func TestCompileActionInvocationsRejectsGitHubTokenAuthorityFromCompositeMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  token:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        token: ${{ github.token }}-${{ toJSON(github) }}
+`)
+
+	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
+	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant github.token authority") {
+		t.Fatalf("composite metadata token error = %v", err)
+	}
+}
+
+func TestCompileActionInvocationsRequiresRetainedEventPayload(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "event", `name: event input
 inputs:
@@ -462,12 +582,90 @@ runs:
   using: node24
   main: index.js
 `)
-	_, err := compileActionInvocations(
+	compiled, err := compileActionInvocations(
 		t.Context(), workspace, nil, "https://github.com", []string{"./event"},
 		[]map[string]string{{"action": "${{ github.event.action }}"}},
 	)
-	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained in a job plan") {
-		t.Fatalf("retained action input event error = %v", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresEventPayload {
+		t.Fatal("action input event did not require the retained event payload")
+	}
+}
+
+func TestCompileActionInvocationsRequiresPayloadForDynamicEventDefault(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "event", `name: event default
+inputs:
+  field:
+    default: action
+  value:
+    default: ${{ github.event[inputs.field] }}
+runs:
+  using: node24
+  main: index.js
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./event"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresEventPayload {
+		t.Fatal("dynamic action input default did not require the retained event payload")
+	}
+}
+
+func TestCompileActionInvocationsRequiresEventPayloadForLifecycleCondition(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "event", `name: event lifecycle
+runs:
+  using: node24
+  main: index.js
+  post: index.js
+  post-if: github.event[env.EVENT_FIELD] == 'opened'
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./event"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresEventPayload {
+		t.Fatal("action lifecycle event did not require the retained event payload")
+	}
+}
+
+func TestCompileActionInvocationsRequiresEventPayloadForCompositeMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "event", `name: event composite
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo '${{ toJSON(github.event) }}'
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./event"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresEventPayload {
+		t.Fatal("composite metadata event did not require the retained event payload")
+	}
+}
+
+func TestCompileActionInvocationsDoesNotRetainPayloadForEventIdentity(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "identity", `name: identity lifecycle
+runs:
+  using: node24
+  main: index.js
+  post: index.js
+  post-if: github.ref_name == 'main'
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./identity"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresEventPayload {
+		t.Fatal("event identity unnecessarily required the retained event payload")
 	}
 }
 
@@ -547,12 +745,10 @@ func TestMemoizeActionSourceCoalescesConcurrentResolution(t *testing.T) {
 	var wait sync.WaitGroup
 	errs := make(chan error, workers)
 	for range workers {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
+		wait.Go(func() {
 			_, _, err := shared.Fetch(t.Context(), ref)
 			errs <- err
-		}()
+		})
 	}
 	<-fake.started
 	close(fake.release)
@@ -753,6 +949,233 @@ jobs:
 `)
 	if err == nil || !strings.Contains(err.Error(), "action input default that references github.token") || !strings.Contains(err.Error(), "no effective permissions") {
 		t.Fatalf("compilePlansForTest() error = %v, want empty permission rejection", err)
+	}
+}
+
+func TestCompilePlansPrunesOnlyKnownFalseRootActionTokenAuthority(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "token-reachability.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, workspace, ".github/actions/token", `name: token default
+inputs:
+  token:
+    default: ${{ case(true, github.token, '') }}
+  deploy_key:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	compile := func(source string) ([]plan.Job, error) {
+		return compilePlansForTest(t.Context(), workflowPath, []byte(source), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	}
+	for _, test := range []struct {
+		name      string
+		condition string
+		jobIf     string
+	}{
+		{name: "step", condition: "        if: false\n"},
+		{name: "job", jobIf: "    if: false\n"},
+		{name: "matrix", condition: "        if: matrix.enabled\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			matrix := ""
+			if test.name == "matrix" {
+				matrix = "    strategy:\n      matrix:\n        enabled: [false]\n"
+			}
+			source := "on: push\njobs:\n  token:\n" + test.jobIf + matrix + "    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/token\n" + test.condition + "        with:\n          token: ${{ secrets.GITHUB_TOKEN }}\n          deploy_key: ${{ secrets.DEPLOY_KEY }}\n"
+			plans, err := compile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 1 || plans[0].GitHubToken != nil || plans[0].HasCapability("provider-token-write") {
+				t.Fatalf("known-false action retained token authority: %#v", plans)
+			}
+			if !reflect.DeepEqual(plans[0].RequiredSecrets, []string{"DEPLOY_KEY"}) || !plans[0].HasCapability("secrets") {
+				t.Fatalf("known-false action dropped ordinary secret inventory: %#v", plans[0])
+			}
+			if len(plans[0].Actions) == 0 || len(plans[0].Program.Actions) == 0 {
+				t.Fatal("known-false action was not resolved and retained in the plan")
+			}
+		})
+	}
+	_, err := compile(`on: push
+permissions: {}
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/token
+        if: env.RUNTIME_FLAG == 'yes'
+        with:
+          deploy_key: ${{ secrets.DEPLOY_KEY }}
+`)
+	if err == nil || !strings.Contains(err.Error(), "no effective permissions") {
+		t.Fatalf("runtime-dependent action condition error = %v, want conservative token authority", err)
+	}
+}
+
+func TestCompilePlansPrunesActionTokenAuthorityBehindKnownFalseCallGuard(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    if: false
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/token
+`)
+	writeAction(t, repository, ".github/actions/token", `name: token default
+inputs:
+  token:
+    default: ${{ github.token }}
+runs:
+  using: node24
+  main: index.js
+`)
+	plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || len(plans[0].CallGuards) != 1 || plans[0].GitHubToken != nil || plans[0].HasCapability("provider-token-write") {
+		t.Fatalf("known-false call guard retained token authority: %#v", plans)
+	}
+	if len(plans[0].Actions) == 0 || len(plans[0].Program.Actions) == 0 {
+		t.Fatal("known-false call guard skipped action resolution")
+	}
+}
+
+func TestCompilePlansDoNotUseCalleeInputsForCallerGuardReachability(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.result.outputs.deploy }}
+    steps:
+      - id: result
+        run: echo deploy=yes >> "$GITHUB_OUTPUT"
+  delegated:
+    needs: prepare
+    uses: ./.github/workflows/middle.yml
+    with:
+      deploy: ${{ needs.prepare.outputs.deploy }}
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      deploy: {type: string, required: true}
+jobs:
+  delegated:
+    if: inputs.deploy != ''
+    uses: ./.github/workflows/leaf.yml
+    with:
+      deploy: false
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      deploy: {type: boolean, required: true}
+jobs:
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/token
+`)
+	writeAction(t, repository, ".github/actions/token", `name: token default
+inputs:
+  token:
+    default: ${{ github.token }}
+runs:
+  using: node24
+  main: index.js
+`)
+	plans, err := compilePlansForTest(t.Context(), caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 || len(plans[1].CallGuards) != 1 || plans[1].Inputs["deploy"] != false || plans[1].GitHubToken == nil || !plans[1].HasCapability("provider-token-write") {
+		t.Fatalf("caller-scoped guard authority = %#v", plans)
+	}
+}
+
+func TestCompilePlansRetainsActionEventPayloadOnlyForReachableRoots(t *testing.T) {
+	repository := t.TempDir()
+	workflowPath := filepath.Join(repository, ".github", "workflows", "event.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, repository, ".github/actions/event", `name: event default
+inputs:
+  action:
+    default: ${{ github.event.action }}
+runs:
+  using: node24
+  main: index.js
+`)
+	compile := func(condition string) plan.Job {
+		t.Helper()
+		workflow := []byte("on: push\njobs:\n  event:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/event\n        if: " + condition + "\n")
+		plans, err := compilePlansForTest(t.Context(), workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(plans) != 1 {
+			t.Fatalf("plans = %#v", plans)
+		}
+		return plans[0]
+	}
+	if job := compile("false"); job.Event.PayloadArtifact || len(job.Actions) == 0 || len(job.Program.Actions) == 0 {
+		t.Fatalf("known-false event action plan = %#v", job)
+	}
+	if job := compile("env.RUNTIME == 'yes'"); !job.Event.PayloadArtifact {
+		t.Fatalf("runtime-dependent event action did not retain payload: %#v", job)
+	}
+}
+
+func TestCheckoutAuthorityFollowsRootReachability(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout-reachability.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, remote, "", checkoutTestManifest(actionintegration.CheckoutV7Commit))
+	compile := func(condition, inputs string) (Bundle, error) {
+		t.Helper()
+		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@" + actionintegration.CheckoutV7Commit + "\n        if: " + condition + "\n" + inputs)
+		return CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust:     EventUntrusted,
+			Runners:        RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"}},
+			ResolveActions: true,
+			ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+		})
+	}
+	bundle, err := compile("false", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.HasCapability("provider-token-read") || len(bundle.Plans[0].Authorization.ProviderTokenReadCapabilitySources) != 0 || len(bundle.Plans[0].Job.Actions) == 0 {
+		t.Fatalf("known-false checkout authority = %#v", bundle.Plans)
+	}
+	if _, err := compile("false", "        with:\n          token: ''\n"); err == nil || !strings.Contains(err.Error(), "checkout adapter") {
+		t.Fatalf("invalid unreachable checkout input error = %v", err)
+	}
+	bundle, err = compile("env.RUNTIME == 'yes'", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || !bundle.Plans[0].Job.HasCapability("provider-token-read") || !reflect.DeepEqual(bundle.Plans[0].Authorization.ProviderTokenReadCapabilitySources, []string{"checkout-adapter"}) {
+		t.Fatalf("runtime-dependent checkout authority = %#v", bundle.Plans)
 	}
 }
 
@@ -1104,7 +1527,9 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		"        with:\n          fetch-depth: '100'\n",
 		"        with:\n          ref: ${{ github.sha }}\n",
 		"        with:\n          ref: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
-		"        with:\n          ref: test-catalog\n          path: test-catalog\n          fetch-depth: '100'\n          persist-credentials: false\n",
+		"        with:\n          ref: test-catalog\n          path: sources/test-catalog\n          fetch-depth: '100'\n          persist-credentials: false\n",
+		"        with:\n          clean: false\n          filter: blob:none\n          lfs: true\n",
+		"        with:\n          sparse-checkout: |\n            src\n            docs\n          sparse-checkout-cone-mode: false\n",
 		"        with:\n          submodules: ' ReCuRsIvE '\n",
 	}
 	for _, with := range accepted {
@@ -1123,7 +1548,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		"ref":         "          ref: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
 		"ssh-key":     "          ssh-key: key\n",
 		"submodules":  "          submodules: yes\n",
-		"path":        "          path: nested/path\n",
+		"path":        "          path: nested/.git/path\n",
 		"fetch-depth": "          fetch-depth: '-1'\n",
 		"credentials": "          persist-credentials: true\n",
 	}
@@ -1145,14 +1570,27 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 	if _, err := compile(actionintegration.CheckoutV1Commit, "        with:\n          persist-credentials: false\n"); err == nil || !strings.Contains(err.Error(), "explicit input \"persist-credentials\" is unsupported by this actions/checkout release") {
 		t.Fatalf("v1.2.0 later-contract input error = %v", err)
 	}
+
+	unknown := strings.Repeat("0", 40)
+	if _, err := compile(unknown, "        with:\n          path: sources/app\n          filter: blob:none\n"); err != nil {
+		t.Fatalf("unknown checkout fallback inputs: %v", err)
+	}
+	if _, err := compile(unknown, "        with:\n          path: ../outside\n"); err == nil || !strings.Contains(err.Error(), "checkout adapter") {
+		t.Fatalf("unknown checkout fallback path error = %v", err)
+	}
 }
 
 func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	for version, commit := range map[string]string{
+		"v1.0.0":     "af513c7a016048ae468971c52ed77d9562c7c819",
 		"v1.2.0":     actionintegration.CheckoutV1Commit,
+		"v2.0.0":     "722adc63f1aa60a57ec37892e133b1d319cae598",
 		"v2.8.0":     actionintegration.CheckoutV2Commit,
+		"v3.0.0":     "a12a3943b4bdde767164f792f33f40b04645d846",
+		"v3.6.0":     "f43a0e5ff2bd294095638e18286ca9a3d1956744",
 		"v3.7.0":     actionintegration.CheckoutV3Commit,
+		"v4.0.0":     "1e31de5234b9f8995739874a8ce0492dc87873e2",
 		"v4":         actionintegration.CheckoutV4Commit,
 		"v5":         actionintegration.CheckoutV5Commit,
 		"v6":         actionintegration.CheckoutV6Commit,
@@ -1173,8 +1611,8 @@ func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 	unknown := strings.Repeat("0", 40)
 	writeAction(t, remote, "", checkoutTestManifest(unknown))
 	actionSource := &fakeActionSource{root: remote, commit: unknown, calls: map[string]int{}}
-	if _, _, _, _, err := compileActionLocks(t.Context(), workspace, actionSource, []string{"actions/checkout@v7"}); err == nil || !strings.Contains(err.Error(), "does not admit") {
-		t.Fatalf("unknown checkout commit error = %v", err)
+	if _, locks, _, _, err := compileActionLocks(t.Context(), workspace, actionSource, []string{"actions/checkout@v7"}); err != nil || len(locks) != 1 || locks[0].Commit != unknown {
+		t.Fatalf("unknown checkout fallback locks = %#v, error = %v", locks, err)
 	}
 }
 
@@ -1238,7 +1676,7 @@ func TestCompileBundleLegacyCheckoutWarning(t *testing.T) {
 	}
 	compile := func(steps string) Bundle {
 		t.Helper()
-		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n" + steps)
+		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n" + steps)
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -1262,15 +1700,249 @@ func TestCompileBundleLegacyCheckoutWarning(t *testing.T) {
 		"        with:\n          path: again\n" +
 		"      - uses: actions/checkout@" + actionintegration.CheckoutV2Commit + "\n" +
 		"        with:\n          path: legacy\n")
-	if len(bundle.IR.Warnings) != 2 ||
-		bundle.IR.Warnings[0].Code != "W_CHECKOUT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[0].Message, "v1.2.0") || bundle.IR.Warnings[0].Line == 0 ||
-		bundle.IR.Warnings[1].Code != "W_CHECKOUT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[1].Message, "v2.8.0") {
+	if len(bundle.Plans) != 2 || len(bundle.IR.Warnings) != 2 ||
+		bundle.IR.Warnings[0].Code != "W_CHECKOUT_LEGACY_RELEASE" || bundle.IR.Warnings[0].Path != "./.github/workflows/checkout.yml" || bundle.IR.Warnings[0].Job != "checkout" || bundle.IR.Warnings[0].Step != 1 || bundle.IR.Warnings[0].Line == 0 ||
+		bundle.IR.Warnings[0].Message != "actions/checkout v1.2.0 behaves like v1. It does not set the ref and commit outputs, which actions/checkout added in v4.2.0. It also defaults to full history when fetch-depth is omitted. Upgrade to actions/checkout v4 or later if either difference matters." ||
+		bundle.IR.Warnings[1].Code != "W_CHECKOUT_LEGACY_RELEASE" || bundle.IR.Warnings[1].Path != "./.github/workflows/checkout.yml" || bundle.IR.Warnings[1].Job != "checkout" || bundle.IR.Warnings[1].Step != 3 ||
+		bundle.IR.Warnings[1].Message != "actions/checkout v2.8.0 behaves like v2. It does not set the ref and commit outputs, which actions/checkout added in v4.2.0. Upgrade to actions/checkout v4 or later if a later step reads either output." {
 		t.Fatalf("legacy checkout warnings = %#v", bundle.IR.Warnings)
 	}
 
 	bundle = compile("      - uses: actions/checkout@" + actionintegration.CheckoutV4Commit + "\n")
 	if len(bundle.IR.Warnings) != 0 {
 		t.Fatalf("warnings = %#v, want none", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleUnknownCheckoutCommitWarningIsDeduplicated(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unknown := strings.Repeat("0", 40)
+	otherUnknown := strings.Repeat("1", 40)
+	root := t.TempDir()
+	writeAction(t, root, "", checkoutTestManifest(unknown))
+	otherRoot := t.TempDir()
+	writeAction(t, otherRoot, "", checkoutTestManifest(otherUnknown))
+	workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n      - uses: actions/checkout@" + unknown + "\n      - uses: actions/checkout@" + unknown + "\n        with:\n          path: again\n      - uses: actions/checkout@" + otherUnknown + "\n        with:\n          path: other\n")
+	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   commitActionSource{roots: map[string]string{unknown: root, otherUnknown: otherRoot}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 || len(bundle.IR.Warnings) != 2 {
+		t.Fatalf("plans = %d, warnings = %#v, want one warning per distinct commit across matrix and repeated steps", len(bundle.Plans), bundle.IR.Warnings)
+	}
+	warning := bundle.IR.Warnings[0]
+	if warning.Code != "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK" || warning.Path != "./.github/workflows/checkout.yml" || warning.Job != "checkout" || warning.Step != 1 || warning.Line == 0 ||
+		!strings.Contains(warning.Message, unknown) || !strings.Contains(warning.Message, actionintegration.CheckoutFallbackContractRelease) || !strings.Contains(warning.Message, "does not run the upstream action JavaScript") {
+		t.Fatalf("unknown checkout fallback warning = %#v", warning)
+	}
+	if bundle.IR.Warnings[1].Code != "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[1].Step != 3 || !strings.Contains(bundle.IR.Warnings[1].Message, otherUnknown) {
+		t.Fatalf("second unknown checkout fallback warning = %#v", bundle.IR.Warnings[1])
+	}
+
+	writeAction(t, workspace, ".github/actions/wrapper", "runs:\n  using: composite\n  steps:\n    - uses: actions/checkout@"+unknown+"\n")
+	workflow = []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n")
+	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err = CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   commitActionSource{roots: map[string]string{unknown: root}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[0].Step != 1 || !strings.Contains(bundle.IR.Warnings[0].Message, unknown) {
+		t.Fatalf("nested unknown checkout fallback warnings = %#v", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roots := map[string]string{}
+	for _, commit := range []string{
+		actionintegration.UploadArtifactV1Commit,
+		actionintegration.UploadArtifactV2Commit,
+		actionintegration.UploadArtifactV3Commit,
+		actionintegration.UploadArtifactCommit,
+	} {
+		root := t.TempDir()
+		writeAction(t, root, "", uploadArtifactTestManifest(commit))
+		roots[commit] = root
+	}
+	compile := func(steps string) Bundle {
+		t.Helper()
+		workflow := []byte("on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps:\n" + steps)
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions: true,
+			ActionSource:   commitActionSource{roots: roots},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bundle
+	}
+
+	bundle := compile("      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV1Commit + "\n" +
+		"        with:\n          name: v1\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV1Commit + "\n" +
+		"        with:\n          name: v1-again\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV2Commit + "\n" +
+		"        with:\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV3Commit + "\n" +
+		"        with:\n          path: payload\n")
+	if len(bundle.IR.Warnings) != 3 ||
+		bundle.IR.Warnings[0].Code != "W_UPLOAD_ARTIFACT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[0].Message, "v1.0.0") || bundle.IR.Warnings[0].Line == 0 ||
+		bundle.IR.Warnings[1].Code != "W_UPLOAD_ARTIFACT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[1].Message, "v2.3.1") ||
+		bundle.IR.Warnings[2].Code != "W_UPLOAD_ARTIFACT_LEGACY_RELEASE" || !strings.Contains(bundle.IR.Warnings[2].Message, "v3.2.1") {
+		t.Fatalf("legacy upload-artifact warnings = %#v", bundle.IR.Warnings)
+	}
+
+	bundle = compile("      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactCommit + "\n" +
+		"        with:\n          path: payload\n")
+	if len(bundle.IR.Warnings) != 0 {
+		t.Fatalf("warnings = %#v, want none", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleUnknownUploadArtifactWarningIsDeduplicated(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unknown := strings.Repeat("0", 40)
+	otherUnknown := strings.Repeat("1", 40)
+	roots := map[string]string{}
+	for _, commit := range []string{unknown, otherUnknown} {
+		root := t.TempDir()
+		writeAction(t, root, "", uploadArtifactTestManifest(commit))
+		roots[commit] = root
+	}
+	compile := func(workflow []byte) Bundle {
+		t.Helper()
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions: true,
+			ActionSource:   commitActionSource{roots: roots},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bundle
+	}
+	workflow := []byte("on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n      - uses: actions/upload-artifact@" + unknown + "\n        with:\n          path: payload\n          archive: true\n      - uses: actions/upload-artifact@" + unknown + "\n        with:\n          path: again\n      - uses: actions/upload-artifact@" + otherUnknown + "\n        with:\n          path: other\n")
+	bundle := compile(workflow)
+	if len(bundle.Plans) != 2 || len(bundle.IR.Warnings) != 2 {
+		t.Fatalf("plans = %d, warnings = %#v, want one warning per distinct commit across matrix and repeated steps", len(bundle.Plans), bundle.IR.Warnings)
+	}
+	warning := bundle.IR.Warnings[0]
+	if warning.Code != "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || warning.Path != "./.github/workflows/artifact.yml" || warning.Job != "upload" || warning.Step != 1 || warning.Line == 0 ||
+		!strings.Contains(warning.Message, unknown) || !strings.Contains(warning.Message, actionintegration.UploadArtifactFallbackContractRelease) || !strings.Contains(warning.Message, "does not run the upstream action JavaScript") {
+		t.Fatalf("unknown upload-artifact fallback warning = %#v", warning)
+	}
+	if bundle.IR.Warnings[1].Code != "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[1].Step != 3 || !strings.Contains(bundle.IR.Warnings[1].Message, otherUnknown) {
+		t.Fatalf("second unknown upload-artifact fallback warning = %#v", bundle.IR.Warnings[1])
+	}
+
+	writeAction(t, workspace, ".github/actions/wrapper", "runs:\n  using: composite\n  steps:\n    - uses: actions/upload-artifact@"+unknown+"\n      with:\n        path: payload\n")
+	workflow = []byte("on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n")
+	bundle = compile(workflow)
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[0].Step != 1 || !strings.Contains(bundle.IR.Warnings[0].Message, unknown) {
+		t.Fatalf("nested unknown upload-artifact fallback warnings = %#v", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleUnknownDownloadArtifactWarningIsDeduplicated(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unknown := strings.Repeat("0", 40)
+	otherUnknown := strings.Repeat("1", 40)
+	roots := map[string]string{}
+	for _, commit := range []string{unknown, otherUnknown} {
+		root := t.TempDir()
+		writeAction(t, root, "", "name: download artifact\nruns:\n  using: node24\n  main: index.js\n")
+		roots[commit] = root
+	}
+	compile := func(workflow []byte) Bundle {
+		t.Helper()
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions: true,
+			ActionSource:   commitActionSource{roots: roots},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bundle
+	}
+	workflow := []byte("on: push\njobs:\n  producer:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo payload\n  download:\n    needs: producer\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n      - uses: actions/download-artifact@" + unknown + "\n        with:\n          name: payload\n          skip-decompress: false\n          digest-mismatch: error\n      - uses: actions/download-artifact@" + unknown + "\n        with:\n          name: again\n      - uses: actions/download-artifact@" + otherUnknown + "\n        with:\n          name: other\n")
+	bundle := compile(workflow)
+	if len(bundle.Plans) != 3 || len(bundle.IR.Warnings) != 2 {
+		t.Fatalf("plans = %d, warnings = %#v, want one warning per distinct commit across matrix and repeated steps", len(bundle.Plans), bundle.IR.Warnings)
+	}
+	warning := bundle.IR.Warnings[0]
+	if warning.Code != "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || warning.Path != "./.github/workflows/artifact.yml" || warning.Job != "download" || warning.Step != 1 || warning.Line == 0 ||
+		!strings.Contains(warning.Message, unknown) || !strings.Contains(warning.Message, actionintegration.DownloadArtifactFallbackContractRelease) || !strings.Contains(warning.Message, "verified direct needs producers") || !strings.Contains(warning.Message, "does not run the upstream action JavaScript") {
+		t.Fatalf("unknown download-artifact fallback warning = %#v", warning)
+	}
+	if bundle.IR.Warnings[1].Code != "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[1].Step != 3 || !strings.Contains(bundle.IR.Warnings[1].Message, otherUnknown) {
+		t.Fatalf("second unknown download-artifact fallback warning = %#v", bundle.IR.Warnings[1])
+	}
+
+	writeAction(t, workspace, ".github/actions/wrapper", "runs:\n  using: composite\n  steps:\n    - uses: actions/download-artifact@"+unknown+"\n      with:\n        name: payload\n")
+	workflow = []byte("on: push\njobs:\n  producer:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo payload\n  download:\n    needs: producer\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n")
+	bundle = compile(workflow)
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[0].Step != 1 || !strings.Contains(bundle.IR.Warnings[0].Message, unknown) {
+		t.Fatalf("nested unknown download-artifact fallback warnings = %#v", bundle.IR.Warnings)
 	}
 }
 
@@ -1346,14 +2018,8 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeAction(t, remote, "", "name: upload artifact\nruns:\n  using: node24\n  main: dist/index.js\n")
-	if err := os.MkdirAll(filepath.Join(remote, "dist"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(remote, "dist", "index.js"), []byte("throw new Error('adapter only')\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	compile := func(commit, with string) ([]plan.Job, error) {
+		writeAction(t, remote, "", uploadArtifactTestManifest(commit))
 		workflow := []byte("on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/upload-artifact@" + commit + "\n" + with)
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
@@ -1367,6 +2033,19 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 			ResolveActions: true,
 			ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
 		})
+	}
+
+	for version, test := range map[string]struct {
+		commit string
+		with   string
+	}{
+		"v1.0.0": {commit: actionintegration.UploadArtifactV1Commit, with: "        with:\n          name: payload\n          path: payload/result.txt\n"},
+		"v2.3.1": {commit: actionintegration.UploadArtifactV2Commit, with: "        with:\n          path: payload/result.txt\n          if-no-files-found: error\n"},
+		"v3.2.1": {commit: actionintegration.UploadArtifactV3Commit, with: "        with:\n          path: payload/result.txt\n          include-hidden-files: true\n"},
+	} {
+		if plans, err := compile(test.commit, test.with); err != nil || len(plans) != 1 {
+			t.Fatalf("audited %s upload rejected: plans = %#v, error = %v", version, plans, err)
+		}
 	}
 
 	plans, err := compile(actionintegration.UploadArtifactCommit, "        with:\n          name: payload\n          path: payload/result.txt\n          if-no-files-found: error\n          compression-level: '0'\n")
@@ -1423,8 +2102,11 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		})
 	}
 
-	if _, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.UploadArtifactCommit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV5Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV6Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV7Commit) {
-		t.Fatalf("unsupported upload-artifact commit error = %v", err)
+	if plans, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n          archive: true\n"); err != nil || len(plans) != 1 {
+		t.Fatalf("unknown upload-artifact fallback plans = %#v, error = %v", plans, err)
+	}
+	if _, err := compile("c6a366c94c3e0affe28c06c8df20a878f24da3cf", "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), "does not admit resolved commit") {
+		t.Fatalf("known unsupported upload-artifact commit error = %v", err)
 	}
 
 	matrixWorkflow := []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        mode: [production, test]\n    steps:\n      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV6Commit + "\n        if: matrix.mode == 'test'\n        with:\n          name: ${{ github.sha }}\n          path: ./artifacts.tar.gz\n          retention-days: '0'\n")
@@ -1519,8 +2201,8 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 	if _, err := compile(actionintegration.DownloadArtifactCommit, "", "        with:\n          name: payload\n"); err == nil || !strings.Contains(err.Error(), "direct needs producer") {
 		t.Fatalf("needs-free download-artifact error = %v", err)
 	}
-	if _, err := compile(strings.Repeat("b", 40), "    needs: producer\n", "        with:\n          name: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.DownloadArtifactCommit) || !strings.Contains(err.Error(), actionintegration.DownloadArtifactV5Commit) {
-		t.Fatalf("unsupported download-artifact commit error = %v", err)
+	if plans, err := compile(strings.Repeat("b", 40), "    needs: producer\n", "        with:\n          name: payload\n          skip-decompress: false\n          digest-mismatch: error\n"); err != nil || len(plans) != 2 {
+		t.Fatalf("unknown download-artifact fallback plans = %#v, error = %v", plans, err)
 	}
 	for name, with := range map[string]string{
 		"raw":             "        with:\n          name: payload\n          skip-decompress: true\n",
@@ -1612,8 +2294,8 @@ func TestDownloadArtifactMutableTagMustResolveToAuditedExactLock(t *testing.T) {
 	}
 
 	resolved.commit = strings.Repeat("b", 40)
-	if _, _, _, _, err := compileActionLocks(t.Context(), t.TempDir(), resolved, []string{"actions/download-artifact@v8"}); err == nil {
-		t.Fatal("mutable v8 tag resolving to an unaudited commit was accepted")
+	if _, locks, _, _, err := compileActionLocks(t.Context(), t.TempDir(), resolved, []string{"actions/download-artifact@v8"}); err != nil || len(locks) != 1 || locks[0].Commit != resolved.commit {
+		t.Fatalf("mutable v8 tag unknown commit fallback locks = %#v, error = %v", locks, err)
 	}
 }
 
@@ -1636,6 +2318,107 @@ func TestCompilePlansDockerfileActionCapabilities(t *testing.T) {
 	}
 	if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"docker", "network"}) || len(plans[0].Actions) != 1 || plans[0].Actions[0].Source != "github" {
 		t.Fatalf("Dockerfile action plans = %#v", plans)
+	}
+}
+
+func TestCompilePlansPrebuiltDockerActionCapabilitiesAndDeterminism(t *testing.T) {
+	remote := t.TempDir()
+	image := "busybox@sha256:" + strings.Repeat("a", 64)
+	writeAction(t, remote, "", `name: remote prebuilt Docker
+runs:
+  using: docker
+  image: docker://`+image+`
+  entrypoint: /bin/echo
+  args: [hello]
+`)
+	workflowPath := filepath.Join("..", "..", "testdata", "dockerfile-action", ".github", "workflows", "docker-action.yml")
+	options := Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	}
+	compile := func() []byte {
+		plans, err := compilePlansForTest(t.Context(), workflowPath, readFile(t, workflowPath+".tmpl"), pushEvent(t), "prebuilt-docker-test", testDistributionDigest, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"docker", "network"}) || len(plans[0].Actions) != 1 || plans[0].Actions[0].Source != "github" || plans[0].Actions[0].DockerImage != image {
+			t.Fatalf("prebuilt Docker action plans = %#v", plans)
+		}
+		encoded, err := plan.Encode(plans[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(encoded, []byte(`"entrypoint": "/bin/echo"`)) {
+			t.Fatalf("job plan omitted normalized Docker action entrypoint: %s", encoded)
+		}
+		return encoded
+	}
+	first, second := compile(), compile()
+	if !bytes.Equal(first, second) {
+		t.Fatalf("prebuilt Docker action plans are not deterministic:\n%s\n%s", first, second)
+	}
+}
+
+func TestCompileDockerfileActionArgsAreValidatedButNotPlanned(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "docker", `name: Docker args
+inputs:
+  target:
+    default: default-value
+runs:
+  using: docker
+  image: Dockerfile
+  args:
+    - literal
+    - ${{ inputs.target }}
+`)
+	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./docker"}, []map[string]string{{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(compiled.locks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("literal")) || bytes.Contains(encoded, []byte("inputs.target")) {
+		t.Fatalf("job-plan locks retained Docker args: %s", encoded)
+	}
+
+	invalid := []string{
+		"${{ inputs }}",
+		"${{ inputs[env.name] }}",
+		"${{ secrets.token }}",
+		"${{ inputs.target || 'fallback' }}",
+		"${{ format('{0}', inputs.target) }}",
+	}
+	for _, argument := range invalid {
+		writeAction(t, workspace, "docker", "runs:\n  using: docker\n  image: Dockerfile\n  args:\n    - \""+strings.ReplaceAll(argument, "\"", "\\\"")+"\"\n")
+		_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./docker"}, []map[string]string{{}})
+		if err == nil || !strings.Contains(err.Error(), "docker action argument 1") {
+			t.Errorf("argument %q error = %v, want resolution rejection", argument, err)
+		}
+	}
+}
+
+func TestCompileDockerfileActionValidatesInputDefaultsBeforeArgs(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "docker", `inputs:
+  target:
+    default: ${{ runner.temp }}
+runs:
+  using: docker
+  image: Dockerfile
+  args:
+    - ${{ secrets.token }}
+`)
+	_, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./docker"}, []map[string]string{{}})
+	if err == nil || !strings.Contains(err.Error(), `action input "target" default`) || strings.Contains(err.Error(), "docker action argument") {
+		t.Fatalf("compileActionInvocations() error = %v, want input-default rejection first", err)
 	}
 }
 

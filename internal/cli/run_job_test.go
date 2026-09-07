@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,11 +15,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -133,6 +136,7 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 		Steps:        []plan.Step{{ID: "produce", Kind: "run", Command: `echo "result=cli-ok" >> "$GITHUB_OUTPUT"`}},
 		RequiresMise: &requiresMise,
 	}
+	attachCLIExecutionProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -415,13 +419,18 @@ func TestRunJobAnnotatesUnavailableBuildkiteSecretWithMigrationGuidance(t *testi
 	}
 	t.Setenv("BUILDKITE_GHA_AGENT", agentPath)
 	runner := &cliCaptureRunner{}
+	events := captureCommandTelemetry(t)
 	var stdout, stderr bytes.Buffer
 
 	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 {
 		t.Fatalf("run() code = %d, stderr = %q, want 1", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), `resolve secret "EXAMPLE_SECRET": buildkite Agent secret request failed`) {
+	if !strings.Contains(stderr.String(), `resolve secret "EXAMPLE_SECRET": secret is unavailable; it may not exist, this job may not have access, or the Buildkite secret service may be temporarily unavailable`) {
 		t.Fatalf("stderr = %q, want secret resolution failure", stderr.String())
+	}
+	event := <-events
+	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeSecretUnavailable {
+		t.Fatalf("telemetry = %#v", event)
 	}
 	var annotations []cliCommand
 	for _, command := range runner.commands {
@@ -435,18 +444,16 @@ func TestRunJobAnnotatesUnavailableBuildkiteSecretWithMigrationGuidance(t *testi
 	}
 	body := string(annotations[0].stdin)
 	for _, want := range []string{
-		"#### Missing secret",
+		"#### Secret unavailable",
 		"Buildkite secret <code>EXAMPLE_SECRET</code>",
 		`<a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets" target="_blank">Create or migrate the secret into Buildkite</a>`,
 		`<a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets/access-policies" target="_blank">grant this job access with its access policy</a>`,
+		"retry the job. The Buildkite secret service may be temporarily unavailable",
 		"> ℹ️ GitHub does not expose an existing secret's value after creation",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("annotation = %q, want %q", body, want)
 		}
-	}
-	if strings.Contains(body, "Retry the job") {
-		t.Errorf("annotation = %q, does not want retry guidance", body)
 	}
 	if last := runner.commands[len(runner.commands)-1]; len(last.args) == 0 || last.args[0] != "annotate" {
 		t.Fatalf("last command = %#v, want guidance annotation after authoritative publication", last)
@@ -712,8 +719,12 @@ func TestRunJobFailsWhenAuthoritativePublicationFails(t *testing.T) {
 	if !strings.Contains(stdout.String(), "~~~ :package: Publish GitHub Actions result\n") || !strings.Contains(stdout.String(), "^^^ +++\n") {
 		t.Fatalf("stdout = %q, want failed publication group expanded", stdout.String())
 	}
-	if event := <-events; event.FailurePhase != telemetry.FailurePhaseResultPublication || event.FailureCode != telemetry.FailureCodeUnknown {
+	event := <-events
+	if event.FailurePhase != telemetry.FailurePhaseResultPublication || event.FailureCode != telemetry.FailureCodeUnknown {
 		t.Fatalf("telemetry = %#v", event)
+	}
+	if !strings.Contains(event.ErrorMessage, "publish terminal result") {
+		t.Fatalf("telemetry error message = %q", event.ErrorMessage)
 	}
 }
 
@@ -727,8 +738,58 @@ func TestRunJobTelemetryClassifiesExecutionFailure(t *testing.T) {
 	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if event := <-events; event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeUnknown {
+	event := <-events
+	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeStepProcessExit {
 		t.Fatalf("telemetry = %#v", event)
+	}
+	if !strings.Contains(event.ErrorMessage, "exit status 7") {
+		t.Fatalf("telemetry error message = %q", event.ErrorMessage)
+	}
+}
+
+func TestRunJobTelemetryClassifiesUnsupportedShell(t *testing.T) {
+	job := cliRunJobPlan()
+	job.Steps[0].Shell = "pwsh"
+	job.Steps[0].Command = "Get-Location"
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	events := captureCommandTelemetry(t)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	event := <-events
+	if event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeUnsupportedFeature {
+		t.Fatalf("telemetry = %#v", event)
+	}
+	if event.Blocker != "shell" || event.BlockerDetail != "" {
+		t.Fatalf("telemetry blocker = %q / %q", event.Blocker, event.BlockerDetail)
+	}
+	if !strings.Contains(event.ErrorMessage, `shell "pwsh" is unsupported`) {
+		t.Fatalf("telemetry error message = %q", event.ErrorMessage)
+	}
+}
+
+func TestRunJobValidateHostErrorsClassifyAsUnsupported(t *testing.T) {
+	job := plan.Job{RequiredCapabilities: []string{"docker"}}
+	err := gharuntime.ValidateHost(job, "darwin", "arm64")
+	if err == nil {
+		t.Fatal("ValidateHost() = nil, want macOS docker rejection")
+	}
+	if got := runtimeFailureCode(err); got != telemetry.FailureCodeUnsupportedFeature {
+		t.Fatalf("runtimeFailureCode() = %q, want %q for %v", got, telemetry.FailureCodeUnsupportedFeature, err)
+	}
+	if got := runtimeFailureCode(errors.Join(err, context.Canceled)); got != telemetry.FailureCodeUnsupportedFeature {
+		t.Fatalf("runtimeFailureCode() = %q, want %q when cancellation is joined with an unrelated failure", got, telemetry.FailureCodeUnsupportedFeature)
+	}
+}
+
+func TestRunJobCanceledSecretDoesNotClassifyUnavailable(t *testing.T) {
+	secretError := &gharuntime.SecretResolutionError{Name: "EXAMPLE_SECRET", Err: errors.New("request failed")}
+	for _, cancellation := range []error{context.Canceled, context.DeadlineExceeded} {
+		if got := runtimeFailureCode(errors.Join(secretError, cancellation)); got != "" {
+			t.Errorf("runtimeFailureCode(%v) = %q, want no failure code", cancellation, got)
+		}
 	}
 }
 
@@ -828,6 +889,7 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
 		RequiresMise:         &requiresMise,
 	}
+	attachCLIExecutionProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -846,6 +908,37 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 	result, err := os.ReadFile(resultPath)
 	if err != nil || !bytes.Contains(result, []byte(`"conclusion": "success"`)) {
 		t.Fatalf("result = %q, error = %v", result, err)
+	}
+}
+
+func TestHydrateEventPayloadDownloadsFromExactImporterJob(t *testing.T) {
+	payload := []byte(`{"action":"opened","number":42}`)
+	digest := transport.Digest(payload)
+	path, err := buildkitepipeline.EventPath(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := cliRunJobPlan()
+	job.Event.PayloadDigest = digest
+	job.Event.PayloadArtifact = true
+	runner := &cliCaptureRunner{dataByPath: map[string][]byte{path: payload}}
+	if err := hydrateEventPayload(t.Context(), transport.Agent{Runner: runner}, &job, cliTestJobID); err != nil {
+		t.Fatal(err)
+	}
+	if job.Event.Payload == nil || (*job.Event.Payload)["action"] != "opened" {
+		t.Fatalf("hydrated event = %#v", job.Event.Payload)
+	}
+	if len(runner.commands) != 1 || len(runner.commands[0].args) != 6 ||
+		!slices.Equal(runner.commands[0].args[:3], []string{"artifact", "download", path}) ||
+		runner.commands[0].args[3] == "" ||
+		!slices.Equal(runner.commands[0].args[4:], []string{"--step", cliTestJobID}) {
+		t.Fatalf("artifact commands = %#v", runner.commands)
+	}
+
+	tampered := &cliCaptureRunner{dataByPath: map[string][]byte{path: []byte(`{"action":"closed"}`)}}
+	job.Event.Payload = nil
+	if err := hydrateEventPayload(t.Context(), transport.Agent{Runner: tampered}, &job, cliTestJobID); err == nil || !strings.Contains(err.Error(), "does not match its digest") {
+		t.Fatalf("tampered event error = %v", err)
 	}
 }
 
@@ -871,8 +964,84 @@ func cliRunJobPlan() plan.Job {
 	}
 }
 
+func attachCLIExecutionProgram(job *plan.Job) {
+	actions := map[string]executionprogram.Action{}
+	for _, lock := range job.Actions {
+		action := executionprogram.Action{Runtime: "node24", Main: "index.js", PreIf: cliProgramSite(""), PostIf: cliProgramSite("")}
+		if lock.DockerImage != "" {
+			action.Runtime, action.Main, action.Image = "docker", "", lock.DockerImage
+		}
+		actions[lock.ID] = action
+	}
+	normalized := executionprogram.Program{Version: executionprogram.Version, Actions: actions, Job: executionprogram.Job{
+		Condition: cliProgramSite(job.Condition), ContinueOnError: job.ContinueOnError, TimeoutMinutes: job.TimeoutMinutes,
+		Env:      cliProgramBindings(job.Env),
+		Defaults: executionprogram.Defaults{Shell: cliProgramSite(job.DefaultShell), WorkingDirectory: cliProgramSite(job.DefaultWorkingDirectory)},
+		Outputs:  cliProgramBindings(job.Outputs),
+	}}
+	normalized.Job.Guards = make([]executionprogram.Guard, len(job.CallGuards))
+	for i, guard := range job.CallGuards {
+		normalized.Job.Guards[i].Condition = cliProgramSite(guard.Condition)
+	}
+	normalized.Job.Steps = make([]executionprogram.Step, len(job.Steps))
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		projected := executionprogram.Step{ID: step.ID, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Env: cliProgramBindings(step.Env), Condition: cliProgramSite(step.Condition), ContinueOnError: executionprogram.BoolControl{Literal: step.ContinueOnError}, TimeoutMinutes: executionprogram.NumberControl{Literal: step.TimeoutMinutes}, Name: cliProgramSite(step.Name)}
+		if step.ContinueOnErrorExpression != "" {
+			value := cliProgramSite(step.ContinueOnErrorExpression)
+			projected.ContinueOnError.Expression = &value
+		}
+		if step.TimeoutMinutesExpression != "" {
+			value := cliProgramSite(step.TimeoutMinutesExpression)
+			projected.TimeoutMinutes.Expression = &value
+		}
+		switch step.Kind {
+		case "run":
+			projected.Run = &executionprogram.Run{Command: cliProgramSite(step.Command), Shell: cliProgramSite(step.Shell), WorkingDirectory: cliProgramSite(step.WorkingDirectory)}
+		case "uses":
+			projected.Invocation = &executionprogram.Invocation{Uses: cliProgramSite(step.Uses), With: cliProgramBindings(step.With)}
+			if step.Action != nil {
+				projected.Invocation.Lock = step.Action.Lock
+			}
+		}
+		normalized.Job.Steps[i] = projected
+		step.Execution = &normalized.Job.Steps[i]
+	}
+	if job.Container != nil {
+		normalized.Job.Container = &executionprogram.Container{Image: cliProgramSite(job.Container.Image), Env: cliProgramBindings(job.Container.Env), Ports: cliProgramSites(job.Container.Ports)}
+	}
+	normalized.DeriveSiteSemantics()
+	job.Program = &normalized
+}
+
+func cliProgramSite(source string) executionprogram.Site {
+	return executionprogram.Site{Source: source}
+}
+
+func cliProgramBindings(values map[string]string) []executionprogram.Binding {
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]executionprogram.Binding, 0, len(names))
+	for _, name := range names {
+		result = append(result, executionprogram.Binding{Name: name, Value: cliProgramSite(values[name])})
+	}
+	return result
+}
+
+func cliProgramSites(values []string) []executionprogram.Site {
+	result := make([]executionprogram.Site, len(values))
+	for i, value := range values {
+		result[i] = cliProgramSite(value)
+	}
+	return result
+}
+
 func writeCLIJobPlan(t *testing.T, job plan.Job) (string, string) {
 	t.Helper()
+	attachCLIExecutionProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
 		t.Fatal(err)

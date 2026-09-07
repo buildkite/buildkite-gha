@@ -57,7 +57,7 @@ func (w *synchronizedWriter) Write(data []byte) (int, error) {
 	return w.w.Write(data)
 }
 
-func validateBatch(args []string, stderr io.Writer, version string) int {
+func validateBatch(args []string, stderr io.Writer, clientVersion string) int {
 	options, err := parseBatchValidationArgs(args)
 	if err != nil {
 		return usageError(stderr, "validate-batch: %v", err)
@@ -80,7 +80,7 @@ func validateBatch(args []string, stderr io.Writer, version string) int {
 		}
 		resolverOptions = append(resolverOptions, actionsource.WithGitHubAPITokenProvider(func(context.Context) (string, error) { return token, nil }))
 	}
-	actionSource, cleanup, resolutionSnapshotID, err := newHostedActionSourceWithSnapshot(context.Background(), options.actionCacheDir, resolverOptions, storeOptions)
+	actionSource, cleanup, resolutionSnapshotID, err := newHostedActionSourceWithSnapshot(context.Background(), options.actionCacheDir, clientVersion, resolverOptions, storeOptions)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate-batch: %v\n", err)
 		return 1
@@ -103,9 +103,7 @@ func validateBatch(args []string, stderr io.Writer, version string) int {
 	var resumed atomic.Int64
 	var workers sync.WaitGroup
 	for range options.jobs {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			for record := range work {
 				if ctx.Err() != nil {
 					return
@@ -125,7 +123,7 @@ func validateBatch(args []string, stderr io.Writer, version string) int {
 					resumed.Add(1)
 					continue
 				}
-				if err := writeBatchValidationResult(ctx, resultPath, record, version, options.actionCacheDir, runtime, workerStderr); err != nil {
+				if err := writeBatchValidationResult(ctx, resultPath, record, clientVersion, options.actionCacheDir, runtime, workerStderr); err != nil {
 					select {
 					case failures <- fmt.Errorf("%s: %w", record.ID, err):
 						cancel()
@@ -135,7 +133,7 @@ func validateBatch(args []string, stderr io.Writer, version string) int {
 				}
 				completed.Add(1)
 			}
-		}()
+		})
 	}
 sendRecords:
 	for _, record := range records {
@@ -371,8 +369,8 @@ func localCompilationDependencyDigest(workflowPath string, contents []byte) (str
 				if strings.Contains(step.Uses, "${{") {
 					return false
 				}
-				if strings.HasPrefix(step.Uses, "./") {
-					path := strings.TrimPrefix(step.Uses, "./")
+				if after, ok := strings.CutPrefix(step.Uses, "./"); ok {
+					path := after
 					if path != "" && (filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))) != path || strings.Contains(path, "\\")) {
 						return false
 					}
@@ -474,7 +472,7 @@ func loadBatchValidationResult(path, workflow string) (compatibility.ProcessingR
 	seen := make(map[string]bool, len(report.Evaluations))
 	for _, evaluation := range report.Evaluations {
 		if seen[evaluation.Event] || evaluation.Source != "generated" || evaluation.Report.Schema != compatibility.ProcessingSchema ||
-			(evaluation.Event != "push" && evaluation.Event != "pull_request" && evaluation.Event != "merge_group" && evaluation.Event != "release" && evaluation.Event != "workflow_dispatch" && evaluation.Event != "schedule") {
+			(evaluation.Event != "push" && evaluation.Event != "pull_request" && evaluation.Event != "merge_group" && evaluation.Event != "release" && evaluation.Event != "issues" && evaluation.Event != "workflow_dispatch" && evaluation.Event != "schedule") {
 			return compatibility.ProcessingReportV3{}, false
 		}
 		seen[evaluation.Event] = true
@@ -482,7 +480,7 @@ func loadBatchValidationResult(path, workflow string) (compatibility.ProcessingR
 	return report, true
 }
 
-func writeBatchValidationResult(ctx context.Context, path string, record batchValidationRecord, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) error {
+func writeBatchValidationResult(ctx context.Context, path string, record batchValidationRecord, clientVersion, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create report directory: %w", err)
 	}
@@ -493,7 +491,7 @@ func writeBatchValidationResult(ctx context.Context, path string, record batchVa
 	temporaryPath := temporary.Name()
 	defer func() { _ = os.Remove(temporaryPath) }()
 	out := processingOutput{context: ctx, command: "validate-batch", format: "json", reports: temporary, stderr: stderr}
-	_ = validateAllEventsSource(ctx, out, record.Source, record.content, version, actionCacheDir, runtime, stderr)
+	_ = validateAllEventsSource(ctx, out, record.Source, record.content, clientVersion, actionCacheDir, runtime, stderr)
 	if record.resumable {
 		contentID, complete := localCompilationDependencyDigest(record.Source, record.content)
 		if !complete || contentID != record.contentID {

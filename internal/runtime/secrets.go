@@ -120,7 +120,7 @@ func (r AgentSecrets) ResolveSecret(ctx context.Context, name string) (string, e
 	command.Stdout = &output
 	command.Stderr = io.Discard
 	if err := command.Run(); err != nil {
-		return "", errors.New("buildkite Agent secret request failed")
+		return "", errors.New("secret is unavailable; it may not exist, this job may not have access, or the Buildkite secret service may be temporarily unavailable")
 	}
 	if output.exceeded {
 		return "", fmt.Errorf("buildkite Agent secret response exceeds %d bytes", maxSecretBytes)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -45,7 +46,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 		t.Fatalf("schema = %q", manifest.Schema)
 	}
 
-	wantOrder := []string{"smoke-shell", "smoke-concurrent", "smoke-ci", "smoke-artifact", "smoke-artifact-multi-prefix", "example-basic", "example-artifacts", "example-advanced", "plugin-demo-cache", "public-actions", "dockerfile-action", "container-runtime", "summary-annotation", "workflow-command-annotations", "upload-artifact", "cache-v6", "cache-v5", "cache-v2-compatibility", "cache-v2-admission", "unsupported-job-container", "unsupported-service-container"}
+	wantOrder := []string{"smoke-shell", "smoke-concurrent", "smoke-ci", "smoke-artifact", "smoke-artifact-multi-prefix", "example-basic", "example-artifacts", "example-advanced", "plugin-demo-cache", "public-actions", "dockerfile-action", "container-runtime", "summary-annotation", "workflow-command-annotations", "hash-files", "upload-artifact", "cache-v6", "cache-v5", "cache-v2-compatibility", "cache-v2-admission", "unsupported-job-container", "unsupported-service-container"}
 	if len(manifest.Fixtures) != len(wantOrder) {
 		t.Fatalf("fixtures = %d, want %d", len(manifest.Fixtures), len(wantOrder))
 	}
@@ -129,10 +130,5 @@ func TestProductionPluginActionWorkflowCompilesDeterministically(t *testing.T) {
 }
 
 func slicesContain(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }

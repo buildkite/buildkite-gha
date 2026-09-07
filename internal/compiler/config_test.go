@@ -26,9 +26,8 @@ jobs:
 	options := Options{
 		EventTrust: EventTrusted,
 		Vars: VariableSources{
-			Bridge:    map[string]string{"runner": "ubuntu-22.04", "versions": `["bridge"]`, "SOURCE": "bridge"},
-			Provider:  map[string]string{"RUNNER": "ubuntu-24.04", "VERSIONS": `["provider"]`, "source": "provider"},
-			Buildkite: map[string]string{"VERSIONS": `[12,"14"]`, "SOURCE": "buildkite"},
+			Organization: map[string]string{"runner": "ubuntu-22.04", "versions": `["organization"]`, "SOURCE": "organization"},
+			Repository:   map[string]string{"RUNNER": "ubuntu-24.04", "VERSIONS": `[12,"14"]`, "source": "repository"},
 		},
 		Runners: RunnerPolicy{Labels: map[string]string{"ubuntu-24.04": "linux-trusted"}},
 	}
@@ -47,12 +46,122 @@ jobs:
 	if err := json.Unmarshal(first, &ir); err != nil {
 		t.Fatal(err)
 	}
-	wantVars := map[string]string{"RUNNER": "ubuntu-24.04", "VERSIONS": `[12,"14"]`, "SOURCE": "buildkite"}
-	if !reflect.DeepEqual(ir.Vars, wantVars) {
-		t.Fatalf("vars snapshot = %#v, want %#v", ir.Vars, wantVars)
+	// Repository variables override organization variables spelled
+	// differently, and the IR keeps each scope for the job plans.
+	wantVars := map[string]string{"RUNNER": "ubuntu-24.04", "VERSIONS": `[12,"14"]`, "source": "repository"}
+	if !reflect.DeepEqual(ir.VarsBeforeEnvironment(), wantVars) || !reflect.DeepEqual(ir.OrganizationVars, options.Vars.Organization) || !reflect.DeepEqual(ir.RepositoryVars, options.Vars.Repository) {
+		t.Fatalf("vars snapshot = %#v (organization %#v, repository %#v), want %#v", ir.VarsBeforeEnvironment(), ir.OrganizationVars, ir.RepositoryVars, wantVars)
 	}
 	if len(ir.Jobs) != 2 || ir.Jobs[0].Queue != "linux-trusted" || ir.Jobs[0].Matrix["version"] != float64(12) || ir.Jobs[1].Matrix["version"] != "14" {
 		t.Fatalf("compiled jobs = %#v", ir.Jobs)
+	}
+}
+
+func TestCompileResolvesRunNameFromGitHubAndDispatchInputs(t *testing.T) {
+	workflow := []byte(`name: Deploy
+run-name: Deploy ${{ inputs.target }} from ${{ github.ref_name }} by @${{ github.actor }}
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        default: staging
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	event := strings.Replace(string(pushEvent(t)), `"event": "push"`, `"event": "workflow_dispatch"`, 1)
+	event = strings.Replace(event, `"payload": {`, `"payload": {"inputs":{"target":"production"},`, 1)
+	compiled, err := CompileWithOptions("deploy.yml", workflow, []byte(event), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if ir.Workflow.Name != "Deploy" || ir.Workflow.RunName != "Deploy production from main by @buildkite-gha-smoke" {
+		t.Fatalf("workflow presentation = %#v", ir.Workflow)
+	}
+}
+
+func TestCompileResolvesMissingDispatchInputAsEmptyOnPush(t *testing.T) {
+	workflow := []byte(`name: Deploy
+run-name: Deploy ${{ inputs.target }} from ${{ github.ref_name }}
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      target:
+        default: production
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	compiled, err := CompileWithOptions("deploy.yml", workflow, pushEvent(t), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if ir.Workflow.RunName != "Deploy  from main" {
+		t.Fatalf("push run-name = %q, want missing dispatch input rendered as empty", ir.Workflow.RunName)
+	}
+}
+
+func TestCompileTreatsBlankRunNameAsAbsentAndLocatesUnsupportedContext(t *testing.T) {
+	workflow := []byte("name: CI\nrun-name: '   '\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+	compiled, err := CompileWithOptions("blank.yml", workflow, pushEvent(t), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if ir.Workflow.RunName != "" {
+		t.Fatalf("blank run-name = %q, want absent", ir.Workflow.RunName)
+	}
+	workflow = []byte("name: CI\nrun-name: ${{ github.head_ref }}\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+	compiled, err = CompileWithOptions("resolved-blank.yml", workflow, pushEvent(t), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if ir.Workflow.RunName != "" {
+		t.Fatalf("resolved blank run-name = %q, want absent", ir.Workflow.RunName)
+	}
+
+	workflow = []byte("name: CI\nrun-name: Run ${{ vars.TARGET }}\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+	if _, err := Validate("invalid.yml", workflow); err == nil || !strings.Contains(err.Error(), `invalid.yml:2:11: workflow run-name: run-name context "vars" is unavailable`) {
+		t.Fatalf("unsupported run-name validation error = %v", err)
+	}
+	_, err = CompileWithOptions("invalid.yml", workflow, pushEvent(t), defaultOptions())
+	if err == nil || !strings.Contains(err.Error(), `invalid.yml:2:11: workflow run-name: run-name context "vars" is unavailable`) {
+		t.Fatalf("unsupported run-name error = %v", err)
+	}
+}
+
+func TestValidateRunNameDoesNotEvaluateRequiredDispatchInputs(t *testing.T) {
+	workflow := []byte(`name: Deploy
+run-name: Deploy ${{ fromJSON(inputs.config).target }}
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        required: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	if _, err := Validate("deploy.yml", workflow); err != nil {
+		t.Fatalf("event-independent validation evaluated required input: %v", err)
 	}
 }
 
@@ -60,10 +169,10 @@ func TestCompileOptionsRejectCaseCollisionsWithinOneVarsSource(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n")
 	_, err := CompileWithOptions("vars.yml", workflow, pushEvent(t), Options{
 		EventTrust: EventTrusted,
-		Vars:       VariableSources{Bridge: map[string]string{"Deploy_Env": "one", "DEPLOY_ENV": "two"}},
+		Vars:       VariableSources{Repository: map[string]string{"Deploy_Env": "one", "DEPLOY_ENV": "two"}},
 		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-24.04": "linux"}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "bridge vars source contains case-colliding names") {
+	if err == nil || !strings.Contains(err.Error(), "repository vars source contains case-colliding names") {
 		t.Fatalf("CompileWithOptions() error = %v, want vars collision", err)
 	}
 }
@@ -177,7 +286,7 @@ jobs:
 	event := strings.Replace(string(pushEvent(t)), `"payload": {`, `"payload": {"channel":"stable",`, 1)
 	options := Options{
 		EventTrust: EventTrusted,
-		Vars:       VariableSources{Bridge: map[string]string{"MATRIX": `{"os":["ubuntu-22.04","ubuntu-24.04"]}`}},
+		Vars:       VariableSources{Repository: map[string]string{"MATRIX": `{"os":["ubuntu-22.04","ubuntu-24.04"]}`}},
 		Runners: RunnerPolicy{Labels: map[string]string{
 			"ubuntu-22.04":       "linux",
 			"ubuntu-24.04":       "linux",
@@ -200,16 +309,51 @@ jobs:
 	}
 }
 
+func TestCompileAppliesRunnerSelectorToExpressionResolvedLabels(t *testing.T) {
+	workflow := []byte(`on: push
+jobs:
+  test:
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS) }}
+    steps:
+      - run: true
+`)
+	target := RunnerTarget{
+		Queue:    "linux-medium",
+		Platform: PlatformLinuxAMD64,
+		Image:    "example.com/toolchains/noble@sha256:" + strings.Repeat("0", 64),
+	}
+	compiled, err := CompileWithOptions("expression-runner.yml", workflow, pushEvent(t), Options{
+		EventTrust: EventTrusted,
+		Vars:       VariableSources{Repository: map[string]string{"RUNNER_LABELS": `["self-hosted","custom-linux"]`}},
+		Runners: RunnerPolicy{Selectors: []RunnerSelector{{
+			Labels: []string{"self-hosted", "custom-linux"},
+			Target: target,
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 1 || !slices.Equal(ir.Jobs[0].RunsOn, []string{"self-hosted", "custom-linux"}) || ir.Jobs[0].Queue != target.Queue || ir.Jobs[0].RuntimeImage != target.Image {
+		t.Fatalf("expression-selected runner = %#v", ir.Jobs)
+	}
+}
+
 func TestRunsOnPolicyFailsClosedWithLocatedDiagnostics(t *testing.T) {
 	tests := []struct {
-		name   string
-		runsOn string
-		vars   map[string]string
-		labels map[string]string
-		want   string
+		name          string
+		runsOn        string
+		vars          map[string]string
+		labels        map[string]string
+		want          string
+		blockerDetail string
 	}{
-		{name: "unsupported operating system", runsOn: "windows-latest", labels: map[string]string{"windows-latest": "windows"}, want: `unsupported operating system runner label "windows-latest"`},
-		{name: "unmapped label", runsOn: "ubuntu-20.04", labels: map[string]string{"ubuntu-24.04": "linux"}, want: `runner label "ubuntu-20.04" is not mapped by policy`},
+		{name: "unsupported operating system", runsOn: "windows-latest", labels: map[string]string{"windows-latest": "windows"}, want: `unsupported operating system runner label "windows-latest"`, blockerDetail: "windows-latest"},
+		{name: "unsupported operating system among labels", runsOn: "[self-hosted, windows-latest]", labels: map[string]string{"self-hosted": "linux"}, want: `unsupported operating system runner label "windows-latest"`, blockerDetail: "windows-latest"},
+		{name: "unmapped label", runsOn: "ubuntu-20.04", labels: map[string]string{"ubuntu-24.04": "linux"}, want: `runner label "ubuntu-20.04" is not mapped by policy`, blockerDetail: "ubuntu-20.04"},
 		{name: "unresolved expression", runsOn: "${{ vars.RUNNER }}", labels: map[string]string{"ubuntu-24.04": "linux"}, want: `unavailable value "vars.runner"`},
 		{name: "conflicting labels", runsOn: "[self-hosted, linux]", labels: map[string]string{"self-hosted": "one", "linux": "two"}, want: "runner labels resolve to conflicting queues"},
 	}
@@ -218,11 +362,71 @@ func TestRunsOnPolicyFailsClosedWithLocatedDiagnostics(t *testing.T) {
 			workflow := []byte("on: push\njobs:\n  test:\n    runs-on: " + test.runsOn + "\n    steps:\n      - run: true\n")
 			_, err := CompileWithOptions("policy.yml", workflow, pushEvent(t), Options{
 				EventTrust: EventTrusted,
-				Vars:       VariableSources{Bridge: test.vars},
+				Vars:       VariableSources{Repository: test.vars},
 				Runners:    RunnerPolicy{Labels: test.labels},
 			})
 			if err == nil || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), "policy.yml:") {
 				t.Fatalf("CompileWithOptions() error = %v, want located %q", err, test.want)
+			}
+			if test.blockerDetail != "" {
+				var finding *ProcessingFinding
+				if !errors.As(err, &finding) || finding.Blocker != "runner_label" || finding.BlockerDetail != test.blockerDetail {
+					t.Fatalf("processing blocker = %#v, want runner_label/%s", finding, test.blockerDetail)
+				}
+			}
+		})
+	}
+}
+
+func TestEventDerivedRunnerLabelsOmitBlockerDetail(t *testing.T) {
+	tests := []struct {
+		name     string
+		workflow []byte
+		event    []byte
+	}{
+		{
+			name: "workflow dispatch input",
+			workflow: []byte(`on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        type: string
+jobs:
+  test:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - run: true
+`),
+			event: bytes.Replace(readFile(t, smokePath("events", "workflow_dispatch.json")), []byte(`"inputs": {}`), []byte(`"inputs": {"runner": "windows-secret"}`), 1),
+		},
+		{
+			name: "matrix value",
+			workflow: []byte(`on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        runner:
+          - ${{ github.event.runner }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - run: true
+`),
+			event: bytes.Replace(pushEvent(t), []byte(`"payload": {`), []byte(`"payload": {"runner": "windows-secret",`), 1),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := CompileWithOptions("policy.yml", test.workflow, test.event, Options{
+				EventTrust: EventTrusted,
+				Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
+			})
+			if err == nil {
+				t.Fatal("CompileWithOptions() error = nil, want runner policy rejection")
+			}
+			var finding *ProcessingFinding
+			if !errors.As(err, &finding) || finding.Blocker != "runner_label" || finding.BlockerDetail != "" {
+				t.Fatalf("processing blocker = %#v, want runner_label with no detail", finding)
 			}
 		})
 	}
@@ -256,7 +460,7 @@ func TestRunnerRejectionDiagnosticIsActionableWithoutResolvedLabel(t *testing.T)
 	}{
 		{name: "no labels", trust: EventTrusted, want: "Set runs-on"},
 		{name: "duplicate label", labels: []string{"ubuntu-24.04", "ubuntu-24.04"}, trust: EventTrusted, want: "Remove duplicate labels"},
-		{name: "unsupported operating system", labels: []string{"windows-latest"}, trust: EventTrusted, want: "Use a Linux or macOS runner label"},
+		{name: "unsupported operating system", labels: []string{"windows-latest"}, trust: EventTrusted, want: `change runs-on to "ubuntu-latest"`},
 		{name: "unmapped label", labels: []string{"macos-15"}, trust: EventTrusted, want: "Configure a mapping"},
 		{name: "conflicting queues", labels: []string{"self-hosted", "linux"}, trust: EventTrusted, want: "Use labels that map to one runner target"},
 		{name: "conflicting targets", labels: []string{"ubuntu-24.04", "macos"}, trust: EventTrusted, want: "Use labels that map to one runner target"},
@@ -289,6 +493,27 @@ func TestRunnerRejectionDiagnosticOmitsIrrelevantAllowlistForDuplicateLabel(t *t
 	}
 }
 
+func TestRunnerPolicySelectorTargetDoesNotChangeOverlappingLabelTarget(t *testing.T) {
+	jammy := RunnerTarget{Platform: PlatformLinuxAMD64, Image: "example.com/toolchains/jammy@sha256:" + strings.Repeat("0", 64)}
+	fallback := RunnerTarget{Queue: "linux-medium", Platform: PlatformLinuxAMD64}
+	policy := RunnerPolicy{
+		Targets: map[string]RunnerTarget{"ubuntu-22.04": jammy},
+		Selectors: []RunnerSelector{{
+			Labels: []string{"self-hosted", "ubuntu-22.04"},
+			Target: fallback,
+		}},
+	}
+	if got, err := policy.resolve([]string{"ubuntu-22.04"}, EventTrusted); err != nil || got != jammy {
+		t.Fatalf("standalone preset = %#v, %v", got, err)
+	}
+	if got, err := policy.resolve([]string{"ubuntu-22.04", "self-hosted"}, EventTrusted); err != nil || got != fallback {
+		t.Fatalf("multi-label selector = %#v, %v", got, err)
+	}
+	if got, err := (RunnerPolicy{Selectors: []RunnerSelector{{Labels: []string{"windows-latest"}, Target: fallback}}}).resolve([]string{"windows-latest"}, EventTrusted); err != nil || got != fallback {
+		t.Fatalf("server target = %#v, %v", got, err)
+	}
+}
+
 func TestRunnerRejectionDiagnosticFallsBackWhenUnclassified(t *testing.T) {
 	message, detail := runnerRejectionDiagnostic(errors.New("boom"), nil, nil, nil)
 	if message != "Runner target is unsupported. Use a configured Linux or macOS runner target." || detail != "" {
@@ -301,14 +526,16 @@ func TestRunnerRejectionDiagnosticSeparatesStaticLabelFromAllowlist(t *testing.T
 	tests := []struct {
 		label       string
 		wantMessage string
+		wantDetail  string
 	}{
 		{
 			label:       "windows-latest",
-			wantMessage: `Runner label "windows-latest" requires Windows, which is unsupported. Use a Linux or macOS runner label.`,
+			wantMessage: `Windows runners aren't currently supported. Imported jobs run on Linux or macOS Buildkite hosted agents. If this job can run on Linux, change "windows-latest" to "ubuntu-latest". If it requires Windows, open an issue in https://github.com/buildkite/buildkite-gha to help us prioritize Windows support.`,
 		},
 		{
 			label:       "macos-latest",
 			wantMessage: `Runner label "macos-latest" has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.`,
+			wantDetail:  "Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest.",
 		},
 	}
 	policy := RunnerPolicy{Targets: map[string]RunnerTarget{
@@ -322,7 +549,7 @@ func TestRunnerRejectionDiagnosticSeparatesStaticLabelFromAllowlist(t *testing.T
 			t.Fatalf("resolve(%q) error = nil", test.label)
 		}
 		message, detail := runnerRejectionDiagnostic(err, []string{test.label}, supported, nil)
-		if message != test.wantMessage || detail != "Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest." {
+		if message != test.wantMessage || detail != test.wantDetail {
 			t.Fatalf("runnerRejectionDiagnostic(%q) = %q, %q", test.label, message, detail)
 		}
 		if strings.Contains(message, "ubuntu-22.04") {
@@ -381,14 +608,14 @@ func TestCompilePlansUsePolicyQueueAndContainOnlyNonSecretVars(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo '${{ secrets.TOKEN }}'\n")
 	options := Options{
 		EventTrust: EventTrusted,
-		Vars:       VariableSources{Bridge: map[string]string{"PUBLIC": "snapshotted"}},
+		Vars:       VariableSources{Repository: map[string]string{"PUBLIC": "snapshotted"}},
 		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-24.04": "linux"}},
 	}
 	plans, err := compilePlansForTest(t.Context(), "plan.yml", workflow, pushEvent(t), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Target.Queue != "linux" || plans[0].Vars["PUBLIC"] != "snapshotted" {
+	if len(plans) != 1 || plans[0].Target.Queue != "linux" || plans[0].RepositoryVars["PUBLIC"] != "snapshotted" {
 		t.Fatalf("compiled plans = %#v", plans)
 	}
 	encoded, err := json.Marshal(plans)

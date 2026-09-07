@@ -1,9 +1,9 @@
-// Package telemetry emits bounded, best-effort buildkite-gha product events.
 package telemetry
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +12,10 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const (
@@ -20,8 +24,14 @@ const (
 	defaultTimeout        = 1500 * time.Millisecond
 	responseDrainLimit    = 32 << 10
 	maxClientVersionBytes = 64
+	maxBlockerDetailBytes = 1024
 	maxDurationMS         = int64(1<<31 - 1)
 	maxDiagnostics        = 20
+
+	// MaxErrorMessageBytes bounds the error message sent on unsuccessful
+	// commands. Over-long messages keep their final bytes, where a failing
+	// command's last error output lands.
+	MaxErrorMessageBytes = 1024
 )
 
 type Command string
@@ -73,6 +83,10 @@ const (
 	FailureCodePipelineGeneration FailureCode = "E_PIPELINE_GENERATION"
 	FailureCodeEnvironment        FailureCode = "E_ENVIRONMENT"
 	FailureCodeProfile            FailureCode = "E_PROFILE"
+	FailureCodeStepProcessExit    FailureCode = "E_STEP_PROCESS_EXIT"
+	FailureCodeUnsupportedFeature FailureCode = "E_UNSUPPORTED_FEATURE"
+	FailureCodeRuntimeIntegrity   FailureCode = "E_RUNTIME_INTEGRITY"
+	FailureCodeSecretUnavailable  FailureCode = "E_SECRET_UNAVAILABLE"
 )
 
 type Severity string
@@ -83,24 +97,34 @@ const (
 )
 
 type Diagnostic struct {
-	Code     string   `json:"code"`
-	Severity Severity `json:"severity"`
+	Code          string   `json:"code"`
+	Severity      Severity `json:"severity"`
+	Blocker       string   `json:"blocker,omitempty"`
+	BlockerDetail string   `json:"blocker_detail,omitempty"`
 }
 
 type Details struct {
-	FailurePhase FailurePhase
-	FailureCode  FailureCode
-	Diagnostics  []Diagnostic
+	FailurePhase          FailurePhase
+	FailureCode           FailureCode
+	ErrorMessage          string
+	ErrorMessageTruncated bool
+	Diagnostics           []Diagnostic
+	Blocker               string
+	BlockerDetail         string
 }
 
 type Properties struct {
-	Command       Command      `json:"command"`
-	Outcome       Outcome      `json:"outcome"`
-	ClientVersion string       `json:"client_version"`
-	DurationMS    int64        `json:"duration_ms,omitempty"`
-	FailurePhase  FailurePhase `json:"failure_phase,omitempty"`
-	FailureCode   FailureCode  `json:"failure_code,omitempty"`
-	Diagnostics   []Diagnostic `json:"diagnostics,omitempty"`
+	Command               Command      `json:"command"`
+	Outcome               Outcome      `json:"outcome"`
+	ClientVersion         string       `json:"client_version"`
+	DurationMS            int64        `json:"duration_ms,omitempty"`
+	FailurePhase          FailurePhase `json:"failure_phase,omitempty"`
+	FailureCode           FailureCode  `json:"failure_code,omitempty"`
+	ErrorMessage          string       `json:"error_message,omitempty"`
+	ErrorMessageTruncated bool         `json:"error_message_truncated,omitempty"`
+	Diagnostics           []Diagnostic `json:"diagnostics,omitempty"`
+	Blocker               string       `json:"blocker,omitempty"`
+	BlockerDetail         string       `json:"blocker_detail,omitempty"`
 }
 
 type Config struct {
@@ -117,6 +141,7 @@ type Client struct {
 	eventsURL     string
 	jobToken      string
 	clientVersion string
+	userAgent     string
 	client        *http.Client
 	timeout       time.Duration
 }
@@ -149,10 +174,12 @@ func New(config Config) (*Client, error) {
 	if timeout <= 0 || timeout > defaultTimeout {
 		timeout = defaultTimeout
 	}
+	clientVersion := boundedClientVersion(config.ClientVersion)
 	return &Client{
 		eventsURL:     u.String(),
 		jobToken:      config.JobToken,
-		clientVersion: boundedClientVersion(config.ClientVersion),
+		clientVersion: clientVersion,
+		userAgent:     useragent.FromVersion(config.ClientVersion),
 		client:        &bounded,
 		timeout:       timeout,
 	}, nil
@@ -182,6 +209,12 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 	if err != nil {
 		return err
 	}
+	blocker, blockerDetail, err := boundedBlocker(details.Blocker, details.BlockerDetail)
+	if err != nil {
+		return err
+	}
+	errorMessage, errorMessageTruncated := boundedErrorMessage(details.ErrorMessage)
+	errorMessageTruncated = errorMessage != "" && (errorMessageTruncated || details.ErrorMessageTruncated)
 	durationMS := duration.Milliseconds()
 	if durationMS < 0 {
 		durationMS = 0
@@ -195,7 +228,9 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 		Event: EventCommandCompleted,
 		Properties: Properties{
 			Command: command, Outcome: outcome, ClientVersion: c.clientVersion, DurationMS: durationMS,
-			FailurePhase: details.FailurePhase, FailureCode: details.FailureCode, Diagnostics: diagnostics,
+			FailurePhase: details.FailurePhase, FailureCode: details.FailureCode,
+			ErrorMessage: errorMessage, ErrorMessageTruncated: errorMessageTruncated, Diagnostics: diagnostics,
+			Blocker: blocker, BlockerDetail: blockerDetail,
 		},
 	})
 	if err != nil {
@@ -209,6 +244,7 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 	}
 	request.Header.Set("Authorization", "Token "+c.jobToken)
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", c.userAgent)
 	response, err := c.client.Do(request)
 	if err != nil {
 		return fmt.Errorf("send telemetry event: %w", err)
@@ -237,7 +273,8 @@ func validFailureCode(code FailureCode) bool {
 	case FailureCodeUnknown, FailureCodeWorkflowSyntax, FailureCodeEventInvalid, FailureCodeGraphInvalid,
 		FailureCodeMatrixInvalid, FailureCodeExpressionInvalid, FailureCodeActionDiscovery,
 		FailureCodeActionResolution, FailureCodePlanConstruction, FailureCodePipelineGeneration,
-		FailureCodeEnvironment, FailureCodeProfile:
+		FailureCodeEnvironment, FailureCodeProfile, FailureCodeStepProcessExit,
+		FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable:
 		return true
 	default:
 		return false
@@ -245,23 +282,58 @@ func validFailureCode(code FailureCode) bool {
 }
 
 func boundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
-	seen := make(map[string]bool, min(len(in), maxDiagnostics))
+	seen := make(map[Diagnostic]bool, min(len(in), maxDiagnostics))
 	out := make([]Diagnostic, 0, min(len(in), maxDiagnostics))
 	for _, diagnostic := range in {
 		severity, ok := diagnosticSeverity(diagnostic.Code)
 		if !ok || diagnostic.Severity != severity {
 			return nil, fmt.Errorf("invalid telemetry diagnostic")
 		}
-		if seen[diagnostic.Code] {
+		blocker, blockerDetail, err := boundedBlocker(diagnostic.Blocker, diagnostic.BlockerDetail)
+		if err != nil {
+			return nil, err
+		}
+		diagnostic.Blocker, diagnostic.BlockerDetail = blocker, blockerDetail
+		if seen[diagnostic] {
 			continue
 		}
-		seen[diagnostic.Code] = true
+		seen[diagnostic] = true
 		out = append(out, diagnostic)
 		if len(out) == maxDiagnostics {
 			break
 		}
 	}
 	return out, nil
+}
+
+func boundedBlocker(blocker, detail string) (string, string, error) {
+	switch blocker {
+	case "":
+		if detail != "" {
+			return "", "", fmt.Errorf("telemetry blocker detail requires a blocker")
+		}
+		return "", "", nil
+	case "runner_label", "environment", "shell", "action_ref", "expression", "trigger":
+	default:
+		return "", "", fmt.Errorf("invalid telemetry blocker")
+	}
+	detail = strings.Map(func(character rune) rune {
+		if unicode.IsControl(character) {
+			return ' '
+		}
+		return character
+	}, strings.ToValidUTF8(detail, "�"))
+	detail = strings.Join(strings.Fields(detail), " ")
+	if len(detail) > maxBlockerDetailBytes {
+		digest := sha256.Sum256([]byte(detail))
+		suffix := fmt.Sprintf("…#%x", digest[:6])
+		detail = detail[:maxBlockerDetailBytes-len(suffix)]
+		for !utf8.ValidString(detail) {
+			detail = detail[:len(detail)-1]
+		}
+		detail += suffix
+	}
+	return blocker, detail, nil
 }
 
 func diagnosticSeverity(code string) (Severity, bool) {
@@ -271,7 +343,7 @@ func diagnosticSeverity(code string) (Severity, bool) {
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
 		string(FailureCodeEnvironment), string(FailureCodeProfile):
 		return SeverityError, true
-	case "W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED":
+	case "W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED":
 		return SeverityWarning, true
 	default:
 		return "", false
@@ -304,6 +376,24 @@ func boundedClientVersion(version string) string {
 		}
 	}
 	return version
+}
+
+func boundedErrorMessage(message string) (string, bool) {
+	message = strings.Map(func(character rune) rune {
+		if unicode.IsControl(character) {
+			return ' '
+		}
+		return character
+	}, strings.ToValidUTF8(message, "�"))
+	message = strings.Join(strings.Fields(message), " ")
+	if len(message) <= MaxErrorMessageBytes {
+		return message, false
+	}
+	start := len(message) - MaxErrorMessageBytes
+	for !utf8.RuneStart(message[start]) {
+		start++
+	}
+	return strings.TrimSpace(message[start:]), true
 }
 
 func validAgentURL(u *url.URL) bool {

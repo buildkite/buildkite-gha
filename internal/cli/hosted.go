@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -18,6 +19,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
 const (
@@ -30,18 +32,6 @@ const (
 
 var runnerQueuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var runnerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
-
-func configuredRunnerPlatform(labels []string, configuredTargets map[string]compiler.RunnerTarget) (compiler.Platform, error) {
-	if len(labels) == 0 {
-		return compiler.Platform{}, fmt.Errorf("runs-on resolved to no labels")
-	}
-	canonical := strings.ToLower(strings.TrimSpace(labels[0]))
-	if target, ok := configuredTargets[canonical]; ok {
-		return target.Platform, nil
-	}
-	_, platform, err := supportedRunnerTarget(canonical)
-	return platform, err
-}
 
 type hostedCompilation struct {
 	Bundle     compiler.Bundle
@@ -96,15 +86,16 @@ func (s *repositorySourceSwitch) set(source compiler.RepositorySource) {
 	s.mu.Unlock()
 }
 
-func importerJobActionSourceAuthentication(warnings io.Writer) *actionSourceAuthentication {
+func importerJobActionSourceAuthentication(warnings io.Writer, clientVersion string) *actionSourceAuthentication {
 	authentication := &actionSourceAuthentication{
 		redactor: gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
 		warnings: warnings,
 	}
 	provider, err := gharuntime.NewAgentGitHubTokens(gharuntime.AgentGitHubTokenConfig{
-		Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
-		JobID:    os.Getenv("BUILDKITE_JOB_ID"),
-		JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+		Endpoint:      os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+		JobID:         os.Getenv("BUILDKITE_JOB_ID"),
+		JobToken:      os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+		ClientVersion: clientVersion,
 	})
 	if err != nil {
 		return authentication
@@ -169,9 +160,7 @@ func (a *actionSourceAuthentication) warnAnonymousFallback(reason string) {
 
 func hostedOptions(groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string) compiler.Options {
 	targets := hostedRunnerTargets()
-	for label, target := range configuredTargets {
-		targets[label] = target
-	}
+	maps.Copy(targets, configuredTargets)
 	options := compiler.Options{
 		EventTrust:           compiler.EventUntrusted,
 		GroupLabel:           groupLabel,
@@ -187,6 +176,15 @@ func hostedOptions(groupLabel string, configuredTargets map[string]compiler.Runn
 		}
 	}
 	return options
+}
+
+func applyRunnerSelectors(options *compiler.Options, selectors []compiler.RunnerSelector) {
+	options.Runners.Selectors = selectors
+	for _, selector := range selectors {
+		if selector.Target.Queue != "" && !slices.Contains(options.Runners.UntrustedQueues, selector.Target.Queue) {
+			options.Runners.UntrustedQueues = append(options.Runners.UntrustedQueues, selector.Target.Queue)
+		}
+	}
 }
 
 // hostedRunnerTargets is the runner preset shared by hosted validation and
@@ -206,17 +204,20 @@ func compileHosted(ctx context.Context, workflowPath string, workflowSource, eve
 }
 
 func compileHostedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", nil, actionCacheDir, sharedActionSource, actionAuthentication)
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, nil, runtimeDistributions, "", nil, actionCacheDir, sharedActionSource, actionAuthentication, nil, compiler.VariableSources{})
 }
 
 func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, stepKeyNamespace, oidc, "", nil, actionAuthentication)
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, nil, runtimeDistributions, stepKeyNamespace, oidc, "", nil, actionAuthentication, nil, compiler.VariableSources{})
 }
 
-func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerSelectors []compiler.RunnerSelector, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication, environmentSource compiler.EnvironmentSource, vars compiler.VariableSources) (hostedCompilation, error) {
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
+	applyRunnerSelectors(&options, runnerSelectors)
 	options.StepKeyNamespace = stepKeyNamespace
 	options.OIDC = oidc
+	options.EnvironmentSource = environmentSource
+	options.Vars = vars
 	repositorySource := sharedActionSource
 	cleanup := func() {}
 	if repositorySource == nil {
@@ -228,7 +229,7 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 			}
 		}
 		var err error
-		repositorySource, cleanup, err = newHostedActionSource(ctx, actionCacheDir, sourceOptions, nil)
+		repositorySource, cleanup, err = newHostedActionSource(ctx, actionCacheDir, version, sourceOptions, nil)
 		if err != nil {
 			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, err)
 		}
@@ -265,12 +266,14 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 	return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, nil
 }
 
-func newHostedActionSource(ctx context.Context, actionCacheDir string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), error) {
-	actionSource, cleanup, _, err := newHostedActionSourceWithSnapshot(ctx, actionCacheDir, resolverOptions, storeOptions)
+func newHostedActionSource(ctx context.Context, actionCacheDir, clientVersion string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), error) {
+	actionSource, cleanup, _, err := newHostedActionSourceWithSnapshot(ctx, actionCacheDir, clientVersion, resolverOptions, storeOptions)
 	return actionSource, cleanup, err
 }
 
-func newHostedActionSourceWithSnapshot(ctx context.Context, actionCacheDir string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), string, error) {
+func newHostedActionSourceWithSnapshot(ctx context.Context, actionCacheDir, clientVersion string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), string, error) {
+	resolverOptions = append(resolverOptions, actionsource.WithUserAgentVersion(clientVersion))
+	storeOptions = append(storeOptions, actionsource.WithUserAgentVersion(clientVersion))
 	actionRoot := actionCacheDir
 	cleanup := func() {}
 	if actionRoot == "" {
@@ -302,7 +305,7 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	var diagnostics []error
 	addFailure := func(artifact compiler.PlanArtifact, message, detail string, err error) {
 		finding := &compiler.ProcessingFinding{
-			Stage: compiler.StageAdmission, Code: "E_PROFILE", Category: "admission",
+			Stage: workflowprocessing.StageAdmission, Code: "E_PROFILE", Category: "admission",
 			Job: artifact.Job.Workflow.LogicalJobID, Instance: artifact.Job.Target.StepKey,
 			Message: message, Detail: detail, Err: err,
 		}
@@ -319,7 +322,7 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 				continue
 			}
 			if capability == "docker" && !admittedDockerProvenance(artifact.Job, artifact.Authorization.DockerCapabilitySources) {
-				message := fmt.Sprintf("Job %q requires Docker without matching compiler provenance. Hosted runs support only verified Dockerfile actions and bounded job or service containers.", artifact.Job.Workflow.LogicalJobID)
+				message := fmt.Sprintf("Job %q requires Docker without matching compiler provenance. Hosted runs support only verified Docker actions and bounded job or service containers.", artifact.Job.Workflow.LogicalJobID)
 				addFailure(artifact, message, "", errors.New("unsupported Docker access"))
 				continue
 			}
@@ -471,7 +474,7 @@ func bundleRunsUnprovenActions(bundle compiler.Bundle) bool {
 	for _, artifact := range bundle.Plans {
 		for _, lock := range artifact.Job.Actions {
 			identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
-			if !actionintegration.UsesNativeAdapter(identity) {
+			if _, native, err := actionintegration.AdmitNativeAdapter(identity, lock.Commit); err != nil || !native {
 				return true
 			}
 		}
@@ -516,7 +519,7 @@ func configuredRunnerTarget(label, queue, image string) (string, compiler.Runner
 }
 
 func supportedRunnerTarget(label string) (string, compiler.Platform, error) {
-	if label != strings.TrimSpace(label) || strings.ContainsAny(label, "\r\n") {
+	if label == "" || label != strings.TrimSpace(label) || strings.ContainsAny(label, "\r\n") {
 		return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q", label)
 	}
 	canonical := strings.ToLower(label)
@@ -528,6 +531,9 @@ func supportedRunnerTarget(label string) (string, compiler.Platform, error) {
 		// These remain available as local fallbacks when the Agent API is absent.
 		return canonical, compiler.PlatformDarwinARM64, nil
 	default:
-		return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q", label)
+		// Configuring an otherwise unknown selector explicitly maps it to the
+		// supported Linux/amd64 platform. The Agent API owns compatibility
+		// policy for every selector that is not configured locally.
+		return canonical, compiler.PlatformLinuxAMD64, nil
 	}
 }

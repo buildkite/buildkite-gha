@@ -246,11 +246,11 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 		EventProvider:      "github",
 		Workflows: []Workflow{
 			{
-				GroupLabel: "CI", GroupKey: "gha-workflow-1111111111111111", Event: "push", Condition: `build.source_event == "push"`,
+				GroupLabel: "CI", GroupKey: "gha-workflow-1111111111111111", Event: "push", Condition: `build.env("BUILDKITE_GITHUB_EVENT") == "push"`,
 				Jobs: []Job{{Key: "gha-1111111111111111-test", Label: "Test", PlanDigest: testDigest("first plan")}},
 			},
 			{
-				GroupLabel: ".github/workflows/release.yml", GroupKey: "gha-workflow-2222222222222222", Event: "workflow_dispatch", Condition: `build.source == "ui"`,
+				GroupLabel: ".github/workflows/release.yml", GroupKey: "gha-workflow-2222222222222222", Event: "workflow_dispatch", Condition: `build.env("BUILDKITE_GITHUB_EVENT") == "workflow_dispatch"`,
 				Jobs: []Job{{Key: "gha-2222222222222222-test", Label: "Test \"quoted\"\nnext", PlanDigest: testDigest("second plan")}},
 			},
 		},
@@ -280,7 +280,7 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 	if err := yaml.Unmarshal(output, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document.Steps) != 2 || document.Steps[0].Group != ":github: workflow · CI" || document.Steps[0].Key != "gha-workflow-1111111111111111" || document.Steps[0].Condition != `build.source_event == "push"` || document.Steps[0].DependsOn != "importer" || document.Steps[0].Notify != nil || len(document.Steps[0].Steps) != 1 || document.Steps[0].Steps[0].Key != "gha-1111111111111111-test" || len(document.Steps[0].Steps[0].Notify) != 1 || document.Steps[0].Steps[0].Notify[0].GitHubCheck.Name != "CI / Test (push)" {
+	if len(document.Steps) != 2 || document.Steps[0].Group != ":github: workflow · CI" || document.Steps[0].Key != "gha-workflow-1111111111111111" || document.Steps[0].Condition != `build.env("BUILDKITE_GITHUB_EVENT") == "push"` || document.Steps[0].DependsOn != "importer" || document.Steps[0].Notify != nil || len(document.Steps[0].Steps) != 1 || document.Steps[0].Steps[0].Key != "gha-1111111111111111-test" || len(document.Steps[0].Steps[0].Notify) != 1 || document.Steps[0].Steps[0].Notify[0].GitHubCheck.Name != "CI / Test (push)" {
 		t.Fatalf("first aggregate group = %#v\n%s", document.Steps, output)
 	}
 	if document.Steps[1].Group != ":github: workflow · .github/workflows/release.yml" || document.Steps[1].Key != "gha-workflow-2222222222222222" || document.Steps[1].DependsOn != "importer" || document.Steps[1].Notify != nil || len(document.Steps[1].Steps) != 1 || document.Steps[1].Steps[0].Key != "gha-2222222222222222-test" || len(document.Steps[1].Steps[0].Notify) != 1 || document.Steps[1].Steps[0].Notify[0].GitHubCheck.Name != ".github/workflows/release.yml / Test \"quoted\"\nnext (workflow_dispatch)" {
@@ -298,6 +298,78 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 	}
 	if !strings.Contains(string(output), `name: ".github/workflows/release.yml / Test \"quoted\"\nnext (workflow_dispatch)"`) {
 		t.Fatalf("GitHub Check name did not use YAML scalar escaping:\n%s", output)
+	}
+}
+
+func TestEmitKeylessAggregateScopesArtifactsWithoutImporterDependencies(t *testing.T) {
+	producer := "22222222-2222-4222-8222-222222222222"
+	output, err := Emit(Pipeline{
+		ArtifactProducer:   producer,
+		DistributionDigest: testDigest("distribution"),
+		EventProvider:      "github",
+		DisableRunnerUser:  true,
+		Workflows: []Workflow{
+			{
+				GroupLabel: "CI", GroupKey: "workflow-ci", Event: "push", Condition: "true",
+				ConcurrencyGate: &ConcurrencyGate{Group: "buildkite-gha/concurrency/ci"},
+				Jobs:            []Job{{Key: "test", Label: "Test", PlanDigest: testDigest("plan")}},
+			},
+			{
+				GroupLabel: "Skipped", GroupKey: "workflow-skipped", Event: "push",
+				SkipReason: "This workflow is not triggered by a `push` event",
+			},
+			{
+				GroupLabel: "Failed", GroupKey: "workflow-failed", Event: "push",
+				Failure: &Failure{
+					AnnotationPath: ".buildkite-gha/failures/annotations/annotation.html",
+					MessagePath:    ".buildkite-gha/failures/messages/message.txt",
+					Summary:        "Workflow preparation failed.",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type dependency struct {
+		Step string `yaml:"step"`
+	}
+	var document struct {
+		Steps []struct {
+			DependsOn *yaml.Node `yaml:"depends_on"`
+			Plugins   []map[string]struct {
+				Step string `yaml:"step"`
+			} `yaml:"plugins"`
+			Steps []struct {
+				Key       string       `yaml:"key"`
+				Command   string       `yaml:"command"`
+				DependsOn []dependency `yaml:"depends_on"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 3 {
+		t.Fatalf("steps = %#v\n%s", document.Steps, output)
+	}
+	for _, workflow := range document.Steps {
+		if workflow.DependsOn != nil {
+			t.Fatalf("keyless workflow emitted importer dependency: %#v\n%s", workflow.DependsOn, output)
+		}
+		for _, step := range workflow.Steps {
+			for _, dependency := range step.DependsOn {
+				if dependency.Step == "" || dependency.Step == producer {
+					t.Fatalf("step %q emitted invalid importer dependency %#v\n%s", step.Key, dependency, output)
+				}
+			}
+			if step.Key == "test" && (!strings.Contains(step.Command, "--step '"+producer+"'") || !strings.Contains(step.Command, "--plan-producer '"+producer+"'")) {
+				t.Fatalf("job artifacts are not scoped to importer job %q:\n%s", producer, step.Command)
+			}
+		}
+	}
+	if failurePlugin := document.Steps[2].Plugins[0]["artifacts#v1.9.4"]; failurePlugin.Step != producer {
+		t.Fatalf("failure artifacts are scoped to %q, want %q", failurePlugin.Step, producer)
 	}
 }
 
@@ -586,7 +658,7 @@ func TestEmitAggregateWorkflowConcurrencyDependencies(t *testing.T) {
 		t.Fatalf("aggregate concurrency group = %#v\n%s", document.Steps, output)
 	}
 	openKey, closeKey := concurrencyGateKeys("importer\x00workflow-ci", pipeline.Workflows[0].ConcurrencyGate.Group, pipeline.Workflows[0].Jobs)
-	open, producer, consumer, close := document.Steps[0].Steps[0], document.Steps[0].Steps[1], document.Steps[0].Steps[2], document.Steps[0].Steps[3]
+	open, close, producer, consumer := document.Steps[0].Steps[0], document.Steps[0].Steps[1], document.Steps[0].Steps[2], document.Steps[0].Steps[3]
 	if open.Key != openKey || len(open.DependsOn) != 0 {
 		t.Fatalf("aggregate opening gate = %#v", open)
 	}
@@ -676,7 +748,7 @@ func TestEmitWrapsJobsInWorkflowConcurrencyGate(t *testing.T) {
 		t.Fatalf("steps = %#v\n%s", document.Steps, output)
 	}
 	openKey, closeKey := concurrencyGateKeys(pipeline.CompilerStep, pipeline.ConcurrencyGate.Group, pipeline.Jobs)
-	open, producer, consumer, close := document.Steps[0], document.Steps[1], document.Steps[2], document.Steps[3]
+	open, close, producer, consumer := document.Steps[0], document.Steps[1], document.Steps[2], document.Steps[3]
 	if open.Key != openKey || open.Concurrency != 1 || open.ConcurrencyGroup != pipeline.ConcurrencyGate.Group || len(open.DependsOn) != 1 || open.DependsOn[0].Step != "importer" || open.DependsOn[0].AllowFailure {
 		t.Fatalf("opening gate = %#v", open)
 	}
@@ -707,6 +779,141 @@ func TestEmitWrapsJobsInWorkflowConcurrencyGate(t *testing.T) {
 		if !dependency.AllowFailure {
 			t.Fatalf("closing gate has strict generated dependency: %#v", close.DependsOn)
 		}
+	}
+}
+
+func TestEmitWrapsNestedReusableWorkflowConcurrencyGates(t *testing.T) {
+	outer := ConcurrencyGate{ID: "call", Group: "buildkite-gha/concurrency/outer"}
+	inner := ConcurrencyGate{ID: "call-inner", Group: "buildkite-gha/concurrency/inner"}
+	pipeline := Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Jobs: []Job{
+			{Key: "prepare", Label: "Prepare", Queue: "linux", PlanDigest: testDigest("prepare")},
+			{Key: "outer_start", Label: "Outer start", Queue: "linux", PlanDigest: testDigest("outer-start"), ConcurrencyGates: []ConcurrencyGate{outer}},
+			{Key: "inner", Label: "Inner", Queue: "mac", PlanDigest: testDigest("inner"), ConcurrencyGates: []ConcurrencyGate{outer, inner}},
+			{Key: "outer_finish", Label: "Outer finish", Queue: "linux", PlanDigest: testDigest("outer-finish"), Dependencies: []string{"inner"}, ConcurrencyGates: []ConcurrencyGate{outer}},
+		},
+	}
+	output, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type emittedDependency struct {
+		Step         string `yaml:"step"`
+		AllowFailure bool   `yaml:"allow_failure"`
+	}
+	type emittedStep struct {
+		Label            string              `yaml:"label"`
+		Key              string              `yaml:"key"`
+		ConcurrencyGroup string              `yaml:"concurrency_group"`
+		DependsOn        []emittedDependency `yaml:"depends_on"`
+		Agents           map[string]string   `yaml:"agents"`
+	}
+	var document struct {
+		Steps []emittedStep `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 8 {
+		t.Fatalf("nested reusable gate steps = %d, want 8\n%s", len(document.Steps), output)
+	}
+	outerOpen, outerClose := document.Steps[0], document.Steps[1]
+	innerOpen, innerClose := document.Steps[2], document.Steps[3]
+	if outerOpen.ConcurrencyGroup != outer.Group || outerOpen.Agents["queue"] != "mac" || len(outerOpen.DependsOn) != 1 || outerOpen.DependsOn[0].Step != "importer" || outerOpen.DependsOn[0].AllowFailure {
+		t.Fatalf("outer opening gate = %#v", outerOpen)
+	}
+	if innerOpen.ConcurrencyGroup != inner.Group || innerOpen.Agents["queue"] != "mac" || len(innerOpen.DependsOn) != 1 || innerOpen.DependsOn[0].Step != outerOpen.Key || innerOpen.DependsOn[0].AllowFailure {
+		t.Fatalf("inner opening gate = %#v", innerOpen)
+	}
+	if innerClose.ConcurrencyGroup != inner.Group || len(innerClose.DependsOn) != 1 || innerClose.DependsOn[0].Step != "inner" || !innerClose.DependsOn[0].AllowFailure {
+		t.Fatalf("inner closing gate = %#v", innerClose)
+	}
+	if outerClose.ConcurrencyGroup != outer.Group || len(outerClose.DependsOn) != 4 || outerClose.DependsOn[3].Step != innerClose.Key || !outerClose.DependsOn[3].AllowFailure {
+		t.Fatalf("outer closing gate = %#v", outerClose)
+	}
+}
+
+func TestEmitRejectsReusableConcurrencyWithExternalPrerequisite(t *testing.T) {
+	_, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Jobs: []Job{
+			{Key: "prepare", Label: "Prepare", Queue: "linux", PlanDigest: testDigest("prepare")},
+			{Key: "deploy", Label: "Deploy", Queue: "linux", PlanDigest: testDigest("deploy"), Dependencies: []string{"prepare"}, ConcurrencyGates: []ConcurrencyGate{{ID: "call", Group: "buildkite-gha/concurrency/deploy"}}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), `concurrency gate "call" has an external prerequisite`) {
+		t.Fatalf("Emit() error = %v, want external prerequisite rejection", err)
+	}
+}
+
+func TestEmitRejectsConcurrencyGroupSharedWithMemberJob(t *testing.T) {
+	group := "buildkite-gha/concurrency/deploy"
+	tests := []struct {
+		name     string
+		pipeline Pipeline
+		want     string
+	}{
+		{
+			name: "workflow",
+			pipeline: Pipeline{
+				CompilerStep: "importer", DistributionDigest: testDigest("distribution"), ConcurrencyGate: &ConcurrencyGate{Group: group},
+				Jobs: []Job{{Key: "deploy", Label: "Deploy", Queue: "linux", PlanDigest: testDigest("workflow-deploy"), Concurrency: 1, ConcurrencyGroup: group}},
+			},
+			want: `workflow concurrency gate shares group with member job "deploy"`,
+		},
+		{
+			name: "reusable workflow",
+			pipeline: Pipeline{
+				CompilerStep: "importer", DistributionDigest: testDigest("distribution"),
+				Jobs: []Job{{Key: "deploy", Label: "Deploy", Queue: "linux", PlanDigest: testDigest("reusable-deploy"), Concurrency: 1, ConcurrencyGroup: group, ConcurrencyGates: []ConcurrencyGate{{ID: "call", Group: group}}}},
+			},
+			want: `reusable-workflow concurrency gate "call" shares group with member job "deploy"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Emit(test.pipeline)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Emit() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestEmitRejectsConcurrencyGroupSharedWithEnclosingGate(t *testing.T) {
+	group := "buildkite-gha/concurrency/deploy"
+	tests := []struct {
+		name     string
+		pipeline Pipeline
+		want     string
+	}{
+		{
+			name: "workflow",
+			pipeline: Pipeline{
+				CompilerStep: "importer", DistributionDigest: testDigest("distribution"), ConcurrencyGate: &ConcurrencyGate{Group: group},
+				Jobs: []Job{{Key: "deploy", Label: "Deploy", Queue: "linux", PlanDigest: testDigest("workflow-gate"), ConcurrencyGates: []ConcurrencyGate{{ID: "call", Group: group}}}},
+			},
+			want: `concurrency gate "call" shares group with enclosing workflow gate`,
+		},
+		{
+			name: "nested reusable workflow",
+			pipeline: Pipeline{
+				CompilerStep: "importer", DistributionDigest: testDigest("distribution"),
+				Jobs: []Job{{Key: "deploy", Label: "Deploy", Queue: "linux", PlanDigest: testDigest("nested-gate"), ConcurrencyGates: []ConcurrencyGate{{ID: "outer", Group: group}, {ID: "inner", Group: group}}}},
+			},
+			want: `concurrency gate "inner" shares group with enclosing gate "outer"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Emit(test.pipeline)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Emit() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -770,6 +977,79 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 	}
 	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir() {
 		t.Fatalf("mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
+	}
+}
+
+func TestEmitMergesConfiguredAndManagedCacheVolume(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Jobs: []Job{{
+			Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan"), RequiresMise: true,
+			Cache: &CacheVolume{Paths: []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper"}, Name: "dependencies", Size: "40g"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Command string `yaml:"command"`
+			Cache   struct {
+				Paths []string `yaml:"paths"`
+				Name  string   `yaml:"name"`
+				Size  string   `yaml:"size"`
+			} `yaml:"cache"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 {
+		t.Fatalf("steps = %#v", document.Steps)
+	}
+	step := document.Steps[0]
+	wantPaths := []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper", platformMiseCachePath("linux/amd64")}
+	if !slices.Equal(step.Cache.Paths, wantPaths) || step.Cache.Name != "dependencies" || step.Cache.Size != "40g" {
+		t.Fatalf("merged cache = %#v, want paths %#v with configured name and size", step.Cache, wantPaths)
+	}
+	for _, path := range []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper"} {
+		if !strings.Contains(step.Command, "readlink -f -- '"+path+"'") {
+			t.Fatalf("runner-home cache path %q is not made writable by runner:\n%s", path, step.Command)
+		}
+	}
+	if !strings.Contains(step.Command, "readlink -f -- '"+platformMiseCachePath("linux/amd64")+"'") || !strings.Contains(step.Command, `stat -c '%d' -- "$cache_target"`) || !strings.Contains(step.Command, `mountpoint -q -- "$cache_target"`) || !strings.Contains(step.Command, `chown -R runner:"$runner_group" "$cache_target"`) {
+		t.Fatalf("cache ownership is not constrained to the Buildkite volume:\n%s", step.Command)
+	}
+}
+
+func TestEmitConfiguredCacheUsesBuildkiteDefaultsWithoutMise(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Jobs:               []Job{{Key: "shell", Label: "Shell", PlanDigest: testDigest("plan"), Cache: &CacheVolume{Paths: []string{"/home/runner/.cache"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Cache struct {
+				Paths []string `yaml:"paths"`
+				Name  string   `yaml:"name"`
+				Size  string   `yaml:"size"`
+			} `yaml:"cache"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	wantPaths := []string{"/home/runner/.cache", platformCacheValidationPath("linux/amd64")}
+	if len(document.Steps) != 1 || !slices.Equal(document.Steps[0].Cache.Paths, wantPaths) || document.Steps[0].Cache.Name != "" || document.Steps[0].Cache.Size != "" || strings.Contains(string(output), "BUILDKITE_GHA_MISE_DATA_DIR") {
+		t.Fatalf("configured cache did not preserve Buildkite defaults:\n%s", output)
+	}
+	if !strings.Contains(string(output), "readlink -f -- '"+platformCacheValidationPath("linux/amd64")+"'") || !strings.Contains(string(output), "readlink -f -- '/home/runner/.cache'") {
+		t.Fatalf("cache path is not made writable by runner:\n%s", output)
 	}
 }
 
@@ -908,6 +1188,8 @@ func TestEmitRejectsInvalidGraphsAndIdentifiers(t *testing.T) {
 		{name: "compiler dependency", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest, Dependencies: []string{"compiler"}}}}, want: "invalid dependency"},
 		{name: "compiler collision", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "compiler", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid generated step key"},
 		{name: "UUID compiler", in: Pipeline{CompilerStep: "123e4567-e89b-12d3-a456-426614174000", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid compiler step key"},
+		{name: "keyless non-aggregate", in: Pipeline{ArtifactProducer: "producer", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid compiler step key"},
+		{name: "keyless aggregate without producer", in: Pipeline{EventProvider: "github", Workflows: []Workflow{{GroupLabel: "CI", GroupKey: "workflow-ci", Event: "push", Condition: "true", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}}}, want: "invalid compiler step key"},
 		{name: "UUID key", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "123e4567-e89b-12d3-a456-426614174000", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid generated step key"},
 		{name: "bad digest", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: "sha256:nope"}}}, want: "invalid plan digest"},
 		{name: "mutable runtime image", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest, RuntimeImage: "buildkite/agent-base:ubuntu-jammy-hosted-toolchains", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "immutable registry sha256 reference"},

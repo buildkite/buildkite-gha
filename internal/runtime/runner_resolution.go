@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
-	"time"
+
+	"github.com/buildkite/buildkite-gha/internal/agentapi"
 )
 
 const runnerResolutionResponseLimit = 64 << 10
@@ -25,40 +25,39 @@ type RunnerSuggestion struct {
 	ID       string
 	Queue    string
 	Platform string
+	Image    string
+	Warnings []RunnerWarning
+}
+
+type RunnerWarning struct {
+	Code    string
+	Message string
 }
 
 type AgentRunnerResolverConfig struct {
-	Endpoint string
-	JobID    string
-	JobToken string
-	Client   *http.Client
+	Endpoint      string
+	JobID         string
+	JobToken      string
+	ClientVersion string
+	Client        *http.Client
 }
 
 type AgentRunnerResolver struct {
 	resolveURL string
-	jobToken   string
-	client     *http.Client
+	agent      *agentapi.Client
 }
 
 func NewAgentRunnerResolver(config AgentRunnerResolverConfig) (*AgentRunnerResolver, error) {
-	resolveURL, err := agentRunnerResolutionURL(config.Endpoint, config.JobID)
+	agent, err := agentapi.New(agentapi.Config{
+		Endpoint: config.Endpoint, JobID: config.JobID, JobToken: config.JobToken,
+		ClientVersion: config.ClientVersion, HTTPClient: config.Client,
+	}, "runner resolution")
 	if err != nil {
 		return nil, err
 	}
-	if config.JobToken == "" || strings.ContainsAny(config.JobToken, "\r\n") {
-		return nil, fmt.Errorf("runner resolution Agent job token is required")
-	}
-	client := config.Client
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
-	}
-	bounded := *client
-	bounded.Jar = nil
-	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	if bounded.Timeout == 0 {
-		bounded.Timeout = 15 * time.Second
-	}
-	return &AgentRunnerResolver{resolveURL: resolveURL, jobToken: config.JobToken, client: &bounded}, nil
+	return &AgentRunnerResolver{
+		resolveURL: agent.URL("github-actions/runners"), agent: agent,
+	}, nil
 }
 
 func (c *AgentRunnerResolver) Resolve(ctx context.Context, requirements []RunnerRequirement) ([]RunnerSuggestion, error) {
@@ -104,10 +103,8 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 	if err != nil {
 		return nil, fmt.Errorf("create runner resolution request: %w", err)
 	}
-	request.Header.Set("Authorization", "Token "+c.jobToken)
-	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
-	response, err := c.client.Do(request)
+	response, err := c.agent.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("request runner resolution: %w", err)
 	}
@@ -129,15 +126,19 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 			Target *struct {
 				Queue    string `json:"queue"`
 				Platform string `json:"platform"`
+				Image    string `json:"image"`
 			} `json:"target"`
 			Error *struct {
 				Code    string `json:"code"`
 				Message string `json:"message"`
 			} `json:"error"`
+			Warnings []struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"warnings"`
 		} `json:"resolutions"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&decoded); err != nil {
 		return nil, fmt.Errorf("decode runner resolution response: %w", err)
 	}
@@ -157,21 +158,17 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 		}
 		seen[resolution.ID] = true
 		if resolution.Target != nil {
-			suggestions = append(suggestions, RunnerSuggestion{ID: resolution.ID, Queue: resolution.Target.Queue, Platform: resolution.Target.Platform})
+			suggestion := RunnerSuggestion{ID: resolution.ID, Queue: resolution.Target.Queue, Platform: resolution.Target.Platform, Image: resolution.Target.Image}
+			for _, warning := range resolution.Warnings {
+				if strings.TrimSpace(warning.Code) == "" || strings.TrimSpace(warning.Message) == "" {
+					return nil, fmt.Errorf("runner resolution response contains an invalid warning")
+				}
+				suggestion.Warnings = append(suggestion.Warnings, RunnerWarning{Code: warning.Code, Message: warning.Message})
+			}
+			suggestions = append(suggestions, suggestion)
+		} else if len(resolution.Warnings) != 0 {
+			return nil, fmt.Errorf("runner resolution response contains warnings without a target")
 		}
 	}
 	return suggestions, nil
-}
-
-func agentRunnerResolutionURL(endpoint, jobID string) (string, error) {
-	if !validBuildkiteJobID(jobID) {
-		return "", fmt.Errorf("runner resolution Agent job ID is required")
-	}
-	u, err := url.Parse(endpoint)
-	if err != nil || !validCredentialServiceURL(u) {
-		return "", fmt.Errorf("safe runner resolution Agent endpoint using HTTPS or loopback HTTP is required")
-	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/github-actions/runners"
-	u.RawPath = ""
-	return u.String(), nil
 }

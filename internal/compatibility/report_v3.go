@@ -119,7 +119,7 @@ func writeIndentedProcessing(w io.Writer, report ProcessingReport) error {
 	if err := WriteProcessing(&rendered, "text", report); err != nil {
 		return err
 	}
-	for _, line := range strings.Split(strings.TrimSuffix(rendered.String(), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSuffix(rendered.String(), "\n"), "\n") {
 		if _, err := fmt.Fprintf(w, "  %s\n", line); err != nil {
 			return err
 		}

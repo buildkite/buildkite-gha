@@ -5,14 +5,23 @@ import (
 	"testing"
 )
 
-func TestDownloadArtifactExactContract(t *testing.T) {
+func TestDownloadArtifactContracts(t *testing.T) {
 	for _, commit := range DownloadArtifactCommits() {
 		if err := validateDownloadArtifactCommit(commit); err != nil {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
 	}
-	if err := validateDownloadArtifactCommit(strings.Repeat("0", 40)); err == nil {
-		t.Fatal("unrecognized commit accepted")
+	unknown := strings.Repeat("0", 40)
+	if err := validateDownloadArtifactCommit(unknown); err != nil || !DownloadArtifactUsesFallbackContract(unknown) {
+		t.Fatalf("unknown immutable commit fallback = %v, %t", err, DownloadArtifactUsesFallbackContract(unknown))
+	}
+	if DownloadArtifactUsesFallbackContract(DownloadArtifactV801Commit) {
+		t.Fatal("known v8.0.1 commit uses fallback contract")
+	}
+	for _, malformed := range []string{"v8", strings.Repeat("A", 40), strings.Repeat("0", 39)} {
+		if err := validateDownloadArtifactCommit(malformed); err == nil {
+			t.Fatalf("malformed commit %q accepted", malformed)
+		}
 	}
 	for _, commit := range DownloadArtifactCommits() {
 		for _, inputs := range []map[string]string{{"name": "payload"}, {"Name": " payload ", "path": "", "merge-multiple": " False "}, {"name": "${{ github.sha }}", "path": "./out/"}} {
@@ -53,6 +62,25 @@ func TestDownloadArtifactExactContract(t *testing.T) {
 				t.Fatal("unsupported v8 mode accepted")
 			}
 		})
+	}
+}
+
+func TestDownloadArtifactFallbackUsesBoundedV8Contract(t *testing.T) {
+	unknown := strings.Repeat("0", 40)
+	if err := ValidateDownloadArtifactInputs(unknown, map[string]string{
+		"name": "payload", "path": "out", "skip-decompress": "false", "digest-mismatch": "error",
+	}); err != nil {
+		t.Fatalf("fallback rejected bounded v8 inputs: %v", err)
+	}
+	for _, inputs := range []map[string]string{
+		{"name": "payload", "path": "../outside"},
+		{"name": "payload", "skip-decompress": "true"},
+		{"name": "payload", "digest-mismatch": "warn"},
+		{"name": "payload", "github-token": "token"},
+	} {
+		if err := ValidateDownloadArtifactInputs(unknown, inputs); err == nil {
+			t.Fatalf("fallback accepted unsafe inputs %#v", inputs)
+		}
 	}
 }
 

@@ -20,7 +20,7 @@ func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 		if r.URL.Path != "/jobs/"+testCacheJobID+"/github_workflow_access_token" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Token job-secret" || r.Header.Get("Accept") != "application/json" || r.Header.Get("Content-Type") != "application/json" {
+		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Token job-secret" || r.Header.Get("Accept") != "application/json" || r.Header.Get("Content-Type") != "application/json" || r.Header.Get("User-Agent") != "buildkite-gha/1.2.3" {
 			t.Errorf("request = %s headers %#v", r.Method, r.Header)
 		}
 		body, err := io.ReadAll(r.Body)
@@ -33,7 +33,7 @@ func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 		_, _ = io.WriteString(w, `{"token":"`+statelessToken+`"}`)
 	}))
 	defer server.Close()
-	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret"})
+	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret", ClientVersion: "1.2.3"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,30 +53,34 @@ func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 	}
 }
 
-func TestAgentGitHubTokensMintsExactReadAllWorkflowPermissions(t *testing.T) {
-	const wantBody = `{"repo_url":"https://github.com/buildkite/buildkite-gha","workflow":"ci.yml","permissions":{"actions":"read","artifact_metadata":"read","attestations":"read","checks":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","packages":"read","pages":"read","pull_requests":"read","security_events":"read","statuses":"read"}}`
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(body) != wantBody {
-			t.Errorf("request body = %s, want %s", body, wantBody)
-		}
-		_, _ = io.WriteString(w, `{"token":"ghs_read_all"}`)
-	}))
-	defer server.Close()
-	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	permissions := map[string]string{
-		"actions": "read", "artifact_metadata": "read", "attestations": "read", "checks": "read", "contents": "read",
-		"deployments": "read", "discussions": "read", "issues": "read", "packages": "read", "pages": "read",
-		"pull_requests": "read", "security_events": "read", "statuses": "read",
-	}
-	if token, err := provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", permissions); err != nil || token != "ghs_read_all" {
-		t.Fatalf("WorkflowToken(read-all) = %q, %v", token, err)
+func TestAgentGitHubTokensMintsExactAllWorkflowPermissions(t *testing.T) {
+	for _, access := range []string{"read", "write"} {
+		t.Run(access, func(t *testing.T) {
+			wantBody := `{"repo_url":"https://github.com/buildkite/buildkite-gha","workflow":"ci.yml","permissions":{"actions":"` + access + `","artifact_metadata":"` + access + `","attestations":"` + access + `","checks":"` + access + `","contents":"` + access + `","deployments":"` + access + `","discussions":"` + access + `","issues":"` + access + `","packages":"` + access + `","pages":"` + access + `","pull_requests":"` + access + `","security_events":"` + access + `","statuses":"` + access + `"}}`
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(body) != wantBody {
+					t.Errorf("request body = %s, want %s", body, wantBody)
+				}
+				_, _ = io.WriteString(w, `{"token":"ghs_all"}`)
+			}))
+			defer server.Close()
+			provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			permissions := map[string]string{
+				"actions": access, "artifact_metadata": access, "attestations": access, "checks": access, "contents": access,
+				"deployments": access, "discussions": access, "issues": access, "packages": access, "pages": access,
+				"pull_requests": access, "security_events": access, "statuses": access,
+			}
+			if token, err := provider.WorkflowToken(t.Context(), "buildkite/buildkite-gha", "ci.yml", permissions); err != nil || token != "ghs_all" {
+				t.Fatalf("WorkflowToken(%s-all) = %q, %v", access, token, err)
+			}
+		})
 	}
 }
 

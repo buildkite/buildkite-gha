@@ -10,20 +10,81 @@ import (
 func TestTranslateTriggerCondition(t *testing.T) {
 	got, err := TranslateTriggerCondition([]workflow.Trigger{
 		{Event: "push", Branches: []string{"main", "releases/**", "!releases/**-alpha", "releases/v[0-9]+"}},
-		{Event: "pull_request"}, {Event: "merge_group", Branches: []string{"main"}}, {Event: "release", Types: []string{"published", "released"}}, {Event: "workflow_dispatch"}, {Event: "schedule"}, {Event: "workflow_call"},
+		{Event: "pull_request"}, {Event: "merge_group", Branches: []string{"main"}}, {Event: "release", Types: []string{"published", "released"}}, {Event: "issues", Types: []string{"opened", "typed"}}, {Event: "workflow_dispatch"}, {Event: "schedule"}, {Event: "workflow_call"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`build.source_event == "push"`, `build.branch =~ /^main$/`, `releases\/.*`, `build.source_event == "pull_request"`, `build.source_action == "opened"`, `build.source_action == "synchronize"`, `build.source_event == "merge_group"`, `build.merge_queue.base_branch =~ /^main$/`, `build.source_action == "checks_requested"`, `build.source == "ui"`, `build.source == "schedule"`} {
+	for _, want := range []string{`build.env("BUILDKITE_GITHUB_EVENT") == "push"`, `build.branch =~ /^main$/`, `releases\/.*`, `build.env("BUILDKITE_GITHUB_EVENT") == "pull_request"`, `build.source_action == "opened"`, `build.source_action == "synchronize"`, `build.env("BUILDKITE_GITHUB_EVENT") == "merge_group"`, `build.merge_queue.base_branch =~ /^main$/`, `build.source_action == "checks_requested"`, `build.env("BUILDKITE_GITHUB_EVENT") == "workflow_dispatch"`, `build.env("BUILDKITE_GITHUB_EVENT") == "schedule"`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("condition missing %q:\n%s", want, got)
 		}
 	}
-	for _, want := range []string{`build.source_event == "release"`, `build.source_action == "published"`, `build.source_action == "released"`} {
+	for _, want := range []string{`build.env("BUILDKITE_GITHUB_EVENT") == "release"`, `build.source_action == "published"`, `build.source_action == "released"`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("release condition missing %q:\n%s", want, got)
 		}
+	}
+	for _, want := range []string{`build.env("BUILDKITE_GITHUB_EVENT") == "issues"`, `build.source_action == "opened"`, `build.source_action == "typed"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("issues condition missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestLiveEventPredicatePreservesNonWebhookMappings(t *testing.T) {
+	tests := []struct {
+		event    string
+		wants    []string
+		excludes []string
+	}{
+		{event: "push", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "push"`, `build.env("BUILDKITE_GITHUB_EVENT") == null`, `build.env("BUILDKITE_GITHUB_EVENT") != "push"`, `build.env("BUILDKITE_GITHUB_EVENT") != "pull_request"`, `build.env("BUILDKITE_GITHUB_EVENT") != "workflow_dispatch"`, `build.env("BUILDKITE_GITHUB_EVENT") != "schedule"`, `build.pull_request.id == null`, `build.source != "schedule"`}, excludes: []string{`build.source != "ui"`, `build.source != "api"`}},
+		{event: "pull_request", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "pull_request"`, `build.env("BUILDKITE_GITHUB_EVENT") == null`, `build.pull_request.id != null`}},
+		{event: "workflow_dispatch", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "workflow_dispatch"`}, excludes: []string{"build.source"}},
+		{event: "schedule", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "schedule"`, `build.env("BUILDKITE_GITHUB_EVENT") == null`, `build.pull_request.id == null`, `build.source == "schedule"`}},
+		{event: "merge_group", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "merge_group"`}, excludes: []string{"build.source"}},
+		{event: "release", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "release"`}, excludes: []string{"build.source"}},
+		{event: "issues", wants: []string{`build.env("BUILDKITE_GITHUB_EVENT") == "issues"`}, excludes: []string{"build.source"}},
+	}
+	for _, test := range tests {
+		t.Run(test.event, func(t *testing.T) {
+			predicate := LiveEventPredicate(test.event)
+			for _, want := range test.wants {
+				if !strings.Contains(predicate, want) {
+					t.Errorf("predicate missing %q: %s", want, predicate)
+				}
+			}
+			for _, excluded := range test.excludes {
+				if strings.Contains(predicate, excluded) {
+					t.Errorf("predicate contains %q: %s", excluded, predicate)
+				}
+			}
+			if len(test.wants) > 1 && (!strings.HasPrefix(predicate, "(") || !strings.HasSuffix(predicate, ")")) {
+				t.Errorf("fallback predicate is not grouped: %s", predicate)
+			}
+		})
+	}
+	if predicate := LiveEventPredicate("issue_comment"); predicate != "" {
+		t.Fatalf("unsupported predicate = %q", predicate)
+	}
+}
+
+func TestLiveEventPredicatePrefersGitHubEventName(t *testing.T) {
+	predicate := LiveEventPredicate("push")
+	preferred := "build.env(" + yamlScalar("GITHUB_EVENT_NAME") + ")"
+	compatibility := "build.env(" + yamlScalar("BUILDKITE_GITHUB_EVENT") + ")"
+	for _, want := range []string{
+		preferred + " == " + yamlScalar("push"),
+		preferred + " == null",
+		preferred + " == " + yamlScalar(""),
+		compatibility + " == " + yamlScalar("push"),
+	} {
+		if !strings.Contains(predicate, want) {
+			t.Fatalf("LiveEventPredicate(push) = %q, want %q", predicate, want)
+		}
+	}
+	if strings.Contains(predicate, "("+compatibility+" == "+yamlScalar("push")+" ||") {
+		t.Fatalf("LiveEventPredicate(push) allows the compatibility event to override GITHUB_EVENT_NAME: %q", predicate)
 	}
 }
 
@@ -34,25 +95,58 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 		want     string
 	}{
 		{name: "paths", triggers: []workflow.Trigger{{Event: "push", Paths: []string{"src/**"}}}, want: "path filters are unsupported"},
-		{name: "event", triggers: []workflow.Trigger{{Event: "issues"}}, want: "unsupported GitHub trigger"},
+		{name: "event", triggers: []workflow.Trigger{{Event: "issue_comment"}}, want: "unsupported GitHub trigger"},
 		{name: "mixed include ignore", triggers: []workflow.Trigger{{Event: "push", Branches: []string{"main"}, BranchesIgnore: []string{"release"}}}, want: "cannot be combined"},
 		{name: "leading negative", triggers: []workflow.Trigger{{Event: "push", Branches: []string{"!release/**"}}}, want: "must follow a positive"},
 		{name: "unsupported PR type", triggers: []workflow.Trigger{{Event: "pull_request", Types: []string{"not-real"}}}, want: "cannot be mapped exactly"},
-		{name: "unsupported merge group type", triggers: []workflow.Trigger{{Event: "merge_group", Types: []string{"destroyed"}}}, want: "cannot be mapped exactly"},
-		{name: "merge group paths", triggers: []workflow.Trigger{{Event: "merge_group", Paths: []string{"src/**"}}}, want: "path filters are unsupported"},
-		{name: "bare release", triggers: []workflow.Trigger{{Event: "release"}}, want: "requires explicit types"},
+		{name: "unsupported merge group type", triggers: []workflow.Trigger{{Event: "merge_group", Types: []string{"destroyed"}}}, want: `merge_group type "destroyed" is unsupported`},
+		{name: "merge group tags", triggers: []workflow.Trigger{{Event: "merge_group", Tags: []string{"v*"}}}, want: "unsupported filters"},
+		{name: "bare release", triggers: []workflow.Trigger{{Event: "release"}}, want: "on: release needs a types list"},
 		{name: "release unpublished", triggers: []workflow.Trigger{{Event: "release", Types: []string{"unpublished"}}}, want: "cannot be mapped exactly"},
 		{name: "release edited", triggers: []workflow.Trigger{{Event: "release", Types: []string{"edited"}}}, want: "cannot be mapped exactly"},
 		{name: "release deleted", triggers: []workflow.Trigger{{Event: "release", Types: []string{"deleted"}}}, want: "cannot be mapped exactly"},
 		{name: "release prereleased", triggers: []workflow.Trigger{{Event: "release", Types: []string{"prereleased"}}}, want: "cannot be mapped exactly"},
 		{name: "release branch filter", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Branches: []string{"main"}}}, want: "unsupported filters"},
 		{name: "release paths", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Paths: []string{"src/**"}}}, want: "path filters are unsupported"},
+		{name: "empty issues types", triggers: []workflow.Trigger{{Event: "issues", Types: []string{}}}, want: "issues types is explicitly empty"},
+		{name: "unknown issues type", triggers: []workflow.Trigger{{Event: "issues", Types: []string{"not-real"}}}, want: `issues activity type "not-real" cannot be mapped exactly`},
+		{name: "issues branches", triggers: []workflow.Trigger{{Event: "issues", Branches: []string{"main"}}}, want: "issues has unsupported filters"},
+		{name: "issues tags", triggers: []workflow.Trigger{{Event: "issues", Tags: []string{"v*"}}}, want: "issues has unsupported filters"},
+		{name: "issues paths", triggers: []workflow.Trigger{{Event: "issues", Paths: []string{"src/**"}}}, want: "issues path filters are unsupported"},
+		{name: "issues workflows", triggers: []workflow.Trigger{{Event: "issues", Workflows: []string{"CI"}}}, want: "issues has unsupported filters"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := TranslateTriggerCondition(test.triggers)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Errorf("TranslateTriggerCondition(%v) error = %v, want %q", test.triggers, err, test.want)
+			}
+		})
+	}
+}
+
+func TestTranslateTriggerConditionReportsActionableTriggerErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		trigger workflow.Trigger
+		want    string
+	}{
+		{
+			name:    "unsupported merge group type",
+			trigger: workflow.Trigger{Event: "merge_group", Types: []string{"destroyed"}},
+			want:    `merge_group type "destroyed" is unsupported. checks_requested is the only merge queue activity currently mapped. Set types: [checks_requested]. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
+		},
+		{
+			name:    "bare release",
+			trigger: workflow.Trigger{Event: "release"},
+			want:    `on: release needs a types list. A bare release covers every release event, while the currently supported types are exactly published, created, and released. Use on: {release: {types: [published]}}. If you need another release type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := TranslateTriggerCondition([]workflow.Trigger{test.trigger})
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("TranslateTriggerCondition() error = %q, want %q", err, test.want)
 			}
 		})
 	}
@@ -71,6 +165,7 @@ func TestTranslateEventTriggerConditionUsesMergeGroupSnapshot(t *testing.T) {
 	}
 	condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{{
 		Event: "merge_group", Branches: []string{"main"}, Types: []string{"checks_requested"},
+		Paths: []string{"src/**"},
 	}}, "merge_group", expressions, snapshot)
 	if err != nil || !applicable {
 		t.Fatalf("condition/applicable/error = %q / %t / %v", condition, applicable, err)
@@ -111,6 +206,49 @@ func TestTranslateEventTriggerConditionUsesReleaseSnapshot(t *testing.T) {
 	}
 }
 
+func TestTranslateEventTriggerConditionUsesIssuesSnapshot(t *testing.T) {
+	action := "typed"
+	condition, applicable, err := TranslateEventTriggerCondition(
+		[]workflow.Trigger{{Event: "issues", Types: []string{"opened", "typed"}}},
+		"issues",
+		TriggerConditionExpressions{EventPredicate: `build.source == "webhook"`, IssuesAction: `"typed"`},
+		TriggerEventSnapshot{IssuesAction: &action},
+	)
+	if err != nil || !applicable {
+		t.Fatalf("condition/applicable/error = %q / %t / %v", condition, applicable, err)
+	}
+	for _, want := range []string{`build.source == "webhook"`, `"typed" == "opened"`, `"typed" == "typed"`} {
+		if !strings.Contains(condition, want) {
+			t.Fatalf("issues condition missing %q: %s", want, condition)
+		}
+	}
+	reason, err := TriggerFilterMismatchReason(
+		[]workflow.Trigger{{Event: "issues", Types: []string{"opened"}}},
+		"issues", TriggerEventSnapshot{IssuesAction: &action},
+	)
+	if err != nil || !strings.Contains(reason, `"typed"`) {
+		t.Fatalf("issues mismatch reason = %q, %v", reason, err)
+	}
+}
+
+func TestTranslateTriggerConditionAcceptsDocumentedIssuesActivityTypes(t *testing.T) {
+	types := []string{
+		"opened", "edited", "deleted", "transferred", "pinned", "unpinned",
+		"closed", "reopened", "assigned", "unassigned", "labeled", "unlabeled",
+		"locked", "unlocked", "milestoned", "demilestoned", "typed", "untyped",
+		"field_added", "field_removed",
+	}
+	condition, err := TranslateTriggerCondition([]workflow.Trigger{{Event: "issues", Types: types}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, activity := range types {
+		if !strings.Contains(condition, `build.source_action == "`+activity+`"`) {
+			t.Errorf("condition missing documented issues activity %q: %s", activity, condition)
+		}
+	}
+}
+
 func TestTranslateTriggerConditionRequiresDirectBuildSource(t *testing.T) {
 	_, err := TranslateTriggerCondition([]workflow.Trigger{{Event: "workflow_call"}})
 	if err == nil || !strings.Contains(err.Error(), "no supported build source") {
@@ -118,12 +256,81 @@ func TestTranslateTriggerConditionRequiresDirectBuildSource(t *testing.T) {
 	}
 }
 
+func TestTranslateTriggerConditionIgnoresUnsupportedEventsBesideSupportedOnes(t *testing.T) {
+	got, err := TranslateTriggerCondition([]workflow.Trigger{
+		{Event: "push"},
+		{Event: "issue_comment", Types: []string{"created"}},
+		{Event: "pull_request_target", Paths: []string{"src/**"}, Branches: []string{"main"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `build.env("BUILDKITE_GITHUB_EVENT") == "push"`) || strings.Contains(got, "issue_comment") || strings.Contains(got, "pull_request_target") {
+		t.Fatalf("condition = %q", got)
+	}
+}
+
+func TestValidateTriggerConditionsIgnoresUnsupportedEventsBesideSupportedOnes(t *testing.T) {
+	if err := ValidateTriggerConditions([]workflow.Trigger{
+		{Event: "push"},
+		{Event: "issue_comment", Types: []string{"created"}},
+		{Event: "pull_request_target", Paths: []string{"src/**"}},
+		{Event: "workflow_run"},
+	}); err != nil {
+		t.Fatalf("ValidateTriggerConditions() error = %v", err)
+	}
+	err := ValidateTriggerConditions([]workflow.Trigger{{Event: "discussion"}, {Event: "issue_comment"}})
+	if err == nil || !strings.Contains(err.Error(), `unsupported GitHub trigger event "discussion"`) || !strings.Contains(err.Error(), `unsupported GitHub trigger event "issue_comment"`) {
+		t.Fatalf("ValidateTriggerConditions() error = %v", err)
+	}
+}
+
+func TestTranslateEventTriggerConditionIgnoresUnsupportedEvents(t *testing.T) {
+	expressions := TriggerConditionExpressions{
+		EventPredicate: `build.env("BUILDKITE_GITHUB_EVENT") == "push"`,
+		Branch:         "build.branch",
+		Tag:            "build.tag",
+	}
+	condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{
+		{Event: "push"}, {Event: "issue_comment"}, {Event: "pull_request_target", Paths: []string{"src/**"}},
+	}, "push", expressions, TriggerEventSnapshot{})
+	if err != nil || !applicable {
+		t.Fatalf("condition/applicable/error = %q / %t / %v", condition, applicable, err)
+	}
+	if !strings.Contains(condition, `build.env("BUILDKITE_GITHUB_EVENT") == "push"`) {
+		t.Fatalf("condition = %q", condition)
+	}
+	condition, applicable, err = TranslateEventTriggerCondition([]workflow.Trigger{
+		{Event: "issue_comment"},
+	}, "push", expressions, TriggerEventSnapshot{})
+	if err != nil || applicable || condition != "" {
+		t.Fatalf("condition/applicable/error = %q / %t / %v", condition, applicable, err)
+	}
+}
+
+func TestSupportedTriggerEvent(t *testing.T) {
+	for event := range supportedTriggerEvents {
+		trigger := workflow.Trigger{Event: event}
+		if event == "release" {
+			trigger.Types = []string{"published"}
+		}
+		_, _, err := translateTrigger(trigger, liveTriggerExpressions(event), TriggerEventSnapshot{}, true)
+		if unsupportedTriggerEvent(err) {
+			t.Errorf("translateTrigger(%q) reports an unsupported event", event)
+		}
+	}
+	_, _, err := translateTrigger(workflow.Trigger{Event: "issue_comment"}, liveTriggerExpressions("issue_comment"), TriggerEventSnapshot{}, true)
+	if SupportedTriggerEvent("issue_comment") || !unsupportedTriggerEvent(err) {
+		t.Errorf("issue_comment must be an unsupported trigger event, error = %v", err)
+	}
+}
+
 func TestValidateTriggerConditionsAllowsReusableOnlyWorkflow(t *testing.T) {
 	if err := ValidateTriggerConditions([]workflow.Trigger{{Event: "workflow_call"}}); err != nil {
 		t.Fatalf("ValidateTriggerConditions(workflow_call) error = %v", err)
 	}
-	if err := ValidateTriggerConditions([]workflow.Trigger{{Event: "issues"}}); err == nil || !strings.Contains(err.Error(), "unsupported GitHub trigger") {
-		t.Fatalf("ValidateTriggerConditions(issues) error = %v", err)
+	if err := ValidateTriggerConditions([]workflow.Trigger{{Event: "issue_comment"}}); err == nil || !strings.Contains(err.Error(), "unsupported GitHub trigger") {
+		t.Fatalf("ValidateTriggerConditions(issue_comment) error = %v", err)
 	}
 }
 

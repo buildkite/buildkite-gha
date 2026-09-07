@@ -16,7 +16,7 @@ steps:
           set -euo pipefail
           proof="$${COMPATIBILITY_PROOF:?COMPATIBILITY_PROOF is required}"
           case "$$proof" in
-            shell-upload|concurrent-steps|public-actions|hosted-docker|dockerfile-action|container-runtime|summary-annotation|workflow-annotations|skipped-workflow-annotation|upload-artifact|artifact-roundtrip|experimental-runner-user) ;;
+            shell-upload|concurrent-steps|public-actions|hosted-docker|dockerfile-action|container-runtime|summary-annotation|workflow-annotations|skipped-workflow-annotation|hash-files|upload-artifact|artifact-roundtrip|experimental-runner-user) ;;
             *) echo "Unknown compatibility proof: $$proof" >&2; exit 2 ;;
           esac
           buildkite-agent pipeline upload ".buildkite/$$proof-proof.yml"
@@ -62,6 +62,7 @@ steps:
 
   - group: ":test_tube: CI"
     key: "ci"
+    if: build.env("VULNERABILITY_SCAN") != "1"
     steps:
       - label: ":go: Repository checks"
         key: "checks"
@@ -123,6 +124,15 @@ steps:
               version: "2026.5.12"
         command: "mise run corpus:starter-profile"
 
+      - label: ":github: Documented compatibility gaps"
+        key: "compatibility-gaps"
+        soft_fail: true
+        timeout_in_minutes: 20
+        plugins:
+          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+              version: "2026.5.12"
+        command: "mise run compatibility:gaps"
+
       - label: ":pipeline: Load public actions runtime proof"
         key: "public-actions-ci-loader"
         if: build.env("DEMO_SUITE") != "plugin" && build.env("SMOKE_PROBE") != "hosted" && build.env("COMPATIBILITY_PROOF") == null
@@ -142,6 +152,17 @@ steps:
         command: |
           revision="$$(git rev-parse HEAD)"
           mise exec -- go run -ldflags "-X main.revision=$$revision" ./cmd/buildkite-gha plugin
+
+  - label: ":shield: Scheduled vulnerability scan"
+    key: "vulnerability-scan"
+    if: build.env("VULNERABILITY_SCAN") == "1"
+    cache: ".buildkite/cache-volume"
+    plugins:
+      - setup-go#v0.1.0:
+          mise-version: "2026.5.12"
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: "mise run vulnerability"
 
   - wait: ~
 

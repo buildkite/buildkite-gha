@@ -1,4 +1,5 @@
 // Direct runtime template evaluation and runtime reference resolution.
+
 package expression
 
 import (
@@ -61,36 +62,38 @@ const (
 	runtimeReferenceRunner
 )
 
-// ValidateRuntimeTemplate verifies that every expression in a runtime template
+// validateRuntimeTemplate verifies that every expression in a runtime template
 // is one direct reference supported by Evaluate. Runtime values are
 // deliberately not resolved because many contexts do not exist until a job or
 // step runs.
-func ValidateRuntimeTemplate(template string) error {
-	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
-		validator := newSemanticValidator(runtimeReferenceSurface)
-		validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
-			if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
-				return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
-			}
-			return nil
-		}
-		validator.referenceError = func(err error) error {
-			return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
-		}
-		validator.unsupported = func(node actionlint.ExprNode) error {
-			_, _, err := referencePath(node)
-			return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
-		}
-		return validator.validate(node)
-	})
+func validateRuntimeTemplate(template string) error {
+	return visitTemplateExpressions(template, validateRuntimeReferenceNode)
 }
 
-// Evaluate substitutes direct runtime references in a template once.
-func Evaluate(template string, context Context) (string, error) {
+func validateRuntimeReferenceNode(node actionlint.ExprNode) error {
+	validator := newSemanticValidator(runtimeReferenceSurface)
+	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
+		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
+			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+		}
+		return nil
+	}
+	validator.referenceError = func(err error) error {
+		return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
+	}
+	validator.unsupported = func(node actionlint.ExprNode) error {
+		_, _, err := referencePath(node)
+		return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
+	}
+	return validator.validate(node)
+}
+
+// evaluateDirectTemplate substitutes direct runtime references in a template once.
+func evaluateDirectTemplate(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateDirectRuntimeNode)
 }
 
-func EvaluateValue(source string, context Context) (any, error) {
+func evaluateRuntimeValue(source string, context Context) (any, error) {
 	body, err := expressionBody(source)
 	if err != nil {
 		return nil, err
@@ -127,9 +130,13 @@ type ObjectEntry struct {
 	Value any
 }
 
-// EvaluateObject evaluates one fromJSON expression while retaining JSON object
+// evaluateObject evaluates one fromJSON expression while retaining JSON object
 // order for surfaces, such as services, where declaration order is observable.
-func EvaluateObject(source string, context Context) ([]ObjectEntry, error) {
+func evaluateObject(source string, context Context) ([]ObjectEntry, error) {
+	return evaluateRuntimeObject(source, context)
+}
+
+func evaluateRuntimeObject(source string, context Context) ([]ObjectEntry, error) {
 	body, err := expressionBody(source)
 	if err != nil {
 		return nil, err
@@ -192,15 +199,15 @@ func EvaluateObject(source string, context Context) ([]ObjectEntry, error) {
 	return result, nil
 }
 
-// EvaluateStep evaluates the expression surface available to workflow step
+// evaluateStep evaluates the expression surface available to workflow step
 // fields. Other runtime surfaces remain direct-reference only.
-func EvaluateStep(template string, context Context) (string, error) {
+func evaluateStep(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateStepRuntimeNode)
 }
 
-// EvaluateStepControl evaluates one complete expression for a typed workflow
+// evaluateStepControl evaluates one complete expression for a typed workflow
 // step control.
-func EvaluateStepControl(expression string, context Context) (any, error) {
+func evaluateStepControl(expression string, context Context) (any, error) {
 	body, err := expressionBody(expression)
 	if err != nil {
 		return nil, err
@@ -212,9 +219,9 @@ func EvaluateStepControl(expression string, context Context) (any, error) {
 	return evaluateStepRuntimeExpression(node, context, true, true, nil)
 }
 
-// ValidateStepControl validates every branch of a typed workflow step control
+// validateStepControl validates every branch of a typed workflow step control
 // without resolving runtime values.
-func ValidateStepControl(expression string) error {
+func validateStepControl(expression string) error {
 	body, err := expressionBody(expression)
 	if err != nil {
 		return err
@@ -226,22 +233,22 @@ func ValidateStepControl(expression string) error {
 	return validateStepRuntimeExpression(node, true, true, nil)
 }
 
-// EvaluateJobEnvironment evaluates a job-level environment template.
-func EvaluateJobEnvironment(template string, context Context) (string, error) {
+// evaluateJobEnvironment evaluates a job-level environment template.
+func evaluateJobEnvironment(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
 		return evaluateStepRuntimeExpression(node, context, false, false, map[string]bool{"github": true, "needs": true, "matrix": true, "vars": true, "secrets": true, "inputs": true})
 	})
 }
 
-// EvaluateJobDefault evaluates a job-level run default template.
-func EvaluateJobDefault(template string, context Context) (string, error) {
+// evaluateJobDefault evaluates a job-level run default template.
+func evaluateJobDefault(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
 		return evaluateStepRuntimeExpression(node, context, false, false, map[string]bool{"github": true, "needs": true, "matrix": true, "env": true, "vars": true, "inputs": true})
 	})
 }
 
-// EvaluateJobOutput evaluates a job output template after all steps settle.
-func EvaluateJobOutput(template string, context Context) (string, error) {
+// evaluateJobOutput evaluates a job output template after all steps settle.
+func evaluateJobOutput(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
 		return evaluateStepRuntimeExpression(node, context, false, false, map[string]bool{"github": true, "needs": true, "matrix": true, "runner": true, "env": true, "vars": true, "secrets": true, "steps": true, "inputs": true})
 	})
@@ -321,6 +328,14 @@ func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, al
 		return fmt.Errorf("unsupported runtime logical operator %s", kind)
 	}
 	evaluator.call = func(evaluator *semanticEvaluator, call *actionlint.FuncCallNode) (any, error) {
+		if isToJSONGitHubCall(call) {
+			if !allowGitHubToken {
+				return nil, fmt.Errorf("github.token is unavailable in this field")
+			}
+			if _, err := resolveRuntimeReferenceWithMissingMembers("github", []string{"token"}, context); err != nil {
+				return nil, err
+			}
+		}
 		if value, recognized, err := evaluatePureFunction(evaluator, call); recognized {
 			return value, err
 		}
@@ -346,6 +361,12 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 			return fmt.Errorf("runtime context %q is unavailable in this field", root)
 		}
 		if strings.EqualFold(root, "github") {
+			if len(path) == 0 {
+				return fmt.Errorf("dynamic or whole github access is unsupported")
+			}
+			if len(path) >= 1 && strings.EqualFold(path[0], "event") {
+				return nil
+			}
 			if len(path) != 1 {
 				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))
 			}
@@ -355,7 +376,7 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 					return fmt.Errorf("github.token is unavailable in this field")
 				}
 				return nil
-			case "action_path", "actor", "base_ref", "event_name", "head_ref", "job", "ref", "ref_name", "ref_type", "repository", "repository_owner", "server_url", "sha", "workflow":
+			case "action_path", "action_ref", "action_repository", "actor", "base_ref", "event_name", "head_ref", "job", "ref", "ref_name", "ref_type", "repository", "repository_owner", "run_attempt", "run_id", "run_number", "server_url", "sha", "workflow", "workflow_ref", "workflow_sha", "workspace":
 				return nil
 			default:
 				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))
@@ -385,8 +406,12 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 			return fmt.Errorf("runtime context %q is unavailable in this field", root)
 		}
 		switch root {
-		case "github", "secrets":
-			return fmt.Errorf("dynamic or whole %s access is unsupported", root)
+		case "github":
+			if !isGitHubEventAccess(access) {
+				return fmt.Errorf("dynamic or whole github access is unsupported")
+			}
+		case "secrets":
+			return fmt.Errorf("dynamic or whole secrets access is unsupported")
 		case "steps", "needs":
 			return fmt.Errorf("computed or aggregate %s access is unsupported", root)
 		case "job":
@@ -416,6 +441,15 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 	validator.validateCompare = func(actionlint.CompareOpNodeKind) error { return nil }
 	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
 	validator.validateCall = func(validator *semanticValidator, call *actionlint.FuncCallNode) error {
+		if isToJSONGitHubCall(call) {
+			if allowedContexts != nil && !allowedContexts["github"] {
+				return fmt.Errorf("runtime context %q is unavailable in this field", "github")
+			}
+			if !allowGitHubToken {
+				return fmt.Errorf("github.token is unavailable in this field")
+			}
+			return nil
+		}
 		if recognized, err := validatePureFunction(validator, call); recognized {
 			return err
 		}
@@ -431,6 +465,19 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 	}
 	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported runtime expression") }
 	return validator.validate(node)
+}
+
+// requiredGitHubRuntimeValue names github members that must never fall back to
+// null: token because absence means missing authority, and run identity or
+// workspace because a silently empty value would corrupt derived cache keys
+// and paths when the runtime cannot supply them.
+func requiredGitHubRuntimeValue(name string) bool {
+	switch strings.ToLower(name) {
+	case "token", "run_attempt", "run_id", "run_number", "workspace":
+		return true
+	default:
+		return false
+	}
 }
 
 func resolveStepRuntimeRoot(root string, context Context) (any, error) {
@@ -523,9 +570,18 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 	case runtimeReferenceServiceValue:
 		return resolveServiceValue(context.Services, path[1], path[2], "expression")
 	case runtimeReferenceGitHub:
+		if strings.EqualFold(path[0], "event") {
+			event, found, err := objectValue(context.GitHub, path[0])
+			if err != nil {
+				return nil, err
+			}
+			if !found || event == nil {
+				return nil, fmt.Errorf("expression requires an event payload that is unavailable in this job plan")
+			}
+		}
 		value, ok := lookupRuntimeValue(context.GitHub, path)
 		if !ok {
-			if !allowMissing || context.GitHub == nil || strings.EqualFold(path[0], "token") {
+			if !allowMissing || context.GitHub == nil || requiredGitHubRuntimeValue(path[0]) {
 				return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
 			}
 			return nil, nil
@@ -643,22 +699,28 @@ func referenceName(root string, path []string) string {
 func lookupRuntimeValue(value any, path []string) (any, bool) {
 	current := value
 	for _, part := range path {
-		object, ok := current.(map[string]any)
-		if !ok {
-			return nil, false
-		}
 		matched := false
-		for name, item := range object {
-			if strings.EqualFold(name, part) {
-				current, matched = item, true
-				break
-			}
+		switch object := current.(type) {
+		case map[string]any:
+			current, matched = findFold(object, part)
+		case map[string]string:
+			current, matched = findFold(object, part)
 		}
 		if !matched {
 			return nil, false
 		}
 	}
 	return current, true
+}
+
+func findFold[V any](values map[string]V, target string) (V, bool) {
+	for name, value := range values {
+		if strings.EqualFold(name, target) {
+			return value, true
+		}
+	}
+	var zero V
+	return zero, false
 }
 
 func findString(values map[string]string, name string) string {

@@ -1,5 +1,3 @@
-// Package integration classifies and admits actions with Buildkite-specific
-// execution or service requirements.
 package integration
 
 // Identity is the canonical, resolved portion of an action lock used for
@@ -109,9 +107,17 @@ func Admit(identity Identity, commit string) (Descriptor, bool, error) {
 	return entry.descriptor, true, nil
 }
 
-// UsesNativeAdapter reports whether the resolved identity replaces the
-// upstream action lifecycle with Buildkite-native execution.
-func UsesNativeAdapter(identity Identity) bool {
-	descriptor, _ := Lookup(identity)
-	return descriptor.Adapter != ""
+// AdmitNativeAdapter reports whether an exact action release replaces the
+// upstream lifecycle with Buildkite-native execution. It applies the same
+// audited-commit policy as Admit.
+func AdmitNativeAdapter(identity Identity, commit string) (Adapter, bool, error) {
+	descriptor, known := Lookup(identity)
+	if !known || descriptor.Adapter == "" {
+		return "", false, nil
+	}
+	descriptor, _, err := Admit(identity, commit)
+	if err != nil {
+		return descriptor.Adapter, false, err
+	}
+	return descriptor.Adapter, true, nil
 }

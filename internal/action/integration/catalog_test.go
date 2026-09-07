@@ -38,7 +38,7 @@ func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 }
 
 func TestAdmitEnforcesCatalogCommitPolicy(t *testing.T) {
-	invalidCommit := strings.Repeat("0", 40)
+	invalidCommit := strings.Repeat("z", 40)
 	for _, test := range []struct {
 		name     string
 		identity Identity

@@ -1,4 +1,3 @@
-// Package workflow owns the parsed workflow model used by the compiler.
 package workflow
 
 import "github.com/buildkite/buildkite-gha/internal/expression"
@@ -18,6 +17,8 @@ type Span struct {
 // Workflow is the actionlint-independent syntax needed by the workflow compiler.
 type Workflow struct {
 	Name                    string                `json:"name,omitempty"`
+	RunName                 string                `json:"run_name,omitempty"`
+	RunNameSpan             Span                  `json:"-"`
 	Triggers                []Trigger             `json:"triggers,omitempty"`
 	Env                     map[string]string     `json:"env,omitempty"`
 	Permissions             *Permissions          `json:"permissions,omitempty"`
@@ -26,7 +27,7 @@ type Workflow struct {
 	DefaultWorkingDirectory string                `json:"default_working_directory,omitempty"`
 	CallInputs              map[string]CallInput  `json:"call_inputs,omitempty"`
 	CallOutputs             map[string]CallOutput `json:"call_outputs,omitempty"`
-	RequiredCallSecrets     []string              `json:"required_call_secrets,omitempty"`
+	CallSecrets             map[string]CallSecret `json:"call_secrets,omitempty"`
 	Callable                bool                  `json:"callable,omitempty"`
 	Jobs                    []Job                 `json:"jobs"`
 }
@@ -50,6 +51,7 @@ func (w Workflow) ReusableOnly() bool {
 // empty list), which is significant for GitHub's defaults.
 type Trigger struct {
 	Event          string           `json:"event"`
+	Position       Position         `json:"position"`
 	Types          []string         `json:"types,omitempty"`
 	Branches       []string         `json:"branches,omitempty"`
 	BranchesIgnore []string         `json:"branches_ignore,omitempty"`
@@ -111,6 +113,14 @@ type CallOutput struct {
 	Span  Span   `json:"span"`
 }
 
+// CallSecret declares one secret accepted by workflow_call. Map keys are
+// case-normalized aliases; Name and Span retain the callee-owned declaration.
+type CallSecret struct {
+	Name     string `json:"name"`
+	Required bool   `json:"required,omitempty"`
+	Span     Span   `json:"span"`
+}
+
 // Job is one logical GitHub Actions job.
 type Job struct {
 	ID                      string                 `json:"id"`
@@ -122,6 +132,7 @@ type Job struct {
 	FailFast                *bool                  `json:"fail_fast,omitempty"`
 	MaxParallel             *int                   `json:"max_parallel,omitempty"`
 	Concurrency             *Concurrency           `json:"concurrency,omitempty"`
+	Environment             string                 `json:"environment,omitempty"`
 	Reusable                *ReusableWorkflowCall  `json:"reusable_workflow,omitempty"`
 	Env                     map[string]string      `json:"env,omitempty"`
 	Permissions             *Permissions           `json:"permissions,omitempty"`
@@ -174,11 +185,18 @@ type ContainerCredentials struct {
 
 // ReusableWorkflowCall is a job-level invocation of another workflow.
 type ReusableWorkflowCall struct {
-	Uses           string           `json:"uses"`
-	Inputs         map[string]Value `json:"inputs,omitempty"`
-	Secrets        bool             `json:"secrets,omitempty"`
-	InheritSecrets bool             `json:"inherit_secrets,omitempty"`
-	Span           Span             `json:"span"`
+	Uses           string                   `json:"uses"`
+	Inputs         map[string]Value         `json:"inputs,omitempty"`
+	Secrets        map[string]SecretMapping `json:"secrets,omitempty"`
+	InheritSecrets bool                     `json:"inherit_secrets,omitempty"`
+	Span           Span                     `json:"span"`
+}
+
+// SecretMapping binds one callee alias to a direct caller secret reference.
+// The source is normalized for case-insensitive lookup; Span owns the source.
+type SecretMapping struct {
+	Source string `json:"source"`
+	Span   Span   `json:"span"`
 }
 
 // Matrix retains either static rows or a deferred expression.
@@ -188,6 +206,7 @@ type Matrix struct {
 	Include           []MatrixCombination    `json:"include,omitempty"`
 	IncludeExpression *expression.Expression `json:"include_expression,omitempty"`
 	Exclude           []MatrixCombination    `json:"exclude,omitempty"`
+	ExcludeExpression *expression.Expression `json:"exclude_expression,omitempty"`
 	Span              Span                   `json:"span"`
 }
 

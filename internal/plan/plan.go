@@ -1,28 +1,33 @@
-// Package plan owns the job-plan boundary between compilation and execution.
 package plan
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
-	"github.com/buildkite/buildkite-gha/internal/expression"
+	"github.com/buildkite/buildkite-gha/internal/git"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
-const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json"
+const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json"
 
 const MaxNeedProducers = 1024
 const MaxNeedOutputs = 64
 const MaxCallGuards = 4
 const maxStepTargets = 256
+const MaxEventPayloadBytes = 25 << 20
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var compilerVersionPattern = regexp.MustCompile(`^[ -~]{1,256}$`)
@@ -30,8 +35,6 @@ var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var logicalJobIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$`)
 var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var actionLockIDPattern = regexp.MustCompile(`^a-[0-9a-f]{16}$`)
-var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-var containerImagePattern = regexp.MustCompile(`^(?:(?:[a-z0-9]+(?:[._-][a-z0-9]+)*|\[[0-9a-f:]+\])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$`)
 var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
 var serviceNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,254}$`)
@@ -41,7 +44,7 @@ var githubWorkflowFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._
 // ValidContainerImageReference reports whether image is a supported literal
 // Docker image reference.
 func ValidContainerImageReference(image string) bool {
-	return containerImagePattern.MatchString(image)
+	return metadata.ValidDockerImageReference(image)
 }
 
 var githubTokenPermissionAccess = map[string]map[string]bool{
@@ -90,6 +93,7 @@ type ActionLock struct {
 	Commit       string                    `json:"commit,omitempty"`
 	Path         string                    `json:"path,omitempty"`
 	SourceDigest string                    `json:"source_digest"`
+	DockerImage  string                    `json:"docker_image,omitempty"`
 	Children     map[string]ActionSelector `json:"children,omitempty"`
 }
 
@@ -104,15 +108,17 @@ type Runtime struct {
 }
 
 type Event struct {
-	Provider      string `json:"provider"`
-	Name          string `json:"name"`
-	PayloadDigest string `json:"payload_digest"`
-	Repository    string `json:"repository,omitempty"`
-	Ref           string `json:"ref,omitempty"`
-	HeadRef       string `json:"head_ref,omitempty"`
-	BaseRef       string `json:"base_ref,omitempty"`
-	SHA           string `json:"sha,omitempty"`
-	Actor         string `json:"actor,omitempty"`
+	Provider        string          `json:"provider"`
+	Name            string          `json:"name"`
+	PayloadDigest   string          `json:"payload_digest"`
+	PayloadArtifact bool            `json:"payload_artifact,omitempty"`
+	Payload         *map[string]any `json:"-"`
+	Repository      string          `json:"repository,omitempty"`
+	Ref             string          `json:"ref,omitempty"`
+	HeadRef         string          `json:"head_ref,omitempty"`
+	BaseRef         string          `json:"base_ref,omitempty"`
+	SHA             string          `json:"sha,omitempty"`
+	Actor           string          `json:"actor,omitempty"`
 }
 
 // EventRepositoryOwner returns the owner component of an event repository.
@@ -156,7 +162,10 @@ func EventServerURL(provider string) string {
 }
 
 type Workflow struct {
-	Path         string                `json:"path"`
+	Path string `json:"path"`
+	// RunPath identifies the top-level caller when Path identifies a reusable
+	// workflow. An empty RunPath means Path already identifies the workflow run.
+	RunPath      string                `json:"run_path,omitempty"`
 	Name         string                `json:"name,omitempty"`
 	Digest       string                `json:"digest"`
 	LogicalJobID string                `json:"logical_job_id"`
@@ -250,6 +259,7 @@ type Step struct {
 	TimeoutMinutes            float64           `json:"timeout_minutes,omitempty"`
 	TimeoutMinutesExpression  string            `json:"timeout_minutes_expression,omitempty"`
 	Source                    *Span             `json:"source,omitempty"`
+	Execution                 *program.Step     `json:"-"`
 }
 
 type Container struct {
@@ -287,6 +297,7 @@ type DeferredInput struct {
 type GitHubToken struct {
 	Workflow    string            `json:"workflow"`
 	Permissions map[string]string `json:"permissions"`
+	Aliases     []string          `json:"aliases,omitempty"`
 }
 
 // OIDCConfiguration applies additional Buildkite claims to every OIDC token
@@ -307,6 +318,7 @@ type Job struct {
 	Target               Target                   `json:"target"`
 	RequiredCapabilities []string                 `json:"required_capabilities"`
 	RequiredSecrets      []string                 `json:"required_secrets,omitempty"`
+	SecretMappings       map[string]string        `json:"secret_mappings,omitempty"`
 	GitHubToken          *GitHubToken             `json:"github_token,omitempty"`
 	IDTokenPermission    string                   `json:"id_token_permission,omitempty"`
 	OIDC                 *OIDCConfiguration       `json:"oidc,omitempty"`
@@ -314,29 +326,34 @@ type Job struct {
 	Inputs               map[string]any           `json:"inputs,omitempty"`
 	DeferredInputs       map[string]DeferredInput `json:"deferred_inputs,omitempty"`
 	DeferredInputValues  map[string]any           `json:"-"`
-	Vars                 map[string]string        `json:"vars,omitempty"`
+	OrganizationVars     map[string]string        `json:"organization_vars,omitempty"`
+	RepositoryVars       map[string]string        `json:"repository_vars,omitempty"`
+	EnvironmentVars      map[string]string        `json:"environment_vars,omitempty"`
 	Dependencies         []string                 `json:"dependencies,omitempty"`
 	NeedSources          map[string][]NeedSource  `json:"need_sources,omitempty"`
 	NeedOutputs          map[string][]NeedOutput  `json:"need_outputs,omitempty"`
 	CallGuards           []CallGuard              `json:"call_guards,omitempty"`
 	// Needs is populated only from verified producer-attributed manifests at
 	// runtime. It is never accepted from or encoded into an immutable plan.
-	Needs                   map[string]Need   `json:"-"`
-	Env                     map[string]string `json:"env,omitempty"`
-	Condition               string            `json:"condition,omitempty"`
-	ContinueOnError         bool              `json:"continue_on_error,omitempty"`
-	TimeoutMinutes          float64           `json:"timeout_minutes,omitempty"`
-	DefaultShell            string            `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
-	Outputs                 map[string]string `json:"outputs,omitempty"`
-	Steps                   []Step            `json:"steps"`
+	Needs   map[string]Need  `json:"-"`
+	Program *program.Program `json:"program"`
+	// The executor-facing projections below are derived from Program. They are
+	// never accepted from or encoded into the plan boundary.
+	Env                     map[string]string `json:"-"`
+	Condition               string            `json:"-"`
+	ContinueOnError         bool              `json:"-"`
+	TimeoutMinutes          float64           `json:"-"`
+	DefaultShell            string            `json:"-"`
+	DefaultWorkingDirectory string            `json:"-"`
+	Outputs                 map[string]string `json:"-"`
+	Steps                   []Step            `json:"-"`
 	Actions                 []ActionLock      `json:"actions,omitempty"`
 	// RequiresMise is the compiler's explicit action-runtime decision.
 	RequiresMise       *bool                       `json:"requires_mise,omitempty"`
-	Container          *Container                  `json:"container,omitempty"`
-	Services           map[string]ServiceContainer `json:"services,omitempty"`
-	ServiceOrder       []string                    `json:"service_order,omitempty"`
-	ServicesExpression string                      `json:"services_expression,omitempty"`
+	Container          *Container                  `json:"-"`
+	Services           map[string]ServiceContainer `json:"-"`
+	ServiceOrder       []string                    `json:"-"`
+	ServicesExpression string                      `json:"-"`
 }
 
 // NeedsMise reports whether a generated job needs the managed action runtime.
@@ -365,31 +382,16 @@ func Decode(source []byte) (Job, error) {
 		return Job{}, fmt.Errorf("decode job plan: %w", err)
 	}
 	var presence struct {
-		Steps []map[string]json.RawMessage `json:"steps"`
+		Program json.RawMessage `json:"program"`
 	}
 	if err := json.Unmarshal(source, &presence); err != nil {
 		return Job{}, fmt.Errorf("decode job plan: %w", err)
 	}
-	for i, step := range presence.Steps {
-		controls := make(map[string]bool, 4)
-		for name := range step {
-			for _, canonical := range []string{"continue_on_error", "continue_on_error_expression", "timeout_minutes", "timeout_minutes_expression"} {
-				if !strings.EqualFold(name, canonical) {
-					continue
-				}
-				if controls[canonical] {
-					return Job{}, fmt.Errorf("decode job plan: step %d repeats %s with different casing", i+1, canonical)
-				}
-				controls[canonical] = true
-				break
-			}
-		}
-		if controls["continue_on_error"] && controls["continue_on_error_expression"] {
-			return Job{}, fmt.Errorf("decode job plan: step %d has both continue_on_error fields", i+1)
-		}
-		if controls["timeout_minutes"] && controls["timeout_minutes_expression"] {
-			return Job{}, fmt.Errorf("decode job plan: step %d has both timeout_minutes fields", i+1)
-		}
+	if len(presence.Program) == 0 || string(presence.Program) == "null" {
+		return Job{}, fmt.Errorf("decode job plan: normalized execution program is required")
+	}
+	if err := rejectAmbiguousProgramControls(presence.Program); err != nil {
+		return Job{}, fmt.Errorf("decode job plan: %w", err)
 	}
 	var job Job
 	decoder := json.NewDecoder(bytes.NewReader(source))
@@ -401,6 +403,9 @@ func Decode(source []byte) (Job, error) {
 	if job.RequiredCapabilities == nil {
 		return Job{}, fmt.Errorf("decode job plan: required_capabilities must be a concrete array")
 	}
+	if err := job.ProjectProgram(); err != nil {
+		return Job{}, fmt.Errorf("decode job plan: %w", err)
+	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		if err == nil {
 			return Job{}, fmt.Errorf("decode job plan: multiple JSON values")
@@ -411,6 +416,56 @@ func Decode(source []byte) (Job, error) {
 		return Job{}, err
 	}
 	return job, nil
+}
+
+func rejectAmbiguousProgramControls(source json.RawMessage) error {
+	var document struct {
+		Job struct {
+			Steps []map[string]json.RawMessage `json:"steps"`
+		} `json:"job"`
+	}
+	if err := json.Unmarshal(source, &document); err != nil {
+		return err
+	}
+	for i, step := range document.Job.Steps {
+		for _, controlName := range []string{"continue_on_error", "timeout_minutes"} {
+			var controlSource json.RawMessage
+			matches := 0
+			for name, value := range step {
+				if strings.EqualFold(name, controlName) {
+					matches++
+					controlSource = value
+				}
+			}
+			if matches > 1 {
+				return fmt.Errorf("step %d repeats %s with different casing", i+1, strings.ReplaceAll(controlName, "_", "-"))
+			}
+			if len(controlSource) == 0 {
+				continue
+			}
+			var control map[string]json.RawMessage
+			if err := json.Unmarshal(controlSource, &control); err != nil {
+				continue
+			}
+			hasLiteral, hasExpression := false, false
+			literalCount, expressionCount := 0, 0
+			for name := range control {
+				if strings.EqualFold(name, "literal") {
+					hasLiteral, literalCount = true, literalCount+1
+				}
+				if strings.EqualFold(name, "expression") {
+					hasExpression, expressionCount = true, expressionCount+1
+				}
+			}
+			if literalCount > 1 || expressionCount > 1 {
+				return fmt.Errorf("step %d repeats a field in %s with different casing", i+1, strings.ReplaceAll(controlName, "_", "-"))
+			}
+			if hasLiteral && hasExpression {
+				return fmt.Errorf("step %d has both literal and expression %s", i+1, strings.ReplaceAll(controlName, "_", "-"))
+			}
+		}
+	}
+	return nil
 }
 
 func rejectDuplicateKeys(source []byte) error {
@@ -475,6 +530,9 @@ func Encode(job Job) ([]byte, error) {
 	if job.RequiredCapabilities == nil {
 		job.RequiredCapabilities = []string{}
 	}
+	if err := job.ProjectProgram(); err != nil {
+		return nil, err
+	}
 	if err := job.Validate(); err != nil {
 		return nil, err
 	}
@@ -488,9 +546,45 @@ func Encode(job Job) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// DecodeEventPayload verifies and decodes one immutable event artifact.
+func DecodeEventPayload(source []byte, expectedDigest string) (map[string]any, error) {
+	if len(source) > MaxEventPayloadBytes {
+		return nil, fmt.Errorf("event payload artifact exceeds the %d-byte limit", MaxEventPayloadBytes)
+	}
+	digest := sha256.Sum256(source)
+	if "sha256:"+hex.EncodeToString(digest[:]) != expectedDigest {
+		return nil, fmt.Errorf("event payload artifact does not match its digest")
+	}
+	if err := rejectDuplicateKeys(source); err != nil {
+		return nil, fmt.Errorf("decode event payload artifact: %w", err)
+	}
+	var payload map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(source))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode event payload artifact: %w", err)
+	}
+	if payload == nil {
+		return nil, fmt.Errorf("event payload artifact must contain a JSON object")
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("decode event payload artifact: multiple JSON values")
+		}
+		return nil, fmt.Errorf("decode event payload artifact: %w", err)
+	}
+	return payload, nil
+}
+
 func (job Job) Validate() error {
 	if job.Schema != Schema {
 		return fmt.Errorf("unsupported job plan schema %q", job.Schema)
+	}
+	if job.Program == nil {
+		return fmt.Errorf("normalized execution program is required")
+	}
+	if err := job.Program.Validate(); err != nil {
+		return fmt.Errorf("normalized execution program: %w", err)
 	}
 	if job.RequiresMise == nil {
 		return fmt.Errorf("job plan requires an explicit requires_mise decision")
@@ -514,8 +608,24 @@ func (job Job) Validate() error {
 	if len(job.Event.Repository) > 512 || len(job.Event.Ref) > 1024 || len(job.Event.HeadRef) > 1024 || len(job.Event.BaseRef) > 1024 || len(job.Event.SHA) > 128 || len(job.Event.Actor) > 256 {
 		return fmt.Errorf("job plan event identity exceeds its size limit")
 	}
+	if job.Event.Payload != nil {
+		payload, err := json.Marshal(job.Event.Payload)
+		if err != nil {
+			return fmt.Errorf("encode job plan event payload: %w", err)
+		}
+		if len(payload) > MaxEventPayloadBytes {
+			return fmt.Errorf("job plan event payload exceeds the %d-byte limit", MaxEventPayloadBytes)
+		}
+		digest := sha256.Sum256(payload)
+		if "sha256:"+hex.EncodeToString(digest[:]) != job.Event.PayloadDigest {
+			return fmt.Errorf("job plan event payload does not match its digest")
+		}
+	}
 	if job.Workflow.Path == "" || len(job.Workflow.Path) > 1024 || !utf8.ValidString(job.Workflow.Path) || hasControl(job.Workflow.Path) || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {
 		return fmt.Errorf("job plan requires a workflow path, sha256 digest, and logical job id")
+	}
+	if job.Workflow.RunPath != "" && !validWorkflowRunPath(job.Workflow.RunPath) {
+		return fmt.Errorf("job plan has invalid workflow run path")
 	}
 	if err := validateRemoteWorkflowSource(job.Workflow); err != nil {
 		return err
@@ -532,11 +642,24 @@ func (job Job) Validate() error {
 	if job.TimeoutMinutes < 0 || job.TimeoutMinutes > 360 {
 		return fmt.Errorf("job timeout_minutes must be between 0 and 360")
 	}
-	if len(job.Condition) > 65536 || len(job.RequiredSecrets) > 128 {
-		return fmt.Errorf("job plan condition or required secrets exceed their size limit")
+	if len(job.Condition) > 65536 || len(job.RequiredSecrets) > 128 || len(job.SecretMappings) > 128 {
+		return fmt.Errorf("job plan condition, required secrets, or secret mappings exceed their size limit")
 	}
 	if err := validateInputs(job.Inputs); err != nil {
 		return err
+	}
+	for _, scope := range []struct {
+		name  string
+		vars  map[string]string
+		limit int
+	}{
+		{"organization", job.OrganizationVars, organizationVarsLimit},
+		{"repository", job.RepositoryVars, repositoryVarsLimit},
+		{"environment", job.EnvironmentVars, environmentVarsLimit},
+	} {
+		if err := validateVars(scope.name, scope.vars, scope.limit); err != nil {
+			return err
+		}
 	}
 	capabilities := make(map[string]struct{}, len(job.RequiredCapabilities))
 	if !sort.StringsAreSorted(job.RequiredCapabilities) {
@@ -589,29 +712,56 @@ func (job Job) Validate() error {
 				return fmt.Errorf("service %q: %w", name, err)
 			}
 		}
-		if job.ServicesExpression != "" {
-			if len(job.ServicesExpression) > 65536 {
-				return fmt.Errorf("services expression exceeds its size limit")
-			}
-			if err := expression.ValidateServiceMapRuntimeExpression(job.ServicesExpression); err != nil {
-				return err
-			}
+		if len(job.ServicesExpression) > 65536 {
+			return fmt.Errorf("services expression exceeds its size limit")
 		}
 	}
 	if !sort.StringsAreSorted(job.RequiredSecrets) {
 		return fmt.Errorf("job plan required secrets must be sorted")
 	}
+	seenRequiredSecrets := make(map[string]struct{}, len(job.RequiredSecrets))
 	for i, name := range job.RequiredSecrets {
 		if !secretNamePattern.MatchString(name) || i > 0 && job.RequiredSecrets[i-1] == name {
 			return fmt.Errorf("job plan contains invalid or repeated required secret %q", name)
 		}
-		if name == "GITHUB_TOKEN" {
+		if strings.EqualFold(name, "GITHUB_TOKEN") {
 			return fmt.Errorf("job plan must provide GITHUB_TOKEN through the scoped workflow token contract")
 		}
+		normalized := strings.ToUpper(name)
+		if _, exists := seenRequiredSecrets[normalized]; exists {
+			return fmt.Errorf("job plan repeats case-insensitive required secret %q", name)
+		}
+		seenRequiredSecrets[normalized] = struct{}{}
 	}
 	if len(job.RequiredSecrets) != 0 {
 		if _, ok := capabilities["secrets"]; !ok {
 			return fmt.Errorf("job plan required secrets need the secrets capability")
+		}
+	}
+	requiredSecrets := make(map[string]struct{}, len(job.RequiredSecrets))
+	ordinaryAliases := make(map[string]struct{}, max(len(job.RequiredSecrets), len(job.SecretMappings)))
+	for _, name := range job.RequiredSecrets {
+		requiredSecrets[name] = struct{}{}
+		if len(job.SecretMappings) == 0 {
+			ordinaryAliases[strings.ToUpper(name)] = struct{}{}
+		}
+	}
+	for alias, source := range job.SecretMappings {
+		if !secretNamePattern.MatchString(alias) || strings.EqualFold(alias, "GITHUB_TOKEN") || !secretNamePattern.MatchString(source) {
+			return fmt.Errorf("job plan contains invalid secret mapping %q to %q", alias, source)
+		}
+		if _, ok := requiredSecrets[source]; !ok {
+			return fmt.Errorf("job plan secret mapping %q references undeclared source %q", alias, source)
+		}
+		normalized := strings.ToUpper(alias)
+		if _, exists := ordinaryAliases[normalized]; exists {
+			return fmt.Errorf("job plan repeats case-insensitive secret alias %q", alias)
+		}
+		ordinaryAliases[normalized] = struct{}{}
+	}
+	if len(job.SecretMappings) != 0 {
+		if _, ok := capabilities["secrets"]; !ok {
+			return fmt.Errorf("job plan secret mappings need the secrets capability")
 		}
 	}
 	_, workflowTokenCapability := capabilities["provider-token-write"]
@@ -627,6 +777,17 @@ func (job Job) Validate() error {
 		}
 		if err := validateGitHubTokenPermissions(job.GitHubToken.Permissions); err != nil {
 			return err
+		}
+		if !sort.StringsAreSorted(job.GitHubToken.Aliases) {
+			return fmt.Errorf("job plan GitHub token aliases must be sorted")
+		}
+		for i, alias := range job.GitHubToken.Aliases {
+			if !secretNamePattern.MatchString(alias) || strings.EqualFold(alias, "GITHUB_TOKEN") || i > 0 && strings.EqualFold(job.GitHubToken.Aliases[i-1], alias) {
+				return fmt.Errorf("job plan contains invalid or repeated GitHub token alias %q", alias)
+			}
+			if _, exists := ordinaryAliases[strings.ToUpper(alias)]; exists {
+				return fmt.Errorf("job plan GitHub token alias %q overlaps ordinary secret authority", alias)
+			}
 		}
 	}
 	if job.IDTokenPermission != "" && job.IDTokenPermission != "read" && job.IDTokenPermission != "write" {
@@ -739,12 +900,12 @@ func (job Job) Validate() error {
 	if len(job.CallGuards) > MaxCallGuards {
 		return fmt.Errorf("job plan has more than %d reusable-workflow call guards", MaxCallGuards)
 	}
+	if len(job.CallGuards) != len(job.Program.Job.Guards) {
+		return fmt.Errorf("job plan call guard projection does not match normalized program")
+	}
 	for i, guard := range job.CallGuards {
 		if strings.TrimSpace(guard.Condition) == "" || len(guard.Condition) > 65536 {
 			return fmt.Errorf("job plan call guard %d has an invalid condition", i+1)
-		}
-		if err := expression.ValidateCallCondition(guard.Condition); err != nil {
-			return fmt.Errorf("job plan call guard %d condition: %w", i+1, err)
 		}
 		if err := validateInputs(guard.Inputs); err != nil {
 			return fmt.Errorf("job plan call guard %d: %w", i+1, err)
@@ -841,6 +1002,17 @@ func (job Job) Validate() error {
 		}
 	}
 	if len(job.Actions) != 0 || hasStepActions(job.Steps) {
+		for _, lock := range job.Actions {
+			if lock.DockerImage == "" {
+				continue
+			}
+			if _, ok := capabilities["docker"]; !ok {
+				return fmt.Errorf("prebuilt Docker actions require docker capability")
+			}
+			if _, ok := capabilities["network"]; !ok {
+				return fmt.Errorf("prebuilt Docker actions require network capability")
+			}
+		}
 		if err := validateActionLocks(job); err != nil {
 			return err
 		}
@@ -853,7 +1025,7 @@ func validateRemoteWorkflowSource(workflow Workflow) error {
 		return nil
 	}
 	remote := workflow.Remote
-	if remote.Repository == "" || remote.Repository != strings.ToLower(remote.Repository) || len(remote.Repository) > 140 || remote.RequestedRef == "" || len(remote.RequestedRef) > 1024 || !utf8.ValidString(remote.RequestedRef) || hasControl(remote.RequestedRef) || !commitPattern.MatchString(remote.Commit) || !digestPattern.MatchString(remote.SourceDigest) {
+	if remote.Repository == "" || remote.Repository != strings.ToLower(remote.Repository) || len(remote.Repository) > 140 || remote.RequestedRef == "" || len(remote.RequestedRef) > 1024 || !utf8.ValidString(remote.RequestedRef) || hasControl(remote.RequestedRef) || !git.ValidObjectID(remote.Commit) || !digestPattern.MatchString(remote.SourceDigest) {
 		return fmt.Errorf("job plan remote workflow has invalid immutable source provenance")
 	}
 	ref, err := source.Parse(workflow.Path)
@@ -886,6 +1058,83 @@ func validateInputs(inputs map[string]any) error {
 		}
 	}
 	return nil
+}
+
+// GitHub's documented variable limits: variables per scope, bytes per value,
+// and bytes of names and values per scope.
+const (
+	organizationVarsLimit = 1000
+	repositoryVarsLimit   = 500
+	environmentVarsLimit  = 100
+	varValueByteLimit     = 48 << 10
+	varsByteLimit         = 256 << 10
+)
+
+// validateVars bounds one scope of the job's variables by GitHub's limits.
+// Names follow GitHub's case-insensitive identifier rules, and the runtime
+// matches names case-insensitively, so case-colliding names are invalid here.
+func validateVars(scope string, vars map[string]string, limit int) error {
+	if len(vars) > limit {
+		return fmt.Errorf("job plan %s vars exceed their size limit", scope)
+	}
+	names := make(map[string]struct{}, len(vars))
+	total := 0
+	for name, value := range vars {
+		if !secretNamePattern.MatchString(name) {
+			return fmt.Errorf("job plan has invalid %s variable name %q", scope, name)
+		}
+		normalized := strings.ToUpper(name)
+		if _, exists := names[normalized]; exists {
+			return fmt.Errorf("job plan repeats case-insensitive %s variable %q", scope, name)
+		}
+		names[normalized] = struct{}{}
+		if len(value) > varValueByteLimit {
+			return fmt.Errorf("job plan %s variable %q exceeds its size limit", scope, name)
+		}
+		total += len(name) + len(value)
+	}
+	if total > varsByteLimit {
+		return fmt.Errorf("job plan %s vars exceed their size limit", scope)
+	}
+	return nil
+}
+
+// OrganizationVars, RepositoryVars, and EnvironmentVars hold the job's GitHub
+// Actions configuration variables by scope. VarsBeforeEnvironment is the vars
+// context of positions GitHub evaluates before the job's environment applies:
+// reusable-workflow call guards and jobs.<id>.if. Repository variables
+// override organization variables.
+func (job Job) VarsBeforeEnvironment() map[string]string {
+	return MergeVars(job.OrganizationVars, job.RepositoryVars)
+}
+
+// Vars is the vars context of every runner-evaluated position: job env,
+// defaults, outputs, services, steps, and action inputs. Environment
+// variables override repository variables, which override organization
+// variables.
+func (job Job) Vars() map[string]string {
+	return MergeVars(job.OrganizationVars, job.RepositoryVars, job.EnvironmentVars)
+}
+
+// MergeVars lays each later scope over the earlier ones. GitHub variable
+// names are case-insensitive, so an overriding variable replaces a name
+// spelled differently. The result is nil when no scope defines a variable.
+func MergeVars(scopes ...map[string]string) map[string]string {
+	var merged map[string]string
+	for _, scope := range scopes {
+		for name, value := range scope {
+			if merged == nil {
+				merged = map[string]string{}
+			}
+			for existing := range merged {
+				if strings.EqualFold(existing, name) {
+					delete(merged, existing)
+				}
+			}
+			merged[name] = value
+		}
+	}
+	return merged
 }
 
 func validateDeferredInputs(inputs map[string]any, deferred map[string]DeferredInput, dependencies map[string]struct{}) (map[string]struct{}, error) {
@@ -1023,24 +1272,7 @@ func validateServiceContainer(service ServiceContainer, templates bool) error {
 		}
 	}
 	values := append(append(append([]string{service.Image, service.Options, service.Command, service.Entrypoint}, service.Ports...), service.Volumes...), mapStringValues(service.Env)...)
-	if templates {
-		for _, value := range values {
-			if strings.Contains(value, "${{") {
-				if err := expression.ValidateRuntimeTemplate(value); err != nil {
-					return fmt.Errorf("service container has invalid runtime template: %w", err)
-				}
-			}
-		}
-		if service.Credentials != nil {
-			for _, value := range []string{service.Credentials.Username, service.Credentials.Password} {
-				if strings.Contains(value, "${{") {
-					if err := expression.ValidateServiceCredentialTemplate(value); err != nil {
-						return fmt.Errorf("service container has invalid credential template: %w", err)
-					}
-				}
-			}
-		}
-	} else {
+	if !templates {
 		for _, value := range values {
 			if strings.Contains(value, "${{") {
 				return fmt.Errorf("service container retains a runtime template")
@@ -1079,6 +1311,14 @@ func validGitHubRepository(repository string) bool {
 	}
 	parts := strings.Split(repository, "/")
 	return parts[0] != "." && parts[0] != ".." && parts[1] != "." && parts[1] != ".."
+}
+
+func validWorkflowRunPath(value string) bool {
+	if len(value) > 1024 || !utf8.ValidString(value) || hasControl(value) || strings.Contains(value, `\`) {
+		return false
+	}
+	relative := strings.TrimPrefix(value, "./")
+	return relative != "" && relative != "." && !path.IsAbs(relative) && path.Clean(relative) == relative && relative != ".." && !strings.HasPrefix(relative, "../")
 }
 
 // GitHubWorkflowPolicyFilename derives the workflow-policy endpoint filename
@@ -1208,6 +1448,9 @@ func validateActionLocks(job Job) error {
 		if !digestPattern.MatchString(lock.SourceDigest) || len(lock.Children) > 1024 {
 			return fmt.Errorf("action lock %q has invalid digest or too many children", lock.ID)
 		}
+		if lock.DockerImage != "" && !ValidContainerImageReference(lock.DockerImage) {
+			return fmt.Errorf("action lock %q has invalid Docker image", lock.ID)
+		}
 		if err := validateLockIdentity(lock); err != nil {
 			return fmt.Errorf("action lock %q: %w", lock.ID, err)
 		}
@@ -1290,6 +1533,39 @@ func validateActionLocks(job Job) error {
 	if len(reachable) != len(locks) {
 		return fmt.Errorf("job plan contains unused action locks")
 	}
+	for id, action := range job.Program.Actions {
+		lock, ok := locks[id]
+		if !ok || !reachable[id] {
+			return fmt.Errorf("action program %q has no reachable immutable lock", id)
+		}
+		if action.Runtime == "docker" {
+			image, _ := metadata.DockerImageReference(action.Image)
+			if image != lock.DockerImage {
+				return fmt.Errorf("action program %q Docker image does not match its immutable lock", id)
+			}
+		}
+		for i, step := range action.Steps {
+			if step.Invocation == nil {
+				continue
+			}
+			selector, ok := lock.Children[step.Invocation.Uses.Source]
+			if !ok || selector.Lock != step.Invocation.Lock {
+				return fmt.Errorf("action program %q composite step %d does not match its immutable child lock", id, i+1)
+			}
+		}
+	}
+	for _, lock := range job.Actions {
+		id := lock.ID
+		if _, ok := job.Program.Actions[id]; ok {
+			continue
+		}
+		if _, native, err := integration.AdmitNativeAdapter(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit); err != nil {
+			return fmt.Errorf("action lock %q is not an admitted native-adapter release: %w", id, err)
+		} else if native {
+			continue
+		}
+		return fmt.Errorf("reachable action lock %q has no normalized execution program", id)
+	}
 	return nil
 }
 
@@ -1300,7 +1576,7 @@ func validateLockIdentity(lock ActionLock) error {
 			return fmt.Errorf("invalid workspace identity")
 		}
 	case "github":
-		if lock.Repository == "" || len(lock.Repository) > 140 || lock.Repository != strings.ToLower(lock.Repository) || lock.RequestedRef == "" || len(lock.RequestedRef) > 1024 || !utf8.ValidString(lock.RequestedRef) || hasControl(lock.RequestedRef) || !commitPattern.MatchString(lock.Commit) || lock.Path != "" && !cleanActionPath(lock.Path) {
+		if lock.Repository == "" || len(lock.Repository) > 140 || lock.Repository != strings.ToLower(lock.Repository) || lock.RequestedRef == "" || len(lock.RequestedRef) > 1024 || !utf8.ValidString(lock.RequestedRef) || hasControl(lock.RequestedRef) || !git.ValidObjectID(lock.Commit) || lock.Path != "" && !cleanActionPath(lock.Path) {
 			return fmt.Errorf("invalid GitHub identity")
 		}
 		r, err := source.Parse(lock.Repository + "@x")
@@ -1314,8 +1590,8 @@ func validateLockIdentity(lock ActionLock) error {
 }
 
 func validateTopLevelIdentity(uses string, lock ActionLock) error {
-	if strings.HasPrefix(uses, "./") {
-		path := strings.TrimPrefix(uses, "./")
+	if after, ok := strings.CutPrefix(uses, "./"); ok {
+		path := after
 		if lock.Source != "workspace" || path != "" && !cleanActionPath(path) || lock.Path != path {
 			return fmt.Errorf("local action reference does not match lock identity")
 		}
@@ -1329,8 +1605,8 @@ func validateTopLevelIdentity(uses string, lock ActionLock) error {
 }
 
 func validateChildIdentity(parent ActionLock, uses string, child ActionLock) error {
-	if strings.HasPrefix(uses, "./") {
-		path := strings.TrimPrefix(uses, "./")
+	if after, ok := strings.CutPrefix(uses, "./"); ok {
+		path := after
 		if path != "" && !cleanActionPath(path) || child.Source != "workspace" || child.Path != path {
 			return fmt.Errorf("local child does not match workspace action identity")
 		}
@@ -1347,7 +1623,7 @@ func cleanActionPath(value string) bool {
 	if value == "" || len(value) > 1024 || !utf8.ValidString(value) || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || hasControl(value) {
 		return false
 	}
-	for _, segment := range strings.Split(value, "/") {
+	for segment := range strings.SplitSeq(value, "/") {
 		if segment == "" || segment == "." || segment == ".." || len(segment) > 255 {
 			return false
 		}
@@ -1401,10 +1677,5 @@ func validateControlStep(step Step, backgroundIDs map[string]struct{}) error {
 }
 
 func (job Job) HasCapability(name string) bool {
-	for _, capability := range job.RequiredCapabilities {
-		if capability == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(job.RequiredCapabilities, name)
 }

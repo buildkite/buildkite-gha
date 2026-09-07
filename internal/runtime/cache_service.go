@@ -11,7 +11,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
+
+	"github.com/buildkite/buildkite-gha/internal/agentapi"
 )
 
 const (
@@ -45,29 +46,29 @@ type CacheCredentialProvider interface {
 // service. Endpoint and JobToken are runtime connection and authentication
 // material; this provider does not add them to action subprocess environments.
 type AgentCacheConfig struct {
-	Endpoint   string
-	JobID      string
-	JobToken   string
-	ResultsURL string
-	Client     *http.Client
+	Endpoint      string
+	JobID         string
+	JobToken      string
+	ResultsURL    string
+	ClientVersion string
+	Client        *http.Client
 }
 
 // AgentCacheCredentials mints GHAC tokens through Buildkite's job-bound Agent
 // API endpoint.
 type AgentCacheCredentials struct {
 	mintURL    string
-	jobToken   string
 	resultsURL string
-	client     *http.Client
+	agent      *agentapi.Client
 }
 
 func NewAgentCacheCredentials(config AgentCacheConfig) (*AgentCacheCredentials, error) {
-	mintURL, err := agentCacheMintURL(config.Endpoint, config.JobID)
+	agent, err := agentapi.New(agentapi.Config{
+		Endpoint: config.Endpoint, JobID: config.JobID, JobToken: config.JobToken,
+		ClientVersion: config.ClientVersion, HTTPClient: config.Client,
+	}, "cache")
 	if err != nil {
 		return nil, err
-	}
-	if config.JobToken == "" || strings.ContainsAny(config.JobToken, "\r\n") {
-		return nil, fmt.Errorf("cache Agent job token is required")
 	}
 	if config.ResultsURL == "" {
 		config.ResultsURL = defaultCacheResultsURL
@@ -76,17 +77,9 @@ func NewAgentCacheCredentials(config AgentCacheConfig) (*AgentCacheCredentials, 
 	if err != nil {
 		return nil, err
 	}
-	client := config.Client
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
-	}
-	bounded := *client
-	bounded.Jar = nil
-	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	if bounded.Timeout == 0 {
-		bounded.Timeout = 15 * time.Second
-	}
-	return &AgentCacheCredentials{mintURL: mintURL, jobToken: config.JobToken, resultsURL: resultsURL, client: &bounded}, nil
+	return &AgentCacheCredentials{
+		mintURL: agent.URL("ghac_tokens"), resultsURL: resultsURL, agent: agent,
+	}, nil
 }
 
 func (c *AgentCacheCredentials) Credentials(ctx context.Context) (CacheCredentials, error) {
@@ -97,9 +90,7 @@ func (c *AgentCacheCredentials) Credentials(ctx context.Context) (CacheCredentia
 	if err != nil {
 		return CacheCredentials{}, fmt.Errorf("create cache credential request: %w", err)
 	}
-	request.Header.Set("Authorization", "Token "+c.jobToken)
-	request.Header.Set("Accept", "application/json")
-	response, err := c.client.Do(request)
+	response, err := c.agent.Do(request)
 	if err != nil {
 		return CacheCredentials{}, fmt.Errorf("request cache credential: %w", err)
 	}
@@ -132,19 +123,6 @@ func (c *AgentCacheCredentials) Credentials(ctx context.Context) (CacheCredentia
 	return CacheCredentials{ResultsURL: c.resultsURL, Token: body.Token}, nil
 }
 
-func agentCacheMintURL(endpoint, jobID string) (string, error) {
-	if !validBuildkiteJobID(jobID) {
-		return "", fmt.Errorf("cache Agent job ID is required")
-	}
-	u, err := url.Parse(endpoint)
-	if err != nil || !validCredentialServiceURL(u) {
-		return "", fmt.Errorf("safe cache Agent endpoint using HTTPS or loopback HTTP is required")
-	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/ghac_tokens"
-	u.RawPath = ""
-	return u.String(), nil
-}
-
 func normalizeCacheResultsURL(value string) (string, error) {
 	u, err := url.Parse(value)
 	if err != nil || !validCredentialServiceURL(u) || u.Path != "" && u.Path != "/" {
@@ -167,24 +145,6 @@ func validCredentialServiceURL(u *url.URL) bool {
 	}
 	ip := net.ParseIP(u.Hostname())
 	return ip != nil && ip.IsLoopback()
-}
-
-func validBuildkiteJobID(value string) bool {
-	if len(value) != 36 {
-		return false
-	}
-	for index, character := range []byte(value) {
-		if index == 8 || index == 13 || index == 18 || index == 23 {
-			if character != '-' {
-				return false
-			}
-			continue
-		}
-		if character < '0' || character > '9' && character < 'a' || character > 'f' {
-			return false
-		}
-	}
-	return true
 }
 
 func cacheCredentialStatusError(status int) error {
@@ -259,7 +219,7 @@ func applyGitHubServerURLOverride(env map[string]string) {
 	}
 }
 
-func (r Runner) cacheActionEnvironment(ctx context.Context, processor *commandProcessor) (map[string]string, error) {
+func (r Runner) cacheActionEnvironment(ctx context.Context, processor *commandOutputProcessor) (map[string]string, error) {
 	if r.Cache == nil {
 		return nil, fmt.Errorf("cache credential provider is not configured")
 	}

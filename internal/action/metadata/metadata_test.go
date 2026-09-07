@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -65,9 +66,9 @@ func TestValidateDockerEntrypoints(t *testing.T) {
 		ok     bool
 	}{
 		{name: "exact Dockerfile", ok: true},
-		{name: "non Dockerfile image", mutate: func(m *Metadata) { m.Runs.Image = "docker://alpine" }},
+		{name: "invalid image", mutate: func(m *Metadata) { m.Runs.Image = "alpine" }},
 		{name: "entrypoint", mutate: func(m *Metadata) { m.Runs.Entrypoint = "main.sh" }},
-		{name: "args", mutate: func(m *Metadata) { m.Runs.Args = []string{"x"} }},
+		{name: "args", mutate: func(m *Metadata) { m.Runs.Args = []string{"", " --flag "} }, ok: true},
 		{name: "main", mutate: func(m *Metadata) { m.Runs.Main = "main.sh" }},
 		{name: "pre", mutate: func(m *Metadata) { m.Runs.Pre = "pre.sh" }},
 		{name: "pre condition", mutate: func(m *Metadata) { m.Runs.PreIf = "always()" }},
@@ -105,6 +106,101 @@ func TestValidateDockerEntrypoints(t *testing.T) {
 			}
 			if (err == nil) != test.ok {
 				t.Fatalf("validation error = %v, want success %v", err, test.ok)
+			}
+		})
+	}
+}
+
+func TestValidatePrebuiltDockerImage(t *testing.T) {
+	tests := []struct {
+		name       string
+		image      string
+		entrypoint string
+		ok         bool
+	}{
+		{name: "tag", image: "docker://alpine:3.20", ok: true},
+		{name: "digest", image: "docker://busybox@sha256:" + strings.Repeat("a", 64), ok: true},
+		{name: "registry port", image: "docker://registry.example.test:5000/team/action:v1", entrypoint: "/entrypoint.sh", ok: true},
+		{name: "missing prefix", image: "alpine:3.20"},
+		{name: "empty reference", image: "docker://"},
+		{name: "tag expression", image: "docker://alpine:${{ inputs.tag }}"},
+		{name: "invalid digest", image: "docker://busybox@sha256:abc"},
+		{name: "uppercase repository", image: "docker://Owner/action:v1"},
+		{name: "too long", image: "docker://" + strings.Repeat("a", 513)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := Metadata{Runs: Runs{Using: "docker", Image: test.image, Entrypoint: test.entrypoint}}
+			err := m.ValidateEntrypoints(RuntimeDocker)
+			if (err == nil) != test.ok {
+				t.Fatalf("ValidateEntrypoints() error = %v, want success %v", err, test.ok)
+			}
+		})
+	}
+}
+
+func TestLoadDockerArgsRequiresStringSequence(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args string
+		ok   bool
+	}{
+		{name: "ordered strings", args: "[first, '', '  ', '--privileged']", ok: true},
+		{name: "empty sequence", args: "[]", ok: true},
+		{name: "scalar", args: "value"},
+		{name: "number", args: "[1]"},
+		{name: "mapping", args: "{name: value}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeAction(t, root, "Dockerfile", "FROM scratch\n")
+			writeAction(t, root, "action.yml", "runs:\n  using: docker\n  image: Dockerfile\n  args: "+test.args+"\n")
+			action, err := Load(root, ".")
+			if (err == nil) != test.ok {
+				t.Fatalf("Load() error = %v, want success %v", err, test.ok)
+			}
+			if test.ok && test.name == "ordered strings" {
+				want := []string{"first", "", "  ", "--privileged"}
+				if !slices.Equal(action.Runs.Args, want) {
+					t.Fatalf("runs.args = %#v, want %#v", action.Runs.Args, want)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadDockerArgsResolvesAliasesBeforeStringValidation(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		metadata string
+		ok       bool
+	}{
+		{name: "aliased runtime strings", ok: true, metadata: `name: &runtime docker
+runs:
+  using: *runtime
+  image: Dockerfile
+  args: [first, ""]
+`},
+		{name: "aliased runtime number", metadata: `name: &runtime docker
+runs:
+  using: *runtime
+  image: Dockerfile
+  args: [1]
+`},
+		{name: "merged runtime boolean", metadata: `runs:
+  <<: &defaults
+    using: docker
+    image: Dockerfile
+  args: [true]
+`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeAction(t, root, "Dockerfile", "FROM scratch\n")
+			writeAction(t, root, "action.yml", test.metadata)
+			_, err := Load(root, ".")
+			if (err == nil) != test.ok {
+				t.Fatalf("Load() error = %v, want success %v", err, test.ok)
 			}
 		})
 	}

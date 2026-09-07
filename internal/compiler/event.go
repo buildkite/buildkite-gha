@@ -2,7 +2,6 @@ package compiler
 
 import (
 	"bytes"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
+	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
@@ -107,7 +107,7 @@ func validateMergeGroupEvent(ref, sha string, payload map[string]any) error {
 	if !strings.HasPrefix(baseRef, "refs/heads/") || strings.TrimPrefix(baseRef, "refs/heads/") == "" {
 		return fmt.Errorf("merge_group event snapshot requires payload.merge_group.base_ref to be a branch ref")
 	}
-	if !validEventCommit(headSHA) || !validEventCommit(baseSHA) {
+	if !git.ValidObjectID(headSHA) || !git.ValidObjectID(baseSHA) {
 		return fmt.Errorf("merge_group event snapshot requires full lowercase payload.merge_group head and base SHAs")
 	}
 	if ref != headRef || sha != headSHA {
@@ -140,15 +140,10 @@ func validateReleaseEvent(ref, sha string, payload map[string]any) error {
 	if ref != "refs/tags/"+tag {
 		return fmt.Errorf("release event snapshot ref must match payload.release.tag_name")
 	}
-	if !validEventCommit(sha) {
+	if !git.ValidObjectID(sha) {
 		return fmt.Errorf("release event snapshot requires a full lowercase sha")
 	}
 	return nil
-}
-
-func validEventCommit(commit string) bool {
-	decoded, err := hex.DecodeString(commit)
-	return err == nil && len(decoded) == 20 && commit == strings.ToLower(commit)
 }
 
 func compileContext(event Event, vars map[string]string, workflowPath, workflowName string) expression.CompileContext {
@@ -177,9 +172,6 @@ func compileContext(event Event, vars map[string]string, workflowPath, workflowN
 }
 
 func workflowDispatchInputs(parsed *workflow.Workflow, event Event) map[string]any {
-	if event.Event != "workflow_dispatch" && event.Event != "validation" {
-		return nil
-	}
 	var declarations []workflow.DispatchInput
 	for _, trigger := range parsed.Triggers {
 		if trigger.Event == "workflow_dispatch" && trigger.Dispatch != nil {
@@ -187,8 +179,14 @@ func workflowDispatchInputs(parsed *workflow.Workflow, event Event) map[string]a
 			break
 		}
 	}
-	provided, _ := event.Payload["inputs"].(map[string]any)
 	result := make(map[string]any, len(declarations))
+	if event.Event != "workflow_dispatch" && event.Event != "validation" {
+		for _, declaration := range declarations {
+			result[declaration.Name] = zeroInputValue(declaration.Type)
+		}
+		return result
+	}
+	provided, _ := event.Payload["inputs"].(map[string]any)
 	for _, declaration := range declarations {
 		value, ok := provided[declaration.Name]
 		if !ok {

@@ -37,6 +37,62 @@ func TestParseSmokeWorkflowsIntoOwnedModel(t *testing.T) {
 	}
 }
 
+func TestParseRetainsRunNameAndSourceSpan(t *testing.T) {
+	parsed, err := Parse("deploy.yml", []byte("name: Deploy\nrun-name: Deploy ${{ inputs.target }} by @${{ github.actor }}\non: workflow_dispatch\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.RunName != "Deploy ${{ inputs.target }} by @${{ github.actor }}" || parsed.RunNameSpan.Start.Line != 2 || parsed.RunNameSpan.Start.Column == 0 {
+		t.Fatalf("run-name = %q at %#v", parsed.RunName, parsed.RunNameSpan)
+	}
+}
+
+func TestParseOwnsReusableWorkflowSecretDeclarationsAndMappings(t *testing.T) {
+	source := []byte(`on:
+  workflow_call:
+    secrets:
+      Required_Token:
+        required: true
+      optional_token:
+jobs:
+  nested:
+    uses: ./.github/workflows/nested.yml
+    secrets:
+      target_token: ${{ secrets['SOURCE_TOKEN'] }}
+`)
+	parsed, err := Parse("reusable.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.CallSecrets) != 2 || !parsed.CallSecrets["REQUIRED_TOKEN"].Required || parsed.CallSecrets["REQUIRED_TOKEN"].Span.Start.Line != 4 {
+		t.Fatalf("call secret declarations = %#v", parsed.CallSecrets)
+	}
+	mapping := parsed.Jobs[0].Reusable.Secrets["TARGET_TOKEN"]
+	if mapping.Source != "SOURCE_TOKEN" || mapping.Span.Start.Line != 11 {
+		t.Fatalf("call secret mapping = %#v", mapping)
+	}
+}
+
+func TestParseRejectsUnsupportedReusableWorkflowSecretMappings(t *testing.T) {
+	for _, value := range []string{"literal", "${{ vars.SOURCE }}", "${{ secrets[inputs.name] }}", "${{ secrets.A }}-${{ secrets.B }}"} {
+		source := "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    secrets:\n      target: " + value + "\n"
+		if _, err := Parse("caller.yml", []byte(source)); err == nil || !strings.Contains(err.Error(), "secret mapping") {
+			t.Fatalf("Parse(%q) error = %v", value, err)
+		}
+	}
+}
+
+func TestParseRejectsCaseCollidingReusableWorkflowSecretAliases(t *testing.T) {
+	for _, source := range []string{
+		"on:\n  workflow_call:\n    secrets:\n      TOKEN: {}\n      token: {}\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
+		"on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    secrets:\n      TOKEN: ${{ secrets.A }}\n      token: ${{ secrets.B }}\n",
+	} {
+		if _, err := Parse("collision.yml", []byte(source)); err == nil {
+			t.Fatal("Parse() accepted case-colliding secret aliases")
+		}
+	}
+}
+
 func TestParsePreservesEnvironmentVariableCase(t *testing.T) {
 	source := []byte("on: push\nenv:\n  WorkflowValue: workflow\njobs:\n  build:\n    runs-on: ubuntu-latest\n    env:\n      JobValue: job\n    steps:\n      - run: true\n        env:\n          STEP_VALUE: step\n")
 	parsed, err := Parse("env.yml", source)
@@ -83,10 +139,68 @@ func TestParseKeepsWorkflowAndJobExpressionSurfacesSeparate(t *testing.T) {
 	}
 }
 
-func TestParseRejectsGitHubEnvironment(t *testing.T) {
-	_, err := Parse("environment.yml", []byte("on: push\njobs:\n  deploy:\n    environment: production\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
-	if err == nil || !strings.Contains(err.Error(), "GitHub environments and environment secrets are unsupported") {
-		t.Fatalf("Parse() error = %v", err)
+func TestParseGitHubEnvironment(t *testing.T) {
+	parsed, err := Parse("environment.yml", []byte("on: push\njobs:\n  deploy:\n    environment: production\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Jobs[0].Environment != "production" {
+		t.Fatalf("Parse() environment = %q, want %q", parsed.Jobs[0].Environment, "production")
+	}
+
+	// The url is used only for GitHub deployment records, which are never
+	// created, so the mapping form is accepted and the url ignored.
+	parsed, err = Parse("environment.yml", []byte("on: push\njobs:\n  deploy:\n    environment:\n      name: production\n      url: https://example.com\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Jobs[0].Environment != "production" {
+		t.Fatalf("Parse() environment = %q, want %q", parsed.Jobs[0].Environment, "production")
+	}
+
+	for _, test := range []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "expression name",
+			source: "on: push\njobs:\n  deploy:\n    environment: ${{ github.ref_name }}\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "environment names that use expressions are unsupported; use a literal environment name",
+		},
+		{
+			name:   "reusable workflow call",
+			source: "on: push\njobs:\n  deploy:\n    environment: production\n    uses: ./.github/workflows/deploy.yml\n",
+			want:   `"environment" is not available`,
+		},
+		{
+			name:   "blank name",
+			source: "on: push\njobs:\n  deploy:\n    environment: \" \"\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "environment requires a literal name",
+		},
+		{
+			name:   "control characters",
+			source: "on: push\njobs:\n  deploy:\n    environment: \"prod\\nuction\"\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "environment name must be at most 255 characters without control characters",
+		},
+		{
+			name:   "name longer than 255 characters",
+			source: "on: push\njobs:\n  deploy:\n    environment: " + strings.Repeat("e", 256) + "\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "environment name must be at most 255 characters without control characters",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Parse("environment.yml", []byte(test.source)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+
+	// The 255-character limit counts characters, not UTF-8 bytes, matching
+	// GitHub: 255 two-byte characters are 510 bytes and remain valid.
+	multibyte := "on: push\njobs:\n  deploy:\n    environment: " + strings.Repeat("é", 255) + "\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	if _, err := Parse("environment.yml", []byte(multibyte)); err != nil {
+		t.Fatalf("Parse() with a 255-character multibyte environment name failed: %v", err)
 	}
 }
 
@@ -121,23 +235,27 @@ jobs:
 	}
 }
 
-func TestParseExpandsTopLevelReadAllPermissions(t *testing.T) {
-	parsed, err := Parse("permissions.yml", []byte("on: push\npermissions: read-all\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]string{
-		"actions": "read", "artifact-metadata": "read", "attestations": "read", "checks": "read", "contents": "read",
-		"deployments": "read", "discussions": "read", "issues": "read", "packages": "read", "pages": "read",
-		"pull-requests": "read", "security-events": "read", "statuses": "read",
-	}
-	if parsed.Permissions == nil || !reflect.DeepEqual(parsed.Permissions.Scopes, want) {
-		t.Fatalf("workflow permissions = %#v, want %#v", parsed.Permissions, want)
-	}
-	for _, excluded := range []string{"id-token", "models", "repository-projects", "code-quality", "metadata", "vulnerability-alerts"} {
-		if _, ok := parsed.Permissions.Scopes[excluded]; ok {
-			t.Errorf("read-all included excluded scope %q", excluded)
-		}
+func TestParseExpandsTopLevelAllPermissions(t *testing.T) {
+	for _, access := range []string{"read", "write"} {
+		t.Run(access, func(t *testing.T) {
+			parsed, err := Parse("permissions.yml", []byte("on: push\npermissions: "+access+"-all\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{
+				"actions": access, "artifact-metadata": access, "attestations": access, "checks": access, "contents": access,
+				"deployments": access, "discussions": access, "issues": access, "packages": access, "pages": access,
+				"pull-requests": access, "security-events": access, "statuses": access,
+			}
+			if parsed.Permissions == nil || !reflect.DeepEqual(parsed.Permissions.Scopes, want) {
+				t.Fatalf("workflow permissions = %#v, want %#v", parsed.Permissions, want)
+			}
+			for _, excluded := range []string{"id-token", "models", "repository-projects", "code-quality", "metadata", "vulnerability-alerts"} {
+				if _, ok := parsed.Permissions.Scopes[excluded]; ok {
+					t.Errorf("%s-all included excluded scope %q", access, excluded)
+				}
+			}
+		})
 	}
 }
 
@@ -165,8 +283,7 @@ func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
 	for _, test := range []struct {
 		name, declaration, want string
 	}{
-		{name: "write all", declaration: "permissions: write-all\n", want: "permissions.yml:2:14: job \"permissions\": permission aliases are unsupported"},
-		{name: "non-canonical name", declaration: "permissions:\n  pull_requests: write\n", want: "permissions.yml:3:3: job \"permissions\": unsupported permission \"pull_requests\""},
+		{name: "non-canonical name", declaration: "permissions:\n  pull_requests: write\n", want: "permissions.yml:3:3: workflow permissions: unsupported permission \"pull_requests\""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			source := []byte("on: push\n" + test.declaration + "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
@@ -178,14 +295,31 @@ func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
 	}
 }
 
-func TestParseRejectsJobPermissionAliases(t *testing.T) {
-	for _, alias := range []string{"read-all", "write-all"} {
-		t.Run(alias, func(t *testing.T) {
-			source := []byte("on: push\njobs:\n  test:\n    permissions: " + alias + "\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+func TestParseRejectsInvalidPermissionScalars(t *testing.T) {
+	for _, test := range []struct {
+		name, source, want string
+	}{
+		{name: "workflow", source: "on: push\npermissions: write\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n", want: `permissions.yml:2:14: workflow permissions: invalid permissions scalar "write"; use read-all, write-all, or a permissions map`},
+		{name: "job", source: "on: push\njobs:\n  test:\n    permissions: write\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n", want: `permissions.yml:4:18: job "test": invalid permissions scalar "write"; declare each needed permission in a map`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Parse("permissions.yml", []byte(test.source))
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("Parse() error = %q, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestParseRejectsJobPermissionShorthand(t *testing.T) {
+	for _, shorthand := range []string{"read-all", "write-all"} {
+		t.Run(shorthand, func(t *testing.T) {
+			source := []byte("on: push\njobs:\n  publish:\n    permissions: " + shorthand + "\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 			_, err := Parse("permissions.yml", source)
-			want := "permissions.yml:4:18: job \"permissions\": permission aliases are unsupported"
-			if err == nil || !strings.Contains(err.Error(), want) {
-				t.Fatalf("Parse() error = %v, want %q", err, want)
+			access := strings.TrimSuffix(shorthand, "-all")
+			want := `permissions.yml:4:18: permissions: ` + shorthand + ` is unsupported as job-level shorthand. In job "publish", you cannot set separate repository permissions. At the workflow top level, declare each needed repository permission, such as contents: ` + access + ` and pull-requests: ` + access + `. These permissions apply to every job that receives GITHUB_TOKEN. Use permissions: ` + shorthand + ` at the workflow top level only when every supported repository permission should have ` + access + ` access. If you need different repository permissions for individual jobs, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`
+			if err == nil || err.Error() != want {
+				t.Fatalf("Parse() error = %q, want %q", err, want)
 			}
 		})
 	}
@@ -200,6 +334,17 @@ func TestParseOwnsLiteralContainersInDeclarationOrder(t *testing.T) {
 	job := parsed.Jobs[0]
 	if job.Container == nil || job.Container.Image != "node:24" || job.Container.Env["NODE_ENV"] != "test" || len(job.Services) != 2 || job.Services[0].Name != "zed" || job.Services[1].Name != "alpha" || job.Services[1].Container.Image != "registry.example:5000/team/postgres:16" {
 		t.Fatalf("owned containers = %#v / %#v", job.Container, job.Services)
+	}
+}
+
+func TestParseRetainsJobContainerImageExpression(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: ghcr.io/acme/tool:${{ matrix.version }}\n    steps: [{run: true}]\n")
+	parsed, err := Parse("containers.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Jobs[0].Container.Image; got != "ghcr.io/acme/tool:${{ matrix.version }}" {
+		t.Fatalf("container image = %q", got)
 	}
 }
 
@@ -310,147 +455,6 @@ func TestContainerValidationIsScopedAndSourceLocated(t *testing.T) {
 	}
 }
 
-func TestParseOwnsWorkflowAndJobConcurrency(t *testing.T) {
-	source := []byte(`name: concurrency
-on: push
-concurrency:
-  group: workflow-${{ github.ref }}
-  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    concurrency: deploy
-    steps: [{run: true}]
-`)
-	parsed, err := Parse("concurrency.yml", source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if parsed.Concurrency == nil || parsed.Concurrency.Group != "workflow-${{ github.ref }}" || parsed.Concurrency.CancelInProgress || parsed.Concurrency.Span.Start.Line != 4 {
-		t.Fatalf("workflow concurrency = %#v", parsed.Concurrency)
-	}
-	if expr := parsed.Concurrency.CancelInProgressExpression; expr == nil || expr.Text != "${{ startsWith(github.ref, 'refs/pull/') }}" || parsed.Concurrency.CancelInProgressPosition.Line != 5 {
-		t.Fatalf("workflow cancellation expression = %#v at %#v", expr, parsed.Concurrency.CancelInProgressPosition)
-	}
-	if len(parsed.Jobs) != 1 || parsed.Jobs[0].Concurrency == nil || parsed.Jobs[0].Concurrency.Group != "deploy" || parsed.Jobs[0].Concurrency.Span.Start.Line != 9 {
-		t.Fatalf("job concurrency = %#v", parsed.Jobs)
-	}
-}
-
-func TestParseOwnsWorkflowLiteralCancellation(t *testing.T) {
-	for _, test := range []struct {
-		name, source string
-	}{
-		{
-			name:   "lowercase",
-			source: "on: push\nconcurrency:\n  group: deploy\n  cancel-in-progress: true\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
-		},
-		{
-			name:   "uppercase",
-			source: "on: push\nconcurrency:\n  group: deploy\n  cancel-in-progress: TRUE\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
-		},
-		{
-			name:   "alias",
-			source: "on: push\nenv:\n  CANCEL: &cancel TRUE\nconcurrency:\n  group: deploy\n  cancel-in-progress: *cancel\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			parsed, err := Parse("concurrency.yml", []byte(test.source))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if parsed.Concurrency == nil || parsed.Concurrency.Group != "deploy" || !parsed.Concurrency.CancelInProgress {
-				t.Fatalf("workflow concurrency = %#v", parsed.Concurrency)
-			}
-			if position := parsed.Concurrency.CancelInProgressPosition; position.Line == 0 || position.Column == 0 {
-				t.Fatalf("cancellation position = %#v", position)
-			}
-		})
-	}
-}
-
-func TestParseOwnsAliasedConcurrency(t *testing.T) {
-	for _, test := range []struct {
-		name, source string
-		workflow     bool
-	}{
-		{
-			name:     "workflow-key",
-			source:   "on: push\nenv:\n  FIELD: &field concurrency\n*field: deploy\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
-			workflow: true,
-		},
-		{
-			name:   "jobs-and-job-keys",
-			source: "on: push\nenv:\n  JOBS: &jobs jobs\n  FIELD: &field concurrency\n*jobs:\n  test:\n    runs-on: ubuntu-latest\n    *field: deploy\n    steps: [{run: true}]\n",
-		},
-		{
-			name:   "whole-job",
-			source: "on: push\njobs:\n  anchor-holder:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        include:\n          - &shared-job\n            runs-on: ubuntu-latest\n            concurrency: deploy\n            steps:\n              - run: echo ok\n    steps:\n      - run: echo holder\n  test: *shared-job\n",
-		},
-		{
-			name:   "job-id",
-			source: "on: push\nenv:\n  ID: &job-id test\njobs:\n  *job-id:\n    runs-on: ubuntu-latest\n    concurrency: deploy\n    steps: [{run: true}]\n",
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			parsed, err := Parse("concurrency.yml", []byte(test.source))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if test.workflow {
-				if parsed.Concurrency == nil || parsed.Concurrency.Group != "deploy" {
-					t.Fatalf("workflow concurrency = %#v", parsed.Concurrency)
-				}
-				return
-			}
-			found := false
-			for _, job := range parsed.Jobs {
-				if job.ID == "test" && job.Concurrency != nil && job.Concurrency.Group == "deploy" {
-					found = true
-				}
-			}
-			if !found {
-				t.Fatalf("jobs = %#v, want test concurrency group", parsed.Jobs)
-			}
-		})
-	}
-}
-
-func TestParseRetainsJobConcurrencyCancellationWithLocation(t *testing.T) {
-	for _, test := range []struct {
-		name, source string
-		expression   bool
-	}{
-		{
-			name:   "literal",
-			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency: {group: deploy, cancel-in-progress: true}\n    steps: [{run: true}]\n",
-		},
-		{
-			name:   "title-case literal",
-			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency: {group: deploy, cancel-in-progress: True}\n    steps: [{run: true}]\n",
-		},
-		{
-			name:       "expression",
-			source:     "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency:\n      group: deploy\n      cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}\n    steps: [{run: true}]\n",
-			expression: true,
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			parsed, err := Parse("concurrency.yml", []byte(test.source))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(parsed.Jobs) != 1 || parsed.Jobs[0].Concurrency == nil {
-				t.Fatalf("jobs = %#v, want retained concurrency", parsed.Jobs)
-			}
-			concurrency := parsed.Jobs[0].Concurrency
-			if concurrency.CancelInProgress != !test.expression || (concurrency.CancelInProgressExpression != nil) != test.expression || concurrency.CancelInProgressPosition.Line == 0 || concurrency.CancelInProgressPosition.Column == 0 {
-				t.Fatalf("job cancellation = %#v", concurrency)
-			}
-		})
-	}
-}
-
 func TestParseContainerShortForms(t *testing.T) {
 	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: node:24\n    services:\n      redis: redis:7\n      postgres: {image: postgres:16, ports: ['5432:5432/udp']}\n    steps: [{run: true}]\n")
 	parsed, err := Parse("short.yml", source)
@@ -494,159 +498,6 @@ func TestParseRetainsAllYAMLBooleanSpellingsForJobContinueOnError(t *testing.T) 
 			}
 			if parsed.Jobs[0].ContinueOnError != test.want {
 				t.Fatalf("continue-on-error %s = %t, want %t", test.value, parsed.Jobs[0].ContinueOnError, test.want)
-			}
-		})
-	}
-}
-
-func TestParseRetainsConcurrentRuntimeControls(t *testing.T) {
-	source := []byte(`name: concurrent runtime
-on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Background producer
-        id: producer
-        run: echo ok
-        background: true
-        continue-on-error: true
-      - name: Targeted barrier
-        wait: [producer]
-      - name: Full barrier
-        wait-all:
-      - name: Stop producer
-        cancel: producer
-      - parallel:
-          - name: Parallel shell
-            run: echo shell
-            env:
-              MEMBER: shell
-          - id: parallel-action
-            uses: ./action
-            with:
-              Message: hello
-`)
-	parsed, err := Parse("workflow.yml", source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	steps := parsed.Jobs[0].Steps
-	if len(steps) != 7 {
-		t.Fatalf("steps = %#v, want seven lowered steps", steps)
-	}
-	if steps[0].Kind != "run" || !steps[0].Background || steps[0].ID != "producer" || !steps[0].ContinueOnError {
-		t.Fatalf("background step = %#v", steps[0])
-	}
-	if steps[1].Kind != "wait" || len(steps[1].Targets) != 1 || steps[1].Targets[0] != "producer" || steps[1].ContinueOnError {
-		t.Fatalf("targeted wait = %#v", steps[1])
-	}
-	if steps[2].Kind != "wait-all" || len(steps[2].Targets) != 0 {
-		t.Fatalf("wait-all = %#v", steps[2])
-	}
-	if steps[3].Kind != "cancel" || len(steps[3].Targets) != 1 || steps[3].Targets[0] != "producer" {
-		t.Fatalf("cancel = %#v", steps[3])
-	}
-	if steps[4].Kind != "run" || !steps[4].Background || steps[4].ID == "" || steps[4].Env["MEMBER"] != "shell" {
-		t.Fatalf("parallel shell member = %#v", steps[4])
-	}
-	if steps[5].Kind != "uses" || !steps[5].Background || steps[5].ID != "parallel-action" || steps[5].With["message"] != "hello" {
-		t.Fatalf("parallel action member = %#v", steps[5])
-	}
-	if steps[6].Kind != "wait" || len(steps[6].Targets) != 2 || steps[6].Targets[0] != steps[4].ID || steps[6].Targets[1] != steps[5].ID {
-		t.Fatalf("parallel barrier = %#v", steps[6])
-	}
-}
-
-func TestParseParallelMembersRetainEnclosingExpressionContext(t *testing.T) {
-	source := []byte(`on: push
-jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    outputs:
-      artifact: ${{ steps.produce.outputs.artifact }}
-    steps:
-      - id: produce
-        run: echo "artifact=ready" >> "$GITHUB_OUTPUT"
-  test:
-    needs: prepare
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        os: [ubuntu-latest]
-    steps:
-      - id: prior
-        run: echo "ready=true" >> "$GITHUB_OUTPUT"
-      - parallel:
-          - if:  steps.prior.outputs.ready == 'true'
-            env:
-              MATRIX_OS: ${{ matrix.os }}
-              NEED_VALUE: ${{ needs.prepare.outputs.artifact }}
-            run: test "$MATRIX_OS" = ubuntu-latest && test "$NEED_VALUE" = ready
-`)
-	parsed, err := Parse("workflow.yml", source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	steps := parsed.Jobs[1].Steps
-	if len(steps) != 3 || steps[1].If != "steps.prior.outputs.ready == 'true'" || steps[1].IfSpan.Start.Line != 20 || steps[1].IfSpan.Start.Column != 18 || steps[1].Env["MATRIX_OS"] != "${{ matrix.os }}" || steps[1].Env["NEED_VALUE"] != "${{ needs.prepare.outputs.artifact }}" {
-		t.Fatalf("parallel member context expressions = %#v", steps)
-	}
-}
-
-func TestParseParallelOwnsBooleanSpellingsAndDeterministicIDs(t *testing.T) {
-	source := []byte(`on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - parallel:
-          - run: echo one
-            continue-on-error: True
-          - run: echo two
-            continue-on-error: False
-`)
-	parsed, err := Parse("workflow.yml", source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	steps := parsed.Jobs[0].Steps
-	if len(steps) != 3 || steps[0].ID != "__parallel_6_9_1" || steps[1].ID != "__parallel_6_9_2" || steps[2].ID != "__parallel_6_9_wait" {
-		t.Fatalf("parallel ids = %#v", steps)
-	}
-	if !steps[0].ContinueOnError || steps[1].ContinueOnError {
-		t.Fatalf("parallel continue-on-error values = %v, %v", steps[0].ContinueOnError, steps[1].ContinueOnError)
-	}
-	if steps[2].Span.End.Line < steps[1].Span.End.Line {
-		t.Fatalf("parallel barrier span = %#v, final member span = %#v", steps[2].Span, steps[1].Span)
-	}
-}
-
-func TestParseConcurrentControlsRejectInvalidInput(t *testing.T) {
-	tests := []struct {
-		name  string
-		steps string
-		want  string
-	}{
-		{name: "background false", steps: "      - run: true\n        background: false\n", want: "background must be the literal true"},
-		{name: "unknown target", steps: "      - wait: future\n      - id: future\n        run: true\n        background: true\n", want: `wait target "future" is not a prior background step`},
-		{name: "duplicate target", steps: "      - id: work\n        run: true\n        background: true\n      - wait: [work, WORK]\n", want: `wait repeats background step "WORK"`},
-		{name: "conditional control", steps: "      - wait-all:\n        if: always()\n", want: `wait-all control does not support "if"`},
-		{name: "continue-on-error control", steps: "      - wait-all:\n        continue-on-error: true\n", want: `wait-all control does not support "continue-on-error"`},
-		{name: "empty parallel", steps: "      - parallel: []\n", want: "parallel requires a non-empty list"},
-		{name: "nested background", steps: "      - parallel:\n          - run: true\n            background: true\n", want: `parallel member does not support "background"`},
-		{name: "parallel member execution", steps: "      - parallel:\n          - run: true\n            uses: ./action\n", want: "parallel member must declare exactly one"},
-		{name: "parallel outer field", steps: "      - name: group\n        parallel:\n          - run: true\n", want: `parallel control does not support "name"`},
-		{name: "parallel outer fields deterministic", steps: "      - name: group\n        id: group\n        parallel:\n          - run: true\n", want: `parallel control does not support "id"`},
-		{name: "parallel docker overrides", steps: "      - parallel:\n          - uses: docker://example/image\n            with:\n              Entrypoint: /bin/sh\n", want: "unsupported entrypoint or args overrides"},
-		{name: "unmatched actionlint error", steps: "      - run: true\n        background: true\n        unexpected: true\n", want: `unexpected key "unexpected"`},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			source := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n" + test.steps
-			_, err := Parse("workflow.yml", []byte(source))
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("Parse() error = %v, want %q", err, test.want)
 			}
 		})
 	}
@@ -709,6 +560,30 @@ jobs:
 	}
 	if matrix.IncludeExpression.Span.Start.Line != 8 || matrix.IncludeExpression.Span.Start.Column != 18 {
 		t.Fatalf("matrix include expression span = %#v", matrix.IncludeExpression.Span)
+	}
+}
+
+func TestParseRetainsMatrixExcludeExpression(t *testing.T) {
+	parsed, err := Parse("matrix.yml", []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        exclude: ${{ fromJSON(vars.EXCLUDE) }}
+    steps:
+      - run: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	matrix := parsed.Jobs[0].Matrix
+	if matrix == nil || matrix.ExcludeExpression == nil || matrix.ExcludeExpression.Text != "${{ fromJSON(vars.EXCLUDE) }}" {
+		t.Fatalf("matrix exclude expression = %#v", matrix)
+	}
+	if matrix.ExcludeExpression.Span.Start.Line != 8 || matrix.ExcludeExpression.Span.Start.Column != 18 {
+		t.Fatalf("matrix exclude expression span = %#v", matrix.ExcludeExpression.Span)
 	}
 }
 

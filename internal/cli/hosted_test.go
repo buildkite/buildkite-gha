@@ -51,6 +51,11 @@ func TestConfiguredLinuxRunnerTargetsDefaultHostedToolchainImages(t *testing.T) 
 	if target.Image != override {
 		t.Fatalf("explicit image = %q, want %q", target.Image, override)
 	}
+
+	canonical, target, err := configuredRunnerTarget("ubuntu-18.04", "legacy-linux", "")
+	if err != nil || canonical != "ubuntu-18.04" || target != (compiler.RunnerTarget{Queue: "legacy-linux", Platform: compiler.PlatformLinuxAMD64}) {
+		t.Fatalf("fallback override = %q, %#v, %v", canonical, target, err)
+	}
 }
 
 func TestHostedRunnerTargetsContainOnlyHostedGuarantees(t *testing.T) {
@@ -483,12 +488,10 @@ func TestActionSourceAuthenticationReusesOneTokenAcrossConcurrentWorkflowResolve
 	var wg sync.WaitGroup
 	errs := make(chan error, resolverCount)
 	for _, resolver := range resolvers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, err := resolver.Resolve(t.Context(), ref)
 			errs <- err
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)
@@ -613,7 +616,7 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	t.Setenv("BUILDKITE_JOB_ID", "")
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "")
 	var warnings bytes.Buffer
-	authentication := importerJobActionSourceAuthentication(&warnings)
+	authentication := importerJobActionSourceAuthentication(&warnings, "test-version")
 	token, err := authentication.token(t.Context(), "buildkite/buildkite-gha")
 	if err != nil || token != "" || authentication.provider != nil || !strings.Contains(warnings.String(), "authentication is unavailable") {
 		t.Fatalf("ambient GitHub token authentication = provider %v, token %q, error %v, warnings %q", authentication.provider != nil, token, err, warnings.String())
@@ -624,7 +627,7 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
-	if authentication := importerJobActionSourceAuthentication(io.Discard); authentication.provider == nil {
+	if authentication := importerJobActionSourceAuthentication(io.Discard, "test-version"); authentication.provider == nil {
 		t.Fatal("job-scoped Agent configuration did not configure action-source authentication")
 	}
 }
@@ -795,7 +798,7 @@ func TestUnprivilegedUploadRejectsDockerWithoutCompilerProvenance(t *testing.T) 
 	}}}}
 	err := validateUnprivilegedBundle(bundle)
 	var finding *compiler.ProcessingFinding
-	want := `Job "unproven-docker" requires Docker without matching compiler provenance. Hosted runs support only verified Dockerfile actions and bounded job or service containers.`
+	want := `Job "unproven-docker" requires Docker without matching compiler provenance. Hosted runs support only verified Docker actions and bounded job or service containers.`
 	if err == nil || !errors.As(err, &finding) || finding.Message != want || finding.Detail != "" {
 		t.Fatalf("validateUnprivilegedBundle() error = %v, want Docker provenance rejection", err)
 	}

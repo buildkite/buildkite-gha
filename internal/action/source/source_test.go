@@ -32,9 +32,28 @@ func TestParse(t *testing.T) {
 			t.Errorf("Parse(%q) = %#v, %v", good, r, err)
 		}
 	}
-	for _, bad := range []string{"", "./local@v1", "docker://image@v1", "owner@v1", "owner/repo", "owner/repo@", "owner//repo@v1", "owner/repo/../x@v1", `owner/repo\x@v1`, "owner/repo@a?b", "owner/repo@${{ x }}", "-owner/repo@v1", "owner/repo.git@v1", "owner/repo@a//b"} {
+	for _, bad := range []string{"", "./local@v1", "owner@v1", "owner/repo", "owner/repo@", "owner//repo@v1", "owner/./x@v1", "owner/../x@v1", "owner/..github/x@v1", "owner/.github/../x@v1", `owner/repo\x@v1`, "owner/repo@a?b", "owner/repo@${{ x }}", "-owner/repo@v1", "owner/repo.git@v1", "owner/repo@a//b"} {
 		if _, err := Parse(bad); err == nil {
 			t.Errorf("Parse(%q) succeeded", bad)
+		}
+	}
+}
+
+func TestParseDotPrefixedRepository(t *testing.T) {
+	raw := "GaloisInc/.github/.github/workflows/haskell-ci.yml@v2"
+	got, err := Parse(raw)
+	want := Reference{
+		Owner: "GaloisInc", Repository: ".github", Path: ".github/workflows/haskell-ci.yml", Ref: "v2", Raw: raw,
+	}
+	if err != nil || got != want {
+		t.Fatalf("Parse(%q) = %#v, %v; want %#v", raw, got, err, want)
+	}
+}
+
+func TestParseExplainsUnsupportedContainerActions(t *testing.T) {
+	for _, reference := range []string{"docker://alpine:3.20", "docker://image@sha256:abc", "DOCKER://alpine:latest"} {
+		if _, err := Parse(reference); err == nil || err.Error() != UnsupportedContainerActionReason {
+			t.Errorf("Parse(%q) error = %v, want %q", reference, err, UnsupportedContainerActionReason)
 		}
 	}
 }
@@ -46,7 +65,7 @@ func TestResolverTagPeelingAndHeaders(t *testing.T) {
 		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
 			t.Error("credentials sent")
 		}
-		if r.Header.Get("User-Agent") == "" || r.Header.Get("Accept") == "" || r.Header.Get("X-GitHub-Api-Version") == "" {
+		if r.Header.Get("User-Agent") != "buildkite-gha/1.2.3" || r.Header.Get("Accept") == "" || r.Header.Get("X-GitHub-Api-Version") == "" {
 			t.Error("required headers missing")
 		}
 		switch {
@@ -59,7 +78,7 @@ func TestResolverTagPeelingAndHeaders(t *testing.T) {
 		}
 	}))
 	defer ts.Close()
-	r, err := NewResolver(&http.Client{}, WithTestEndpoints(ts.URL))
+	r, err := NewResolver(&http.Client{}, WithTestEndpoints(ts.URL), WithUserAgentVersion("1.2.3"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -597,10 +616,13 @@ func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 		if r.URL.Path != "/Owner/Repo/tar.gz/"+testSHA {
 			t.Errorf("URL = %s", r.URL.Path)
 		}
+		if r.Header.Get("User-Agent") != "buildkite-gha/1.2.3" {
+			t.Errorf("User-Agent = %q", r.Header.Get("User-Agent"))
+		}
 		_, _ = w.Write(archive)
 	}))
 	defer ts.Close()
-	store, err := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, ts.URL))
+	store, err := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, ts.URL), WithUserAgentVersion("1.2.3"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -816,7 +838,7 @@ func TestGitRepositorySourceUsesExistingConfigurationOnlyForRepositoryRoots(t *t
 	})
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()
-	option := WithGitRepositorySource(git)
+	option := withGitFixtureSource(git)
 	endpoint := WithTestEndpoints(server.URL, server.URL)
 	resolver, err := NewResolver(server.Client(), endpoint, option)
 	if err != nil {
@@ -877,7 +899,7 @@ func TestGitRepositorySourceReauthorizesAuthenticatedCacheEntries(t *testing.T) 
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()
 	endpoint := WithTestEndpoints(server.URL, server.URL)
-	option := WithGitRepositorySource(git)
+	option := withGitFixtureSource(git)
 	resolver, err := NewResolver(server.Client(), endpoint, option)
 	if err != nil {
 		t.Fatal(err)
@@ -922,7 +944,7 @@ func TestGitRepositorySourceRejectsMutableRefDrift(t *testing.T) {
 	})
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()
-	option := WithGitRepositorySource(git)
+	option := withGitFixtureSource(git)
 	endpoint := WithTestEndpoints(server.URL, server.URL)
 	resolver, err := NewResolver(server.Client(), endpoint, option)
 	if err != nil {
@@ -1004,7 +1026,7 @@ func TestGitRepositorySourcePreservesArchiveLimits(t *testing.T) {
 	})
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()
-	option := WithGitRepositorySource(git)
+	option := withGitFixtureSource(git)
 	limits := WithLimits(1<<20, 128, 128, 100)
 	endpoint := WithTestEndpoints(server.URL, server.URL)
 	resolver, err := NewResolver(server.Client(), endpoint, option, limits)
@@ -1079,7 +1101,7 @@ func TestGitRepositorySourceBoundsFetchPackInput(t *testing.T) {
 	}
 	server := httptest.NewTLSServer(http.NotFoundHandler())
 	defer server.Close()
-	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), WithGitRepositorySource(wrapper), WithLimits(100, 1<<20, 1<<20, 100))
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), withGitFixtureSource(wrapper), WithLimits(100, 1<<20, 1<<20, 100))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1094,6 +1116,38 @@ func TestGitRepositorySourceBoundsFetchPackInput(t *testing.T) {
 	}
 	if !strings.Contains(string(log), "index-pack --max-input-size=100") {
 		t.Fatalf("Git pack input was not bounded: %s", log)
+	}
+}
+
+// withGitFixtureSource enables Git fallback and reopens the file transport
+// that the production policy denies, so fixtures served through the global
+// url.<file>.insteadOf rewrite remain reachable.
+func withGitFixtureSource(executable string) Option {
+	return func(c *config) error {
+		if err := WithGitRepositorySource(executable)(c); err != nil {
+			return err
+		}
+		c.gitTestArgs = []string{"-c", "protocol.file.allow=always"}
+		return nil
+	}
+}
+
+func TestGitRepositorySourceDeniesNonHTTPSTransports(t *testing.T) {
+	git, _, _, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) {
+		t.Fatalf("Resolve() error = %v, want denial when the inherited URL rewrite selects a non-HTTPS transport", err)
 	}
 }
 
@@ -1230,13 +1284,11 @@ func TestStoreConcurrentMaterialize(t *testing.T) {
 	results := make(chan Materialized, 2)
 	errs := make(chan error, 2)
 	for range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			got, err := store.Materialize(t.Context(), resolved)
 			results <- got
 			errs <- err
-		}()
+		})
 	}
 	wg.Wait()
 	close(results)
@@ -1302,7 +1354,7 @@ func TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease(t *testing.T) {
 
 func TestStoreMaintenanceUsesLRUAndCleansOnlyUnlockedPartials(t *testing.T) {
 	root := t.TempDir()
-	repository := filepath.Join(root, "owner", "repo")
+	repository := filepath.Join(root, "owner", ".github")
 	if err := os.MkdirAll(repository, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1374,9 +1426,7 @@ func TestStoreConcurrentBoundedEviction(t *testing.T) {
 	errs := make(chan error, 8)
 	var workers sync.WaitGroup
 	for i := range 8 {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			commit := fmt.Sprintf("%040x", i+1)
 			materialized, err := stores[i%len(stores)].Materialize(t.Context(), Resolved{Reference: ref, Commit: commit})
 			if err == nil {
@@ -1384,7 +1434,7 @@ func TestStoreConcurrentBoundedEviction(t *testing.T) {
 				materialized.Release()
 			}
 			errs <- err
-		}()
+		})
 	}
 	workers.Wait()
 	close(errs)
@@ -1726,15 +1776,13 @@ func TestActionResolutionSnapshotCoalescesConcurrentResolution(t *testing.T) {
 	errs := make(chan error, 8)
 	var workers sync.WaitGroup
 	for range 8 {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			resolved, err := resolver.Resolve(t.Context(), ref)
 			if err == nil && resolved.Commit != testSHA {
 				err = fmt.Errorf("commit = %s", resolved.Commit)
 			}
 			errs <- err
-		}()
+		})
 	}
 	workers.Wait()
 	close(errs)

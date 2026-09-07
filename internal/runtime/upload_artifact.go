@@ -71,7 +71,15 @@ func parseUploadOptions(commit string, inputs map[string]string) (uploadOptions,
 	for k, v := range inputs {
 		values[strings.ToLower(k)] = strings.TrimSpace(v)
 	}
-	o := uploadOptions{name: "artifact", noFiles: "warn", level: 6}
+	o := uploadOptions{
+		name:    "artifact",
+		noFiles: "warn",
+		hidden:  actionintegration.UploadArtifactIncludesHiddenByDefault(commit),
+		level:   6,
+	}
+	if commit == actionintegration.UploadArtifactV1Commit {
+		o.noFiles = "error"
+	}
 	if v, ok := values["name"]; ok {
 		o.name = strings.TrimSpace(v)
 	}
@@ -127,7 +135,7 @@ type archiveFile struct {
 	info       os.FileInfo
 }
 
-func (r *jobRun) runUploadArtifactCommit(ctx context.Context, processor *commandProcessor, workspace, commit string, inputs map[string]string) (result Result, returnErr error) {
+func (r *jobRun) runUploadArtifactCommit(ctx context.Context, processor *commandOutputProcessor, workspace, commit string, inputs map[string]string) (result Result, returnErr error) {
 	result = newResult()
 	defer func() { returnErr = processor.scrubError(returnErr) }()
 	if err := ctx.Err(); err != nil {
@@ -159,7 +167,12 @@ func (r *jobRun) runUploadArtifactCommit(ctx context.Context, processor *command
 	if err != nil {
 		return result, err
 	}
-	if len(files) == 0 {
+	emptyV1Directory := false
+	if commit == actionintegration.UploadArtifactV1Commit {
+		info, statErr := os.Stat(filepath.Join(workspace, filepath.FromSlash(o.paths[0])))
+		emptyV1Directory = statErr == nil && info.IsDir()
+	}
+	if len(files) == 0 && !emptyV1Directory {
 		message := fmt.Sprintf("No files were found with the provided path: %s. No artifacts will be uploaded.", o.searchPath)
 		switch o.noFiles {
 		case "error":
@@ -222,8 +235,10 @@ func (r *jobRun) runUploadArtifactCommit(ctx context.Context, processor *command
 	}
 	// The future download adapter resolves this opaque ID through the result manifest.
 	id := strconv.FormatUint(idNumber, 10)
-	result.Outputs["artifact-id"] = id
-	result.Outputs["artifact-digest"] = digest
+	if actionintegration.UploadArtifactSupportsOutputs(commit) {
+		result.Outputs["artifact-id"] = id
+		result.Outputs["artifact-digest"] = digest
+	}
 	result.Artifacts = []transport.ResultArtifact{{Name: o.name, ID: id, Path: rel, Digest: "sha256:" + digest, Size: size, FileCount: len(files)}}
 	success = true
 	return result, nil
@@ -238,7 +253,7 @@ func verifyUploadZIP(ctx context.Context, path, digest string, size int64) error
 		return err
 	}
 	hash := sha256.New()
-	written, copyErr := io.Copy(hash, io.LimitReader(contextReader{ctx: ctx, reader: file}, transport.MaxResultArtifactSizeBytes+1))
+	written, copyErr := io.Copy(hash, contextReader{ctx: ctx, reader: file})
 	closeErr := file.Close()
 	if copyErr != nil {
 		return errors.Join(copyErr, closeErr)
@@ -262,14 +277,9 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 	}
 	var files []archiveFile
 	var archiveBases []string
-	var bytes int64
 	add := func(disk string, info os.FileInfo) error {
 		if err := ctx.Err(); err != nil {
 			return err
-		}
-		bytes += info.Size()
-		if bytes > transport.MaxResultArtifactSizeBytes {
-			return fmt.Errorf("artifact source bytes exceed 1 GiB")
 		}
 		files = append(files, archiveFile{disk: disk, size: info.Size(), info: info})
 		if len(files) > transport.MaxResultArtifactFileCount {
@@ -439,7 +449,7 @@ func uploadGlobMatches(pattern, relative string) (bool, error) {
 
 func rejectUploadSymlinkComponents(ctx context.Context, workspace, relative string) error {
 	current := workspace
-	for _, component := range strings.Split(filepath.FromSlash(relative), string(filepath.Separator)) {
+	for component := range strings.SplitSeq(filepath.FromSlash(relative), string(filepath.Separator)) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -459,7 +469,7 @@ func rejectUploadSymlinkComponents(ctx context.Context, workspace, relative stri
 }
 
 func hiddenPath(p string) bool {
-	for _, s := range strings.Split(filepath.ToSlash(p), "/") {
+	for s := range strings.SplitSeq(filepath.ToSlash(p), "/") {
 		if strings.HasPrefix(s, ".") && s != "." && s != ".." {
 			return true
 		}
@@ -577,9 +587,6 @@ func writeUploadZIP(ctx context.Context, path, workspace string, files []archive
 	info, e := f.Stat()
 	if e != nil {
 		return "", 0, e
-	}
-	if info.Size() > transport.MaxResultArtifactSizeBytes {
-		return "", 0, fmt.Errorf("final ZIP exceeds 1 GiB")
 	}
 	return hex.EncodeToString(h.Sum(nil)), info.Size(), nil
 }

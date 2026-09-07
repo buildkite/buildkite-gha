@@ -17,6 +17,8 @@ workflow is executable:
    output, environment-file, masking, summary, and post-action events.
 4. `artifact.yml` adds GitHub artifact-action compatibility and verifies one
    payload in both consumer matrix instances.
+5. `hash-files.yml` verifies matched and empty hashes, ordered exclusions, and
+   step condition evaluation against files created by an earlier step.
 
 `manifest.json` is the authoritative, ordered compatibility inventory for
 these workflows and the related behavior-oriented proof fixtures. Every

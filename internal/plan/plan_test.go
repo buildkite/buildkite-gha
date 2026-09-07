@@ -1,15 +1,22 @@
 package plan
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -32,9 +39,76 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 	validateJobPlanSchema(t, source)
 }
 
+func TestCheckoutInputsRoundTripDeterministically(t *testing.T) {
+	job := validJob()
+	lockID := "a-0000000000000001"
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"network", "provider-token-read"}
+	job.Steps = []Step{{
+		ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &ActionSelector{Lock: lockID},
+		With: map[string]string{
+			"filter": "blob:none", "lfs": "true", "path": "sources/application",
+			"sparse-checkout": "src\ndocs\n", "sparse-checkout-cone-mode": "false",
+		},
+	}}
+	job.Actions = []ActionLock{{
+		ID: lockID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7",
+		Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
+	}}
+	synchronizeExecutionProgram(&job)
+	first, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("checkout plan encoding is nondeterministic")
+	}
+	decoded, err := Decode(first)
+	if err != nil || !maps.Equal(decoded.Steps[0].With, job.Steps[0].With) || decoded.Event.Repository != job.Event.Repository {
+		t.Fatalf("decoded checkout plan = %#v, %v", decoded, err)
+	}
+}
+
+func TestEventPayloadArtifactRoundTripAndValidation(t *testing.T) {
+	job := validJob()
+	job.Event.PayloadArtifact = true
+	payload := []byte(`{"action":"opened","pull_request":{"number":42}}`)
+	job.Event.PayloadDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(payload))
+
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJobPlanSchema(t, encoded)
+	decoded, err := Decode(encoded)
+	if err != nil || !decoded.Event.PayloadArtifact || decoded.Event.Payload != nil {
+		t.Fatalf("Decode() payload artifact = %#v, %v", decoded.Event, err)
+	}
+	decodedPayload, err := DecodeEventPayload(payload, job.Event.PayloadDigest)
+	if err != nil || decodedPayload["action"] != "opened" {
+		t.Fatalf("DecodeEventPayload() = %#v, %v", decodedPayload, err)
+	}
+	if _, err := DecodeEventPayload([]byte(`{"action":"closed"}`), job.Event.PayloadDigest); err == nil || !strings.Contains(err.Error(), "does not match its digest") {
+		t.Fatalf("DecodeEventPayload() tampered error = %v", err)
+	}
+	oversized := []byte(`{"body":"` + strings.Repeat("x", MaxEventPayloadBytes) + `"}`)
+	if _, err := DecodeEventPayload(oversized, fmt.Sprintf("sha256:%x", sha256.Sum256(oversized))); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("DecodeEventPayload() oversized error = %v", err)
+	}
+	empty, err := DecodeEventPayload([]byte(`{}`), fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(`{}`))))
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("DecodeEventPayload() empty = %#v, %v", empty, err)
+	}
+}
+
 func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 	job := validJob()
 	job.Workflow.Path = "owner/repository/.github/workflows/ci.yml@v1"
+	job.Workflow.RunPath = "./.github/workflows/caller.yml"
 	job.Workflow.Remote = &RemoteWorkflowSource{
 		Repository: "owner/repository", RequestedRef: "v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
 	}
@@ -59,6 +133,8 @@ func TestRemoteWorkflowSourceRoundTripAndValidation(t *testing.T) {
 		{name: "nested path", edit: func(job *Job) { job.Workflow.Path = "owner/repository/.github/workflows/nested/ci.yml@v1" }, want: "path does not match"},
 		{name: "commit", edit: func(job *Job) { job.Workflow.Remote.Commit = strings.Repeat("A", 40) }, want: "invalid immutable source provenance"},
 		{name: "tree digest", edit: func(job *Job) { job.Workflow.Remote.SourceDigest = "sha256:invalid" }, want: "invalid immutable source provenance"},
+		{name: "absolute run path", edit: func(job *Job) { job.Workflow.RunPath = "/.github/workflows/caller.yml" }, want: "invalid workflow run path"},
+		{name: "escaping run path", edit: func(job *Job) { job.Workflow.RunPath = "../caller.yml" }, want: "invalid workflow run path"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -99,6 +175,7 @@ func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 			},
 		},
 	}}
+	synchronizeExecutionProgram(&job)
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -110,13 +187,89 @@ func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 	}
 
 	job.CallGuards[0].Condition = "matrix.os"
+	job.Program.Job.Guards[0].Condition.Source = "matrix.os"
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), `call condition context "matrix" is unsupported`) {
 		t.Fatalf("Validate() unavailable call context error = %v", err)
 	}
 	job.CallGuards[0].Condition = "true"
+	job.Program.Job.Guards[0].Condition.Source = "true"
 	job.CallGuards[0].NeedSources["prepare"][0].PlanDigest = "sha256:tampered"
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "producer identity") {
 		t.Fatalf("Validate() tampered call producer error = %v", err)
+	}
+}
+
+func TestCallGuardProjectionMustMatchProgram(t *testing.T) {
+	job := validJob()
+	job.CallGuards = []CallGuard{{Condition: "always()"}}
+	synchronizeExecutionProgram(&job)
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	programDocument := document["program"].(map[string]any)
+	programDocument["job"].(map[string]any)["guards"] = []any{}
+	tampered, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(tampered); err == nil || !strings.Contains(err.Error(), "call guard projection") {
+		t.Fatalf("Decode() mismatch error = %v", err)
+	}
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	delete(document, "call_guards")
+	tampered, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(tampered); err == nil || !strings.Contains(err.Error(), "call guard projection") {
+		t.Fatalf("Decode() inverse mismatch error = %v", err)
+	}
+
+	job.Program.Job.Guards = nil
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "call guard projection") {
+		t.Fatalf("Validate() mismatch error = %v", err)
+	}
+}
+
+func TestDecodeRejectsCaseCollidingProgramControls(t *testing.T) {
+	job := validJob()
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	step := document["program"].(map[string]any)["job"].(map[string]any)["steps"].([]any)[0].(map[string]any)
+	step["Continue_On_Error"] = map[string]any{"literal": true}
+	tampered, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(tampered); err == nil || !strings.Contains(err.Error(), "different casing") {
+		t.Fatalf("Decode() collision error = %v", err)
+	}
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	step = document["program"].(map[string]any)["job"].(map[string]any)["steps"].([]any)[0].(map[string]any)
+	control := step["continue_on_error"].(map[string]any)
+	control["literal"] = false
+	control["Literal"] = true
+	tampered, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(tampered); err == nil || !strings.Contains(err.Error(), "different casing") {
+		t.Fatalf("Decode() inner collision error = %v", err)
 	}
 }
 
@@ -212,6 +365,7 @@ func TestValidateRejectsOutOfRangeTimeouts(t *testing.T) {
 func TestJobContinueOnErrorContract(t *testing.T) {
 	job := validJob()
 	job.ContinueOnError = true
+	synchronizeExecutionProgram(&job)
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -230,6 +384,7 @@ func TestStepControlExpressionContract(t *testing.T) {
 	job := validJob()
 	job.Steps[0].ContinueOnErrorExpression = "${{ matrix.experimental }}"
 	job.Steps[0].TimeoutMinutesExpression = "${{ matrix.timeout }}"
+	synchronizeExecutionProgram(&job)
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -243,6 +398,30 @@ func TestStepControlExpressionContract(t *testing.T) {
 		t.Fatalf("decoded step = %#v", step)
 	}
 	validateJobPlanSchema(t, encoded)
+	if strings.Contains(string(encoded), `"file":""`) {
+		t.Fatal("encoded program retains empty location files")
+	}
+
+	schema := compileJobPlanSchema(t)
+	for _, test := range []struct {
+		control string
+		literal any
+	}{
+		{control: "continue_on_error", literal: false},
+		{control: "timeout_minutes", literal: float64(0)},
+	} {
+		var invalid map[string]any
+		if err := json.Unmarshal(encoded, &invalid); err != nil {
+			t.Fatal(err)
+		}
+		program := invalid["program"].(map[string]any)
+		programJob := program["job"].(map[string]any)
+		control := programJob["steps"].([]any)[0].(map[string]any)[test.control].(map[string]any)
+		control["literal"] = test.literal
+		if err := schema.Validate(invalid); err == nil {
+			t.Errorf("schema accepted literal and expression for %s", test.control)
+		}
+	}
 
 	job.Steps[0].ContinueOnError = true
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "both literal and expression continue_on_error") {
@@ -267,7 +446,7 @@ func TestDecodeRejectsBothStepControlWireKeysAtZeroValues(t *testing.T) {
 		{literal: "continue_on_error", expression: "continue_on_error_expreſſion", value: false},
 	} {
 		job := validJob()
-		encoded, err := json.Marshal(job)
+		encoded, err := Encode(job)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -275,9 +454,19 @@ func TestDecodeRejectsBothStepControlWireKeysAtZeroValues(t *testing.T) {
 		if err := json.Unmarshal(encoded, &wire); err != nil {
 			t.Fatal(err)
 		}
-		step := wire["steps"].([]any)[0].(map[string]any)
-		step[test.literal] = test.value
-		step[test.expression] = "${{ true }}"
+		program := wire["program"].(map[string]any)
+		jobProgram := program["job"].(map[string]any)
+		step := jobProgram["steps"].([]any)[0].(map[string]any)
+		controlName := "continue_on_error"
+		if strings.HasPrefix(test.literal, "timeout") {
+			controlName = "timeout_minutes"
+		}
+		control := step[controlName].(map[string]any)
+		control["literal"] = test.value
+		control["expression"] = map[string]any{
+			"source": "${{ true }}", "profile": "step-control", "result": map[bool]string{true: "boolean", false: "number"}[controlName == "continue_on_error"],
+			"provenance": "workflow", "purpose": "expression", "location": map[string]any{"file": "", "field": "", "start": map[string]any{"line": 0, "column": 0}, "end": map[string]any{"line": 0, "column": 0}},
+		}
 		encoded, err = json.Marshal(wire)
 		if err != nil {
 			t.Fatal(err)
@@ -436,13 +625,53 @@ func TestRequiredSecretsRoundTripAsNamesOnly(t *testing.T) {
 	}
 }
 
+func TestSecretMappingsRoundTripAsNamesOnlyAndValidateAuthority(t *testing.T) {
+	job := validJob()
+	job.RequiredCapabilities = []string{"secrets"}
+	job.RequiredSecrets = []string{"ORIGINAL"}
+	job.SecretMappings = map[string]string{"ALIAS": "ORIGINAL"}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJobPlanSchema(t, encoded)
+	if !strings.Contains(string(encoded), `"secret_mappings"`) || !strings.Contains(string(encoded), `"ALIAS": "ORIGINAL"`) || strings.Contains(string(encoded), "secret-value") {
+		t.Fatalf("Encode() = %s", encoded)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil || !reflect.DeepEqual(decoded.SecretMappings, job.SecretMappings) {
+		t.Fatalf("Decode() mappings = %#v, error = %v", decoded.SecretMappings, err)
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*Job)
+		want string
+	}{
+		{name: "missing source", edit: func(j *Job) { j.SecretMappings["ALIAS"] = "OTHER" }, want: "undeclared source"},
+		{name: "reserved alias", edit: func(j *Job) { j.SecretMappings = map[string]string{"GITHUB_TOKEN": "ORIGINAL"} }, want: "invalid secret mapping"},
+		{name: "missing capability", edit: func(j *Job) { j.RequiredCapabilities = nil }, want: "secrets capability"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := job
+			changed.RequiredCapabilities = append([]string(nil), job.RequiredCapabilities...)
+			changed.SecretMappings = maps.Clone(job.SecretMappings)
+			test.edit(&changed)
+			if err := changed.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 	job := validJob()
+	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{{
 		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
-		SourceDigest: "sha256:" + strings.Repeat("a", 64),
+		SourceDigest: "sha256:" + strings.Repeat("a", 64), DockerImage: "busybox@sha256:" + strings.Repeat("b", 64),
 	}}
+	synchronizeExecutionProgram(&job)
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -459,6 +688,49 @@ func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 		t.Fatalf("encoding is not deterministic\nfirst: %s\nsecond: %s", encoded, reencoded)
 	}
 	validateJobPlanSchema(t, encoded)
+
+	for _, test := range []struct {
+		name string
+		edit func(*Job)
+		want string
+	}{
+		{name: "invalid image", edit: func(j *Job) { j.Actions[0].DockerImage = "INVALID" }, want: "invalid Docker image"},
+		{name: "missing docker capability", edit: func(j *Job) { j.RequiredCapabilities = []string{"network"} }, want: "require docker capability"},
+		{name: "missing network capability", edit: func(j *Job) { j.RequiredCapabilities = []string{"docker"} }, want: "require network capability"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := job
+			changed.Actions = append([]ActionLock(nil), job.Actions...)
+			changed.RequiredCapabilities = append([]string(nil), job.RequiredCapabilities...)
+			test.edit(&changed)
+			if err := changed.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestReachableActionLocksRequireProgramsExceptNativeAdapters(t *testing.T) {
+	job := validJob()
+	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./action", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "workspace", Path: "action", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
+	synchronizeExecutionProgram(&job)
+	delete(job.Program.Actions, "a-0000000000000001")
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "has no normalized execution program") {
+		t.Fatalf("Validate() missing action program error = %v", err)
+	}
+
+	job = validJob()
+	job.Steps = []Step{{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v4", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "github", Repository: "actions/checkout", RequestedRef: "v4", Commit: integration.CheckoutV4Commit, SourceDigest: "sha256:" + strings.Repeat("b", 64)}}
+	synchronizeExecutionProgram(&job)
+	if err := job.Validate(); err != nil {
+		t.Fatalf("Validate() native adapter error = %v", err)
+	}
+	job.Actions[0].Commit = strings.Repeat("z", 40)
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "invalid GitHub identity") {
+		t.Fatalf("Validate() malformed native commit error = %v", err)
+	}
 }
 
 func TestRequiresMiseRoundTripAndSchema(t *testing.T) {
@@ -467,9 +739,10 @@ func TestRequiresMiseRoundTripAndSchema(t *testing.T) {
 	job.Steps = []Step{{ID: "native", Kind: "uses", Uses: "actions/checkout@v4", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{{
 		ID: "a-0000000000000001", Source: "github", Repository: "actions/checkout", RequestedRef: "v4",
-		Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
+		Commit: integration.CheckoutV4Commit, SourceDigest: "sha256:" + strings.Repeat("b", 64),
 	}}
 	job.RequiresMise = &requiresMise
+	synchronizeExecutionProgram(&job)
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -485,6 +758,7 @@ func TestRequiresMiseRoundTripAndSchema(t *testing.T) {
 	}
 	job.RequiresMise = &requiresMise
 	job.Steps[0].Action = nil
+	job.Program.Job.Steps[0].Invocation.Lock = ""
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "immutable selector") {
 		t.Fatalf("Validate() unresolved false error = %v", err)
 	}
@@ -521,7 +795,10 @@ func TestRuntimeDistributionRoundTripAndSchema(t *testing.T) {
 		edit func(map[string]any)
 	}{
 		{name: "run step without command", edit: func(document map[string]any) {
-			delete(document["steps"].([]any)[0].(map[string]any), "command")
+			program := document["program"].(map[string]any)
+			programJob := program["job"].(map[string]any)
+			run := programJob["steps"].([]any)[0].(map[string]any)["run"].(map[string]any)
+			delete(run, "command")
 		}},
 		{name: "unknown GitHub permission", edit: func(document map[string]any) {
 			document["required_capabilities"] = []any{"provider-token-write"}
@@ -536,7 +813,14 @@ func TestRuntimeDistributionRoundTripAndSchema(t *testing.T) {
 			}}
 		}},
 		{name: "invalid container", edit: func(document map[string]any) {
-			document["container"] = map[string]any{"image": "INVALID IMAGE", "ports": []any{"65536"}}
+			program := document["program"].(map[string]any)
+			programJob := program["job"].(map[string]any)
+			step := programJob["steps"].([]any)[0].(map[string]any)
+			image := maps.Clone(step["name"].(map[string]any))
+			image["source"] = "INVALID IMAGE"
+			port := maps.Clone(step["name"].(map[string]any))
+			port["source"] = "65536"
+			programJob["container"] = map[string]any{"image": image, "ports": []any{port}}
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -575,6 +859,7 @@ func TestRemoteNestedActionLocks(t *testing.T) {
 		{ID: "a-0000000000000001", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: commit, Path: "root", SourceDigest: digest, Children: map[string]ActionSelector{"owner/repo/root/child@v1": {Lock: "a-0000000000000002"}}},
 		{ID: "a-0000000000000002", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: commit, Path: "root/child", SourceDigest: digest},
 	}
+	synchronizeExecutionProgram(&job)
 	if err := job.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -589,6 +874,7 @@ func TestActionLockValidationMatrix(t *testing.T) {
 		job := validJob()
 		job.Steps = []Step{{ID: "remote", Kind: "uses", Uses: "Owner/Repo/root@v1", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 		job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: strings.Repeat("c", 40), Path: "root", SourceDigest: "sha256:" + strings.Repeat("b", 64)}}
+		synchronizeExecutionProgram(&job)
 		return job
 	}
 	if err := remote().Validate(); err != nil {
@@ -636,6 +922,7 @@ func TestLocalChildPreservesParentIdentity(t *testing.T) {
 		{ID: "a-0000000000000001", Source: "workspace", Path: "root", SourceDigest: digest, Children: map[string]ActionSelector{"./child": {Lock: "a-0000000000000002"}}},
 		{ID: "a-0000000000000002", Source: "workspace", Path: "child", SourceDigest: digest},
 	}
+	synchronizeExecutionProgram(&job)
 	if err := job.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -661,6 +948,7 @@ func TestRemoteCompositeLocalChildUsesWorkspaceIdentity(t *testing.T) {
 		},
 		{ID: "a-0000000000000002", Source: "workspace", Path: "child", SourceDigest: "sha256:" + strings.Repeat("b", 64)},
 	}
+	synchronizeExecutionProgram(&job)
 	if err := job.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -680,6 +968,7 @@ func TestActionSelectorsAndPathsRejectInvalidValues(t *testing.T) {
 		job.RequiresMise = &requiresMise
 		job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 		job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "workspace", Path: "actions/build", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
+		synchronizeExecutionProgram(&job)
 		return job
 	}
 	tests := []struct {
@@ -733,6 +1022,7 @@ func TestWorkspaceRootActionAndSharedChildDAG(t *testing.T) {
 		{ID: "a-0000000000000001", Source: "workspace", SourceDigest: digest, Children: children},
 		{ID: "a-0000000000000002", Source: "github", Repository: "manyletters/repository", RequestedRef: "v1", Commit: strings.Repeat("b", 40), SourceDigest: "sha256:" + strings.Repeat("c", 64)},
 	}
+	synchronizeExecutionProgram(&job)
 	if err := job.Validate(); err != nil {
 		t.Fatalf("workspace-root action with shared-child DAG rejected: %v", err)
 	}
@@ -754,6 +1044,7 @@ func TestActionLockGraphDepthAndCycles(t *testing.T) {
 				job.Actions[i].Children = map[string]ActionSelector{"./child": {Lock: "a-" + leftPadHex(i+1)}}
 			}
 		}
+		synchronizeExecutionProgram(&job)
 		return job
 	}
 	exact := chain(metadata.MaxNestedActionDepth)
@@ -782,7 +1073,7 @@ func leftPadHex(value int) string {
 }
 
 func validJob() Job {
-	return Job{
+	job := Job{
 		Schema:               Schema,
 		Compiler:             Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
 		Runtime:              &Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
@@ -793,6 +1084,114 @@ func validJob() Job {
 		Steps:                []Step{{ID: "step-1", Kind: "run", Command: "true"}},
 		RequiresMise:         new(bool),
 	}
+	program := programFromProjection(job)
+	job.Program = &program
+	return job
+}
+
+func synchronizeExecutionProgram(job *Job) {
+	program := programFromProjection(*job)
+	job.Program = &program
+}
+
+func programFromProjection(job Job) program.Program {
+	result := program.Program{Version: program.Version, Job: program.Job{
+		Condition:       testPlanSite(job.Condition),
+		ContinueOnError: job.ContinueOnError, TimeoutMinutes: job.TimeoutMinutes,
+		Env: testPlanBindings(job.Env),
+		Defaults: program.Defaults{
+			Shell:            testPlanSite(job.DefaultShell),
+			WorkingDirectory: testPlanSite(job.DefaultWorkingDirectory),
+		},
+		Outputs: testPlanBindings(job.Outputs),
+	}}
+	result.Actions = make(map[string]program.Action)
+	for _, lock := range job.Actions {
+		_, native, err := integration.AdmitNativeAdapter(integration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
+		if err == nil && native {
+			continue
+		}
+		action := program.Action{Runtime: "node24", Main: "index.js", PreIf: testActionSite(""), PostIf: testActionSite("")}
+		if lock.DockerImage != "" {
+			action.Runtime, action.Main, action.Image = "docker", "", "docker://"+lock.DockerImage
+		}
+		result.Actions[lock.ID] = action
+	}
+	if len(result.Actions) == 0 {
+		result.Actions = nil
+	}
+	result.Job.Guards = make([]program.Guard, len(job.CallGuards))
+	for i, guard := range job.CallGuards {
+		result.Job.Guards[i].Condition = testPlanSite(guard.Condition)
+	}
+	result.Job.Steps = make([]program.Step, len(job.Steps))
+	for i, step := range job.Steps {
+		projected := program.Step{ID: step.ID, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Env: testPlanBindings(step.Env), Condition: testPlanSite(step.Condition), ContinueOnError: program.BoolControl{Literal: step.ContinueOnError}, TimeoutMinutes: program.NumberControl{Literal: step.TimeoutMinutes}, Name: testPlanSite(step.Name)}
+		if step.ContinueOnErrorExpression != "" {
+			value := testPlanSite(step.ContinueOnErrorExpression)
+			projected.ContinueOnError.Expression = &value
+		}
+		if step.TimeoutMinutesExpression != "" {
+			value := testPlanSite(step.TimeoutMinutesExpression)
+			projected.TimeoutMinutes.Expression = &value
+		}
+		switch step.Kind {
+		case "run":
+			projected.Run = &program.Run{Command: testPlanSite(step.Command), Shell: testPlanSite(step.Shell), WorkingDirectory: testPlanSite(step.WorkingDirectory)}
+		case "uses":
+			projected.Invocation = &program.Invocation{Uses: testPlanSite(step.Uses), With: testPlanBindings(step.With)}
+			if step.Action != nil {
+				projected.Invocation.Lock = step.Action.Lock
+			}
+		}
+		result.Job.Steps[i] = projected
+	}
+	if job.Container != nil {
+		result.Job.Container = &program.Container{Image: testPlanSite(job.Container.Image), Env: testPlanBindings(job.Container.Env), Ports: testPlanSites(job.Container.Ports)}
+	}
+	if job.ServicesExpression != "" {
+		value := testPlanSite(job.ServicesExpression)
+		result.Job.Services.Dynamic = &value
+	}
+	for _, name := range job.ServiceOrder {
+		container := job.Services[name]
+		service := program.Service{Name: name, Container: program.ServiceContainer{Image: testPlanSite(container.Image), Env: testPlanBindings(container.Env), Ports: testPlanSites(container.Ports), Volumes: testPlanSites(container.Volumes), Options: testPlanSite(container.Options), Command: testPlanSite(container.Command), Entrypoint: testPlanSite(container.Entrypoint)}}
+		if container.Credentials != nil {
+			service.Container.Credentials = &program.ContainerCredentials{Username: testPlanSite(container.Credentials.Username), Password: testPlanSite(container.Credentials.Password)}
+		}
+		result.Job.Services.Static = append(result.Job.Services.Static, service)
+	}
+	result.DeriveSiteSemantics()
+	return result
+}
+
+func testPlanSite(source string) program.Site {
+	return program.Site{Source: source}
+}
+
+func testActionSite(source string) program.Site {
+	return program.Site{Source: source}
+}
+
+func testPlanBindings(values map[string]string) []program.Binding {
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]program.Binding, 0, len(names))
+	for _, name := range names {
+		result = append(result, program.Binding{Name: name, Value: testPlanSite(values[name])})
+	}
+	return result
+}
+
+func testPlanSites(values []string) []program.Site {
+	result := make([]program.Site, len(values))
+	for i, value := range values {
+		result[i] = testPlanSite(value)
+	}
+	return result
 }
 
 func compileJobPlanSchema(t *testing.T) *jsonschema.Schema {
@@ -827,6 +1226,69 @@ func validateJobPlanSchema(t *testing.T, encoded []byte) {
 	}
 }
 
+func TestNormalizedRunCommandSchemaLimits(t *testing.T) {
+	encoded, err := Encode(validJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base map[string]any
+	if err := json.Unmarshal(encoded, &base); err != nil {
+		t.Fatal(err)
+	}
+	schema := compileJobPlanSchema(t)
+	validate := func(t *testing.T, document map[string]any, wantValid bool) {
+		t.Helper()
+		err := schema.Validate(document)
+		if wantValid && err != nil {
+			t.Fatalf("schema rejected command boundary: %v", err)
+		}
+		if !wantValid && err == nil {
+			t.Fatal("schema accepted an oversized normalized site")
+		}
+	}
+	clone := func(t *testing.T) map[string]any {
+		t.Helper()
+		encoded, err := json.Marshal(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document map[string]any
+		if err := json.Unmarshal(encoded, &document); err != nil {
+			t.Fatal(err)
+		}
+		return document
+	}
+	workflowCommand := func(document map[string]any) map[string]any {
+		return document["program"].(map[string]any)["job"].(map[string]any)["steps"].([]any)[0].(map[string]any)["run"].(map[string]any)["command"].(map[string]any)
+	}
+
+	document := clone(t)
+	workflowCommand(document)["source"] = strings.Repeat("x", 1048576)
+	validate(t, document, true)
+	document = clone(t)
+	workflowCommand(document)["source"] = strings.Repeat("x", 1048577)
+	validate(t, document, false)
+
+	document = clone(t)
+	site := func(source string) map[string]any {
+		return map[string]any{"source": source, "location": map[string]any{"field": "action"}}
+	}
+	document["program"].(map[string]any)["actions"] = map[string]any{"a-0000000000000001": map[string]any{
+		"runtime": "composite", "pre_if": site(""), "post_if": site(""),
+		"steps": []any{map[string]any{
+			"name": site(""), "shell": site("bash"), "working_directory": site(""), "condition": site(""),
+			"run": map[string]any{"command": site(strings.Repeat("x", 1048576))},
+		}},
+	}}
+	validate(t, document, true)
+	document["program"].(map[string]any)["actions"].(map[string]any)["a-0000000000000001"].(map[string]any)["steps"].([]any)[0].(map[string]any)["run"].(map[string]any)["command"].(map[string]any)["source"] = strings.Repeat("x", 1048577)
+	validate(t, document, false)
+
+	document = clone(t)
+	document["program"].(map[string]any)["job"].(map[string]any)["steps"].([]any)[0].(map[string]any)["name"].(map[string]any)["source"] = strings.Repeat("x", 65537)
+	validate(t, document, false)
+}
+
 func TestContainerContract(t *testing.T) {
 	job := validJob()
 	job.RequiredCapabilities = []string{"docker", "network"}
@@ -844,6 +1306,7 @@ func TestContainerContract(t *testing.T) {
 	job.ServiceOrder = []string{"database"}
 	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "workspace", Path: "actions/build", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
+	synchronizeExecutionProgram(&job)
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -985,7 +1448,7 @@ func TestGitHubWorkflowTokenContractAndSchema(t *testing.T) {
 	job := validJob()
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
-	job.GitHubToken = &GitHubToken{Workflow: "ci.yml", Permissions: map[string]string{"contents": "read", "pull_requests": "write"}}
+	job.GitHubToken = &GitHubToken{Workflow: "ci.yml", Permissions: map[string]string{"contents": "read", "pull_requests": "write"}, Aliases: []string{"TOKEN_ALIAS"}}
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -1041,9 +1504,15 @@ func TestGitHubWorkflowTokenContractAndSchema(t *testing.T) {
 		{name: "missing workflow", edit: func(j *Job) { j.GitHubToken.Workflow = "" }, want: "simple .yml or .yaml filename"},
 		{name: "unknown permission", edit: func(j *Job) { j.GitHubToken.Permissions = map[string]string{"administration": "write"} }, want: "unsupported permission"},
 		{name: "invalid access", edit: func(j *Job) { j.GitHubToken.Permissions = map[string]string{"contents": "admin"} }, want: "unsupported permission"},
+		{name: "reserved alias", edit: func(j *Job) { j.GitHubToken.Aliases = []string{"GITHUB_TOKEN"} }, want: "invalid or repeated GitHub token alias"},
+		{name: "unsorted aliases", edit: func(j *Job) { j.GitHubToken.Aliases = []string{"Z_TOKEN", "A_TOKEN"} }, want: "aliases must be sorted"},
+		{name: "ordinary alias overlap", edit: func(j *Job) {
+			j.RequiredCapabilities = []string{"provider-token-write", "secrets"}
+			j.RequiredSecrets = []string{"TOKEN_ALIAS"}
+		}, want: "overlaps ordinary secret authority"},
 		{name: "reserved ambient secret", edit: func(j *Job) {
 			j.RequiredCapabilities = []string{"provider-token-write", "secrets"}
-			j.RequiredSecrets = []string{"GITHUB_TOKEN"}
+			j.RequiredSecrets = []string{"github_token"}
 		}, want: "scoped workflow token contract"},
 		{name: "other provider", edit: func(j *Job) { j.Event.Provider = "cursor-origin" }, want: "valid github.com event repository"},
 	} {
@@ -1052,10 +1521,8 @@ func TestGitHubWorkflowTokenContractAndSchema(t *testing.T) {
 			changed.RequiredCapabilities = append([]string(nil), job.RequiredCapabilities...)
 			changed.RequiredSecrets = append([]string(nil), job.RequiredSecrets...)
 			permissions := map[string]string{}
-			for name, access := range job.GitHubToken.Permissions {
-				permissions[name] = access
-			}
-			changed.GitHubToken = &GitHubToken{Workflow: job.GitHubToken.Workflow, Permissions: permissions}
+			maps.Copy(permissions, job.GitHubToken.Permissions)
+			changed.GitHubToken = &GitHubToken{Workflow: job.GitHubToken.Workflow, Permissions: permissions, Aliases: append([]string(nil), job.GitHubToken.Aliases...)}
 			test.edit(&changed)
 			if err := changed.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Validate() error = %v, want %q", err, test.want)
@@ -1104,6 +1571,8 @@ func TestContainerPortGrammarMatchesSchema(t *testing.T) {
 			job := validJob()
 			job.RequiredCapabilities = []string{"docker", "network"}
 			job.Container = &Container{Image: "node:24", Ports: []string{test.port}}
+			program := programFromProjection(job)
+			job.Program = &program
 			encoded, err := json.Marshal(job)
 			if err != nil {
 				t.Fatal(err)
@@ -1134,12 +1603,16 @@ func TestContainerImageGrammarMatchesSchema(t *testing.T) {
 		{"localhost:0/private/service", false},
 		{"localhost:65536/private/service", false},
 		{"LOCALHOST:5000/private/service", false},
+		{"${{ matrix.image }}", false},
+		{"${{ secrets.IMAGE }}", false},
 		{"${{ needs.build.outputs.image }}", false},
 	} {
 		t.Run(test.image, func(t *testing.T) {
 			job := validJob()
 			job.RequiredCapabilities = []string{"docker", "network"}
 			job.Container = &Container{Image: test.image}
+			program := programFromProjection(job)
+			job.Program = &program
 			encoded, err := json.Marshal(job)
 			if err != nil {
 				t.Fatal(err)
@@ -1155,4 +1628,92 @@ func TestContainerImageGrammarMatchesSchema(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateBoundsVarsPerScope(t *testing.T) {
+	job := validJob()
+	job.OrganizationVars = manyVars(1000)
+	job.RepositoryVars = map[string]string{"AWS_REGION": "eu-west-1", "empty": "", "CERT_PEM": strings.Repeat("x", 48<<10)}
+	job.EnvironmentVars = map[string]string{"aws_region": "us-east-1"}
+	if err := job.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want GitHub-shaped vars accepted", err)
+	}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded.OrganizationVars, job.OrganizationVars) || !reflect.DeepEqual(decoded.RepositoryVars, job.RepositoryVars) || !reflect.DeepEqual(decoded.EnvironmentVars, job.EnvironmentVars) {
+		t.Fatalf("decoded vars = %#v, %#v, %#v", decoded.OrganizationVars, decoded.RepositoryVars, decoded.EnvironmentVars)
+	}
+	for name, testCase := range map[string]struct {
+		set  func(*Job, map[string]string)
+		vars map[string]string
+		want string
+	}{
+		"invalid name":          {setEnvironmentVars, map[string]string{"AWS-REGION": "x"}, `invalid environment variable name "AWS-REGION"`},
+		"case collision":        {setRepositoryVars, map[string]string{"Region": "a", "REGION": "b"}, "repeats case-insensitive repository variable"},
+		"oversized value":       {setOrganizationVars, map[string]string{"CERT_PEM": strings.Repeat("x", 48<<10+1)}, `organization variable "CERT_PEM" exceeds its size limit`},
+		"oversized total":       {setEnvironmentVars, oversizedVars(), "environment vars exceed their size limit"},
+		"too many environment":  {setEnvironmentVars, manyVars(101), "environment vars exceed their size limit"},
+		"too many repository":   {setRepositoryVars, manyVars(501), "repository vars exceed their size limit"},
+		"too many organization": {setOrganizationVars, manyVars(1001), "organization vars exceed their size limit"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			job := validJob()
+			testCase.set(&job, testCase.vars)
+			if err := job.Validate(); err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, testCase.want)
+			}
+		})
+	}
+}
+
+func setOrganizationVars(job *Job, vars map[string]string) { job.OrganizationVars = vars }
+func setRepositoryVars(job *Job, vars map[string]string)   { job.RepositoryVars = vars }
+func setEnvironmentVars(job *Job, vars map[string]string)  { job.EnvironmentVars = vars }
+
+// TestJobVarsPositions proves the two vars contexts a plan yields: repository
+// variables override organization variables before the environment applies,
+// and environment variables override both in runner-evaluated positions,
+// replacing differently spelled names.
+func TestJobVarsPositions(t *testing.T) {
+	job := Job{
+		OrganizationVars: map[string]string{"REGION": "org", "ORG_ONLY": "org", "tier": "org"},
+		RepositoryVars:   map[string]string{"region": "repo", "REPO_ONLY": "repo"},
+		EnvironmentVars:  map[string]string{"Region": "env", "TIER": "env"},
+	}
+	before := map[string]string{"region": "repo", "ORG_ONLY": "org", "tier": "org", "REPO_ONLY": "repo"}
+	if got := job.VarsBeforeEnvironment(); !reflect.DeepEqual(got, before) {
+		t.Fatalf("VarsBeforeEnvironment() = %#v, want %#v", got, before)
+	}
+	all := map[string]string{"Region": "env", "ORG_ONLY": "org", "TIER": "env", "REPO_ONLY": "repo"}
+	if got := job.Vars(); !reflect.DeepEqual(got, all) {
+		t.Fatalf("Vars() = %#v, want %#v", got, all)
+	}
+	if got := (Job{}).Vars(); got != nil {
+		t.Fatalf("Vars() without variables = %#v, want nil", got)
+	}
+	if got := MergeVars(nil, map[string]string{}); got != nil {
+		t.Fatalf("MergeVars() of empty scopes = %#v, want nil", got)
+	}
+}
+
+func oversizedVars() map[string]string {
+	vars := map[string]string{}
+	for i := range 11 {
+		vars[fmt.Sprintf("VAR_%d", i)] = strings.Repeat("x", 48<<10)
+	}
+	return vars
+}
+
+func manyVars(count int) map[string]string {
+	vars := make(map[string]string, count)
+	for i := range count {
+		vars[fmt.Sprintf("VAR_%d", i)] = "x"
+	}
+	return vars
 }

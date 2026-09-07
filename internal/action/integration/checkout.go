@@ -1,4 +1,4 @@
-//go:generate ../../../scripts/update-checkout-main-commits
+//go:generate go run ./cmd/generate-checkout-profiles
 
 package integration
 
@@ -9,13 +9,13 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/git"
 )
 
 const (
-	// CheckoutV1Commit through CheckoutV7Commit are the current audited release
-	// implementations. CheckoutV1Commit, CheckoutV2Commit, and CheckoutV3Commit
-	// are the final v1, v2, and v3 releases and are admitted exactly rather
-	// than extending the v4-and-later main-branch snapshot.
+	// CheckoutV1Commit through CheckoutV7Commit identify principal release
+	// contracts within the broader frozen upstream snapshots.
 	// CheckoutV7InitialCommit is retained because it is pinned by the OSS
 	// compatibility corpus; its later v7.0.1 changes do not affect the adapter's
 	// bounded exact-event-SHA operation.
@@ -27,6 +27,10 @@ const (
 	CheckoutV6Commit        = "d23441a48e516b6c34aea4fa41551a30e30af803"
 	CheckoutV7InitialCommit = "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
 	CheckoutV7Commit        = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+
+	// CheckoutFallbackContractRelease identifies the stable contract used for
+	// immutable commits absent from the frozen per-commit snapshot.
+	CheckoutFallbackContractRelease = "v7.0.1"
 )
 
 var checkoutCommits = map[string]string{
@@ -40,47 +44,98 @@ var checkoutCommits = map[string]string{
 	CheckoutV7Commit:        "v7.0.1",
 }
 
-// checkoutInputIntroduced records the earliest admitted release generation
-// declaring each version-gated input. Inputs absent from this map are declared
-// by every admitted release.
-var checkoutInputIntroduced = map[string]int{
-	"ssh-key":                   2,
-	"ssh-known-hosts":           2,
-	"ssh-strict":                2,
-	"persist-credentials":       2,
-	"set-safe-directory":        2,
-	"allow-unsafe-pr-checkout":  2,
-	"fetch-tags":                3,
-	"sparse-checkout":           3,
-	"sparse-checkout-cone-mode": 3,
-	"github-server-url":         3,
-	"filter":                    4,
-	"show-progress":             4,
-	"ssh-user":                  4,
+// checkoutContract records the adapter-visible contract declared by one
+// immutable upstream action manifest.
+type checkoutContract struct {
+	// inputs is a sorted, comma-separated set of names declared by the
+	// immutable upstream action manifest.
+	inputs                  string
+	fullHistory             bool
+	refOutput, commitOutput bool
 }
 
-func checkoutGeneration(commit string) int {
-	switch commit {
-	case CheckoutV1Commit:
-		return 1
-	case CheckoutV2Commit:
-		return 2
-	case CheckoutV3Commit:
-		return 3
+type checkoutInputRule struct {
+	valid func(value, repository string) bool
+}
+
+// checkoutInputRules owns the supported value validation for the bounded
+// native adapter. checkoutCommitContracts owns each immutable commit's input
+// declarations.
+var checkoutInputRules = map[string]checkoutInputRule{
+	"repository": {strings.EqualFold},
+	"ref": {func(value, _ string) bool {
+		return value == "" || git.ValidObjectID(value) || validCheckoutBranch(value)
+	}},
+	"fetch-depth": {func(value, _ string) bool {
+		depth, err := strconv.ParseUint(value, 10, 31)
+		return err == nil && depth <= 1<<31-1
+	}},
+	"clean": {func(value, _ string) bool { return actionBoolean(value) }},
+	"lfs":   {func(value, _ string) bool { return actionBoolean(value) }},
+	"submodules": {func(value, _ string) bool {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "", "false", "true", "recursive":
+			return true
+		}
+		return false
+	}},
+	"path": {func(value, _ string) bool {
+		return value == "" || validCheckoutPath(value)
+	}},
+	"ssh-key":                   {func(value, _ string) bool { return value == "" }},
+	"ssh-known-hosts":           {func(value, _ string) bool { return value == "" }},
+	"ssh-strict":                {func(value, _ string) bool { return actionTrue(value) }},
+	"persist-credentials":       {func(value, _ string) bool { return actionFalse(value) }},
+	"set-safe-directory":        {func(value, _ string) bool { return actionTrue(value) }},
+	"allow-unsafe-pr-checkout":  {func(value, _ string) bool { return actionFalse(value) }},
+	"fetch-tags":                {func(value, _ string) bool { return actionBoolean(value) }},
+	"sparse-checkout":           {func(value, _ string) bool { return validSparseCheckout(value) }},
+	"sparse-checkout-cone-mode": {func(value, _ string) bool { return actionBoolean(value) }},
+	"github-server-url": {func(value, _ string) bool {
+		return value == "" || value == "https://github.com"
+	}},
+	"filter":        {func(value, _ string) bool { return validCheckoutFilter(value) }},
+	"show-progress": {func(value, _ string) bool { return actionBoolean(value) }},
+	"ssh-user":      {func(value, _ string) bool { return value == "git" }},
+}
+
+func (c checkoutContract) declaresInput(name string) bool {
+	return strings.Contains(","+c.inputs+",", ","+name+",")
+}
+
+func checkoutContractForCommit(commit string) (checkoutContract, bool) {
+	contract, exact := checkoutCommitContracts[commit]
+	if exact {
+		return contract, true
 	}
-	return 4
+	if !git.ValidObjectID(commit) {
+		return checkoutContract{}, false
+	}
+	return checkoutCommitContracts[CheckoutV7Commit], false
 }
 
-// CheckoutSupportsOutputs reports whether the admitted release declares the
-// ref and commit outputs, added upstream in v4.2.0.
+// CheckoutUsesFallbackContract reports whether an immutable commit is absent
+// from the frozen snapshot and therefore uses the stable fallback contract.
+func CheckoutUsesFallbackContract(commit string) bool {
+	if !git.ValidObjectID(commit) {
+		return false
+	}
+	_, exact := checkoutCommitContracts[commit]
+	return !exact
+}
+
+// CheckoutSupportsOutputs reports whether the selected exact or fallback
+// contract declares the ref and commit outputs, added upstream in v4.2.0.
 func CheckoutSupportsOutputs(commit string) bool {
-	return checkoutGeneration(commit) >= 4
+	contract, _ := checkoutContractForCommit(commit)
+	return contract.refOutput && contract.commitOutput
 }
 
-// CheckoutDefaultsToFullHistory reports whether the admitted release fetched
-// full history when fetch-depth was omitted, as v1's runner plugin did.
+// CheckoutDefaultsToFullHistory reports whether the selected exact or fallback
+// contract fetches full history when fetch-depth is omitted.
 func CheckoutDefaultsToFullHistory(commit string) bool {
-	return commit == CheckoutV1Commit
+	contract, _ := checkoutContractForCommit(commit)
+	return contract.fullHistory
 }
 
 // LegacyCheckoutRelease reports the admitted release label for the v1 and v2
@@ -92,18 +147,20 @@ func LegacyCheckoutRelease(commit string) (string, bool) {
 	return "", false
 }
 
-// validateCheckoutCommit admits known releases and a static snapshot of
-// commits reachable from upstream main. Mutable references are resolved before
-// this check, so changes after the snapshot are rejected until regeneration.
+// validateCheckoutCommit admits immutable commits. Commits captured by the
+// frozen snapshots retain their exact contract; other valid SHAs use the
+// stable fallback contract.
 func validateCheckoutCommit(commit string) error {
-	if _, ok := checkoutCommits[commit]; ok {
-		return nil
-	}
-	if _, ok := checkoutMainCommits[commit]; !ok {
-		supported := append(sortedCheckoutCommits(), "upstream main snapshot ("+checkoutMainSnapshotCommit+")")
-		return versionError("actions/checkout", "native adapter", commit, supported)
+	if !git.ValidObjectID(commit) {
+		return versionError("actions/checkout", "native adapter", commit, supportedCheckoutContracts())
 	}
 	return nil
+}
+
+func supportedCheckoutContracts() []string {
+	return append(sortedCheckoutCommits(),
+		"frozen upstream release and main snapshots (main "+checkoutMainSnapshotCommit+")",
+		"other lowercase 40-hex immutable commits via the "+CheckoutFallbackContractRelease+" fallback contract")
 }
 
 func sortedCheckoutCommits() []string {
@@ -118,9 +175,12 @@ func sortedCheckoutCommits() []string {
 // ValidateCheckoutInputs enforces the release-specific input contract
 // implemented by the tokenless event-repository checkout adapter.
 func ValidateCheckoutInputs(commit string, inputs map[string]string, repository, sha string) error {
+	contract, exact := checkoutContractForCommit(commit)
+	if !exact && !git.ValidObjectID(commit) {
+		return versionError("actions/checkout", "native adapter", commit, supportedCheckoutContracts())
+	}
 	names := sortedNames(inputs)
 	seen := make(map[string]bool, len(names))
-	generation := checkoutGeneration(commit)
 	for _, name := range names {
 		value := inputs[name]
 		normalized := strings.ToLower(name)
@@ -128,80 +188,23 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 			return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
 		}
 		seen[normalized] = true
-		if checkoutInputIntroduced[normalized] > generation {
+		if !contract.declaresInput(normalized) {
 			return fmt.Errorf("explicit input %q is unsupported by this actions/checkout release", name)
 		}
-		switch normalized {
-		case "repository":
-			if strings.EqualFold(value, repository) {
-				continue
-			}
-		case "ref":
-			if value == "" || ValidCheckoutSHA(value) || validCheckoutBranch(value) {
-				continue
-			}
-		case "persist-credentials":
-			if actionFalse(value) {
-				continue
-			}
-		case "fetch-depth":
-			if depth, err := strconv.ParseUint(value, 10, 31); err == nil && depth <= 1<<31-1 {
-				continue
-			}
-		case "clean", "set-safe-directory":
-			if actionTrue(value) {
-				continue
-			}
-		case "lfs", "allow-unsafe-pr-checkout":
-			if actionFalse(value) {
-				continue
-			}
-		case "submodules":
-			switch strings.ToLower(strings.TrimSpace(value)) {
-			case "", "false", "true", "recursive":
-				continue
-			}
-		case "fetch-tags":
-			if actionBoolean(value) {
-				continue
-			}
-		case "show-progress":
-			if actionBoolean(value) {
-				continue
-			}
-		case "path":
-			if value == "" || validCheckoutPath(value) {
-				continue
-			}
-		case "ssh-key", "ssh-known-hosts", "sparse-checkout":
-			if value == "" {
-				continue
-			}
-		case "filter":
-			if value == "" {
-				continue
-			}
-		case "ssh-strict", "sparse-checkout-cone-mode":
-			if actionTrue(value) {
-				continue
-			}
-		case "ssh-user":
-			if value == "git" {
-				continue
-			}
-		case "github-server-url":
-			if value == "" || value == "https://github.com" {
-				continue
-			}
+		rule, ok := checkoutInputRules[normalized]
+		if !ok {
+			return fmt.Errorf("explicit input %q value is unsupported", name)
 		}
-		return fmt.Errorf("explicit input %q value is unsupported", name)
+		if !rule.valid(value, repository) {
+			return fmt.Errorf("explicit input %q value is unsupported", name)
+		}
 	}
 	return nil
 }
 
 func validCheckoutBranch(value string) bool {
-	if strings.HasPrefix(value, "refs/heads/") {
-		value = strings.TrimPrefix(value, "refs/heads/")
+	if after, ok := strings.CutPrefix(value, "refs/heads/"); ok {
+		value = after
 	} else if strings.HasPrefix(value, "refs/") {
 		return false
 	}
@@ -217,7 +220,7 @@ func validCheckoutBranch(value string) bool {
 			return false
 		}
 	}
-	for _, segment := range strings.Split(value, "/") {
+	for segment := range strings.SplitSeq(value, "/") {
 		if segment == "" || segment == "." || segment == ".." || strings.HasPrefix(segment, ".") || strings.HasSuffix(strings.ToLower(segment), ".lock") {
 			return false
 		}
@@ -230,19 +233,34 @@ func validCheckoutBranch(value string) bool {
 	return true
 }
 
-// ValidCheckoutSHA reports whether value is a lowercase 40-hex Git commit ID.
-func ValidCheckoutSHA(value string) bool {
-	if len(value) != 40 {
+func validCheckoutPath(value string) bool {
+	if len(value) > 1024 || value == "." || value == ".." || strings.Contains(value, "\\") || strings.ContainsAny(value, "\r\n\x00") || !filepath.IsLocal(value) {
 		return false
 	}
-	for _, r := range value {
-		if r < '0' || r > '9' && (r < 'a' || r > 'f') {
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." || strings.EqualFold(part, ".git") {
 			return false
 		}
 	}
 	return true
 }
 
-func validCheckoutPath(value string) bool {
-	return len(value) <= 255 && value != "." && value != ".." && !strings.EqualFold(value, ".git") && !strings.Contains(value, "/") && !strings.Contains(value, "\\") && !strings.ContainsAny(value, "\r\n\x00") && filepath.IsLocal(value)
+func validCheckoutFilter(value string) bool {
+	return value == "" || len(value) <= 1024 && !strings.ContainsAny(value, "\r\n\x00")
+}
+
+func validSparseCheckout(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) > 1<<20 || strings.ContainsRune(value, '\x00') {
+		return false
+	}
+	lines := 0
+	for _, line := range strings.Split(value, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines++
+		}
+	}
+	return lines > 0 && lines <= 1000
 }

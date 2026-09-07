@@ -1,4 +1,3 @@
-// Package source fetches immutable GitHub repository source archives.
 package source
 
 import (
@@ -28,6 +27,9 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/git"
+	"github.com/buildkite/buildkite-gha/internal/useragent"
 )
 
 const (
@@ -35,12 +37,13 @@ const (
 	defaultCodeload = "https://codeload.github.com"
 	manifestName    = "manifest-v1.json"
 	mutableRefTTL   = time.Hour
+	// UnsupportedContainerActionReason explains the supported alternative to docker:// actions.
+	UnsupportedContainerActionReason = "docker:// container actions are unsupported; use a Dockerfile action or replace the action with a run step"
 )
 
 var (
 	ownerRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`)
-	repoRE  = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?$`)
-	shaRE   = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	repoRE  = regexp.MustCompile(`^(?:[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?|\.[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,97}[A-Za-z0-9])?)$`)
 )
 
 // Reference is a parsed remote repository reference. RepositoryRoot asks a
@@ -85,7 +88,13 @@ func (m Materialized) Retain(ctx context.Context) (Materialized, error) {
 
 // Parse parses owner/repository[/path]@ref.
 func Parse(raw string) (Reference, error) {
-	if len(raw) == 0 || len(raw) > 2048 || !utf8.ValidString(raw) || strings.ContainsAny(raw, "\\?#") || strings.Contains(raw, "${{") || hasControl(raw) {
+	if len(raw) == 0 || len(raw) > 2048 || !utf8.ValidString(raw) || hasControl(raw) {
+		return Reference{}, fmt.Errorf("invalid action reference")
+	}
+	if strings.HasPrefix(strings.ToLower(raw), "docker://") {
+		return Reference{}, errors.New(UnsupportedContainerActionReason)
+	}
+	if strings.ContainsAny(raw, "\\?#") || strings.Contains(raw, "${{") {
 		return Reference{}, fmt.Errorf("invalid action reference")
 	}
 	at := strings.LastIndexByte(raw, '@')
@@ -93,7 +102,7 @@ func Parse(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("action reference must contain owner/repository@ref")
 	}
 	left, ref := raw[:at], raw[at+1:]
-	if len(ref) > 1024 || strings.HasPrefix(left, "./") || strings.HasPrefix(left, "/") || strings.HasPrefix(strings.ToLower(left), "docker://") {
+	if len(ref) > 1024 || strings.HasPrefix(left, "./") || strings.HasPrefix(left, "/") {
 		return Reference{}, fmt.Errorf("invalid action reference")
 	}
 	parts := strings.Split(left, "/")
@@ -111,7 +120,7 @@ func Parse(raw string) (Reference, error) {
 // PinReference replaces a mutable ref with an immutable commit while retaining
 // the originally requested ref for repository-source authorization.
 func PinReference(ref Reference, commit string) (Reference, error) {
-	if !shaRE.MatchString(commit) {
+	if !git.ValidObjectID(commit) {
 		return Reference{}, fmt.Errorf("commit must be lower-case full SHA")
 	}
 	raw := ref.Owner + "/" + ref.Repository
@@ -160,9 +169,11 @@ type config struct {
 	finalHosts                          map[string]bool
 	credential                          *actionSourceCredential
 	git                                 string
+	gitTestArgs                         []string
 	mutableRefs                         *mutableRefCache
 	resolutionSnapshot                  *actionResolutionSnapshot
 	cacheMaxBytes                       int64
+	userAgent                           string
 	maxCompressed, maxExpanded, maxFile int64
 	maxEntries                          int
 	maxPath, maxSegment                 int
@@ -171,12 +182,20 @@ type config struct {
 func defaults() config {
 	api, _ := url.Parse(defaultAPI)
 	codeload, _ := url.Parse(defaultCodeload)
-	return config{api: api, codeload: codeload, finalHosts: map[string]bool{"codeload.github.com": true}, maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
+	return config{api: api, codeload: codeload, finalHosts: map[string]bool{"codeload.github.com": true}, userAgent: useragent.FromVersion(""), maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
 }
 
 // Option configures trusted process-level limits or test endpoints. Options must
 // never be populated from workflow input.
 type Option func(*config) error
+
+// WithUserAgentVersion identifies the buildkite-gha client making requests.
+func WithUserAgentVersion(version string) Option {
+	return func(c *config) error {
+		c.userAgent = useragent.FromVersion(version)
+		return nil
+	}
+}
 
 // WithGitHubActionSourceTokenProvider authenticates mutable-ref API requests using a
 // credential provisioned at the first such request and cached for this client.
@@ -332,7 +351,7 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 	parsed.RepositoryRoot = ref.RepositoryRoot
 	parsed.authorizationRef = ref.authorizationRef
 	ref = parsed
-	if shaRE.MatchString(ref.Ref) {
+	if git.ValidObjectID(ref.Ref) {
 		return Resolved{Reference: ref, Commit: ref.Ref}, nil
 	}
 	if r.cfg.resolutionSnapshot != nil {
@@ -399,14 +418,14 @@ func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, 
 	if err := r.get(ctx, repoParts(ref, "commits", ref.Ref), &v); err != nil {
 		return Resolved{}, err
 	}
-	if !shaRE.MatchString(v.SHA) {
+	if !git.ValidObjectID(v.SHA) {
 		return Resolved{}, fmt.Errorf("GitHub returned malformed commit SHA")
 	}
 	return Resolved{Reference: ref, Commit: v.SHA}, nil
 }
 func (r *Resolver) peel(ctx context.Context, ref Reference, typ, sha string) (string, error) {
 	for range 5 {
-		if !shaRE.MatchString(sha) {
+		if !git.ValidObjectID(sha) {
 			return "", fmt.Errorf("GitHub returned malformed object SHA")
 		}
 		if typ == "commit" {
@@ -433,13 +452,14 @@ func repoParts(r Reference, suffix ...string) []string {
 }
 func apiURL(base *url.URL, parts ...string) *url.URL {
 	u := *base
-	decoded := strings.TrimSuffix(base.Path, "/")
+	var decoded strings.Builder
+	decoded.WriteString(strings.TrimSuffix(base.Path, "/"))
 	escaped := strings.TrimSuffix(base.EscapedPath(), "/")
 	for _, part := range parts {
-		decoded += "/" + part
+		decoded.WriteString("/" + part)
 		escaped += "/" + url.PathEscape(part)
 	}
-	u.Path, u.RawPath = decoded, escaped
+	u.Path, u.RawPath = decoded.String(), escaped
 	return &u
 }
 func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
@@ -451,7 +471,7 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	if err != nil {
 		return err
 	}
-	setAPIHeaders(req, actionSourceToken(cfg, parts))
+	setAPIHeaders(req, actionSourceToken(cfg, parts), cfg.userAgent)
 	c := *client
 	c.Jar = nil
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -563,8 +583,11 @@ func fetchWithGit(ctx context.Context, cfg config, ref Reference, requestedRef s
 	fetched := false
 	for _, candidate := range refs {
 		limitError := &containsWriter{needle: []byte("pack exceeds maximum allowed size")}
-		err = runGitEnvironment(fetchCtx, cfg.git, repository, io.Discard, limitError, boundedEnvironment,
+		// cfg.gitTestArgs follows gitBaseArgs so tests can reopen the file
+		// transport for local fixtures; production configurations leave it empty.
+		fetchArgs := append(append([]string{}, cfg.gitTestArgs...),
 			"-c", "fetch.unpackLimit=1", "fetch", "--quiet", "--force", "--no-tags", "--depth=1", "--no-recurse-submodules", "--no-auto-maintenance", "--", remote, candidate)
+		err = runGitEnvironment(fetchCtx, cfg.git, repository, io.Discard, limitError, boundedEnvironment, fetchArgs...)
 		if err == nil {
 			fetched = true
 			break
@@ -601,7 +624,7 @@ func gitCommit(ctx context.Context, executable, repository string) (string, erro
 		return "", &NotPublicError{}
 	}
 	commit := strings.TrimSpace(output.String())
-	if !shaRE.MatchString(commit) {
+	if !git.ValidObjectID(commit) {
 		return "", fmt.Errorf("git returned malformed commit SHA")
 	}
 	return commit, nil
@@ -724,8 +747,26 @@ func runGit(ctx context.Context, executable, repository string, stdout io.Writer
 	return runGitEnvironment(ctx, executable, repository, stdout, io.Discard, gitEnvironment(), args...)
 }
 
+// gitBaseArgs pins every Git invocation to the same boundary as the verified
+// checkout adapter: hooks are disabled, only HTTPS may reach the network so an
+// inherited URL rewrite cannot select another transport, redirects are not
+// followed so credentials stay with the requested host, received objects are
+// checked, and the credential helper receives the repository path so Buildkite
+// authorizes the exact repository. Credential helpers themselves are inherited
+// from the importer's Git configuration; nothing here supplies or captures one.
+func gitBaseArgs() []string {
+	return []string{
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "credential.interactive=false",
+		"-c", "credential.useHttpPath=true",
+		"-c", "http.followRedirects=false",
+		"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
+		"-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true",
+	}
+}
+
 func runGitEnvironment(ctx context.Context, executable, repository string, stdout, stderr io.Writer, environment []string, args ...string) error {
-	base := []string{"-c", "core.hooksPath=/dev/null", "-c", "credential.interactive=false"}
+	base := gitBaseArgs()
 	if repository != "" {
 		base = append(base, "-C", repository)
 	}
@@ -767,13 +808,13 @@ func rateLimitError(resp *http.Response, body []byte) error {
 	}
 	return &RateLimitError{reset}
 }
-func setAPIHeaders(r *http.Request, token string) {
+func setAPIHeaders(r *http.Request, token, userAgent string) {
 	r.Header.Del("Authorization")
 	r.Header.Del("Cookie")
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
-	r.Header.Set("User-Agent", "buildkite-gha-action-source/1")
+	r.Header.Set("User-Agent", userAgent)
 	r.Header.Set("Accept", "application/vnd.github+json")
 	r.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 }
@@ -830,7 +871,7 @@ func NewStoreContext(ctx context.Context, root string, client *http.Client, opts
 
 // Materialize returns the verified repository and selected source identity.
 func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialized, error) {
-	if !shaRE.MatchString(resolved.Commit) {
+	if !git.ValidObjectID(resolved.Commit) {
 		return Materialized{}, fmt.Errorf("commit must be lower-case full SHA")
 	}
 	parsed, err := Parse(resolved.Reference.Raw)
@@ -1069,7 +1110,7 @@ func (s *Store) extractGitRepository(ctx context.Context, resolved Resolved, dst
 	if commit != resolved.Commit {
 		return fmt.Errorf("repository source changed while resolving immutable commit")
 	}
-	args := []string{"-c", "core.hooksPath=/dev/null", "-C", repository, "archive", "--format=tar", "--prefix=repository/", commit}
+	args := append(gitBaseArgs(), "-C", repository, "archive", "--format=tar", "--prefix=repository/", commit)
 	cmd := exec.CommandContext(ctx, s.cfg.git, args...)
 	cmd.Env = gitEnvironment()
 	cmd.Stderr = io.Discard
@@ -1102,7 +1143,7 @@ func (s *Store) downloadArchive(ctx context.Context, u *url.URL, dst string) err
 	}
 	req.Header.Del("Authorization")
 	req.Header.Del("Cookie")
-	req.Header.Set("User-Agent", "buildkite-gha-action-source/1")
+	req.Header.Set("User-Agent", s.cfg.userAgent)
 	c := *s.client
 	c.Jar = nil
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -1114,6 +1155,7 @@ func (s *Store) downloadArchive(ctx context.Context, u *url.URL, dst string) err
 		}
 		req.Header.Del("Authorization")
 		req.Header.Del("Cookie")
+		req.Header.Set("User-Agent", s.cfg.userAgent)
 		return nil
 	}
 	resp, e := c.Do(req)
@@ -1439,7 +1481,7 @@ func omittedSymlinkTarget(name, linkname string, size int64, c config) (string, 
 	if target == "." || target == ".." || strings.HasPrefix(target, "../") {
 		return "", fmt.Errorf("archive symlink target escapes root")
 	}
-	for _, part := range strings.Split(target, "/") {
+	for part := range strings.SplitSeq(target, "/") {
 		if part == "" || part == "." || part == ".." || len(part) > c.maxSegment {
 			return "", fmt.Errorf("unsafe archive symlink target")
 		}

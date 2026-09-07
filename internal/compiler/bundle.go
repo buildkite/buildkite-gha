@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"strings"
@@ -39,6 +40,7 @@ type PlanAuthorization struct {
 type Bundle struct {
 	IR                IR
 	Plans             []PlanArtifact
+	EventArtifact     *transport.Artifact
 	Pipeline          []byte
 	GeneratedWorkflow buildkitepipeline.Workflow
 	Processing        ProcessingEvidence
@@ -79,6 +81,10 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	if err != nil {
 		return Bundle{IR: ir}, err
 	}
+	ir, err = reducePlanEventExpressions(ir)
+	if err != nil {
+		return Bundle{IR: ir}, err
+	}
 	options.ActionSource = newMemoizedActionSource(options.ActionSource)
 	evidence, err := validateActionResolutions(ctx, ir, options)
 	bundle := Bundle{IR: ir, Processing: evidence}
@@ -94,6 +100,10 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("compiler produced %d plans and %d authorizations for %d job instances", len(plans), len(authorizations), len(ir.Jobs)))
 	}
 	warnedLegacyCheckout := map[string]bool{}
+	warnedUnknownCheckout := map[string]bool{}
+	warnedUnknownUploadArtifact := map[string]bool{}
+	warnedLegacyUploadArtifact := map[string]bool{}
+	warnedUnknownDownloadArtifact := map[string]bool{}
 	for i, job := range plans {
 		locks := make(map[string]plan.ActionLock, len(job.Actions))
 		for _, lock := range job.Actions {
@@ -103,17 +113,63 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 			if step.Action == nil || stepIndex >= len(ir.Jobs[i].Steps) {
 				continue
 			}
-			lock := locks[step.Action.Lock]
-			descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-			if descriptor.Adapter != actionintegration.AdapterCheckoutExactEventSHA {
-				continue
+			for _, lock := range reachableActionLocks(locks, step.Action.Lock) {
+				descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+				switch descriptor.Adapter {
+				case actionintegration.AdapterCheckoutExactEventSHA:
+					if actionintegration.CheckoutUsesFallbackContract(lock.Commit) {
+						if warnedUnknownCheckout[lock.Commit] {
+							continue
+						}
+						warnedUnknownCheckout[lock.Commit] = true
+						warning := unknownCheckoutCommitWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, lock.Commit)
+						warning.Path = ir.Jobs[i].SourcePath
+						warning.Job = ir.Jobs[i].LogicalJobID
+						warning.Step = stepIndex + 1
+						bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
+						continue
+					}
+					release, legacy := actionintegration.LegacyCheckoutRelease(lock.Commit)
+					if !legacy || warnedLegacyCheckout[release] {
+						continue
+					}
+					warnedLegacyCheckout[release] = true
+					warning := legacyCheckoutWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release, actionintegration.CheckoutDefaultsToFullHistory(lock.Commit))
+					warning.Path = ir.Jobs[i].SourcePath
+					warning.Job = ir.Jobs[i].LogicalJobID
+					warning.Step = stepIndex + 1
+					bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
+				case actionintegration.AdapterUploadArtifactBuildkite:
+					if actionintegration.UploadArtifactUsesFallbackContract(lock.Commit) {
+						if warnedUnknownUploadArtifact[lock.Commit] {
+							continue
+						}
+						warnedUnknownUploadArtifact[lock.Commit] = true
+						warning := unknownUploadArtifactCommitWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, lock.Commit)
+						warning.Path = ir.Jobs[i].SourcePath
+						warning.Job = ir.Jobs[i].LogicalJobID
+						warning.Step = stepIndex + 1
+						bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
+						continue
+					}
+					release, legacy := actionintegration.LegacyUploadArtifactRelease(lock.Commit)
+					if !legacy || warnedLegacyUploadArtifact[release] {
+						continue
+					}
+					warnedLegacyUploadArtifact[release] = true
+					bundle.IR.Warnings = append(bundle.IR.Warnings, legacyUploadArtifactWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release))
+				case actionintegration.AdapterDownloadArtifactBuildkite:
+					if !actionintegration.DownloadArtifactUsesFallbackContract(lock.Commit) || warnedUnknownDownloadArtifact[lock.Commit] {
+						continue
+					}
+					warnedUnknownDownloadArtifact[lock.Commit] = true
+					warning := unknownDownloadArtifactCommitWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, lock.Commit)
+					warning.Path = ir.Jobs[i].SourcePath
+					warning.Job = ir.Jobs[i].LogicalJobID
+					warning.Step = stepIndex + 1
+					bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
+				}
 			}
-			release, legacy := actionintegration.LegacyCheckoutRelease(lock.Commit)
-			if !legacy || warnedLegacyCheckout[release] {
-				continue
-			}
-			warnedLegacyCheckout[release] = true
-			bundle.IR.Warnings = append(bundle.IR.Warnings, legacyCheckoutWarning(ir.Jobs[i].Steps[stepIndex].Span.Start, release))
 		}
 	}
 	warnedReusablePermissions := false
@@ -128,10 +184,15 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		}
 		if (ir.Jobs[i].jobPermissionsIgnored || jobPermissionsIgnored(job.GitHubToken.Permissions, ir.Jobs[i].Permissions)) && !warnedJobPermissions {
 			position := ir.Jobs[i].Source.Start
+			path := ir.Jobs[i].SourcePath
 			if ir.Jobs[i].jobPermissionsIgnored && ir.Jobs[i].reusableCall.Line != 0 {
 				position = ir.Jobs[i].reusableCall
+				path = ir.Workflow.Path
 			}
-			bundle.IR.Warnings = append(bundle.IR.Warnings, jobWorkflowTokenWarning(position))
+			warning := jobWorkflowTokenWarning(position, job.GitHubToken.Permissions)
+			warning.Path = path
+			warning.Job = ir.Jobs[i].LogicalJobID
+			bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
 			warnedJobPermissions = true
 		}
 	}
@@ -160,8 +221,52 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		artifacts[i] = PlanArtifact{Job: job, Digest: digest, Path: planPath, Contents: contents, Authorization: authorizations[i]}
 	}
 	bundle.Plans = artifacts
+	for _, job := range plans {
+		if !job.Event.PayloadArtifact {
+			continue
+		}
+		contents, err := json.Marshal(ir.Event.Payload)
+		if err != nil {
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("encode event payload artifact: %w", err))
+		}
+		if len(contents) > plan.MaxEventPayloadBytes {
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("event payload artifact exceeds the %d-byte limit", plan.MaxEventPayloadBytes))
+		}
+		digest := transport.Digest(contents)
+		if digest != job.Event.PayloadDigest {
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("event payload artifact does not match the plan digest"))
+		}
+		path, err := buildkitepipeline.EventPath(digest)
+		if err != nil {
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", err)
+		}
+		bundle.EventArtifact = &transport.Artifact{Path: path, Digest: digest, Contents: contents}
+		break
+	}
 	bundle.Processing.PlansConstructed = true
 	return bundle, nil
+}
+
+func reachableActionLocks(locks map[string]plan.ActionLock, root string) []plan.ActionLock {
+	var reachable []plan.ActionLock
+	visited := map[string]bool{}
+	var visit func(string)
+	visit = func(id string) {
+		if visited[id] {
+			return
+		}
+		visited[id] = true
+		lock, ok := locks[id]
+		if !ok {
+			return
+		}
+		reachable = append(reachable, lock)
+		for _, uses := range sortedKeys(lock.Children) {
+			visit(lock.Children[uses].Lock)
+		}
+	}
+	visit(root)
+	return reachable
 }
 
 func jobPermissionsIgnored(workflowPermissions, effectivePermissions map[string]string) bool {
@@ -192,9 +297,16 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 			Platform:           ir.Jobs[i].Platform.String(),
 			DistributionDigest: job.RuntimeDistributionDigest(),
 			PlanDigest:         artifact.Digest,
+			EventPayload:       job.Event.PayloadArtifact,
 			Dependencies:       append([]string(nil), ir.Jobs[i].Needs...),
 			RequiresMise:       job.NeedsMise(),
+			Cache:              ir.Jobs[i].Cache,
 			SoftFail:           job.ContinueOnError,
+		}
+		for _, gate := range ir.Jobs[i].ConcurrencyGates {
+			jobs[i].ConcurrencyGates = append(jobs[i].ConcurrencyGates, buildkitepipeline.ConcurrencyGate{
+				ID: gate.ID, Group: buildkiteConcurrencyGroup(ir.Event.Repository, gate.Group),
+			})
 		}
 		if ir.Jobs[i].Platform == PlatformLinuxAMD64 {
 			jobs[i].RuntimeImage = ir.Jobs[i].RuntimeImage
@@ -214,6 +326,24 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 			jobs[i].ConcurrencyGroup = "buildkite-gha/" + workflowScope + "/" + ir.Jobs[i].LogicalJobID
 		}
 	}
+	var approvalGates []buildkitepipeline.ApprovalGate
+	gateKeys := make(map[string]string)
+	for i := range ir.Jobs {
+		if !ir.Jobs[i].EnvironmentApproval {
+			continue
+		}
+		environment := ir.Jobs[i].Environment
+		// GitHub environment names are case-insensitive, so case variants
+		// share one gate; the label keeps the first authored spelling.
+		identity := strings.ToLower(environment)
+		key, exists := gateKeys[identity]
+		if !exists {
+			key = environmentGateKey(options.StepKeyNamespace, environment)
+			gateKeys[identity] = key
+			approvalGates = append(approvalGates, buildkitepipeline.ApprovalGate{Key: key, Environment: environment})
+		}
+		jobs[i].ApprovalGate = key
+	}
 	var concurrencyGate *buildkitepipeline.ConcurrencyGate
 	if ir.Workflow.ConcurrencyGroup != "" {
 		concurrencyGate = &buildkitepipeline.ConcurrencyGate{
@@ -223,12 +353,14 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 	}
 	generatedWorkflow := buildkitepipeline.Workflow{
 		ConcurrencyGate: concurrencyGate,
+		ApprovalGates:   approvalGates,
 		Jobs:            jobs,
 	}
 	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep:    compilerStep,
 		GroupLabel:      options.GroupLabel,
 		ConcurrencyGate: generatedWorkflow.ConcurrencyGate,
+		ApprovalGates:   generatedWorkflow.ApprovalGates,
 		Jobs:            generatedWorkflow.Jobs,
 	})
 	if err != nil {

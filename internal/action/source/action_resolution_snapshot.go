@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/buildkite/buildkite-gha/internal/git"
 )
 
 const actionResolutionSnapshotSchema = "buildkite-gha-action-resolution-snapshot/v1"
@@ -286,7 +288,7 @@ func loadActionResolutionSnapshotEntry(path string, ref Reference) (Resolved, er
 	var entry actionResolutionSnapshotEntry
 	if !decodeActionResolutionJSON(file, &entry) || entry.Schema != actionResolutionSnapshotSchema ||
 		entry.Owner != strings.ToLower(ref.Owner) || entry.Repository != strings.ToLower(ref.Repository) || entry.Ref != ref.Ref ||
-		(entry.Missing == (entry.Commit != "")) || entry.Commit != "" && !shaRE.MatchString(entry.Commit) {
+		(entry.Missing == (entry.Commit != "")) || entry.Commit != "" && !git.ValidObjectID(entry.Commit) {
 		return Resolved{}, fmt.Errorf("action resolution snapshot entry is invalid"), true
 	}
 	if entry.Missing {

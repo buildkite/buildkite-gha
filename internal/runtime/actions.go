@@ -2,17 +2,21 @@ package runtime
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
 
 // ActionMaterializer materializes an already resolved, immutable action source.
@@ -43,6 +47,74 @@ type actionLockResolver struct {
 	workspace    string
 	materializer ActionMaterializer
 	locks        map[string]*actionLockEntry
+}
+
+type prebuiltDockerBackend struct {
+	docker string
+	config string
+	env    map[string]string
+	images map[string]string
+}
+
+func (r *jobRun) preparePrebuiltDockerActions(ctx context.Context, processor *commandOutputProcessor, actions *actionLockResolver) (_ *prebuiltDockerBackend, err error) {
+	images := map[string]string{}
+	for _, lock := range actions.job.Actions {
+		if lock.DockerImage != "" {
+			images[lock.DockerImage] = ""
+		}
+	}
+	if len(images) == 0 {
+		return nil, nil
+	}
+	docker, config, env, err := privateDocker(r.Runner)
+	if err != nil {
+		return nil, err
+	}
+	backend := &prebuiltDockerBackend{docker: docker, config: config, env: env, images: images}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, backend.cleanup())
+		}
+	}()
+	ordered := make([]string, 0, len(images))
+	for image := range images {
+		ordered = append(ordered, image)
+	}
+	sort.Strings(ordered)
+	for _, image := range ordered {
+		if pullErr := r.pullContainerImage(ctx, processor, env, docker, image); pullErr != nil {
+			return nil, fmt.Errorf("pull prebuilt Docker action image %q: %w", image, pullErr)
+		}
+		imageID, inspectErr := inspectDockerImageID(ctx, env, docker, image)
+		if inspectErr != nil {
+			return nil, fmt.Errorf("inspect prebuilt Docker action image %q: %w", image, inspectErr)
+		}
+		images[image] = imageID
+	}
+	return backend, nil
+}
+
+func inspectDockerImageID(ctx context.Context, env map[string]string, docker, image string) (string, error) {
+	output, err := boundedDockerOutput(ctx, env, docker, "image", "inspect", "--format", "{{.Id}}", image)
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(output)
+	digest, ok := strings.CutPrefix(id, "sha256:")
+	if !ok || len(digest) != 64 {
+		return "", fmt.Errorf("docker returned invalid image ID %q", id)
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return "", fmt.Errorf("docker returned invalid image ID %q", id)
+	}
+	return id, nil
+}
+
+func (b *prebuiltDockerBackend) cleanup() error {
+	if b == nil || b.config == "" {
+		return nil
+	}
+	return removeDockerConfig(b.config)
 }
 
 func newActionLockResolver(job plan.Job, workspace string, materializer ActionMaterializer) *actionLockResolver {
@@ -95,7 +167,8 @@ func usesDownloadArtifactAdapter(lock plan.ActionLock) bool {
 }
 
 func usesNativeAdapter(lock plan.ActionLock) bool {
-	return actionintegration.UsesNativeAdapter(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	_, admitted, err := actionintegration.AdmitNativeAdapter(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
+	return err == nil && admitted
 }
 
 func usesCacheService(lock plan.ActionLock) bool {
@@ -121,6 +194,17 @@ func (r *actionLockResolver) source(selector plan.ActionSelector) (_ string, err
 		return "", fmt.Errorf("resolve action lock %q: lock identity is ambiguous", selector.Lock)
 	}
 	return entry.lock.Source, nil
+}
+
+func (r *actionLockResolver) program(selector plan.ActionSelector) *executionprogram.Action {
+	if r == nil {
+		return nil
+	}
+	action, ok := r.job.Program.Actions[selector.Lock]
+	if !ok {
+		return nil
+	}
+	return &action
 }
 
 func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSelector) (_ metadata.Metadata, _ plan.ActionLock, err error) {
@@ -155,6 +239,14 @@ func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSe
 	if err != nil {
 		return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock %q: %w", selector.Lock, err)
 	}
+	planned, ok := r.job.Program.Actions[selector.Lock]
+	if !ok {
+		if usesNativeAdapter(entry.lock) {
+			return m, entry.lock, nil
+		}
+		return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock %q: action program is missing", selector.Lock)
+	}
+	m = planned.Metadata(m.Path, m.SourceRoot)
 	return m, entry.lock, nil
 }
 
@@ -165,33 +257,18 @@ func (r *actionLockResolver) verifyWorkspace(lock plan.ActionLock) (metadata.Met
 	if err := verifyWorkflow(r.job, r.workspace); err != nil {
 		return metadata.Metadata{}, fmt.Errorf("workspace action workflow verification failed: %w", err)
 	}
-	resolved, err := metadata.Load(r.workspace, lock.Path)
+	actionPath, err := verifiedActionPath(r.workspace, lock.Path)
 	if err != nil {
-		return metadata.Metadata{}, fmt.Errorf("resolve workspace action before metadata load: %w", err)
+		return metadata.Metadata{}, fmt.Errorf("resolve workspace action: %w", err)
 	}
-	digest, err := source.DigestTree(resolved.Path)
+	digest, err := source.DigestTree(actionPath)
 	if err != nil {
 		return metadata.Metadata{}, fmt.Errorf("digest workspace action tree before metadata load: %w", err)
 	}
 	if digest != lock.SourceDigest {
 		return metadata.Metadata{}, fmt.Errorf("workspace action digest mismatch: lock binds %s, tree has %s", lock.SourceDigest, digest)
 	}
-	m, err := metadata.Load(r.workspace, lock.Path)
-	if err != nil {
-		return metadata.Metadata{}, fmt.Errorf("load workspace action: %w", err)
-	}
-	if m.Path != resolved.Path {
-		return metadata.Metadata{}, fmt.Errorf("workspace action path mutated during metadata load")
-	}
-	digest, err = source.DigestTree(m.Path)
-	if err != nil {
-		return metadata.Metadata{}, fmt.Errorf("digest workspace action tree after metadata load: %w", err)
-	}
-	if digest != lock.SourceDigest {
-		return metadata.Metadata{}, fmt.Errorf("workspace action mutated during metadata load: lock binds %s, tree has %s", lock.SourceDigest, digest)
-	}
-	m.SourceRoot = m.Path
-	return m, nil
+	return metadata.Metadata{Path: actionPath, SourceRoot: actionPath}, nil
 }
 
 func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLockEntry) (metadata.Metadata, error) {
@@ -213,7 +290,7 @@ func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLock
 	}
 	// Parsing also enforces commit-like reference syntax only structurally, so
 	// insist on a lower-case full SHA independently of RequestedRef.
-	if len(lock.Commit) != 40 || strings.Trim(lock.Commit, "0123456789abcdef") != "" {
+	if !git.ValidObjectID(lock.Commit) {
 		return metadata.Metadata{}, fmt.Errorf("GitHub action commit is not an exact lower-case SHA")
 	}
 	resolved := source.Resolved{Reference: ref, Commit: lock.Commit, SourceDigest: lock.SourceDigest}
@@ -247,25 +324,39 @@ func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLock
 	if digest != lock.SourceDigest {
 		return metadata.Metadata{}, fmt.Errorf("materialized repository tree digest mismatch: lock binds %s, tree has %s", lock.SourceDigest, digest)
 	}
-	m, err := metadata.Load(repositoryRoot, lock.Path)
+	actionPath, err := verifiedActionPath(repositoryRoot, lock.Path)
 	if err != nil {
-		// Admitted legacy releases predate the supported metadata set, and a
-		// native adapter replaces their execution entirely, so the verified
-		// tree digest is the admission boundary rather than the manifest.
 		if usesNativeAdapter(lock) {
 			return metadata.Metadata{SourceRoot: repositoryRoot}, nil
 		}
-		return metadata.Metadata{}, fmt.Errorf("load materialized action: %w", err)
+		return metadata.Metadata{}, fmt.Errorf("resolve materialized action path: %w", err)
 	}
-	digest, err = source.DigestTree(repositoryRoot)
+	return metadata.Metadata{Path: actionPath, SourceRoot: repositoryRoot}, nil
+}
+
+func verifiedActionPath(root, relative string) (string, error) {
+	canonicalRoot, err := filepath.Abs(root)
 	if err != nil {
-		return metadata.Metadata{}, fmt.Errorf("digest materialized repository tree after metadata load: %w", err)
+		return "", err
 	}
-	if digest != lock.SourceDigest {
-		return metadata.Metadata{}, fmt.Errorf("materialized repository tree mutated during metadata load: lock binds %s, tree has %s", lock.SourceDigest, digest)
+	canonicalRoot, err = filepath.EvalSymlinks(canonicalRoot)
+	if err != nil {
+		return "", err
 	}
-	m.SourceRoot = repositoryRoot
-	return m, nil
+	candidate := filepath.Join(canonicalRoot, filepath.FromSlash(relative))
+	logical, err := os.Lstat(candidate)
+	if err != nil || !logical.IsDir() {
+		return "", fmt.Errorf("action path is not a directory")
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(canonicalRoot, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("action path escapes verified source root")
+	}
+	return resolved, nil
 }
 
 func (entry *actionLockEntry) materialize(ctx context.Context, materializer ActionMaterializer, resolved source.Resolved) (source.Materialized, error) {

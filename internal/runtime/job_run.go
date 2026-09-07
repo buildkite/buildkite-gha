@@ -16,7 +16,7 @@ type jobRun struct {
 	job             plan.Job
 	workspace       string
 	callerWorkspace bool
-	processor       *commandProcessor
+	processor       *commandOutputProcessor
 	eval            expression.Context
 	result          JobResult
 	runtimeEnv      map[string]string
@@ -25,6 +25,7 @@ type jobRun struct {
 	supervisor      *backgroundSupervisor
 	prepared        remotePreparations
 	preFailures     map[int]stepExecution
+	reachableSteps  []bool
 	runErr          error
 	hardFailure     bool
 
@@ -33,6 +34,7 @@ type jobRun struct {
 	explicitJobPATH  bool
 	jobContainer     *jobContainerBackend
 	jobDocker        *jobContainerBackend
+	prebuiltDocker   *prebuiltDockerBackend
 	nodeVerification *managedNodeVerification
 	artifactRegistry *artifactRegistry
 	node16Warnings   *node16DeprecationWarnings

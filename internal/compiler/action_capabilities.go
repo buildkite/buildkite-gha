@@ -3,6 +3,7 @@ package compiler
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -39,10 +40,8 @@ func collectActionCapabilities(repositoryRoot, uses string, capabilities map[str
 	if err != nil {
 		return err
 	}
-	for _, ancestor := range stack {
-		if ancestor == action.Path {
-			return fmt.Errorf("local action recursion detected at %q", action.Path)
-		}
+	if slices.Contains(stack, action.Path) {
+		return fmt.Errorf("local action recursion detected at %q", action.Path)
 	}
 	if len(stack) >= metadata.MaxNestedActionDepth {
 		return fmt.Errorf("local action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, action.Path)

@@ -18,6 +18,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 )
 
 // RepositorySource resolves and materializes immutable GitHub repositories.
@@ -79,18 +80,16 @@ type actionNode struct {
 }
 
 type actionCompilation struct {
-	selectors           []plan.ActionSelector
-	locks               []plan.ActionLock
-	capabilities        []string
-	requiredSecrets     []string
-	githubTokenActions  []string
-	requiresMise        bool
-	requiresGitHubToken bool
-}
-
-type actionRequirements struct {
-	githubToken     bool
-	requiredSecrets map[string]bool
+	selectors            []plan.ActionSelector
+	locks                []plan.ActionLock
+	capabilities         []string
+	requiredSecrets      []string
+	githubTokenActions   []string
+	requiresMise         bool
+	requiresGitHubToken  bool
+	requiresEventPayload bool
+	programs             map[string]program.Action
+	rootAuthorities      []program.ActionAuthority
 }
 
 // validateActionResolutions resolves each independent root invocation before
@@ -117,8 +116,13 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 			}
 			position := step.Span.Start
 			message, detail, action := actionResolutionMessage(step.Uses, err)
+			blockerDetail := step.Uses
+			if instance.BlockerDetailUnsafe {
+				blockerDetail = ""
+			}
 			diagnostics = append(diagnostics, &ProcessingFinding{
 				Stage: StageResolution, Code: CodeActionResolution, Category: "action-resolution",
+				Blocker: "action_ref", BlockerDetail: blockerDetail,
 				Path: instance.SourcePath, Line: position.Line, Column: position.Column,
 				Job: instance.LogicalJobID, Instance: instance.Key, Action: action, Step: i + 1,
 				Message: message, Detail: detail,
@@ -145,7 +149,7 @@ func actionResolutionMessage(reference string, err error) (message, detail, acti
 	var runtimeErr *metadata.UnsupportedRuntimeError
 	if errors.As(err, &runtimeErr) {
 		runtime := fmt.Sprintf("runtime %q", runtimeErr.Runtime)
-		if version := strings.TrimPrefix(runtimeErr.Runtime, "node"); version != runtimeErr.Runtime {
+		if version, ok := strings.CutPrefix(runtimeErr.Runtime, "node"); ok {
 			runtime = "Node.js " + version
 		}
 		if strings.HasPrefix(action, "./") {
@@ -182,7 +186,7 @@ func unsupportedMetadataFields(reason string) string {
 		return ""
 	}
 	linesByField := map[string][]string{}
-	for _, line := range strings.Split(reason, "\n") {
+	for line := range strings.SplitSeq(reason, "\n") {
 		if strings.Contains(line, "yaml: unmarshal errors:") || strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -251,34 +255,98 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 		caps = append(caps, c)
 	}
 	sort.Strings(caps)
+	planningPrograms := make(map[string]program.Action, len(b.nodes))
+	programs := make(map[string]program.Action, len(b.nodes))
+	for _, node := range b.nodes {
+		planningPrograms[node.lock.ID] = lowerActionProgram(node)
+		if node.native {
+			continue
+		}
+		programs[node.lock.ID] = planningPrograms[node.lock.ID]
+	}
 	requiresGitHubToken := false
+	requiresEventPayload := false
 	requiredSecrets := map[string]bool{}
 	var githubTokenActions []string
+	var rootAuthorities []program.ActionAuthority
 	if suppliedInputs != nil {
+		rootAuthorities = make([]program.ActionAuthority, len(roots))
 		for i, root := range roots {
-			requirements, err := root.inspectInvocation(suppliedInputs[i], true, serverURL)
+			if err := validateActionAdapterInputs(root); err != nil {
+				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
+			}
+			authority, err := program.InventoryActionAuthority(planningPrograms, root.lock.ID, workflowActionBindings(suppliedInputs[i]), program.ActionAuthorityOptions{ServerURL: serverURL})
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
-			requiresGitHubToken = requiresGitHubToken || requirements.githubToken
-			if requirements.githubToken {
+			rootAuthorities[i] = authority
+			requiresGitHubToken = requiresGitHubToken || authority.GitHubToken
+			requiresEventPayload = requiresEventPayload || authority.EventPayload
+			if authority.GitHubToken {
 				githubTokenActions = append(githubTokenActions, refs[i])
 			}
-			for name := range requirements.requiredSecrets {
+			for _, name := range authority.Secrets {
 				requiredSecrets[name] = true
 			}
 		}
 	}
 	secretNames := sortedKeys(requiredSecrets)
 	return actionCompilation{
-		selectors:           selectors,
-		locks:               locks,
-		capabilities:        caps,
-		requiredSecrets:     secretNames,
-		githubTokenActions:  githubTokenActions,
-		requiresMise:        b.requiresMise,
-		requiresGitHubToken: requiresGitHubToken,
+		selectors:            selectors,
+		locks:                locks,
+		capabilities:         caps,
+		requiredSecrets:      secretNames,
+		githubTokenActions:   githubTokenActions,
+		requiresMise:         b.requiresMise,
+		requiresGitHubToken:  requiresGitHubToken,
+		requiresEventPayload: requiresEventPayload,
+		programs:             programs,
+		rootAuthorities:      rootAuthorities,
 	}, nil
+}
+
+func workflowActionBindings(values map[string]string) []program.Binding {
+	result := make([]program.Binding, 0, len(values))
+	for _, name := range sortedKeys(values) {
+		result = append(result, program.Binding{Name: name, Value: program.Site{
+			Source: values[name], Surface: program.SurfaceStepTemplate, Result: program.ResultString,
+			Provenance: program.ProvenanceWorkflow, Purpose: program.PurposeActionInput,
+		}})
+	}
+	return result
+}
+
+func validateActionAdapterInputs(root *actionNode) error {
+	if root == nil || root.runtime != metadata.RuntimeComposite {
+		return nil
+	}
+	for i, step := range root.metadata.Runs.Steps {
+		if step.Uses == "" {
+			continue
+		}
+		child := root.children[step.Uses]
+		if child == nil {
+			return fmt.Errorf("composite action step %d child %q is missing", i+1, step.Uses)
+		}
+		descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: child.lock.Source, Repository: child.lock.Repository, Path: child.lock.Path})
+		if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
+			if err := actionintegration.ValidateUploadArtifactInputs(child.lock.Commit, step.With); err != nil {
+				return fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
+			}
+		}
+		if err := validateActionAdapterInputs(child); err != nil {
+			return fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
+		}
+	}
+	return nil
+}
+
+func lowerActionProgram(node *actionNode) program.Action {
+	children := make(map[string]string, len(node.lock.Children))
+	for uses, selector := range node.lock.Children {
+		children[uses] = selector.Lock
+	}
+	return program.ActionFromMetadata(node.metadata, string(node.runtime), children)
 }
 
 func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*actionNode, error) {
@@ -308,7 +376,11 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	b.active[key] = true
 	defer delete(b.active, key)
 
-	if actionintegration.UsesNativeAdapter(actionintegration.Identity{Source: n.lock.Source, Repository: n.lock.Repository, Path: n.lock.Path}) {
+	_, native, err := actionintegration.AdmitNativeAdapter(actionintegration.Identity{Source: n.lock.Source, Repository: n.lock.Repository, Path: n.lock.Path}, n.lock.Commit)
+	if err != nil {
+		return nil, err
+	}
+	if native {
 		// The native adapter replaces the admitted release's execution
 		// entirely, and admitted legacy releases predate the supported
 		// metadata and runtime set, so upstream metadata must not gate
@@ -338,11 +410,14 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	if err := m.ValidateEntrypoints(runtime); err != nil {
 		return nil, err
 	}
+	if image, ok := metadata.DockerImageReference(m.Runs.Image); ok {
+		n.lock.DockerImage = image
+	}
 	if runtime == metadata.RuntimeNode16 || runtime == metadata.RuntimeNode24 {
-		if err := expression.ValidateActionLifecycleCondition(m.Runs.PreIf); err != nil {
+		if err := validateCompileSite(m.Runs.PreIf, expression.ProfileActionLifecycle, expression.ResultBoolean); err != nil {
 			return nil, fmt.Errorf("pre-if: %w", err)
 		}
-		if err := expression.ValidateActionLifecycleCondition(m.Runs.PostIf); err != nil {
+		if err := validateCompileSite(m.Runs.PostIf, expression.ProfileActionLifecycle, expression.ResultBoolean); err != nil {
 			return nil, fmt.Errorf("post-if: %w", err)
 		}
 		b.requiresMise = true
@@ -370,98 +445,9 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	return n, nil
 }
 
-func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string) (actionRequirements, error) {
-	requirements := actionRequirements{requiredSecrets: map[string]bool{}}
-	for _, suppliedName := range sortedKeys(supplied) {
-		value := supplied[suppliedName]
-		referencesEvent, err := expression.TemplateReferencesGitHubEvent(value)
-		if err != nil {
-			return actionRequirements{}, fmt.Errorf("action input %q: %w", suppliedName, err)
-		}
-		if referencesEvent {
-			return actionRequirements{}, fmt.Errorf("action input %q: github.event cannot be retained in a job plan", suppliedName)
-		}
-		names, err := expression.SecretReferences(value)
-		if err != nil {
-			return actionRequirements{}, fmt.Errorf("action input %q: %w", suppliedName, err)
-		}
-		referencesToken, err := expression.ReferencesGitHubToken(value)
-		if err != nil {
-			return actionRequirements{}, fmt.Errorf("action input %q: %w", suppliedName, err)
-		}
-		if !workflowAuthored && len(names) != 0 {
-			return actionRequirements{}, fmt.Errorf("action input %q: composite action metadata cannot grant secret authority", suppliedName)
-		}
-		if !workflowAuthored && referencesToken {
-			return actionRequirements{}, fmt.Errorf("action input %q: composite action metadata cannot grant github.token authority", suppliedName)
-		}
-		requirements.githubToken = requirements.githubToken || referencesToken
-		input, declared := n.metadata.Inputs[strings.ToLower(suppliedName)]
-		for _, name := range names {
-			if declared && !input.Required && name != "GITHUB_TOKEN" {
-				continue
-			}
-			requirements.requiredSecrets[name] = true
-		}
-	}
-	if n.native {
-		return requirements, nil
-	}
-	for _, name := range sortedKeys(n.metadata.Inputs) {
-		input := n.metadata.Inputs[name]
-		if input.Default == nil || hasActionInput(supplied, name) {
-			continue
-		}
-		if err := expression.ValidateActionInputDefault(*input.Default); err != nil {
-			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
-		}
-		referencesToken, err := expression.ActionInputDefaultRequiresGitHubToken(*input.Default, serverURL)
-		if err != nil {
-			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
-		}
-		requirements.githubToken = requirements.githubToken || referencesToken
-	}
-	if n.runtime != metadata.RuntimeComposite {
-		return requirements, nil
-	}
-	for i, step := range n.metadata.Runs.Steps {
-		if step.Uses == "" {
-			continue
-		}
-		child := n.children[step.Uses]
-		if child == nil {
-			return actionRequirements{}, fmt.Errorf("composite action step %d child %q is missing", i+1, step.Uses)
-		}
-		descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: child.lock.Source, Repository: child.lock.Repository, Path: child.lock.Path})
-		if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
-			if err := actionintegration.ValidateUploadArtifactInputs(child.lock.Commit, step.With); err != nil {
-				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
-			}
-		}
-		childRequirements, err := child.inspectInvocation(step.With, false, serverURL)
-		if err != nil {
-			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
-		}
-		requirements.githubToken = requirements.githubToken || childRequirements.githubToken
-		for name := range childRequirements.requiredSecrets {
-			requirements.requiredSecrets[name] = true
-		}
-	}
-	return requirements, nil
-}
-
-func hasActionInput(inputs map[string]string, name string) bool {
-	for candidate := range inputs {
-		if strings.EqualFold(candidate, name) {
-			return true
-		}
-	}
-	return false
-}
-
 func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, plan.ActionLock, string, string, error) {
-	if strings.HasPrefix(raw, "./") {
-		p := strings.TrimPrefix(raw, "./")
+	if after, ok := strings.CutPrefix(raw, "./"); ok {
+		p := after
 		if p == "." || p != "" && (path.Clean(p) != p || strings.Contains(p, "\\") || strings.HasPrefix(p, "/")) {
 			return "", plan.ActionLock{}, "", "", fmt.Errorf("invalid local action path")
 		}

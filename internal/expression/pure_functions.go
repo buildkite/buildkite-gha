@@ -42,117 +42,167 @@ func validatePureFunction(validator *semanticValidator, node *actionlint.FuncCal
 	return true, nil
 }
 
-func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCallNode) (any, bool, error) {
+func evaluatePureFunction[T any](evaluator *expressionEvaluator[T], node *actionlint.FuncCallNode) (T, bool, error) {
+	var zero T
 	name := strings.ToLower(node.Callee)
 	argc := len(node.Args)
 	switch name {
 	case "case":
 		if argc < 3 || argc > 255 || argc%2 != 1 {
-			return nil, true, fmt.Errorf("function %q requires 3 to 255 odd-numbered arguments", node.Callee)
+			return zero, true, fmt.Errorf("function %q requires 3 to 255 odd-numbered arguments", node.Callee)
 		}
-		for i := 0; i < argc-1; i += 2 {
-			predicate, err := evaluator.evaluate(node.Args[i])
-			if err != nil {
-				return nil, true, err
-			}
-			selected, ok := predicate.(bool)
-			if !ok {
-				return nil, true, fmt.Errorf("function %q predicate %d resolved to %T, want boolean", node.Callee, i/2+1, predicate)
-			}
-			if selected {
-				value, err := evaluator.evaluate(node.Args[i+1])
-				return value, true, err
-			}
-		}
-		value, err := evaluator.evaluate(node.Args[argc-1])
+		value, err := evaluateCaseFunction(evaluator, node, 0)
 		return value, true, err
 	case "startswith", "contains", "endswith":
 		if argc != 2 {
-			return nil, true, fmt.Errorf("function %q requires 2 arguments", node.Callee)
+			return zero, true, fmt.Errorf("function %q requires 2 arguments", node.Callee)
 		}
-		value, err := evaluator.evaluate(node.Args[0])
+		first, err := evaluator.evaluate(node.Args[0])
 		if err != nil {
-			return nil, true, err
+			return zero, true, err
+		}
+		value, known := evaluator.domain.value(first)
+		if !known {
+			second, err := evaluator.evaluate(node.Args[1])
+			if err != nil {
+				return zero, true, err
+			}
+			return evaluator.domain.unknown(first, second), true, nil
 		}
 		if name == "contains" {
 			if items, ok := expressionCollection(value); ok {
 				if len(items) == 0 {
-					return false, true, nil
+					return evaluator.domain.derive(false, first), true, nil
 				}
-				search, err := evaluator.evaluate(node.Args[1])
+				searchValue, err := evaluator.evaluate(node.Args[1])
 				if err != nil {
-					return nil, true, err
+					return zero, true, err
+				}
+				search, searchKnown := evaluator.domain.value(searchValue)
+				if !searchKnown {
+					return evaluator.domain.unknown(first, searchValue), true, nil
 				}
 				for _, item := range items {
 					if githubEqual(item, search) {
-						return true, true, nil
+						return evaluator.domain.derive(true, first, searchValue), true, nil
 					}
 				}
-				return false, true, nil
+				return evaluator.domain.derive(false, first, searchValue), true, nil
 			}
 		}
 		valueText, ok := expressionString(value)
 		if !ok {
-			return false, true, nil
+			return evaluator.domain.derive(false, first), true, nil
 		}
-		search, err := evaluator.evaluate(node.Args[1])
+		searchValue, err := evaluator.evaluate(node.Args[1])
 		if err != nil {
-			return nil, true, err
+			return zero, true, err
+		}
+		search, searchKnown := evaluator.domain.value(searchValue)
+		if !searchKnown {
+			return evaluator.domain.unknown(first, searchValue), true, nil
 		}
 		searchText, ok := expressionString(search)
 		if !ok {
-			return false, true, nil
+			return evaluator.domain.derive(false, first, searchValue), true, nil
 		}
 		valueText, searchText = strings.ToLower(valueText), strings.ToLower(searchText)
 		switch name {
 		case "startswith":
-			return strings.HasPrefix(valueText, searchText), true, nil
+			return evaluator.domain.derive(strings.HasPrefix(valueText, searchText), first, searchValue), true, nil
 		case "contains":
-			return strings.Contains(valueText, searchText), true, nil
+			return evaluator.domain.derive(strings.Contains(valueText, searchText), first, searchValue), true, nil
 		default:
-			return strings.HasSuffix(valueText, searchText), true, nil
+			return evaluator.domain.derive(strings.HasSuffix(valueText, searchText), first, searchValue), true, nil
 		}
 	case "format":
 		if argc < 1 || argc > 255 {
-			return nil, true, fmt.Errorf("function %q requires 1 to 255 arguments", node.Callee)
+			return zero, true, fmt.Errorf("function %q requires 1 to 255 arguments", node.Callee)
 		}
-		value, err := evaluator.evaluate(node.Args[0])
+		formatValue, err := evaluator.evaluate(node.Args[0])
 		if err != nil {
-			return nil, true, err
+			return zero, true, err
+		}
+		value, known := evaluator.domain.value(formatValue)
+		if !known {
+			values := []T{formatValue}
+			for _, argument := range node.Args[1:] {
+				value, err := evaluator.evaluate(argument)
+				if err != nil {
+					return zero, true, err
+				}
+				values = append(values, value)
+			}
+			return evaluator.domain.unknown(values...), true, nil
 		}
 		format, ok := expressionAggregateString(value)
 		if !ok {
-			return nil, true, fmt.Errorf("function %q cannot convert %T to a format string", node.Callee, value)
+			return zero, true, fmt.Errorf("function %q cannot convert %T to a format string", node.Callee, value)
 		}
+		values := []T{formatValue}
+		unknown := false
 		formatted, err := expressionFormat(format, len(node.Args)-1, func(index int) (any, error) {
-			return evaluator.evaluate(node.Args[index+1])
+			value, err := evaluator.evaluate(node.Args[index+1])
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, value)
+			concrete, known := evaluator.domain.value(value)
+			if !known {
+				unknown = true
+				return "", nil
+			}
+			return concrete, nil
 		})
-		return formatted, true, err
+		if err != nil {
+			return zero, true, err
+		}
+		if unknown {
+			return evaluator.domain.unknown(values...), true, nil
+		}
+		return evaluator.domain.derive(formatted, values...), true, nil
 	case "join":
 		if argc != 1 && argc != 2 {
-			return nil, true, fmt.Errorf("function %q requires 1 or 2 arguments", node.Callee)
+			return zero, true, fmt.Errorf("function %q requires 1 or 2 arguments", node.Callee)
 		}
-		value, err := evaluator.evaluate(node.Args[0])
+		first, err := evaluator.evaluate(node.Args[0])
 		if err != nil {
-			return nil, true, err
+			return zero, true, err
+		}
+		value, known := evaluator.domain.value(first)
+		if !known {
+			if argc == 1 {
+				return evaluator.domain.unknown(first), true, nil
+			}
+			separator, err := evaluator.evaluate(node.Args[1])
+			if err != nil {
+				return zero, true, err
+			}
+			return evaluator.domain.unknown(first, separator), true, nil
 		}
 		items, ok := expressionCollection(value)
 		if !ok {
 			if reflected := reflect.ValueOf(value); reflected.IsValid() && reflected.Kind() == reflect.Map {
-				return "", true, nil
+				return evaluator.domain.derive("", first), true, nil
 			}
 			joined, convertible := expressionString(value)
 			if !convertible {
-				return nil, true, fmt.Errorf("function %q cannot convert %T to a string", node.Callee, value)
+				return zero, true, fmt.Errorf("function %q cannot convert %T to a string", node.Callee, value)
 			}
-			return joined, true, nil
+			return evaluator.domain.derive(joined, first), true, nil
 		}
 		separator := ","
+		values := []T{first}
 		if argc == 2 && len(items) > 1 {
-			value, err := evaluator.evaluate(node.Args[1])
+			separatorValue, err := evaluator.evaluate(node.Args[1])
 			if err != nil {
-				return nil, true, err
+				return zero, true, err
 			}
+			value, separatorKnown := evaluator.domain.value(separatorValue)
+			if !separatorKnown {
+				return evaluator.domain.unknown(first, separatorValue), true, nil
+			}
+			values = append(values, separatorValue)
 			separator, ok = expressionString(value)
 			if !ok {
 				separator = ","
@@ -162,40 +212,90 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 		for i, item := range items {
 			parts[i], ok = expressionAggregateString(item)
 			if !ok {
-				return nil, true, fmt.Errorf("function %q item %d cannot convert %T to a string", node.Callee, i, item)
+				return zero, true, fmt.Errorf("function %q item %d cannot convert %T to a string", node.Callee, i, item)
 			}
 		}
-		return strings.Join(parts, separator), true, nil
+		return evaluator.domain.derive(strings.Join(parts, separator), values...), true, nil
 	case "tojson":
 		if argc != 1 {
-			return nil, true, fmt.Errorf("function %q requires 1 argument", node.Callee)
+			return zero, true, fmt.Errorf("function %q requires 1 argument", node.Callee)
 		}
-		value, err := evaluator.evaluate(node.Args[0])
+		argument, err := evaluator.evaluate(node.Args[0])
 		if err != nil {
-			return nil, true, err
+			return zero, true, err
+		}
+		value, known := evaluator.domain.value(argument)
+		if !known {
+			return evaluator.domain.unknown(argument), true, nil
 		}
 		encoded, err := encodeExpressionJSON(value)
 		if err != nil {
-			return nil, true, fmt.Errorf("function %q: %w", node.Callee, err)
+			return zero, true, fmt.Errorf("function %q: %w", node.Callee, err)
 		}
-		return encoded, true, nil
+		return evaluator.domain.derive(encoded, argument), true, nil
 	case "fromjson":
 		if argc != 1 {
-			return nil, true, fmt.Errorf("function %q requires 1 argument", node.Callee)
+			return zero, true, fmt.Errorf("function %q requires 1 argument", node.Callee)
 		}
-		value, err := evaluator.evaluate(node.Args[0])
+		argument, err := evaluator.evaluate(node.Args[0])
 		if err != nil {
-			return nil, true, err
+			return zero, true, err
+		}
+		value, known := evaluator.domain.value(argument)
+		if !known {
+			return evaluator.domain.unknown(argument), true, nil
 		}
 		text, ok := expressionString(value)
 		if !ok {
-			return nil, true, fmt.Errorf("function %q cannot convert %T to a string", node.Callee, value)
+			return zero, true, fmt.Errorf("function %q cannot convert %T to a string", node.Callee, value)
 		}
 		decoded, err := decodeJSONValue(text)
-		return decoded, true, err
+		if err != nil {
+			return zero, true, err
+		}
+		return evaluator.domain.derive(decoded, argument), true, nil
 	default:
-		return nil, false, nil
+		return zero, false, nil
 	}
+}
+
+func evaluateCaseFunction[T any](evaluator *expressionEvaluator[T], node *actionlint.FuncCallNode, index int) (T, error) {
+	var zero T
+	if index == len(node.Args)-1 {
+		return evaluator.evaluate(node.Args[index])
+	}
+	predicate, err := evaluator.evaluate(node.Args[index])
+	if err != nil {
+		return zero, err
+	}
+	predicateValue, known := evaluator.domain.value(predicate)
+	if !known {
+		selected, err := evaluator.evaluate(node.Args[index+1])
+		if err != nil {
+			return zero, err
+		}
+		remainder, err := evaluateCaseFunction(evaluator, node, index+2)
+		if err != nil {
+			return zero, err
+		}
+		return evaluator.result(evaluator.domain.join(selected, remainder), predicate), nil
+	}
+	selected, ok := predicateValue.(bool)
+	if !ok {
+		return zero, fmt.Errorf("function %q predicate %d resolved to %T, want boolean", node.Callee, index/2+1, predicateValue)
+	}
+	if selected {
+		value, err := evaluator.evaluate(node.Args[index+1])
+		if err != nil {
+			return zero, err
+		}
+		return evaluator.result(value, predicate), nil
+	}
+	remainder, err := evaluateCaseFunction(evaluator, node, index+2)
+	if err != nil {
+		return zero, err
+	}
+	return evaluator.result(remainder, predicate), nil
 }
 
 func expressionAggregateString(value any) (string, bool) {

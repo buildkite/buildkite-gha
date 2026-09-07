@@ -1,0 +1,9 @@
+name: Compatibility gap - pull request tag filters
+on:
+  pull_request:
+    tags: ["v*"]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo compatible

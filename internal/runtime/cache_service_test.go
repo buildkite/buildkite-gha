@@ -38,7 +38,7 @@ func TestAgentCacheCredentialsMintsBoundedJobCredential(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.EscapedPath() != "/v3/jobs/"+testCacheJobID+"/ghac_tokens" || r.URL.RawQuery != "" {
 			t.Errorf("request = %s %s", r.Method, r.URL.String())
 		}
-		if r.Header.Get("Authorization") != "Token job-secret" || r.Header.Get("Accept") != "application/json" || len(body) != 0 {
+		if r.Header.Get("Authorization") != "Token job-secret" || r.Header.Get("Accept") != "application/json" || r.Header.Get("User-Agent") != "buildkite-gha/1.2.3" || len(body) != 0 {
 			t.Errorf("request headers/body = %#v / %q", r.Header, body)
 		}
 		_, _ = io.WriteString(w, `{"token":"header.payload.signature"}`)
@@ -46,9 +46,11 @@ func TestAgentCacheCredentialsMintsBoundedJobCredential(t *testing.T) {
 	defer server.Close()
 
 	provider, err := NewAgentCacheCredentials(AgentCacheConfig{
-		Endpoint: server.URL + "/v3/",
-		JobID:    testCacheJobID, JobToken: "job-secret",
-		ResultsURL: server.URL,
+		Endpoint:      server.URL + "/v3/",
+		JobID:         testCacheJobID,
+		JobToken:      "job-secret",
+		ResultsURL:    server.URL,
+		ClientVersion: "1.2.3",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -329,7 +331,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	result, err := (Runner{
 		Node24: node, Actions: materializer, Cache: provider, Redactor: redactor,
 		Stdout: &logs, Stderr: &logs,
-	}).RunJob(t.Context(), job, workspace)
+	}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -342,7 +344,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 		"ordinary-pre": false, "ordinary-main": false, "ordinary-post": false,
 	}
 	seenTokens := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(string(contents)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(contents)), "\n") {
 		fields := strings.Split(line, "|")
 		if len(fields) != 4 || fields[2] != "https://cache.example/" || fields[3] != "true" {
 			t.Fatalf("invalid lifecycle record %q in %q", line, contents)
@@ -387,7 +389,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	}
 
 	job.Actions[0].Commit = strings.Repeat("b", 40)
-	if _, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: redactor}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
+	if _, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: redactor}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
 		t.Fatalf("unsupported runtime cache commit error = %v", err)
 	}
 }
@@ -501,7 +503,7 @@ fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "\n");
 				Commit: strings.Repeat("a", 40), SourceDigest: digest,
 			}}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-			result, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: &testRedactor{}}).RunJob(t.Context(), job, workspace)
+			result, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: &testRedactor{}}).runTestJob(t.Context(), job, workspace)
 			if err != nil || result.Conclusion != "success" {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 			}
@@ -559,7 +561,7 @@ func TestActionCacheRedactorIsPinnedBeforeWorkflowExecution(t *testing.T) {
 		SourceDigest: digestTree(t, filepath.Join(workspace, filepath.FromSlash(actionPath))),
 	}}
 	provider := &sequenceCacheCredentials{tokens: []string{token}}
-	result, err := (Runner{Node24: node, Cache: provider, Redactor: AgentRedactor{}}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Node24: node, Cache: provider, Redactor: AgentRedactor{}}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -593,7 +595,7 @@ func TestGenericActionCacheDisablesWhenRedactorCannotBePinned(t *testing.T) {
 	result, err := (Runner{
 		Node24: node, Cache: provider,
 		Redactor: AgentRedactor{Executable: filepath.Join(t.TempDir(), "missing-agent")},
-	}).RunJob(t.Context(), job, workspace)
+	}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -622,11 +624,15 @@ func TestExplicitCacheRequiresPinnedRedactorBeforeWorkflowExecution(t *testing.T
 		RequestedRef: actionintegration.CacheCommit, Commit: actionintegration.CacheCommit,
 		SourceDigest: digestTree(t, remote),
 	}}
+	attachTestProgram(&job)
+	if err := attachTestActionProgramFromRoot(&job, lockID, remote, "."); err != nil {
+		t.Fatal(err)
+	}
 	provider := &sequenceCacheCredentials{tokens: []string{"header.unused.signature"}}
 	_, err := (Runner{
 		Cache:    provider,
 		Redactor: AgentRedactor{Executable: filepath.Join(t.TempDir(), "missing-agent")},
-	}).RunJob(t.Context(), job, workspace)
+	}).runTestJob(t.Context(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "resolve Buildkite Agent redactor before workflow execution") {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -653,7 +659,7 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	result := newResult()
 	result.Env["MARKER"] = marker
 	result.Env["ACTIONS_RUNTIME_TOKEN"] = "workflow-token"
-	processor := newCommandProcessor(io.Discard, io.Discard)
+	processor := newCommandOutputProcessor(io.Discard, io.Discard)
 	runner := newJobRun(Runner{Cache: provider, Redactor: &testRedactor{}})
 	if err := runner.runJavaScriptPhase(
 		t.Context(), processor, actionRoot, node,
@@ -728,7 +734,7 @@ func TestCacheRedactorFailureAbortsBeforeExecutionAndScrubsToken(t *testing.T) {
 		return CacheCredentials{ResultsURL: "https://cache.example", Token: token}, nil
 	})
 	var logs bytes.Buffer
-	processor := newCommandProcessor(&logs, &logs)
+	processor := newCommandOutputProcessor(&logs, &logs)
 	result := newResult()
 	result.Env["MARKER"] = marker
 	err := newJobRun(Runner{Cache: provider, Redactor: failingCacheRedactor{token: token}}).runJavaScriptPhase(
@@ -766,7 +772,7 @@ func TestActionRuntimeCacheTokenCommandFileEffectsAreDiscarded(t *testing.T) {
 			result.Paths = []string{"/existing/path"}
 			state := map[string]string{"kept": "action state"}
 			err := newJobRun(Runner{Cache: provider, Redactor: &testRedactor{}}).runJavaScriptPhase(
-				t.Context(), newCommandProcessor(io.Discard, io.Discard), actionRoot, node,
+				t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), actionRoot, node,
 				javaScriptAction{Name: "ordinary", Path: actionRoot, Main: "main.js"}, "main.js", nil, state, &result,
 			)
 			if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "phase effects were discarded") {

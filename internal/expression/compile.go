@@ -1,12 +1,11 @@
 // Compile-time expression evaluation: graph-construction substitution and
 // evaluation against the snapshotted CompileContext.
+
 package expression
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/rhysd/actionlint"
@@ -24,10 +23,10 @@ type CompileContext struct {
 	Strategy map[string]any
 }
 
-// EvaluateCompile evaluates one complete graph-time expression. The supported
+// evaluateCompile evaluates one complete graph-time expression. The supported
 // surface is intentionally limited to literals, github/event/vars/matrix
 // references, boolean/equality operators, and selected pure functions.
-func EvaluateCompile(expr Expression, context CompileContext) (any, error) {
+func evaluateCompile(expr Expression, context CompileContext) (any, error) {
 	node, err := parseCompileExpression(expr)
 	if err != nil {
 		return nil, err
@@ -38,9 +37,9 @@ func EvaluateCompile(expr Expression, context CompileContext) (any, error) {
 	return evaluateCompileNode(node, context)
 }
 
-// EvaluateCompileAvailable evaluates an expression until it either produces a
+// evaluateCompileAvailable evaluates an expression until it either produces a
 // value, needs a runtime-only value, or encounters a deterministic error.
-func EvaluateCompileAvailable(expr Expression, context CompileContext) (any, bool, error) {
+func evaluateCompileAvailable(expr Expression, context CompileContext) (any, bool, error) {
 	node, err := parseCompileExpression(expr)
 	if err != nil {
 		return nil, false, err
@@ -65,65 +64,125 @@ func parseCompileExpression(expr Expression) (actionlint.ExprNode, error) {
 	return node, nil
 }
 
-// ValidateReusableInputDefault validates an expression-valued workflow_call
+// validateReusableInputDefault validates an expression-valued workflow_call
 // input default without resolving its values.
-func ValidateReusableInputDefault(template string) error {
-	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
-		validator := newSemanticValidator(compileTimeSurface)
-		validator.validateReference = func(_ actionlint.ExprNode, root string, _ []string) error {
-			if !strings.EqualFold(root, "github") && !strings.EqualFold(root, "vars") {
-				return fmt.Errorf("reusable-workflow input default context %q is unavailable", root)
-			}
-			return nil
-		}
-		validator.validateAccess = func(node actionlint.ExprNode) error {
-			root := referenceRoot(node)
-			if !strings.EqualFold(root, "github") && !strings.EqualFold(root, "vars") {
-				return fmt.Errorf("reusable-workflow input default context %q is unavailable", root)
-			}
-			switch node := node.(type) {
-			case *actionlint.ObjectDerefNode:
-				return validator.validate(node.Receiver)
-			case *actionlint.IndexAccessNode:
-				if err := validator.validate(node.Operand); err != nil {
-					return err
-				}
-				return validator.validate(node.Index)
-			case *actionlint.ArrayDerefNode:
-				return validator.validate(node.Receiver)
-			default:
-				return nil
-			}
-		}
-		validator.validateCompare = func(actionlint.CompareOpNodeKind) error { return nil }
-		validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
-		validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
-			if recognized, err := validatePureFunction(validator, node); recognized {
-				return err
-			}
-			return fmt.Errorf("unsupported reusable-workflow input default function %q", node.Callee)
-		}
-		validator.unsupported = func(actionlint.ExprNode) error {
-			return fmt.Errorf("unsupported reusable-workflow input default expression")
-		}
-		if err := validator.validate(node); err != nil {
-			return err
-		}
-		return validateCompileExpressionNode(node)
-	})
+func validateReusableInputDefault(template string) error {
+	return visitTemplateExpressions(template, validateReusableInputDefaultNode)
 }
 
-// EvaluateReusableInputDefault evaluates a statically available workflow_call
+func validateReusableInputDefaultNode(node actionlint.ExprNode) error {
+	validator := newSemanticValidator(compileTimeSurface)
+	validator.validateReference = func(_ actionlint.ExprNode, root string, _ []string) error {
+		if !strings.EqualFold(root, "github") && !strings.EqualFold(root, "vars") {
+			return fmt.Errorf("reusable-workflow input default context %q is unavailable", root)
+		}
+		return nil
+	}
+	validator.validateAccess = func(node actionlint.ExprNode) error {
+		root := referenceRoot(node)
+		if !strings.EqualFold(root, "github") && !strings.EqualFold(root, "vars") {
+			return fmt.Errorf("reusable-workflow input default context %q is unavailable", root)
+		}
+		switch node := node.(type) {
+		case *actionlint.ObjectDerefNode:
+			return validator.validate(node.Receiver)
+		case *actionlint.IndexAccessNode:
+			if err := validator.validate(node.Operand); err != nil {
+				return err
+			}
+			return validator.validate(node.Index)
+		case *actionlint.ArrayDerefNode:
+			return validator.validate(node.Receiver)
+		default:
+			return nil
+		}
+	}
+	validator.validateCompare = func(actionlint.CompareOpNodeKind) error { return nil }
+	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
+	validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
+		if recognized, err := validatePureFunction(validator, node); recognized {
+			return err
+		}
+		return fmt.Errorf("unsupported reusable-workflow input default function %q", node.Callee)
+	}
+	validator.unsupported = func(actionlint.ExprNode) error {
+		return fmt.Errorf("unsupported reusable-workflow input default expression")
+	}
+	if err := validator.validate(node); err != nil {
+		return err
+	}
+	return validateCompileExpressionNode(node)
+}
+
+// evaluateReusableInputDefault evaluates a statically available workflow_call
 // input default. A complete expression preserves its type; a template renders
 // to a string.
-func EvaluateReusableInputDefault(template string, context CompileContext) (any, error) {
-	if err := ValidateReusableInputDefault(template); err != nil {
+func evaluateReusableInputDefault(template string, context CompileContext) (any, error) {
+	if err := validateReusableInputDefault(template); err != nil {
 		return nil, err
 	}
-	if expression, err := Parse(template, 1, 1); err == nil {
-		return EvaluateCompile(expression, context)
+	if expression, err := parseExpression(template, 1, 1); err == nil {
+		return evaluateCompile(expression, context)
 	}
-	return EvaluateCompileTemplate(template, context)
+	return evaluateCompileTemplate(template, context)
+}
+
+// validateRunName validates the supported expression surface available while
+// creating a workflow run.
+func validateRunName(template string) error {
+	return visitTemplateExpressions(template, validateRunNameNode)
+}
+
+func validateRunNameNode(node actionlint.ExprNode) error {
+	validator := newSemanticValidator(compileTimeSurface)
+	validator.validateReference = func(_ actionlint.ExprNode, root string, _ []string) error {
+		if !strings.EqualFold(root, "github") && !strings.EqualFold(root, "inputs") {
+			return fmt.Errorf("run-name context %q is unavailable", root)
+		}
+		return nil
+	}
+	validator.validateAccess = func(node actionlint.ExprNode) error {
+		root := referenceRoot(node)
+		if root != "" && !strings.EqualFold(root, "github") && !strings.EqualFold(root, "inputs") {
+			return fmt.Errorf("run-name context %q is unavailable", root)
+		}
+		switch node := node.(type) {
+		case *actionlint.ObjectDerefNode:
+			return validator.validate(node.Receiver)
+		case *actionlint.IndexAccessNode:
+			if err := validator.validate(node.Operand); err != nil {
+				return err
+			}
+			return validator.validate(node.Index)
+		case *actionlint.ArrayDerefNode:
+			return validator.validate(node.Receiver)
+		default:
+			return nil
+		}
+	}
+	validator.validateCompare = func(actionlint.CompareOpNodeKind) error { return nil }
+	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
+	validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
+		if recognized, err := validatePureFunction(validator, node); recognized {
+			return err
+		}
+		return fmt.Errorf("unsupported run-name function %q", node.Callee)
+	}
+	validator.unsupported = func(actionlint.ExprNode) error {
+		return fmt.Errorf("unsupported run-name expression")
+	}
+	if err := validator.validate(node); err != nil {
+		return err
+	}
+	return validateCompileExpressionNode(node)
+}
+
+// evaluateRunName evaluates a validated workflow run-name.
+func evaluateRunName(template string, context CompileContext) (string, error) {
+	if err := validateRunName(template); err != nil {
+		return "", err
+	}
+	return evaluateCompileTemplate(template, context)
 }
 
 func validateCompileExpressionNode(node actionlint.ExprNode) error {
@@ -234,10 +293,10 @@ func validateCompileAccessNode(validator *semanticValidator, node actionlint.Exp
 	}
 }
 
-// EvaluateCompileCondition evaluates a condition whose entire value is known
+// evaluateCompileCondition evaluates a condition whose entire value is known
 // while constructing the graph. Callers may fall back to runtime condition
 // handling when this returns an unavailable-context or unsupported error.
-func EvaluateCompileCondition(source string, context CompileContext) (bool, error) {
+func evaluateCompileCondition(source string, context CompileContext) (bool, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil {
 		return false, err
@@ -252,18 +311,21 @@ func EvaluateCompileCondition(source string, context CompileContext) (bool, erro
 	return githubTruthy(value), nil
 }
 
-// ReduceCompileCondition replaces every compile-time scalar subtree in a
+// reduceCompileCondition replaces every compile-time scalar subtree in a
 // condition while preserving runtime-dependent subtrees for later evaluation.
-func ReduceCompileCondition(source string, context CompileContext) (string, error) {
+func reduceCompileCondition(source string, context CompileContext) (string, error) {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return source, err
+	}
+	if _, _, err := evaluateCompileNodeAvailable(node, context); err != nil {
+		return "", err
 	}
 	return reduceCompileNode(node, context), nil
 }
 
 func reduceCompileNode(node actionlint.ExprNode, context CompileContext) string {
-	if value, err := evaluateCompileNode(node, context); err == nil {
+	if value, available, _ := evaluateCompileNodeAvailable(node, context); available {
 		if literal, ok := compileScalarLiteral(value); ok {
 			return literal
 		}
@@ -294,216 +356,62 @@ func reduceCompileNode(node actionlint.ExprNode, context CompileContext) string 
 	}
 }
 
+// evaluateCompileNodeAvailable checks every branch before evaluation. This
+// prevents short-circuit evaluation from hiding runtime dependencies or
+// deterministic errors in an unselected branch.
+func evaluateCompileNodeAvailable(node actionlint.ExprNode, context CompileContext) (any, bool, error) {
+	children := func(nodes ...actionlint.ExprNode) (bool, error) {
+		available := true
+		for _, child := range nodes {
+			_, childAvailable, err := evaluateCompileNodeAvailable(child, context)
+			if err != nil {
+				return false, err
+			}
+			available = available && childAvailable
+		}
+		return available, nil
+	}
+	switch node := node.(type) {
+	case *actionlint.ObjectDerefNode:
+		if available, err := children(node.Receiver); err != nil || !available {
+			return nil, available, err
+		}
+	case *actionlint.ArrayDerefNode:
+		if available, err := children(node.Receiver); err != nil || !available {
+			return nil, available, err
+		}
+	case *actionlint.NotOpNode:
+		if available, err := children(node.Operand); err != nil || !available {
+			return nil, available, err
+		}
+	case *actionlint.CompareOpNode:
+		if available, err := children(node.Left, node.Right); err != nil || !available {
+			return nil, available, err
+		}
+	case *actionlint.LogicalOpNode:
+		if available, err := children(node.Left, node.Right); err != nil || !available {
+			return nil, available, err
+		}
+	case *actionlint.FuncCallNode:
+		if available, err := children(node.Args...); err != nil || !available {
+			return nil, available, err
+		}
+	case *actionlint.IndexAccessNode:
+		if available, err := children(node.Operand, node.Index); err != nil || !available {
+			return nil, available, err
+		}
+	}
+	value, err := evaluateCompileNode(node, context)
+	var dependency compileRuntimeDependencyError
+	if errors.As(err, &dependency) {
+		return nil, false, nil
+	}
+	return value, err == nil, err
+}
+
 func compileScalarLiteral(value any) (string, bool) {
 	literal, err := compileInputLiteral(value)
 	return literal, err == nil
-}
-
-// EvaluateCompileTemplate substitutes supported graph-time expressions once.
-func EvaluateCompileTemplate(template string, context CompileContext) (string, error) {
-	const open = "${{"
-	var evaluated strings.Builder
-	remaining := template
-	for {
-		start := strings.Index(remaining, open)
-		if start < 0 {
-			evaluated.WriteString(remaining)
-			return evaluated.String(), nil
-		}
-		evaluated.WriteString(remaining[:start])
-		source := remaining[start+len(open):]
-		_, consumed, lexErr := actionlint.LexExpression(source)
-		if lexErr != nil {
-			return "", fmt.Errorf("invalid expression: %w", lexErr)
-		}
-		text := open + source[:consumed]
-		value, err := EvaluateCompile(Expression{Text: text}, context)
-		if err != nil {
-			return "", err
-		}
-		replacement, scalar := expressionString(value)
-		if !scalar {
-			return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
-		}
-		evaluated.WriteString(replacement)
-		remaining = source[consumed:]
-	}
-}
-
-// EvaluateAvailableCompileTemplate folds each graph-time expression that can be
-// resolved independently and preserves expressions that need runtime context.
-func EvaluateAvailableCompileTemplate(template string, context CompileContext) (string, error) {
-	const open = "${{"
-	var evaluated strings.Builder
-	remaining := template
-	for {
-		start := strings.Index(remaining, open)
-		if start < 0 {
-			evaluated.WriteString(remaining)
-			return evaluated.String(), nil
-		}
-		evaluated.WriteString(remaining[:start])
-		source := remaining[start+len(open):]
-		_, consumed, lexErr := actionlint.LexExpression(source)
-		if lexErr != nil {
-			return "", fmt.Errorf("invalid expression: %w", lexErr)
-		}
-		complete := open + source[:consumed]
-		value, err := EvaluateCompile(Expression{Text: complete}, context)
-		if err != nil {
-			evaluated.WriteString(complete)
-		} else {
-			replacement, scalar := expressionString(value)
-			if !scalar {
-				return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
-			}
-			if introducesExpressionSyntax(evaluated.String(), replacement, source[consumed:]) {
-				return "", fmt.Errorf("compile-time expression result contains expression syntax")
-			}
-			evaluated.WriteString(replacement)
-		}
-		remaining = source[consumed:]
-	}
-}
-
-func introducesExpressionSyntax(before, replacement, after string) bool {
-	if len(before) > 2 {
-		before = before[len(before)-2:]
-	}
-	if len(after) > 2 {
-		after = after[:2]
-	}
-	boundary, replacementEnd := len(before), len(before)+len(replacement)
-	combined := before + replacement + after
-	for offset := 0; offset < len(combined); {
-		relative := strings.Index(combined[offset:], "${{")
-		if relative < 0 {
-			return false
-		}
-		start := offset + relative
-		end := start + len("${{")
-		if len(replacement) > 0 && start < replacementEnd && end > boundary || len(replacement) == 0 && start < boundary && end > boundary {
-			return true
-		}
-		offset = start + 1
-	}
-	return false
-}
-
-// SubstituteCompileInputs replaces static inputs.<name> and inputs['name']
-// references inside expression regions with equivalent GitHub expression
-// literals. Text and string literals outside those references are preserved
-// byte-for-byte.
-func SubstituteCompileInputs(template string, inputs map[string]any) (string, error) {
-	resolved := template
-	for {
-		next, err := substituteCompileInputsOnce(resolved, inputs)
-		if err != nil {
-			return "", err
-		}
-		if next == resolved {
-			return next, nil
-		}
-		resolved = next
-	}
-}
-
-func substituteCompileInputsOnce(template string, inputs map[string]any) (string, error) {
-	const open = "${{"
-	var substituted strings.Builder
-	remaining := template
-	for {
-		start := strings.Index(remaining, open)
-		if start < 0 {
-			substituted.WriteString(remaining)
-			return substituted.String(), nil
-		}
-		substituted.WriteString(remaining[:start+len(open)])
-		source := remaining[start+len(open):]
-		tokens, consumed, lexErr := actionlint.LexExpression(source)
-		if lexErr != nil {
-			return "", fmt.Errorf("invalid expression: %w", lexErr)
-		}
-		expressionSource := source[:consumed]
-		type replacement struct {
-			start, end int
-			value      string
-		}
-		var replacements []replacement
-		for i := 0; i < len(tokens); i++ {
-			if tokens[i].Kind != actionlint.TokenKindIdent || !strings.EqualFold(tokens[i].Value, "inputs") {
-				continue
-			}
-			// A preceding '.' means this is a property named "inputs" on
-			// another receiver, such as github.event.inputs.<name>, not the
-			// workflow-call inputs context.
-			if i > 0 && tokens[i-1].Kind == actionlint.TokenKindDot {
-				continue
-			}
-			var name string
-			var end, consumedTokens int
-			switch {
-			case i+2 < len(tokens) && tokens[i+1].Kind == actionlint.TokenKindDot && tokens[i+2].Kind == actionlint.TokenKindIdent:
-				name = tokens[i+2].Value
-				end = tokens[i+2].Offset + len(tokens[i+2].Value)
-				consumedTokens = 2
-			case i+3 < len(tokens) && tokens[i+1].Kind == actionlint.TokenKindLeftBracket && tokens[i+2].Kind == actionlint.TokenKindString && tokens[i+3].Kind == actionlint.TokenKindRightBracket:
-				name = strings.ReplaceAll(strings.Trim(tokens[i+2].Value, "'"), "''", "'")
-				end = tokens[i+3].Offset + 1
-				consumedTokens = 3
-			default:
-				continue
-			}
-			value, ok := findCompileInput(inputs, name)
-			if !ok {
-				continue
-			}
-			literal, err := compileInputLiteral(value)
-			if err != nil {
-				return "", err
-			}
-			replacements = append(replacements, replacement{
-				start: tokens[i].Offset,
-				end:   end,
-				value: literal,
-			})
-			i += consumedTokens
-		}
-		for i := len(replacements) - 1; i >= 0; i-- {
-			replacement := replacements[i]
-			expressionSource = expressionSource[:replacement.start] + replacement.value + expressionSource[replacement.end:]
-		}
-		substituted.WriteString(expressionSource)
-		remaining = source[consumed:]
-	}
-}
-
-func findCompileInput(inputs map[string]any, target string) (any, bool) {
-	for name, value := range inputs {
-		if strings.EqualFold(name, target) {
-			return value, true
-		}
-	}
-	return nil, false
-}
-
-func compileInputLiteral(value any) (string, error) {
-	switch value := value.(type) {
-	case nil:
-		return "null", nil
-	case bool:
-		return strconv.FormatBool(value), nil
-	case string:
-		return "'" + strings.ReplaceAll(value, "'", "''") + "'", nil
-	case json.Number:
-		return value.String(), nil
-	case int:
-		return strconv.Itoa(value), nil
-	case float64:
-		return expressionNumberString(value), nil
-	default:
-		return "", fmt.Errorf("compile-time input %T cannot be represented as an expression literal", value)
-	}
 }
 
 func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any, error) {
@@ -563,10 +471,7 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 		if recognized {
 			return value, err
 		}
-		if strings.EqualFold(node.Callee, "hashFiles") {
-			return nil, compileRuntimeDependencyError{fmt.Errorf("unsupported compile-time function %q", node.Callee)}
-		}
-		return nil, fmt.Errorf("unsupported compile-time function %q", node.Callee)
+		return nil, compileRuntimeDependencyError{fmt.Errorf("unsupported compile-time function %q", node.Callee)}
 	}
 	return evaluator.evaluate(node)
 }

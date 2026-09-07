@@ -51,7 +51,7 @@ func TestUploadRejectsUnsupportedImporterBeforeProcessing(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &cliCaptureRunner{}
 			var stdout, stderr bytes.Buffer
-			if code := uploadFromPlatform("linux", "arm64", test.args, &stdout, &stderr, "dev", transport.Agent{Runner: runner}); code != 1 {
+			if code := uploadFromPlatform("linux", "arm64", test.args, &stdout, &stderr, "dev", "dev", transport.Agent{Runner: runner}); code != 1 {
 				t.Fatalf("uploadFromPlatform() code = %d, want 1", code)
 			}
 			if got := stderr.String(); got != "buildkite-gha: upload: importer requires linux/amd64 or darwin/arm64, running on linux/arm64\n" {
@@ -74,7 +74,7 @@ func TestDarwinUploadRequiresLinuxDistributionForLinuxWorkflow(t *testing.T) {
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	code := uploadFromPlatform("darwin", "arm64", []string{"--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", transport.Agent{Runner: runner})
+	code := uploadFromPlatform("darwin", "arm64", []string{"--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", "dev", transport.Agent{Runner: runner})
 	if code != 1 || !strings.Contains(stderr.String(), "runtime distribution for linux/amd64 is required by the selected workflows") {
 		t.Fatalf("uploadFromPlatform() = %d, stderr = %q", code, stderr.String())
 	}

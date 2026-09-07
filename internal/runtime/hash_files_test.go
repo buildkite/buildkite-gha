@@ -16,6 +16,7 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 	"golang.org/x/sys/unix"
 )
 
@@ -185,7 +186,7 @@ func TestRunJobPinsHashWorkspaceBeforePathReplacement(t *testing.T) {
 		{ID: "replace", Kind: "run", Shell: "sh", Env: map[string]string{"OUTSIDE": outside}, Command: `mv "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE-moved" && ln -s "$OUTSIDE" "$GITHUB_WORKSPACE"`},
 		{ID: "hash", Kind: "run", Shell: "sh", Env: map[string]string{"VALUE_HASH": "${{ hashFiles('value') }}"}, Command: "test \"$VALUE_HASH\" = " + githubHash("inside")},
 	})
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() pinned workspace result = %#v, %v", result, err)
 	}
@@ -204,7 +205,7 @@ func TestRunJobHashFilesArgumentsUseStepEnvironment(t *testing.T) {
 		Condition: "hashFiles(env.PATTERN) != ''",
 		Command:   `test "${{ hashFiles(env.PATTERN) }}" = "` + digest + `"`,
 	}})
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() step environment hashFiles result = %#v, %v", result, err)
 	}
@@ -224,27 +225,44 @@ func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
 			test.change(&job)
-			if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `unsupported runtime function "hashFiles"`) {
+			if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `unsupported runtime function "hashFiles"`) {
 				t.Fatalf("RunJob() default hashFiles error = %v", err)
 			}
 		})
 	}
 
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "name", Name: "${{ hashFiles('value') }}", Kind: "run", Shell: "sh", Command: "true"}})
-	if result, err := (Runner{}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("step name unexpectedly evaluated hashFiles: %#v, %v", result, err)
 	}
 
 	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "runs:\n  using: composite\n  steps:\n    - shell: sh\n      run: echo \"${{ hashFiles('value') }}\"\n")
 	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
-	if _, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `runtime function "hashFiles" is unavailable`) {
-		t.Fatalf("composite metadata hashFiles error = %v", err)
+	if err := synthesizeTestLocalActionLocks(&job, workspace); err != nil {
+		t.Fatal(err)
+	}
+	attachTestProgram(&job)
+	if err := attachTestActionPrograms(&job, workspace, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := job.Program.Actions[job.Actions[0].ID].Steps[0].Run.Command.Source; got != "echo \"${{ hashFiles('value') }}\"" {
+		t.Fatalf("normalized composite command = %q", got)
+	}
+	action := job.Program.Actions[job.Actions[0].ID]
+	if value, err := executionprogram.EvaluateSite(action.Steps[0].Condition, executionprogram.EvaluationContext{}); err != nil || value != true {
+		t.Fatalf("normalized composite condition = %#v, %v", value, err)
+	}
+	if _, err := executionprogram.EvaluateSite(action.Steps[0].Run.Command, executionprogram.EvaluationContext{}); err == nil {
+		t.Fatal("normalized action command admitted unavailable hashFiles")
+	}
+	if result, err := (Runner{}).RunJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), `runtime function "hashFiles" is unavailable`) {
+		t.Fatalf("composite metadata hashFiles result/error = %#v / %v", result, err)
 	}
 
 	writeFixtureFile(t, workspace, ".github/actions/child/action.yml", "inputs:\n  value:\n    required: false\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: true\n")
 	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "runs:\n  using: composite\n  steps:\n    - shell: sh\n      run: printf 'TEMPLATE=$%s\\n' \"{{ false && hashFiles('value') || 'ok' }}\" >> \"$GITHUB_ENV\"\n    - uses: ./.github/actions/child\n      with:\n        value: ${{ env.TEMPLATE }}\n")
 	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
-	if result, err := (Runner{}).RunJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+	if result, err := (Runner{}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
 		t.Fatalf("nested composite input was evaluated twice: %#v, %v", result, err)
 	}
 }
@@ -414,7 +432,7 @@ func TestHashFilesStepEnvironmentFailureUsesStepConclusion(t *testing.T) {
 		{ID: "invalid", Kind: "run", Shell: "sh", ContinueOnError: true, Env: map[string]string{"HASH": "${{ hashFiles('link') }}"}, Command: "exit 99"},
 		{ID: "after", Kind: "run", Shell: "sh", Condition: "steps.invalid.outcome == 'failure' && steps.invalid.conclusion == 'success'", Command: "touch " + marker},
 	})
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -435,7 +453,7 @@ func TestHashFilesStepConditionFailureRunsFailureCleanup(t *testing.T) {
 		{ID: "invalid", Kind: "run", Shell: "sh", Condition: "hashFiles('link') != ''", Command: "exit 99"},
 		{ID: "cleanup", Kind: "run", Shell: "sh", Condition: "failure()", Command: "touch " + marker},
 	})
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -460,7 +478,7 @@ func TestHashFilesSkippedStepsDoNotAccessWorkspace(t *testing.T) {
 		{ID: "condition", Kind: "run", Shell: "sh", Condition: "hashFiles('link') != ''", Command: "touch " + conditionMarker},
 		{ID: "cleanup", Kind: "run", Shell: "sh", Condition: "always()", Command: "touch " + cleanupMarker},
 	})
-	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -497,7 +515,7 @@ func TestHashFilesRemotePreFailureUsesStepConclusion(t *testing.T) {
 	job.RequiredCapabilities = []string{"network"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "action", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-	result, err := (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace)
+	result, err := (Runner{Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -540,7 +558,7 @@ func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 				Command:        "true",
 			}})
 			started := time.Now()
-			_, err = (Runner{}).RunJob(t.Context(), job, workspace)
+			_, err = (Runner{}).runTestJob(t.Context(), job, workspace)
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("RunJob() timeout error = %v", err)
 			}
@@ -585,7 +603,7 @@ func TestHashFilesPrePhaseUsesStepTimeoutContext(t *testing.T) {
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "action", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	started := time.Now()
-	_, err = (Runner{Actions: materializer}).RunJob(t.Context(), job, workspace)
+	_, err = (Runner{Actions: materializer}).runTestJob(t.Context(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("RunJob() pre timeout error = %v", err)
 	}

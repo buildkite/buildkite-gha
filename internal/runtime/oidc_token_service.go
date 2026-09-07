@@ -13,12 +13,13 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/agentapi"
 )
 
 const oidcTokenResponseLimit = 64 << 10
@@ -38,44 +39,33 @@ type AgentOIDCTokenConfig struct {
 	Claims         []string
 	AWSSessionTags []string
 	SubjectClaim   string
+	ClientVersion  string
 	Client         *http.Client
 }
 
 // AgentOIDCTokens mints job-bound Buildkite OIDC tokens through the Agent API.
 type AgentOIDCTokens struct {
-	mintURL  string
-	jobToken string
-	claims   []string
-	awsTags  []string
-	subject  string
-	client   *http.Client
+	mintURL string
+	claims  []string
+	awsTags []string
+	subject string
+	agent   *agentapi.Client
 }
 
 func NewAgentOIDCTokens(config AgentOIDCTokenConfig) (*AgentOIDCTokens, error) {
-	mintURL, err := agentOIDCTokenURL(config.Endpoint, config.JobID)
+	agent, err := agentapi.New(agentapi.Config{
+		Endpoint: config.Endpoint, JobID: config.JobID, JobToken: config.JobToken,
+		ClientVersion: config.ClientVersion, HTTPClient: config.Client,
+	}, "OIDC token")
 	if err != nil {
 		return nil, err
 	}
-	if config.JobToken == "" || strings.ContainsAny(config.JobToken, "\r\n") {
-		return nil, fmt.Errorf("OIDC token Agent job token is required")
-	}
-	client := config.Client
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
-	}
-	bounded := *client
-	bounded.Jar = nil
-	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	if bounded.Timeout == 0 {
-		bounded.Timeout = 15 * time.Second
-	}
 	return &AgentOIDCTokens{
-		mintURL:  mintURL,
-		jobToken: config.JobToken,
-		claims:   append([]string(nil), config.Claims...),
-		awsTags:  append([]string(nil), config.AWSSessionTags...),
-		subject:  config.SubjectClaim,
-		client:   &bounded,
+		mintURL: agent.URL("oidc/tokens"),
+		claims:  append([]string(nil), config.Claims...),
+		awsTags: append([]string(nil), config.AWSSessionTags...),
+		subject: config.SubjectClaim,
+		agent:   agent,
 	}, nil
 }
 
@@ -99,10 +89,8 @@ func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (strin
 	if err != nil {
 		return "", fmt.Errorf("create OIDC token request: %w", err)
 	}
-	request.Header.Set("Authorization", "Token "+c.jobToken)
-	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
-	response, err := c.client.Do(request)
+	response, err := c.agent.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("request OIDC token: %w", err)
 	}
@@ -133,19 +121,6 @@ func (c *AgentOIDCTokens) OIDCToken(ctx context.Context, audience string) (strin
 		return "", fmt.Errorf("OIDC token response contains an invalid token")
 	}
 	return decoded.Token, nil
-}
-
-func agentOIDCTokenURL(endpoint, jobID string) (string, error) {
-	if !validBuildkiteJobID(jobID) {
-		return "", fmt.Errorf("OIDC token Agent job ID is required")
-	}
-	u, err := url.Parse(endpoint)
-	if err != nil || !validCredentialServiceURL(u) {
-		return "", fmt.Errorf("safe OIDC token Agent endpoint using HTTPS or loopback HTTP is required")
-	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/oidc/tokens"
-	u.RawPath = ""
-	return u.String(), nil
 }
 
 type oidcTokenHTTPError struct {
@@ -188,12 +163,12 @@ type idTokenService struct {
 	listener   net.Listener
 	provider   OIDCTokenProvider
 	redactor   Redactor
-	processor  *commandProcessor
+	processor  *commandOutputProcessor
 	mu         sync.RWMutex
 	authHashes map[[sha256.Size]byte]struct{}
 }
 
-func startIDTokenService(ctx context.Context, provider OIDCTokenProvider, redactor Redactor, processor *commandProcessor) (*idTokenService, error) {
+func startIDTokenService(ctx context.Context, provider OIDCTokenProvider, redactor Redactor, processor *commandOutputProcessor) (*idTokenService, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("start actions ID-token service: %w", err)

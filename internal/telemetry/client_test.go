@@ -7,10 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const testJobID = "22222222-2222-4222-8222-222222222222"
@@ -30,6 +32,9 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 		if got := r.Header.Get("Content-Type"); got != "application/json" {
 			t.Errorf("Content-Type = %q", got)
 		}
+		if got := r.Header.Get("User-Agent"); got != "buildkite-gha/1.2.3" {
+			t.Errorf("User-Agent = %q", got)
+		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
@@ -43,13 +48,34 @@ func TestClientEmitsCommandCompletedEvent(t *testing.T) {
 	}
 	duration := 1234 * time.Millisecond
 	if err := client.Emit(CommandRunJob, OutcomeFailure, duration, Details{
-		FailurePhase: FailurePhaseParsing,
-		FailureCode:  FailureCodeWorkflowSyntax,
+		FailurePhase:          FailurePhaseParsing,
+		FailureCode:           FailureCodeWorkflowSyntax,
+		ErrorMessage:          "  buildkite-gha: run-job:\ninvalid workflow\tvalue  ",
+		ErrorMessageTruncated: true,
+		Blocker:               "shell",
+		BlockerDetail:         "pwsh",
+		Diagnostics: []Diagnostic{{
+			Code: string(FailureCodeExpressionInvalid), Severity: SeverityError,
+			Blocker: "runner_label", BlockerDetail: "windows-latest",
+		}},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if request.Event != EventCommandCompleted || request.Properties.Command != CommandRunJob || request.Properties.Outcome != OutcomeFailure || request.Properties.ClientVersion != "1.2.3" || request.Properties.DurationMS != 1234 || request.Properties.FailurePhase != FailurePhaseParsing || request.Properties.FailureCode != FailureCodeWorkflowSyntax {
-		t.Fatalf("event = %#v", request)
+	if request.Event != EventCommandCompleted {
+		t.Fatalf("event = %q, want %q", request.Event, EventCommandCompleted)
+	}
+	want := Properties{
+		Command: CommandRunJob, Outcome: OutcomeFailure, ClientVersion: "1.2.3", DurationMS: 1234,
+		FailurePhase: FailurePhaseParsing, FailureCode: FailureCodeWorkflowSyntax,
+		ErrorMessage: "buildkite-gha: run-job: invalid workflow value", ErrorMessageTruncated: true,
+		Blocker: "shell", BlockerDetail: "pwsh",
+		Diagnostics: []Diagnostic{{
+			Code: string(FailureCodeExpressionInvalid), Severity: SeverityError,
+			Blocker: "runner_label", BlockerDetail: "windows-latest",
+		}},
+	}
+	if !reflect.DeepEqual(request.Properties, want) {
+		t.Fatalf("properties = %#v, want %#v", request.Properties, want)
 	}
 }
 
@@ -183,6 +209,9 @@ func TestPropertiesAreBounded(t *testing.T) {
 	if len(client.clientVersion) != maxClientVersionBytes {
 		t.Fatalf("client version length = %d", len(client.clientVersion))
 	}
+	if client.userAgent != "buildkite-gha/unknown" {
+		t.Fatalf("User-Agent = %q, want bounded fallback", client.userAgent)
+	}
 	if err := client.Emit(Command("arbitrary"), OutcomeSuccess, 0, Details{}); err == nil {
 		t.Fatal("Emit() accepted an unknown command")
 	}
@@ -197,6 +226,37 @@ func TestPropertiesAreBounded(t *testing.T) {
 	}
 }
 
+func TestErrorMessageIsNormalizedAndUTF8Bounded(t *testing.T) {
+	message := "earlier output\n\t" + strings.Repeat("界", MaxErrorMessageBytes) + "\n immediate failure"
+	bounded, truncated := boundedErrorMessage(message)
+	if !truncated {
+		t.Fatal("boundedErrorMessage() did not report truncation")
+	}
+	if len(bounded) > MaxErrorMessageBytes {
+		t.Fatalf("boundedErrorMessage() returned %d bytes, want at most %d", len(bounded), MaxErrorMessageBytes)
+	}
+	if !utf8.ValidString(bounded) {
+		t.Fatalf("boundedErrorMessage() returned invalid UTF-8: %q", bounded)
+	}
+	if strings.HasPrefix(bounded, "earlier output") || !strings.HasSuffix(bounded, "immediate failure") {
+		t.Fatalf("boundedErrorMessage() = %q, want final failure without earlier output", bounded)
+	}
+	if got, truncated := boundedErrorMessage("\n failure\t details\x00 \r\n"); got != "failure details" || truncated {
+		t.Fatalf("boundedErrorMessage() = %q, %t", got, truncated)
+	}
+}
+
+func TestRuntimeClassificationCodesAreFailureCodesOnly(t *testing.T) {
+	for _, code := range []FailureCode{FailureCodeStepProcessExit, FailureCodeUnsupportedFeature, FailureCodeRuntimeIntegrity, FailureCodeSecretUnavailable} {
+		if !validFailureCode(code) {
+			t.Errorf("validFailureCode(%q) = false", code)
+		}
+		if _, ok := diagnosticSeverity(string(code)); ok {
+			t.Errorf("diagnosticSeverity(%q) accepted a failure-only code as a diagnostic", code)
+		}
+	}
+}
+
 func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 	errorCodes := []string{
 		string(FailureCodeWorkflowSyntax), string(FailureCodeEventInvalid), string(FailureCodeGraphInvalid),
@@ -204,7 +264,7 @@ func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
 		string(FailureCodeEnvironment), string(FailureCodeProfile),
 	}
-	warningCodes := []string{"W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED"}
+	warningCodes := []string{"W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", "W_TRIGGER_EVENT_UNSUPPORTED"}
 	input := make([]Diagnostic, 0, len(errorCodes)+len(warningCodes)+2)
 	for _, code := range errorCodes {
 		input = append(input, Diagnostic{Code: code, Severity: SeverityError})
@@ -222,6 +282,36 @@ func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 	}
 	if _, err := boundedDiagnostics([]Diagnostic{{Code: "CUSTOMER_VALUE", Severity: SeverityError}}); err == nil {
 		t.Fatal("boundedDiagnostics() accepted non-allowlisted code")
+	}
+}
+
+func TestDiagnosticsPreserveDistinctBlockersForOneCode(t *testing.T) {
+	common := strings.Repeat("x", maxBlockerDetailBytes)
+	input := []Diagnostic{
+		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "expression", BlockerDetail: common + "first"},
+		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "expression", BlockerDetail: common + "second"},
+	}
+	bounded, err := boundedDiagnostics(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded) != 2 || bounded[0].BlockerDetail == bounded[1].BlockerDetail {
+		t.Fatalf("bounded diagnostics collapsed distinct details: %#v", bounded)
+	}
+	for _, diagnostic := range bounded {
+		if len(diagnostic.BlockerDetail) > maxBlockerDetailBytes || !strings.Contains(diagnostic.BlockerDetail, "…#") {
+			t.Fatalf("bounded diagnostic detail = %q", diagnostic.BlockerDetail)
+		}
+	}
+}
+
+func TestBlockerDetailsAreNormalizedAndBounded(t *testing.T) {
+	blocker, detail, err := boundedBlocker("shell", "  pwsh\n"+strings.Repeat("界", maxBlockerDetailBytes))
+	if err != nil || blocker != "shell" || len(detail) > maxBlockerDetailBytes || !utf8.ValidString(detail) || !strings.HasPrefix(detail, "pwsh ") {
+		t.Fatalf("boundedBlocker() = %q, %q, %v", blocker, detail, err)
+	}
+	if _, _, err := boundedBlocker("customer-value", "detail"); err == nil {
+		t.Fatal("boundedBlocker() accepted an unknown blocker")
 	}
 }
 
@@ -249,10 +339,7 @@ func (b *countingBody) Read(p []byte) (int, error) {
 	if b.remaining == 0 {
 		return 0, io.EOF
 	}
-	n := int64(len(p))
-	if n > b.remaining {
-		n = b.remaining
-	}
+	n := min(int64(len(p)), b.remaining)
 	for i := range p[:n] {
 		p[i] = 'x'
 	}

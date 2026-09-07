@@ -18,12 +18,15 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/transport"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
 const (
 	processingAnnotationContext   = "buildkite-gha-processing"
 	skippedWorkflowsContext       = "buildkite-gha-skipped-workflows"
+	runnerResolutionContext       = "buildkite-gha-runner-resolution"
 	processingAnnotationBodyLimit = 1024 * 1024
 	processingAnnotationNotice    = "\n_Additional diagnostics omitted at the Buildkite annotation size limit._\n"
 	processingAnnotationTimeout   = 5 * time.Second
@@ -143,7 +146,7 @@ func writePluginProcessing(w io.Writer, report compatibility.ProcessingReport) e
 			}
 			metadata := []string{"workflow=" + workflow}
 			if diagnostic.Stage != "" {
-				metadata = append(metadata, "stage="+diagnostic.Stage)
+				metadata = append(metadata, "stage="+string(diagnostic.Stage))
 			}
 			if diagnostic.Job != "" {
 				metadata = append(metadata, "job="+diagnostic.Job)
@@ -191,10 +194,11 @@ type skippedWorkflow struct {
 	label  string
 	key    string
 	reason string
+	events []string
 }
 
-func (o processingOutput) annotateSkippedWorkflows(parent context.Context, event string, workflows []skippedWorkflow) {
-	body := skippedWorkflowsAnnotation(event, workflows, o.buildURL)
+func (o processingOutput) annotateSkippedWorkflows(parent context.Context, event string, allSkipped bool, workflows []skippedWorkflow) {
+	body := skippedWorkflowsAnnotation(event, allSkipped, workflows, o.buildURL)
 	if o.annotationJob == "" || body == "" {
 		return
 	}
@@ -205,22 +209,54 @@ func (o processingOutput) annotateSkippedWorkflows(parent context.Context, event
 	}
 }
 
-func skippedWorkflowsAnnotation(event string, workflows []skippedWorkflow, buildURL string) string {
+func (o processingOutput) annotateRunnerResolutionWarnings(parent context.Context, warnings []runtime.RunnerWarning) {
+	if o.annotationJob == "" || len(warnings) == 0 {
+		return
+	}
+	var body strings.Builder
+	body.WriteString("#### Unsupported runner labels were mapped to Ubuntu\n\nBuildkite used heuristic runner mappings:\n\n")
+	for _, warning := range warnings {
+		_, _ = fmt.Fprintf(&body, "* %s — %s\n", annotationCode(warning.Code), annotationHTML(warning.Message))
+	}
+	ctx, cancel := context.WithTimeout(parent, processingAnnotationTimeout)
+	defer cancel()
+	if err := o.agent.AnnotateJob(ctx, o.annotationJob, runnerResolutionContext, "warning", body.String()); err != nil {
+		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: warning: runner resolution annotation: %v\n", o.command, err)
+	}
+}
+
+func skippedWorkflowsAnnotation(event string, allSkipped bool, workflows []skippedWorkflow, buildURL string) string {
 	if len(workflows) == 0 || buildURL == "" {
 		return ""
 	}
 	var out strings.Builder
 	if len(workflows) == 1 {
-		out.WriteString("#### 1 workflow was skipped\n\n")
+		out.WriteString("#### 1 workflow was skipped")
 	} else {
-		_, _ = fmt.Fprintf(&out, "#### %d workflows were skipped\n\n", len(workflows))
+		_, _ = fmt.Fprintf(&out, "#### %d workflows were skipped", len(workflows))
 	}
-	_, _ = fmt.Fprintf(&out, "The current <code>%s</code> event does not match these workflows:\n\n", annotationHTML(event))
+	if allSkipped {
+		out.WriteString(", so this build ran nothing")
+	}
+	out.WriteString("\n\n")
+	_, _ = fmt.Fprintf(&out, "The current <code>%s</code> event does not match the following workflows:\n\n", annotationHTML(event))
 	for _, workflow := range workflows {
 		annotationURL := fmt.Sprintf("%s/canvas?key=%s&open=false", strings.TrimRight(buildURL, "/"), url.QueryEscape(workflow.key))
 		label := annotationHTML(strings.Join(strings.Fields(workflow.label), " "))
 		label = strings.NewReplacer("\\", "\\\\", "[", "\\[", "]", "\\]").Replace(label)
-		_, _ = fmt.Fprintf(&out, "* [:github: %s](%s) — %s\n", label, annotationURL, annotationHTML(workflow.reason))
+		detail := annotationHTML(workflow.reason)
+		if len(workflow.events) > 0 {
+			eventMatched := false
+			configuredEvents := make([]string, len(workflow.events))
+			for i, configuredEvent := range workflow.events {
+				eventMatched = eventMatched || configuredEvent == event
+				configuredEvents[i] = annotationCode(configuredEvent)
+			}
+			if !eventMatched {
+				detail = "This workflow is triggered on: " + strings.Join(configuredEvents, ", ")
+			}
+		}
+		_, _ = fmt.Fprintf(&out, "* [:github: %s](%s) — %s\n", label, annotationURL, detail)
 	}
 	return out.String()
 }
@@ -399,7 +435,12 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 	if len(details) != 0 {
 		for _, sentence := range details {
 			out.WriteString("<p>")
-			out.WriteString(annotationHTML(sentence))
+			detail := annotationHTML(sentence)
+			detail = strings.ReplaceAll(detail, "&#34;windows-latest&#34;", annotationCode("windows-latest"))
+			detail = strings.ReplaceAll(detail, "&#34;ubuntu-latest&#34;", annotationCode("ubuntu-latest"))
+			const issueURL = "https://github.com/buildkite/buildkite-gha"
+			detail = strings.ReplaceAll(detail, issueURL+" ", `<a href="`+issueURL+`" target="_blank">buildkite/buildkite-gha</a> `)
+			out.WriteString(detail)
 			out.WriteString("</p>\n")
 		}
 	}
@@ -441,8 +482,8 @@ func annotationDiagnosticPresentation(diagnostic compatibility.Diagnostic) (head
 			fmt.Sprintf("Action %q is unsupported: ", diagnostic.Action),
 			fmt.Sprintf("Action %q could not be resolved: ", diagnostic.Action),
 		} {
-			if strings.HasPrefix(message, prefix) {
-				message = upperFirst(strings.TrimPrefix(message, prefix))
+			if after, ok := strings.CutPrefix(message, prefix); ok {
+				message = upperFirst(after)
 				break
 			}
 		}
@@ -544,7 +585,7 @@ func applyHostedPreflight(report *compatibility.ProcessingReport, preflight host
 	report.ApplyEvidence(preflight.Bundle.Processing)
 	report.ApplyWarnings(report.Workflow, preflight.Bundle.IR.Warnings)
 	if preflight.Admitted {
-		report.SetStage(string(compiler.StageAdmission), compatibility.Passed)
+		report.SetStage(workflowprocessing.StageAdmission, compatibility.Passed)
 		report.Admission.Result = "admitted"
 	}
 }
@@ -554,14 +595,14 @@ func applyHostedPreflight(report *compatibility.ProcessingReport, preflight host
 func classifyHostedFailure(report *compatibility.ProcessingReport, workflowPath string, err error) string {
 	var failure *hostedFailure
 	if errors.As(err, &failure) && failure.Kind == hostedAdmissionFailure {
-		report.AddFailure(workflowPath, string(compiler.StageAdmission), "E_PROFILE", "admission", err)
+		report.AddFailure(workflowPath, workflowprocessing.StageAdmission, "E_PROFILE", "admission", err)
 		report.Admission.Result = "not-admitted"
 		return "not-admitted"
 	}
 	if errors.As(err, &failure) && failure.Kind == hostedEnvironmentFailure {
 		report.AddEnvironmentFailure("hosted workflow-processing environment could not be initialized")
 	} else {
-		report.AddFailure(workflowPath, string(compiler.StageResolution), compiler.CodeActionResolution, "action-resolution", err)
+		report.AddFailure(workflowPath, workflowprocessing.StageResolution, workflowprocessing.CodeActionResolution, "action-resolution", err)
 	}
 	return "indeterminate"
 }

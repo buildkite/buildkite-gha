@@ -44,6 +44,8 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	started := time.Now()
 	var result gharuntime.JobResult
 	details := &commandTelemetryDetails{}
+	stderr = details.captureErrors(stderr)
+	agent.Runner = captureCommandRunnerErrors(agent.Runner, stderr)
 	defer func() {
 		outcome := telemetryOutcome(code, result.Conclusion, ctx.Err())
 		emitCommandTelemetry(ctx, telemetry.CommandRunJob, outcome, clientVersion, time.Since(started), details.forOutcome(outcome))
@@ -110,7 +112,17 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
+	if options.artifactProducer == "" {
+		options.artifactProducer = options.planProducer
+	}
+	if err := hydrateEventPayload(ctx, agent, &job, options.artifactProducer); err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: hydrate event payload: %v\n", err)
+		return 1
+	}
 	if err := gharuntime.ValidateHost(job, runtime.GOOS, runtime.GOARCH); err != nil {
+		details.setFailurePhase(telemetry.FailurePhaseExecution)
+		details.setFailureCode(runtimeFailureCode(err))
+		setRuntimeBlocker(details, err)
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
@@ -136,7 +148,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			return 1
 		}
 		defer func() { _ = os.RemoveAll(actionCache) }()
-		store, err := actionsource.NewStoreContext(ctx, actionCache, nil)
+		store, err := actionsource.NewStoreContext(ctx, actionCache, nil, actionsource.WithUserAgentVersion(clientVersion))
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure action cache: %v\n", err)
 			return 1
@@ -151,10 +163,11 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	}
 	if cacheRequired || len(job.Actions) > 0 {
 		cacheCredentials, err = gharuntime.NewAgentCacheCredentials(gharuntime.AgentCacheConfig{
-			Endpoint:   os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
-			JobID:      os.Getenv("BUILDKITE_JOB_ID"),
-			JobToken:   os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
-			ResultsURL: os.Getenv("BUILDKITE_GHA_CACHE_URL"),
+			Endpoint:      os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+			JobID:         os.Getenv("BUILDKITE_JOB_ID"),
+			JobToken:      os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+			ResultsURL:    os.Getenv("BUILDKITE_GHA_CACHE_URL"),
+			ClientVersion: clientVersion,
 		})
 		if err != nil && cacheRequired {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure actions/cache service: %v\n", err)
@@ -172,6 +185,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			JobToken:         os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
 			OrganizationSlug: os.Getenv("BUILDKITE_ORGANIZATION_SLUG"),
 			PipelineSlug:     os.Getenv("BUILDKITE_PIPELINE_SLUG"),
+			ClientVersion:    clientVersion,
 		})
 		if tokenErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure GitHub token service: %v\n", tokenErr)
@@ -182,9 +196,10 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	var oidcTokens gharuntime.OIDCTokenProvider
 	if job.IDTokenPermission == "write" {
 		config := gharuntime.AgentOIDCTokenConfig{
-			Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
-			JobID:    os.Getenv("BUILDKITE_JOB_ID"),
-			JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+			Endpoint:      os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+			JobID:         os.Getenv("BUILDKITE_JOB_ID"),
+			JobToken:      os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+			ClientVersion: clientVersion,
 		}
 		if job.OIDC != nil {
 			config.Claims = job.OIDC.Claims
@@ -232,6 +247,11 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		RepositoryCredentials: repositoryCredentials,
 		WorkflowToken:         workflowTokens,
 		OIDCToken:             oidcTokens,
+		RunIdentity: gharuntime.RunIdentity{
+			BuildID:     os.Getenv("BUILDKITE_BUILD_ID"),
+			BuildNumber: os.Getenv("BUILDKITE_BUILD_NUMBER"),
+			RetryCount:  os.Getenv("BUILDKITE_RETRY_COUNT"),
+		},
 	}
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {
@@ -246,7 +266,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			if err != nil {
 				return "", fmt.Errorf("prepare action runtime: create private action runtime: %w", err)
 			}
-			mise, err := resolveRuntimeMise(ctx, os.Getenv("BUILDKITE_GHA_MISE"), runner.MiseDataDir, privateRuntime, stderr)
+			mise, err := resolveRuntimeMiseVersion(ctx, os.Getenv("BUILDKITE_GHA_MISE"), runner.MiseDataDir, privateRuntime, stderr, clientVersion)
 			if err != nil {
 				return "", fmt.Errorf("prepare action runtime: %w", err)
 			}
@@ -287,6 +307,8 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		failureVisible = result.FailureVisible()
 		if runErr != nil {
 			details.setFailurePhase(telemetry.FailurePhaseExecution)
+			details.setFailureCode(runtimeFailureCode(runErr))
+			setRuntimeBlocker(details, runErr)
 		}
 	}
 	if result.Conclusion == "" {
@@ -340,6 +362,35 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	return 0
+}
+
+// runtimeFailureCode attributes a RunJob error so ordinary workflow failures,
+// such as a test command exiting nonzero, are not counted as compatibility
+// gaps. Unattributed errors return "" and keep the unknown failure code.
+func runtimeFailureCode(err error) telemetry.FailureCode {
+	var secretError *gharuntime.SecretResolutionError
+	if errors.As(err, &secretError) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ""
+		}
+		return telemetry.FailureCodeSecretUnavailable
+	}
+	switch gharuntime.ClassifyFailure(err) {
+	case gharuntime.FailureClassStepProcessExit:
+		return telemetry.FailureCodeStepProcessExit
+	case gharuntime.FailureClassUnsupportedFeature:
+		return telemetry.FailureCodeUnsupportedFeature
+	case gharuntime.FailureClassIntegrity:
+		return telemetry.FailureCodeRuntimeIntegrity
+	default:
+		return ""
+	}
+}
+
+func setRuntimeBlocker(details *commandTelemetryDetails, err error) {
+	if blocker, detail, ok := gharuntime.UnsupportedFeature(err); ok {
+		details.setBlocker(blocker, detail)
+	}
 }
 
 func hasGitHubActionLocks(locks []plan.ActionLock) bool {
@@ -402,6 +453,42 @@ func callGuardsHaveNeedSources(guards []plan.CallGuard) bool {
 	return false
 }
 
+func hydrateEventPayload(ctx context.Context, agent transport.Agent, job *plan.Job, producer string) error {
+	if !job.Event.PayloadArtifact {
+		return nil
+	}
+	if producer == "" {
+		return fmt.Errorf("event payload artifact requires an importer job producer")
+	}
+	path, err := buildkitepipeline.EventPath(job.Event.PayloadDigest)
+	if err != nil {
+		return err
+	}
+	root, err := os.MkdirTemp("", "buildkite-gha-event-")
+	if err != nil {
+		return fmt.Errorf("create event payload directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(root) }()
+	if err := agent.DownloadArtifact(ctx, path, root, producer); err != nil {
+		return fmt.Errorf("download event payload artifact: %w", err)
+	}
+	file, err := os.Open(filepath.Join(root, filepath.FromSlash(path)))
+	if err != nil {
+		return fmt.Errorf("open event payload artifact: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	source, err := io.ReadAll(io.LimitReader(file, int64(plan.MaxEventPayloadBytes)+1))
+	if err != nil {
+		return fmt.Errorf("read event payload artifact: %w", err)
+	}
+	payload, err := plan.DecodeEventPayload(source, job.Event.PayloadDigest)
+	if err != nil {
+		return err
+	}
+	job.Event.Payload = &payload
+	return nil
+}
+
 func writeJobResult(path string, result gharuntime.JobResult) error {
 	encoded, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
@@ -433,12 +520,13 @@ func publishSecretResolutionAnnotation(parent context.Context, agent transport.A
 	if !errors.As(runErr, &secretError) {
 		return nil
 	}
-	body := fmt.Sprintf(`#### Missing secret
+	body := fmt.Sprintf(`#### Secret unavailable
 
 This job could not retrieve the Buildkite secret %s.
 
 1. <a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets" target="_blank">Create or migrate the secret into Buildkite</a>.
 1. If the secret already exists, <a href="https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets/access-policies" target="_blank">grant this job access with its access policy</a>.
+1. If the secret and its access policy are correct, retry the job. The Buildkite secret service may be temporarily unavailable.
 
 > ℹ️ GitHub does not expose an existing secret's value after creation. Copy or rotate the value manually. GitHub repository and environment secrets are not available directly to this job.
 `, annotationCode(secretError.Name))
@@ -448,11 +536,12 @@ This job could not retrieve the Buildkite secret %s.
 }
 
 type runJobOptions struct {
-	planPath        string
-	planDigest      string
-	planProducer    string
-	resultPath      string
-	hostedToolCache bool
+	planPath         string
+	planDigest       string
+	planProducer     string
+	artifactProducer string
+	resultPath       string
+	hostedToolCache  bool
 }
 
 func runJobArgs(args []string) (runJobOptions, error) {
@@ -466,7 +555,7 @@ func runJobArgs(args []string) (runJobOptions, error) {
 			}
 			seen[args[i]] = true
 			options.hostedToolCache = true
-		case "--plan", "--plan-digest", "--plan-producer", "--result":
+		case "--plan", "--plan-digest", "--plan-producer", "--artifact-producer", "--result":
 			option := args[i]
 			if seen[option] {
 				return runJobOptions{}, fmt.Errorf("%s may only be specified once", option)
@@ -483,6 +572,8 @@ func runJobArgs(args []string) (runJobOptions, error) {
 				options.planDigest = args[i]
 			case "--plan-producer":
 				options.planProducer = args[i]
+			case "--artifact-producer":
+				options.artifactProducer = args[i]
 			case "--result":
 				options.resultPath = args[i]
 			}
