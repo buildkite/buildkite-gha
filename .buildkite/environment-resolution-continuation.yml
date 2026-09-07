@@ -1,0 +1,45 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":white_check_mark: Environment secret runtime proof complete"
+    key: "environment-resolution-complete"
+    depends_on:
+      - step: "gha-environment-secret"
+        allow_failure: true
+    timeout_in_minutes: 10
+    retry:
+      automatic: false
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      proof_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-environment-plan.XXXXXXXX")"
+      trap 'rm -rf -- "$$proof_root"' EXIT
+      buildkite-agent artifact download '.buildkite-gha/plans/*.json' "$$proof_root" --step environment-resolution-importer
+      mapfile -t plans < <(find "$$proof_root" -type f -path '*/.buildkite-gha/plans/*.json' -print)
+      if [[ "$${#plans[@]}" != 1 ]]; then
+        echo "Expected one immutable job plan, found $${#plans[@]}" >&2
+        exit 1
+      fi
+      mise exec -- jq -e '
+        (.secret_mappings | to_entries) as $$mappings
+        | (.required_secrets | type) == "array" and
+          (.required_secrets | length) == 1 and
+          ($$mappings | length) == 1 and
+          ($$mappings[0].key | test("^[A-Za-z_][A-Za-z0-9_]*$$")) and
+          ($$mappings[0].value == ("TEST_" + ($$mappings[0].key | ascii_upcase))) and
+          (.required_secrets[0] == $$mappings[0].value) and
+          (.workflow.logical_job_id == "environment-secret") and
+          (.target.step_key == "gha-environment-secret")
+      ' "$${plans[0]}" >/dev/null
+      echo 'The immutable plan requests exactly one TEST_<UPPERCASE_NAME> secret and maps it to the GitHub environment secret name'
+      outcome="$$(buildkite-agent step get outcome --step gha-environment-secret)"
+      if [[ "$$outcome" != passed ]]; then
+        secret_name="$$(buildkite-agent meta-data get environment-resolution-secret-name)"
+        secret_key="TEST_$${secret_name^^}"
+        echo "The runtime job did not pass. Confirm Buildkite secret $$secret_key exists and its access policy includes this hosted job" >&2
+        exit 1
+      fi
+      echo 'The generated job passed after resolving and delivering the environment-scoped Buildkite secret'
