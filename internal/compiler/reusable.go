@@ -66,7 +66,16 @@ type sourcedCallGuard struct {
 
 type reusableInputs struct {
 	values   map[string]any
-	deferred map[string]needBinding
+	deferred map[string]deferredInput
+}
+
+// deferredInput is one string reusable-workflow input whose value embeds caller
+// needs outputs. template is the caller value with every graph-time part
+// folded; needs binds each referenced caller need to its members and the
+// referenced outputs.
+type deferredInput struct {
+	template string
+	needs    map[string]needBinding
 }
 
 type needBinding struct {
@@ -734,8 +743,39 @@ func cloneNeedBinding(binding needBinding) needBinding {
 func cloneReusableInputs(inputs reusableInputs) reusableInputs {
 	return reusableInputs{
 		values:   cloneAnyMap(inputs.values),
-		deferred: cloneNeedBindings(inputs.deferred),
+		deferred: cloneDeferredInputs(inputs.deferred),
 	}
+}
+
+func cloneDeferredInputs(inputs map[string]deferredInput) map[string]deferredInput {
+	if inputs == nil {
+		return nil
+	}
+	cloned := make(map[string]deferredInput, len(inputs))
+	for name, input := range inputs {
+		cloned[name] = cloneDeferredInput(input)
+	}
+	return cloned
+}
+
+func cloneDeferredInput(input deferredInput) deferredInput {
+	return deferredInput{template: input.template, needs: cloneNeedBindings(input.needs)}
+}
+
+// deferredInputMembers lists every caller job that any deferred input reads.
+func deferredInputMembers(inputs map[string]deferredInput) []string {
+	seen := make(map[string]struct{})
+	for _, input := range inputs {
+		for _, member := range bindingMembers(input.needs) {
+			seen[member] = struct{}{}
+		}
+	}
+	members := make([]string, 0, len(seen))
+	for member := range seen {
+		members = append(members, member)
+	}
+	sort.Strings(members)
+	return members
 }
 
 func cloneSourcedCallGuards(guards []sourcedCallGuard) []sourcedCallGuard {
@@ -760,7 +800,7 @@ func namespacedJobID(namespace, id string) string {
 
 func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWorkflowCall, callee *workflow.Workflow, parentInputs reusableInputs, callNeeds map[string]needBinding, matrix map[string]any, context expression.CompileContext) (reusableInputs, error) {
 	values := make(map[string]any, len(call.Inputs))
-	deferredValues := make(map[string]needBinding)
+	deferredValues := make(map[string]deferredInput)
 	for _, name := range sortedValueKeys(call.Inputs) {
 		value := call.Inputs[name]
 		if _, ok := callee.CallInputs[name]; !ok {
@@ -772,19 +812,30 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 				deferredValues[name] = deferred
 				continue
 			}
-			if deferred, ok := deferredNeedInput(text, callNeeds); ok {
-				deferredValues[name] = deferred
-				continue
-			}
 			var err error
-			resolved, err = evaluateStaticCallValue(text, parentInputs.values, matrix, context)
+			needsDependent := usesNeeds(text) || referencesDeferredInput(text, parentInputs.deferred)
+			if needsDependent {
+				var deferred deferredInput
+				deferred, err = deferredNeedInput(text, parentInputs, callNeeds, matrix, context)
+				if err == nil {
+					deferredValues[name] = deferred
+					continue
+				}
+			} else {
+				resolved, err = evaluateStaticCallValue(text, parentInputs.values, matrix, context)
+			}
 			if err != nil {
 				detail := fmt.Sprintf("Reusable-workflow input %q is not statically resolvable: %v", name, err)
 				message := fmt.Sprintf("Reusable workflow input %q uses a value that is unavailable before jobs run. Replace it with a literal or an expression that does not depend on job results.", name)
-				if need, _, ok := deferredNeedReference(text); ok {
-					message = fmt.Sprintf("Reusable workflow input %q references job %q, but the call does not list it in needs. Add %q to the reusable-workflow call's needs.", name, need, need)
-				} else if strings.Contains(err.Error(), `unsupported compile-time context "needs"`) {
-					message = fmt.Sprintf("Reusable workflow input %q uses a needs expression in an unsupported form. Pass the whole value as exactly ${{ needs.<job>.outputs.<name> }}, with nothing around it. Only string inputs can take a needs value, and Buildkite resolves it before the called job runs, so the reference has to be the entire value rather than part of a larger expression. If you need a computed input from job outputs, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.", name)
+				var unlisted unlistedNeedError
+				var forwarded compoundForwardedInputError
+				switch {
+				case errors.As(err, &unlisted):
+					message = fmt.Sprintf("Reusable workflow input %q references job %q, but the call does not list it in needs. Add %q to the reusable-workflow call's needs.", name, unlisted.need, unlisted.need)
+				case errors.As(err, &forwarded):
+					message = fmt.Sprintf("Reusable workflow input %q combines parent input %q, which carries a needs value, with other text. Forward it as exactly ${{ inputs.%s }}, or compute the value where the needs output is referenced directly.", name, forwarded.input, forwarded.input)
+				case needsDependent:
+					message = fmt.Sprintf("Reusable workflow input %q uses a needs expression in an unsupported form: %v. Reference job outputs as needs.<job>.outputs.<name>, list each job in the call's needs, and keep the rest of the value resolvable before jobs run (literals, github, vars, matrix, and static inputs). Only string inputs can take a needs value; Buildkite resolves the referenced outputs before the called job runs.", name, err)
 				}
 				return reusableInputs{}, &ProcessingFinding{
 					Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
@@ -798,7 +849,7 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 	}
 
 	resolved := make(map[string]any, len(callee.CallInputs))
-	deferred := make(map[string]needBinding, len(deferredValues))
+	deferred := make(map[string]deferredInput, len(deferredValues))
 	for _, name := range sortedValueKeys(callee.CallInputs) {
 		declaration := callee.CallInputs[name]
 		value, supplied := values[name]
@@ -809,7 +860,7 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 				span := call.Inputs[name].Span
 				return reusableInputs{}, locatedJobError(path, job, span.Start.Line, span.Start.Column, fmt.Sprintf("deferred reusable-workflow input %q must be string", name))
 			}
-			deferred[name] = cloneNeedBinding(deferredValue)
+			deferred[name] = cloneDeferredInput(deferredValue)
 			continue
 		}
 		if !ok && declaration.Default != nil {
@@ -847,53 +898,108 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 	return reusableInputs{values: resolved, deferred: deferred}, nil
 }
 
-func forwardedDeferredInput(value string, deferred map[string]needBinding) (needBinding, bool) {
+func forwardedDeferredInput(value string, deferred map[string]deferredInput) (deferredInput, bool) {
 	root, path, err := staticReference(value)
 	if err != nil || !strings.EqualFold(root, "inputs") || len(path) != 1 {
-		return needBinding{}, false
+		return deferredInput{}, false
 	}
-	for name, binding := range deferred {
+	for name, input := range deferred {
 		if strings.EqualFold(name, path[0]) {
-			return cloneNeedBinding(binding), true
+			return cloneDeferredInput(input), true
 		}
 	}
-	return needBinding{}, false
+	return deferredInput{}, false
 }
 
-func deferredNeedInput(value string, needs map[string]needBinding) (needBinding, bool) {
-	need, outputName, ok := deferredNeedReference(value)
-	if !ok {
-		return needBinding{}, false
-	}
-	for existing, binding := range needs {
-		if !strings.EqualFold(existing, need) {
-			continue
+// unlistedNeedError reports a needs reference to a job the call does not list.
+type unlistedNeedError struct{ need string }
+
+func (e unlistedNeedError) Error() string {
+	return fmt.Sprintf("expression references job %q, which the call does not list in needs", e.need)
+}
+
+// compoundForwardedInputError reports a needs-dependent parent input used
+// inside a larger expression. Such inputs forward only as the whole value.
+type compoundForwardedInputError struct{ input string }
+
+func (e compoundForwardedInputError) Error() string {
+	return fmt.Sprintf("expression combines needs-dependent parent input %q with other text", e.input)
+}
+
+func usesNeeds(value string) bool {
+	referenced, err := referencesContext(value, expression.ProfilePartialTemplate, "needs", false)
+	return err == nil && referenced
+}
+
+// deferredNeedInput reduces a caller value that reads needs outputs to its
+// residual template and binds every referenced output to the call's needs.
+func deferredNeedInput(value string, parentInputs reusableInputs, needs map[string]needBinding, matrix map[string]any, context expression.CompileContext) (deferredInput, error) {
+	resolved := replaceStaticInputs(value, parentInputs.values)
+	if hasInputExpression(resolved) {
+		for _, name := range sortedKeys(parentInputs.deferred) {
+			if referencesInput(resolved, name) {
+				return deferredInput{}, compoundForwardedInputError{input: name}
+			}
 		}
-		deferred := needBinding{members: append([]string(nil), binding.members...), projectOutputs: true}
+		return deferredInput{}, fmt.Errorf("expression references an unavailable or unsupported input")
+	}
+	context.Matrix = matrix
+	template, references, err := expression.ReduceDeferredInput(resolved, context)
+	if err != nil {
+		return deferredInput{}, err
+	}
+	deferred := deferredInput{template: template, needs: make(map[string]needBinding, len(references))}
+	for _, reference := range references {
+		need, binding, ok := findNeedBinding(needs, reference.Job)
+		if !ok {
+			return deferredInput{}, unlistedNeedError{need: reference.Job}
+		}
+		bound, exists := deferred.needs[need]
+		if !exists {
+			bound = needBinding{members: append([]string(nil), binding.members...), projectOutputs: true, outputs: []needOutputBinding{}}
+		}
 		if !binding.projectOutputs {
 			for _, member := range binding.members {
-				deferred.outputs = append(deferred.outputs, needOutputBinding{name: "value", member: member, output: outputName})
+				bound.outputs = append(bound.outputs, needOutputBinding{name: reference.Output, member: member, output: reference.Output})
 			}
-			return deferred, true
-		}
-		for _, output := range binding.outputs {
-			if !strings.EqualFold(output.name, outputName) {
-				continue
+		} else {
+			for _, output := range binding.outputs {
+				if strings.EqualFold(output.name, reference.Output) {
+					bound.outputs = append(bound.outputs, output)
+				}
 			}
-			output.name = "value"
-			deferred.outputs = append(deferred.outputs, output)
 		}
-		return deferred, true
+		sortNeedOutputBindings(bound.outputs)
+		deferred.needs[need] = bound
 	}
-	return needBinding{}, false
+	return deferred, nil
 }
 
-func deferredNeedReference(value string) (need, output string, ok bool) {
-	root, path, err := staticReference(value)
-	if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") {
-		return "", "", false
+func findNeedBinding(needs map[string]needBinding, job string) (string, needBinding, bool) {
+	for name, binding := range needs {
+		if strings.EqualFold(name, job) {
+			return name, binding, true
+		}
 	}
-	return path[0], path[2], true
+	return "", needBinding{}, false
+}
+
+// referencesInput reports whether substituting the named input changes the
+// value, which means the value reads that input.
+func referencesInput(value, name string) bool {
+	substituted, err := expression.SubstituteCompileInputs(value, map[string]any{name: "deferred"})
+	return err == nil && substituted != value
+}
+
+// referencesDeferredInput reports whether the value reads any parent input
+// that carries a needs value.
+func referencesDeferredInput(value string, deferred map[string]deferredInput) bool {
+	for name := range deferred {
+		if referencesInput(value, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func evaluateStaticCallValue(value string, inputs, matrix map[string]any, context expression.CompileContext) (any, error) {
@@ -1141,7 +1247,7 @@ func replaceSliceInputs(values []string, inputs map[string]any) []string {
 	return result
 }
 
-func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInputs map[string]needBinding) error {
+func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInputs map[string]deferredInput) error {
 	jobValues := []string{job.Name}
 	jobRuntimeValues := []string{job.DefaultShell, job.DefaultWorkingDirectory}
 	jobRuntimeValues = appendMapValues(jobRuntimeValues, job.Env)
@@ -1253,7 +1359,7 @@ func hasInputExpression(value string) bool {
 	return err != nil || usesInputs
 }
 
-func hasUnresolvedTemplateInput(value string, deferredInputs map[string]needBinding) bool {
+func hasUnresolvedTemplateInput(value string, deferredInputs map[string]deferredInput) bool {
 	resolved, err := expression.SubstituteCompileInputs(value, deferredInputPlaceholders(deferredInputs))
 	if err != nil {
 		return true
@@ -1262,7 +1368,7 @@ func hasUnresolvedTemplateInput(value string, deferredInputs map[string]needBind
 	return err != nil || usesInputs
 }
 
-func hasUnresolvedConditionInput(value string, deferredInputs map[string]needBinding) bool {
+func hasUnresolvedConditionInput(value string, deferredInputs map[string]deferredInput) bool {
 	if strings.TrimSpace(value) == "" {
 		return false
 	}
@@ -1273,7 +1379,7 @@ func hasUnresolvedConditionInput(value string, deferredInputs map[string]needBin
 	return hasUnresolvedTemplateInput(template, deferredInputs)
 }
 
-func deferredInputPlaceholders(inputs map[string]needBinding) map[string]any {
+func deferredInputPlaceholders(inputs map[string]deferredInput) map[string]any {
 	placeholders := make(map[string]any, len(inputs))
 	for name := range inputs {
 		placeholders[name] = "deferred"

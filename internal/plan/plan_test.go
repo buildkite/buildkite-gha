@@ -155,8 +155,9 @@ func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 	job.Dependencies = []string{"gha-prepare"}
 	job.DeferredInputs = map[string]DeferredInput{
 		"subject": {
-			Sources: []NeedSource{{StepKey: "gha-prepare", PlanDigest: digest}},
-			Outputs: []NeedOutput{{Name: "value", StepKey: "gha-prepare", Output: "subject"}},
+			Template:    "type=raw,value=${{ needs.prepare.outputs.subject }}",
+			NeedSources: map[string][]NeedSource{"prepare": {{StepKey: "gha-prepare", PlanDigest: digest}}},
+			NeedOutputs: map[string][]NeedOutput{"prepare": {{Name: "subject", StepKey: "gha-prepare", Output: "subject"}}},
 		},
 	}
 	job.CallGuards = []CallGuard{{
@@ -170,8 +171,9 @@ func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 		},
 		DeferredInputs: map[string]DeferredInput{
 			"subject": {
-				Sources: []NeedSource{{StepKey: "gha-prepare", PlanDigest: digest}},
-				Outputs: []NeedOutput{{Name: "value", StepKey: "gha-prepare", Output: "subject"}},
+				Template:    "type=raw,value=${{ needs.prepare.outputs.subject }}",
+				NeedSources: map[string][]NeedSource{"prepare": {{StepKey: "gha-prepare", PlanDigest: digest}}},
+				NeedOutputs: map[string][]NeedOutput{"prepare": {{Name: "subject", StepKey: "gha-prepare", Output: "subject"}}},
 			},
 		},
 	}}
@@ -196,6 +198,77 @@ func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 	job.CallGuards[0].NeedSources["prepare"][0].PlanDigest = "sha256:tampered"
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "producer identity") {
 		t.Fatalf("Validate() tampered call producer error = %v", err)
+	}
+}
+
+func TestDeferredInputTemplateValidation(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("1", 64)
+	source := NeedSource{StepKey: "gha-prepare", PlanDigest: digest}
+	valid := DeferredInput{
+		Template:    "type=raw,value=${{ needs.prepare.outputs.tag }}\ntype=raw,value=${{ format('{0}-{1}', needs.Prepare.outputs.tag, needs.prepare.outputs.flavor) }}",
+		NeedSources: map[string][]NeedSource{"prepare": {source}},
+		NeedOutputs: map[string][]NeedOutput{"prepare": {{Name: "flavor", StepKey: "gha-prepare", Output: "flavor"}, {Name: "tag", StepKey: "gha-prepare", Output: "tag"}}},
+	}
+	for _, test := range []struct {
+		name         string
+		dependencies []string
+		edit         func(input *DeferredInput)
+		want         string
+	}{
+		{name: "valid", edit: func(*DeferredInput) {}},
+		{name: "empty template", edit: func(input *DeferredInput) { input.Template = "" }, want: "has an invalid template"},
+		{name: "no needs reference", edit: func(input *DeferredInput) { input.Template = "literal ${{ github.ref }}" }, want: "template"},
+		{name: "need result", edit: func(input *DeferredInput) { input.Template = "${{ needs.prepare.result }}" }, want: "needs.<job>.outputs.<name>"},
+		{name: "whole outputs", edit: func(input *DeferredInput) { input.Template = "${{ toJSON(needs.prepare.outputs) }}" }, want: `unsupported runtime expression "needs.prepare.outputs"`},
+		{name: "unbound prerequisite", edit: func(input *DeferredInput) { input.Template = "${{ needs.other.outputs.tag }}" }, want: `references unbound prerequisite "other"`},
+		{
+			name:         "unread prerequisite",
+			dependencies: []string{"gha-other", "gha-prepare"},
+			edit: func(input *DeferredInput) {
+				input.NeedSources = map[string][]NeedSource{"prepare": {source}, "other": {{StepKey: "gha-other", PlanDigest: digest}}}
+			},
+			want: `binds prerequisite "other" that its template does not read`,
+		},
+		{
+			name: "producer is not a dependency",
+			edit: func(input *DeferredInput) {
+				input.NeedSources = map[string][]NeedSource{"prepare": {{StepKey: "gha-missing", PlanDigest: digest}}}
+			},
+			want: "is not a dependency",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := validJob()
+			job.Dependencies = []string{"gha-prepare"}
+			if test.dependencies != nil {
+				job.Dependencies = test.dependencies
+			}
+			input := DeferredInput{Template: valid.Template, NeedSources: map[string][]NeedSource{}, NeedOutputs: map[string][]NeedOutput{}}
+			for need, sources := range valid.NeedSources {
+				input.NeedSources[need] = append([]NeedSource(nil), sources...)
+			}
+			for need, outputs := range valid.NeedOutputs {
+				input.NeedOutputs[need] = append([]NeedOutput(nil), outputs...)
+			}
+			test.edit(&input)
+			job.DeferredInputs = map[string]DeferredInput{"tags": input}
+			synchronizeExecutionProgram(&job)
+			err := job.Validate()
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				encoded, err := Encode(job)
+				if err != nil {
+					t.Fatal(err)
+				}
+				validateJobPlanSchema(t, encoded)
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

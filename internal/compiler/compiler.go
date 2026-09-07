@@ -142,11 +142,15 @@ type CallGuard struct {
 	NeedOutputs    map[string][]NeedOutput  `json:"need_outputs,omitempty"`
 }
 
-// DeferredInput binds one string workflow_call input to exact prerequisite
-// outputs without exposing the caller's needs context to the callee.
+// DeferredInput is one string workflow_call input whose value embeds caller
+// needs outputs. Template is the caller value with every graph-time part
+// folded; NeedGroups and NeedOutputs bind each referenced caller job to exact
+// producers and outputs without exposing the caller's needs context to the
+// callee.
 type DeferredInput struct {
-	Sources []string     `json:"sources"`
-	Outputs []NeedOutput `json:"outputs,omitempty"`
+	Template    string                  `json:"template"`
+	NeedGroups  map[string][]string     `json:"need_groups"`
+	NeedOutputs map[string][]NeedOutput `json:"need_outputs"`
 }
 
 // NeedOutput is the plan-boundary projection of one caller-visible output from
