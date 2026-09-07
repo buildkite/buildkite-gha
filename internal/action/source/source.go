@@ -603,7 +603,7 @@ func fetchWithGit(ctx context.Context, cfg config, ref Reference, requestedRef s
 		// cfg.gitTestArgs follows gitBaseArgs so tests can reopen the file
 		// transport for local fixtures; production configurations leave it and
 		// cfg.gitTestRemoteBase empty.
-		fetchArgs := append(append([]string{}, cfg.gitTestArgs...),
+		fetchArgs := append(append(append([]string{}, cfg.gitTestArgs...), gitRemoteArgs(remote)...),
 			"-c", "fetch.unpackLimit=1", "fetch", "--quiet", "--force", "--no-tags", "--depth=1", "--no-recurse-submodules", "--no-auto-maintenance", "--", remote, candidate)
 		err = runGitEnvironment(fetchCtx, cfg.git, repository, io.Discard, limitError, boundedEnvironment, fetchArgs...)
 		if err == nil {
@@ -780,6 +780,18 @@ func gitBaseArgs() []string {
 		"-c", "http.followRedirects=false",
 		"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
 		"-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true",
+	}
+}
+
+// gitRemoteArgs pins the settings Git resolves per URL for the exact remote
+// being fetched. Inherited http.<url>.* and credential.<url>.* keys take
+// precedence over the generic keys in gitBaseArgs; an exact-URL command-line
+// value is the longest possible match and, on a tie, the last one applied.
+func gitRemoteArgs(remote string) []string {
+	return []string{
+		"-c", "http." + remote + ".followRedirects=false",
+		"-c", "http." + remote + ".sslVerify=true",
+		"-c", "credential." + remote + ".useHttpPath=true",
 	}
 }
 

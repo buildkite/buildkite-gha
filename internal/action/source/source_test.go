@@ -1163,6 +1163,50 @@ func TestGitRepositorySourceDeniesNonHTTPSTransports(t *testing.T) {
 	}
 }
 
+func TestGitRepositorySourcePinsURLScopedHTTPSettings(t *testing.T) {
+	git, _, _, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	const remote = "https://github.com/o/r.git"
+	runSourceGit(t, git, "", "config", "--global", "http.https://github.com/.followRedirects", "true")
+	runSourceGit(t, git, "", "config", "--global", "http.https://github.com/o/.sslVerify", "false")
+	runSourceGit(t, git, "", "config", "--global", "credential.https://github.com/.useHttpPath", "false")
+	args := append(gitBaseArgs(), gitRemoteArgs(remote)...)
+	for key, want := range map[string]string{"http.followRedirects": "false", "http.sslVerify": "true", "credential.useHttpPath": "true"} {
+		got := strings.TrimSpace(runSourceGit(t, git, "", append(args, "config", "--get-urlmatch", key, remote)...))
+		if got != want {
+			t.Fatalf("effective %s for %s = %q, want %q despite inherited URL-scoped override", key, remote, got, want)
+		}
+	}
+
+	root := t.TempDir()
+	invocations := filepath.Join(root, "invocations")
+	t.Setenv("GIT_INVOCATIONS", invocations)
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GIT_INVOCATIONS\"\ncase \" $* \" in *\" fetch \"*) exit 1;; esac\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	if _, err := resolver.Resolve(t.Context(), ref); err == nil {
+		t.Fatal("Resolve() succeeded against a failing fetch wrapper")
+	}
+	log, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "http."+remote+".followRedirects=false") || !strings.Contains(string(log), " fetch ") {
+		t.Fatalf("fetch did not pin URL-scoped settings for %s: %s", remote, log)
+	}
+}
+
 func TestGitRepositorySourceRefusesInheritedURLRewrites(t *testing.T) {
 	git, _, _, _ := configureGitRepositorySource(t, map[string]string{
 		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
