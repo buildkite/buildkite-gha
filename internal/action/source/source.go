@@ -807,6 +807,12 @@ func runGitEnvironment(ctx context.Context, executable, repository string, stdou
 	return cmd.Run()
 }
 
+// gitEnvironment inherits the importer's environment, including the settings
+// that locate its credential helpers, but removes variables that would prompt,
+// trace credentials, or override the transport policy set through -c.
+// GIT_SSL_NO_VERIFY and GIT_ALLOW_PROTOCOL take precedence over any http.* or
+// protocol.* configuration, and the GIT_CONFIG_* variables inject configuration
+// that is not visible on the command line.
 func gitEnvironment() []string {
 	environment := os.Environ()
 	filtered := environment[:0]
@@ -817,7 +823,14 @@ func gitEnvironment() []string {
 			strings.HasPrefix(value, "GIT_TRACE_") ||
 			strings.HasPrefix(value, "GIT_CURL_VERBOSE=") ||
 			strings.HasPrefix(value, "GCM_TRACE=") ||
-			strings.HasPrefix(value, "GCM_TRACE_") {
+			strings.HasPrefix(value, "GCM_TRACE_") ||
+			strings.HasPrefix(value, "GIT_SSL_NO_VERIFY=") ||
+			strings.HasPrefix(value, "GIT_ALLOW_PROTOCOL=") ||
+			strings.HasPrefix(value, "GIT_PROTOCOL_FROM_USER=") ||
+			strings.HasPrefix(value, "GIT_CONFIG_PARAMETERS=") ||
+			strings.HasPrefix(value, "GIT_CONFIG_COUNT=") ||
+			strings.HasPrefix(value, "GIT_CONFIG_KEY_") ||
+			strings.HasPrefix(value, "GIT_CONFIG_VALUE_") {
 			continue
 		}
 		filtered = append(filtered, value)

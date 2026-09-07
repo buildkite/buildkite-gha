@@ -67,8 +67,9 @@ the importer passes Git a canonical credential-free `https://github.com/` URL
 for the called repository. Git inherits the importer's credential helpers,
 configuration, and environment. Each invocation allows only the HTTPS
 transport, refuses redirects, verifies TLS, and checks received objects. These
-values are pinned for the exact repository URL, so inherited `http.<url>.*`
-settings cannot relax them. The importer expands the URL with
+values are pinned for the exact repository URL, and Git environment variables
+that would relax them, such as `GIT_SSL_NO_VERIFY` and `GIT_ALLOW_PROTOCOL`,
+are removed, so inherited configuration cannot weaken them. The importer expands the URL with
 `git ls-remote --get-url` before fetching and stops if an inherited
 `url.<base>.insteadOf` rewrite changed it, so the request and the credential
 helper lookup stay on `github.com`. The Buildkite Agent

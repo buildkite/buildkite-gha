@@ -1002,6 +1002,14 @@ func TestGitRepositorySourceEnvironmentDisablesInteractionAndTracing(t *testing.
 	t.Setenv("GIT_CURL_VERBOSE", "1")
 	t.Setenv("GCM_TRACE", "1")
 	t.Setenv("GCM_TRACE_SECRETS", "1")
+	t.Setenv("GIT_SSL_NO_VERIFY", "1")
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file:https")
+	t.Setenv("GIT_PROTOCOL_FROM_USER", "1")
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'http.followRedirects=true'")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "http.https://github.com/o/r.git.sslVerify")
+	t.Setenv("GIT_CONFIG_VALUE_0", "false")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/importer/.gitconfig")
 
 	environment := make(map[string]string)
 	for _, entry := range gitEnvironment() {
@@ -1010,13 +1018,45 @@ func TestGitRepositorySourceEnvironmentDisablesInteractionAndTracing(t *testing.
 			environment[key] = value
 		}
 	}
-	if environment["BUILDKITE_GHA_PRESERVED"] != "yes" || environment["GIT_TERMINAL_PROMPT"] != "0" || environment["GCM_INTERACTIVE"] != "never" {
+	if environment["BUILDKITE_GHA_PRESERVED"] != "yes" || environment["GIT_CONFIG_GLOBAL"] != "/importer/.gitconfig" || environment["GIT_TERMINAL_PROMPT"] != "0" || environment["GCM_INTERACTIVE"] != "never" {
 		t.Fatalf("Git environment did not preserve process configuration or disable prompts: %#v", environment)
 	}
 	for _, key := range []string{"GIT_TRACE", "GIT_TRACE_CURL", "GIT_CURL_VERBOSE", "GCM_TRACE", "GCM_TRACE_SECRETS"} {
 		if _, exists := environment[key]; exists {
 			t.Errorf("Git environment retained tracing variable %s", key)
 		}
+	}
+	for _, key := range []string{"GIT_SSL_NO_VERIFY", "GIT_ALLOW_PROTOCOL", "GIT_PROTOCOL_FROM_USER", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"} {
+		if _, exists := environment[key]; exists {
+			t.Errorf("Git environment retained policy override variable %s", key)
+		}
+	}
+}
+
+func TestGitRepositorySourceEnvironmentCannotDisableTLSVerification(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_SSL_NO_VERIFY", "1")
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	repository := t.TempDir()
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", repository)
+	remote := server.URL + "/o/r.git"
+	fetch := func(environment []string) string {
+		var stderr bytes.Buffer
+		args := append(gitRemoteArgs(remote), "fetch", "--quiet", "--", remote, "main")
+		if err := runGitEnvironment(t.Context(), git, repository, io.Discard, &stderr, environment, args...); err == nil {
+			t.Fatalf("fetch from a self-signed server succeeded")
+		}
+		return strings.ToLower(stderr.String())
+	}
+	if filtered := fetch(gitEnvironment()); !strings.Contains(filtered, "certificate") {
+		t.Fatalf("filtered environment did not fail on TLS verification: %s", filtered)
+	}
+	if inherited := fetch(os.Environ()); strings.Contains(inherited, "certificate") {
+		t.Fatalf("GIT_SSL_NO_VERIFY should bypass verification without the filter, got: %s", inherited)
 	}
 }
 
