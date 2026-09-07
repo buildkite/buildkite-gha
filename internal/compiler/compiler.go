@@ -161,6 +161,11 @@ type Report struct {
 	Warnings              []Warning
 	Jobs                  []JobInstance
 	RuntimeMatrixBoundary bool
+	// ReferencesVars reports whether any expression in the workflow or a
+	// reusable workflow it calls reads the vars context. Callers resolve
+	// repository and organization variables before compiling only when it is
+	// set, so workflows without vars references cost no resolution request.
+	ReferencesVars        bool
 	RuntimeMatrices       []RuntimeMatrixDescriptor
 	ParsedJobs            []ParsedJob
 	NotEvaluatedJobs      map[string]bool
@@ -761,20 +766,22 @@ func supported(path string, job workflow.Job) error {
 	return nil
 }
 
+// resolveCompileTimeConditions reduces event values in the job and step
+// conditions. Conditions keep vars residual: the runtime evaluates each
+// position with its own scopes from the plan (repository over organization
+// for the job condition, the environment laid over them for steps), and a
+// condition a variable makes false must not prune token or secret authority,
+// which planning computes from the residual condition.
 func resolveCompileTimeConditions(job workflow.Job, context expression.CompileContext, matrix map[string]any) workflow.Job {
 	context.Matrix = matrix
+	context.Vars = nil
 	if resolved, ok := resolveCompileTimeCondition(job.If, expression.ProfileCompileJobCondition, context); ok {
 		job.If = resolved
 	}
-	// Step conditions run after the job's environment applies, so their vars
-	// context is not known here. Keep vars residual so the runtime evaluates
-	// them with environment variables laid over the pre-environment scopes.
-	stepContext := context
-	stepContext.Vars = nil
 	job.Steps = append([]workflow.Step(nil), job.Steps...)
 	for i := range job.Steps {
 		step := &job.Steps[i]
-		if resolved, ok := resolveCompileTimeCondition(step.If, expression.ProfileCompileStepCondition, stepContext); ok {
+		if resolved, ok := resolveCompileTimeCondition(step.If, expression.ProfileCompileStepCondition, context); ok {
 			step.If = resolved
 		}
 	}

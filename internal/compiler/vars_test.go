@@ -154,10 +154,11 @@ jobs:
 	if registry := deploy.Services["registry"]; registry.Image != "registry:shared" || registry.Credentials == nil || registry.Credentials.Username != "${{ vars.REGION }}" {
 		t.Fatalf("service = %#v, want compile-time image and residual credential vars", registry)
 	}
-	// jobs.<id>.if is evaluated before the environment applies, so the same
-	// expression there does reduce with the repository value.
-	if deploy.Condition != "true" {
-		t.Fatalf("job condition = %q, want repository value applied", deploy.Condition)
+	// jobs.<id>.if keeps vars residual too: the runtime evaluates it with
+	// VarsBeforeEnvironment, and a value that made it false at compile time
+	// would otherwise prune the job's token and secret authority.
+	if deploy.Condition != "(true && (vars.region == 'base'))" {
+		t.Fatalf("job condition = %q, want vars kept for runtime evaluation", deploy.Condition)
 	}
 }
 

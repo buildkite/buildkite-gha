@@ -97,12 +97,22 @@ func TestRunCompileResolvesEnvironmentsThroughAgent(t *testing.T) {
 }
 
 // agentEnvironmentsStub serves the Agent API endpoints upload contacts:
-// runner resolution, which reports every requirement unmapped, and
+// runner resolution, which reports every requirement unmapped;
+// github-actions/variables, which is absent (404); and
 // github-actions/environments, which rejects requests without the job token,
 // counts resolution requests, and answers each requested environment with a
 // required-reviewers snapshot naming one DEPLOY_KEY secret. The production
 // environment also defines the AWS_REGION variable.
 func agentEnvironmentsStub(t *testing.T, jobToken string, status int) (*httptest.Server, *int) {
+	t.Helper()
+	// This backend offers no repository or organization variables, so vars
+	// references outside the environment stay empty.
+	return agentStub(t, jobToken, status, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })
+}
+
+// agentStub is agentEnvironmentsStub with a caller-supplied
+// github-actions/variables handler.
+func agentStub(t *testing.T, jobToken string, status int, variables http.HandlerFunc) (*httptest.Server, *int) {
 	t.Helper()
 	requests := new(int)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +130,10 @@ func agentEnvironmentsStub(t *testing.T, jobToken string, status int) (*httptest
 				resolutions[i] = map[string]any{"id": requirement.ID, "error": map[string]string{"code": "unmapped_labels", "message": "No compatible runner is configured."}}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"resolutions": resolutions})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/github-actions/variables") {
+			variables(w, r)
 			return
 		}
 		*requests++
