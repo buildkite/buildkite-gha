@@ -40,7 +40,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `python`, and custom shell templates. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
-| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local, public, and approved private GitHub workflows with static inputs, deferred string inputs from direct needs outputs, and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. Private access requires a separate importer opt-in and existing Git access. |
+| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local, public, and approved private GitHub workflows with static inputs, string inputs that embed needs outputs, and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. Private access requires a separate importer opt-in and existing Git access. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile and public prebuilt-image actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Reusable-workflow jobs use the top-level workflow permissions. |
@@ -91,7 +91,7 @@ workflow name or fallback path from `GITHUB_WORKFLOW`; the event from
 `GITHUB_EVENT_NAME`; and the commit from `GITHUB_WORKFLOW_SHA`. These values
 must match the repository and checked-out workflow. The Buildkite-prefixed path
 and event remain compatibility fallbacks, while `BUILDKITE_GITHUB_ACTION`
-supplies the pull request action. Explicit plugin selection takes precedence
+supplies the pull request, issue, or comment action. Explicit plugin selection takes precedence
 over server workflow selection. Without either selection, the plugin fails.
 The server-selected importer does not need a step key. The plugin uploads its
 artifacts before the dynamic pipeline and scopes retrieval to the importer job
@@ -214,7 +214,8 @@ Upload selects one effective event, in this order:
 
 The fallback prefers `GITHUB_EVENT_NAME`, then preserves `push`, `pull_request`,
 `workflow_dispatch`, and `schedule` from `BUILDKITE_GITHUB_EVENT` across
-rebuilds. Otherwise:
+rebuilds. It preserves `issues` and `issue_comment` only with complete GitHub
+Actions Pipeline Trigger workflow path, ref, and SHA identity. Otherwise:
 
 | Buildkite source | Effective event |
 | --- | --- |
@@ -225,13 +226,15 @@ rebuilds. Otherwise:
 
 An explicit snapshot does not consult contradictory live event fields. Linked
 merge-group data must match the queue refs and commits. Linked release data must
-match the Buildkite event, action, branch, and tag. Linked issues data provides
-the issue activity and payload.
+match the Buildkite event, action, branch, and tag. Linked issue and comment data
+must match the Buildkite action, default-branch ref, and repository. Comment
+payloads may describe either issue or pull request conversations.
 
 With the GitHub Code Access App, Buildkite resolves a release tag to its peeled
 commit before creating the build. Without it, the plugin resolves Buildkite's
 symbolic `HEAD` from the checkout as a compatibility fallback. The fallback
-cannot infer a merge group, release, or issues event without linked-webhook data.
+cannot infer a merge group, release, issues, or issue-comment event without
+linked-webhook data.
 
 The selected event then controls applicability, event-dependent compilation,
 the group condition, and the provider-check suffix.
@@ -242,7 +245,8 @@ the group condition, and the provider-check suffix.
 | `pull_request` | `branches` and `branches-ignore` match the base branch. Omitted `types` defaults to `opened`, `synchronize`, and `reopened`; explicitly listed activity types must map exactly to a supported Buildkite source action. Matching `paths` and `paths-ignore` can be admitted when the bounded local-diff requirements below are met. |
 | `merge_group` | Native Buildkite merge queue builds only. Enable merge queue builds and Merge groups webhook delivery in the pipeline's GitHub settings. `branches` and `branches-ignore` match the target branch. The only supported activity is `checks_requested`; other types and tag and workflow filters are rejected. `paths` and `paths-ignore` are ignored with a warning, matching GitHub, which does not evaluate path filters for `merge_group` events. The merge group ref and SHA identify the speculative queue commit. |
 | `release` | Native Buildkite release builds only. In the pipeline's GitHub settings, enable **Additional Webhooks** > **Releases** and use **Code** trigger mode. Connect the GitHub Code Access App for immutable server provenance and hosted release `GITHUB_TOKEN` issuance. `types` is required and may contain only `published`, `created`, and `released`; bare `release`, all other activity types, and branch, tag, path, and workflow filters are rejected. Draft `created` deliveries are rejected. The ref is `refs/tags/<tag_name>`. The SHA is the server-resolved peeled commit, or the checked-out commit for the compatibility fallback. |
-| `issues` | Native Buildkite GitHub issue builds only. A bare trigger accepts every GitHub Actions issue activity. Explicit `types` may contain `opened`, `edited`, `deleted`, `transferred`, `pinned`, `unpinned`, `closed`, `reopened`, `assigned`, `unassigned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `milestoned`, `demilestoned`, `typed`, `untyped`, `field_added`, and `field_removed`. Empty or unknown types and branch, tag, path, or workflow filters are rejected. |
+| `issues` | A bare trigger accepts every GitHub Actions issue activity. Explicit `types` may contain `opened`, `edited`, `deleted`, `transferred`, `pinned`, `unpinned`, `closed`, `reopened`, `assigned`, `unassigned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `milestoned`, `demilestoned`, `typed`, `untyped`, `field_added`, and `field_removed`. Empty or unknown types and branch, tag, path, or workflow filters are rejected. In a GitHub Actions Pipeline Trigger build, Buildkite selects workflows and the checkout from the latest verified default-branch SHA; native issue-build settings, branch/path filters, and comment gating do not participate. Existing native Buildkite issue builds remain supported through linked webhook data and retain their own build-creation settings. |
+| `issue_comment` | A bare trigger accepts `created`, `edited`, and `deleted`; explicit `types` may contain those activities. Both issue and pull request conversation comments are supported. Empty or unknown types and branch, tag, path, or workflow filters are rejected. GitHub Actions Pipeline Trigger builds select workflows and the checkout from the latest verified default-branch SHA and do not inherit native command-word, trusted-commenter, PR-only, branch, or path gating. |
 | `workflow_dispatch` | Selected only by an explicit snapshot or authoritative `GITHUB_EVENT_NAME` or `BUILDKITE_GITHUB_EVENT` value. Webhook-style branch, tag, type, and workflow filters are unsupported. |
 | `schedule` | Selected for Buildkite scheduled builds. Buildkite owns cron configuration and does not expose which schedule started a build, so every `on.schedule` workflow is eligible for every Buildkite scheduled build. |
 | `workflow_call` | Defines a reusable-workflow interface. A reusable-only local file is available to callers but does not become a top-level group. |
@@ -331,7 +335,8 @@ Private references work for the pipeline repository and cross-repository sources
 - Literal public or approved private references to a `.yml` or `.yaml` file directly under `owner/repository/.github/workflows/`.
 - `boolean`, `number`, and `string` inputs.
 - Static input values. Caller values may use graph-time `github`, matrix, and parent reusable-workflow inputs with the supported operators and pure functions.
-- String inputs passed as exactly `${{ needs.<job>.outputs.<name> }}`. The call must list the job in `needs`. Buildkite resolves the verified output before each flattened callee job runs.
+- String inputs that read `needs.<job>.outputs.<name>`, alone or inside a larger value such as `type=raw,value=${{ needs.meta.outputs.tag }}` or `${{ format('{0}-{1}', github.ref_name, needs.meta.outputs.tag) }}`. The call must list each job in `needs`. Every other part of the value must resolve before jobs run: literals, graph-time `github`, `vars`, matrix values, static parent inputs, and the supported operators and pure functions. Buildkite resolves the verified outputs and renders the value before each flattened callee job runs.
+- Forwarding a needs-dependent parent input to a nested call as exactly `${{ inputs.<name> }}`.
 - Literal defaults and expression defaults over graph-time `github` values.
 - Nested calls up to four levels.
 - `secrets: inherit` for repository-local calls. Each nested edge must repeat it.
@@ -347,7 +352,9 @@ Private references work for the pipeline repository and cross-repository sources
 - Dynamic workflow paths.
 - Secret forwarding for public remote calls.
 - Literal, compound, dynamic, or non-secret explicit mapping values.
-- Compound `needs`-dependent inputs or dynamic matrices.
+- `needs.<job>.result`, whole `needs.<job>.outputs` objects, or needs values mixed with runtime-only values such as `github.run_id` in inputs.
+- Combining a needs-dependent parent input with other text in a nested call.
+- Dynamic matrices.
 - Input defaults that reference `inputs`.
 - Literal or compound output expressions.
 
@@ -1297,40 +1304,43 @@ Alternate repositories, tags, non-event dynamic commits, GitHub Enterprise Serve
 
 ### Upload artifact action
 
-**🟡 Supported subset.** These root `actions/upload-artifact` actions use a native Buildkite ZIP adapter:
+**🟡 Supported subset.** Resolved commits in the frozen upstream release and `main` snapshots use a native Buildkite ZIP adapter. These principal releases remain named compatibility points:
 
 | Release | Commit |
 | --- | --- |
 | v1.0.0 | [`3446296876d12d4e3a0f3145a3c87e67bf0a16b5`](https://github.com/actions/upload-artifact/tree/3446296876d12d4e3a0f3145a3c87e67bf0a16b5) |
 | v2.3.1 | [`82c141cc518b40d92cc801eee768e7aafc9c2fa2`](https://github.com/actions/upload-artifact/tree/82c141cc518b40d92cc801eee768e7aafc9c2fa2) |
 | v3.2.1 | [`ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5`](https://github.com/actions/upload-artifact/tree/ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5) |
+| v4.6.0 | [`65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08`](https://github.com/actions/upload-artifact/tree/65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08) |
 | v4.6.2 | [`ea165f8d65b6e75b540449e92b4886f43607fa02`](https://github.com/actions/upload-artifact/tree/ea165f8d65b6e75b540449e92b4886f43607fa02) |
 | v5.0.0 | [`330a01c490aca151604b8cf639adc76d48f6c5d4`](https://github.com/actions/upload-artifact/tree/330a01c490aca151604b8cf639adc76d48f6c5d4) |
 | v6.0.0 | [`b7c566a772e6b6bfb58ed0dc250532a479d7789f`](https://github.com/actions/upload-artifact/tree/b7c566a772e6b6bfb58ed0dc250532a479d7789f) |
 | v7.0.1 | [`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`](https://github.com/actions/upload-artifact/tree/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a) |
 
-The v1.0.0, v2.3.1, and v3.2.1 commits match the floating legacy major tags used on github.com. Other known legacy commits are unsupported, including v3.2.2, which upstream publishes only as a GitHub Enterprise Server security backport and deprecates on github.com. Every known admitted release accepts only its declared inputs.
+Each snapshotted commit retains the inputs, outputs, hidden-file default, and v1 path behavior declared by its upstream contract. For example, v4.0.0 accepts `compression-level` but rejects the later `overwrite` and `include-hidden-files` inputs, and exposes `artifact-id` without the later `artifact-digest`. The v3.2.2 and v3.2.2-node20 commits remain unsupported because upstream publishes them only as GitHub Enterprise Server security backports and deprecates them on github.com.
 
-An unknown lowercase 40-hex immutable commit uses the stable v7.0.1 contract as a compatibility fallback. Compilation emits one `W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK` warning for each distinct unknown commit. The fallback can differ from the commit's upstream manifest, but it does not widen the native adapter or execute upstream JavaScript. Malformed commits remain unsupported. Compilation emits `W_UPLOAD_ARTIFACT_LEGACY_RELEASE` for known v1 through v3 commits to recommend v4 or later.
+An immutable commit absent from the snapshot uses the stable v7.0.1 contract as a compatibility fallback. Compilation emits one `W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK` warning for each distinct unknown commit. The fallback can differ from the commit's upstream manifest, but it does not widen the native adapter or execute upstream JavaScript. Malformed commits remain unsupported. Compilation emits `W_UPLOAD_ARTIFACT_LEGACY_RELEASE` for the principal v1 through v3 releases to recommend v4 or later.
+
+Maintainers can refresh the frozen tags, branches, and per-commit profiles with `go generate ./internal/action/integration`. Regeneration records only manifests whose inputs and outputs fit the bounded adapter. Other valid resolved SHAs continue to use the fallback.
 
 | Input | Supported values |
 | --- | --- |
-| `name` | v1.0.0: required. v2.3.1 and later: defaults to `artifact`. |
-| `path` | Required. v1.0.0 accepts one literal file or directory. v2.3.1 and later accept literal paths or bounded `*`, `?`, character-class, and `**` file globs. |
-| `if-no-files-found` | v2.3.1 and later: `warn`, `error`, or `ignore`. v1.0.0 fails when its literal path is missing and uploads an empty existing directory. |
-| `retention-days` | v2.3.1 and later: nonnegative integer; advisory only. |
-| `compression-level` | v4.6.2 and later: `0` through `9`. |
-| `overwrite` | v4.6.2 and later: omitted or `false`. |
-| `include-hidden-files` | v3.2.1 and later. v1.0.0 and v2.3.1 include hidden paths by default. |
-| `archive` | v7.0.1 only; omitted or `true`. |
+| `name` | Required by v1 runner-plugin contracts. Later contracts default to `artifact`. |
+| `path` | Required. v1 runner-plugin contracts accept one literal file or directory. Later contracts accept literal paths or bounded `*`, `?`, character-class, and `**` file globs. |
+| `if-no-files-found` | When declared: `warn`, `error`, or `ignore`. The v1 runner-plugin contract fails when its literal path is missing and uploads an empty existing directory. |
+| `retention-days` | When declared: nonnegative integer; advisory only. |
+| `compression-level` | When declared: `0` through `9`. |
+| `overwrite` | When declared: omitted or `false`. |
+| `include-hidden-files` | When declared: GitHub Actions boolean, default `false`. Earlier contracts without this input retain hidden paths. |
+| `archive` | When declared: omitted or `true`. |
 
-Unsupported path forms include exclusions, symlinks, absolute paths, traversal, braces, extglobs, leading glob comments, and special files. At most 32 path roots may be selected. For v3.2.1 and later, hidden path segments remain excluded unless explicitly enabled.
+Unsupported path forms include exclusions, symlinks, absolute paths, traversal, braces, extglobs, leading glob comments, and special files. At most 32 path roots may be selected. Contracts that declare `include-hidden-files` exclude hidden path segments unless explicitly enabled.
 
 An artifact may contain at most 10,000 files. `buildkite-gha` does not impose a source or ZIP byte limit; the Buildkite Agent and configured artifact storage enforce their limits. A job may publish 64 artifacts.
 
 Downloads verify the recorded archive size and digest before staging every member. File-count, path, format, and filesystem limits protect extraction; there is no separate fixed expansion-byte policy.
 
-For v4.6.2 and later, the adapter sets `artifact-id` and `artifact-digest`; `artifact-url` is empty because no GitHub run-scoped URL exists. The v1 through v3 releases expose no outputs. Merge, raw upload, overwrite, and effective retention control are unsupported.
+The adapter sets `artifact-id` and `artifact-digest` only when the snapshotted or fallback contract declares them. `artifact-url` remains empty because no GitHub run-scoped URL exists. Merge, raw upload, overwrite, and effective retention control are unsupported.
 
 ### Download artifact action
 
@@ -1612,7 +1622,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-Use `--event push`, `--event pull_request`, `--event merge_group`, `--event release`, `--event issues`, `--event workflow_dispatch`, or `--event schedule` instead of `--event-path` to evaluate the hosted profile with a generated minimal snapshot. The generated release event is a stable `published` event, and the generated issues event is `opened`. Generated snapshots are representative compatibility test inputs, not proof of every activity or equivalents to real payloads. The options are mutually exclusive.
+Use `--event push`, `--event pull_request`, `--event merge_group`, `--event release`, `--event issues`, `--event issue_comment`, `--event workflow_dispatch`, or `--event schedule` instead of `--event-path` to evaluate the hosted profile with a generated minimal snapshot. The generated release event is a stable `published` event, the generated issues event is `opened`, and the generated issue-comment event is `created`. Generated snapshots are representative compatibility test inputs, not proof of every activity or equivalents to real payloads. The options are mutually exclusive.
 
 Use `--all-events` to evaluate every declared supported event separately. Its `processing-report/v3` output preserves the event-independent result and each generated event's v2 report. Aggregate admission means every generated snapshot was admitted; it does not cover other payload shapes. A `context-required` result means compilation and hosted-policy checks passed, but generated inputs cannot measure a supported admission path, such as push or pull-request path filters without linked webhook and local diff evidence. It does not claim admission.
 

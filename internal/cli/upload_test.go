@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -768,7 +769,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "multi-trigger.yml")
-	workflowSource := "name: Active event\non:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  issues:\n    types: [opened, typed]\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
+	workflowSource := "name: Active event\non:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  issues:\n    types: [opened, typed]\n  issue_comment:\n    types: [created, edited, deleted]\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
 	if err := os.WriteFile(workflowPath, []byte(workflowSource), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -778,17 +779,18 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 	}
 
 	for _, test := range []struct {
-		name, source, githubEvent, wantEvent, wantCondition string
-		wantFallback                                        string
-		eventPath                                           string
-		webhook                                             []byte
+		name, source, githubEvent, githubAction, wantEvent, wantCondition string
+		wantFallback                                                      string
+		eventPath                                                         string
+		webhook                                                           []byte
 	}{
 		{name: "push fallback", source: "webhook", wantEvent: "push", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "push"`},
 		{name: "rebuilt push", source: "ui", githubEvent: "push", wantEvent: "push", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "push"`},
 		{name: "pull request webhook metadata", source: "webhook", githubEvent: "pull_request", webhook: []byte(`{"action":"opened","pull_request":{"base":{"ref":"main"}}}`), wantEvent: "pull_request", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "pull_request"`},
 		{name: "merge group webhook metadata", source: "webhook", githubEvent: "merge_group", webhook: []byte(`{"action":"checks_requested","merge_group":{"head_ref":"refs/heads/gh-readonly-queue/main/pr-1-deadbeef","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_ref":"refs/heads/main","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`), wantEvent: "merge_group", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "merge_group"`},
 		{name: "release webhook metadata", source: "webhook", githubEvent: "release", webhook: []byte(`{"action":"published","release":{"tag_name":"v1.2.3","draft":false,"prerelease":false}}`), wantEvent: "release", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "release"`},
-		{name: "issues webhook metadata", source: "webhook", githubEvent: "issues", webhook: []byte(`{"action":"typed","issue":{"number":1}}`), wantEvent: "issues", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "issues"`},
+		{name: "issues webhook metadata", source: "webhook", githubEvent: "issues", githubAction: "typed", webhook: []byte(`{"action":"typed","issue":{"number":1},"repository":{"id":12345,"full_name":"buildkite/buildkite-gha"}}`), wantEvent: "issues", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "issues"`},
+		{name: "issue comment webhook metadata", source: "webhook", githubEvent: "issue_comment", githubAction: "edited", webhook: []byte(`{"action":"edited","issue":{"number":1},"comment":{"id":123456},"repository":{"id":12345,"full_name":"buildkite/buildkite-gha"}}`), wantEvent: "issue_comment", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "issue_comment"`},
 		{name: "UI fallback", source: "ui", wantEvent: "push", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "push"`, wantFallback: `build.source != "schedule"`},
 		{name: "API fallback", source: "api", wantEvent: "push", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "push"`, wantFallback: `build.source != "schedule"`},
 		{name: "schedule fallback", source: "schedule", wantEvent: "schedule", wantCondition: `build.env("BUILDKITE_GITHUB_EVENT") == "schedule"`, wantFallback: `build.source == "schedule"`},
@@ -804,7 +806,12 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 			t.Setenv("BUILDKITE_PULL_REQUEST", "false")
 			t.Setenv("BUILDKITE_SOURCE", test.source)
 			t.Setenv("BUILDKITE_GITHUB_EVENT", test.githubEvent)
-			t.Setenv("BUILDKITE_GITHUB_ACTION", "")
+			t.Setenv("BUILDKITE_GITHUB_ACTION", test.githubAction)
+			if test.githubEvent == "issues" || test.githubEvent == "issue_comment" {
+				t.Setenv(pipelineTriggerWorkflowPathEnvironment, ".github/workflows/multi-trigger.yml")
+				t.Setenv(githubWorkflowRefEnvironment, "buildkite/buildkite-gha/.github/workflows/multi-trigger.yml@refs/heads/main")
+				t.Setenv(githubWorkflowSHAEnvironment, strings.Repeat("a", 40))
+			}
 			if test.githubEvent == "merge_group" {
 				t.Setenv("BUILDKITE_BRANCH", "gh-readonly-queue/main/pr-1-deadbeef")
 				t.Setenv("BUILDKITE_MERGE_QUEUE_BASE_BRANCH", "main")
@@ -1411,7 +1418,7 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 func TestRunUploadWarnsAboutUnsupportedTriggersOnSkippedWorkflows(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "cross-event.yml")
-	if err := os.WriteFile(workflowPath, []byte("on: [pull_request, issue_comment]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+	if err := os.WriteFile(workflowPath, []byte("on: [pull_request, discussion]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -1425,7 +1432,7 @@ func TestRunUploadWarnsAboutUnsupportedTriggersOnSkippedWorkflows(t *testing.T) 
 	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "W_TRIGGER_EVENT_UNSUPPORTED") || !strings.Contains(stderr.String(), "on.issue_comment") {
+	if !strings.Contains(stderr.String(), "W_TRIGGER_EVENT_UNSUPPORTED") || !strings.Contains(stderr.String(), "on.discussion") {
 		t.Fatalf("skipped workflow upload stderr missing unsupported-trigger warning: %q", stderr.String())
 	}
 }
@@ -1733,7 +1740,7 @@ func TestRunUploadEmitsReusableInputFailuresAsActionableFailingSteps(t *testing.
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"caller.yml":   "name: Caller\non: push\njobs:\n  middle:\n    uses: ./.github/workflows/middle.yml\n",
-		"middle.yml":   "on: workflow_call\njobs:\n  prepare:\n    runs-on: ubuntu-latest\n    outputs:\n      target: ${{ steps.value.outputs.target }}\n    steps:\n      - id: value\n        run: echo target=test >> $GITHUB_OUTPUT\n  call:\n    needs: prepare\n    uses: ./.github/workflows/reusable.yml\n    with:\n      target: prefix-${{ needs.prepare.outputs.target }}\n",
+		"middle.yml":   "on: workflow_call\njobs:\n  prepare:\n    runs-on: ubuntu-latest\n    outputs:\n      target: ${{ steps.value.outputs.target }}\n    steps:\n      - id: value\n        run: echo target=test >> $GITHUB_OUTPUT\n  call:\n    needs: prepare\n    uses: ./.github/workflows/reusable.yml\n    with:\n      target: prefix-${{ needs.prepare.result }}\n",
 		"reusable.yml": "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 	})
 	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
@@ -1767,11 +1774,11 @@ func TestRunUploadEmitsReusableInputFailuresAsActionableFailingSteps(t *testing.
 	if len(pipeline.Steps) != 1 || !isGeneratedFailureCommand(pipeline.Steps[0].Command) {
 		t.Fatalf("reusable input failure pipeline = %#v", pipeline.Steps)
 	}
-	primary := `Reusable workflow input "target" uses a needs expression in an unsupported form. Pass the whole value as exactly ${{ needs.<job>.outputs.<name> }}, with nothing around it. Only string inputs can take a needs value, and Buildkite resolves it before the called job runs, so the reference has to be the entire value rather than part of a larger expression. If you need a computed input from job outputs, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`
-	detail := `Reusable-workflow input "target" is not statically resolvable: unsupported compile-time context "needs"`
+	primary := `Reusable workflow input "target" uses a needs expression in an unsupported form: reusable-workflow input needs reference "needs.prepare.result" must be needs.<job>.outputs.<name>. Reference job outputs as needs.<job>.outputs.<name>, list each job in the call's needs, and keep the rest of the value resolvable before jobs run (literals, github, vars, matrix, and static inputs). Only string inputs can take a needs value; Buildkite resolves the referenced outputs before the called job runs.`
+	detail := `Reusable-workflow input "target" is not statically resolvable: reusable-workflow input needs reference "needs.prepare.result" must be needs.<job>.outputs.<name>`
 	message := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
 	annotation := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "annotations"))
-	if !strings.Contains(message, primary) || !strings.Contains(message, "detail: "+detail) || !strings.Contains(annotation, "<strong>Reusable workflow input &#34;target&#34; uses a needs expression in an unsupported form.</strong>") || !strings.Contains(annotation, "Pass the whole value as exactly ${{ needs.&lt;job&gt;.outputs.&lt;name&gt; }}") || !strings.Contains(annotation, "github.com/buildkite/buildkite-gha") || !strings.Contains(annotation, strings.ReplaceAll(detail, `"`, "&#34;")) || len(pipeline.Steps[0].Notify) != 1 || strings.Contains(pipeline.Steps[0].Notify[0].GitHubCheck.Output.Summary, "<h2") || !strings.Contains(pipeline.Steps[0].Notify[0].GitHubCheck.Output.Summary, "Reusable workflow input &#34;target&#34;") {
+	if !strings.Contains(message, primary) || !strings.Contains(message, "detail: "+detail) || !strings.Contains(annotation, "<strong>Reusable workflow input &#34;target&#34; uses a needs expression in an unsupported form: reusable-workflow input needs reference &#34;needs.prepare.result&#34; must be needs.&lt;job&gt;.outputs.&lt;name&gt;.</strong>") || !strings.Contains(annotation, "Reference job outputs as needs.&lt;job&gt;.outputs.&lt;name&gt;, list each job in the call&#39;s needs") || !strings.Contains(annotation, html.EscapeString(detail)) || len(pipeline.Steps[0].Notify) != 1 || strings.Contains(pipeline.Steps[0].Notify[0].GitHubCheck.Output.Summary, "<h2") || !strings.Contains(pipeline.Steps[0].Notify[0].GitHubCheck.Output.Summary, "Reusable workflow input &#34;target&#34;") {
 		t.Fatalf("reusable input failure output = message %q, annotation %q, pipeline %#v", message, annotation, pipeline.Steps[0])
 	}
 }

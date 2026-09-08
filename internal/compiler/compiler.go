@@ -142,11 +142,15 @@ type CallGuard struct {
 	NeedOutputs    map[string][]NeedOutput  `json:"need_outputs,omitempty"`
 }
 
-// DeferredInput binds one string workflow_call input to exact prerequisite
-// outputs without exposing the caller's needs context to the callee.
+// DeferredInput is one string workflow_call input whose value embeds caller
+// needs outputs. Template is the caller value with every graph-time part
+// folded; NeedGroups and NeedOutputs bind each referenced caller job to exact
+// producers and outputs without exposing the caller's needs context to the
+// callee.
 type DeferredInput struct {
-	Sources []string     `json:"sources"`
-	Outputs []NeedOutput `json:"outputs,omitempty"`
+	Template    string                  `json:"template"`
+	NeedGroups  map[string][]string     `json:"need_groups"`
+	NeedOutputs map[string][]NeedOutput `json:"need_outputs"`
 }
 
 // NeedOutput is the plan-boundary projection of one caller-visible output from
@@ -529,7 +533,7 @@ func unknownUploadArtifactCommitWarning(position workflow.Position, commit strin
 		Code:   "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK",
 		Line:   position.Line,
 		Column: position.Column,
-		Message: fmt.Sprintf("actions/upload-artifact resolved to immutable commit %s, which is outside the exact admission set. The native adapter is using the supported %s contract instead; it still restricts names, paths, archive mode, overwrite, hidden files, sizes, and outputs, and does not run the upstream action JavaScript.",
+		Message: fmt.Sprintf("actions/upload-artifact resolved to immutable commit %s, which is absent from the frozen per-commit snapshot. The native adapter is using the supported %s contract instead; it still restricts names, paths, archive mode, overwrite, hidden files, sizes, and outputs, and does not run the upstream action JavaScript.",
 			commit, actionintegration.UploadArtifactFallbackContractRelease),
 	}
 }

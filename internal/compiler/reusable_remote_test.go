@@ -277,11 +277,11 @@ jobs:
 		t.Fatal(err)
 	}
 	deferred, ok := callee.DeferredInputs["base64-subjects"]
-	if !ok || len(deferred.Sources) != 1 || deferred.Sources[0] != (plan.NeedSource{StepKey: producer.Target.StepKey, PlanDigest: transport.Digest(producerPlan)}) {
-		t.Fatalf("deferred input sources = %#v", callee.DeferredInputs)
+	if !ok || deferred.Template != "${{ needs.hash.outputs.hashes }}" || len(deferred.NeedSources["hash"]) != 1 || deferred.NeedSources["hash"][0] != (plan.NeedSource{StepKey: producer.Target.StepKey, PlanDigest: transport.Digest(producerPlan)}) {
+		t.Fatalf("deferred input = %#v", callee.DeferredInputs)
 	}
-	if len(deferred.Outputs) != 1 || deferred.Outputs[0] != (plan.NeedOutput{Name: "value", StepKey: producer.Target.StepKey, Output: "hashes"}) {
-		t.Fatalf("deferred input outputs = %#v", deferred.Outputs)
+	if len(deferred.NeedOutputs["hash"]) != 1 || deferred.NeedOutputs["hash"][0] != (plan.NeedOutput{Name: "hashes", StepKey: producer.Target.StepKey, Output: "hashes"}) {
+		t.Fatalf("deferred input outputs = %#v", deferred.NeedOutputs)
 	}
 	if len(callee.Dependencies) != 1 || callee.Dependencies[0] != producer.Target.StepKey || len(callee.NeedSources["hash"]) != 1 || len(callee.NeedOutputs["hash"]) != 0 {
 		t.Fatalf("callee dependencies = %#v, needs = %#v / %#v", callee.Dependencies, callee.NeedSources, callee.NeedOutputs)

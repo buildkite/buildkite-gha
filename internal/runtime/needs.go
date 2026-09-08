@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
@@ -49,20 +50,31 @@ func ResolveNeeds(ctx context.Context, agent transport.Agent, root, buildID stri
 	return needs, nil
 }
 
-// ResolveDeferredInputs loads exact producer outputs into workflow_call string
-// inputs without adding the caller's needs context to the callee expression scope.
+// ResolveDeferredInputs renders each workflow_call string input template from
+// exact producer outputs without adding the caller's needs context to the
+// callee expression scope. Only the outputs the template references are
+// available; the caller's need results stay hidden.
 func ResolveDeferredInputs(ctx context.Context, agent transport.Agent, root, buildID string, deferred map[string]plan.DeferredInput) (map[string]any, error) {
+	engine := expression.NewEngine()
 	inputs := make(map[string]any, len(deferred))
 	for _, name := range sortedKeys(deferred) {
 		input := deferred[name]
-		needs, err := ResolveNeeds(ctx, agent, root, buildID,
-			map[string][]plan.NeedSource{"input": input.Sources},
-			map[string][]plan.NeedOutput{"input": input.Outputs},
+		needs, err := ResolveNeeds(ctx, agent, root, buildID, input.NeedSources, input.NeedOutputs)
+		if err != nil {
+			return nil, fmt.Errorf("input %q: %w", name, err)
+		}
+		outputs := make(map[string]expression.NeedStatus, len(needs))
+		for job, need := range needs {
+			outputs[job] = expression.NeedStatus{Outputs: need.Outputs}
+		}
+		value, err := engine.Evaluate(
+			expression.Site{Source: input.Template, Profile: expression.ProfileDeferredInput, Result: expression.ResultString, Purpose: expression.PurposeExpression},
+			expression.Values{Runtime: expression.Context{Needs: outputs}},
 		)
 		if err != nil {
 			return nil, fmt.Errorf("input %q: %w", name, err)
 		}
-		inputs[name] = needs["input"].Outputs["value"]
+		inputs[name] = value
 	}
 	return inputs, nil
 }
