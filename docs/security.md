@@ -65,7 +65,10 @@ Private reusable workflows use the separate, default-off
 `private-reusable-workflows` importer setting. After anonymous access fails,
 the importer passes Git a canonical credential-free `https://github.com/` URL
 for the called repository. Git inherits the importer's credential helpers,
-configuration, and environment. Each invocation allows only the HTTPS
+configuration, and environment. Credentials come only from credential helpers:
+terminal prompts and askpass programs (`GIT_ASKPASS`, `core.askPass`,
+`SSH_ASKPASS`) are disabled, so a denied repository fails instead of running
+or waiting on a prompt program. Each invocation allows only the HTTPS
 transport, refuses redirects, verifies TLS, and checks received objects. These
 values are pinned for the exact repository URL, and Git environment variables
 that would relax them, such as `GIT_SSL_NO_VERIFY` and `GIT_ALLOW_PROTOCOL`,

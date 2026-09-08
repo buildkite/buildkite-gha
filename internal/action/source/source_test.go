@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -1063,6 +1064,8 @@ func TestGitRepositorySourceFailuresAreNonEnumeratingAndDoNotLeakOutput(t *testi
 func TestGitRepositorySourceEnvironmentDisablesInteractionAndTracing(t *testing.T) {
 	t.Setenv("BUILDKITE_GHA_PRESERVED", "yes")
 	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	t.Setenv("GIT_ASKPASS", "/importer/askpass")
+	t.Setenv("SSH_ASKPASS", "/importer/askpass")
 	t.Setenv("GCM_INTERACTIVE", "always")
 	t.Setenv("GIT_TRACE", "1")
 	t.Setenv("GIT_TRACE_CURL", "/tmp/git-trace")
@@ -1094,8 +1097,17 @@ func TestGitRepositorySourceEnvironmentDisablesInteractionAndTracing(t *testing.
 			environment[key] = value
 		}
 	}
-	if environment["BUILDKITE_GHA_PRESERVED"] != "yes" || environment["GIT_CONFIG_GLOBAL"] != "/importer/.gitconfig" || environment["GIT_TERMINAL_PROMPT"] != "0" || environment["GCM_INTERACTIVE"] != "never" {
-		t.Fatalf("Git environment did not preserve process configuration or disable prompts: %#v", environment)
+	for key, want := range map[string]string{
+		"BUILDKITE_GHA_PRESERVED": "yes",
+		"GIT_CONFIG_GLOBAL":       "/importer/.gitconfig",
+		"GIT_TERMINAL_PROMPT":     "0",
+		"GIT_ASKPASS":             "",
+		"SSH_ASKPASS":             "",
+		"GCM_INTERACTIVE":         "never",
+	} {
+		if got, exists := environment[key]; !exists || got != want {
+			t.Errorf("Git environment %s = %q (present %t), want %q", key, got, exists, want)
+		}
 	}
 	for _, key := range []string{"GIT_TRACE", "GIT_TRACE_CURL", "GIT_CURL_VERBOSE", "GCM_TRACE", "GCM_TRACE_SECRETS"} {
 		if _, exists := environment[key]; exists {
@@ -1167,6 +1179,91 @@ func TestGitRepositorySourceEnvironmentCannotReplaceRemoteHelper(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("bounded fetch ran the replacement git-remote-https from the inherited GIT_EXEC_PATH (stat error %v)", err)
+	}
+}
+
+// TestGitRepositorySourceDeniedAuthenticationDoesNotRunAskpass covers a
+// private repository that rejects the importer's credentials. Git must fail
+// without running the inherited GIT_ASKPASS, core.askPass, or SSH_ASKPASS
+// programs, which could block on a prompt or run arbitrary code.
+func TestGitRepositorySourceDeniedAuthenticationDoesNotRunAskpass(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	marker := filepath.Join(root, "askpass-ran")
+	askpass := filepath.Join(root, "askpass")
+	if err := os.WriteFile(askpass, []byte("#!/bin/sh\n: > '"+marker+"'\necho token\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	if err := os.Mkdir(filepath.Join(root, "home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runSourceGit(t, git, "", "config", "--global", "core.askPass", askpass)
+	t.Setenv("GIT_ASKPASS", askpass)
+	t.Setenv("SSH_ASKPASS", askpass)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/info/refs") {
+			w.Header().Set("WWW-Authenticate", `Basic realm="private"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	certificate := filepath.Join(root, "server.pem")
+	if err := os.WriteFile(certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trust := []string{"-c", "http.sslCAInfo=" + certificate}
+	remote := server.URL + "/o/r.git"
+
+	// Without the fetch boundary, Git asks the inherited program for
+	// credentials even when terminal prompts are disabled.
+	scratch := t.TempDir()
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", scratch)
+	control := exec.CommandContext(t.Context(), git, append(append([]string{"-C", scratch}, trust...), "fetch", "--quiet", "--", remote, "main")...)
+	control.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if err := control.Run(); err == nil {
+		t.Fatal("fetch from a denying server succeeded")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("inherited askpass should run without the fetch boundary: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	// Git 2.46 and earlier ignore credential.interactive, so the askpass
+	// sources must be neutralized even when that setting is turned back on.
+	permissive := append(append(trust, gitRemoteArgs(remote)...), "-c", "credential.interactive=true", "fetch", "--quiet", "--", remote, "main")
+	if err := runGitEnvironment(t.Context(), git, scratch, io.Discard, io.Discard, gitEnvironment(), permissive...); err == nil {
+		t.Fatal("fetch from a denying server succeeded")
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fetch boundary relied on credential.interactive to stop askpass (stat error %v)", err)
+	}
+
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git), func(c *config) error {
+		c.gitTestRemoteBase = server.URL + "/"
+		c.gitTestArgs = trust
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) {
+		t.Fatalf("Resolve() error = %v, want non-enumerating denial", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("denied fetch ran an inherited askpass program (stat error %v)", err)
 	}
 }
 

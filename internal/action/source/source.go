@@ -769,7 +769,7 @@ func runGit(ctx context.Context, executable, repository string, stdout io.Writer
 }
 
 // gitBaseArgs pins every Git invocation to the same boundary as the verified
-// checkout adapter: hooks are disabled, only HTTPS may reach the network so an
+// checkout adapter: hooks and askpass programs are disabled, only HTTPS may reach the network so an
 // inherited URL rewrite cannot select another transport, redirects are not
 // followed so credentials stay with the requested host, received objects are
 // checked, replace refs never substitute objects for the pinned commit, and the
@@ -780,6 +780,7 @@ func gitBaseArgs() []string {
 	return []string{
 		"--no-replace-objects",
 		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.askPass=",
 		"-c", "credential.interactive=false",
 		"-c", "credential.useHttpPath=true",
 		"-c", "http.followRedirects=false",
@@ -813,8 +814,8 @@ func runGitEnvironment(ctx context.Context, executable, repository string, stdou
 }
 
 // gitEnvironment inherits the importer's environment, including the settings
-// that locate its credential helpers, but removes variables that would prompt,
-// trace credentials, override the transport policy set through -c, replace
+// that locate its credential helpers, but removes variables that would prompt
+// (including askpass programs), trace credentials, override the transport policy set through -c, replace
 // Git's own programs, or redirect the private repository. GIT_SSL_NO_VERIFY
 // and GIT_ALLOW_PROTOCOL take precedence over any http.* or protocol.*
 // configuration, the GIT_CONFIG_* variables inject configuration that is not
@@ -839,6 +840,8 @@ func gitEnvironment() []string {
 			strings.HasPrefix(value, "GIT_INDEX_FILE=") ||
 			strings.HasPrefix(value, "GIT_NAMESPACE=") ||
 			strings.HasPrefix(value, "GIT_TERMINAL_PROMPT=") ||
+			strings.HasPrefix(value, "GIT_ASKPASS=") ||
+			strings.HasPrefix(value, "SSH_ASKPASS=") ||
 			strings.HasPrefix(value, "GCM_INTERACTIVE=") ||
 			strings.HasPrefix(value, "GIT_TRACE=") ||
 			strings.HasPrefix(value, "GIT_TRACE_") ||
@@ -856,7 +859,11 @@ func gitEnvironment() []string {
 		}
 		filtered = append(filtered, value)
 	}
-	return append(filtered, "GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never")
+	// Git consults GIT_ASKPASS, then core.askPass, then SSH_ASKPASS, and runs
+	// the first one set. An empty GIT_ASKPASS ends that search without a
+	// program, so the checkout adapter's setting is mirrored here and a denied
+	// repository fails instead of running or blocking on a prompt program.
+	return append(filtered, "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "GCM_INTERACTIVE=never")
 }
 func rateLimitError(resp *http.Response, body []byte) error {
 	if resp.StatusCode != http.StatusTooManyRequests && (resp.StatusCode != http.StatusForbidden || (resp.Header.Get("X-RateLimit-Remaining") != "0" && !strings.Contains(strings.ToLower(string(body)), "rate limit"))) {
