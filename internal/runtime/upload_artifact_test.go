@@ -20,6 +20,7 @@ import (
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
@@ -90,19 +91,21 @@ func TestUploadArtifactRuntimeVersionMatrix(t *testing.T) {
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, "payload", "versioned")
 	for _, test := range []struct {
-		name        string
-		commit      string
-		inputs      map[string]string
-		wantOutputs bool
+		name               string
+		commit             string
+		inputs             map[string]string
+		wantID, wantDigest bool
 	}{
 		{name: "v1.0.0", commit: actionintegration.UploadArtifactV1Commit, inputs: map[string]string{"name": "v1", "path": "payload"}},
 		{name: "v2.3.1 defaults", commit: actionintegration.UploadArtifactV2Commit, inputs: map[string]string{"path": "payload"}},
 		{name: "v3.2.1 defaults", commit: actionintegration.UploadArtifactV3Commit, inputs: map[string]string{"path": "payload"}},
-		{name: "v4.6.2 defaults", commit: actionintegration.UploadArtifactCommit, inputs: map[string]string{"path": "payload"}, wantOutputs: true},
-		{name: "v5.0.0 defaults", commit: actionintegration.UploadArtifactV5Commit, inputs: map[string]string{"path": "./payload"}, wantOutputs: true},
-		{name: "v6.0.0 defaults", commit: actionintegration.UploadArtifactV6Commit, inputs: map[string]string{"path": "./payload", "retention-days": "0"}, wantOutputs: true},
-		{name: "v7.0.1 ZIP", commit: actionintegration.UploadArtifactV7Commit, inputs: map[string]string{"path": "payload", "archive": " true ", "name": "v7"}, wantOutputs: true},
-		{name: "unknown commit v7 fallback", commit: strings.Repeat("0", 40), inputs: map[string]string{"path": "payload", "archive": "true"}, wantOutputs: true},
+		{name: "v4.0.0 outputs", commit: "c7d193f32edcb7bfad88892161225aeda64e9392", inputs: map[string]string{"path": "payload"}, wantID: true},
+		{name: "v4.6.0 defaults", commit: actionintegration.UploadArtifactV460Commit, inputs: map[string]string{"path": "payload"}, wantID: true, wantDigest: true},
+		{name: "v4.6.2 defaults", commit: actionintegration.UploadArtifactCommit, inputs: map[string]string{"path": "payload"}, wantID: true, wantDigest: true},
+		{name: "v5.0.0 defaults", commit: actionintegration.UploadArtifactV5Commit, inputs: map[string]string{"path": "./payload"}, wantID: true, wantDigest: true},
+		{name: "v6.0.0 defaults", commit: actionintegration.UploadArtifactV6Commit, inputs: map[string]string{"path": "./payload", "retention-days": "0"}, wantID: true, wantDigest: true},
+		{name: "v7.0.1 ZIP", commit: actionintegration.UploadArtifactV7Commit, inputs: map[string]string{"path": "payload", "archive": " true ", "name": "v7"}, wantID: true, wantDigest: true},
+		{name: "unknown commit v7 fallback", commit: strings.Repeat("0", 40), inputs: map[string]string{"path": "payload", "archive": "true"}, wantID: true, wantDigest: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			uploader := &captureArtifactUploader{}
@@ -111,11 +114,8 @@ func TestUploadArtifactRuntimeVersionMatrix(t *testing.T) {
 			if err != nil || len(uploader.uploads) != 1 || len(result.Artifacts) != 1 {
 				t.Fatalf("runtime matrix result = %#v, uploads = %d, error = %v", result, len(uploader.uploads), err)
 			}
-			if test.wantOutputs && (result.Outputs["artifact-id"] == "" || result.Outputs["artifact-digest"] == "" || result.Outputs["artifact-url"] != "") {
+			if (result.Outputs["artifact-id"] != "") != test.wantID || (result.Outputs["artifact-digest"] != "") != test.wantDigest || result.Outputs["artifact-url"] != "" {
 				t.Fatalf("runtime matrix outputs = %#v", result.Outputs)
-			}
-			if !test.wantOutputs && len(result.Outputs) != 0 {
-				t.Fatalf("legacy runtime outputs = %#v, want none", result.Outputs)
 			}
 			reader, err := zip.NewReader(bytes.NewReader(uploader.uploads[0].data), int64(len(uploader.uploads[0].data)))
 			if err != nil {
@@ -718,7 +718,7 @@ func TestUploadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	lockID := "a-0000000000000001"
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID: "upload", Kind: "uses", Uses: "actions/upload-artifact@" + actionintegration.UploadArtifactCommit,
 		With:   map[string]string{"name": "payload", "path": "payload/result.txt", "if-no-files-found": "error"},
 		Action: &plan.ActionSelector{Lock: lockID},
@@ -744,10 +744,13 @@ func TestUploadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) {
 	}
 
 	maskedJob := job
-	maskedJob.Steps = append(append([]plan.Step(nil), job.Steps...), plan.Step{
+	maskedProgram := *job.Program
+	maskedProgram.Job = job.Program.Job
+	maskedJob.Program = &maskedProgram
+	maskedJob.Program.Job.Steps = append(append([]executionprogram.Step(nil), job.Program.Job.Steps...), normalizeRuntimeTestStep(runtimeTestStep{
 		ID: "mask-after-upload", Kind: "run", Shell: "bash",
 		Command: `echo "::add-mask::load"`,
-	})
+	}))
 	maskedResult, err := (Runner{Actions: materializer, Artifacts: &captureArtifactUploader{}}).runTestJob(t.Context(), maskedJob, workspace)
 	if err == nil || !strings.Contains(err.Error(), "artifact name contains a registered secret") || len(maskedResult.Artifacts) != 0 || maskedResult.Conclusion != "failure" {
 		t.Fatalf("late artifact-name mask result = %#v, error = %v", maskedResult, err)
@@ -793,7 +796,7 @@ func TestUploadArtifactLegacyManifestsUseNativeAdapter(t *testing.T) {
 				t.Fatal(err)
 			}
 			const lockID = "a-0000000000000001"
-			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 				ID: "upload", Kind: "uses", Uses: "actions/upload-artifact@" + test.commit,
 				With: test.inputs, Action: &plan.ActionSelector{Lock: lockID},
 			}})
@@ -826,7 +829,7 @@ func TestUploadArtifactV6ConditionalMatrixAndExpressionName(t *testing.T) {
 		t.Fatal(err)
 	}
 	const lockID = "a-0000000000000006"
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID: "upload", Kind: "uses", Uses: "actions/upload-artifact@" + actionintegration.UploadArtifactV6Commit,
 		Condition: "matrix.mode == 'test'",
 		With: map[string]string{

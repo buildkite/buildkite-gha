@@ -20,6 +20,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
 type fakeActionSource struct {
@@ -212,6 +213,66 @@ func TestActionResolutionMessageDistinguishesResolutionFailure(t *testing.T) {
 	want := `Action "owner/action@v1" could not be resolved: tag v1 was not found`
 	if got, detail, action := actionResolutionMessage("owner/action@v1", err); got != want || detail != "" || action != "owner/action@v1" {
 		t.Fatalf("actionResolutionMessage() = %q, %q, %q; want %q, empty detail, %q", got, detail, action, want, "owner/action@v1")
+	}
+}
+
+func TestActionResolutionMessageExplainsActionCreatedByEarlierStep(t *testing.T) {
+	reference := "slsa-framework/slsa-github-generator/.github/actions/generate-builder@v2.1.0"
+	action := "./__BUILDER_CHECKOUT_DIR__/.github/actions/privacy-check"
+	err := &actionChildError{
+		child: action,
+		err:   fmt.Errorf("compile action %q: resolve local action %q: %w", action, strings.TrimPrefix(action, "./"), os.ErrNotExist),
+	}
+	wantAction := "./.github/actions/privacy-check"
+	want := `Local action "./.github/actions/privacy-check" is unavailable during compilation. Local actions must already exist in the event repository; Buildkite cannot resolve one created by an earlier step, such as actions/checkout with path. Check in the action and reference its repository path, or use a public owner/repository/path@ref action. Buildkite reports this error on the affected expanded job, skips jobs that depend on it, and may run independently compiled jobs.`
+	wantDetail := `The local action is referenced by composite action "slsa-framework/slsa-github-generator/.github/actions/generate-builder@v2.1.0".`
+	if got, detail, resolvedAction := actionResolutionMessage(reference, err); got != want || detail != wantDetail || resolvedAction != wantAction {
+		t.Fatalf("actionResolutionMessage() = %q, %q, %q; want %q, %q, %q", got, detail, resolvedAction, want, wantDetail, wantAction)
+	}
+}
+
+func TestActionResolutionMessageRetainsMissingLocalActionPath(t *testing.T) {
+	action := "./vendor/.github/actions/privacy-check"
+	err := fmt.Errorf("compile action %q: resolve local action %q: %w", action, strings.TrimPrefix(action, "./"), os.ErrNotExist)
+	message, _, reportedAction := actionResolutionMessage(action, err)
+	if reportedAction != action || !strings.Contains(message, action) {
+		t.Fatalf("actionResolutionMessage() = %q, action %q; want original action path", message, reportedAction)
+	}
+}
+
+func TestActionResolutionMessageDoesNotMisclassifyMissingEntrypoint(t *testing.T) {
+	action := "./.github/actions/checked-in"
+	err := fmt.Errorf("compile action %q: JavaScript action main entry point %q: %w", action, "dist/index.js", os.ErrNotExist)
+	message, _, reportedAction := actionResolutionMessage(action, err)
+	if reportedAction != action || !strings.Contains(message, `JavaScript action main entry point "dist/index.js"`) || strings.Contains(message, "created by an earlier step") {
+		t.Fatalf("actionResolutionMessage() = %q, action %q; want missing entry point diagnostic", message, reportedAction)
+	}
+}
+
+func TestValidateActionResolutionsAttributesMissingCalledWorkflowAction(t *testing.T) {
+	reference := "./__BUILDER_CHECKOUT_DIR__/.github/actions/secure-download-artifact"
+	ir := IR{
+		Event: Event{Provider: "github"},
+		Jobs: []JobInstance{{
+			Key: "gha-call-remote-upload-assets", LogicalJobID: "call-remote.upload-assets",
+			SourcePath:     "slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0",
+			RepositoryRoot: t.TempDir(),
+			Steps:          []workflow.Step{{Kind: "uses", Uses: reference, Span: workflow.Span{Start: workflow.Position{Line: 281, Column: 15}}}},
+		}},
+	}
+	evidence, err := validateActionResolutions(t.Context(), ir, Options{})
+	if err == nil || len(evidence.Actions) != 1 || evidence.Actions[0].Passed {
+		t.Fatalf("validateActionResolutions() evidence = %#v, error = %v", evidence, err)
+	}
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) {
+		t.Fatalf("validateActionResolutions() error = %v, want processing finding", err)
+	}
+	if finding.Path != ir.Jobs[0].SourcePath || finding.Line != 281 || finding.Column != 15 || finding.Job != "call-remote.upload-assets" || finding.Instance != "gha-call-remote-upload-assets" || finding.Action != "./.github/actions/secure-download-artifact" || finding.Step != 1 {
+		t.Fatalf("missing local action attribution = %#v", finding)
+	}
+	if !strings.Contains(finding.Message, "created by an earlier step") || strings.Contains(finding.Message, "__BUILDER_CHECKOUT_DIR__") || strings.Contains(finding.Message, ir.Jobs[0].RepositoryRoot) || strings.Contains(finding.Message, "lstat") {
+		t.Fatalf("missing local action message = %q", finding.Message)
 	}
 }
 
@@ -1418,8 +1479,9 @@ jobs:
 		t.Fatalf("plan schemas = %#v, want current plans", []string{first[0].Schema, first[1].Schema, first[2].Schema})
 	}
 	actionJob := first[0]
-	if len(actionJob.Actions) != 3 || actionJob.Steps[0].Action == nil || actionJob.Steps[1].Action == nil || actionJob.Steps[2].Action == nil || *actionJob.Steps[1].Action != *actionJob.Steps[2].Action {
-		t.Fatalf("action locks/selectors = %#v / %#v", actionJob.Actions, actionJob.Steps)
+	steps := actionJob.Program.Job.Steps
+	if len(actionJob.Actions) != 3 || steps[0].Invocation.Lock == "" || steps[1].Invocation.Lock == "" || steps[2].Invocation.Lock == "" || steps[1].Invocation.Lock != steps[2].Invocation.Lock {
+		t.Fatalf("action locks/selectors = %#v / %#v", actionJob.Actions, steps)
 	}
 	if fake.calls["Owner/Repo@v1"] != 2 {
 		t.Fatalf("remote calls = %d, want one per independent compilation", fake.calls["Owner/Repo@v1"])
@@ -1478,7 +1540,7 @@ jobs:
 	if !reflect.DeepEqual(first, second) {
 		t.Fatal("workspace action plans are not deterministic")
 	}
-	if len(first) != 1 || first[0].Schema != plan.Schema || len(first[0].Actions) != 1 || first[0].Actions[0].Source != "workspace" || first[0].Steps[0].Action == nil {
+	if len(first) != 1 || first[0].Schema != plan.Schema || len(first[0].Actions) != 1 || first[0].Actions[0].Source != "workspace" || first[0].Program.Job.Steps[0].Invocation.Lock == "" {
 		t.Fatalf("workspace action plan = %#v", first)
 	}
 }
@@ -1787,6 +1849,8 @@ func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
 		actionintegration.UploadArtifactV1Commit,
 		actionintegration.UploadArtifactV2Commit,
 		actionintegration.UploadArtifactV3Commit,
+		"c7d193f32edcb7bfad88892161225aeda64e9392", // v4.0.0
+		actionintegration.UploadArtifactV460Commit,
 		actionintegration.UploadArtifactCommit,
 	} {
 		root := t.TempDir()
@@ -1829,7 +1893,11 @@ func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
 		t.Fatalf("legacy upload-artifact warnings = %#v", bundle.IR.Warnings)
 	}
 
-	bundle = compile("      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactCommit + "\n" +
+	bundle = compile("      - uses: actions/upload-artifact@c7d193f32edcb7bfad88892161225aeda64e9392\n" +
+		"        with:\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV460Commit + "\n" +
+		"        with:\n          path: payload\n" +
+		"      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactCommit + "\n" +
 		"        with:\n          path: payload\n")
 	if len(bundle.IR.Warnings) != 0 {
 		t.Fatalf("warnings = %#v, want none", bundle.IR.Warnings)
@@ -2063,6 +2131,8 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		t.Fatalf("upload-artifact v7 plans = %#v", plans)
 	}
 	for version, commit := range map[string]string{
+		"v4.0.0": "c7d193f32edcb7bfad88892161225aeda64e9392",
+		"v4.6.0": actionintegration.UploadArtifactV460Commit,
 		"v5.0.0": actionintegration.UploadArtifactV5Commit,
 		"v6.0.0": actionintegration.UploadArtifactV6Commit,
 	} {
@@ -2129,7 +2199,9 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		t.Fatalf("conditional v6 matrix produced %d plans, want 2", len(plans))
 	}
 	for _, job := range plans {
-		if job.Steps[0].Condition != "matrix.mode == 'test'" || job.Steps[0].With["name"] != "${{ github.sha }}" || job.Steps[0].With["path"] != "./artifacts.tar.gz" || job.Actions[0].Commit != actionintegration.UploadArtifactV6Commit {
+		step := job.Program.Job.Steps[0]
+		with := testBindingSources(step.Invocation.With)
+		if step.Condition.Source != "matrix.mode == 'test'" || with["name"] != "${{ github.sha }}" || with["path"] != "./artifacts.tar.gz" || job.Actions[0].Commit != actionintegration.UploadArtifactV6Commit {
 			t.Fatalf("conditional v6 matrix plan = %#v", job)
 		}
 	}
@@ -2176,7 +2248,7 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 		t.Fatalf("download-artifact v5 pattern plans = %#v, %v", plans, err)
 	}
 	plans, err = compile(actionintegration.DownloadArtifactV5Commit, "    needs: producer\n", "        with:\n          pattern: '{junit-results-backend,product-junit-results}-*'\n          path: out\n          merge-multiple: true\n")
-	if err != nil || len(plans) != 2 || plans[1].Steps[0].With["pattern"] != "{junit-results-backend,product-junit-results}-*" {
+	if err != nil || len(plans) != 2 || testBindingSources(plans[1].Program.Job.Steps[0].Invocation.With)["pattern"] != "{junit-results-backend,product-junit-results}-*" {
 		t.Fatalf("download-artifact PostHog pattern plans = %#v, %v", plans, err)
 	}
 
@@ -2267,7 +2339,8 @@ jobs:
 		t.Fatalf("plans = %d, want two producers and two consumers", len(plans))
 	}
 	for i, producer := range plans[:2] {
-		if producer.Workflow.LogicalJobID != "producer" || len(producer.Steps) != 1 || producer.Steps[0].Condition != "matrix.publish" || producer.Matrix["publish"] != (i == 0) {
+		steps := producer.Program.Job.Steps
+		if producer.Workflow.LogicalJobID != "producer" || len(steps) != 1 || steps[0].Condition.Source != "matrix.publish" || producer.Matrix["publish"] != (i == 0) {
 			t.Fatalf("producer %d = %#v", i, producer)
 		}
 	}
@@ -2275,7 +2348,9 @@ jobs:
 		if consumer.Workflow.LogicalJobID != "consumer" || consumer.Matrix["shard"] != []string{"one", "two"}[i] || len(consumer.NeedSources["producer"]) != 2 {
 			t.Fatalf("consumer %d fan-in = %#v", i, consumer)
 		}
-		if len(consumer.Steps) != 1 || consumer.Steps[0].With["name"] != "${{ github.sha }}" || consumer.Steps[0].With["path"] != "./" || len(consumer.Actions) != 1 || consumer.Actions[0].Commit != actionintegration.DownloadArtifactV7Commit {
+		steps := consumer.Program.Job.Steps
+		with := testBindingSources(steps[0].Invocation.With)
+		if len(steps) != 1 || with["name"] != "${{ github.sha }}" || with["path"] != "./" || len(consumer.Actions) != 1 || consumer.Actions[0].Commit != actionintegration.DownloadArtifactV7Commit {
 			t.Fatalf("consumer %d download = %#v", i, consumer)
 		}
 	}

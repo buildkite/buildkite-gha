@@ -1,3 +1,5 @@
+//go:generate go run ./cmd/generate-upload-artifact-profiles
+
 package integration
 
 import (
@@ -19,17 +21,14 @@ const (
 	// The v1, v2, and v3 commits are the floating legacy major releases used on
 	// github.com and are admitted exactly. Raw v7 uploads remain explicitly
 	// unsupported by ValidateUploadArtifactInputs.
-	UploadArtifactV1Commit = "3446296876d12d4e3a0f3145a3c87e67bf0a16b5"
-	UploadArtifactV2Commit = "82c141cc518b40d92cc801eee768e7aafc9c2fa2"
-	UploadArtifactV3Commit = "ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5"
-	UploadArtifactCommit   = "ea165f8d65b6e75b540449e92b4886f43607fa02"
-	UploadArtifactV5Commit = "330a01c490aca151604b8cf639adc76d48f6c5d4"
-	UploadArtifactV6Commit = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
-	UploadArtifactV7Commit = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
-	// uploadArtifactV322Commit is a GHES-only legacy security backport that
-	// remains outside the github.com native adapter contract.
-	uploadArtifactV322Commit = "c6a366c94c3e0affe28c06c8df20a878f24da3cf"
-
+	UploadArtifactV1Commit   = "3446296876d12d4e3a0f3145a3c87e67bf0a16b5"
+	UploadArtifactV2Commit   = "82c141cc518b40d92cc801eee768e7aafc9c2fa2"
+	UploadArtifactV3Commit   = "ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5"
+	UploadArtifactV460Commit = "65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08"
+	UploadArtifactCommit     = "ea165f8d65b6e75b540449e92b4886f43607fa02"
+	UploadArtifactV5Commit   = "330a01c490aca151604b8cf639adc76d48f6c5d4"
+	UploadArtifactV6Commit   = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+	UploadArtifactV7Commit   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	// UploadArtifactFallbackContractRelease identifies the stable contract used
 	// for immutable commits outside the exact admission set.
 	UploadArtifactFallbackContractRelease = "v7.0.1"
@@ -39,89 +38,110 @@ const (
 	MaxUploadArtifactPathBytes = 4096
 )
 
+// uploadArtifactUnsupportedCommits are GHES-only legacy security backports
+// that remain outside the github.com native adapter contract.
+var uploadArtifactUnsupportedCommits = map[string]bool{
+	"c6a366c94c3e0affe28c06c8df20a878f24da3cf": true, // v3.2.2
+	"c6a3b2bd78b3985e4b2f15397fec357f0fd808de": true, // v3.2.2-node20
+}
+
 var uploadArtifactCommits = map[string]string{
-	UploadArtifactV1Commit: "v1.0.0",
-	UploadArtifactV2Commit: "v2.3.1",
-	UploadArtifactV3Commit: "v3.2.1",
-	UploadArtifactCommit:   "v4.6.2",
-	UploadArtifactV5Commit: "v5.0.0",
-	UploadArtifactV6Commit: "v6.0.0",
-	UploadArtifactV7Commit: "v7.0.1",
+	UploadArtifactV1Commit:   "v1.0.0",
+	UploadArtifactV2Commit:   "v2.3.1",
+	UploadArtifactV3Commit:   "v3.2.1",
+	UploadArtifactV460Commit: "v4.6.0",
+	UploadArtifactCommit:     "v4.6.2",
+	UploadArtifactV5Commit:   "v5.0.0",
+	UploadArtifactV6Commit:   "v6.0.0",
+	UploadArtifactV7Commit:   "v7.0.1",
 }
 
-// uploadArtifactInputIntroduced records the first admitted generation that
-// declared each version-gated input. Inputs absent from this map are declared
-// by every admitted release. The v7 archive input retains its more specific
-// validation below.
-var uploadArtifactInputIntroduced = map[string]int{
-	"if-no-files-found":    2,
-	"retention-days":       2,
-	"include-hidden-files": 3,
-	"compression-level":    4,
-	"overwrite":            4,
+// uploadArtifactContract records the adapter-visible contract declared by one
+// immutable upstream action manifest.
+type uploadArtifactContract struct {
+	// inputs and outputs are sorted, comma-separated name sets.
+	inputs, outputs string
+	nameRequired    bool
+	v1              bool
+	hiddenByDefault bool
 }
 
-func uploadArtifactGeneration(commit string) int {
-	switch commit {
-	case UploadArtifactV1Commit:
-		return 1
-	case UploadArtifactV2Commit:
-		return 2
-	case UploadArtifactV3Commit:
-		return 3
+func (c uploadArtifactContract) declaresInput(name string) bool {
+	return strings.Contains(","+c.inputs+",", ","+name+",")
+}
+
+func (c uploadArtifactContract) declaresOutput(name string) bool {
+	return strings.Contains(","+c.outputs+",", ","+name+",")
+}
+
+func uploadArtifactContractForCommit(commit string) (uploadArtifactContract, bool) {
+	if !uploadArtifactUnsupportedCommits[commit] {
+		if contract, exact := uploadArtifactCommitContracts[commit]; exact {
+			return contract, true
+		}
 	}
-	return 4
+	if !git.ValidObjectID(commit) || uploadArtifactUnsupportedCommits[commit] {
+		return uploadArtifactContract{}, false
+	}
+	return uploadArtifactCommitContracts[UploadArtifactV7Commit], false
 }
 
 // UploadArtifactUsesFallbackContract reports whether an immutable commit is
-// outside the exact admission set and therefore uses the stable v7 contract.
+// absent from the frozen snapshot and therefore uses the stable v7 contract.
 func UploadArtifactUsesFallbackContract(commit string) bool {
-	if !git.ValidObjectID(commit) || commit == uploadArtifactV322Commit {
+	if !git.ValidObjectID(commit) || uploadArtifactUnsupportedCommits[commit] {
 		return false
 	}
-	_, exact := uploadArtifactCommits[commit]
+	_, exact := uploadArtifactCommitContracts[commit]
 	return !exact
 }
 
-func uploadArtifactContractCommit(commit string) string {
-	if UploadArtifactUsesFallbackContract(commit) {
-		return UploadArtifactV7Commit
-	}
-	return commit
-}
-
-// UploadArtifactSupportsOutputs reports whether the admitted release declares
-// artifact outputs. Upstream legacy v1 through v3 releases declared none.
-func UploadArtifactSupportsOutputs(commit string) bool {
-	return uploadArtifactGeneration(uploadArtifactContractCommit(commit)) >= 4
+// UploadArtifactSupportsOutput reports whether the selected exact or fallback
+// contract declares an output.
+func UploadArtifactSupportsOutput(commit, name string) bool {
+	contract, _ := uploadArtifactContractForCommit(commit)
+	return contract.declaresOutput(name)
 }
 
 // UploadArtifactIncludesHiddenByDefault reports whether omission of
-// include-hidden-files retains hidden paths for the admitted release.
+// include-hidden-files retains hidden paths for the selected contract.
 func UploadArtifactIncludesHiddenByDefault(commit string) bool {
-	commit = uploadArtifactContractCommit(commit)
-	return commit == UploadArtifactV1Commit || commit == UploadArtifactV2Commit
+	contract, _ := uploadArtifactContractForCommit(commit)
+	return contract.hiddenByDefault
+}
+
+// UploadArtifactUsesV1Contract reports whether the selected exact contract
+// has the single-path and missing-path behavior of the v1 runner plugin.
+func UploadArtifactUsesV1Contract(commit string) bool {
+	contract, _ := uploadArtifactContractForCommit(commit)
+	return contract.v1
 }
 
 // LegacyUploadArtifactRelease reports the release label for admitted v1
 // through v3 commits, which warrant an upgrade warning.
 func LegacyUploadArtifactRelease(commit string) (string, bool) {
-	if uploadArtifactGeneration(commit) <= 3 {
+	if commit == UploadArtifactV1Commit || commit == UploadArtifactV2Commit || commit == UploadArtifactV3Commit {
 		return uploadArtifactCommits[commit], true
 	}
 	return "", false
 }
 
 func validateUploadArtifactCommit(commit string) error {
-	if _, ok := uploadArtifactCommits[commit]; !ok && (!git.ValidObjectID(commit) || commit == uploadArtifactV322Commit) {
-		commits := make([]string, 0, len(uploadArtifactCommits))
-		for supported, version := range uploadArtifactCommits {
-			commits = append(commits, version+" ("+supported+")")
-		}
-		sort.Strings(commits)
-		return versionError("actions/upload-artifact", "native adapter", commit, commits)
+	if !git.ValidObjectID(commit) || uploadArtifactUnsupportedCommits[commit] {
+		return versionError("actions/upload-artifact", "native adapter", commit, supportedUploadArtifactContracts())
 	}
 	return nil
+}
+
+func supportedUploadArtifactContracts() []string {
+	commits := make([]string, 0, len(uploadArtifactCommits)+2)
+	for supported, version := range uploadArtifactCommits {
+		commits = append(commits, version+" ("+supported+")")
+	}
+	sort.Strings(commits)
+	return append(commits,
+		"frozen upstream release and main snapshots (main "+uploadArtifactMainSnapshotCommit+")",
+		"other lowercase 40-hex immutable commits via the "+UploadArtifactFallbackContractRelease+" fallback contract")
 }
 
 // ValidateUploadArtifactInputs validates the bounded adapter's static input
@@ -138,7 +158,7 @@ func ValidateEvaluatedUploadArtifactInputs(commit string, inputs map[string]stri
 }
 
 func validateUploadArtifactInputs(commit string, inputs map[string]string, evaluated bool) error {
-	generation, err := validateUploadArtifactInputNames(commit, inputs)
+	contract, err := validateUploadArtifactInputNames(commit, inputs)
 	if err != nil {
 		return err
 	}
@@ -151,11 +171,11 @@ func validateUploadArtifactInputs(commit string, inputs map[string]string, evalu
 		if err != nil {
 			return err
 		}
-		if generation == 1 && (len(paths) != 1 || strings.ContainsAny(paths[0], "*?[")) {
+		if contract.v1 && (len(paths) != 1 || strings.ContainsAny(paths[0], "*?[")) {
 			return fmt.Errorf("input %q in actions/upload-artifact v1 must be one literal file or directory", "path")
 		}
 	}
-	if generation == 1 {
+	if contract.nameRequired {
 		name, ok := inputFold(inputs, "name")
 		if !ok || strings.TrimSpace(name) == "" {
 			return fmt.Errorf("required input %q is missing", "name")
@@ -197,31 +217,30 @@ func validateUploadArtifactValues(inputs map[string]string, evaluated bool) erro
 	return nil
 }
 
-func validateUploadArtifactInputNames(commit string, inputs map[string]string) (int, error) {
+func validateUploadArtifactInputNames(commit string, inputs map[string]string) (uploadArtifactContract, error) {
 	if err := validateUploadArtifactCommit(commit); err != nil {
-		return 0, err
+		return uploadArtifactContract{}, err
 	}
-	contractCommit := uploadArtifactContractCommit(commit)
-	generation := uploadArtifactGeneration(contractCommit)
+	contract, _ := uploadArtifactContractForCommit(commit)
 	allowed := map[string]bool{"name": true, "path": true, "if-no-files-found": true, "include-hidden-files": true, "compression-level": true, "overwrite": true, "archive": true, "retention-days": true}
 	seen := map[string]bool{}
 	for _, name := range sortedNames(inputs) {
 		lower := strings.ToLower(name)
 		if seen[lower] {
-			return 0, fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
+			return uploadArtifactContract{}, fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
 		}
 		seen[lower] = true
 		if !allowed[lower] {
-			return 0, fmt.Errorf("unknown input %q is unsupported by the bounded upload-artifact adapter", name)
+			return uploadArtifactContract{}, fmt.Errorf("unknown input %q is unsupported by the bounded upload-artifact adapter", name)
 		}
-		if lower == "archive" && contractCommit != UploadArtifactV7Commit {
-			return 0, fmt.Errorf("input %q exists only in actions/upload-artifact v7", name)
-		}
-		if uploadArtifactInputIntroduced[lower] > generation {
-			return 0, fmt.Errorf("explicit input %q is unsupported by this actions/upload-artifact release", name)
+		if !contract.declaresInput(lower) {
+			if lower == "archive" {
+				return uploadArtifactContract{}, fmt.Errorf("input %q exists only in actions/upload-artifact v7", name)
+			}
+			return uploadArtifactContract{}, fmt.Errorf("explicit input %q is unsupported by this actions/upload-artifact release", name)
 		}
 	}
-	return generation, nil
+	return contract, nil
 }
 
 func uploadArtifactExpression(value string) bool {

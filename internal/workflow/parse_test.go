@@ -1,13 +1,75 @@
 package workflow
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestParseIssueTypes(t *testing.T) {
+	for _, event := range []string{"issues", "issue_comment"} {
+		for _, types := range []string{"", "    types: []\n", "    types: [ # empty\n    ]\n", "    types: [edited]\n"} {
+			t.Run(event+"/"+types, func(t *testing.T) {
+				source := "on:\n  " + event + ":\n" + types + "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+				parsed, err := Parse("types.yml", []byte(source))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var want []string
+				if strings.Contains(types, "edited") {
+					want = []string{"edited"}
+				}
+				if len(parsed.Triggers) != 1 || !reflect.DeepEqual(parsed.Triggers[0].Types, want) || parsed.Triggers[0].Position != (Position{Line: 2, Column: 3}) {
+					t.Fatalf("triggers = %#v, want types %#v at 2:3", parsed.Triggers, want)
+				}
+				if parsed.Jobs[0].Span.Start.Line != 4+strings.Count(types, "\n") {
+					t.Fatalf("job source position changed: %#v", parsed.Jobs[0].Span)
+				}
+			})
+		}
+	}
+}
+
+func TestParseEmptyIssueTypesTogether(t *testing.T) {
+	for _, on := range []string{
+		`on: {issues: {types: []}, issue_comment: {types: []}}`,
+		`'on': {'issues': {types: &empty []}, 'issue_comment': {types: *empty}}`,
+		`on: {issues: &trigger {types: []}, issue_comment: *trigger}`,
+	} {
+		parsed, err := Parse("types.yml", []byte(on+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(parsed.Triggers) != 2 || parsed.Triggers[0].Types != nil || parsed.Triggers[1].Types != nil {
+			t.Fatalf("triggers = %#v, want two default-all triggers", parsed.Triggers)
+		}
+	}
+}
+
+func TestParseEmptyIssueTypesPreservesDiagnostics(t *testing.T) {
+	for _, test := range []struct{ on, want string }{
+		{"issues: {types: []}\n  pull_request: {types: []}", `"types" section should not be empty`},
+		{"issue_comment: {types: []}\n  release: {types: []}", `"types" section should not be empty`},
+		{"issues: {types: []}\n  merge_group: {types: []}", `"types" section should not be empty`},
+		{"issues: {types: &empty []}\n  pull_request: {types: *empty}", `"types" section should not be empty`},
+		{"issues: {types: {}}", "sequence"},
+		{"issue_comment: {types: null}", "should not be empty"},
+		{"issues: {types: ''}", "should not be empty"},
+		{"issue_comment: {types: [[]]}", "scalar"},
+		{"issues: {types: [], unexpected: true}", `unexpected key "unexpected"`},
+		{"issues: {types: &empty []}", `anchor "empty" is defined but not used`},
+		{"issues: {types: []}\n  issue_comment: {types: []}", `types.yml:7:12: "steps" section should not be empty`},
+	} {
+		t.Run(test.on, func(t *testing.T) {
+			source := "on:\n  " + test.on + "\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: []\n"
+			if _, err := Parse("types.yml", []byte(source)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
 
 func TestParseSmokeWorkflowsIntoOwnedModel(t *testing.T) {
 	for _, name := range []string{"shell.yml", "ci.yml", "artifact.yml"} {
@@ -140,20 +202,68 @@ func TestParseKeepsWorkflowAndJobExpressionSurfacesSeparate(t *testing.T) {
 	}
 }
 
-func TestParseRejectsGitHubEnvironment(t *testing.T) {
-	_, err := Parse("environment.yml", []byte("on: push\njobs:\n  deploy:\n    environment: production\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
-	want := `environment.yml:4:5: GitHub environments and environment secrets are unsupported. Remove the environment key from job "deploy". Approvals, deployment records, and protection rules are unavailable. Move environment secrets into Buildkite secrets and reference them by name. If you need GitHub environments, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`
-	if err == nil || err.Error() != want {
-		t.Fatalf("Parse() error = %q, want %q", err, want)
+func TestParseGitHubEnvironment(t *testing.T) {
+	parsed, err := Parse("environment.yml", []byte("on: push\njobs:\n  deploy:\n    environment: production\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	var blocker interface {
-		CompatibilityBlocker() (string, string)
+	if parsed.Jobs[0].Environment != "production" {
+		t.Fatalf("Parse() environment = %q, want %q", parsed.Jobs[0].Environment, "production")
 	}
-	if !errors.As(err, &blocker) {
-		t.Fatalf("Parse() error has no compatibility blocker: %v", err)
+
+	// The url is used only for GitHub deployment records, which are never
+	// created, so the mapping form is accepted and the url ignored.
+	parsed, err = Parse("environment.yml", []byte("on: push\njobs:\n  deploy:\n    environment:\n      name: production\n      url: https://example.com\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if kind, detail := blocker.CompatibilityBlocker(); kind != "environment" || detail != "production" {
-		t.Fatalf("compatibility blocker = %q / %q", kind, detail)
+	if parsed.Jobs[0].Environment != "production" {
+		t.Fatalf("Parse() environment = %q, want %q", parsed.Jobs[0].Environment, "production")
+	}
+
+	for _, test := range []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "expression name",
+			source: "on: push\njobs:\n  deploy:\n    environment: ${{ github.ref_name }}\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "environment names that use expressions are unsupported; use a literal environment name",
+		},
+		{
+			name:   "reusable workflow call",
+			source: "on: push\njobs:\n  deploy:\n    environment: production\n    uses: ./.github/workflows/deploy.yml\n",
+			want:   `"environment" is not available`,
+		},
+		{
+			name:   "blank name",
+			source: "on: push\njobs:\n  deploy:\n    environment: \" \"\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "environment requires a literal name",
+		},
+		{
+			name:   "control characters",
+			source: "on: push\njobs:\n  deploy:\n    environment: \"prod\\nuction\"\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "environment name must be at most 255 characters without control characters",
+		},
+		{
+			name:   "name longer than 255 characters",
+			source: "on: push\njobs:\n  deploy:\n    environment: " + strings.Repeat("e", 256) + "\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "environment name must be at most 255 characters without control characters",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Parse("environment.yml", []byte(test.source)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+
+	// The 255-character limit counts characters, not UTF-8 bytes, matching
+	// GitHub: 255 two-byte characters are 510 bytes and remain valid.
+	multibyte := "on: push\njobs:\n  deploy:\n    environment: " + strings.Repeat("é", 255) + "\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	if _, err := Parse("environment.yml", []byte(multibyte)); err != nil {
+		t.Fatalf("Parse() with a 255-character multibyte environment name failed: %v", err)
 	}
 }
 

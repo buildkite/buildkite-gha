@@ -17,6 +17,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/program"
 )
@@ -26,7 +27,6 @@ const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.j
 const MaxNeedProducers = 1024
 const MaxNeedOutputs = 64
 const MaxCallGuards = 4
-const maxStepTargets = 256
 const MaxEventPayloadBytes = 25 << 20
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -240,28 +240,6 @@ type Span struct {
 	End   Position `json:"end"`
 }
 
-type Step struct {
-	ID                        string            `json:"id"`
-	Name                      string            `json:"name,omitempty"`
-	Kind                      string            `json:"kind"`
-	Background                bool              `json:"background,omitempty"`
-	Targets                   []string          `json:"targets,omitempty"`
-	Command                   string            `json:"command,omitempty"`
-	Uses                      string            `json:"uses,omitempty"`
-	Action                    *ActionSelector   `json:"action,omitempty"`
-	Shell                     string            `json:"shell,omitempty"`
-	WorkingDirectory          string            `json:"working_directory,omitempty"`
-	Env                       map[string]string `json:"env,omitempty"`
-	With                      map[string]string `json:"with,omitempty"`
-	Condition                 string            `json:"condition,omitempty"`
-	ContinueOnError           bool              `json:"continue_on_error,omitempty"`
-	ContinueOnErrorExpression string            `json:"continue_on_error_expression,omitempty"`
-	TimeoutMinutes            float64           `json:"timeout_minutes,omitempty"`
-	TimeoutMinutesExpression  string            `json:"timeout_minutes_expression,omitempty"`
-	Source                    *Span             `json:"source,omitempty"`
-	Execution                 *program.Step     `json:"-"`
-}
-
 type Container struct {
 	Image string            `json:"image"`
 	Env   map[string]string `json:"env,omitempty"`
@@ -284,11 +262,15 @@ type ServiceContainer struct {
 	Entrypoint  string                `json:"entrypoint,omitempty"`
 }
 
-// DeferredInput binds one string workflow_call input to exact, verified
-// prerequisite outputs. The runtime resolves it before evaluating callee fields.
+// DeferredInput is one string workflow_call input whose value embeds caller
+// needs outputs. Template contains only needs.<job>.outputs.<name> references
+// to the logical prerequisites in NeedSources, each hydrated from exact,
+// verified producer outputs. The runtime renders it before evaluating callee
+// fields; the callee never sees the caller's needs context.
 type DeferredInput struct {
-	Sources []NeedSource `json:"sources"`
-	Outputs []NeedOutput `json:"outputs,omitempty"`
+	Template    string                  `json:"template"`
+	NeedSources map[string][]NeedSource `json:"need_sources"`
+	NeedOutputs map[string][]NeedOutput `json:"need_outputs"`
 }
 
 // GitHubToken describes one synthetic secrets.GITHUB_TOKEN value. Workflow is
@@ -308,7 +290,10 @@ type OIDCConfiguration struct {
 	SubjectClaim   string   `json:"subject_claim,omitempty"`
 }
 
-// Job is one immutable, compiler-selected workflow job instance.
+// Job is the serialized execution envelope for one generated Buildkite command
+// job, not a Buildkite API object. It contains the normalized GitHub Actions
+// workflow job assigned to that command job plus its instance metadata and the
+// transport, authority, and runtime configuration needed to execute it.
 type Job struct {
 	Schema               string                   `json:"schema"`
 	Compiler             Compiler                 `json:"compiler"`
@@ -326,7 +311,9 @@ type Job struct {
 	Inputs               map[string]any           `json:"inputs,omitempty"`
 	DeferredInputs       map[string]DeferredInput `json:"deferred_inputs,omitempty"`
 	DeferredInputValues  map[string]any           `json:"-"`
-	Vars                 map[string]string        `json:"vars,omitempty"`
+	OrganizationVars     map[string]string        `json:"organization_vars,omitempty"`
+	RepositoryVars       map[string]string        `json:"repository_vars,omitempty"`
+	EnvironmentVars      map[string]string        `json:"environment_vars,omitempty"`
 	Dependencies         []string                 `json:"dependencies,omitempty"`
 	NeedSources          map[string][]NeedSource  `json:"need_sources,omitempty"`
 	NeedOutputs          map[string][]NeedOutput  `json:"need_outputs,omitempty"`
@@ -344,7 +331,6 @@ type Job struct {
 	DefaultShell            string            `json:"-"`
 	DefaultWorkingDirectory string            `json:"-"`
 	Outputs                 map[string]string `json:"-"`
-	Steps                   []Step            `json:"-"`
 	Actions                 []ActionLock      `json:"actions,omitempty"`
 	// RequiresMise is the compiler's explicit action-runtime decision.
 	RequiresMise       *bool                       `json:"requires_mise,omitempty"`
@@ -357,8 +343,10 @@ type Job struct {
 // NeedsMise reports whether a generated job needs the managed action runtime.
 func (job Job) NeedsMise() bool {
 	usesActions := len(job.Actions) != 0
-	for _, step := range job.Steps {
-		usesActions = usesActions || step.Uses != "" || step.Action != nil || step.Kind == "uses"
+	if executionJob := job.ExecutionJob(); executionJob != nil {
+		for _, step := range executionJob.Steps {
+			usesActions = usesActions || step.Invocation != nil || step.Kind == "uses"
+		}
 	}
 	if !usesActions {
 		return false
@@ -584,6 +572,7 @@ func (job Job) Validate() error {
 	if err := job.Program.Validate(); err != nil {
 		return fmt.Errorf("normalized execution program: %w", err)
 	}
+	executionJob := job.ExecutionJob()
 	if job.RequiresMise == nil {
 		return fmt.Errorf("job plan requires an explicit requires_mise decision")
 	}
@@ -591,8 +580,8 @@ func (job Job) Validate() error {
 		return fmt.Errorf("job plan runtime distribution digest is required")
 	}
 	if job.RequiresMise != nil && !*job.RequiresMise {
-		for _, step := range job.Steps {
-			if (step.Kind == "uses" || step.Uses != "") && step.Action == nil {
+		for _, step := range executionJob.Steps {
+			if step.Invocation != nil && step.Invocation.Lock == "" {
 				return fmt.Errorf("job plan requires_mise may be false only when every action has an immutable selector")
 			}
 		}
@@ -645,6 +634,19 @@ func (job Job) Validate() error {
 	}
 	if err := validateInputs(job.Inputs); err != nil {
 		return err
+	}
+	for _, scope := range []struct {
+		name  string
+		vars  map[string]string
+		limit int
+	}{
+		{"organization", job.OrganizationVars, organizationVarsLimit},
+		{"repository", job.RepositoryVars, repositoryVarsLimit},
+		{"environment", job.EnvironmentVars, environmentVarsLimit},
+	} {
+		if err := validateVars(scope.name, scope.vars, scope.limit); err != nil {
+			return err
+		}
 	}
 	capabilities := make(map[string]struct{}, len(job.RequiredCapabilities))
 	if !sort.StringsAreSorted(job.RequiredCapabilities) {
@@ -885,7 +887,7 @@ func (job Job) Validate() error {
 	if len(job.CallGuards) > MaxCallGuards {
 		return fmt.Errorf("job plan has more than %d reusable-workflow call guards", MaxCallGuards)
 	}
-	if len(job.CallGuards) != len(job.Program.Job.Guards) {
+	if len(job.CallGuards) != len(executionJob.Guards) {
 		return fmt.Errorf("job plan call guard projection does not match normalized program")
 	}
 	for i, guard := range job.CallGuards {
@@ -913,80 +915,7 @@ func (job Job) Validate() error {
 	if len(sourcedDependencies) != len(dependencies) {
 		return fmt.Errorf("job plan dependencies and prerequisite producers differ")
 	}
-	if len(job.Steps) == 0 {
-		return fmt.Errorf("job plan contains no steps")
-	}
-	ids := make(map[string]struct{}, len(job.Steps))
-	backgroundIDs := make(map[string]struct{})
-	for i, step := range job.Steps {
-		if step.ID == "" {
-			return fmt.Errorf("job plan step %d has no deterministic id", i+1)
-		}
-		if len(step.ID) > 255 {
-			return fmt.Errorf("job plan step id %q exceeds 255 bytes", step.ID)
-		}
-		id := strings.ToLower(step.ID)
-		if _, exists := ids[id]; exists {
-			return fmt.Errorf("job plan contains duplicate step id %q", step.ID)
-		}
-		ids[id] = struct{}{}
-		if step.TimeoutMinutes < 0 || step.TimeoutMinutes > 360 {
-			return fmt.Errorf("job plan step %q timeout_minutes must be between 0 and 360", step.ID)
-		}
-		if step.TimeoutMinutesExpression != "" && step.TimeoutMinutes != 0 {
-			return fmt.Errorf("job plan step %q has both literal and expression timeout_minutes", step.ID)
-		}
-		if step.ContinueOnErrorExpression != "" && step.ContinueOnError {
-			return fmt.Errorf("job plan step %q has both literal and expression continue_on_error", step.ID)
-		}
-		if len(step.TimeoutMinutesExpression) > 65536 || len(step.ContinueOnErrorExpression) > 65536 {
-			return fmt.Errorf("job plan step %q control expression exceeds 65536 bytes", step.ID)
-		}
-		for _, control := range []struct{ name, value string }{
-			{name: "continue_on_error", value: step.ContinueOnErrorExpression},
-			{name: "timeout_minutes", value: step.TimeoutMinutesExpression},
-		} {
-			trimmed := strings.TrimSpace(control.value)
-			if control.value != "" && (!strings.HasPrefix(trimmed, "${{") || !strings.HasSuffix(trimmed, "}}")) {
-				return fmt.Errorf("job plan step %q %s expression must be complete", step.ID, control.name)
-			}
-		}
-		if len(step.Condition) > 65536 {
-			return fmt.Errorf("job plan step %q condition exceeds 65536 bytes", step.ID)
-		}
-		switch step.Kind {
-		case "run":
-			if strings.TrimSpace(step.Command) == "" {
-				return fmt.Errorf("run step %q has no command", step.ID)
-			}
-			if step.Uses != "" || step.Action != nil || len(step.Targets) != 0 {
-				return fmt.Errorf("run step %q contains incompatible action or control fields", step.ID)
-			}
-			if step.Background {
-				backgroundIDs[id] = struct{}{}
-			}
-		case "uses":
-			if strings.TrimSpace(step.Uses) == "" {
-				return fmt.Errorf("action step %q has no action reference", step.ID)
-			}
-			if len(step.Uses) > 1024 {
-				return fmt.Errorf("action step %q reference exceeds 1024 bytes", step.ID)
-			}
-			if step.Command != "" || len(step.Targets) != 0 {
-				return fmt.Errorf("action step %q contains incompatible run or control fields", step.ID)
-			}
-			if step.Background {
-				backgroundIDs[id] = struct{}{}
-			}
-		case "wait", "wait-all", "cancel":
-			if err := validateControlStep(step, backgroundIDs); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("step %q has unsupported kind %q", step.ID, step.Kind)
-		}
-	}
-	if len(job.Actions) != 0 || hasStepActions(job.Steps) {
+	if len(job.Actions) != 0 || hasStepActions(executionJob.Steps) {
 		for _, lock := range job.Actions {
 			if lock.DockerImage == "" {
 				continue
@@ -1045,6 +974,83 @@ func validateInputs(inputs map[string]any) error {
 	return nil
 }
 
+// GitHub's documented variable limits: variables per scope, bytes per value,
+// and bytes of names and values per scope.
+const (
+	organizationVarsLimit = 1000
+	repositoryVarsLimit   = 500
+	environmentVarsLimit  = 100
+	varValueByteLimit     = 48 << 10
+	varsByteLimit         = 256 << 10
+)
+
+// validateVars bounds one scope of the job's variables by GitHub's limits.
+// Names follow GitHub's case-insensitive identifier rules, and the runtime
+// matches names case-insensitively, so case-colliding names are invalid here.
+func validateVars(scope string, vars map[string]string, limit int) error {
+	if len(vars) > limit {
+		return fmt.Errorf("job plan %s vars exceed their size limit", scope)
+	}
+	names := make(map[string]struct{}, len(vars))
+	total := 0
+	for name, value := range vars {
+		if !secretNamePattern.MatchString(name) {
+			return fmt.Errorf("job plan has invalid %s variable name %q", scope, name)
+		}
+		normalized := strings.ToUpper(name)
+		if _, exists := names[normalized]; exists {
+			return fmt.Errorf("job plan repeats case-insensitive %s variable %q", scope, name)
+		}
+		names[normalized] = struct{}{}
+		if len(value) > varValueByteLimit {
+			return fmt.Errorf("job plan %s variable %q exceeds its size limit", scope, name)
+		}
+		total += len(name) + len(value)
+	}
+	if total > varsByteLimit {
+		return fmt.Errorf("job plan %s vars exceed their size limit", scope)
+	}
+	return nil
+}
+
+// OrganizationVars, RepositoryVars, and EnvironmentVars hold the job's GitHub
+// Actions configuration variables by scope. VarsBeforeEnvironment is the vars
+// context of positions GitHub evaluates before the job's environment applies:
+// reusable-workflow call guards and jobs.<id>.if. Repository variables
+// override organization variables.
+func (job Job) VarsBeforeEnvironment() map[string]string {
+	return MergeVars(job.OrganizationVars, job.RepositoryVars)
+}
+
+// Vars is the vars context of every runner-evaluated position: job env,
+// defaults, outputs, services, steps, and action inputs. Environment
+// variables override repository variables, which override organization
+// variables.
+func (job Job) Vars() map[string]string {
+	return MergeVars(job.OrganizationVars, job.RepositoryVars, job.EnvironmentVars)
+}
+
+// MergeVars lays each later scope over the earlier ones. GitHub variable
+// names are case-insensitive, so an overriding variable replaces a name
+// spelled differently. The result is nil when no scope defines a variable.
+func MergeVars(scopes ...map[string]string) map[string]string {
+	var merged map[string]string
+	for _, scope := range scopes {
+		for name, value := range scope {
+			if merged == nil {
+				merged = map[string]string{}
+			}
+			for existing := range merged {
+				if strings.EqualFold(existing, name) {
+					delete(merged, existing)
+				}
+			}
+			merged[name] = value
+		}
+	}
+	return merged
+}
+
 func validateDeferredInputs(inputs map[string]any, deferred map[string]DeferredInput, dependencies map[string]struct{}) (map[string]struct{}, error) {
 	if len(inputs)+len(deferred) > 25 {
 		return nil, fmt.Errorf("inputs exceed their size limit")
@@ -1063,43 +1069,61 @@ func validateDeferredInputs(inputs map[string]any, deferred map[string]DeferredI
 			return nil, fmt.Errorf("repeats input %q", name)
 		}
 		names[lowerName] = struct{}{}
-		if len(input.Sources) == 0 || len(input.Sources) > MaxNeedProducers {
-			return nil, fmt.Errorf("input %q has no valid producers", name)
+		if input.Template == "" || len(input.Template) > 65536 || !utf8.ValidString(input.Template) || strings.ContainsRune(input.Template, 0) {
+			return nil, fmt.Errorf("input %q has an invalid template", name)
 		}
-		producers := make(map[string]struct{}, len(input.Sources))
-		for i, source := range input.Sources {
-			if !targetPattern.MatchString(source.StepKey) || !digestPattern.MatchString(source.PlanDigest) || i > 0 && input.Sources[i-1].StepKey >= source.StepKey {
-				return nil, fmt.Errorf("input %q has invalid, repeated, or unsorted producer identity", name)
-			}
-			key := strings.ToLower(source.StepKey)
-			if _, exists := dependencies[key]; !exists {
-				return nil, fmt.Errorf("input %q producer %q is not a dependency", name, source.StepKey)
-			}
-			producers[key] = struct{}{}
-			sourced[key] = struct{}{}
+		references, err := expression.DeferredInputReferences(input.Template)
+		if err != nil {
+			return nil, fmt.Errorf("input %q has an invalid template: %w", name, err)
 		}
-		if len(input.Outputs) > MaxNeedOutputs {
-			return nil, fmt.Errorf("input %q has too many output projections", name)
+		if len(references) == 0 {
+			return nil, fmt.Errorf("input %q template reads no prerequisite output", name)
 		}
-		for i, output := range input.Outputs {
-			if output.Name != "value" || !targetPattern.MatchString(output.StepKey) || !targetPattern.MatchString(output.Output) {
-				return nil, fmt.Errorf("input %q has invalid output projection", name)
+		inputSourced, err := validateLogicalNeeds(input.NeedSources, input.NeedOutputs, dependencies)
+		if err != nil {
+			return nil, fmt.Errorf("input %q %w", name, err)
+		}
+		referenced := make(map[string]struct{}, len(references))
+		for _, reference := range references {
+			lowerJob := strings.ToLower(reference.Job)
+			if _, exists := lowerKey(input.NeedSources, lowerJob); !exists {
+				return nil, fmt.Errorf("input %q template references unbound prerequisite %q", name, reference.Job)
 			}
-			if _, exists := producers[strings.ToLower(output.StepKey)]; !exists {
-				return nil, fmt.Errorf("input %q output selects unknown producer %q", name, output.StepKey)
+			referenced[lowerJob] = struct{}{}
+		}
+		for need := range input.NeedSources {
+			if _, exists := referenced[strings.ToLower(need)]; !exists {
+				return nil, fmt.Errorf("input %q binds prerequisite %q that its template does not read", name, need)
 			}
-			if i > 0 && compareNeedOutput(input.Outputs[i-1], output) >= 0 {
-				return nil, fmt.Errorf("input %q output projections must be unique and sorted", name)
-			}
+		}
+		for dependency := range inputSourced {
+			sourced[dependency] = struct{}{}
 		}
 	}
 	return sourced, nil
 }
 
+func lowerKey[V any](values map[string]V, lowerName string) (V, bool) {
+	for name, value := range values {
+		if strings.ToLower(name) == lowerName {
+			return value, true
+		}
+	}
+	var zero V
+	return zero, false
+}
+
 func validateCallGuardNeeds(guard CallGuard, dependencies map[string]struct{}) (map[string]struct{}, error) {
+	return validateLogicalNeeds(guard.NeedSources, guard.NeedOutputs, dependencies)
+}
+
+// validateLogicalNeeds checks one caller-scoped set of logical prerequisites:
+// every producer is a job dependency owned by exactly one prerequisite, and
+// every output projection selects one of that prerequisite's producers.
+func validateLogicalNeeds(needSources map[string][]NeedSource, needOutputs map[string][]NeedOutput, dependencies map[string]struct{}) (map[string]struct{}, error) {
 	sourced := make(map[string]struct{})
-	names := make(map[string]map[string]struct{}, len(guard.NeedSources))
-	for name, sources := range guard.NeedSources {
+	names := make(map[string]map[string]struct{}, len(needSources))
+	for name, sources := range needSources {
 		if len(name) > 255 || !logicalJobIDPattern.MatchString(name) || len(sources) == 0 || len(sources) > MaxNeedProducers {
 			return nil, fmt.Errorf("contains invalid prerequisite %q", name)
 		}
@@ -1124,8 +1148,8 @@ func validateCallGuardNeeds(guard CallGuard, dependencies map[string]struct{}) (
 		}
 		names[lowerName] = steps
 	}
-	seenOutputNeeds := make(map[string]struct{}, len(guard.NeedOutputs))
-	for name, outputs := range guard.NeedOutputs {
+	seenOutputNeeds := make(map[string]struct{}, len(needOutputs))
+	for name, outputs := range needOutputs {
 		lowerName := strings.ToLower(name)
 		producers, exists := names[lowerName]
 		if !exists {
@@ -1335,9 +1359,9 @@ func validateContainerImageEnv(image string, env map[string]string) error {
 	return nil
 }
 
-func hasStepActions(steps []Step) bool {
+func hasStepActions(steps []program.Step) bool {
 	for _, step := range steps {
-		if step.Action != nil {
+		if step.Invocation != nil && step.Invocation.Lock != "" {
 			return true
 		}
 	}
@@ -1414,24 +1438,24 @@ func validateActionLocks(job Job) error {
 		heights[id] = height
 		return height, nil
 	}
-	for _, step := range job.Steps {
+	for _, step := range job.ExecutionJob().Steps {
 		if step.Kind != "uses" {
-			if step.Action != nil {
+			if step.Invocation != nil && step.Invocation.Lock != "" {
 				return fmt.Errorf("non-action step %q has an action selector", step.ID)
 			}
 			continue
 		}
-		if step.Action == nil {
+		if step.Invocation == nil || step.Invocation.Lock == "" {
 			return fmt.Errorf("action step %q has no action selector", step.ID)
 		}
-		if !actionLockIDPattern.MatchString(step.Action.Lock) {
-			return fmt.Errorf("action step %q has malformed action selector lock %q", step.ID, step.Action.Lock)
+		if !actionLockIDPattern.MatchString(step.Invocation.Lock) {
+			return fmt.Errorf("action step %q has malformed action selector lock %q", step.ID, step.Invocation.Lock)
 		}
-		lock, ok := locks[step.Action.Lock]
+		lock, ok := locks[step.Invocation.Lock]
 		if !ok {
-			return fmt.Errorf("action selector references missing lock %q", step.Action.Lock)
+			return fmt.Errorf("action selector references missing lock %q", step.Invocation.Lock)
 		}
-		if err := validateTopLevelIdentity(step.Uses, lock); err != nil {
+		if err := validateTopLevelIdentity(step.Invocation.Uses.Source, lock); err != nil {
 			return fmt.Errorf("action step %q: %w", step.ID, err)
 		}
 		if _, err := visit(lock.ID, 1); err != nil {
@@ -1546,42 +1570,6 @@ func hasControl(value string) bool {
 		}
 	}
 	return false
-}
-
-func validateControlStep(step Step, backgroundIDs map[string]struct{}) error {
-	if step.Background || step.Command != "" || step.Uses != "" || step.Action != nil || step.Shell != "" || step.WorkingDirectory != "" || len(step.Env) != 0 || len(step.With) != 0 || step.Condition != "" || step.ContinueOnError || step.ContinueOnErrorExpression != "" || step.TimeoutMinutes != 0 || step.TimeoutMinutesExpression != "" {
-		return fmt.Errorf("control step %q contains incompatible execution fields", step.ID)
-	}
-	switch step.Kind {
-	case "wait":
-		if len(step.Targets) == 0 || len(step.Targets) > maxStepTargets {
-			return fmt.Errorf("wait step %q must target between 1 and %d background steps", step.ID, maxStepTargets)
-		}
-	case "wait-all":
-		if len(step.Targets) != 0 {
-			return fmt.Errorf("wait-all step %q cannot target individual steps", step.ID)
-		}
-		return nil
-	case "cancel":
-		if len(step.Targets) != 1 {
-			return fmt.Errorf("cancel step %q must target exactly one background step", step.ID)
-		}
-	}
-	seen := make(map[string]struct{}, len(step.Targets))
-	for _, target := range step.Targets {
-		if !targetPattern.MatchString(target) {
-			return fmt.Errorf("control step %q has invalid target %q", step.ID, target)
-		}
-		key := strings.ToLower(target)
-		if _, exists := seen[key]; exists {
-			return fmt.Errorf("control step %q repeats target %q", step.ID, target)
-		}
-		seen[key] = struct{}{}
-		if _, exists := backgroundIDs[key]; !exists {
-			return fmt.Errorf("control step %q target %q is not a prior background step", step.ID, target)
-		}
-	}
-	return nil
 }
 
 func (job Job) HasCapability(name string) bool {

@@ -167,7 +167,7 @@ func TestProgramWireDerivesSiteSemanticsFromPosition(t *testing.T) {
 func TestValidateDerivesSiteSemanticsInPlace(t *testing.T) {
 	program := Program{Version: Version, Job: Job{
 		Condition: Site{Source: "true"},
-		Steps:     []Step{{ID: "step", Condition: Site{Source: "true"}, Run: &Run{Command: Site{Source: "echo ok"}}}},
+		Steps:     []Step{{ID: "step", Kind: "run", Condition: Site{Source: "true"}, Run: &Run{Command: Site{Source: "echo ok"}}}},
 	}}
 	if err := program.Validate(); err != nil {
 		t.Fatal(err)

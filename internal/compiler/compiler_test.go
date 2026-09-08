@@ -485,7 +485,8 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 2 || plans[1].Condition != "always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref && github.head_ref == ''" || plans[1].Steps[0].Condition != "success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready && github.head_ref == ''" || plans[1].Steps[1].Condition != "failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && job.services.redis.ports[6379]" {
+	steps := plans[1].Program.Job.Steps
+	if len(plans) != 2 || plans[1].Condition != "always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref && github.head_ref == ''" || steps[0].Condition.Source != "success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready && github.head_ref == ''" || steps[1].Condition.Source != "failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && job.services.redis.ports[6379]" {
 		t.Fatalf("runtime conditions were not retained: %#v", plans)
 	}
 }
@@ -571,7 +572,7 @@ jobs:
       - run: true
 `)
 	options := defaultOptions()
-	options.Vars.Bridge = map[string]string{
+	options.Vars.Repository = map[string]string{
 		"EXCLUDE": `[{"os":"macos-latest"}]`,
 		"INCLUDE": `[{"os":"ubuntu-latest","version":24},{"os":"macos-14","version":14}]`,
 	}
@@ -611,7 +612,7 @@ jobs:
     steps: [{run: true}]
 `)
 	options := defaultOptions()
-	options.Vars.Bridge = map[string]string{"MATRIX": `{"value":[` + strings.Join(values, ",") + `]}`}
+	options.Vars.Repository = map[string]string{"MATRIX": `{"value":[` + strings.Join(values, ",") + `]}`}
 	_, err := CompileWithOptions("bounded-matrix.yml", source, readFile(t, smokePath("events", "push.json")), options)
 	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("matrix expands beyond %d instances", maxMatrixInstances)) {
 		t.Fatalf("Compile() error = %v, want static matrix instance limit", err)
@@ -747,7 +748,7 @@ jobs:
 `)
 	compiled, err := CompileWithOptions("numeric-matrix.yml", source, readFile(t, smokePath("events", "push.json")), Options{
 		EventTrust: EventTrusted,
-		Vars:       VariableSources{Bridge: map[string]string{"VERSIONS": `[12,14]`}},
+		Vars:       VariableSources{Repository: map[string]string{"VERSIONS": `[12,14]`}},
 		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
 	})
 	if err != nil {
@@ -894,8 +895,8 @@ jobs:
 	if plans[1].Schema != plan.Schema || !reflect.DeepEqual(plans[1].NeedOutputs, map[string][]plan.NeedOutput{"prepare": {}}) {
 		t.Fatalf("callee root caller prerequisite projection = %q / %#v", plans[1].Schema, plans[1].NeedOutputs)
 	}
-	if plans[3].Condition != "always() && needs.delegated.result == 'success'" || plans[3].Steps[0].Command != `test "${{ needs.delegated.result }}" = success` {
-		t.Fatalf("downstream reusable-workflow result expressions = %q / %q", plans[3].Condition, plans[3].Steps[0].Command)
+	if plans[3].Condition != "always() && needs.delegated.result == 'success'" || plans[3].Program.Job.Steps[0].Run.Command.Source != `test "${{ needs.delegated.result }}" = success` {
+		t.Fatalf("downstream reusable-workflow result expressions = %q / %q", plans[3].Condition, plans[3].Program.Job.Steps[0].Run.Command.Source)
 	}
 	if !reflect.DeepEqual(plans[3].NeedSources, map[string][]plan.NeedSource{
 		"delegated": {
@@ -1466,8 +1467,8 @@ jobs:
 	conditions := make(map[string][2]string, len(plans))
 	for _, job := range plans {
 		stepCondition := ""
-		if len(job.Steps) != 0 {
-			stepCondition = job.Steps[0].Condition
+		if len(job.Program.Job.Steps) != 0 {
+			stepCondition = job.Program.Job.Steps[0].Condition.Source
 		}
 		conditions[job.Workflow.LogicalJobID] = [2]string{job.Condition, stepCondition}
 	}
@@ -1546,7 +1547,8 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "release" || plans[0].Outputs["label"] != "release" || len(plans[0].Steps) != 3 || plans[0].Steps[0].Command != "echo true ${{ github.ref }}" || plans[0].Steps[1].Condition != "${{ true && github.ref }}" || plans[0].Steps[2].Condition != "'release'" {
+	steps := plans[0].Program.Job.Steps
+	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "release" || plans[0].Outputs["label"] != "release" || len(steps) != 3 || steps[0].Run.Command.Source != "echo true ${{ github.ref }}" || steps[1].Condition.Source != "${{ true && github.ref }}" || steps[2].Condition.Source != "'release'" {
 		t.Fatalf("reusable condition = %#v", plans)
 	}
 }
@@ -1645,7 +1647,12 @@ jobs:
 		t.Fatalf("forwarded deferred input = %#v", ir.Jobs)
 	}
 	deferred := ir.Jobs[1].DeferredInputs["subjects"]
-	if !reflect.DeepEqual(deferred.Sources, []string{ir.Jobs[0].Key}) || !reflect.DeepEqual(deferred.Outputs, []NeedOutput{{Name: "value", StepKey: ir.Jobs[0].Key, Output: "hashes"}}) {
+	want := DeferredInput{
+		Template:    "${{ needs.hash.outputs.hashes }}",
+		NeedGroups:  map[string][]string{"hash": {ir.Jobs[0].Key}},
+		NeedOutputs: map[string][]NeedOutput{"hash": {{Name: "hashes", StepKey: ir.Jobs[0].Key, Output: "hashes"}}},
+	}
+	if !reflect.DeepEqual(deferred, want) {
 		t.Fatalf("forwarded deferred binding = %#v", deferred)
 	}
 	if !reflect.DeepEqual(ir.Jobs[1].CallGuards[0].DeferredInputs["subjects"], deferred) {
@@ -1707,8 +1714,108 @@ jobs:
 	}
 	consumer := ir.Jobs[2]
 	deferred := consumer.DeferredInputs["subject"]
-	if len(consumer.Needs) != 2 || len(deferred.Sources) != 2 || len(deferred.Outputs) != 1 || !slices.Equal(consumer.Needs, deferred.Sources) {
+	if len(consumer.Needs) != 2 || len(deferred.NeedGroups["produce"]) != 2 || len(deferred.NeedOutputs["produce"]) != 1 || !slices.Equal(consumer.Needs, deferred.NeedGroups["produce"]) {
 		t.Fatalf("consumer dependencies = %#v, deferred input = %#v", consumer.Needs, deferred)
+	}
+}
+
+func TestCompileDeferredInputEmbedsNeedsOutputsInLargerValue(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      flavor: ${{ steps.meta.outputs.flavor }}
+    steps:
+      - id: meta
+        run: |
+          echo tag=v4.3.0 >> "$GITHUB_OUTPUT"
+          echo flavor=latest >> "$GITHUB_OUTPUT"
+  produce:
+    uses: ./.github/workflows/producer.yml
+  build-image:
+    needs: [meta, produce]
+    uses: ./.github/workflows/build.yml
+    with:
+      tags: |
+        type=raw,value=${{ needs.Meta.outputs.tag }}
+        type=raw,value=${{ github.ref_name }}-${{ needs.produce.outputs.subject }}
+      flavor: ${{ format('latest={0}', needs.meta.outputs.flavor) }}
+      push: true
+`)
+	writeWorkflow(t, repository, "producer.yml", `on:
+  workflow_call:
+    outputs:
+      subject:
+        value: ${{ jobs.outputter.outputs.subject }}
+jobs:
+  outputter:
+    runs-on: ubuntu-latest
+    outputs:
+      subject: ${{ steps.value.outputs.subject }}
+    steps:
+      - id: value
+        run: echo subject=value >> "$GITHUB_OUTPUT"
+`)
+	writeWorkflow(t, repository, "build.yml", `on:
+  workflow_call:
+    inputs:
+      tags: {type: string, required: true}
+      flavor: {type: string, required: false}
+      push: {type: boolean, required: true}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ inputs.tags }}" "${{ inputs.flavor }}" ${{ inputs.push }}
+`)
+
+	plans, err := compilePlansForTest(t.Context(), callerPath, readFile(t, callerPath), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 3 {
+		t.Fatalf("plans = %d, want meta, producer, and build", len(plans))
+	}
+	meta, producer, build := plans[0], plans[1], plans[2]
+	digest := func(job plan.Job) string {
+		encoded, err := plan.Encode(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return transport.Digest(encoded)
+	}
+	metaSource := plan.NeedSource{StepKey: meta.Target.StepKey, PlanDigest: digest(meta)}
+	producerSource := plan.NeedSource{StepKey: producer.Target.StepKey, PlanDigest: digest(producer)}
+	want := map[string]plan.DeferredInput{
+		"tags": {
+			Template:    "type=raw,value=${{ needs.meta.outputs.tag }}\ntype=raw,value=main-${{ needs.produce.outputs.subject }}\n",
+			NeedSources: map[string][]plan.NeedSource{"meta": {metaSource}, "produce": {producerSource}},
+			NeedOutputs: map[string][]plan.NeedOutput{
+				"meta":    {{Name: "tag", StepKey: meta.Target.StepKey, Output: "tag"}},
+				"produce": {{Name: "subject", StepKey: producer.Target.StepKey, Output: "subject"}},
+			},
+		},
+		"flavor": {
+			Template:    "${{ format('latest={0}', needs.meta.outputs.flavor) }}",
+			NeedSources: map[string][]plan.NeedSource{"meta": {metaSource}},
+			NeedOutputs: map[string][]plan.NeedOutput{"meta": {{Name: "flavor", StepKey: meta.Target.StepKey, Output: "flavor"}}},
+		},
+	}
+	if !reflect.DeepEqual(build.DeferredInputs, want) {
+		t.Fatalf("deferred inputs = %#v, want %#v", build.DeferredInputs, want)
+	}
+	if build.Inputs["push"] != true || len(build.Inputs) != 1 {
+		t.Fatalf("static inputs = %#v", build.Inputs)
+	}
+	if !slices.Equal(build.Dependencies, []string{meta.Target.StepKey, producer.Target.StepKey}) || len(build.NeedOutputs["meta"]) != 0 || len(build.NeedOutputs["produce"]) != 0 {
+		t.Fatalf("build dependencies = %#v, needs outputs = %#v", build.Dependencies, build.NeedOutputs)
+	}
+	step := build.ExecutionJob().Steps[0]
+	if step.Run.Command.Source != `echo "${{ inputs.tags }}" "${{ inputs.flavor }}" true` {
+		t.Fatalf("callee step = %#v", step)
 	}
 }
 
@@ -1743,7 +1850,9 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Inputs["target"] != "release" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Env["VALUE_ENV"] != "${{ inputs[env.KEY] }}" || plans[0].Steps[0].Env["VALUE_INPUT"] != "release" {
+	steps := plans[0].Program.Job.Steps
+	env := testBindingSources(steps[0].Env)
+	if len(plans) != 1 || plans[0].Inputs["target"] != "release" || len(steps) != 1 || env["VALUE_ENV"] != "${{ inputs[env.KEY] }}" || env["VALUE_INPUT"] != "release" {
 		t.Fatalf("computed reusable input plan = %#v", plans)
 	}
 }
@@ -1953,7 +2062,7 @@ jobs:
 			t.Fatalf("Compile() error = %v, want source-located runtime input rejection", err)
 		}
 		var finding *ProcessingFinding
-		if !errors.As(err, &finding) || finding.Message != `Reusable workflow input "target" references job "prepare", but the call does not list it in needs. Add "prepare" to the reusable-workflow call's needs.` || !strings.Contains(finding.Detail, `Reusable-workflow input "target" is not statically resolvable`) || !strings.Contains(finding.Detail, `unsupported compile-time context "needs"`) {
+		if !errors.As(err, &finding) || finding.Message != `Reusable workflow input "target" references job "prepare", but the call does not list it in needs. Add "prepare" to the reusable-workflow call's needs.` || !strings.Contains(finding.Detail, `Reusable-workflow input "target" is not statically resolvable`) || !strings.Contains(finding.Detail, `expression references job "prepare", which the call does not list in needs`) {
 			t.Fatalf("Compile() finding = %#v", finding)
 		}
 	})
@@ -1973,7 +2082,7 @@ jobs:
     needs: prepare
     uses: ./.github/workflows/reusable.yml
     with:
-      target: prefix-${{ needs.prepare.outputs.target }}
+      target: prefix-${{ needs.prepare.result }}
 `)
 		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
@@ -1981,10 +2090,95 @@ jobs:
 			t.Fatal("Compile() error = nil, want unsupported needs input finding")
 		}
 		var finding *ProcessingFinding
-		wantMessage := `Reusable workflow input "target" uses a needs expression in an unsupported form. Pass the whole value as exactly ${{ needs.<job>.outputs.<name> }}, with nothing around it. Only string inputs can take a needs value, and Buildkite resolves it before the called job runs, so the reference has to be the entire value rather than part of a larger expression. If you need a computed input from job outputs, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`
-		wantDetail := `Reusable-workflow input "target" is not statically resolvable: unsupported compile-time context "needs"`
+		wantMessage := `Reusable workflow input "target" uses a needs expression in an unsupported form: reusable-workflow input needs reference "needs.prepare.result" must be needs.<job>.outputs.<name>. Reference job outputs as needs.<job>.outputs.<name>, list each job in the call's needs, and keep the rest of the value resolvable before jobs run (literals, github, vars, matrix, and static inputs). Only string inputs can take a needs value; Buildkite resolves the referenced outputs before the called job runs.`
+		wantDetail := `Reusable-workflow input "target" is not statically resolvable: reusable-workflow input needs reference "needs.prepare.result" must be needs.<job>.outputs.<name>`
 		if !errors.As(err, &finding) || finding.Message != wantMessage || finding.Detail != wantDetail || finding.Path != "./.github/workflows/caller.yml" || finding.Line != 14 || finding.Column != 15 || finding.Job != "call" {
 			t.Fatalf("Compile() finding = %#v", finding)
+		}
+	})
+
+	t.Run("needs input mixed with runtime value", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.value.outputs.target }}
+    steps:
+      - id: value
+        run: echo target=test >> "$GITHUB_OUTPUT"
+  call:
+    needs: prepare
+    uses: ./.github/workflows/reusable.yml
+    with:
+      target: ${{ needs.prepare.outputs.target }}-${{ github.run_id }}
+`)
+		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		var finding *ProcessingFinding
+		if err == nil || !errors.As(err, &finding) || !strings.HasPrefix(finding.Message, `Reusable workflow input "target" uses a needs expression in an unsupported form: compile-time expression references unavailable value "github.run_id".`) {
+			t.Fatalf("Compile() finding = %#v", finding)
+		}
+	})
+
+	t.Run("needs input compounds forwarded parent input", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.value.outputs.target }}
+    steps:
+      - id: value
+        run: echo target=test >> "$GITHUB_OUTPUT"
+  call:
+    needs: prepare
+    uses: ./.github/workflows/middle.yml
+    with:
+      target: ${{ needs.prepare.outputs.target }}
+`)
+		writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      target: prefix-${{ inputs.target }}
+`)
+		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		var finding *ProcessingFinding
+		wantMessage := `Reusable workflow input "target" combines parent input "target", which carries a needs value, with other text. Forward it as exactly ${{ inputs.target }}, or compute the value where the needs output is referenced directly.`
+		if err == nil || !errors.As(err, &finding) || finding.Message != wantMessage || finding.Path != "./.github/workflows/caller.yml" || finding.Line != 12 || finding.Job != "call" {
+			t.Fatalf("Compile() finding = %#v", finding)
+		}
+	})
+
+	t.Run("needs input into non-string input", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      count: ${{ steps.value.outputs.count }}
+    steps:
+      - id: value
+        run: echo count=1 >> "$GITHUB_OUTPUT"
+  call:
+    needs: prepare
+    uses: ./.github/workflows/reusable.yml
+    with:
+      count: ${{ needs.prepare.outputs.count }}0
+`)
+		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      count:\n        type: number\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), `deferred reusable-workflow input "count" must be string`) || !strings.Contains(err.Error(), "./.github/workflows/caller.yml:14:14") {
+			t.Fatalf("Compile() error = %v, want non-string deferred input rejection", err)
 		}
 	})
 
@@ -2182,7 +2376,7 @@ jobs:
       - run: echo ${{ inputs.target }}
 `)
 	options := defaultOptions()
-	options.Vars.Bridge = map[string]string{"CALLS": `{"target":["linux","darwin"]}`}
+	options.Vars.Repository = map[string]string{"CALLS": `{"target":["linux","darwin"]}`}
 	result, err := CompileWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), options)
 	if err != nil {
 		t.Fatal(err)
@@ -3109,7 +3303,7 @@ jobs:
 `)
 	result, err := CompileWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), Options{
 		EventTrust: EventTrusted,
-		Vars:       VariableSources{Bridge: map[string]string{"COUNT": "3", "SUFFIX": "release"}},
+		Vars:       VariableSources{Repository: map[string]string{"COUNT": "3", "SUFFIX": "release"}},
 		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
 	})
 	if err != nil {
@@ -3285,7 +3479,7 @@ jobs:
 `)
 	result, err := CompileWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), Options{
 		EventTrust: EventTrusted,
-		Vars:       VariableSources{Bridge: map[string]string{"PREFIX": "release"}},
+		Vars:       VariableSources{Repository: map[string]string{"PREFIX": "release"}},
 		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
 	})
 	if err != nil {
@@ -3858,11 +4052,12 @@ jobs:
 	if producer.Target.StepKey != "gha-producer" || producer.Workflow.LogicalJobID != "producer" {
 		t.Fatalf("producer target = %#v, workflow = %#v", producer.Target, producer.Workflow)
 	}
-	if producer.Steps[0].ID != "step-1-2" || producer.Steps[1].ID != "step-1" {
-		t.Fatalf("deterministic step ids = %q, %q", producer.Steps[0].ID, producer.Steps[1].ID)
+	steps := producer.Program.Job.Steps
+	if steps[0].ID != "step-1-2" || steps[1].ID != "step-1" {
+		t.Fatalf("deterministic step ids = %q, %q", steps[0].ID, steps[1].ID)
 	}
-	if producer.Steps[2].With["message"] != "${{ steps.step-1.outputs.result }}" {
-		t.Fatalf("JavaScript inputs = %#v", producer.Steps[2].With)
+	if testBindingSources(steps[2].Invocation.With)["message"] != "${{ steps.step-1.outputs.result }}" {
+		t.Fatalf("JavaScript inputs = %#v", steps[2].Invocation.With)
 	}
 	if producer.Outputs["result"] != "${{ steps.composite.outputs.result }}" {
 		t.Fatalf("job outputs = %#v", producer.Outputs)
@@ -3902,9 +4097,12 @@ jobs:
         run: echo second
         background: true
         continue-on-error: true
-      - wait: [first, second]
-      - wait-all:
-      - cancel: first
+      - name: Join selected workers
+        wait: [first, second]
+      - name: Join all workers
+        wait-all:
+      - name: Stop first worker
+        cancel: first
       - parallel:
           - run: echo ${{ secrets.PARALLEL_TOKEN }}
             env:
@@ -3919,14 +4117,14 @@ jobs:
 	if len(plans) != 1 || plans[0].Schema != plan.Schema {
 		t.Fatalf("plans = %#v, want one current plan", plans)
 	}
-	steps := plans[0].Steps
+	steps := plans[0].Program.Job.Steps
 	if len(steps) != 8 || !steps[0].Background || !steps[1].Background {
 		t.Fatalf("background plan steps = %#v", steps)
 	}
-	if !steps[1].ContinueOnError || steps[2].Kind != "wait" || !reflect.DeepEqual(steps[2].Targets, []string{"first", "second"}) || steps[2].ContinueOnError {
+	if !steps[1].ContinueOnError.Literal || steps[2].Kind != "wait" || !reflect.DeepEqual(steps[2].Targets, []string{"first", "second"}) || steps[2].ContinueOnError.Literal {
 		t.Fatalf("targeted plan barrier = %#v", steps[2])
 	}
-	if steps[3].Kind != "wait-all" || steps[4].Kind != "cancel" || !reflect.DeepEqual(steps[4].Targets, []string{"first"}) {
+	if steps[2].Name.Source != "Join selected workers" || steps[3].Kind != "wait-all" || steps[3].Name.Source != "Join all workers" || steps[4].Kind != "cancel" || steps[4].Name.Source != "Stop first worker" || !reflect.DeepEqual(steps[4].Targets, []string{"first"}) {
 		t.Fatalf("plan controls = %#v", steps[3:])
 	}
 	if !steps[5].Background || !steps[6].Background || steps[5].ID == "" || steps[6].ID != "named-parallel" {
@@ -4347,7 +4545,7 @@ jobs:
     steps: [{run: true}]
 `)
 	options := defaultOptions()
-	options.Vars.Buildkite = map[string]string{"IMAGE": "tool"}
+	options.Vars.Repository = map[string]string{"IMAGE": "tool"}
 	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), options)
 	if err != nil {
 		t.Fatal(err)
@@ -4451,7 +4649,7 @@ jobs:
     steps: [{run: true}]
 `)
 	options := defaultOptions()
-	options.Vars.Buildkite = map[string]string{"SERVICE_PORT": "5432", "REGISTRY_USER": "registry-user"}
+	options.Vars.Repository = map[string]string{"SERVICE_PORT": "5432", "REGISTRY_USER": "registry-user"}
 	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), options)
 	if err != nil {
 		t.Fatal(err)
@@ -4461,7 +4659,7 @@ jobs:
 	}
 	for i, image := range []string{"postgres:16", "postgres:17"} {
 		service := plans[i].Services["database"]
-		if service.Image != image || service.Credentials == nil || service.Credentials.Username != "registry-user" || service.Credentials.Password != "${{ secrets.REGISTRY_PASSWORD }}" || service.Env["INSTANCE"] != strconv.Itoa(i) || !slices.Equal(service.Ports, []string{"5432"}) || len(service.Volumes) != 1 || service.Options == "" || service.Command == "" || service.Entrypoint == "" {
+		if service.Image != image || service.Credentials == nil || service.Credentials.Username != "${{ vars.REGISTRY_USER }}" || service.Credentials.Password != "${{ secrets.REGISTRY_PASSWORD }}" || service.Env["INSTANCE"] != strconv.Itoa(i) || !slices.Equal(service.Ports, []string{"5432"}) || len(service.Volumes) != 1 || service.Options == "" || service.Command == "" || service.Entrypoint == "" {
 			t.Fatalf("compiled service %d = %#v", i, service)
 		}
 		if !slices.Equal(plans[i].ServiceOrder, []string{"database"}) {
@@ -4479,18 +4677,35 @@ jobs:
 
 func TestResolveCompileServicesRejectsVariableIntroducedExpressionSyntax(t *testing.T) {
 	services := []workflow.Service{{
+		Name:      "database",
+		Container: workflow.ServiceContainer{Image: "${{ vars.image }}"},
+	}}
+	_, err := resolveCompileServices(services, expression.CompileContext{Vars: map[string]string{"image": "${{ secrets.ADMIN }}"}})
+	if err == nil || !strings.Contains(err.Error(), "compile-time expression result contains expression syntax") {
+		t.Fatalf("resolveCompileServices() error = %v", err)
+	}
+}
+
+// TestResolveCompileServicesKeepsCredentialVariablesResidual proves service
+// credentials are not reduced with the pre-environment vars: the runtime
+// evaluates them after the job's environment applies.
+func TestResolveCompileServicesKeepsCredentialVariablesResidual(t *testing.T) {
+	services := []workflow.Service{{
 		Name: "database",
 		Container: workflow.ServiceContainer{
-			Image: "postgres:16",
+			Image: "postgres:${{ vars.tag }}",
 			Credentials: &workflow.ContainerCredentials{
-				Username: "registry-user",
-				Password: "${{ vars.password }}",
+				Username: "${{ vars.user }}",
+				Password: "${{ secrets.REGISTRY_PASSWORD }}",
 			},
 		},
 	}}
-	_, err := resolveCompileServices(services, expression.CompileContext{Vars: map[string]string{"password": "${{ secrets.ADMIN }}"}})
-	if err == nil || !strings.Contains(err.Error(), "compile-time expression result contains expression syntax") {
-		t.Fatalf("resolveCompileServices() error = %v", err)
+	resolved, err := resolveCompileServices(services, expression.CompileContext{Vars: map[string]string{"tag": "16", "user": "registry-user"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if container := resolved[0].Container; container.Image != "postgres:16" || container.Credentials.Username != "${{ vars.user }}" {
+		t.Fatalf("resolved service = %#v", container)
 	}
 }
 
@@ -4614,7 +4829,8 @@ jobs:
 		t.Fatalf("compiled plans = %d, want 1", len(plans))
 	}
 	job := plans[0]
-	if job.Env["LABEL"] != "bash" || job.Env["INDEXED_LABEL"] != "bash" || job.Inputs["label"] != "bash" || job.Inputs["timeout"] != json.Number("7") || job.DefaultShell != "bash" || job.Outputs["label"] != "bash" || job.Steps[0].TimeoutMinutes != 7 || job.Steps[0].TimeoutMinutesExpression != "" {
+	step := job.Program.Job.Steps[0]
+	if job.Env["LABEL"] != "bash" || job.Env["INDEXED_LABEL"] != "bash" || job.Inputs["label"] != "bash" || job.Inputs["timeout"] != json.Number("7") || job.DefaultShell != "bash" || job.Outputs["label"] != "bash" || step.TimeoutMinutes.Literal != 7 || step.TimeoutMinutes.Expression != nil {
 		t.Fatalf("compiled dispatch input surfaces = %#v", job)
 	}
 }
@@ -4697,7 +4913,8 @@ jobs:
 func TestCompilerWarningsNameOnlyDeclaredSupportedTriggers(t *testing.T) {
 	parsed := &workflow.Workflow{Triggers: []workflow.Trigger{
 		{Event: "workflow_dispatch"},
-		{Event: "issue_comment", Position: workflow.Position{Line: 4, Column: 3}},
+		{Event: "discussion", Position: workflow.Position{Line: 4, Column: 3}},
+		{Event: "issue_comment"},
 		{Event: "issues"},
 		{Event: "release"},
 		{Event: "push"},
@@ -4709,18 +4926,18 @@ func TestCompilerWarningsNameOnlyDeclaredSupportedTriggers(t *testing.T) {
 	}}
 	warnings := compilerWarnings(parsed, false)
 	want := Warning{
-		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Blocker: "trigger", BlockerDetail: "issue_comment", Line: 4, Column: 3,
-		Message: "on.issue_comment is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: issues, merge_group, pull_request, push, release, schedule, workflow_call, workflow_dispatch. Move the jobs this trigger guards to one of those triggers if you need them. If you need issue_comment, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Blocker: "trigger", BlockerDetail: "discussion", Line: 4, Column: 3,
+		Message: "on.discussion is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: issue_comment, issues, merge_group, pull_request, push, release, schedule, workflow_call, workflow_dispatch. Move the jobs this trigger guards to one of those triggers if you need them. If you need discussion, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
 	}
 	if !reflect.DeepEqual(warnings, []Warning{want}) {
 		t.Fatalf("warnings = %#v, want %#v", warnings, []Warning{want})
 	}
 
-	parsed.Triggers = []workflow.Trigger{{Event: "issue_comment", Position: workflow.Position{Line: 1, Column: 5}}}
+	parsed.Triggers = []workflow.Trigger{{Event: "discussion", Position: workflow.Position{Line: 1, Column: 5}}}
 	warnings = compilerWarnings(parsed, false)
 	want = Warning{
-		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Blocker: "trigger", BlockerDetail: "issue_comment", Line: 1, Column: 5,
-		Message: "on.issue_comment is ignored, so nothing in this workflow runs from it. This workflow declares no supported triggers that still run. If you need issue_comment, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
+		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Blocker: "trigger", BlockerDetail: "discussion", Line: 1, Column: 5,
+		Message: "on.discussion is ignored, so nothing in this workflow runs from it. This workflow declares no supported triggers that still run. If you need discussion, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
 	}
 	if !reflect.DeepEqual(warnings, []Warning{want}) {
 		t.Fatalf("warnings without supported triggers = %#v, want %#v", warnings, []Warning{want})

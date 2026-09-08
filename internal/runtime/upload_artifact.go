@@ -77,7 +77,7 @@ func parseUploadOptions(commit string, inputs map[string]string) (uploadOptions,
 		hidden:  actionintegration.UploadArtifactIncludesHiddenByDefault(commit),
 		level:   6,
 	}
-	if commit == actionintegration.UploadArtifactV1Commit {
+	if actionintegration.UploadArtifactUsesV1Contract(commit) {
 		o.noFiles = "error"
 	}
 	if v, ok := values["name"]; ok {
@@ -168,7 +168,7 @@ func (r *jobRun) runUploadArtifactCommit(ctx context.Context, processor *command
 		return result, err
 	}
 	emptyV1Directory := false
-	if commit == actionintegration.UploadArtifactV1Commit {
+	if actionintegration.UploadArtifactUsesV1Contract(commit) {
 		info, statErr := os.Stat(filepath.Join(workspace, filepath.FromSlash(o.paths[0])))
 		emptyV1Directory = statErr == nil && info.IsDir()
 	}
@@ -235,8 +235,10 @@ func (r *jobRun) runUploadArtifactCommit(ctx context.Context, processor *command
 	}
 	// The future download adapter resolves this opaque ID through the result manifest.
 	id := strconv.FormatUint(idNumber, 10)
-	if actionintegration.UploadArtifactSupportsOutputs(commit) {
+	if actionintegration.UploadArtifactSupportsOutput(commit, "artifact-id") {
 		result.Outputs["artifact-id"] = id
+	}
+	if actionintegration.UploadArtifactSupportsOutput(commit, "artifact-digest") {
 		result.Outputs["artifact-digest"] = digest
 	}
 	result.Artifacts = []transport.ResultArtifact{{Name: o.name, ID: id, Path: rel, Digest: "sha256:" + digest, Size: size, FileCount: len(files)}}

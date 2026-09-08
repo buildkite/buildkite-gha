@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
-	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 func TestClassifyFailurePrecedence(t *testing.T) {
@@ -65,7 +64,7 @@ func TestRunJobClassifiesStepProcessExit(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/failing.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: failing\n")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "fail", Kind: "run", Command: "exit 7"}})
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "fail", Kind: "run", Command: "exit 7"}})
 	var logs bytes.Buffer
 	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
@@ -80,7 +79,7 @@ func TestRunJobClassifiesUnsupportedShell(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/shell.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: shell\n")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "shell", Kind: "run", Shell: "pwsh", Command: "Get-Location"}})
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "shell", Kind: "run", Shell: "pwsh", Command: "Get-Location"}})
 	var logs bytes.Buffer
 	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {
@@ -104,7 +103,7 @@ func TestRunJobClassifiesUnsupportedActionRuntime(t *testing.T) {
 	workflowPath := ".github/workflows/action.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: action\n")
 	writeFixtureFile(t, workspace, "action/action.yml", "name: future\nruns:\n  using: future\n  main: main.js\n")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "future", Kind: "uses", Uses: "./action"}})
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "future", Kind: "uses", Uses: "./action"}})
 	var logs bytes.Buffer
 	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {

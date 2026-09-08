@@ -30,6 +30,71 @@ const (
 	stageResolution      = compiler.StageResolution
 )
 
+func TestRunEmptyIssueTypesNativeFixtures(t *testing.T) {
+	requireImporterHost(t)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "empty-types-importer")
+	// Exact workflows accepted by native GitHub in the September 2026 production
+	// verification, but rejected by the released importer before compilation.
+	for _, test := range []struct{ event, fixture string }{
+		{"issues", "empty-issues.yml"}, {"issue_comment", "empty-comment.yml"},
+	} {
+		t.Run(test.event, func(t *testing.T) {
+			source, err := os.ReadFile(filepath.Join("testdata", test.fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, types := range []string{"[]", "omitted", "[edited]", "[deleted]"} {
+				t.Run(types, func(t *testing.T) {
+					workflowSource := strings.Replace(string(source), "types: []", "types: "+types, 1)
+					if types == "omitted" {
+						workflowSource = strings.Replace(string(source), "    types: []\n", "", 1)
+					}
+					dir := t.TempDir()
+					workflowPath := filepath.Join(dir, test.fixture)
+					if err := os.WriteFile(workflowPath, []byte(workflowSource), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					var stdout, stderr bytes.Buffer
+					if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+						t.Fatalf("validate code = %d, stdout = %s, stderr = %s", code, &stdout, &stderr)
+					}
+					eventPath := writeUploadEvent(t, dir, test.event, "refs/heads/main", map[string]any{
+						"action": "edited", "issue": map[string]any{"number": 1, "title": "GHA production e2e 20260908-0337 regression"},
+						"comment": map[string]any{"id": 2},
+					})
+					stdout.Reset()
+					stderr.Reset()
+					if code := Run([]string{"compile", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+						t.Fatalf("compile code = %d, stdout = %s, stderr = %s", code, &stdout, &stderr)
+					}
+					// Upload selects workflows from the snapshot; compile emits jobs.
+					runner := &cliCaptureRunner{}
+					if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+						t.Fatalf("upload code = %d, stderr = %s", code, &stderr)
+					}
+					var pipeline struct {
+						Steps []struct {
+							Condition string `yaml:"if"`
+							Skip      any    `yaml:"skip"`
+						} `yaml:"steps"`
+					}
+					if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+						t.Fatal(err)
+					}
+					want := "(true)"
+					if types == "[edited]" || types == "[deleted]" {
+						want = `(true && ("edited" == "` + strings.Trim(types, "[]") + `"))`
+					}
+					if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != nil || pipeline.Steps[0].Condition != want {
+						t.Fatalf("unexpected snapshot selection: %#v", pipeline.Steps)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestRunValidateAndCompile(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -48,7 +113,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		tests := []struct {
 			name, trigger, want string
 		}{
-			{name: "unsupported event", trigger: "issue_comment", want: `unsupported GitHub trigger event "issue_comment"`},
+			{name: "unsupported event", trigger: "discussion", want: `unsupported GitHub trigger event "discussion"`},
 			{name: "malformed path filter", trigger: "push:\n    paths: ['!src/**']", want: "must follow a positive pattern"},
 			{name: "mixed branch filters", trigger: "push:\n    branches: [main]\n    branches-ignore: [release]", want: "include and ignore filters cannot be combined"},
 			{name: "pull request tag filter", trigger: "pull_request:\n    tags: [v1]", want: "pull_request tag filters are unsupported"},
@@ -58,6 +123,8 @@ func TestRunValidateAndCompile(t *testing.T) {
 			{name: "release branch filter", trigger: "release:\n    types: [published]\n    branches: [main]", want: "release has unsupported filters"},
 			{name: "unknown issues activity", trigger: "issues:\n    types: [not-real]", want: `issues activity type "not-real" cannot be mapped exactly`},
 			{name: "issues branch filter", trigger: "issues:\n    branches: [main]", want: "issues has unsupported filters"},
+			{name: "unknown issue comment activity", trigger: "issue_comment:\n    types: [not-real]", want: `issue_comment activity type "not-real" cannot be mapped exactly`},
+			{name: "issue comment branch filter", trigger: "issue_comment:\n    branches: [main]", want: "issue_comment has unsupported filters"},
 		}
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
@@ -88,24 +155,6 @@ func TestRunValidateAndCompile(t *testing.T) {
 					t.Fatalf("report = %#v, want trigger failure containing %q", report, test.want)
 				}
 			})
-		}
-	})
-
-	t.Run("validate rejects empty issues activities", func(t *testing.T) {
-		workflow := filepath.Join(t.TempDir(), "issues.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  issues:\n    types: []\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		var stdout, stderr bytes.Buffer
-		if code := Run([]string{"validate", "--format", "json", workflow}, &stdout, &stderr, "dev"); code != 1 {
-			t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
-		}
-		var report compatibility.ProcessingReport
-		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
-			t.Fatal(err)
-		}
-		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || !strings.Contains(report.Diagnostics[0].Message, `"types" section should not be empty`) {
-			t.Fatalf("report = %#v", report)
 		}
 	})
 
@@ -193,10 +242,10 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile with generated events", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  issues:\n    types: [opened, field_added, field_removed, typed]\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  issues:\n    types: [opened, field_added, field_removed, typed]\n  issue_comment:\n    types: [created, edited, deleted]\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		for _, event := range []string{"push", "pull_request", "merge_group", "release", "issues", "workflow_dispatch", "schedule"} {
+		for _, event := range []string{"push", "pull_request", "merge_group", "release", "issues", "issue_comment", "workflow_dispatch", "schedule"} {
 			t.Run(event, func(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				args := []string{"validate", "--profile", "hosted", "--event", event, "--format", "json", workflow}
@@ -216,7 +265,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile with all generated events", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  issues:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n  workflow_call:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  release:\n    types: [published, created, released]\n  issues:\n  issue_comment:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n  workflow_call:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -228,10 +277,10 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Schema != compatibility.ProcessingSchemaV3 || report.Result != "admitted" || report.Status != compatibility.Passed || report.Validation.Result != "compilable" || len(report.Evaluations) != 7 {
+		if report.Schema != compatibility.ProcessingSchemaV3 || report.Result != "admitted" || report.Status != compatibility.Passed || report.Validation.Result != "compilable" || len(report.Evaluations) != 8 {
 			t.Fatalf("aggregate report = %#v", report)
 		}
-		for i, event := range []string{"push", "pull_request", "merge_group", "release", "issues", "workflow_dispatch", "schedule"} {
+		for i, event := range []string{"push", "pull_request", "merge_group", "release", "issues", "issue_comment", "workflow_dispatch", "schedule"} {
 			if report.Evaluations[i].Event != event || report.Evaluations[i].Source != "generated" || report.Evaluations[i].Report.Result != "admitted" {
 				t.Fatalf("evaluation %d = %#v", i, report.Evaluations[i])
 			}
@@ -413,7 +462,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile ignores unsupported trigger events beside a supported one", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "mixed.yml")
-		if err := os.WriteFile(workflow, []byte("on: [push, issue_comment, pull_request_target]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on: [push, discussion, pull_request_target]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -439,7 +488,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 				messages[event] = message
 			}
 		}
-		for _, event := range []string{"issue_comment", "pull_request_target"} {
+		for _, event := range []string{"discussion", "pull_request_target"} {
 			want := "on." + event + " is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: push. Move the jobs this trigger guards to one of those triggers if you need them. If you need " + event + ", log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it."
 			if messages[event] != want {
 				t.Fatalf("unsupported-trigger message for %s = %q, want %q; report = %#v", event, messages[event], want, report)
@@ -449,7 +498,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile keeps unsupported-trigger warnings in a not-applicable report", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "cross-event.yml")
-		if err := os.WriteFile(workflow, []byte("on: [pull_request, issue_comment]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on: [pull_request, discussion]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -1517,7 +1566,7 @@ func TestProcessingAnnotationsUseActiveBoundedContext(t *testing.T) {
 		{
 			name: "skipped workflow",
 			publish: func(ctx context.Context, out processingOutput) {
-				out.annotateSkippedWorkflows(ctx, "push", "", true, []skippedWorkflow{{label: "CI", key: "ci", reason: "not applicable"}})
+				out.annotateSkippedWorkflows(ctx, "push", true, []skippedWorkflow{{label: "CI", key: "ci", reason: "not applicable"}})
 			},
 		},
 	} {
@@ -2174,7 +2223,7 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, _, _, _, _, _, err := validateArgs([]string{"--event", "push", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "requires --profile hosted") {
 		t.Fatalf("validateArgs() error = %v, want profile requirement", err)
 	}
-	if _, _, _, _, _, _, err := validateArgs([]string{"--profile", "hosted", "--event", "issue_comment", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "supported events") {
+	if _, _, _, _, _, _, err := validateArgs([]string{"--profile", "hosted", "--event", "discussion", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "supported events") {
 		t.Fatalf("validateArgs() error = %v, want supported event list", err)
 	}
 	if _, _, _, _, _, _, err := validateArgs([]string{"--profile", "hosted", "--all-events", "--event", "push", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {

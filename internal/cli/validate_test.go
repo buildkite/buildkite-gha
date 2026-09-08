@@ -68,12 +68,12 @@ func TestValidateReportsActionableWorkflowSyntaxDiagnostics(t *testing.T) {
 		column                               int
 	}{
 		{
-			name:     "GitHub environment",
-			source:   "on: push\njobs:\n  deploy:\n    environment: production\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
-			headline: "GitHub environments and environment secrets are unsupported.",
-			message:  `GitHub environments and environment secrets are unsupported. Remove the environment key from job "deploy". Approvals, deployment records, and protection rules are unavailable. Move environment secrets into Buildkite secrets and reference them by name. If you need GitHub environments, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`,
+			name:     "GitHub environment expression name",
+			source:   "on: push\njobs:\n  deploy:\n    environment: ${{ github.ref_name }}\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			headline: `job "deploy": environment names that use expressions are unsupported; use a literal environment name`,
+			message:  `job "deploy": environment names that use expressions are unsupported; use a literal environment name`,
 			job:      "deploy",
-			column:   5,
+			column:   18,
 		},
 		{
 			name:     "job-level write-all",

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +15,7 @@ import (
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
@@ -34,9 +34,10 @@ var runnerQueuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var runnerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
 
 type hostedCompilation struct {
-	Bundle     compiler.Bundle
-	HasActions bool
-	Admitted   bool
+	Bundle           compiler.Bundle
+	JobGraphComplete bool
+	HasActions       bool
+	Admitted         bool
 }
 
 type hostedFailureKind string
@@ -178,9 +179,10 @@ func hostedOptions(groupLabel string, configuredTargets map[string]compiler.Runn
 	return options
 }
 
-func applyRunnerSelectors(options *compiler.Options, selectors []compiler.RunnerSelector) {
-	options.Runners.Selectors = selectors
-	for _, selector := range selectors {
+func applyRunnerResolution(options *compiler.Options, resolution agentRunnerResolution) {
+	options.Runners.Selectors = resolution.selectors
+	options.Runners.Rejections = resolution.rejections
+	for _, selector := range resolution.selectors {
 		if selector.Target.Queue != "" && !slices.Contains(options.Runners.UntrustedQueues, selector.Target.Queue) {
 			options.Runners.UntrustedQueues = append(options.Runners.UntrustedQueues, selector.Target.Queue)
 		}
@@ -204,18 +206,20 @@ func compileHosted(ctx context.Context, workflowPath string, workflowSource, eve
 }
 
 func compileHostedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, nil, runtimeDistributions, "", nil, actionCacheDir, sharedActionSource, actionAuthentication)
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, agentRunnerResolution{}, runtimeDistributions, "", nil, actionCacheDir, sharedActionSource, actionAuthentication, nil, compiler.VariableSources{})
 }
 
 func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, nil, runtimeDistributions, stepKeyNamespace, oidc, "", nil, actionAuthentication)
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, agentRunnerResolution{}, runtimeDistributions, stepKeyNamespace, oidc, "", nil, actionAuthentication, nil, compiler.VariableSources{})
 }
 
-func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerSelectors []compiler.RunnerSelector, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerResolution agentRunnerResolution, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication, environmentSource compiler.EnvironmentSource, vars compiler.VariableSources) (hostedCompilation, error) {
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
-	applyRunnerSelectors(&options, runnerSelectors)
+	applyRunnerResolution(&options, runnerResolution)
 	options.StepKeyNamespace = stepKeyNamespace
 	options.OIDC = oidc
+	options.EnvironmentSource = environmentSource
+	options.Vars = vars
 	repositorySource := sharedActionSource
 	cleanup := func() {}
 	if repositorySource == nil {
@@ -234,34 +238,60 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 	}
 	defer cleanup()
 	options.RepositorySource = repositorySource
-	preflight, err := compiler.CompileWithOptionsContext(ctx, workflowPath, workflowSource, eventSource, options)
-	if err != nil {
-		return hostedCompilation{}, hostedError(hostedEvaluationFailure, err)
-	}
-	var ir compiler.IR
-	if err := json.Unmarshal(preflight, &ir); err != nil {
-		return hostedCompilation{}, hostedError(hostedEvaluationFailure, fmt.Errorf("decode compiler preflight: %w", err))
-	}
-	hasActions := irUsesActions(ir)
-	if hasActions {
-		options.ResolveActions = true
-		options.ActionSource = repositorySource
-	}
+	options.ResolveActions = true
+	options.ActionSource = repositorySource
 	bundle, err := compiler.CompileBundlePlansContext(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, options)
+	hasActions := irUsesActions(bundle.IR)
+	compiled := hostedCompilation{Bundle: bundle, JobGraphComplete: bundle.IR.JobGraphComplete, HasActions: hasActions}
 	if err != nil {
-		return hostedCompilation{Bundle: bundle, HasActions: hasActions}, hostedError(hostedEvaluationFailure, err)
+		if compiler.ErrorHasUnscopedFailure(err) {
+			compiled.Bundle = failedPartialBundle(bundle)
+			return compiled, hostedError(hostedEvaluationFailure, err)
+		}
+		if !bundle.IR.JobGraphComplete || len(bundle.Plans) == 0 {
+			return compiled, hostedError(hostedEvaluationFailure, err)
+		}
+		if !hasActions && bundleUsesActions(bundle) {
+			compiled.Bundle = failedPartialBundle(bundle)
+			return compiled, hostedError(hostedEvaluationFailure, errors.Join(err, errors.New("compilation introduced actions absent from the expanded workflow")))
+		}
+		if admissionErr := validateUnprivilegedBundle(bundle); admissionErr != nil {
+			compiled.Bundle = failedPartialBundle(bundle)
+			return compiled, hostedError(hostedEvaluationFailure, errors.Join(err, admissionErr))
+		}
+		generated, generationErr := compiler.GeneratePlannedWorkflow(bundle, options)
+		if generationErr != nil {
+			compiled.Bundle = failedPartialBundle(bundle)
+			return compiled, hostedError(hostedEvaluationFailure, errors.Join(err, generationErr))
+		}
+		bundle.GeneratedWorkflow = generated
+		compiled.Bundle = bundle
+		compiled.Admitted = true
+		return compiled, hostedError(hostedEvaluationFailure, err)
 	}
 	if err := validateUnprivilegedBundle(bundle); err != nil {
-		return hostedCompilation{Bundle: bundle, HasActions: hasActions}, hostedError(hostedAdmissionFailure, err)
+		return compiled, hostedError(hostedAdmissionFailure, err)
 	}
 	bundle, err = compiler.GenerateBundlePipeline(bundle, distributionDigest, importerStep, options)
 	if err != nil {
-		return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, hostedError(hostedEvaluationFailure, err)
+		compiled.Bundle = bundle
+		compiled.Admitted = true
+		return compiled, hostedError(hostedEvaluationFailure, err)
 	}
-	if !hasActions && bundleUsesActions(bundle) {
-		return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, hostedError(hostedEvaluationFailure, fmt.Errorf("final compilation introduced actions absent from preflight"))
+	compiled.Bundle = bundle
+	compiled.Admitted = true
+	return compiled, nil
+}
+
+func failedPartialBundle(bundle compiler.Bundle) compiler.Bundle {
+	bundle.Plans = nil
+	bundle.EventArtifact = nil
+	bundle.GeneratedWorkflow = buildkitepipeline.Workflow{}
+	bundle.JobOutcomes = make(map[string]compiler.JobOutcome, len(bundle.IR.Jobs))
+	for _, instance := range bundle.IR.Jobs {
+		bundle.JobOutcomes[instance.Key] = compiler.JobFailed
 	}
-	return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, nil
+	return bundle
 }
 
 func newHostedActionSource(ctx context.Context, actionCacheDir, clientVersion string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), error) {
@@ -485,8 +515,11 @@ func bundleUsesActions(bundle compiler.Bundle) bool {
 		if len(artifact.Job.Actions) != 0 {
 			return true
 		}
-		for _, step := range artifact.Job.Steps {
-			if step.Uses != "" || step.Action != nil || step.Kind == "uses" {
+		if artifact.Job.Program == nil {
+			continue
+		}
+		for _, step := range artifact.Job.ExecutionJob().Steps {
+			if step.Invocation != nil || step.Kind == "uses" {
 				return true
 			}
 		}

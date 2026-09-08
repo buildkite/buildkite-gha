@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -146,6 +147,20 @@ func actionResolutionMessage(reference string, err error) (message, detail, acti
 	if message, detail, ok := actionintegration.UnsupportedVersionDiagnostic(action, err); ok {
 		return message, detail, action
 	}
+	reason := strings.TrimPrefix(err.Error(), fmt.Sprintf("compile action %q: ", action))
+	localPath, localAction := strings.CutPrefix(action, "./")
+	missingLocalAction := localAction && errors.Is(err, os.ErrNotExist) && strings.HasPrefix(reason, fmt.Sprintf("resolve local action %q: ", localPath))
+	if missingLocalAction {
+		reportedAction := action
+		if path, internal := strings.CutPrefix(action, "./__BUILDER_CHECKOUT_DIR__/"); internal {
+			reportedAction = "./" + path
+		}
+		detail := ""
+		if reference != action {
+			detail = fmt.Sprintf("The local action is referenced by composite action %q.", reference)
+		}
+		return fmt.Sprintf("Local action %q is unavailable during compilation. Local actions must already exist in the event repository; Buildkite cannot resolve one created by an earlier step, such as actions/checkout with path. Check in the action and reference its repository path, or use a public owner/repository/path@ref action. Buildkite reports this error on the affected expanded job, skips jobs that depend on it, and may run independently compiled jobs.", reportedAction), detail, reportedAction
+	}
 	var runtimeErr *metadata.UnsupportedRuntimeError
 	if errors.As(err, &runtimeErr) {
 		runtime := fmt.Sprintf("runtime %q", runtimeErr.Runtime)
@@ -157,7 +172,6 @@ func actionResolutionMessage(reference string, err error) (message, detail, acti
 		}
 		return fmt.Sprintf("Action %q uses %s, which is unsupported. Use an action release that supports Node.js 16, 20, or 24.", action, runtime), "", action
 	}
-	reason := strings.TrimPrefix(err.Error(), fmt.Sprintf("compile action %q: ", action))
 	if strings.HasPrefix(reason, "resolve action reference: ") || strings.HasPrefix(reason, "download action source: ") {
 		return fmt.Sprintf("Action %q could not be resolved: %s", action, reason[strings.Index(reason, ": ")+2:]), "", action
 	}

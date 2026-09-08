@@ -46,9 +46,10 @@ Run `mise run smoke:profile` for the opt-in networked preflight of entries marke
 the same admission policy as production upload without installing or executing
 Node. Admission does not execute action code or prove that a generic action is
 independent of GitHub-only artifact, cache, token, or OIDC services.
-The exact audited `actions/upload-artifact` and exact-name
-`actions/download-artifact` commits are admitted through bounded native
-adapters. The exact audited cache-v2-capable `actions/cache` release commits are
+The frozen `actions/upload-artifact` snapshot and exact-name
+`actions/download-artifact` commits use bounded native adapters. Unknown
+immutable artifact commits use their adapters' documented fallback contracts.
+The exact audited cache-v2-capable `actions/cache` release commits are
 also admitted by this profile. This compile/admission evidence does not prove a
 hosted cache roundtrip. Unpublished, withdrawn, older cache-v1, artifact merge,
 broad download, and unsupported artifact commits remain rejected. The profile leaves unknown

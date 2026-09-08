@@ -277,17 +277,18 @@ jobs:
 		t.Fatal(err)
 	}
 	deferred, ok := callee.DeferredInputs["base64-subjects"]
-	if !ok || len(deferred.Sources) != 1 || deferred.Sources[0] != (plan.NeedSource{StepKey: producer.Target.StepKey, PlanDigest: transport.Digest(producerPlan)}) {
-		t.Fatalf("deferred input sources = %#v", callee.DeferredInputs)
+	if !ok || deferred.Template != "${{ needs.hash.outputs.hashes }}" || len(deferred.NeedSources["hash"]) != 1 || deferred.NeedSources["hash"][0] != (plan.NeedSource{StepKey: producer.Target.StepKey, PlanDigest: transport.Digest(producerPlan)}) {
+		t.Fatalf("deferred input = %#v", callee.DeferredInputs)
 	}
-	if len(deferred.Outputs) != 1 || deferred.Outputs[0] != (plan.NeedOutput{Name: "value", StepKey: producer.Target.StepKey, Output: "hashes"}) {
-		t.Fatalf("deferred input outputs = %#v", deferred.Outputs)
+	if len(deferred.NeedOutputs["hash"]) != 1 || deferred.NeedOutputs["hash"][0] != (plan.NeedOutput{Name: "hashes", StepKey: producer.Target.StepKey, Output: "hashes"}) {
+		t.Fatalf("deferred input outputs = %#v", deferred.NeedOutputs)
 	}
 	if len(callee.Dependencies) != 1 || callee.Dependencies[0] != producer.Target.StepKey || len(callee.NeedSources["hash"]) != 1 || len(callee.NeedOutputs["hash"]) != 0 {
 		t.Fatalf("callee dependencies = %#v, needs = %#v / %#v", callee.Dependencies, callee.NeedSources, callee.NeedOutputs)
 	}
-	if _, exists := callee.Inputs["base64-subjects"]; exists || callee.Steps[0].Env["UNTRUSTED_SUBJECTS"] != "${{ inputs.base64-subjects }}" {
-		t.Fatalf("callee deferred input boundary = inputs %#v, step %#v", callee.Inputs, callee.Steps[0])
+	step := callee.Program.Job.Steps[0]
+	if _, exists := callee.Inputs["base64-subjects"]; exists || testBindingSources(step.Env)["UNTRUSTED_SUBJECTS"] != "${{ inputs.base64-subjects }}" {
+		t.Fatalf("callee deferred input boundary = inputs %#v, step %#v", callee.Inputs, step)
 	}
 	if callee.Workflow.Remote == nil || callee.Workflow.Remote.Repository != "slsa-framework/slsa-github-generator" || callee.Workflow.Remote.RequestedRef != "v2.1.0" {
 		t.Fatalf("remote provenance = %#v", callee.Workflow.Remote)

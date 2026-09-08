@@ -91,7 +91,7 @@ and [compatibility guide](docs/compatibility.md#job-configuration).
 
 The imported workflows are a dynamic part of the Buildkite pipeline. The plugin creates one aggregate group per successfully compiled, selected workflow in a single transaction. Workflows that do not declare the selected event become top-level skipped steps. Explicit-selector groups and replacement steps depend on the keyed importer. Each runnable job publishes a provider check named `<workflow> / <job> (<event>)`: a GitHub check for GitHub events or an Origin check for Origin events. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
 
-Buildkite owns build creation and schedule configuration. Within that build, `buildkite-gha` maps push, pull request, merge queue, release, issue, manual/API, and scheduled builds to `push`, `pull_request`, `merge_group`, `release`, `issues`, `workflow_dispatch`, and `schedule`, then applies the matching `on:` branch, tag, base-branch, activity, and safely evidenced path filters. Cross-event workflows are excluded before event-dependent compilation and retained as top-level skipped steps.
+Buildkite owns build creation and schedule configuration. Within that build, `buildkite-gha` maps push and UI/API builds to `push`, pull requests to `pull_request`, merge queues to `merge_group`, releases to `release`, issues to `issues`, and scheduled builds to `schedule`. GitHub Actions Pipeline Triggers also support `issues` and both issue and pull request conversation comments through `issue_comment`. The importer then applies the matching `on:` branch, tag, base-branch, activity, and safely evidenced path filters. Explicit event snapshots and authoritative GitHub event metadata can select `workflow_dispatch`. Cross-event workflows are excluded before event-dependent compilation and retained as top-level skipped steps.
 
 ## Check workflow compatibility
 
@@ -102,7 +102,8 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 | Linux x86-64 and native macOS arm64 jobs using `bash`, `sh`, `python`, or an installed custom shell | Windows, Linux arm64, or macOS x86-64 |
 | Local and public JavaScript and composite actions; verified Dockerfile and public prebuilt-image actions on Linux | Private actions, private reusable workflows, private container images, and Docker actions on macOS |
 | Static matrices, `needs`, outputs, and local or literal public reusable workflows | Dynamic reusable calls, matrices, and expressions outside the documented subset |
-| Exact-commit checkout, including managed private repository access | GitHub environment secrets, GitHub-issued OIDC claims, or protected queues |
+| Exact-commit checkout, including managed private repository access | GitHub-issued OIDC claims or protected queues |
+| Deployment environments with required-reviewer approval gates and environment secret names; repository, organization, and environment variables | Environment wait timers, branch policies, custom protection rules, or deployment records |
 | Static Buildkite job-accessible secrets, including declared aliases in local reusable workflows | Dynamic secret access or remote reusable-workflow secret forwarding |
 | Scoped `GITHUB_TOKEN` and step `github.token` use allowed by Buildkite policy | Ambient token injection or dynamic token access |
 | Buildkite OIDC tokens through host JavaScript and composite actions | OIDC in Docker actions or job containers |
@@ -196,7 +197,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--event` also supports `pull_request`, `merge_group`, `release`, `issues`, `workflow_dispatch`, and `schedule`. Generated release validation uses one stable `published` snapshot, and generated issues validation uses `opened`. These are representative static validations, not proof of every activity. Generated snapshots are not equivalent to real payloads; use `--event-path` when exact payload data matters.
+`--event` also supports `pull_request`, `merge_group`, `release`, `issues`, `issue_comment`, `workflow_dispatch`, and `schedule`. Generated release validation uses one stable `published` snapshot, generated issues validation uses `opened`, and generated issue-comment validation uses `created`. These are representative static validations, not proof of every activity. Generated snapshots are not equivalent to real payloads; use `--event-path` when exact payload data matters.
 
 Use `--all-events` to evaluate every declared supported event separately:
 

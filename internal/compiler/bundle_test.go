@@ -154,6 +154,199 @@ func TestBundlePlansPermitAdmissionBeforePipelineGeneration(t *testing.T) {
 	}
 }
 
+func TestCompileBundlePlansKeepsOnlyJobsOutsideFailedActionDependencyClosure(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "partial.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte(`on: push
+jobs:
+  independent:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.value.outputs.result }}
+    steps:
+      - id: value
+        run: echo "result=safe" >> "$GITHUB_OUTPUT"
+  broken:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/missing
+  blocked:
+    needs: broken
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundlePlansContext(t.Context(), workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err == nil {
+		t.Fatal("CompileBundlePlansContext() unexpectedly succeeded")
+	}
+	if len(bundle.IR.Jobs) != 3 || len(bundle.Plans) != 1 || bundle.Plans[0].Job.Workflow.LogicalJobID != "independent" || len(bundle.Plans[0].Job.Dependencies) != 0 || bundle.Plans[0].Job.Outputs["value"] != "${{ steps.value.outputs.result }}" {
+		t.Fatalf("partial bundle = jobs %#v, plans %#v", bundle.IR.Jobs, bundle.Plans)
+	}
+	generated, err := GeneratePlannedWorkflow(bundle, defaultOptions())
+	if err != nil || len(generated.Jobs) != 1 || generated.Jobs[0].Key != bundle.Plans[0].Job.Target.StepKey {
+		t.Fatalf("GeneratePlannedWorkflow() = %#v, %v", generated, err)
+	}
+
+	unsafe := bundle
+	unsafe.IR.Jobs = append([]JobInstance(nil), bundle.IR.Jobs...)
+	for i := range unsafe.IR.Jobs {
+		if unsafe.IR.Jobs[i].Key == generated.Jobs[0].Key {
+			unsafe.IR.Jobs[i].Needs = []string{"gha-broken"}
+		}
+	}
+	if _, err := GeneratePlannedWorkflow(unsafe, defaultOptions()); err == nil || !strings.Contains(err.Error(), "without a plan") {
+		t.Fatalf("GeneratePlannedWorkflow() unsafe dependency error = %v", err)
+	}
+}
+
+func TestCompileBundlePlansKeepsJobsOutsideFailedExpressionDependencyClosure(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "partial.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte(`on: push
+jobs:
+  independent:
+    runs-on: ubuntu-latest
+    steps: [{run: echo safe}]
+  broken:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: cmd
+        run: echo unsupported
+  blocked:
+    needs: broken
+    runs-on: ubuntu-latest
+    steps: [{run: echo blocked}]
+`)
+	if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundlePlansContext(t.Context(), workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err == nil || !strings.Contains(err.Error(), "shell") {
+		t.Fatalf("CompileBundlePlansContext() error = %v, want shell failure", err)
+	}
+	if len(bundle.IR.Jobs) != 3 || len(bundle.Plans) != 1 || bundle.Plans[0].Job.Workflow.LogicalJobID != "independent" {
+		t.Fatalf("partial bundle = jobs %#v, plans %#v", bundle.IR.Jobs, bundle.Plans)
+	}
+}
+
+func TestCompileBundlePlansOwnsMatrixInstanceOutcomes(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "matrix.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte(`on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        shell: [bash, cmd]
+    runs-on: ubuntu-latest
+    steps:
+      - shell: ${{ matrix.shell }}
+        run: echo test
+`)
+	if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundlePlansContext(t.Context(), workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err == nil {
+		t.Fatal("CompileBundlePlansContext() unexpectedly succeeded")
+	}
+	var planned, failed int
+	for _, instance := range bundle.IR.Jobs {
+		switch bundle.JobOutcomes[instance.Key] {
+		case JobPlanned:
+			planned++
+		case JobFailed:
+			failed++
+		default:
+			t.Fatalf("matrix instance %q outcome = %q", instance.Key, bundle.JobOutcomes[instance.Key])
+		}
+	}
+	if planned != 1 || failed != 1 || len(bundle.Plans) != 1 {
+		t.Fatalf("matrix outcomes = %#v, plans = %d", bundle.JobOutcomes, len(bundle.Plans))
+	}
+}
+
+func TestCompileBundlePlansCombinesStageFailuresWithoutBlockingIndependentJob(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "stages.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte(`on: push
+jobs:
+  safe:
+    runs-on: ubuntu-latest
+    steps: [{run: echo safe}]
+  bad-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: cmd
+        run: echo bad
+  bad-action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/missing
+`)
+	if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundlePlansContext(t.Context(), workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err == nil || !strings.Contains(err.Error(), "shell") || !strings.Contains(err.Error(), `action "./.github/actions/missing"`) {
+		t.Fatalf("CompileBundlePlansContext() error = %v", err)
+	}
+	counts := map[JobOutcome]int{}
+	for _, outcome := range bundle.JobOutcomes {
+		counts[outcome]++
+	}
+	if counts[JobPlanned] != 1 || counts[JobFailed] != 2 || len(bundle.Plans) != 1 {
+		t.Fatalf("stage outcomes = %#v, plans = %d", bundle.JobOutcomes, len(bundle.Plans))
+	}
+}
+
+func TestCompileBundlePlansKeepsJobsOutsideFailedEnvironmentDependencyClosure(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "partial.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte(`on: push
+jobs:
+  independent:
+    runs-on: ubuntu-latest
+    steps: [{run: echo safe}]
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps: [{run: echo deploy}]
+  blocked:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps: [{run: echo blocked}]
+`)
+	if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundlePlansContext(t.Context(), workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err == nil || !strings.Contains(err.Error(), "environment") {
+		t.Fatalf("CompileBundlePlansContext() error = %v, want environment failure", err)
+	}
+	if !bundle.IR.JobGraphComplete || len(bundle.IR.Jobs) != 3 || len(bundle.Plans) != 1 || bundle.Plans[0].Job.Workflow.LogicalJobID != "independent" {
+		t.Fatalf("partial bundle = jobs %#v, plans %#v", bundle.IR.Jobs, bundle.Plans)
+	}
+}
+
 func TestCompileBundlePreservesExplicitQueuePolicy(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 	bundle, err := CompileBundleWithOptions("workflow.yml", workflow, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", Options{
@@ -449,7 +642,7 @@ jobs:
     steps: [{run: true}]
 `)
 	options := defaultOptions()
-	options.Vars.Bridge = map[string]string{
+	options.Vars.Repository = map[string]string{
 		"OSES":    `["linux","darwin"]`,
 		"EXCLUDE": `[{"os":"darwin"}]`,
 		"INCLUDE": `[{"os":"linux","arch":"amd64"},{"os":"darwin","arch":"arm64"}]`,
@@ -1725,17 +1918,17 @@ runs:
 	if job.Env["JOB_SHA"] != "2222222222222222222222222222222222222222" || job.DefaultShell != "bash" || job.DefaultWorkingDirectory != "." {
 		t.Fatalf("job templates were not reduced: env = %#v, shell = %q, working-directory = %q", job.Env, job.DefaultShell, job.DefaultWorkingDirectory)
 	}
-	step := job.Steps[0]
-	if step.Name != "Head 2222222222222222222222222222222222222222" || step.Env["HEAD_SHA"] != "2222222222222222222222222222222222222222" || step.Shell != "bash" || step.WorkingDirectory != "." {
+	step := job.Program.Job.Steps[0]
+	if step.Name.Source != "Head 2222222222222222222222222222222222222222" || testBindingSources(step.Env)["HEAD_SHA"] != "2222222222222222222222222222222222222222" || step.Run.Shell.Source != "bash" || step.Run.WorkingDirectory.Source != "." {
 		t.Fatalf("step templates were not reduced: %#v", step)
 	}
-	if step.ContinueOnErrorExpression != "${{ (true && (steps.previous.outcome == 'failure')) }}" || step.TimeoutMinutesExpression != "${{ 7 }}" {
+	if step.ContinueOnError.Expression.Source != "${{ (true && (steps.previous.outcome == 'failure')) }}" || step.TimeoutMinutes.Expression.Source != "${{ 7 }}" {
 		t.Fatalf("typed step expressions were not reduced: %#v", step)
 	}
-	if want := "echo '2222222222222222222222222222222222222222' '' 'opened' '${{ ('2222222222222222222222222222222222222222' == steps.previous.outputs.sha) }}'"; step.Command != want {
-		t.Fatalf("command = %q, want %q", step.Command, want)
+	if want := "echo '2222222222222222222222222222222222222222' '' 'opened' '${{ ('2222222222222222222222222222222222222222' == steps.previous.outputs.sha) }}'"; step.Run.Command.Source != want {
+		t.Fatalf("command = %q, want %q", step.Run.Command.Source, want)
 	}
-	if got := job.Steps[1].With["ref"]; got != "2222222222222222222222222222222222222222" {
+	if got := testBindingSources(job.Program.Job.Steps[1].Invocation.With)["ref"]; got != "2222222222222222222222222222222222222222" {
 		t.Fatalf("action input = %q", got)
 	}
 }
@@ -1841,10 +2034,10 @@ jobs:
 	for _, artifact := range bundle.Plans {
 		jobs[artifact.Job.Workflow.LogicalJobID] = artifact.Job
 	}
-	if !jobs["whole-event"].Event.PayloadArtifact || bundle.EventArtifact == nil || !strings.Contains(jobs["whole-event"].Steps[0].Command, "github.event") {
+	if !jobs["whole-event"].Event.PayloadArtifact || bundle.EventArtifact == nil || !strings.Contains(jobs["whole-event"].Program.Job.Steps[0].Run.Command.Source, "github.event") {
 		t.Fatalf("whole-event plan did not retain its runtime payload: %#v", jobs["whole-event"])
 	}
-	if jobs["scalar-event"].Event.PayloadArtifact || jobs["scalar-event"].Steps[0].Command != "echo 'opened'" {
+	if jobs["scalar-event"].Event.PayloadArtifact || jobs["scalar-event"].Program.Job.Steps[0].Run.Command.Source != "echo 'opened'" {
 		t.Fatalf("scalar-event plan retained an unnecessary payload: %#v", jobs["scalar-event"])
 	}
 	if bundle.EventArtifact.Path != ".buildkite-gha/events/"+strings.TrimPrefix(bundle.EventArtifact.Digest, "sha256:")+".json" || !bytes.Contains(bundle.EventArtifact.Contents, []byte(`"commits"`)) {
@@ -1909,8 +2102,8 @@ jobs:
 			t.Errorf("job %q payload artifact = %v, want %v", job.Workflow.LogicalJobID, job.Event.PayloadArtifact, wantPayload[job.Workflow.LogicalJobID])
 		}
 	}
-	control := jobs["control-event"].Steps[1]
-	if !strings.Contains(control.ContinueOnErrorExpression, "github.event") || !strings.Contains(control.TimeoutMinutesExpression, "github.event") {
+	control := jobs["control-event"].Program.Job.Steps[1]
+	if !strings.Contains(control.ContinueOnError.Expression.Source, "github.event") || !strings.Contains(control.TimeoutMinutes.Expression.Source, "github.event") {
 		t.Fatalf("dynamic event controls were not preserved: %#v", control)
 	}
 }
@@ -1935,8 +2128,8 @@ jobs:
 	}
 	for _, artifact := range bundle.Plans {
 		part := artifact.Job.Matrix["part"]
-		if want := fmt.Sprintf("echo refs/heads/main-%s", part); artifact.Job.Steps[0].Command != want {
-			t.Errorf("matrix %v command = %q, want %q", part, artifact.Job.Steps[0].Command, want)
+		if want := fmt.Sprintf("echo refs/heads/main-%s", part); artifact.Job.Program.Job.Steps[0].Run.Command.Source != want {
+			t.Errorf("matrix %v command = %q, want %q", part, artifact.Job.Program.Job.Steps[0].Run.Command.Source, want)
 		}
 	}
 }
@@ -1959,7 +2152,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Steps[0].Command != "echo refs/heads/main" {
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Program.Job.Steps[0].Run.Command.Source != "echo refs/heads/main" {
 		t.Fatalf("reusable-workflow plan = %#v", bundle.Plans)
 	}
 }

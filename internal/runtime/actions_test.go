@@ -376,10 +376,10 @@ runs:
 		},
 		Target:               plan.Target{StepKey: "gha-v3", Queue: "trusted"},
 		RequiredCapabilities: []string{"network"},
-		Steps: []plan.Step{
+		Program: runtimeTestProgram([]runtimeTestStep{
 			{ID: "checkout", Kind: "uses", Uses: "owner/repo@v1", Action: &plan.ActionSelector{Lock: remoteID}},
 			{ID: "verify", Kind: "run", Shell: "sh", Command: `test "$V3_LOCAL_CHILD" = seen`},
-		},
+		}),
 		Actions: []plan.ActionLock{
 			{
 				ID: remoteID, Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: commit, SourceDigest: remoteDigest,

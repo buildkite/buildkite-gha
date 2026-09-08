@@ -17,9 +17,12 @@ import (
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 	"go.yaml.in/yaml/v4"
 )
 
@@ -117,11 +120,77 @@ func TestHostedPreflightCompilesPublicReusableWorkflowWithSharedSource(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if compiled.HasActions || len(compiled.Bundle.Plans) != 1 || compiled.Bundle.Plans[0].Job.Workflow.Remote == nil || compiled.Bundle.Plans[0].Job.Workflow.Remote.Commit != strings.Repeat("a", 40) {
+	if !compiled.JobGraphComplete || compiled.HasActions || len(compiled.Bundle.Plans) != 1 || compiled.Bundle.Plans[0].Job.Workflow.Remote == nil || compiled.Bundle.Plans[0].Job.Workflow.Remote.Commit != strings.Repeat("a", 40) {
 		t.Fatalf("hosted remote workflow result = %#v", compiled)
 	}
 	if source.calls != 1 {
 		t.Fatalf("repository source calls = %d, want one across hosted preflight and plans", source.calls)
+	}
+}
+
+func TestHostedPreflightDoesNotMarkPartialJobGraphComplete(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), ".github", "workflows", "partial.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte(`on: push
+jobs:
+  known:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  unknown:
+    strategy:
+      matrix: ${{ github.ref }}
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("d", 64)
+	compiled, err := compileHostedWithActionCache(t.Context(), workflowPath, workflow, event, "0.0.0-test", digest, "importer", "", nil, map[compiler.Platform]string{compiler.PlatformLinuxAMD64: digest}, "", nil, nil)
+	if err == nil {
+		t.Fatal("compileHostedWithActionCache() unexpectedly succeeded")
+	}
+	if compiled.JobGraphComplete || len(compiled.Bundle.IR.Jobs) != 1 || compiled.Bundle.IR.Jobs[0].LogicalJobID != "known" {
+		t.Fatalf("partial hosted compilation = %#v", compiled)
+	}
+}
+
+func TestHostedPreflightFailsClosedWhenEventArtifactCannotBeBuilt(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), ".github", "workflows", "event.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte(`on: push
+jobs:
+  whole-event:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ toJSON(github.event) }}'
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	event, err := json.Marshal(map[string]any{
+		"provider": "github", "event": "push", "ref": "refs/heads/main", "sha": strings.Repeat("1", 40), "actor": "octocat",
+		"repository": map[string]string{"owner": "buildkite", "name": "buildkite-gha", "clone_url": "https://github.com/buildkite/buildkite-gha.git", "default_branch": "main"},
+		"payload":    map[string]string{"body": strings.Repeat("x", plan.MaxEventPayloadBytes+1)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("d", 64)
+	compiled, err := compileHostedWithActionCache(t.Context(), workflowPath, workflow, event, "0.0.0-test", digest, "importer", "", nil, map[compiler.Platform]string{compiler.PlatformLinuxAMD64: digest}, "", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "event payload artifact exceeds") {
+		t.Fatalf("compileHostedWithActionCache() error = %v", err)
+	}
+	if !compiled.JobGraphComplete || len(compiled.Bundle.Plans) != 0 || compiled.Bundle.JobOutcomes[compiled.Bundle.IR.Jobs[0].Key] != compiler.JobFailed {
+		t.Fatalf("event artifact failure retained runnable work: %#v", compiled)
 	}
 }
 
@@ -198,7 +267,7 @@ runs:
 		t.Fatalf("actions = %#v, want both missing invocations failed", report.Actions)
 	}
 	for _, diagnostic := range report.Diagnostics {
-		if diagnostic.Instance == "" || diagnostic.Step == 0 || diagnostic.Code != compiler.CodeActionResolution || !strings.Contains(diagnostic.Message, `Action "`) || !strings.Contains(diagnostic.Message, "unsupported") {
+		if diagnostic.Instance == "" || diagnostic.Step == 0 || diagnostic.Action == "" || diagnostic.Code != compiler.CodeActionResolution {
 			t.Fatalf("diagnostic lacks invocation identity: %#v", diagnostic)
 		}
 	}
@@ -710,6 +779,49 @@ func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
 	}
 }
 
+func TestFailedPartialBundleRemovesEveryRunnableArtifact(t *testing.T) {
+	bundle := compiler.Bundle{
+		IR: compiler.IR{Jobs: []compiler.JobInstance{
+			{Key: "safe", LogicalJobID: "safe"},
+			{Key: "rejected", LogicalJobID: "rejected"},
+		}},
+		Plans:             []compiler.PlanArtifact{{Job: plan.Job{Target: plan.Target{StepKey: "safe"}}}},
+		EventArtifact:     &transport.Artifact{Path: "event"},
+		GeneratedWorkflow: buildkitepipeline.Workflow{Jobs: []buildkitepipeline.Job{{Key: "safe", PlanDigest: "sha256:" + strings.Repeat("1", 64)}}},
+		JobOutcomes: map[string]compiler.JobOutcome{
+			"safe": compiler.JobPlanned, "rejected": compiler.JobFailed,
+		},
+	}
+
+	failed := failedPartialBundle(bundle)
+	if len(failed.Plans) != 0 || failed.EventArtifact != nil || len(failed.GeneratedWorkflow.Jobs) != 0 {
+		t.Fatalf("failed partial bundle retained runnable artifacts: %#v", failed)
+	}
+	for _, instance := range failed.IR.Jobs {
+		if failed.JobOutcomes[instance.Key] != compiler.JobFailed {
+			t.Fatalf("outcome for %q = %q, want failed", instance.Key, failed.JobOutcomes[instance.Key])
+		}
+	}
+}
+
+func TestPreparationAdmissionFailureDiscardsIndependentPlan(t *testing.T) {
+	compilation := hostedCompilation{JobGraphComplete: true, Bundle: compiler.Bundle{
+		IR:          compiler.IR{Jobs: []compiler.JobInstance{{Key: "safe"}, {Key: "rejected"}}},
+		Plans:       []compiler.PlanArtifact{{Job: plan.Job{Target: plan.Target{StepKey: "safe"}}}},
+		JobOutcomes: map[string]compiler.JobOutcome{"safe": compiler.JobPlanned, "rejected": compiler.JobFailed},
+	}}
+	admissionErr := errors.New("rejected capability")
+	failed, err := failClosedForPreparationAdmission(compilation, errors.New("missing macOS runtime"), admissionErr)
+	if err == nil || !strings.Contains(err.Error(), admissionErr.Error()) || len(failed.Bundle.Plans) != 0 {
+		t.Fatalf("failClosedForPreparationAdmission() = %#v, %v", failed, err)
+	}
+	for _, outcome := range failed.Bundle.JobOutcomes {
+		if outcome != compiler.JobFailed {
+			t.Fatalf("fail-closed outcome = %q", outcome)
+		}
+	}
+}
+
 func TestUnprivilegedUploadAdmitsSecretsCapability(t *testing.T) {
 	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 		Workflow:             plan.Workflow{LogicalJobID: "release"},
@@ -783,7 +895,7 @@ func TestUnprivilegedUploadAllowsPublicAndDockerfileActionCapabilities(t *testin
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Workflow:             plan.Workflow{LogicalJobID: "action-job"},
 			RequiredCapabilities: capabilities,
-			Steps:                []plan.Step{{ID: "action", Kind: "uses", Uses: "owner/example@commit"}},
+			Program:              &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{{ID: "action", Kind: "uses", Invocation: &program.Invocation{Uses: program.Site{Source: "owner/example@commit"}}}}}},
 		}, Authorization: compiler.PlanAuthorization{DockerCapabilitySources: []string{"dockerfile-actions"}}}}}
 		if err := validateUnprivilegedBundle(bundle); err != nil {
 			t.Fatalf("validateUnprivilegedBundle(%v) error = %v", capabilities, err)
@@ -965,14 +1077,14 @@ func TestUnprivilegedUploadDoesNotBroadenKnownServiceActionIdentity(t *testing.T
 
 func TestBundleUsesActionsDetectsStepsAndLocks(t *testing.T) {
 	for _, job := range []plan.Job{
-		{Steps: []plan.Step{{Kind: "uses"}}},
+		{Program: &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{{Kind: "uses", Invocation: &program.Invocation{}}}}}},
 		{Actions: []plan.ActionLock{{ID: "a-deadbeefdeadbeef"}}},
 	} {
 		if !bundleUsesActions(compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: job}}}) {
 			t.Fatalf("bundleUsesActions() = false for %#v", job)
 		}
 	}
-	if bundleUsesActions(compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{Steps: []plan.Step{{Kind: "run"}}}}}}) {
+	if bundleUsesActions(compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{Program: &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{{Kind: "run", Run: &program.Run{}}}}}}}}}) {
 		t.Fatal("bundleUsesActions() = true for shell-only plan")
 	}
 }
@@ -980,12 +1092,12 @@ func TestBundleUsesActionsDetectsStepsAndLocks(t *testing.T) {
 func TestUnprivilegedUploadAllowsCapabilityFreeConcurrentShellSteps(t *testing.T) {
 	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 		Workflow: plan.Workflow{LogicalJobID: "concurrent-job"},
-		Steps: []plan.Step{
-			{ID: "background", Kind: "run", Command: "true", Background: true},
+		Program: &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{
+			{ID: "background", Kind: "run", Run: &program.Run{Command: program.Site{Source: "true"}}, Background: true},
 			{ID: "wait", Kind: "wait", Targets: []string{"background"}},
 			{ID: "wait-all", Kind: "wait-all"},
 			{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
-		},
+		}}},
 	}}}}
 	if err := validateUnprivilegedBundle(bundle); err != nil {
 		t.Fatalf("validateUnprivilegedBundle() error = %v", err)
