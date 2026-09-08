@@ -358,10 +358,19 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 	if r.cfg.resolutionSnapshot != nil {
 		return r.cfg.resolutionSnapshot.resolve(ctx, ref, r.resolveMutable)
 	}
-	if r.cfg.mutableRefs != nil {
+	if r.cfg.mutableRefs != nil && !r.gitRepositorySource(ref) {
 		return r.cfg.mutableRefs.resolve(ctx, ref, r.resolveMutable)
 	}
 	return r.resolveMutable(ctx, ref)
+}
+
+// gitRepositorySource reports whether ref may be served by the Git fallback.
+// Those refs skip the cross-operation mutable-ref cache: Materialize fetches
+// the ref again and rejects a commit the cache pinned before the branch moved,
+// so a stale entry would fail every later operation until it expired. The
+// per-operation repository-source memoizer still pins one commit per upload.
+func (r *Resolver) gitRepositorySource(ref Reference) bool {
+	return ref.RepositoryRoot && r.cfg.git != ""
 }
 
 // ResolutionSnapshotID identifies the immutable mutable-ref generation.
@@ -379,7 +388,7 @@ func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved,
 	if r.cfg.credential != nil && r.cfg.credential.token != "" {
 		if err := ensurePublic(ctx, r.client, r.cfg, ref); err != nil {
 			var notPublic *NotPublicError
-			if !errors.As(err, &notPublic) || !ref.RepositoryRoot || r.cfg.git == "" {
+			if !errors.As(err, &notPublic) || !r.gitRepositorySource(ref) {
 				return Resolved{}, err
 			}
 			return resolveWithGit(ctx, r.cfg, ref)
@@ -407,7 +416,7 @@ func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved,
 	}
 	resolved, err := r.resolveCommit(ctx, ref)
 	var notPublic *NotPublicError
-	if errors.As(err, &notPublic) && ref.RepositoryRoot && r.cfg.git != "" {
+	if errors.As(err, &notPublic) && r.gitRepositorySource(ref) {
 		return resolveWithGit(ctx, r.cfg, ref)
 	}
 	return resolved, err
@@ -774,8 +783,10 @@ func runGit(ctx context.Context, executable, repository string, stdout io.Writer
 // followed so credentials stay with the requested host, received objects are
 // checked, replace refs never substitute objects for the pinned commit, and the
 // credential helper receives the repository path so Buildkite authorizes the
-// exact repository. Credential helpers themselves are inherited from the
-// importer's Git configuration; nothing here supplies or captures one.
+// exact repository. Inherited http.extraHeader values are dropped so a token
+// stored as a header cannot reach a repository the helper did not authorize.
+// Credential helpers themselves are inherited from the importer's Git
+// configuration; nothing here supplies or captures one.
 func gitBaseArgs() []string {
 	return []string{
 		"--no-replace-objects",
@@ -783,6 +794,7 @@ func gitBaseArgs() []string {
 		"-c", "core.askPass=",
 		"-c", "credential.interactive=false",
 		"-c", "credential.useHttpPath=true",
+		"-c", "http.extraHeader=",
 		"-c", "http.followRedirects=false",
 		"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
 		"-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true",
@@ -792,11 +804,14 @@ func gitBaseArgs() []string {
 // gitRemoteArgs pins the settings Git resolves per URL for the exact remote
 // being fetched. Inherited http.<url>.* and credential.<url>.* keys take
 // precedence over the generic keys in gitBaseArgs; an exact-URL command-line
-// value is the longest possible match and, on a tie, the last one applied.
+// value is the longest possible match and, on a tie, the last one applied. An
+// empty extraHeader value resets the list Git collected from inherited
+// configuration, so only the credential helper can attach credentials.
 func gitRemoteArgs(remote string) []string {
 	return []string{
 		"-c", "http." + remote + ".followRedirects=false",
 		"-c", "http." + remote + ".sslVerify=true",
+		"-c", "http." + remote + ".extraHeader=",
 		"-c", "credential." + remote + ".useHttpPath=true",
 	}
 }

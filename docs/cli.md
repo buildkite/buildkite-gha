@@ -122,8 +122,10 @@ verified action source by immutable commit.
 Mutable ref resolutions are cached for one hour under
 `$XDG_CACHE_HOME/buildkite-gha/action-ref-resolutions/v1`, or the platform's
 user cache directory. Concurrent validators can share this cache, so a moved
-tag or branch may use its previous commit for up to one hour. Do not share
-either writable cache between untrusted validation jobs.
+tag or branch may use its previous commit for up to one hour. Uploads with
+`private-reusable-workflows` enabled skip this cache for called repositories
+and resolve their refs once per operation. Do not share either writable cache
+between untrusted validation jobs.
 
 For a large workflow corpus, reuse one validator process and action resolver:
 

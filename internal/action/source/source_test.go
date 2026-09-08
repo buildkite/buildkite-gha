@@ -967,6 +967,79 @@ func TestGitRepositorySourceRejectsMutableRefDrift(t *testing.T) {
 	}
 }
 
+// TestGitRepositorySourceSkipsMutableRefCache covers a persistent importer
+// whose one-hour mutable-ref cache pinned a private branch before it moved.
+// Materialize rejects the stale commit as drift, so Git-backed repository roots
+// must resolve the branch again on every operation instead of reusing the
+// cache; other references keep using it.
+func TestGitRepositorySourceSkipsMutableRefCache(t *testing.T) {
+	git, work, remote, first := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/p/q/git/ref/") {
+			_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, testSHA)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	cache := t.TempDir()
+	option := withGitFixtureSource(git, remote)
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	newResolver := func() *Resolver {
+		t.Helper()
+		resolver, err := NewResolver(server.Client(), endpoint, option)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolver.cfg.mutableRefs, err = newMutableRefCache(cache, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resolver
+	}
+	root, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	root.RepositoryRoot = true
+	resolved, err := newResolver().Resolve(t.Context(), root)
+	if err != nil || resolved.Commit != first {
+		t.Fatalf("Resolve() = %#v, %v, want commit %s", resolved, err, first)
+	}
+	advanceGitRepositorySource(t, git, work)
+	second := strings.TrimSpace(runSourceGit(t, git, work, "rev-parse", "HEAD"))
+	resolver := newResolver()
+	resolved, err = resolver.Resolve(t.Context(), root)
+	if err != nil || resolved.Commit != second {
+		t.Fatalf("Resolve() after branch moved = %#v, %v, want commit %s", resolved, err, second)
+	}
+	store, err := NewStore(t.TempDir(), server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatalf("Materialize() after branch moved = %v", err)
+	}
+	materialized.Release()
+
+	action, _ := Parse("p/q@main")
+	if resolved, err := resolver.Resolve(t.Context(), action); err != nil || resolved.Commit != testSHA {
+		t.Fatalf("Resolve() action = %#v, %v", resolved, err)
+	}
+	entries := 0
+	if err := filepath.WalkDir(cache, func(path string, entry os.DirEntry, err error) error {
+		if err == nil && !entry.IsDir() && filepath.Ext(path) != ".lock" {
+			entries++
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if entries != 1 {
+		t.Fatalf("mutable ref cache entries = %d, want only the action reference", entries)
+	}
+}
+
 // TestGitRepositorySourceIgnoresInheritedInitTemplates covers an importer init
 // template (init.templateDir or GIT_TEMPLATE_DIR) that seeds new repositories
 // with a refs/replace entry and a replacement commit for the fetched commit.
@@ -1264,6 +1337,71 @@ func TestGitRepositorySourceDeniedAuthenticationDoesNotRunAskpass(t *testing.T) 
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("denied fetch ran an inherited askpass program (stat error %v)", err)
+	}
+}
+
+// TestGitRepositorySourceDropsInheritedExtraHeaders covers an importer whose
+// global configuration attaches an Authorization header to every request for a
+// host. Git would send that header to any repository named by workflow YAML
+// without consulting the credential helper, so the fetch boundary must reset
+// both the generic and the URL-scoped header lists.
+func TestGitRepositorySourceDropsInheritedExtraHeaders(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	if err := os.Mkdir(filepath.Join(root, "home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var authorizations atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			authorizations.Add(1)
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	certificate := filepath.Join(root, "server.pem")
+	if err := os.WriteFile(certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trust := []string{"-c", "http.sslCAInfo=" + certificate}
+	remote := server.URL + "/o/r.git"
+	runSourceGit(t, git, "", "config", "--global", "http."+server.URL+"/.extraHeader", "Authorization: Bearer inherited-token")
+	runSourceGit(t, git, "", "config", "--global", "--add", "http.extraHeader", "Authorization: Bearer generic-token")
+
+	// Without the fetch boundary, Git sends the inherited header.
+	scratch := t.TempDir()
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", scratch)
+	control := exec.CommandContext(t.Context(), git, append(append([]string{"-C", scratch}, trust...), "fetch", "--quiet", "--", remote, "main")...)
+	control.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if err := control.Run(); err == nil {
+		t.Fatal("fetch from a denying server succeeded")
+	}
+	if authorizations.Load() == 0 {
+		t.Fatal("inherited extraHeader should reach the server without the fetch boundary")
+	}
+	authorizations.Store(0)
+
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git), func(c *config) error {
+		c.gitTestRemoteBase = server.URL + "/"
+		c.gitTestArgs = trust
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) {
+		t.Fatalf("Resolve() error = %v, want non-enumerating denial", err)
+	}
+	if got := authorizations.Load(); got != 0 {
+		t.Fatalf("requests carrying an inherited Authorization header = %d, want 0", got)
 	}
 }
 
