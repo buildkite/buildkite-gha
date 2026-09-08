@@ -124,7 +124,7 @@ type ApprovalGate struct {
 	Environment string
 }
 
-// Failure replaces a failed aggregate workflow with one synthetic command step.
+// Failure describes diagnostics displayed by a synthetic failing command step.
 type Failure struct {
 	AnnotationPath string
 	MessagePath    string
@@ -160,9 +160,14 @@ func MiseDataDir(platforms ...string) string {
 
 // Job describes one expanded workflow job after queue policy has been applied.
 type Job struct {
-	Key                string
-	Label              string
-	CheckLabel         string
+	Key        string
+	Label      string
+	CheckLabel string
+	// Failure and SkipReason represent a job whose workflow could not be
+	// prepared. Other jobs in the workflow may remain runnable when they do not
+	// depend on a failed preparation path.
+	Failure            *Failure
+	SkipReason         string
 	Queue              string
 	Platform           string
 	DistributionDigest string
@@ -246,7 +251,8 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if workflow.Event == "" {
 				return nil, fmt.Errorf("workflow %q requires an event name", workflow.GroupKey)
 			}
-			if workflow.Failure == nil && workflow.Condition == "" && workflow.SkipReason == "" {
+			preparationOnly := preparationJobsOnly(workflow.Jobs)
+			if workflow.Failure == nil && workflow.Condition == "" && workflow.SkipReason == "" && !preparationOnly {
 				return nil, fmt.Errorf("workflow %q requires a trigger condition or skip reason", workflow.GroupKey)
 			}
 			if workflow.Failure == nil && workflow.Condition != "" && workflow.SkipReason != "" {
@@ -325,10 +331,12 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				}
 				checkLabels[checkLabel] = job.Key
 			}
-			if owner, exists := usedDigests[job.PlanDigest]; exists {
-				return nil, fmt.Errorf("jobs %q and %q share plan digest %s", owner, job.Key, job.PlanDigest)
+			if job.Failure == nil && job.SkipReason == "" {
+				if owner, exists := usedDigests[job.PlanDigest]; exists {
+					return nil, fmt.Errorf("jobs %q and %q share plan digest %s", owner, job.Key, job.PlanDigest)
+				}
+				usedDigests[job.PlanDigest] = job.Key
 			}
-			usedDigests[job.PlanDigest] = job.Key
 		}
 		if workflow.ConcurrencyGate != nil {
 			for _, job := range jobs {
@@ -414,22 +422,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
 		}
-		out.WriteString("    plugins:\n")
-		out.WriteString("      - artifacts#v1.9.4:\n")
-		_, _ = fmt.Fprintf(out, "          step: %s\n", yamlScalar(artifactProducer))
-		out.WriteString("          download:\n")
-		_, _ = fmt.Fprintf(out, "            - from: %s\n", yamlScalar(failure.MessagePath))
-		out.WriteString("              to: .buildkite-gha-failure-message.txt\n")
-		_, _ = fmt.Fprintf(out, "            - from: %s\n", yamlScalar(failure.AnnotationPath))
-		out.WriteString("              to: .buildkite-gha-failure-annotation.html\n")
-		commands := []string{
-			"cat .buildkite-gha-failure-message.txt",
-			"buildkite-agent annotate --scope=job --style=error < .buildkite-gha-failure-annotation.html",
-			"exit 1",
-		}
-		command := strings.Join(commands, "\n")
-		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(command))
-		out.WriteString("    retry:\n      manual:\n        allowed: false\n")
+		emitFailureBody(out, "    ", artifactProducer, *failure, 1)
 		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, workflow.GroupKey, "", "Workflow could not be run", failure.Summary)
 		if pipeline.CompilerStep != "" {
 			_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
@@ -515,6 +508,32 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish reusable-workflow concurrency", gate.CloseKey, &gate.ConcurrencyGate, dependencies)
 	}
 	for _, job := range workflow.Jobs {
+		if job.Failure != nil || job.SkipReason != "" {
+			_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(":github: job · "+job.Label))
+			_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))
+			checkLabel := job.CheckLabel
+			if checkLabel == "" {
+				checkLabel = job.Label
+			}
+			if job.Failure != nil {
+				exitStatus := 1
+				if job.SoftFail {
+					exitStatus = ContinueOnErrorExitStatus
+				}
+				emitFailureBody(out, attributeIndent, artifactProducer, *job.Failure, exitStatus)
+				emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, job.Key, checkLabel, "Job could not be run", job.Failure.Summary)
+				if job.SoftFail {
+					_, _ = fmt.Fprintf(out, "%ssoft_fail:\n%s  - exit_status: %d\n", attributeIndent, attributeIndent, ContinueOnErrorExitStatus)
+				}
+			} else {
+				_, _ = fmt.Fprintf(out, "%sskip: %s\n", attributeIndent, yamlScalar(job.SkipReason))
+				out.WriteString(attributeIndent + "type: command\n")
+				emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, job.Key, checkLabel, "", "")
+			}
+			_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
+			emitJobDependencies(out, attributeIndent, workflow, job, gateOpenKeys, pipeline.CompilerStep)
+			continue
+		}
 		platform := job.Platform
 		if platform == "" {
 			platform = "linux/amd64"
@@ -630,24 +649,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			_, _ = fmt.Fprintf(out, "%sconcurrency: %d\n", attributeIndent, job.Concurrency)
 			_, _ = fmt.Fprintf(out, "%sconcurrency_group: %s\n", attributeIndent, yamlScalar(job.ConcurrencyGroup))
 		}
-		if !workflow.Aggregate {
-			_, _ = fmt.Fprintf(out, "%sdepends_on:\n", attributeIndent)
-			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(pipeline.CompilerStep), attributeIndent)
-		} else if workflow.GateOpenKey != "" || len(job.Dependencies) != 0 || len(job.ConcurrencyGates) != 0 || job.ApprovalGate != "" {
-			_, _ = fmt.Fprintf(out, "%sdepends_on:\n", attributeIndent)
-		}
-		if workflow.GateOpenKey != "" {
-			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(workflow.GateOpenKey), attributeIndent)
-		}
-		for _, dependency := range job.Dependencies {
-			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: true\n", attributeIndent, yamlScalar(dependency), attributeIndent)
-		}
-		for _, gate := range job.ConcurrencyGates {
-			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(gateOpenKeys[gate.ID]), attributeIndent)
-		}
-		if job.ApprovalGate != "" {
-			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(job.ApprovalGate), attributeIndent)
-		}
+		emitJobDependencies(out, attributeIndent, workflow, job, gateOpenKeys, pipeline.CompilerStep)
 	}
 	// Approval gates are emitted after the jobs so no generated step follows a
 	// block step. A block step implicitly holds every later step that lacks an
@@ -669,6 +671,46 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(pipeline.CompilerStep), attributeIndent)
 	}
 	return nil
+}
+
+func emitFailureBody(out *bytes.Buffer, indent, artifactProducer string, failure Failure, exitStatus int) {
+	out.WriteString(indent + "plugins:\n")
+	out.WriteString(indent + "  - artifacts#v1.9.4:\n")
+	_, _ = fmt.Fprintf(out, "%s      step: %s\n", indent, yamlScalar(artifactProducer))
+	out.WriteString(indent + "      download:\n")
+	_, _ = fmt.Fprintf(out, "%s        - from: %s\n", indent, yamlScalar(failure.MessagePath))
+	out.WriteString(indent + "          to: .buildkite-gha-failure-message.txt\n")
+	_, _ = fmt.Fprintf(out, "%s        - from: %s\n", indent, yamlScalar(failure.AnnotationPath))
+	out.WriteString(indent + "          to: .buildkite-gha-failure-annotation.html\n")
+	command := strings.Join([]string{
+		"cat .buildkite-gha-failure-message.txt",
+		"buildkite-agent annotate --scope=job --style=error < .buildkite-gha-failure-annotation.html",
+		fmt.Sprintf("exit %d", exitStatus),
+	}, "\n")
+	_, _ = fmt.Fprintf(out, "%scommand: %s\n", indent, yamlScalar(command))
+	_, _ = fmt.Fprintf(out, "%sretry:\n%s  manual:\n%s    allowed: false\n", indent, indent, indent)
+}
+
+func emitJobDependencies(out *bytes.Buffer, indent string, workflow preparedWorkflow, job Job, gateOpenKeys map[string]string, compilerStep string) {
+	runnable := job.Failure == nil && job.SkipReason == ""
+	if !workflow.Aggregate {
+		_, _ = fmt.Fprintf(out, "%sdepends_on:\n", indent)
+		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", indent, yamlScalar(compilerStep), indent)
+	} else if (workflow.GateOpenKey != "" && runnable) || len(job.Dependencies) != 0 || len(job.ConcurrencyGates) != 0 || job.ApprovalGate != "" {
+		_, _ = fmt.Fprintf(out, "%sdepends_on:\n", indent)
+	}
+	if workflow.GateOpenKey != "" && runnable {
+		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", indent, yamlScalar(workflow.GateOpenKey), indent)
+	}
+	for _, dependency := range job.Dependencies {
+		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: true\n", indent, yamlScalar(dependency), indent)
+	}
+	for _, gate := range job.ConcurrencyGates {
+		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", indent, yamlScalar(gateOpenKeys[gate.ID]), indent)
+	}
+	if job.ApprovalGate != "" {
+		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", indent, yamlScalar(job.ApprovalGate), indent)
+	}
 }
 
 func prepareReusableConcurrencyGates(jobs []Job) ([]preparedConcurrencyGate, error) {
@@ -903,10 +945,12 @@ func orderJobs(compilerStep string, input []Job) ([]Job, error) {
 		if _, exists := jobs[job.Key]; exists {
 			return nil, fmt.Errorf("duplicate generated step key %q", job.Key)
 		}
-		if other, exists := digests[job.PlanDigest]; exists {
-			return nil, fmt.Errorf("jobs %q and %q share plan digest %s", other, job.Key, job.PlanDigest)
+		if job.Failure == nil && job.SkipReason == "" {
+			if other, exists := digests[job.PlanDigest]; exists {
+				return nil, fmt.Errorf("jobs %q and %q share plan digest %s", other, job.Key, job.PlanDigest)
+			}
+			digests[job.PlanDigest] = job.Key
 		}
-		digests[job.PlanDigest] = job.Key
 		job.Dependencies = append([]string(nil), job.Dependencies...)
 		sort.Strings(job.Dependencies)
 		for i, dependency := range job.Dependencies {
@@ -955,6 +999,18 @@ func validateJob(compilerStep string, job Job) error {
 	if !validStepKey(job.Key) || job.Key == compilerStep {
 		return fmt.Errorf("invalid generated step key %q", job.Key)
 	}
+	preparationResult := job.Failure != nil || job.SkipReason != ""
+	if job.Failure != nil && job.SkipReason != "" {
+		return fmt.Errorf("job %q cannot have both failure and skip results", job.Key)
+	}
+	if job.Failure != nil {
+		if err := validateFailure(*job.Failure); err != nil {
+			return fmt.Errorf("job %q failure: %w", job.Key, err)
+		}
+	}
+	if utf8.RuneCountInString(job.SkipReason) > maxSkipReasonLength {
+		return fmt.Errorf("job %q skip reason exceeds %d characters", job.Key, maxSkipReasonLength)
+	}
 	if job.Cache != nil {
 		if err := ValidateCacheVolume(*job.Cache); err != nil {
 			return fmt.Errorf("job %q has invalid cache configuration: %w", job.Key, err)
@@ -966,8 +1022,12 @@ func validateJob(compilerStep string, job Job) error {
 	if job.Queue != "" && !identifierPattern.MatchString(job.Queue) {
 		return fmt.Errorf("job %q has invalid queue %q", job.Key, job.Queue)
 	}
-	if _, err := PlanPath(job.PlanDigest); err != nil {
-		return fmt.Errorf("job %q: %w", job.Key, err)
+	if !preparationResult {
+		if _, err := PlanPath(job.PlanDigest); err != nil {
+			return fmt.Errorf("job %q: %w", job.Key, err)
+		}
+	} else if job.PlanDigest != "" || job.Queue != "" || job.Platform != "" || job.DistributionDigest != "" || job.RuntimeImage != "" || job.EventPayload || job.ApprovalGate != "" || job.RequiresMise || job.Cache != nil || job.Concurrency != 0 || job.ConcurrencyGroup != "" || len(job.ConcurrencyGates) != 0 {
+		return fmt.Errorf("job %q preparation result cannot include runnable job configuration", job.Key)
 	}
 	if job.Concurrency < 0 {
 		return fmt.Errorf("job %q has invalid concurrency %d", job.Key, job.Concurrency)
@@ -987,6 +1047,29 @@ func validateJob(compilerStep string, job Job) error {
 		return fmt.Errorf("job %q has invalid approval gate %q", job.Key, job.ApprovalGate)
 	}
 	return nil
+}
+
+func validateFailure(failure Failure) error {
+	if !validArtifactPath(failure.AnnotationPath) {
+		return fmt.Errorf("requires a valid annotation artifact path")
+	}
+	if !validArtifactPath(failure.MessagePath) {
+		return fmt.Errorf("requires a valid message artifact path")
+	}
+	if failure.Summary == "" {
+		return fmt.Errorf("requires a provider check summary")
+	}
+	return nil
+}
+
+func preparationJobsOnly(jobs []Job) bool {
+	preparation := 0
+	for _, job := range jobs {
+		if job.Failure != nil || job.SkipReason != "" {
+			preparation++
+		}
+	}
+	return preparation != 0 && preparation == len(jobs)
 }
 
 func validStepKey(key string) bool {

@@ -20,6 +20,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
 type fakeActionSource struct {
@@ -212,6 +213,66 @@ func TestActionResolutionMessageDistinguishesResolutionFailure(t *testing.T) {
 	want := `Action "owner/action@v1" could not be resolved: tag v1 was not found`
 	if got, detail, action := actionResolutionMessage("owner/action@v1", err); got != want || detail != "" || action != "owner/action@v1" {
 		t.Fatalf("actionResolutionMessage() = %q, %q, %q; want %q, empty detail, %q", got, detail, action, want, "owner/action@v1")
+	}
+}
+
+func TestActionResolutionMessageExplainsActionCreatedByEarlierStep(t *testing.T) {
+	reference := "slsa-framework/slsa-github-generator/.github/actions/generate-builder@v2.1.0"
+	action := "./__BUILDER_CHECKOUT_DIR__/.github/actions/privacy-check"
+	err := &actionChildError{
+		child: action,
+		err:   fmt.Errorf("compile action %q: resolve local action %q: %w", action, strings.TrimPrefix(action, "./"), os.ErrNotExist),
+	}
+	wantAction := "./.github/actions/privacy-check"
+	want := `Local action "./.github/actions/privacy-check" is unavailable during compilation. Local actions must already exist in the event repository; Buildkite cannot resolve one created by an earlier step, such as actions/checkout with path. Check in the action and reference its repository path, or use a public owner/repository/path@ref action. Buildkite reports this error on the affected expanded job, skips jobs that depend on it, and may run independently compiled jobs.`
+	wantDetail := `The local action is referenced by composite action "slsa-framework/slsa-github-generator/.github/actions/generate-builder@v2.1.0".`
+	if got, detail, resolvedAction := actionResolutionMessage(reference, err); got != want || detail != wantDetail || resolvedAction != wantAction {
+		t.Fatalf("actionResolutionMessage() = %q, %q, %q; want %q, %q, %q", got, detail, resolvedAction, want, wantDetail, wantAction)
+	}
+}
+
+func TestActionResolutionMessageRetainsMissingLocalActionPath(t *testing.T) {
+	action := "./vendor/.github/actions/privacy-check"
+	err := fmt.Errorf("compile action %q: resolve local action %q: %w", action, strings.TrimPrefix(action, "./"), os.ErrNotExist)
+	message, _, reportedAction := actionResolutionMessage(action, err)
+	if reportedAction != action || !strings.Contains(message, action) {
+		t.Fatalf("actionResolutionMessage() = %q, action %q; want original action path", message, reportedAction)
+	}
+}
+
+func TestActionResolutionMessageDoesNotMisclassifyMissingEntrypoint(t *testing.T) {
+	action := "./.github/actions/checked-in"
+	err := fmt.Errorf("compile action %q: JavaScript action main entry point %q: %w", action, "dist/index.js", os.ErrNotExist)
+	message, _, reportedAction := actionResolutionMessage(action, err)
+	if reportedAction != action || !strings.Contains(message, `JavaScript action main entry point "dist/index.js"`) || strings.Contains(message, "created by an earlier step") {
+		t.Fatalf("actionResolutionMessage() = %q, action %q; want missing entry point diagnostic", message, reportedAction)
+	}
+}
+
+func TestValidateActionResolutionsAttributesMissingCalledWorkflowAction(t *testing.T) {
+	reference := "./__BUILDER_CHECKOUT_DIR__/.github/actions/secure-download-artifact"
+	ir := IR{
+		Event: Event{Provider: "github"},
+		Jobs: []JobInstance{{
+			Key: "gha-call-remote-upload-assets", LogicalJobID: "call-remote.upload-assets",
+			SourcePath:     "slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0",
+			RepositoryRoot: t.TempDir(),
+			Steps:          []workflow.Step{{Kind: "uses", Uses: reference, Span: workflow.Span{Start: workflow.Position{Line: 281, Column: 15}}}},
+		}},
+	}
+	evidence, err := validateActionResolutions(t.Context(), ir, Options{})
+	if err == nil || len(evidence.Actions) != 1 || evidence.Actions[0].Passed {
+		t.Fatalf("validateActionResolutions() evidence = %#v, error = %v", evidence, err)
+	}
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) {
+		t.Fatalf("validateActionResolutions() error = %v, want processing finding", err)
+	}
+	if finding.Path != ir.Jobs[0].SourcePath || finding.Line != 281 || finding.Column != 15 || finding.Job != "call-remote.upload-assets" || finding.Instance != "gha-call-remote-upload-assets" || finding.Action != "./.github/actions/secure-download-artifact" || finding.Step != 1 {
+		t.Fatalf("missing local action attribution = %#v", finding)
+	}
+	if !strings.Contains(finding.Message, "created by an earlier step") || strings.Contains(finding.Message, "__BUILDER_CHECKOUT_DIR__") || strings.Contains(finding.Message, ir.Jobs[0].RepositoryRoot) || strings.Contains(finding.Message, "lstat") {
+		t.Fatalf("missing local action message = %q", finding.Message)
 	}
 }
 

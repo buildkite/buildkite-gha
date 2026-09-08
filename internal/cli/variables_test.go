@@ -442,6 +442,42 @@ func TestRunUploadResolvesVariablesForActionInputDefaults(t *testing.T) {
 	}
 }
 
+func TestRunUploadRecompilesIndependentPartialPlanWithActionVariables(t *testing.T) {
+	requireImporterHost(t)
+	variables, variableRequests := agentVariablesHandler(t, http.StatusOK, "")
+	agent, _ := agentStub(t, "job-secret", http.StatusOK, variables)
+	setAgentResolutionEnvironment(t, agent.URL)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "variables-partial-importer")
+	eventPath := pushEventPath(t)
+	workflow := writeUploadWorkflows(t, map[string]string{"build.yml": `on: push
+jobs:
+  safe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/region
+  broken:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/missing
+`})[0]
+	writeRegionAction(t, regionInputDefaultAction)
+
+	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if *variableRequests != 1 {
+		t.Fatalf("variables requests = %d, want 1", *variableRequests)
+	}
+	plans := uploadedPlans(t, runner)
+	if len(plans["safe"]) != 1 || len(plans["broken"]) != 0 || !maps.Equal(plans["safe"][0].RepositoryVars, stubRepositoryVariables) || !maps.Equal(plans["safe"][0].OrganizationVars, stubOrganizationVariables) {
+		t.Fatalf("uploaded plans = %#v", plans)
+	}
+	assertNoVariableValueLeak(t, runner, stdout.String(), stderr.String())
+}
+
 // TestRunCompileIRJSONCarriesVariableScopes pins the documented exposure of
 // compile --format ir-json: the IR is the compiler's full input, so it prints
 // both resolved scopes to stdout.

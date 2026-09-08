@@ -358,6 +358,14 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 Job-level `uses`, `with`, and `secrets` follow these boundaries.
 
+If compilation fails after the complete job graph expands, upload preserves one
+Buildkite item per expanded job. Jobs with compiler errors fail with their own
+diagnostics, and their dependants are skipped. Independent jobs keep their
+compiled plans and run normally. The items keep their normal labels, keys,
+checks, and `needs` links. A runnable job is never emitted unless every job it
+needs also has a plan. If compilation fails before the complete graph is known,
+upload uses one workflow-level failing item instead.
+
 For a local call with `secrets: inherit`, each flattened callee job requests only the static ordinary secret names referenced by that job or its workflow-authored action inputs. Inheritance is one hop: an omitted nested `secrets: inherit` removes ordinary secret authority from every job below that edge. It does not affect direct caller jobs or `GITHUB_TOKEN`.
 
 Explicit mappings must target aliases declared by the called workflow. Every required alias must receive authority; an unmapped optional alias is empty. Nested mappings compose to the original Buildkite secret name and cannot recover an omitted same-named secret. Plans contain aliases and original names, never values. The runtime retrieves each original once, registers its value with both redactors, then projects it to the callee aliases.
@@ -893,6 +901,8 @@ Use an interpreter installed by an earlier step or included in the job image:
 ```
 
 A `uses` step may call a supported local or public action. Action inputs under `with` may use supported direct interpolation. Direct workflow `uses: docker://...` actions are rejected; prebuilt-image declarations belong in locked action metadata.
+
+Local actions must exist in the event repository when the workflow is compiled. An earlier step cannot create a local action with `actions/checkout`, an artifact download, or a command. Use a public `owner/repository/path@ref` action instead.
 
 Action steps can call public and local actions:
 
