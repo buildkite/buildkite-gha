@@ -300,8 +300,14 @@ on:
 ```
 
 Before upload, the importer compares the pull request merge base with its head
-in the local checkout. A changed path must match, and the linked webhook,
-commits, synthetic merge, base branch, and workflow file must agree.
+in the local checkout (`base...head`). The linked webhook must provide full
+base and head commit SHAs with one common merge base verified as an ancestor
+of both commits. The checkout and filtered workflow must match the PR head.
+The comparison uses those pinned commits, not the current base-branch tip.
+
+Buildkite builds the PR head, not GitHub's synthetic merge. Path evaluation
+does not depend on `merge_commit_sha` or `mergeable`, including for conflicting
+and closed PRs. Workflows without path filters do not require diff history.
 
 The check uses the checkout's existing Git access for public, private, and fork
 pull requests. It does not call GitHub or use Buildkite `if_changed`.
@@ -311,12 +317,10 @@ pull requests. It does not call GitHub or use Buildkite `if_changed`.
 | A matching added, modified, deleted, or type-changed path | No local match |
 | A copied destination that matches | A rename, or a diff containing both additions and deletions |
 | At most 300 changed files from complete local history | Missing or shallow history, multiple merge bases, or more than 300 files |
-| A mergeable pull request with matching webhook and workflow data | A conflict, stale data, changed merge workflow, path or pattern containing a backslash, invalid pattern, or malformed Git output |
+| Matching webhook, PR head checkout, and workflow data | Unrelated history, mismatched identity or workflow, path or pattern containing a backslash, invalid pattern, or malformed Git output |
 
 A local non-match is rejected because GitHub does not report whether its diff
-timed out and ran the workflow anyway. Unfiltered `closed` workflows remain
-supported. Filtered `closed` workflows are rejected when GitHub provides an
-actual merge, squash, or rebase commit instead of a synthetic merge.
+timed out and ran the workflow anyway.
 
 An unsupported or inexact filter replaces only the affected workflow with a
 failing step. It never broadens when the workflow runs.

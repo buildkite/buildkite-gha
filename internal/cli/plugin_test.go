@@ -256,7 +256,7 @@ func TestPluginUsesPipelineTriggerPullRequestIdentity(t *testing.T) {
 	t.Setenv("BUILDKITE_PULL_REQUEST", "42")
 	t.Setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
 	setCLIPipelineTriggerEnvironment(t, ".github/workflows/ci.yml", "CI", "pull_request", "buildkite/buildkite-gha/.github/workflows/ci.yml@refs/pull/42/merge")
-	t.Setenv("BUILDKITE_GITHUB_ACTION", "closed")
+	t.Setenv("BUILDKITE_GITHUB_ACTION", "opened")
 
 	headSHA := os.Getenv("BUILDKITE_COMMIT")
 	identities := make([]string, 0, 2)
@@ -265,7 +265,7 @@ func TestPluginUsesPipelineTriggerPullRequestIdentity(t *testing.T) {
 		webhook []byte
 	}{
 		{name: "Buildkite environment fallback"},
-		{name: "linked webhook metadata", webhook: []byte(`{"action":"closed","number":42,"pull_request":{"head":{"ref":"feature","sha":"0123456789abcdef0123456789abcdef01234567"},"base":{"ref":"main"}}}`)},
+		{name: "linked webhook before synthetic merge is available", webhook: []byte(`{"action":"opened","number":42,"pull_request":{"head":{"ref":"feature","sha":"0123456789abcdef0123456789abcdef01234567"},"base":{"ref":"main"},"mergeable":null,"merge_commit_sha":null}}`)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &cliCaptureRunner{webhook: test.webhook}
