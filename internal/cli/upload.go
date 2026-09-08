@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -333,15 +333,17 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	importerDistribution := runtimeDistribution{contents: executableContents, digest: distributionDigest}
 	seedUploadEnvironmentResolutions(ctx, uploadArguments.environmentSource, workflows, validations, processingReports, effectiveEvent.Event)
 	requiredPlatforms := make(map[compiler.Platform]bool, 2)
+	preparationAdmissionFailures := make([]error, len(workflows))
 	for i, input := range workflows {
 		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 			continue
 		}
-		platforms, platformErr := requiredRuntimePlatforms(ctx, input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets, uploadArguments.runnerResolution, repositorySource, uploadArguments.environmentSource, vars)
+		platforms, admissionErr, platformErr := requiredRuntimePlatforms(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, "", uploadArguments.runnerTargets, uploadArguments.runnerResolution, repositorySource, uploadArguments.environmentSource, vars)
 		if platformErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", platformErr)
 			return 1
 		}
+		preparationAdmissionFailures[i] = admissionErr
 		for platform := range platforms {
 			requiredPlatforms[platform] = true
 		}
@@ -352,7 +354,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", acquireErr)
 			return 1
 		}
-		return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, importerJobID, processingReports, out, runtimeDistributions, repositorySource, authentication, vars)
+		return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, importerJobID, processingReports, out, runtimeDistributions, repositorySource, authentication, vars, preparationAdmissionFailures)
 	}
 	requiredDistributionPaths := make(map[compiler.Platform]string, len(requiredPlatforms))
 	for platform := range requiredPlatforms {
@@ -381,10 +383,10 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: runtime distribution for %s is required by the selected workflows\n", platform)
 		return 1
 	}
-	return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, importerJobID, processingReports, out, runtimeDistributions, repositorySource, authentication, vars)
+	return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, importerJobID, processingReports, out, runtimeDistributions, repositorySource, authentication, vars, preparationAdmissionFailures)
 }
 
-func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent, workflows []workflowInput, effectiveEvent effectiveEventSelection, executablePath, distributionDigest, importerStep, importerJobID string, processingReports []compatibility.ProcessingReport, out processingOutput, runtimeDistributions map[compiler.Platform]runtimeDistribution, repositorySource compiler.RepositorySource, authentication *actionSourceAuthentication, vars compiler.VariableSources) int {
+func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent, workflows []workflowInput, effectiveEvent effectiveEventSelection, executablePath, distributionDigest, importerStep, importerJobID string, processingReports []compatibility.ProcessingReport, out processingOutput, runtimeDistributions map[compiler.Platform]runtimeDistribution, repositorySource compiler.RepositorySource, authentication *actionSourceAuthentication, vars compiler.VariableSources, preparationAdmissionFailures []error) int {
 	runtimeDigests := make(map[compiler.Platform]string, len(runtimeDistributions))
 	for platform, runtimeDistribution := range runtimeDistributions {
 		runtimeDigests[platform] = runtimeDistribution.digest
@@ -441,18 +443,28 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			return compileHostedNamespacedWithActionCache(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, bundleCompilerStep, "", uploadArguments.runnerTargets, uploadArguments.runnerResolution, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, "", repositorySource, authentication, uploadArguments.environmentSource, vars)
 		}
 		preflight, err := compileWorkflow(vars)
-		if err == nil {
+		preflight, err = failClosedForPreparationAdmission(preflight, err, preparationAdmissionFailures[i])
+		if err == nil || len(preflight.Bundle.Plans) != 0 {
 			actionVars, again, varsErr := resolveActionVariables(ctx, uploadArguments.variableSource, effectiveEvent.Event, input.ReferencesVars, preflight.Bundle)
 			if varsErr != nil {
 				processingReports[i].AddEnvironmentFailure(varsErr.Error())
 				processingReports[i].Result = "indeterminate"
-				failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks)
+				preflight.Bundle = failedPartialBundle(preflight.Bundle)
+				failed, artifacts := failedExpandedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks, preflight.Bundle, false)
 				generatedWorkflows = append(generatedWorkflows, failed)
 				failureArtifacts = append(failureArtifacts, artifacts...)
+				jobCount += len(failed.Jobs)
 				continue
 			}
 			if again {
+				first := preflight
+				firstErr := err
 				preflight, err = compileWorkflow(actionVars)
+				if !preflight.JobGraphComplete || !sameExpandedJobGraph(first.Bundle.IR, preflight.Bundle.IR) {
+					first.Bundle = failedPartialBundle(first.Bundle)
+					preflight = first
+					err = errors.Join(firstErr, err, errors.New("action-variable recompilation did not preserve the expanded job graph"))
+				}
 			}
 		}
 		applyHostedPreflight(&processingReports[i], preflight)
@@ -461,8 +473,22 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			var failure *hostedFailure
 			if errors.As(err, &failure) && failure.Kind == hostedEvaluationFailure {
 				failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks)
+				if preflight.JobGraphComplete && len(preflight.Bundle.IR.Jobs) != 0 {
+					failed, artifacts = failedExpandedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks, preflight.Bundle, true)
+				}
 				generatedWorkflows = append(generatedWorkflows, failed)
 				failureArtifacts = append(failureArtifacts, artifacts...)
+				runnablePlans := runnablePlanArtifacts(preflight.Bundle)
+				planArtifacts = append(planArtifacts, runnablePlans...)
+				if len(runnablePlans) != 0 && preflight.Bundle.EventArtifact != nil {
+					if eventArtifact != nil && (eventArtifact.Path != preflight.Bundle.EventArtifact.Path || eventArtifact.Digest != preflight.Bundle.EventArtifact.Digest || !bytes.Equal(eventArtifact.Contents, preflight.Bundle.EventArtifact.Contents)) {
+						_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: compiled workflows produced different event payload artifacts")
+						return 1
+					}
+					artifact := *preflight.Bundle.EventArtifact
+					eventArtifact = &artifact
+				}
+				jobCount += len(failed.Jobs)
 				continue
 			}
 			_ = out.write(ctx, processingReports[i])
@@ -611,6 +637,42 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	return 0
 }
 
+func failClosedForPreparationAdmission(compilation hostedCompilation, compileErr, admissionErr error) (hostedCompilation, error) {
+	if admissionErr == nil {
+		return compilation, compileErr
+	}
+	compilation.Bundle = failedPartialBundle(compilation.Bundle)
+	return compilation, hostedError(hostedEvaluationFailure, errors.Join(compileErr, admissionErr))
+}
+
+func sameExpandedJobGraph(left, right compiler.IR) bool {
+	if !left.JobGraphComplete || !right.JobGraphComplete || len(left.Jobs) != len(right.Jobs) {
+		return false
+	}
+	for i := range left.Jobs {
+		if left.Jobs[i].Key != right.Jobs[i].Key || !slices.Equal(left.Jobs[i].Needs, right.Jobs[i].Needs) {
+			return false
+		}
+	}
+	return true
+}
+
+func runnablePlanArtifacts(bundle compiler.Bundle) []compiler.PlanArtifact {
+	runnable := make(map[string]bool, len(bundle.GeneratedWorkflow.Jobs))
+	for _, job := range bundle.GeneratedWorkflow.Jobs {
+		if job.Failure == nil && job.SkipReason == "" {
+			runnable[job.Key] = true
+		}
+	}
+	artifacts := make([]compiler.PlanArtifact, 0, len(runnable))
+	for _, artifact := range bundle.Plans {
+		if runnable[artifact.Job.Target.StepKey] {
+			artifacts = append(artifacts, artifact)
+		}
+	}
+	return artifacts
+}
+
 func processingReportHasErrors(report compatibility.ProcessingReport) bool {
 	for _, diagnostic := range report.Diagnostics {
 		if diagnostic.Level == "error" {
@@ -626,6 +688,93 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		checkName = input.CanonicalPath
 	}
 	label := workflowGroupLabel(checkName, input.RunName)
+	failure, artifacts := generatedFailure(report, sourceLinks)
+	workflow := buildkitepipeline.Workflow{
+		GroupLabel: label,
+		CheckName:  checkName,
+		GroupKey:   "gha-workflow-" + input.Identity,
+		Event:      event,
+		Failure:    failure,
+	}
+	return workflow, artifacts
+}
+
+func failedExpandedGeneratedWorkflow(input workflowInput, event string, report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bundle compiler.Bundle, keepRunnable bool) (buildkitepipeline.Workflow, []transport.Artifact) {
+	ir := bundle.IR
+	checkName := ir.Workflow.Name
+	if checkName == "" {
+		checkName = input.CanonicalPath
+	}
+	workflow := buildkitepipeline.Workflow{
+		GroupLabel: workflowGroupLabel(checkName, ir.Workflow.RunName),
+		CheckName:  checkName,
+		GroupKey:   "gha-workflow-" + input.Identity,
+		Event:      event,
+		Condition:  input.TriggerCondition,
+		Jobs:       compiler.ExpandedWorkflowJobs(ir),
+	}
+	runnable := make(map[string]buildkitepipeline.Job, len(bundle.GeneratedWorkflow.Jobs))
+	if keepRunnable {
+		workflow.ConcurrencyGate = bundle.GeneratedWorkflow.ConcurrencyGate
+		workflow.ApprovalGates = bundle.GeneratedWorkflow.ApprovalGates
+		for _, job := range bundle.GeneratedWorkflow.Jobs {
+			runnable[job.Key] = job
+		}
+	}
+	artifacts := make([]transport.Artifact, 0, 2*len(ir.Jobs))
+	for i, instance := range ir.Jobs {
+		switch bundle.JobOutcomes[instance.Key] {
+		case compiler.JobPlanned:
+			if job, exists := runnable[instance.Key]; exists {
+				workflow.Jobs[i] = job
+				continue
+			}
+			failure, generated := generatedFailure(report, sourceLinks)
+			workflow.Jobs[i].Failure = failure
+			workflow.Jobs[i].SoftFail = instance.ContinueOnError
+			artifacts = append(artifacts, generated...)
+		case compiler.JobFailed:
+			jobReport := processingReportForExpandedJob(report, instance)
+			if !processingReportHasErrors(jobReport) {
+				jobReport = report
+			}
+			failure, generated := generatedFailure(jobReport, sourceLinks)
+			workflow.Jobs[i].Failure = failure
+			workflow.Jobs[i].SoftFail = instance.ContinueOnError
+			artifacts = append(artifacts, generated...)
+		case compiler.JobBlocked:
+			workflow.Jobs[i].SkipReason = "Not run because a prerequisite job could not be compiled"
+		default:
+			workflow.Jobs[i].SkipReason = "Not run because no safe compiled plan was available"
+		}
+	}
+	return workflow, artifacts
+}
+
+func processingReportForExpandedJob(report compatibility.ProcessingReport, instance compiler.JobInstance) compatibility.ProcessingReport {
+	filtered := report
+	filtered.Jobs = nil
+	for _, result := range report.Jobs {
+		if result.Instance == instance.Key || result.Instance == "" && result.ID == instance.LogicalJobID {
+			filtered.Jobs = append(filtered.Jobs, result)
+		}
+	}
+	filtered.Actions = nil
+	for _, action := range report.Actions {
+		if action.Job == instance.Key {
+			filtered.Actions = append(filtered.Actions, action)
+		}
+	}
+	filtered.Diagnostics = nil
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Instance == instance.Key || diagnostic.Instance == "" && (diagnostic.Job == "" || diagnostic.Job == instance.LogicalJobID || diagnostic.Job == instance.Key) {
+			filtered.Diagnostics = append(filtered.Diagnostics, diagnostic)
+		}
+	}
+	return filtered
+}
+
+func generatedFailure(report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (*buildkitepipeline.Failure, []transport.Artifact) {
 	report.Diagnostics = append([]compatibility.Diagnostic(nil), report.Diagnostics...)
 	report.Finalize()
 	messages := make([]string, 0, len(report.Diagnostics))
@@ -653,18 +802,12 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 	_, checkSummary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
 	messageArtifact := generatedFailureArtifact("messages", ".txt", "\x1b[31m"+strings.Join(messages, "\n")+"\x1b[0m\n")
 	annotationArtifact := generatedFailureArtifact("annotations", ".html", annotation)
-	workflow := buildkitepipeline.Workflow{
-		GroupLabel: label,
-		CheckName:  checkName,
-		GroupKey:   "gha-workflow-" + input.Identity,
-		Event:      event,
-		Failure: &buildkitepipeline.Failure{
-			AnnotationPath: annotationArtifact.Path,
-			MessagePath:    messageArtifact.Path,
-			Summary:        checkSummary,
-		},
+	failure := &buildkitepipeline.Failure{
+		AnnotationPath: annotationArtifact.Path,
+		MessagePath:    messageArtifact.Path,
+		Summary:        checkSummary,
 	}
-	return workflow, []transport.Artifact{messageArtifact, annotationArtifact}
+	return failure, []transport.Artifact{messageArtifact, annotationArtifact}
 }
 
 func workflowGroupLabel(workflowName, runName string) string {
@@ -681,29 +824,34 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 	return transport.Artifact{Path: path, Digest: digest, Contents: encoded}
 }
 
-func requiredRuntimePlatforms(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerResolution agentRunnerResolution, repositorySource compiler.RepositorySource, environmentSource compiler.EnvironmentSource, vars compiler.VariableSources) (map[compiler.Platform]bool, error) {
-	options := hostedOptions(groupLabel, configuredTargets, nil)
+func requiredRuntimePlatforms(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerResolution agentRunnerResolution, repositorySource compiler.RepositorySource, environmentSource compiler.EnvironmentSource, vars compiler.VariableSources) (map[compiler.Platform]bool, error, error) {
+	runtimeDigests := map[compiler.Platform]string{
+		compiler.PlatformLinuxAMD64:  distributionDigest,
+		compiler.PlatformDarwinARM64: distributionDigest,
+	}
+	options := hostedOptions(groupLabel, configuredTargets, runtimeDigests)
 	options.Vars = vars
 	applyRunnerResolution(&options, runnerResolution)
 	options.RepositorySource = repositorySource
+	options.ResolveActions = true
+	options.ActionSource = repositorySource
 	options.EnvironmentSource = environmentSource
-	preflight, err := compiler.CompileWithOptionsContext(ctx, workflowPath, workflowSource, eventSource, options)
-	if err != nil {
-		return nil, err
-	}
-	var ir compiler.IR
-	if err := json.Unmarshal(preflight, &ir); err != nil {
-		return nil, fmt.Errorf("decode compiler preflight: %w", err)
-	}
+	bundle, _ := compiler.CompileBundlePlansContext(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, options)
+	return runtimePlatformsForBundle(bundle)
+}
+
+func runtimePlatformsForBundle(bundle compiler.Bundle) (map[compiler.Platform]bool, error, error) {
 	platforms := make(map[compiler.Platform]bool, 2)
-	for _, job := range ir.Jobs {
-		target, err := options.Runners.Resolve(job.RunsOn, options.EventTrust)
-		if err != nil {
-			return nil, fmt.Errorf("resolve runtime platform for job %q: %w", job.LogicalJobID, err)
-		}
-		platforms[target.Platform] = true
+	if err := validateUnprivilegedBundle(bundle); err != nil {
+		return platforms, err, nil
 	}
-	return platforms, nil
+	for _, job := range bundle.IR.Jobs {
+		if bundle.JobOutcomes[job.Key] != compiler.JobPlanned {
+			continue
+		}
+		platforms[job.Platform] = true
+	}
+	return platforms, nil, nil
 }
 
 type workflowInput struct {

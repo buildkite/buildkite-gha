@@ -35,6 +35,10 @@ type IR struct {
 	RepositoryVars   map[string]string `json:"repository_vars,omitempty"`
 	Execution        ExecutionBoundary `json:"execution"`
 	Jobs             []JobInstance     `json:"jobs"`
+	// JobGraphComplete distinguishes a complete expanded graph from the
+	// partial instances retained when expansion fails. It is process-local
+	// evidence and is not part of serialized compiler output.
+	JobGraphComplete bool `json:"-"`
 }
 
 // VarsBeforeEnvironment is the vars context GitHub evaluates before any job's
@@ -310,7 +314,7 @@ func CompileWithOptions(path string, source, eventSource []byte, options Options
 // CompileWithOptionsContext compiles a workflow and permits cancellation while
 // resolving public reusable-workflow source.
 func CompileWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) ([]byte, error) {
-	ir, err := compile(ctx, path, source, eventSource, options)
+	ir, err := CompileIRWithOptionsContext(ctx, path, source, eventSource, options)
 	if err != nil {
 		return nil, err
 	}
@@ -322,6 +326,14 @@ func CompileWithOptionsContext(ctx context.Context, path string, source, eventSo
 		return nil, fmt.Errorf("encode compiler IR: %w", err)
 	}
 	return out.Bytes(), nil
+}
+
+// CompileIRWithOptionsContext returns the owned compiler IR even when a
+// failure occurs after static job expansion. Callers may use that partial
+// result for diagnostics and may compile unaffected jobs separately. Every
+// retained plan still requires normal admission before execution.
+func CompileIRWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) (IR, error) {
+	return compile(ctx, path, source, eventSource, options)
 }
 
 func compile(ctx context.Context, path string, source, eventSource []byte, options Options) (IR, error) {
@@ -350,7 +362,8 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
 	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
-	if expandErr == nil {
+	jobGraphComplete := expandErr == nil
+	if jobGraphComplete {
 		expandErr = resolveJobEnvironments(ctx, expanded.instances, event, options)
 	}
 	digest := sha256.Sum256(source)
@@ -368,7 +381,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 			Supported: true,
 			Reason:    "run-job rejects unsupported shells and local actions",
 		},
-		Jobs: expanded.instances,
+		Jobs: expanded.instances, JobGraphComplete: jobGraphComplete,
 	}
 	return ir, errors.Join(runNameErr, concurrencyErr, cancellationErr, expandErr)
 }

@@ -1221,6 +1221,89 @@ func TestFailedGeneratedWorkflowIncludesWarnings(t *testing.T) {
 	}
 }
 
+func TestFailedExpandedGeneratedWorkflowKeepsJobGraphAndScopesDiagnostics(t *testing.T) {
+	ir := compiler.IR{
+		Workflow: compiler.WorkflowSource{Name: "Reusable CI"},
+		Jobs: []compiler.JobInstance{
+			{Key: "gha-detect", LogicalJobID: "call.detect", Label: "call / Detect"},
+			{Key: "gha-generator", LogicalJobID: "call.generator", Label: "call / Generator", Needs: []string{"gha-detect"}},
+			{Key: "gha-upload", LogicalJobID: "call.upload", Label: "call / Upload", Needs: []string{"gha-detect", "gha-generator"}},
+			{Key: "gha-final", LogicalJobID: "call.final", Label: "call / Final", Needs: []string{"gha-detect", "gha-generator", "gha-upload"}},
+		},
+	}
+	report := compatibility.NewProcessingReport("owner/repo/.github/workflows/reusable.yml@v1", "hosted")
+	report.Diagnostics = append(report.Diagnostics,
+		compatibility.Diagnostic{Level: "error", Code: compiler.CodeActionResolution, Message: "generator action is unavailable", Job: "call.generator", Instance: "gha-generator", Step: 1},
+		compatibility.Diagnostic{Level: "error", Code: compiler.CodeActionResolution, Message: "generator child is unavailable", Job: "call.generator", Instance: "gha-generator", Step: 2},
+		compatibility.Diagnostic{Level: "error", Code: compiler.CodeActionResolution, Message: "upload action is unavailable", Job: "call.upload", Instance: "gha-upload", Step: 1},
+	)
+
+	bundle := compiler.Bundle{
+		IR: ir,
+		JobOutcomes: map[string]compiler.JobOutcome{
+			"gha-detect": compiler.JobPlanned, "gha-generator": compiler.JobFailed,
+			"gha-upload": compiler.JobFailed, "gha-final": compiler.JobBlocked,
+		},
+		GeneratedWorkflow: buildkitepipeline.Workflow{Jobs: []buildkitepipeline.Job{{
+			Key: "gha-detect", Label: "call / Detect", CheckLabel: "call.detect", PlanDigest: "sha256:" + strings.Repeat("1", 64),
+		}}},
+	}
+	workflow, artifacts := failedExpandedGeneratedWorkflow(workflowInput{CanonicalPath: ".github/workflows/caller.yml", Identity: "caller", TriggerCondition: "true"}, "push", report, sourceLinkContext{}, bundle, true)
+	if workflow.Failure != nil || workflow.Condition != "true" || workflow.GroupLabel != "Reusable CI" || len(workflow.Jobs) != 4 || len(artifacts) != 4 {
+		t.Fatalf("expanded failure workflow = %#v, artifacts = %#v", workflow, artifacts)
+	}
+	detect, generator, upload, final := workflow.Jobs[0], workflow.Jobs[1], workflow.Jobs[2], workflow.Jobs[3]
+	if detect.Key != "gha-detect" || detect.SkipReason != "" || detect.Failure != nil || detect.PlanDigest == "" {
+		t.Fatalf("independent job = %#v", detect)
+	}
+	if generator.Failure == nil || !reflect.DeepEqual(generator.Dependencies, []string{"gha-detect"}) || upload.Failure == nil || !reflect.DeepEqual(upload.Dependencies, []string{"gha-detect", "gha-generator"}) {
+		t.Fatalf("direct failures = %#v / %#v", generator, upload)
+	}
+	if final.Failure != nil || final.SkipReason != "Not run because a prerequisite job could not be compiled" || !reflect.DeepEqual(final.Dependencies, []string{"gha-detect", "gha-generator", "gha-upload"}) {
+		t.Fatalf("blocked dependent = %#v", final)
+	}
+	contents := make(map[string]string, len(artifacts))
+	for _, artifact := range artifacts {
+		contents[artifact.Path] = string(artifact.Contents)
+	}
+	generatorMessage := contents[generator.Failure.MessagePath]
+	uploadMessage := contents[upload.Failure.MessagePath]
+	if !strings.Contains(generatorMessage, "generator action is unavailable") || !strings.Contains(generatorMessage, "generator child is unavailable") || strings.Contains(generatorMessage, "upload action is unavailable") {
+		t.Fatalf("generator diagnostics = %q", generatorMessage)
+	}
+	if !strings.Contains(uploadMessage, "upload action is unavailable") || strings.Contains(uploadMessage, "generator action is unavailable") {
+		t.Fatalf("upload diagnostics = %q", uploadMessage)
+	}
+}
+
+func TestFailedExpandedGeneratedWorkflowFallsBackForUnmatchedDiagnostic(t *testing.T) {
+	ir := compiler.IR{Workflow: compiler.WorkflowSource{Name: "CI"}, Jobs: []compiler.JobInstance{{Key: "gha-test", LogicalJobID: "test", Label: "test"}}}
+	report := compatibility.NewProcessingReport("ci.yml", "hosted")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{Level: "error", Code: "E_TEST", Message: "compiler failed", Job: "unmatched"})
+	bundle := compiler.Bundle{IR: ir, JobOutcomes: map[string]compiler.JobOutcome{"gha-test": compiler.JobFailed}}
+	workflow, artifacts := failedExpandedGeneratedWorkflow(workflowInput{CanonicalPath: "ci.yml", Identity: "ci", TriggerCondition: "true"}, "push", report, sourceLinkContext{}, bundle, true)
+	if len(workflow.Jobs) != 1 || workflow.Jobs[0].Failure == nil || workflow.Jobs[0].Failure.Summary == "" {
+		t.Fatalf("workflow = %#v", workflow)
+	}
+	if _, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{CompilerStep: "importer", EventProvider: "github", Workflows: []buildkitepipeline.Workflow{workflow}}); err != nil {
+		t.Fatalf("Emit() error = %v, artifacts = %#v", err, artifacts)
+	}
+}
+
+func TestFailedExpandedGeneratedWorkflowDegradesPlannedJobWithoutGeneratedPlan(t *testing.T) {
+	ir := compiler.IR{Workflow: compiler.WorkflowSource{Name: "CI"}, Jobs: []compiler.JobInstance{{Key: "gha-test", LogicalJobID: "test", Label: "test"}}}
+	report := compatibility.NewProcessingReport("ci.yml", "hosted")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{Level: "error", Code: "E_PIPELINE", Message: "pipeline generation failed"})
+	bundle := compiler.Bundle{IR: ir, JobOutcomes: map[string]compiler.JobOutcome{"gha-test": compiler.JobPlanned}}
+	workflow, _ := failedExpandedGeneratedWorkflow(workflowInput{CanonicalPath: "ci.yml", Identity: "ci", TriggerCondition: "true"}, "push", report, sourceLinkContext{}, bundle, true)
+	if len(workflow.Jobs) != 1 || workflow.Jobs[0].Failure == nil {
+		t.Fatalf("workflow = %#v", workflow)
+	}
+	if _, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{CompilerStep: "importer", EventProvider: "github", Workflows: []buildkitepipeline.Workflow{workflow}}); err != nil {
+		t.Fatalf("Emit() error = %v", err)
+	}
+}
+
 func TestFailedGeneratedWorkflowKeepsLargeDiagnosticsOutOfCommand(t *testing.T) {
 	message := strings.Repeat("large diagnostic ", 16*1024)
 	report := compatibility.NewProcessingReport("ci.yml", "hosted")
@@ -1537,9 +1620,10 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 			Command string             `yaml:"command"`
 			Plugins failureStepPlugins `yaml:"plugins"`
 			Steps   []struct {
-				Label   string `yaml:"label"`
-				Key     string `yaml:"key"`
-				Command string `yaml:"command"`
+				Label   string             `yaml:"label"`
+				Key     string             `yaml:"key"`
+				Command string             `yaml:"command"`
+				Plugins failureStepPlugins `yaml:"plugins"`
 			} `yaml:"steps"`
 		} `yaml:"steps"`
 	}
@@ -1549,11 +1633,12 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	if len(pipeline.Steps) != 3 {
 		t.Fatalf("aggregate pipeline groups = %#v", pipeline.Steps)
 	}
-	wantFailureLabels := []string{":github: workflow · Invalid", ":github: workflow · Missing action"}
-	for i, step := range pipeline.Steps[:2] {
-		if step.Group != "" || len(step.Steps) != 0 || step.Label != wantFailureLabels[i] || !isGeneratedFailureCommand(step.Command) {
-			t.Fatalf("failed workflow step %d = %#v", i, step)
-		}
+	if invalid := pipeline.Steps[0]; invalid.Group != "" || len(invalid.Steps) != 0 || invalid.Label != ":github: workflow · Invalid" || !isGeneratedFailureCommand(invalid.Command) {
+		t.Fatalf("failed workflow step 0 = %#v", invalid)
+	}
+	missing := pipeline.Steps[1]
+	if missing.Group != ":github: workflow · Missing action" || missing.Label != "" || missing.Command != "" || len(missing.Steps) != 1 || missing.Steps[0].Label != ":github: job · action" || !isGeneratedFailureCommand(missing.Steps[0].Command) {
+		t.Fatalf("expanded failed workflow = %#v", missing)
 	}
 	firstFailureMessage := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
 	if !strings.Contains(firstFailureMessage, `Windows runners aren't currently supported. Imported jobs run on Linux or macOS Buildkite hosted agents. If this job can run on Linux, change "windows-latest" to "ubuntu-latest". If it requires Windows, open an issue in https://github.com/buildkite/buildkite-gha to help us prioritize Windows support.`) ||
@@ -1561,12 +1646,145 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 		strings.Count(firstFailureMessage, "detail: Supported runner labels: macos-latest, ubuntu-22.04, ubuntu-24.04, ubuntu-latest.") != 1 {
 		t.Fatalf("multi-diagnostic failure message = %q", firstFailureMessage)
 	}
-	actionFailureAnnotation := string(failureArtifactForStep(pipeline.Steps[1].Plugins, runner.uploaded, "annotations"))
-	if !strings.Contains(actionFailureAnnotation, `Resolve local action &#34;missing-action&#34;`) || !strings.Contains(actionFailureAnnotation, "no such file or directory") {
+	actionFailureAnnotation := string(failureArtifactForStep(missing.Steps[0].Plugins, runner.uploaded, "annotations"))
+	if !strings.Contains(actionFailureAnnotation, `Local action &#34;./missing-action&#34; is unavailable during compilation.`) || !strings.Contains(actionFailureAnnotation, "Local actions must already exist in the event repository") || strings.Contains(actionFailureAnnotation, "no such file or directory") || strings.Contains(actionFailureAnnotation, "lstat") {
 		t.Fatalf("action failure annotation = %q", actionFailureAnnotation)
 	}
 	if pipeline.Steps[2].Group != ":github: workflow · Success" || len(pipeline.Steps[2].Steps) != 1 || pipeline.Steps[2].Steps[0].Key == "" || !strings.Contains(pipeline.Steps[2].Steps[0].Command, `run-job --plan "$plan"`) || !strings.Contains(pipeline.Steps[2].Steps[0].Command, "--user runner") {
 		t.Fatalf("successful workflow group = %#v", pipeline.Steps[2])
+	}
+}
+
+func TestRunUploadRepresentsFourExpandedReusableJobsAfterActionResolutionFailure(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"caller.yml": "name: Reusable CI\non: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n",
+		"reusable.yml": `on: workflow_call
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    concurrency: detect-${{ github.ref }}
+    outputs:
+      marker: ${{ steps.marker.outputs.value }}
+    steps:
+      - id: marker
+        run: echo "value=independent" >> "$GITHUB_OUTPUT"
+  generator:
+    needs: detect
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/missing-generator
+      - uses: ./.github/actions/missing-generator-child
+  upload:
+    needs: [detect, generator]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/missing-upload
+  final:
+    needs: [detect, generator, upload]
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`,
+	})
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_KEY", "reusable-failure-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/caller.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	type dependency struct {
+		Step         string `yaml:"step"`
+		AllowFailure bool   `yaml:"allow_failure"`
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group string `yaml:"group"`
+			Steps []struct {
+				Label            string             `yaml:"label"`
+				Key              string             `yaml:"key"`
+				Skip             string             `yaml:"skip"`
+				Command          string             `yaml:"command"`
+				Plugins          failureStepPlugins `yaml:"plugins"`
+				DependsOn        []dependency       `yaml:"depends_on"`
+				Agents           map[string]string  `yaml:"agents"`
+				Image            string             `yaml:"image"`
+				Concurrency      int                `yaml:"concurrency"`
+				ConcurrencyGroup string             `yaml:"concurrency_group"`
+				Notify           []map[string]any   `yaml:"notify"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	pipelineYAML := runner.commands[len(runner.commands)-1].stdin
+	if err := yaml.Unmarshal(pipelineYAML, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · Reusable CI" || len(pipeline.Steps[0].Steps) != 4 || !strings.Contains(stdout.String(), "Uploaded 4 jobs from 1 workflows") {
+		t.Fatalf("reusable failure pipeline = %#v, stdout = %q\n%s", pipeline.Steps, stdout.String(), pipelineYAML)
+	}
+	jobs := make(map[string]struct {
+		key, skip, command string
+		plugins            failureStepPlugins
+		dependencies       []dependency
+	})
+	for _, step := range pipeline.Steps[0].Steps {
+		jobs[step.Label] = struct {
+			key, skip, command string
+			plugins            failureStepPlugins
+			dependencies       []dependency
+		}{step.Key, step.Skip, step.Command, step.Plugins, step.DependsOn}
+		if step.Label != ":github: job · call / detect" && (step.Agents != nil || step.Image != "" || strings.Contains(step.Command, "run-job")) {
+			t.Fatalf("preparation result retained runnable configuration: %#v", step)
+		}
+	}
+	detect := jobs[":github: job · call / detect"]
+	generator := jobs[":github: job · call / generator"]
+	upload := jobs[":github: job · call / upload"]
+	final := jobs[":github: job · call / final"]
+	if detect.key == "" || detect.skip != "" || !strings.Contains(detect.command, "run-job") || len(detect.plugins) != 0 {
+		t.Fatalf("detect representation = %#v", detect)
+	}
+	if generator.key == "" || !isGeneratedFailureCommand(generator.command) || len(generator.plugins) != 1 || len(generator.dependencies) != 1 || generator.dependencies[0] != (dependency{Step: detect.key, AllowFailure: true}) {
+		t.Fatalf("generator representation = %#v", generator)
+	}
+	if upload.key == "" || !isGeneratedFailureCommand(upload.command) || len(upload.plugins) != 1 || len(upload.dependencies) != 2 || upload.dependencies[1] != (dependency{Step: generator.key, AllowFailure: true}) {
+		t.Fatalf("upload representation = %#v", upload)
+	}
+	if final.key == "" || final.skip != "Not run because a prerequisite job could not be compiled" || len(final.dependencies) != 3 || final.dependencies[2] != (dependency{Step: upload.key, AllowFailure: true}) {
+		t.Fatalf("final representation = %#v", final)
+	}
+	generatorMessage := string(failureArtifactForStep(generator.plugins, runner.uploaded, "messages"))
+	uploadMessage := string(failureArtifactForStep(upload.plugins, runner.uploaded, "messages"))
+	if strings.Count(generatorMessage, "[E_ACTION_RESOLUTION]") != 2 || strings.Contains(generatorMessage, "missing-upload") || strings.Count(uploadMessage, "[E_ACTION_RESOLUTION]") != 1 || strings.Contains(uploadMessage, "missing-generator") {
+		t.Fatalf("scoped failure messages = generator %q, upload %q", generatorMessage, uploadMessage)
+	}
+	var independentPlans int
+	for path, contents := range runner.uploaded {
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
+			continue
+		}
+		independentPlans++
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.Target.StepKey != detect.key || len(job.Dependencies) != 0 || job.Outputs["marker"] != "${{ steps.marker.outputs.value }}" {
+			t.Fatalf("independent plan = %#v", job)
+		}
+	}
+	if independentPlans != 1 || pipeline.Steps[0].Steps[0].Concurrency != 1 || pipeline.Steps[0].Steps[0].ConcurrencyGroup == "" {
+		t.Fatalf("independent plan count = %d, detect concurrency = %d/%q", independentPlans, pipeline.Steps[0].Steps[0].Concurrency, pipeline.Steps[0].Steps[0].ConcurrencyGroup)
+	}
+	for _, step := range pipeline.Steps[0].Steps {
+		if len(step.Notify) != 1 {
+			t.Fatalf("job %q provider checks = %#v", step.Label, step.Notify)
+		}
 	}
 }
 

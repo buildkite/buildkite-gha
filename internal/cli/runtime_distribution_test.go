@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
@@ -80,6 +81,107 @@ func TestDarwinUploadRequiresLinuxDistributionForLinuxWorkflow(t *testing.T) {
 	}
 	if len(runner.uploaded) != 0 {
 		t.Fatalf("missing runtime reached artifact upload: %#v", runner.uploaded)
+	}
+}
+
+func TestRequiredRuntimePlatformsExcludesFailedJobDependencyClosure(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "mixed.yml")
+	source := []byte(`on: push
+jobs:
+  safe:
+    runs-on: ubuntu-latest
+    steps: [{run: echo safe}]
+  deploy:
+    runs-on: macos-latest
+    environment: production
+    steps: [{run: echo deploy}]
+  blocked:
+    needs: deploy
+    runs-on: macos-latest
+    steps: [{run: echo blocked}]
+`)
+	if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := map[string]compiler.RunnerTarget{
+		"ubuntu-latest": {Queue: "linux", Platform: compiler.PlatformLinuxAMD64},
+		"macos-latest":  {Queue: "macos", Platform: compiler.PlatformDarwinARM64},
+	}
+	platforms, admissionErr, err := requiredRuntimePlatforms(t.Context(), workflowPath, source, event, "dev", "sha256:"+strings.Repeat("1", 64), "", targets, agentRunnerResolution{}, nil, nil, compiler.VariableSources{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admissionErr != nil {
+		t.Fatal(admissionErr)
+	}
+	if !platforms[compiler.PlatformLinuxAMD64] || platforms[compiler.PlatformDarwinARM64] || len(platforms) != 1 {
+		t.Fatalf("required runtime platforms = %#v", platforms)
+	}
+}
+
+func TestRequiredRuntimePlatformsExcludesLaterActionFailure(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), ".github", "workflows", "mixed.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte(`on: push
+jobs:
+  safe:
+    runs-on: ubuntu-latest
+    steps: [{run: echo safe}]
+  broken:
+    runs-on: macos-latest
+    steps:
+      - uses: ./.github/actions/missing
+`)
+	if err := os.WriteFile(workflowPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := map[string]compiler.RunnerTarget{
+		"ubuntu-latest": {Queue: "linux", Platform: compiler.PlatformLinuxAMD64},
+		"macos-latest":  {Queue: "macos", Platform: compiler.PlatformDarwinARM64},
+	}
+	platforms, admissionErr, err := requiredRuntimePlatforms(t.Context(), workflowPath, source, event, "dev", "sha256:"+strings.Repeat("1", 64), "", targets, agentRunnerResolution{}, nil, nil, compiler.VariableSources{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admissionErr != nil {
+		t.Fatal(admissionErr)
+	}
+	if !platforms[compiler.PlatformLinuxAMD64] || platforms[compiler.PlatformDarwinARM64] || len(platforms) != 1 {
+		t.Fatalf("required runtime platforms = %#v", platforms)
+	}
+}
+
+func TestRequiredRuntimePlatformsFailsClosedBeforePartialAdmission(t *testing.T) {
+	bundle := compiler.Bundle{
+		IR: compiler.IR{Jobs: []compiler.JobInstance{
+			{Key: "safe", Platform: compiler.PlatformLinuxAMD64},
+			{Key: "rejected", Platform: compiler.PlatformDarwinARM64},
+		}},
+		JobOutcomes: map[string]compiler.JobOutcome{"safe": compiler.JobPlanned, "rejected": compiler.JobPlanned},
+		Plans: []compiler.PlanArtifact{
+			{Job: plan.Job{Target: plan.Target{StepKey: "safe"}}},
+			{Job: plan.Job{Workflow: plan.Workflow{LogicalJobID: "rejected"}, Target: plan.Target{StepKey: "rejected"}, RequiredCapabilities: []string{"privileged-container"}}},
+		},
+	}
+	platforms, admissionErr, err := runtimePlatformsForBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admissionErr == nil {
+		t.Fatal("requiredRuntimePlatforms() admission error = nil")
+	}
+	if len(platforms) != 0 {
+		t.Fatalf("partial admission requested runtime platforms = %#v, want fail-closed empty set", platforms)
 	}
 }
 

@@ -239,6 +239,33 @@ func TestEmitMarksToleratedJobsAsSoftFailures(t *testing.T) {
 	}
 }
 
+func TestEmitMarksToleratedPreparationFailuresAsSoftFailures(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep: "importer",
+		Jobs: []Job{{
+			Key: "report", Label: "Report", SoftFail: true,
+			Failure: &Failure{AnnotationPath: "annotation", MessagePath: "message", Summary: "could not compile"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Command  string `yaml:"command"`
+			SoftFail []struct {
+				ExitStatus int `yaml:"exit_status"`
+			} `yaml:"soft_fail"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 || !strings.HasSuffix(document.Steps[0].Command, "exit 78") || len(document.Steps[0].SoftFail) != 1 || document.Steps[0].SoftFail[0].ExitStatus != ContinueOnErrorExitStatus {
+		t.Fatalf("preparation failure pipeline = %s", output)
+	}
+}
+
 func TestEmitAggregateWorkflowGroups(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep:       "importer",
@@ -616,6 +643,95 @@ exit 1` || !step.Checkout.Skip {
 	}
 }
 
+func TestEmitAggregateExpandedJobPreparationFailures(t *testing.T) {
+	failure := func(name string) *Failure {
+		return &Failure{
+			AnnotationPath: ".buildkite-gha/failures/annotations/" + name + ".html",
+			MessagePath:    ".buildkite-gha/failures/messages/" + name + ".txt",
+			Summary:        name + " could not be compiled",
+		}
+	}
+	output, err := Emit(Pipeline{
+		CompilerStep: "importer", EventProvider: "github",
+		Workflows: []Workflow{{
+			GroupLabel: "Reusable CI", CheckName: "Reusable CI", GroupKey: "workflow-reusable", Event: "push",
+			Jobs: []Job{
+				{Key: "detect", Label: "call / Detect", CheckLabel: "call.detect", SkipReason: "Not run because another job in this workflow could not be compiled"},
+				{Key: "generator", Label: "call / Generator", CheckLabel: "call.generator", Dependencies: []string{"detect"}, Failure: failure("generator")},
+				{Key: "upload", Label: "call / Upload", CheckLabel: "call.upload", Dependencies: []string{"detect", "generator"}, Failure: failure("upload")},
+				{Key: "final", Label: "call / Final", CheckLabel: "call.final", Dependencies: []string{"detect", "generator", "upload"}, SkipReason: "Not run because a prerequisite job could not be compiled"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type dependency struct {
+		Step         string `yaml:"step"`
+		AllowFailure bool   `yaml:"allow_failure"`
+	}
+	var document struct {
+		Steps []struct {
+			Group     string `yaml:"group"`
+			DependsOn string `yaml:"depends_on"`
+			Steps     []struct {
+				Key       string       `yaml:"key"`
+				Skip      string       `yaml:"skip"`
+				Command   string       `yaml:"command"`
+				DependsOn []dependency `yaml:"depends_on"`
+				Plugins   []map[string]struct {
+					Download []struct {
+						From string `yaml:"from"`
+					} `yaml:"download"`
+				} `yaml:"plugins"`
+				Notify []struct {
+					GitHubCheck struct {
+						Name   string `yaml:"name"`
+						Output struct {
+							Title string `yaml:"title"`
+						} `yaml:"output"`
+					} `yaml:"github_check"`
+				} `yaml:"notify"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 || document.Steps[0].Group != ":github: workflow · Reusable CI" || document.Steps[0].DependsOn != "importer" || len(document.Steps[0].Steps) != 4 {
+		t.Fatalf("expanded preparation workflow = %#v\n%s", document.Steps, output)
+	}
+	detect, generator, upload, final := document.Steps[0].Steps[0], document.Steps[0].Steps[1], document.Steps[0].Steps[2], document.Steps[0].Steps[3]
+	if detect.Key != "detect" || detect.Skip == "" || detect.Command != "" || len(detect.Plugins) != 0 || detect.Notify[0].GitHubCheck.Name != "Reusable CI / call.detect (push)" {
+		t.Fatalf("independent skipped job = %#v", detect)
+	}
+	if generator.Key != "generator" || !strings.Contains(generator.Command, "exit 1") || len(generator.Plugins) != 1 || len(generator.DependsOn) != 1 || generator.DependsOn[0] != (dependency{Step: "detect", AllowFailure: true}) || generator.Notify[0].GitHubCheck.Output.Title != "Job could not be run" {
+		t.Fatalf("generator failure = %#v", generator)
+	}
+	if upload.Key != "upload" || len(upload.DependsOn) != 2 || upload.DependsOn[1] != (dependency{Step: "generator", AllowFailure: true}) || final.Key != "final" || final.Skip == "" || len(final.DependsOn) != 3 {
+		t.Fatalf("dependent preparation jobs = %#v / %#v", upload, final)
+	}
+	if strings.Contains(string(output), "run-job") || strings.Contains(string(output), "Prepare GitHub Actions runtime") {
+		t.Fatalf("preparation failure pipeline contains runnable job command:\n%s", output)
+	}
+}
+
+func TestEmitAllowsIndependentRunnableAndPreparationResultJobsTogether(t *testing.T) {
+	_, err := Emit(Pipeline{
+		CompilerStep: "importer", DistributionDigest: testDigest("distribution"), EventProvider: "github",
+		Workflows: []Workflow{{
+			GroupLabel: "CI", GroupKey: "workflow-ci", Event: "push", Condition: "true",
+			Jobs: []Job{
+				{Key: "runnable", Label: "Runnable", PlanDigest: testDigest("plan")},
+				{Key: "blocked", Label: "Blocked", SkipReason: "Workflow compilation failed"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Emit() error = %v", err)
+	}
+}
+
 func TestEmitAggregateWorkflowConcurrencyDependencies(t *testing.T) {
 	pipeline := Pipeline{
 		CompilerStep:       "importer",
@@ -677,6 +793,47 @@ func TestEmitAggregateWorkflowConcurrencyDependencies(t *testing.T) {
 				t.Fatalf("aggregate child %q retains importer dependency: %#v", step.Key, step.DependsOn)
 			}
 		}
+	}
+}
+
+func TestPreparationResultsDoNotWaitForWorkflowConcurrency(t *testing.T) {
+	pipeline := Pipeline{
+		CompilerStep: "importer", DistributionDigest: testDigest("distribution"), EventProvider: "github",
+		Workflows: []Workflow{{
+			GroupLabel: "CI", GroupKey: "workflow-ci", Event: "push", Condition: "true",
+			ConcurrencyGate: &ConcurrencyGate{Group: "buildkite-gha/concurrency/ci"},
+			Jobs: []Job{
+				{Key: "failed", Label: "Failed", Failure: &Failure{AnnotationPath: "annotation", MessagePath: "message", Summary: "could not compile"}},
+				{Key: "runnable", Label: "Runnable", PlanDigest: testDigest("runnable")},
+			},
+		}},
+	}
+	output, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Steps []struct {
+				Key       string `yaml:"key"`
+				DependsOn []struct {
+					Step string `yaml:"step"`
+				} `yaml:"depends_on"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	openKey, _ := concurrencyGateKeys("importer\x00workflow-ci", pipeline.Workflows[0].ConcurrencyGate.Group, pipeline.Workflows[0].Jobs)
+	dependencies := map[string][]string{}
+	for _, step := range document.Steps[0].Steps {
+		for _, dependency := range step.DependsOn {
+			dependencies[step.Key] = append(dependencies[step.Key], dependency.Step)
+		}
+	}
+	if slices.Contains(dependencies["failed"], openKey) || !slices.Contains(dependencies["runnable"], openKey) {
+		t.Fatalf("workflow concurrency dependencies = %#v\n%s", dependencies, output)
 	}
 }
 
