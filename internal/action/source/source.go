@@ -562,7 +562,11 @@ func fetchWithGit(ctx context.Context, cfg config, ref Reference, requestedRef s
 	}
 	cleanup = func() { _ = os.RemoveAll(root) }
 	repository := filepath.Join(root, "repository.git")
-	if err := runGit(ctx, cfg.git, "", io.Discard, "init", "--bare", "--quiet", repository); err != nil {
+	// An empty --template stops Git from copying the importer's init template
+	// (GIT_TEMPLATE_DIR or init.templateDir) into the private repository. A
+	// template can carry refs/replace entries, objects, grafts, and alternates
+	// that would substitute content for the pinned commit.
+	if err := runGit(ctx, cfg.git, "", io.Discard, "init", "--bare", "--quiet", "--template=", repository); err != nil {
 		cleanup()
 		if ctx.Err() != nil {
 			return "", func() {}, ctx.Err()
@@ -768,11 +772,13 @@ func runGit(ctx context.Context, executable, repository string, stdout io.Writer
 // checkout adapter: hooks are disabled, only HTTPS may reach the network so an
 // inherited URL rewrite cannot select another transport, redirects are not
 // followed so credentials stay with the requested host, received objects are
-// checked, and the credential helper receives the repository path so Buildkite
-// authorizes the exact repository. Credential helpers themselves are inherited
-// from the importer's Git configuration; nothing here supplies or captures one.
+// checked, replace refs never substitute objects for the pinned commit, and the
+// credential helper receives the repository path so Buildkite authorizes the
+// exact repository. Credential helpers themselves are inherited from the
+// importer's Git configuration; nothing here supplies or captures one.
 func gitBaseArgs() []string {
 	return []string{
+		"--no-replace-objects",
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "credential.interactive=false",
 		"-c", "credential.useHttpPath=true",
@@ -813,15 +819,18 @@ func runGitEnvironment(ctx context.Context, executable, repository string, stdou
 // and GIT_ALLOW_PROTOCOL take precedence over any http.* or protocol.*
 // configuration, the GIT_CONFIG_* variables inject configuration that is not
 // visible on the command line, GIT_EXEC_PATH selects the directory Git runs
-// remote helpers such as git-remote-https from, and the GIT_DIR family points
-// every command at another repository than the one created for the fetch.
-// boundedGitEnvironment discovers Git's compiled-in executable directory with
-// this environment and sets GIT_EXEC_PATH to its private mirror for the fetch.
+// remote helpers such as git-remote-https from, GIT_TEMPLATE_DIR seeds new
+// repositories with the importer's refs and objects, and the GIT_DIR family
+// points every command at another repository than the one created for the
+// fetch. boundedGitEnvironment discovers Git's compiled-in executable directory
+// with this environment and sets GIT_EXEC_PATH to its private mirror for the
+// fetch.
 func gitEnvironment() []string {
 	environment := os.Environ()
 	filtered := environment[:0]
 	for _, value := range environment {
 		if strings.HasPrefix(value, "GIT_EXEC_PATH=") ||
+			strings.HasPrefix(value, "GIT_TEMPLATE_DIR=") ||
 			strings.HasPrefix(value, "GIT_DIR=") ||
 			strings.HasPrefix(value, "GIT_COMMON_DIR=") ||
 			strings.HasPrefix(value, "GIT_WORK_TREE=") ||

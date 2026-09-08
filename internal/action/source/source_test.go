@@ -966,6 +966,73 @@ func TestGitRepositorySourceRejectsMutableRefDrift(t *testing.T) {
 	}
 }
 
+// TestGitRepositorySourceIgnoresInheritedInitTemplates covers an importer init
+// template (init.templateDir or GIT_TEMPLATE_DIR) that seeds new repositories
+// with a refs/replace entry and a replacement commit for the fetched commit.
+// The archive must contain the pinned commit's tree, not the replacement.
+func TestGitRepositorySourceIgnoresInheritedInitTemplates(t *testing.T) {
+	const original = "on: workflow_call\njobs: {}\n"
+	git, work, remote, commit := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": original,
+	})
+	filename := filepath.Join(work, ".github", "workflows", "ci.yml")
+	if err := os.WriteFile(filename, []byte("on: workflow_call\n# replaced\njobs: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runSourceGit(t, git, work, "add", ".github/workflows/ci.yml")
+	runSourceGit(t, git, work, "commit", "--quiet", "-m", "replacement")
+	replacement := strings.TrimSpace(runSourceGit(t, git, work, "rev-parse", "HEAD"))
+	template := filepath.Join(t.TempDir(), "template")
+	if err := os.MkdirAll(filepath.Join(template, "refs", "replace"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(template, "refs", "replace", commit), []byte(replacement+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.CopyFS(filepath.Join(template, "objects"), os.DirFS(filepath.Join(work, ".git", "objects"))); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"init.templateDir", "GIT_TEMPLATE_DIR"} {
+		t.Run(name, func(t *testing.T) {
+			if name == "GIT_TEMPLATE_DIR" {
+				t.Setenv("GIT_TEMPLATE_DIR", template)
+			} else {
+				runSourceGit(t, git, "", "config", "--global", "init.templateDir", template)
+				t.Cleanup(func() { runSourceGit(t, git, "", "config", "--global", "--unset", "init.templateDir") })
+			}
+			server := httptest.NewTLSServer(http.NotFoundHandler())
+			defer server.Close()
+			option := withGitFixtureSource(git, remote)
+			endpoint := WithTestEndpoints(server.URL, server.URL)
+			resolver, err := NewResolver(server.Client(), endpoint, option)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+			ref.RepositoryRoot = true
+			resolved, err := resolver.Resolve(t.Context(), ref)
+			if err != nil || resolved.Commit != commit {
+				t.Fatalf("Resolve() = %#v, %v", resolved, err)
+			}
+			store, err := NewStore(t.TempDir(), server.Client(), endpoint, option)
+			if err != nil {
+				t.Fatal(err)
+			}
+			materialized, err := store.Materialize(t.Context(), resolved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contents, err := os.ReadFile(filepath.Join(materialized.RepositoryRoot, ".github", "workflows", "ci.yml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(contents) != original {
+				t.Fatalf("archived workflow = %q, want the pinned commit's content %q", contents, original)
+			}
+		})
+	}
+}
+
 func TestGitRepositorySourceFailuresAreNonEnumeratingAndDoNotLeakOutput(t *testing.T) {
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -1011,6 +1078,7 @@ func TestGitRepositorySourceEnvironmentDisablesInteractionAndTracing(t *testing.
 	t.Setenv("GIT_CONFIG_VALUE_0", "false")
 	t.Setenv("GIT_CONFIG_GLOBAL", "/importer/.gitconfig")
 	t.Setenv("GIT_EXEC_PATH", "/importer/git-core")
+	t.Setenv("GIT_TEMPLATE_DIR", "/importer/git-template")
 	t.Setenv("GIT_DIR", "/importer/.git")
 	t.Setenv("GIT_COMMON_DIR", "/importer/.git")
 	t.Setenv("GIT_WORK_TREE", "/importer")
@@ -1039,7 +1107,7 @@ func TestGitRepositorySourceEnvironmentDisablesInteractionAndTracing(t *testing.
 			t.Errorf("Git environment retained policy override variable %s", key)
 		}
 	}
-	for _, key := range []string{"GIT_EXEC_PATH", "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_NAMESPACE"} {
+	for _, key := range []string{"GIT_EXEC_PATH", "GIT_TEMPLATE_DIR", "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_NAMESPACE"} {
 		if _, exists := environment[key]; exists {
 			t.Errorf("Git environment retained program or repository location variable %s", key)
 		}
