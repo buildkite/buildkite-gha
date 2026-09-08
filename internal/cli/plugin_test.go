@@ -55,7 +55,7 @@ func TestPluginTelemetryReportsUnprovenActionRuntime(t *testing.T) {
 			}
 			resolutions := make([]map[string]any, len(body.Requirements))
 			for i, requirement := range body.Requirements {
-				resolutions[i] = map[string]any{"id": requirement.ID, "error": map[string]string{"code": "unmapped_labels", "message": "No compatible runner is configured."}}
+				resolutions[i] = map[string]any{"id": requirement.ID, "target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"resolutions": resolutions})
 			return

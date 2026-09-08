@@ -97,7 +97,8 @@ func TestRunCompileResolvesEnvironmentsThroughAgent(t *testing.T) {
 }
 
 // agentEnvironmentsStub serves the Agent API endpoints upload contacts:
-// runner resolution, which reports every requirement unmapped;
+// runner resolution, which maps every requirement to the hosted Linux queue
+// (a server rejection would fail the job before environments are resolved);
 // github-actions/variables, which is absent (404); and
 // github-actions/environments, which rejects requests without the job token,
 // counts resolution requests, and answers each requested environment with a
@@ -127,7 +128,7 @@ func agentStub(t *testing.T, jobToken string, status int, variables http.Handler
 			}
 			resolutions := make([]map[string]any, len(body.Requirements))
 			for i, requirement := range body.Requirements {
-				resolutions[i] = map[string]any{"id": requirement.ID, "error": map[string]string{"code": "unmapped_labels", "message": "No compatible runner is configured."}}
+				resolutions[i] = map[string]any{"id": requirement.ID, "target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"resolutions": resolutions})
 			return
