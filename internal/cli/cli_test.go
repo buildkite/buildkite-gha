@@ -30,6 +30,71 @@ const (
 	stageResolution      = compiler.StageResolution
 )
 
+func TestRunEmptyIssueTypesNativeFixtures(t *testing.T) {
+	requireImporterHost(t)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "empty-types-importer")
+	// Exact workflows accepted by native GitHub in the September 2026 production
+	// verification, but rejected by the released importer before compilation.
+	for _, test := range []struct{ event, fixture string }{
+		{"issues", "empty-issues.yml"}, {"issue_comment", "empty-comment.yml"},
+	} {
+		t.Run(test.event, func(t *testing.T) {
+			source, err := os.ReadFile(filepath.Join("testdata", test.fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, types := range []string{"[]", "omitted", "[edited]", "[deleted]"} {
+				t.Run(types, func(t *testing.T) {
+					workflowSource := strings.Replace(string(source), "types: []", "types: "+types, 1)
+					if types == "omitted" {
+						workflowSource = strings.Replace(string(source), "    types: []\n", "", 1)
+					}
+					dir := t.TempDir()
+					workflowPath := filepath.Join(dir, test.fixture)
+					if err := os.WriteFile(workflowPath, []byte(workflowSource), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					var stdout, stderr bytes.Buffer
+					if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+						t.Fatalf("validate code = %d, stdout = %s, stderr = %s", code, &stdout, &stderr)
+					}
+					eventPath := writeUploadEvent(t, dir, test.event, "refs/heads/main", map[string]any{
+						"action": "edited", "issue": map[string]any{"number": 1, "title": "GHA production e2e 20260908-0337 regression"},
+						"comment": map[string]any{"id": 2},
+					})
+					stdout.Reset()
+					stderr.Reset()
+					if code := Run([]string{"compile", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+						t.Fatalf("compile code = %d, stdout = %s, stderr = %s", code, &stdout, &stderr)
+					}
+					// Upload selects workflows from the snapshot; compile emits jobs.
+					runner := &cliCaptureRunner{}
+					if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+						t.Fatalf("upload code = %d, stderr = %s", code, &stderr)
+					}
+					var pipeline struct {
+						Steps []struct {
+							Condition string `yaml:"if"`
+							Skip      any    `yaml:"skip"`
+						} `yaml:"steps"`
+					}
+					if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+						t.Fatal(err)
+					}
+					want := "(true)"
+					if types == "[edited]" || types == "[deleted]" {
+						want = `(true && ("edited" == "` + strings.Trim(types, "[]") + `"))`
+					}
+					if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != nil || pipeline.Steps[0].Condition != want {
+						t.Fatalf("unexpected snapshot selection: %#v", pipeline.Steps)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestRunValidateAndCompile(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -90,24 +155,6 @@ func TestRunValidateAndCompile(t *testing.T) {
 					t.Fatalf("report = %#v, want trigger failure containing %q", report, test.want)
 				}
 			})
-		}
-	})
-
-	t.Run("validate rejects empty issues activities", func(t *testing.T) {
-		workflow := filepath.Join(t.TempDir(), "issues.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  issues:\n    types: []\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		var stdout, stderr bytes.Buffer
-		if code := Run([]string{"validate", "--format", "json", workflow}, &stdout, &stderr, "dev"); code != 1 {
-			t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
-		}
-		var report compatibility.ProcessingReport
-		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
-			t.Fatal(err)
-		}
-		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || !strings.Contains(report.Diagnostics[0].Message, `"types" section should not be empty`) {
-			t.Fatalf("report = %#v", report)
 		}
 	})
 

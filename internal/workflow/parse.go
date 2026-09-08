@@ -53,7 +53,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, err
 	}
 	parsed, errs := actionlint.Parse(source)
-	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics)
+	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, emptyIssueTypesDiagnostics(&document))
 	if err := filterActionlintDiagnostics(path, errs, expectedDiagnostics); err != nil {
 		return nil, err
 	}
@@ -214,6 +214,27 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, fmt.Errorf("%s:%d:%d: concurrent step did not match the pinned actionlint syntax tree", path, position.Line, position.Column)
 	}
 	return owned, nil
+}
+
+// GitHub treats empty issues/issue_comment types as omitted. The pinned
+// actionlint parser already returns nil Types for these sequences, but also
+// reports an error. Accept only that diagnostic at each verified empty sequence,
+// leaving the source and all other diagnostics (including alias errors) intact.
+func emptyIssueTypesDiagnostics(document *yaml.Node) []expectedActionlintDiagnostic {
+	if len(document.Content) == 0 {
+		return nil
+	}
+	on := mappingValue(document.Content[0], "on")
+	var diagnostics []expectedActionlintDiagnostic
+	for _, event := range []string{"issues", "issue_comment"} {
+		types := mappingValue(mappingValue(on, event), "types")
+		if types != nil && types.Kind == yaml.SequenceNode && len(types.Content) == 0 {
+			diagnostics = append(diagnostics, expectedActionlintDiagnostic{
+				Position: nodePosition(types), Prefix: `"types" section should not be empty`,
+			})
+		}
+	}
+	return diagnostics
 }
 
 func triggerPosition(event actionlint.Event) Position {

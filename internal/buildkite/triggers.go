@@ -342,11 +342,11 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 				return fmt.Sprintf("Release activity %q does not match this workflow's release activity filters.", *snapshot.ReleaseAction), nil
 			}
 		case "issues":
-			if snapshot.IssuesAction != nil && trigger.Types != nil && !slices.Contains(trigger.Types, *snapshot.IssuesAction) {
+			if snapshot.IssuesAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.IssuesAction) {
 				return fmt.Sprintf("Issue activity %q does not match this workflow's issues activity filters.", *snapshot.IssuesAction), nil
 			}
 		case "issue_comment":
-			if snapshot.IssueCommentAction != nil && trigger.Types != nil && !slices.Contains(trigger.Types, *snapshot.IssueCommentAction) {
+			if snapshot.IssueCommentAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.IssueCommentAction) {
 				return fmt.Sprintf("Issue comment activity %q does not match this workflow's issue_comment activity filters.", *snapshot.IssueCommentAction), nil
 			}
 		}
@@ -616,11 +616,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		if expressions.IssuesAction == "null" {
 			return "", false, fmt.Errorf("issues event snapshot requires payload.action")
 		}
-		if t.Types == nil {
-			return expressions.EventPredicate, true, nil
-		}
 		if len(t.Types) == 0 {
-			return "", false, fmt.Errorf("issues types is explicitly empty")
+			return expressions.EventPredicate, true, nil
 		}
 		actions := make([]string, 0, len(t.Types))
 		for _, action := range t.Types {
@@ -640,11 +637,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		if expressions.IssueCommentAction == "null" {
 			return "", false, fmt.Errorf("issue_comment event snapshot requires payload.action")
 		}
-		if t.Types == nil {
-			return expressions.EventPredicate, true, nil
-		}
 		if len(t.Types) == 0 {
-			return "", false, fmt.Errorf("issue_comment types is explicitly empty")
+			return expressions.EventPredicate, true, nil
 		}
 		actions := make([]string, 0, len(t.Types))
 		for _, action := range t.Types {
