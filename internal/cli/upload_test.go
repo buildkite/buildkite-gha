@@ -2029,6 +2029,8 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"ci.yml":       "name: CI\n" + workflowSource,
 		"mismatch.yml": "name: Original\n" + workflowSource,
+		"ignore.yml":   "name: Ignore docs\non:\n  pull_request:\n    paths-ignore: [\"docs/**\"]\n" + workflowJobs,
+		"plain.yml":    "name: Unfiltered\non: pull_request\n" + workflowJobs,
 	})
 	runGit := func(args ...string) string {
 		t.Helper()
@@ -2053,8 +2055,7 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	runGit("add", "src/main.go")
 	runGit("commit", "-qm", "head")
 	head := runGit("rev-parse", "HEAD")
-	merge := runGit("commit-tree", head+"^{tree}", "-p", base, "-p", head, "-m", "merge")
-	if err := os.WriteFile(filepath.Join(repository, ".github", "workflows", "mismatch.yml"), []byte("name: Local mismatch\non: pull_request\n"+workflowJobs), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(repository, ".github", "workflows", "mismatch.yml"), []byte("name: Local mismatch\n"+workflowSource), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	webhook, err := json.Marshal(map[string]any{
@@ -2062,8 +2063,8 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 		"pull_request": map[string]any{
 			"base":             map[string]any{"ref": "main", "sha": base, "repo": map[string]any{"full_name": "buildkite/buildkite-gha"}},
 			"head":             map[string]any{"ref": "feature", "sha": head, "repo": map[string]any{"full_name": "contributor/buildkite-gha"}},
-			"mergeable":        true,
-			"merge_commit_sha": merge,
+			"mergeable":        nil,
+			"merge_commit_sha": nil,
 		},
 		"sender": map[string]any{"login": "octocat"},
 	})
@@ -2085,7 +2086,7 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	t.Setenv("BUILDKITE_GITHUB_EVENT", "pull_request")
 	runner := &cliCaptureRunner{webhook: webhook}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", ".github/workflows/ci.yml", ".github/workflows/mismatch.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+	if code := run([]string{"upload", ".github/workflows/ci.yml", ".github/workflows/mismatch.yml", ".github/workflows/ignore.yml", ".github/workflows/plain.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 	}
 	var pipeline struct {
@@ -2101,11 +2102,17 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 2 || pipeline.Steps[0].Group != ":github: workflow · CI" || strings.Contains(pipeline.Steps[0].Condition, "false") || len(pipeline.Steps[0].Steps) != 1 {
+	if len(pipeline.Steps) != 4 || pipeline.Steps[0].Group != ":github: workflow · CI" || strings.Contains(pipeline.Steps[0].Condition, "false") || len(pipeline.Steps[0].Steps) != 1 {
 		t.Fatalf("path-filter pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
-	if failure := pipeline.Steps[1]; failure.Label != ":github: workflow · Local mismatch" || !isGeneratedFailureCommand(failure.Command) || failure.Group != "" || len(failure.Steps) != 0 {
+	if failure := pipeline.Steps[2]; failure.Label != ":github: workflow · Local mismatch" || !isGeneratedFailureCommand(failure.Command) || failure.Group != "" || len(failure.Steps) != 0 {
 		t.Fatalf("workflow mismatch failure = %#v\n%s", failure, pipelineCommand.stdin)
+	}
+	for i, name := range map[int]string{1: "Ignore docs", 3: "Unfiltered"} {
+		step := pipeline.Steps[i]
+		if step.Group != ":github: workflow · "+name || len(step.Steps) != 1 || strings.Contains(step.Condition, "false") {
+			t.Fatalf("workflow %s should run: %#v", name, step)
+		}
 	}
 }
 
