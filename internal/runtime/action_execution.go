@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
@@ -1763,6 +1764,11 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutp
 	if err != nil {
 		return result, err
 	}
+	if lock.WorkspaceAlias != "" {
+		// Source-backed local actions stay lazy until an earlier composite step
+		// has populated their caller-workspace path.
+		return result, nil
+	}
 	actionProgram := actions.program(selector)
 	// The native adapters replace the verified action's lifecycle as one
 	// indivisible operation, so upstream metadata never classifies and no
@@ -1970,6 +1976,11 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandOutputProc
 		return result, err
 	}
 	action, actionLock = resolvedAction, &lock
+	if lock.WorkspaceAlias != "" {
+		if err := verifySourceBackedWorkspaceAction(workspace, lock, action.Path); err != nil {
+			return result, err
+		}
+	}
 	actionProgram = actions.program(selector)
 	if usesCheckoutAdapter(lock) {
 		inputs := evaluatedWith
@@ -2149,6 +2160,30 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandOutputProc
 		return result, err
 	}
 	return result, errUnsupportedFeature("action_ref", "", "action %q uses unsupported runtime %q", stepUses(step), actionRuntime)
+}
+
+func verifySourceBackedWorkspaceAction(workspace string, lock plan.ActionLock, sourcePath string) error {
+	localPath := lock.WorkspaceAlias + "/" + lock.Path
+	resolved, err := workspacePath(workspace, localPath)
+	if err != nil {
+		return fmt.Errorf("source-backed local action %q: %w", localPath, err)
+	}
+	info, err := os.Lstat(resolved)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("source-backed local action %q is unavailable in the workspace", localPath)
+	}
+	want, err := actionsource.DigestTree(sourcePath)
+	if err != nil {
+		return fmt.Errorf("digest immutable source-backed local action %q: %w", localPath, err)
+	}
+	got, err := actionsource.DigestTree(resolved)
+	if err != nil {
+		return fmt.Errorf("digest workspace source-backed local action %q: %w", localPath, err)
+	}
+	if got != want {
+		return fmt.Errorf("source-backed local action %q digest mismatch: immutable source has %s, workspace has %s", localPath, want, got)
+	}
+	return nil
 }
 
 func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, actionProgram *executionprogram.Action, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionLock *plan.ActionLock, actionStack []string) (Result, error) {

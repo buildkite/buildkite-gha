@@ -20,6 +20,8 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/program"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json"
@@ -40,6 +42,7 @@ var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}
 var serviceNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,254}$`)
 var githubRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 var githubWorkflowFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$`)
+var sourceWorkspaceAliasCaseFold = cases.Fold()
 
 // ValidContainerImageReference reports whether image is a supported literal
 // Docker image reference.
@@ -86,15 +89,16 @@ type ActionSelector struct {
 }
 
 type ActionLock struct {
-	ID           string                    `json:"id"`
-	Source       string                    `json:"source"`
-	Repository   string                    `json:"repository,omitempty"`
-	RequestedRef string                    `json:"requested_ref,omitempty"`
-	Commit       string                    `json:"commit,omitempty"`
-	Path         string                    `json:"path,omitempty"`
-	SourceDigest string                    `json:"source_digest"`
-	DockerImage  string                    `json:"docker_image,omitempty"`
-	Children     map[string]ActionSelector `json:"children,omitempty"`
+	ID             string                    `json:"id"`
+	Source         string                    `json:"source"`
+	Repository     string                    `json:"repository,omitempty"`
+	RequestedRef   string                    `json:"requested_ref,omitempty"`
+	Commit         string                    `json:"commit,omitempty"`
+	Path           string                    `json:"path,omitempty"`
+	WorkspaceAlias string                    `json:"workspace_alias,omitempty"`
+	SourceDigest   string                    `json:"source_digest"`
+	DockerImage    string                    `json:"docker_image,omitempty"`
+	Children       map[string]ActionSelector `json:"children,omitempty"`
 }
 
 type Compiler struct {
@@ -177,6 +181,7 @@ type Workflow struct {
 type RemoteWorkflowSource struct {
 	Repository   string `json:"repository"`
 	RequestedRef string `json:"requested_ref"`
+	ResolvedRef  string `json:"resolved_ref"`
 	Commit       string `json:"commit"`
 	SourceDigest string `json:"source_digest"`
 }
@@ -939,7 +944,7 @@ func validateRemoteWorkflowSource(workflow Workflow) error {
 		return nil
 	}
 	remote := workflow.Remote
-	if remote.Repository == "" || remote.Repository != strings.ToLower(remote.Repository) || len(remote.Repository) > 140 || remote.RequestedRef == "" || len(remote.RequestedRef) > 1024 || !utf8.ValidString(remote.RequestedRef) || hasControl(remote.RequestedRef) || !git.ValidObjectID(remote.Commit) || !digestPattern.MatchString(remote.SourceDigest) {
+	if remote.Repository == "" || remote.Repository != strings.ToLower(remote.Repository) || len(remote.Repository) > 140 || remote.RequestedRef == "" || len(remote.RequestedRef) > 1024 || !utf8.ValidString(remote.RequestedRef) || hasControl(remote.RequestedRef) || !git.ValidObjectID(remote.Commit) || remote.ResolvedRef != remote.Commit && remote.ResolvedRef != "refs/tags/"+remote.RequestedRef && remote.ResolvedRef != "refs/heads/"+remote.RequestedRef || !digestPattern.MatchString(remote.SourceDigest) {
 		return fmt.Errorf("job plan remote workflow has invalid immutable source provenance")
 	}
 	ref, err := source.Parse(workflow.Path)
@@ -1386,6 +1391,12 @@ func validateActionLocks(job Job) error {
 		if err := validateLockIdentity(lock); err != nil {
 			return fmt.Errorf("action lock %q: %w", lock.ID, err)
 		}
+		if lock.WorkspaceAlias != "" {
+			remote := job.Workflow.Remote
+			if remote == nil || lock.Repository != remote.Repository || lock.RequestedRef != remote.RequestedRef || lock.Commit != remote.Commit || lock.SourceDigest != remote.SourceDigest {
+				return fmt.Errorf("action lock %q workspace alias does not match remote workflow provenance", lock.ID)
+			}
+		}
 		for uses, child := range lock.Children {
 			if len(uses) == 0 || len(uses) > 2048 || !utf8.ValidString(uses) || hasControl(uses) || !actionLockIDPattern.MatchString(child.Lock) {
 				return fmt.Errorf("action lock %q has invalid child selector", lock.ID)
@@ -1504,11 +1515,11 @@ func validateActionLocks(job Job) error {
 func validateLockIdentity(lock ActionLock) error {
 	switch lock.Source {
 	case "workspace":
-		if lock.Repository != "" || lock.RequestedRef != "" || lock.Commit != "" || lock.Path != "" && !cleanActionPath(lock.Path) {
+		if lock.Repository != "" || lock.RequestedRef != "" || lock.Commit != "" || lock.WorkspaceAlias != "" || lock.Path != "" && !cleanActionPath(lock.Path) {
 			return fmt.Errorf("invalid workspace identity")
 		}
 	case "github":
-		if lock.Repository == "" || len(lock.Repository) > 140 || lock.Repository != strings.ToLower(lock.Repository) || lock.RequestedRef == "" || len(lock.RequestedRef) > 1024 || !utf8.ValidString(lock.RequestedRef) || hasControl(lock.RequestedRef) || !git.ValidObjectID(lock.Commit) || lock.Path != "" && !cleanActionPath(lock.Path) {
+		if lock.Repository == "" || len(lock.Repository) > 140 || lock.Repository != strings.ToLower(lock.Repository) || lock.RequestedRef == "" || len(lock.RequestedRef) > 1024 || !utf8.ValidString(lock.RequestedRef) || hasControl(lock.RequestedRef) || !git.ValidObjectID(lock.Commit) || lock.Path != "" && !cleanActionPath(lock.Path) || lock.WorkspaceAlias != "" && (lock.Path == "" || !ValidSourceWorkspaceAlias(lock.WorkspaceAlias)) {
 			return fmt.Errorf("invalid GitHub identity")
 		}
 		r, err := source.Parse(lock.Repository + "@x")
@@ -1524,7 +1535,16 @@ func validateLockIdentity(lock ActionLock) error {
 func validateTopLevelIdentity(uses string, lock ActionLock) error {
 	if after, ok := strings.CutPrefix(uses, "./"); ok {
 		path := after
-		if lock.Source != "workspace" || path != "" && !cleanActionPath(path) || lock.Path != path {
+		if path != "" && !cleanActionPath(path) {
+			return fmt.Errorf("local action reference does not match lock identity")
+		}
+		if lock.WorkspaceAlias != "" {
+			if lock.Source != "github" || path != lock.WorkspaceAlias+"/"+lock.Path {
+				return fmt.Errorf("local action reference does not match source-backed workspace identity")
+			}
+			return nil
+		}
+		if lock.Source != "workspace" || lock.Path != path {
 			return fmt.Errorf("local action reference does not match lock identity")
 		}
 		return nil
@@ -1539,7 +1559,16 @@ func validateTopLevelIdentity(uses string, lock ActionLock) error {
 func validateChildIdentity(parent ActionLock, uses string, child ActionLock) error {
 	if after, ok := strings.CutPrefix(uses, "./"); ok {
 		path := after
-		if path != "" && !cleanActionPath(path) || child.Source != "workspace" || child.Path != path {
+		if path != "" && !cleanActionPath(path) {
+			return fmt.Errorf("local child does not match workspace action identity")
+		}
+		if child.WorkspaceAlias != "" {
+			if parent.Source != "github" || child.Source != "github" || parent.Repository != child.Repository || parent.Commit != child.Commit || parent.SourceDigest != child.SourceDigest || path != child.WorkspaceAlias+"/"+child.Path {
+				return fmt.Errorf("local child does not match source-backed workspace identity")
+			}
+			return nil
+		}
+		if child.Source != "workspace" || child.Path != path {
 			return fmt.Errorf("local child does not match workspace action identity")
 		}
 		return nil
@@ -1561,6 +1590,33 @@ func cleanActionPath(value string) bool {
 		}
 	}
 	return true
+}
+
+// ValidSourceWorkspaceAlias reports whether an alias has one portable,
+// filesystem-stable representation across supported Linux and macOS workers.
+func ValidSourceWorkspaceAlias(value string) bool {
+	if value == "" || len(value) > 255 || value == "." || value == ".." || strings.EqualFold(value, ".git") {
+		return false
+	}
+	for i := range len(value) {
+		if value[i] < 0x20 || value[i] > 0x7e || value[i] == '/' || value[i] == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+// EqualSourceWorkspaceAlias compares an immutable portable alias with a
+// checkout spelling using the canonical normalization and full case folding that
+// can make distinct strings name the same directory on macOS.
+func EqualSourceWorkspaceAlias(alias, value string) bool {
+	if alias == "" || len(value) > 255 {
+		return false
+	}
+	canonical := func(value string) string {
+		return norm.NFD.String(sourceWorkspaceAliasCaseFold.String(norm.NFD.String(value)))
+	}
+	return canonical(alias) == canonical(value)
 }
 
 func hasControl(value string) bool {

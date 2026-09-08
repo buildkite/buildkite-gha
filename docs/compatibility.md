@@ -327,6 +327,8 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 **🟡 Supported subset.** Calls may use a local path or a literal public GitHub reference such as `owner/repository/.github/workflows/ci.yml@v1`. A public reference resolves once per operation to an immutable commit. Nested `./.github/workflows/...` calls resolve in that pinned repository.
 
+Like GitHub, a `./...` action inside a remote reusable workflow resolves in the caller job's workspace, not relative to the called workflow file. A remote workflow may check out its own pinned repository into a portable, top-level ASCII directory and then invoke a local action there. Buildkite binds that action to the called workflow's immutable repository source, rewrites the matching checkout to the exact commit, verifies the workspace copy against the source, and executes the verified source copy.
+
 **✅ Supported:**
 
 - Local `./.github/workflows/...` paths.
@@ -1273,6 +1275,8 @@ The adapter checks out a detached commit or static branch from the event reposit
 
 An explicit input is accepted only when the exact snapshotted contract declares it, or when the v7.0.1 fallback contract declares it for an unknown commit. The following value restrictions then apply:
 
+The table below describes event-repository checkouts. The [source-backed reusable-workflow checkout](#reusable-workflows) is the only exception: its repository, ref, and path must match immutable workflow provenance and a local-action alias. A tag checkout must use the exact `refs/tags/...` ref or commit; Buildkite rejects the bare tag because `actions/checkout` gives a same-named branch precedence. Buildkite discards its `token` input and fetches the exact commit anonymously.
+
 | Input | Supported values |
 | --- | --- |
 | `repository` | Omitted, or the event `owner/repo`. |
@@ -1329,7 +1333,7 @@ Sparse checkout applies `blob:none` automatically unless `filter` is explicit. C
 
 See the [security model](security.md#checkout-and-submodules) for credential, Git, and job-isolation boundaries.
 
-Alternate repositories, tags, non-event dynamic commits, GitHub Enterprise Server, credential persistence, and existing-directory reuse remain unsupported. Commit and branch checkouts remain detached and confined to the event repository.
+Outside the source-backed reusable-workflow exception, alternate repositories, tags, non-event dynamic commits, GitHub Enterprise Server, credential persistence, and existing-directory reuse remain unsupported. Commit and branch checkouts remain detached and confined to the event repository.
 
 ### Upload artifact action
 

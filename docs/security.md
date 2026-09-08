@@ -76,7 +76,13 @@ authority; private images are unsupported.
 - Public actions and reusable workflows resolve once per operation to an
   immutable commit and repository digest.
 - Plans bind the digest of each selected workflow file.
+- Plans retain the branch or tag namespace of a public reusable workflow when
+  one resolved.
 - Runtime jobs do not load remote workflow YAML from the caller workspace.
+- Source-checked local actions in a public reusable workflow use the same
+  provenance: the runtime verifies the caller-workspace alias against the
+  immutable action directory, then executes the verified source copy. See
+  [Reusable workflows](compatibility.md#reusable-workflows).
 - Path-filter admission uses reserved linked-webhook data only after matching
   it to the Buildkite repository, commit, workflow, and bounded local Git
   history. Missing, shallow, ambiguous, or mismatched evidence blocks
@@ -117,7 +123,7 @@ manifests. A missing or changed manifest stops the job.
 
 | Credential | Boundary |
 | --- | --- |
-| Repository checkout | The native adapter checks the event repository and exact commit. Buildkite authorizes private access. Credentials apply only to Git commands and are not persisted. |
+| Repository checkout | The native adapter checks the event repository and exact commit. A source-checked public reusable workflow may instead anonymously check out its provenance-bound public repository at the exact commit. Buildkite authorizes private access only for the event repository. Credentials apply only to Git commands and are not persisted. |
 | `GITHUB_TOKEN` | A short-lived token for the event repository. Buildkite enforces the top-level workflow permission map and build provenance. The token is not ambient. |
 | Cache token | A fresh job-bound token for each compatible JavaScript or Docker action lifecycle. Shell steps do not receive it. |
 | Workflow secrets | Static names resolve with `buildkite-agent secret get` in the destination job. Buildkite Secret access policy is the authority. |
