@@ -31,6 +31,10 @@ const (
 	// CheckoutFallbackContractRelease identifies the stable contract used for
 	// immutable commits absent from the frozen per-commit snapshot.
 	CheckoutFallbackContractRelease = "v7.0.1"
+
+	// The bounded adapter accepts 20 input names. A source checkout may also
+	// author token, which is discarded before adapter validation.
+	maxCheckoutInputNames = 21
 )
 
 var checkoutCommits = map[string]string{
@@ -64,7 +68,7 @@ type checkoutInputRule struct {
 var checkoutInputRules = map[string]checkoutInputRule{
 	"repository": {strings.EqualFold},
 	"ref": {func(value, _ string) bool {
-		return value == "" || git.ValidObjectID(value) || validCheckoutBranch(value)
+		return value == "" || git.ValidObjectID(value) || ValidCheckoutBranch(value)
 	}},
 	"fetch-depth": {func(value, _ string) bool {
 		depth, err := strconv.ParseUint(value, 10, 31)
@@ -179,15 +183,13 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 	if !exact && !git.ValidObjectID(commit) {
 		return versionError("actions/checkout", "native adapter", commit, supportedCheckoutContracts())
 	}
+	if err := ValidateCheckoutInputNames(inputs); err != nil {
+		return err
+	}
 	names := sortedNames(inputs)
-	seen := make(map[string]bool, len(names))
 	for _, name := range names {
 		value := inputs[name]
 		normalized := strings.ToLower(name)
-		if seen[normalized] {
-			return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
-		}
-		seen[normalized] = true
 		if !contract.declaresInput(normalized) {
 			return fmt.Errorf("explicit input %q is unsupported by this actions/checkout release", name)
 		}
@@ -202,7 +204,24 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 	return nil
 }
 
-func validCheckoutBranch(value string) bool {
+// ValidateCheckoutInputNames rejects names whose case-insensitive lookup would be ambiguous.
+func ValidateCheckoutInputNames(inputs map[string]string) error {
+	if len(inputs) > maxCheckoutInputNames {
+		return fmt.Errorf("more than %d explicit checkout inputs is unsupported", maxCheckoutInputNames)
+	}
+	names := sortedNames(inputs)
+	for index, name := range names {
+		for _, previous := range names[:index] {
+			if strings.EqualFold(name, previous) {
+				return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidCheckoutBranch reports whether value is a bounded branch-like Git ref.
+func ValidCheckoutBranch(value string) bool {
 	if after, ok := strings.CutPrefix(value, "refs/heads/"); ok {
 		value = after
 	} else if strings.HasPrefix(value, "refs/") {
