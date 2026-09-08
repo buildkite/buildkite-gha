@@ -127,8 +127,8 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	if artifactCommand.name != "buildkite-agent" || !slices.Equal(artifactCommand.args, wantArtifactArgs) {
 		t.Fatalf("artifact command = %#v, want cwd %q and args %#v", artifactCommand, root, wantArtifactArgs)
 	}
-	if len(runner.uploaded) != 4 {
-		t.Fatalf("uploaded artifacts = %#v, want distribution and three plans", runner.uploaded)
+	if len(runner.uploaded) != 5 {
+		t.Fatalf("uploaded artifacts = %#v, want distribution, event, and three plans", runner.uploaded)
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatalf("temporary artifact root still exists: %v", err)
@@ -183,7 +183,7 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 		}
 		if !strings.HasPrefix(step.Command, "set -euo pipefail\n") ||
 			!strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
-			!strings.Contains(step.Command, `--step 'shell-upload-importer'`) ||
+			!strings.Contains(step.Command, "--step '"+cliTestJobID+"'") ||
 			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
 			!strings.Contains(step.Command, `sha256sum "$plan"`) ||
 			!strings.Contains(step.Command, `sudo -n --preserve-env --user runner`) ||
@@ -259,8 +259,8 @@ func TestRunUploadPublishesMixedRuntimeDistributions(t *testing.T) {
 			artifactUploads[command.args[2]]++
 		}
 	}
-	if len(runner.uploaded) != 4 {
-		t.Fatalf("uploaded artifact count = %d, want two runtimes and two plans", len(runner.uploaded))
+	if len(runner.uploaded) != 5 {
+		t.Fatalf("uploaded artifact count = %d, want two runtimes, event, and two plans", len(runner.uploaded))
 	}
 	for path, count := range artifactUploads {
 		if count != 1 {
@@ -270,7 +270,7 @@ func TestRunUploadPublishesMixedRuntimeDistributions(t *testing.T) {
 
 	planRuntime := map[string]string{}
 	for path, contents := range runner.uploaded {
-		if !strings.HasSuffix(path, ".json") {
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			continue
 		}
 		job, err := plan.Decode(contents)
@@ -636,7 +636,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 	}
 	planCount := 0
 	for path, contents := range runner.uploaded {
-		if !strings.HasSuffix(path, ".json") {
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			continue
 		}
 		job, err := plan.Decode(contents)
@@ -760,7 +760,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	}
 	planCount := 0
 	for path := range runner.uploaded {
-		if strings.HasSuffix(path, ".json") {
+		if strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			planCount++
 		}
 	}
@@ -1002,7 +1002,7 @@ func TestRunUploadIsolatesExplicitEffectiveEventsBeforeCompilation(t *testing.T)
 				t.Fatalf("stdout = %q", stdout.String())
 			}
 			for path, contents := range runner.uploaded {
-				if !strings.HasSuffix(path, ".json") {
+				if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 					continue
 				}
 				job, err := plan.Decode(contents)
@@ -2347,7 +2347,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	}
 	compiledReusable := false
 	for path, contents := range runner.uploaded {
-		if !strings.HasSuffix(path, ".json") {
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			continue
 		}
 		job, err := plan.Decode(contents)
@@ -2439,7 +2439,7 @@ func TestRunUploadUsesExplicitTargetQueueAndRunnerUserDefault(t *testing.T) {
 
 	planCount := 0
 	for path, contents := range runner.uploaded {
-		if !strings.HasSuffix(path, ".json") {
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			continue
 		}
 		job, err := plan.Decode(contents)
@@ -2682,7 +2682,7 @@ func TestRunUploadDerivesOriginEvent(t *testing.T) {
 	}
 }
 
-func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
+func TestRunUploadRetainsWebhookOutsideJobPlans(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "webhook.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-${{ github.event.marker }}\n    steps:\n      - run: echo selected\n"), 0o600); err != nil {
@@ -2698,7 +2698,7 @@ func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
 	t.Setenv("BUILDKITE_BUILD_AUTHOR", "Build Author")
 	t.Setenv("BUILDKITE_GITHUB_EVENT", "pull_request")
-	rawSecret := "raw-webhook-value-must-not-be-retained"
+	rawSecret := "raw-webhook-value-must-not-be-logged"
 	runner := &cliCaptureRunner{webhook: fmt.Appendf(nil, "{\"action\":\"opened\",\"marker\":\"latest\",\"private\":\"%s\",\"pull_request\":{\"base\":{\"ref\":\"main\"}},\"ref\":\"refs/heads/trigger\",\"after\":\"%s\",\"repository\":{\"full_name\":\"other/trigger\"},\"sender\":{\"login\":\"octocat\"}}", rawSecret, strings.Repeat("b", 40))}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"upload", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
@@ -2707,7 +2707,10 @@ func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 	if len(runner.commands) == 0 || !slices.Equal(runner.commands[0].args, []string{"meta-data", "get", "buildkite:webhook"}) {
 		t.Fatalf("commands = %#v, want metadata read first", runner.commands)
 	}
-	metadataReads, planCount := 0, 0
+	if strings.Contains(stdout.String()+stderr.String(), rawSecret) {
+		t.Fatal("webhook payload leaked to logs")
+	}
+	metadataReads, planCount, eventCount := 0, 0, 0
 	for _, command := range runner.commands {
 		if slices.Equal(command.args, []string{"meta-data", "get", "buildkite:webhook"}) {
 			metadataReads++
@@ -2717,7 +2720,14 @@ func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 		}
 	}
 	for path, contents := range runner.uploaded {
-		if !strings.HasSuffix(path, ".json") {
+		if strings.HasPrefix(path, ".buildkite-gha/events/") {
+			eventCount++
+			if !bytes.Contains(contents, []byte(rawSecret)) {
+				t.Fatal("event artifact omitted original payload")
+			}
+			continue
+		}
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			continue
 		}
 		if bytes.Contains(contents, []byte(rawSecret)) {
@@ -2728,19 +2738,19 @@ func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 			t.Fatal(err)
 		}
 		planCount++
-		if job.Event.Name != "pull_request" || job.Event.Repository != "buildkite/buildkite-gha" || job.Event.Ref != "refs/heads/executed" || job.Event.SHA != sha || job.Event.Actor != "octocat" {
+		if !job.Event.PayloadFile || !job.Event.PayloadArtifact || job.Event.Name != "pull_request" || job.Event.Repository != "buildkite/buildkite-gha" || job.Event.Ref != "refs/heads/executed" || job.Event.SHA != sha || job.Event.Actor != "octocat" {
 			t.Fatalf("webhook plan = %#v", job)
 		}
 	}
-	if metadataReads != 1 || planCount != 1 {
-		t.Fatalf("metadata reads = %d, plans = %d", metadataReads, planCount)
+	if metadataReads != 1 || planCount != 1 || eventCount != 1 {
+		t.Fatalf("metadata reads = %d, plans = %d, events = %d", metadataReads, planCount, eventCount)
 	}
 }
 
 func TestRunUploadStoresRuntimeEventOnceForExactImporterJob(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "runtime-event.yml")
-	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        part: [one, two]\n    steps:\n      - run: echo '${{ toJSON(github.event) }}'\n"), 0o600); err != nil {
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        part: [one, two]\n    steps:\n      - run: test -s \"$GITHUB_EVENT_PATH\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sha := strings.Repeat("a", 40)
@@ -2772,7 +2782,7 @@ func TestRunUploadStoresRuntimeEventOnceForExactImporterJob(t *testing.T) {
 				t.Fatalf("plan %q embedded the event payload", path)
 			}
 			job, err := plan.Decode(contents)
-			if err != nil || !job.Event.PayloadArtifact {
+			if err != nil || !job.Event.PayloadArtifact || !job.Event.PayloadFile {
 				t.Fatalf("plan event artifact marker = %#v, %v", job.Event, err)
 			}
 		}
@@ -2793,6 +2803,7 @@ func TestRunUploadStoresRuntimeEventOnceForExactImporterJob(t *testing.T) {
 
 func TestRunUploadRejectsInvalidWebhookMetadata(t *testing.T) {
 	requireImporterHost(t)
+	t.Setenv("BUILDKITE_JOB_ID", "") // Exercise stderr reporting without annotations.
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "webhook-importer")
@@ -2971,7 +2982,7 @@ func TestRunUploadAllowsCompilerVerifiedLocalDockerfileAction(t *testing.T) {
 	}
 	var job plan.Job
 	for path, contents := range runner.uploaded {
-		if !strings.HasSuffix(path, ".json") {
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			continue
 		}
 		decoded, err := plan.Decode(contents)

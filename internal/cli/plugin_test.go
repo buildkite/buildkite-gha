@@ -274,7 +274,7 @@ func TestPluginUsesPipelineTriggerPullRequestIdentity(t *testing.T) {
 				t.Fatalf("run() code/stdout/stderr = %d / %q / %q, want an uploaded PR job", code, stdout.String(), stderr.String())
 			}
 			for path, contents := range runner.uploaded {
-				if !strings.HasSuffix(path, ".json") {
+				if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 					continue
 				}
 				job, err := plan.Decode(contents)
@@ -1302,7 +1302,7 @@ func TestPluginCarriesReleaseCommitIntoPlans(t *testing.T) {
 			}
 			found := false
 			for path, source := range runner.uploaded {
-				if !strings.HasSuffix(path, ".json") {
+				if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 					continue
 				}
 				job, err := plan.Decode(source)

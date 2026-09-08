@@ -43,6 +43,7 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 	}
 	defer cleanup()
 	options := compiler.DefaultOptions()
+	options.EventFile = true // --event-path supplies the caller's event payload.
 	options.RepositorySource = repositorySource
 	// Environments resolve only through the job-scoped Agent API, so compile
 	// resolves them when it runs inside a Buildkite job and otherwise leaves

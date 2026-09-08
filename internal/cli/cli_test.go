@@ -634,6 +634,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 }
 
 func TestCommandsKeepValidatedRuntimeMatrixIncompatibleWithoutUpload(t *testing.T) {
+	t.Setenv("BUILDKITE_JOB_ID", "")
 	workflow := filepath.Join(t.TempDir(), "dynamic.yml")
 	if err := os.WriteFile(workflow, []byte(`on: push
 jobs:

@@ -206,15 +206,16 @@ func compileHosted(ctx context.Context, workflowPath string, workflowSource, eve
 }
 
 func compileHostedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, agentRunnerResolution{}, runtimeDistributions, "", nil, actionCacheDir, sharedActionSource, actionAuthentication, nil, compiler.VariableSources{})
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, agentRunnerResolution{}, runtimeDistributions, "", nil, actionCacheDir, sharedActionSource, actionAuthentication, nil, compiler.VariableSources{}, false)
 }
 
 func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, agentRunnerResolution{}, runtimeDistributions, stepKeyNamespace, oidc, "", nil, actionAuthentication, nil, compiler.VariableSources{})
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, agentRunnerResolution{}, runtimeDistributions, stepKeyNamespace, oidc, "", nil, actionAuthentication, nil, compiler.VariableSources{}, false)
 }
 
-func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerResolution agentRunnerResolution, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication, environmentSource compiler.EnvironmentSource, vars compiler.VariableSources) (hostedCompilation, error) {
+func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerResolution agentRunnerResolution, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication, environmentSource compiler.EnvironmentSource, vars compiler.VariableSources, eventFile bool) (hostedCompilation, error) {
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
+	options.EventFile = eventFile
 	applyRunnerResolution(&options, runnerResolution)
 	options.StepKeyNamespace = stepKeyNamespace
 	options.OIDC = oidc
