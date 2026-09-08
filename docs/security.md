@@ -69,14 +69,16 @@ configuration, and environment. Each invocation allows only the HTTPS
 transport, refuses redirects, verifies TLS, and checks received objects. These
 values are pinned for the exact repository URL, and Git environment variables
 that would relax them, such as `GIT_SSL_NO_VERIFY` and `GIT_ALLOW_PROTOCOL`,
-are removed, so inherited configuration cannot weaken them. The importer expands the URL with
-`git ls-remote --get-url` before fetching and stops if an inherited
-`url.<base>.insteadOf` rewrite changed it, so the request and the credential
-helper lookup stay on `github.com`. The Buildkite Agent
-repository-provider helper requests access for the exact repository; operators
-can also configure broader credentials. Denied repositories, refs, paths, and
-tenants remain indistinguishable from missing sources. Private action source
-access is separate and remains unsupported.
+are removed, so inherited configuration cannot weaken them. `GIT_EXEC_PATH` and
+the `GIT_DIR` family are also removed, so Git runs its remote helpers from its
+own installation and writes only to the private repository created for the
+fetch. The importer expands the URL with `git ls-remote --get-url` before
+fetching and stops if an inherited `url.<base>.insteadOf` rewrite changed it,
+so the request and the credential helper lookup stay on `github.com`. The
+Buildkite Agent repository-provider helper requests access for the exact
+repository; operators can also configure broader credentials. Denied
+repositories, refs, paths, and tenants remain indistinguishable from missing
+sources. Private action source access is separate and remains unsupported.
 
 This design reuses ambient importer Git authority instead of minting a
 workflow-path-scoped credential. Access is repository-wide: enabling it allows

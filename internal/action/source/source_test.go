@@ -1010,6 +1010,14 @@ func TestGitRepositorySourceEnvironmentDisablesInteractionAndTracing(t *testing.
 	t.Setenv("GIT_CONFIG_KEY_0", "http.https://github.com/o/r.git.sslVerify")
 	t.Setenv("GIT_CONFIG_VALUE_0", "false")
 	t.Setenv("GIT_CONFIG_GLOBAL", "/importer/.gitconfig")
+	t.Setenv("GIT_EXEC_PATH", "/importer/git-core")
+	t.Setenv("GIT_DIR", "/importer/.git")
+	t.Setenv("GIT_COMMON_DIR", "/importer/.git")
+	t.Setenv("GIT_WORK_TREE", "/importer")
+	t.Setenv("GIT_OBJECT_DIRECTORY", "/importer/.git/objects")
+	t.Setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/importer/.git/objects")
+	t.Setenv("GIT_INDEX_FILE", "/importer/.git/index")
+	t.Setenv("GIT_NAMESPACE", "importer")
 
 	environment := make(map[string]string)
 	for _, entry := range gitEnvironment() {
@@ -1030,6 +1038,67 @@ func TestGitRepositorySourceEnvironmentDisablesInteractionAndTracing(t *testing.
 		if _, exists := environment[key]; exists {
 			t.Errorf("Git environment retained policy override variable %s", key)
 		}
+	}
+	for _, key := range []string{"GIT_EXEC_PATH", "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_NAMESPACE"} {
+		if _, exists := environment[key]; exists {
+			t.Errorf("Git environment retained program or repository location variable %s", key)
+		}
+	}
+}
+
+// TestGitRepositorySourceEnvironmentCannotReplaceRemoteHelper covers an
+// importer environment whose GIT_EXEC_PATH names a directory with a replacement
+// git-remote-https. The bounded fetch must run the helper from Git's compiled-in
+// executable directory instead, so the replacement is never executed.
+func TestGitRepositorySourceEnvironmentCannotReplaceRemoteHelper(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	marker := filepath.Join(root, "replacement-ran")
+	execPath := filepath.Join(root, "git-core")
+	if err := os.Mkdir(execPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := "#!/bin/sh\n: > '" + marker + "'\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(execPath, "git-remote-https"), []byte(helper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_EXEC_PATH", execPath)
+
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	remote := server.URL + "/o/r.git"
+	scratch := t.TempDir()
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", scratch)
+	args := append(gitRemoteArgs(remote), "fetch", "--quiet", "--", remote, "main")
+	if err := runGitEnvironment(t.Context(), git, scratch, io.Discard, io.Discard, os.Environ(), args...); err == nil {
+		t.Fatal("fetch through the replacement helper succeeded")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("GIT_EXEC_PATH should select the replacement helper without the filter: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git), func(c *config) error {
+		c.gitTestRemoteBase = server.URL + "/"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) {
+		t.Fatalf("Resolve() error = %v, want non-enumerating denial", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bounded fetch ran the replacement git-remote-https from the inherited GIT_EXEC_PATH (stat error %v)", err)
 	}
 }
 

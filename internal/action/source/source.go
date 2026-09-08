@@ -723,8 +723,7 @@ func boundedGitEnvironment(ctx context.Context, executable, root string, limit i
 	environment := gitEnvironment()
 	filtered := environment[:0]
 	for _, value := range environment {
-		if strings.HasPrefix(value, "GIT_EXEC_PATH=") ||
-			strings.HasPrefix(value, "BUILDKITE_GHA_GIT_EXECUTABLE=") ||
+		if strings.HasPrefix(value, "BUILDKITE_GHA_GIT_EXECUTABLE=") ||
 			strings.HasPrefix(value, "BUILDKITE_GHA_GIT_MAX_INPUT_SIZE=") ||
 			strings.HasPrefix(value, "LC_ALL=") ||
 			strings.HasPrefix(value, "LANGUAGE=") {
@@ -809,15 +808,28 @@ func runGitEnvironment(ctx context.Context, executable, repository string, stdou
 
 // gitEnvironment inherits the importer's environment, including the settings
 // that locate its credential helpers, but removes variables that would prompt,
-// trace credentials, or override the transport policy set through -c.
-// GIT_SSL_NO_VERIFY and GIT_ALLOW_PROTOCOL take precedence over any http.* or
-// protocol.* configuration, and the GIT_CONFIG_* variables inject configuration
-// that is not visible on the command line.
+// trace credentials, override the transport policy set through -c, replace
+// Git's own programs, or redirect the private repository. GIT_SSL_NO_VERIFY
+// and GIT_ALLOW_PROTOCOL take precedence over any http.* or protocol.*
+// configuration, the GIT_CONFIG_* variables inject configuration that is not
+// visible on the command line, GIT_EXEC_PATH selects the directory Git runs
+// remote helpers such as git-remote-https from, and the GIT_DIR family points
+// every command at another repository than the one created for the fetch.
+// boundedGitEnvironment discovers Git's compiled-in executable directory with
+// this environment and sets GIT_EXEC_PATH to its private mirror for the fetch.
 func gitEnvironment() []string {
 	environment := os.Environ()
 	filtered := environment[:0]
 	for _, value := range environment {
-		if strings.HasPrefix(value, "GIT_TERMINAL_PROMPT=") ||
+		if strings.HasPrefix(value, "GIT_EXEC_PATH=") ||
+			strings.HasPrefix(value, "GIT_DIR=") ||
+			strings.HasPrefix(value, "GIT_COMMON_DIR=") ||
+			strings.HasPrefix(value, "GIT_WORK_TREE=") ||
+			strings.HasPrefix(value, "GIT_OBJECT_DIRECTORY=") ||
+			strings.HasPrefix(value, "GIT_ALTERNATE_OBJECT_DIRECTORIES=") ||
+			strings.HasPrefix(value, "GIT_INDEX_FILE=") ||
+			strings.HasPrefix(value, "GIT_NAMESPACE=") ||
+			strings.HasPrefix(value, "GIT_TERMINAL_PROMPT=") ||
 			strings.HasPrefix(value, "GCM_INTERACTIVE=") ||
 			strings.HasPrefix(value, "GIT_TRACE=") ||
 			strings.HasPrefix(value, "GIT_TRACE_") ||
