@@ -27,6 +27,12 @@ func TestPluginIsHiddenAndZeroArgument(t *testing.T) {
 	}
 }
 
+func TestRevisionedDevelopmentVersionKeepsPlanCompatibilityVersion(t *testing.T) {
+	if got := commandVersion("dev+0123456789ab"); got != "dev" {
+		t.Fatalf("commandVersion() = %q, want dev", got)
+	}
+}
+
 func TestRunUsageErrors(t *testing.T) {
 	tests := []struct {
 		name string
