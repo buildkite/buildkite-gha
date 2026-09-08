@@ -75,6 +75,7 @@ func hashWorkspaceFilesWithLimits(ctx context.Context, workspace string, sources
 
 func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, sources []string, limits hashFilesLimits, caseInsensitive bool) (digest string, retErr error) {
 	parent := ctx
+	var patterns []hashFilePattern
 	if limits.duration > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, limits.duration)
@@ -86,7 +87,7 @@ func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, source
 			if parent.Err() != nil {
 				retErr = parent.Err()
 			} else {
-				retErr = fmt.Errorf("hashFiles exceeded its %s execution limit: %w", limits.duration, err)
+				retErr = fmt.Errorf("hashFiles exceeded its %s execution limit (%w) while searching %s", limits.duration, err, hashFilesBudgetHint(patterns))
 			}
 		}
 	}()
@@ -223,6 +224,16 @@ func hashWorkspaceFile(ctx context.Context, root *os.Root, directoryInfo fs.File
 	return fileHash.Sum(nil), read, nil
 }
 
+func hashFilesBudgetHint(patterns []hashFilePattern) string {
+	var positive []string
+	for _, pattern := range patterns {
+		if !pattern.negative {
+			positive = append(positive, pattern.pattern)
+		}
+	}
+	return fmt.Sprintf("positive patterns %q; use more specific paths to reduce traversal and hashing", positive)
+}
+
 // hashFileSearchPrefixes derives literal search paths using the same library as
 // matching. Below the first wildcard, traverse conservatively: character classes
 // can consume separators, so matching individual components is not equivalent.
@@ -333,7 +344,7 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen
 			for _, entry := range batch {
 				entriesRead++
 				if entriesRead > limit {
-					return errors.Join(fmt.Errorf("hashFiles traversal inspected more than %d entries", limit), handle.Close())
+					return errors.Join(fmt.Errorf("hashFiles traversal inspected more than %d entries while searching %s", limit, hashFilesBudgetHint(patterns)), handle.Close())
 				}
 				entries = append(entries, entry)
 			}

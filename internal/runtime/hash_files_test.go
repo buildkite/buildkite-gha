@@ -396,9 +396,13 @@ func TestHashWorkspaceFilesExecutionBudget(t *testing.T) {
 			case "verification":
 				limits.afterFileHash = pause
 			}
-			got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"nested/value"}, limits, false)
+			got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"nested/value", "!nested/skip", "other/*.txt"}, limits, false)
 			if got != "" || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "hashFiles exceeded its 20ms execution limit") {
 				t.Fatalf("budget result = %q, %v", got, err)
+			}
+			wantHint := `positive patterns ["nested/value" "other/*.txt"]; use more specific paths to reduce traversal and hashing`
+			if !strings.Contains(err.Error(), wantHint) {
+				t.Fatalf("budget error = %v, want %q", err, wantHint)
 			}
 		})
 	}
@@ -413,6 +417,19 @@ func TestHashWorkspaceFilesExecutionBudget(t *testing.T) {
 		if !errors.Is(err, ctx.Err()) || strings.Contains(err.Error(), "execution limit") {
 			t.Fatalf("parent cancellation = %v, want %v", err, ctx.Err())
 		}
+	}
+}
+
+func TestHashWorkspaceFilesEntryBudgetDiagnostic(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "nested/value", "value")
+	writeFixtureFile(t, workspace, "other/value.txt", "value")
+	limits := defaultHashFilesLimits
+	limits.entries = 1
+	got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"nested/*", "!nested/skip", "other/*.txt"}, limits, false)
+	want := `hashFiles traversal inspected more than 1 entries while searching positive patterns ["nested/*" "other/*.txt"]; use more specific paths to reduce traversal and hashing`
+	if got != "" || err == nil || err.Error() != want {
+		t.Fatalf("entry budget result = %q, %v; want %q", got, err, want)
 	}
 }
 

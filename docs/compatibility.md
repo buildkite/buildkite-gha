@@ -1102,6 +1102,9 @@ size of the workspace.
 Each call has an execution budget covering traversal, matching, sorting, hashing,
 and verification. An earlier step or job deadline still applies. Cancellation is
 checked between operations; it cannot interrupt a blocked filesystem call.
+Entry-limit and execution-budget errors list the positive patterns being searched
+and recommend more specific paths to reduce traversal and hashing. The budget is
+shared across those patterns.
 
 For each file, `hashFiles()` calculates SHA-256 over its contents. It then hashes
 the concatenated binary digests in lexical path order. GitHub Runner does not
