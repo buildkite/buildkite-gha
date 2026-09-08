@@ -88,8 +88,10 @@ jobs:
 		}
 	}
 	deploy := bundle.Plans[1].Job
-	if deploy.Env["REGION"] != "${{ vars.REGION }}" || deploy.Outputs["tier"] != "${{ vars.TIER }}" || deploy.Steps[0].Condition != "vars.tier == 'gold'" {
-		t.Fatalf("deploy templates were rewritten: env=%#v outputs=%#v condition=%q", deploy.Env, deploy.Outputs, deploy.Steps[0].Condition)
+	executionJob := deploy.ExecutionJob()
+	env, outputs := programBindingMap(executionJob.Env), programBindingMap(executionJob.Outputs)
+	if env["REGION"] != "${{ vars.REGION }}" || outputs["tier"] != "${{ vars.TIER }}" || executionJob.Steps[0].Condition.Source != "vars.tier == 'gold'" {
+		t.Fatalf("deploy templates were rewritten: env=%#v outputs=%#v condition=%q", env, outputs, executionJob.Steps[0].Condition.Source)
 	}
 	if strings.Contains(string(bundle.Pipeline), probeRegion) {
 		t.Fatalf("variable value leaked into the pipeline:\n%s", bundle.Pipeline)
@@ -143,11 +145,12 @@ jobs:
 	// repository scope defines the name, including expressions that mix event
 	// values the compiler does reduce, so the runtime applies the environment
 	// override instead of a compile-time repository value.
-	if build.Steps[0].Command != "echo ${{ vars.REGION }} ${{ vars.SHARED }}" || deploy.Steps[0].Command != "echo ${{ vars.region }} ${{ vars.SHARED }}" || build.Condition != "vars.region == 'base'" {
-		t.Fatalf("vars templates were reduced at compile time: build=%q deploy=%q condition=%q", build.Steps[0].Command, deploy.Steps[0].Command, build.Condition)
+	buildExecution, deployExecution := build.ExecutionJob(), deploy.ExecutionJob()
+	if buildExecution.Steps[0].Run.Command.Source != "echo ${{ vars.REGION }} ${{ vars.SHARED }}" || deployExecution.Steps[0].Run.Command.Source != "echo ${{ vars.region }} ${{ vars.SHARED }}" || buildExecution.Condition.Source != "vars.region == 'base'" {
+		t.Fatalf("vars templates were reduced at compile time: build=%q deploy=%q condition=%q", buildExecution.Steps[0].Run.Command.Source, deployExecution.Steps[0].Run.Command.Source, buildExecution.Condition.Source)
 	}
-	if mixed := deploy.Steps[1]; mixed.Command != "echo ${{ format('{0}-{1}', 'refs/heads/main', vars.region) }}" || mixed.Condition != "(true && (vars.region == 'base'))" {
-		t.Fatalf("mixed event and vars expressions were reduced with repository values: command=%q condition=%q", mixed.Command, mixed.Condition)
+	if mixed := deployExecution.Steps[1]; mixed.Run.Command.Source != "echo ${{ format('{0}-{1}', 'refs/heads/main', vars.region) }}" || mixed.Condition.Source != "(true && (vars.region == 'base'))" {
+		t.Fatalf("mixed event and vars expressions were reduced with repository values: command=%q condition=%q", mixed.Run.Command.Source, mixed.Condition.Source)
 	}
 	// Service credentials are runner-evaluated too, while the other service
 	// fields are compile-time and do reduce with the repository value.
@@ -157,8 +160,8 @@ jobs:
 	// jobs.<id>.if keeps vars residual too: the runtime evaluates it with
 	// VarsBeforeEnvironment, and a value that made it false at compile time
 	// would otherwise prune the job's token and secret authority.
-	if deploy.Condition != "(true && (vars.region == 'base'))" {
-		t.Fatalf("job condition = %q, want vars kept for runtime evaluation", deploy.Condition)
+	if deployExecution.Condition.Source != "(true && (vars.region == 'base'))" {
+		t.Fatalf("job condition = %q, want vars kept for runtime evaluation", deployExecution.Condition.Source)
 	}
 }
 

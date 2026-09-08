@@ -25,18 +25,6 @@ func evaluateMap(values map[string]string, context expression.Context) (map[stri
 	return out, nil
 }
 
-func evaluateStepMap(values map[string]string, context expression.Context) (map[string]string, error) {
-	out := make(map[string]string, len(values))
-	for _, name := range sortedKeys(values) {
-		resolved, err := evaluateLegacyTemplate(values[name], expression.ProfileStepTemplate, context)
-		if err != nil {
-			return nil, fmt.Errorf("evaluate %q: %w", name, err)
-		}
-		out[name] = resolved
-	}
-	return out, nil
-}
-
 func resolveActionInputs(action metadata.Metadata, supplied map[string]string, context expression.Context) (map[string]string, error) {
 	inputs := make(map[string]string, len(supplied))
 	for _, name := range sortedKeys(supplied) {

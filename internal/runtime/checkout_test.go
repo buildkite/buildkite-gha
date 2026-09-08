@@ -104,11 +104,11 @@ esac
 		},
 		Target:               plan.Target{StepKey: "gha-checkout", Queue: "trusted"},
 		RequiredCapabilities: []string{"network", "provider-token-read"},
-		Steps: []plan.Step{
+		Program: runtimeTestProgram([]runtimeTestStep{
 			{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &plan.ActionSelector{Lock: checkoutID}},
 			{ID: "hash", Kind: "run", Shell: "sh", Condition: "hashFiles('.git/HEAD') != ''", Env: map[string]string{"HEAD_HASH": "${{ hashFiles('.git/HEAD') }}"}, Command: "test \"$HEAD_HASH\" = " + headDigest},
 			{ID: "local", Kind: "uses", Uses: "./.github/actions/local", Action: &plan.ActionSelector{Lock: localID}},
-		},
+		}),
 		Actions: []plan.ActionLock{
 			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: actionintegration.CheckoutV7Commit, SourceDigest: remoteDigest},
 			{ID: localID, Source: "workspace", Path: ".github/actions/local", SourceDigest: localDigest},
@@ -149,7 +149,7 @@ esac
 		t.Fatalf("checkout HEAD = %q, %v", got, err)
 	}
 
-	job.Steps[0].With = map[string]string{"ref": "${{ needs.configure.outputs.sha }}"}
+	job.Program.Job.Steps[0].Invocation.With = testProgramBindingsPurpose(map[string]string{"ref": "${{ needs.configure.outputs.sha }}"}, executionprogram.SurfaceStepTemplate, executionprogram.PurposeActionInput)
 	job.Needs = map[string]plan.Need{"configure": {Result: "success", Outputs: map[string]string{"sha": strings.Repeat("b", 40)}}}
 	if err := os.Remove(gitLog); err != nil {
 		t.Fatal(err)
@@ -160,7 +160,7 @@ esac
 	if _, err := os.Stat(gitLog); !os.IsNotExist(err) {
 		t.Fatalf("Git ran before dynamic checkout ref rejection: %v", err)
 	}
-	job.Steps[0].With = nil
+	job.Program.Job.Steps[0].Invocation.With = nil
 	job.Needs = nil
 
 	job.Actions[0].Commit = strings.Repeat("0", 40)
@@ -1506,10 +1506,10 @@ fi
 			"POISON_GIT":     poisonGit,
 			"POISON_GIT_LFS": poisonGitLFS,
 		},
-		Steps: []plan.Step{
+		Program: runtimeTestProgram([]runtimeTestStep{
 			{ID: "poison", Kind: "uses", Uses: "owner/repo/poison@v1", Action: &plan.ActionSelector{Lock: poisonID}},
 			{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", With: map[string]string{"filter": "blob:none", "lfs": "true"}, Action: &plan.ActionSelector{Lock: checkoutID}},
-		},
+		}),
 		Actions: []plan.ActionLock{
 			{ID: poisonID, Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: strings.Repeat("b", 40), Path: "poison", SourceDigest: remoteDigest},
 			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: actionintegration.CheckoutV7Commit, SourceDigest: remoteDigest},
@@ -1634,9 +1634,9 @@ esac
 				},
 				Target:               plan.Target{StepKey: "gha-checkout", Queue: "trusted"},
 				RequiredCapabilities: []string{"network"},
-				Steps: []plan.Step{
+				Program: runtimeTestProgram([]runtimeTestStep{
 					{ID: "checkout", Kind: "uses", Uses: "actions/checkout@" + test.commit, Action: &plan.ActionSelector{Lock: checkoutID}},
-				},
+				}),
 				Actions: []plan.ActionLock{
 					{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: test.commit, Commit: test.commit, SourceDigest: remoteDigest},
 				},
@@ -1673,9 +1673,9 @@ func TestContainerPreparationSkipsNativeCheckoutClassification(t *testing.T) {
 			checkoutID := "a-0000000000000001"
 			job := plan.Job{
 				RequiredCapabilities: []string{"network"},
-				Steps: []plan.Step{
+				Program: runtimeTestProgram([]runtimeTestStep{
 					{ID: "checkout", Kind: "uses", Uses: "actions/checkout@" + commit, Action: &plan.ActionSelector{Lock: checkoutID}},
-				},
+				}),
 				Actions: []plan.ActionLock{
 					{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: commit, Commit: commit, SourceDigest: remoteDigest},
 				},
@@ -1723,7 +1723,7 @@ func TestProviderTokenReadRuntimeAuthorityIsCheckoutOnly(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/authority.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: authority\n")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "ordinary", Kind: "run", Command: "true"}})
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "ordinary", Kind: "run", Command: "true"}})
 	job.RequiredCapabilities = []string{"provider-token-read"}
 	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "restricted to the verified checkout adapter") {
 		t.Fatalf("ordinary provider-token-read error = %v", err)
@@ -1748,7 +1748,7 @@ func TestCompositeCheckoutPreservesDynamicRefProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	outerID, checkoutID := "a-0000000000000001", "a-0000000000000002"
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "outer", Kind: "uses", Uses: "./.github/actions/outer", Action: &plan.ActionSelector{Lock: outerID}}})
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "outer", Kind: "uses", Uses: "./.github/actions/outer", Action: &plan.ActionSelector{Lock: outerID}}})
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.Event.Ref = "refs/heads/main"
 	job.Event.SHA = strings.Repeat("a", 40)
@@ -1775,10 +1775,10 @@ func TestCompositeCheckoutPreservesDynamicRefProvenance(t *testing.T) {
 func TestProviderTokenReadPreflightAcceptsUnknownImmutableCheckoutCommit(t *testing.T) {
 	validID, parentID, unknownID := "a-0000000000000001", "a-0000000000000002", "a-0000000000000003"
 	job := plan.Job{
-		Steps: []plan.Step{
+		Program: runtimeTestProgram([]runtimeTestStep{
 			{Kind: "uses", Action: &plan.ActionSelector{Lock: validID}},
 			{Kind: "uses", Action: &plan.ActionSelector{Lock: parentID}},
-		},
+		}),
 		Actions: []plan.ActionLock{
 			{ID: validID, Source: "github", Repository: "actions/checkout", Commit: actionintegration.CheckoutV7Commit},
 			{ID: parentID, Source: "github", Repository: "owner/composite", Commit: strings.Repeat("b", 40), Children: map[string]plan.ActionSelector{"actions/checkout@future": {Lock: unknownID}}},

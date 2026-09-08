@@ -1725,17 +1725,17 @@ runs:
 	if job.Env["JOB_SHA"] != "2222222222222222222222222222222222222222" || job.DefaultShell != "bash" || job.DefaultWorkingDirectory != "." {
 		t.Fatalf("job templates were not reduced: env = %#v, shell = %q, working-directory = %q", job.Env, job.DefaultShell, job.DefaultWorkingDirectory)
 	}
-	step := job.Steps[0]
-	if step.Name != "Head 2222222222222222222222222222222222222222" || step.Env["HEAD_SHA"] != "2222222222222222222222222222222222222222" || step.Shell != "bash" || step.WorkingDirectory != "." {
+	step := job.Program.Job.Steps[0]
+	if step.Name.Source != "Head 2222222222222222222222222222222222222222" || testBindingSources(step.Env)["HEAD_SHA"] != "2222222222222222222222222222222222222222" || step.Run.Shell.Source != "bash" || step.Run.WorkingDirectory.Source != "." {
 		t.Fatalf("step templates were not reduced: %#v", step)
 	}
-	if step.ContinueOnErrorExpression != "${{ (true && (steps.previous.outcome == 'failure')) }}" || step.TimeoutMinutesExpression != "${{ 7 }}" {
+	if step.ContinueOnError.Expression.Source != "${{ (true && (steps.previous.outcome == 'failure')) }}" || step.TimeoutMinutes.Expression.Source != "${{ 7 }}" {
 		t.Fatalf("typed step expressions were not reduced: %#v", step)
 	}
-	if want := "echo '2222222222222222222222222222222222222222' '' 'opened' '${{ ('2222222222222222222222222222222222222222' == steps.previous.outputs.sha) }}'"; step.Command != want {
-		t.Fatalf("command = %q, want %q", step.Command, want)
+	if want := "echo '2222222222222222222222222222222222222222' '' 'opened' '${{ ('2222222222222222222222222222222222222222' == steps.previous.outputs.sha) }}'"; step.Run.Command.Source != want {
+		t.Fatalf("command = %q, want %q", step.Run.Command.Source, want)
 	}
-	if got := job.Steps[1].With["ref"]; got != "2222222222222222222222222222222222222222" {
+	if got := testBindingSources(job.Program.Job.Steps[1].Invocation.With)["ref"]; got != "2222222222222222222222222222222222222222" {
 		t.Fatalf("action input = %q", got)
 	}
 }
@@ -1841,10 +1841,10 @@ jobs:
 	for _, artifact := range bundle.Plans {
 		jobs[artifact.Job.Workflow.LogicalJobID] = artifact.Job
 	}
-	if !jobs["whole-event"].Event.PayloadArtifact || bundle.EventArtifact == nil || !strings.Contains(jobs["whole-event"].Steps[0].Command, "github.event") {
+	if !jobs["whole-event"].Event.PayloadArtifact || bundle.EventArtifact == nil || !strings.Contains(jobs["whole-event"].Program.Job.Steps[0].Run.Command.Source, "github.event") {
 		t.Fatalf("whole-event plan did not retain its runtime payload: %#v", jobs["whole-event"])
 	}
-	if jobs["scalar-event"].Event.PayloadArtifact || jobs["scalar-event"].Steps[0].Command != "echo 'opened'" {
+	if jobs["scalar-event"].Event.PayloadArtifact || jobs["scalar-event"].Program.Job.Steps[0].Run.Command.Source != "echo 'opened'" {
 		t.Fatalf("scalar-event plan retained an unnecessary payload: %#v", jobs["scalar-event"])
 	}
 	if bundle.EventArtifact.Path != ".buildkite-gha/events/"+strings.TrimPrefix(bundle.EventArtifact.Digest, "sha256:")+".json" || !bytes.Contains(bundle.EventArtifact.Contents, []byte(`"commits"`)) {
@@ -1909,8 +1909,8 @@ jobs:
 			t.Errorf("job %q payload artifact = %v, want %v", job.Workflow.LogicalJobID, job.Event.PayloadArtifact, wantPayload[job.Workflow.LogicalJobID])
 		}
 	}
-	control := jobs["control-event"].Steps[1]
-	if !strings.Contains(control.ContinueOnErrorExpression, "github.event") || !strings.Contains(control.TimeoutMinutesExpression, "github.event") {
+	control := jobs["control-event"].Program.Job.Steps[1]
+	if !strings.Contains(control.ContinueOnError.Expression.Source, "github.event") || !strings.Contains(control.TimeoutMinutes.Expression.Source, "github.event") {
 		t.Fatalf("dynamic event controls were not preserved: %#v", control)
 	}
 }
@@ -1935,8 +1935,8 @@ jobs:
 	}
 	for _, artifact := range bundle.Plans {
 		part := artifact.Job.Matrix["part"]
-		if want := fmt.Sprintf("echo refs/heads/main-%s", part); artifact.Job.Steps[0].Command != want {
-			t.Errorf("matrix %v command = %q, want %q", part, artifact.Job.Steps[0].Command, want)
+		if want := fmt.Sprintf("echo refs/heads/main-%s", part); artifact.Job.Program.Job.Steps[0].Run.Command.Source != want {
+			t.Errorf("matrix %v command = %q, want %q", part, artifact.Job.Program.Job.Steps[0].Run.Command.Source, want)
 		}
 	}
 }
@@ -1959,7 +1959,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Steps[0].Command != "echo refs/heads/main" {
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Program.Job.Steps[0].Run.Command.Source != "echo refs/heads/main" {
 		t.Fatalf("reusable-workflow plan = %#v", bundle.Plans)
 	}
 }

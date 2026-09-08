@@ -36,10 +36,7 @@ func TestRunJobPublishesFailureWhenExplicitRuntimeMiseIsInvalid(t *testing.T) {
 		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
 		SourceDigest: "sha256:" + strings.Repeat("a", 64),
 	}}
-	job.Steps = []plan.Step{{
-		ID: "local", Kind: "uses", Uses: "./actions/build",
-		Action: &plan.ActionSelector{Lock: "a-0000000000000001"},
-	}}
+	job.Program.Job.Steps = []executionprogram.Step{cliActionStep("local", "./actions/build", "a-0000000000000001")}
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
 	t.Setenv("BUILDKITE_GHA_MISE", filepath.Join(t.TempDir(), "missing-mise"))
@@ -60,11 +57,12 @@ func TestRunJobMiseRequirementUsesCompilerDecisionAndFailsClosed(t *testing.T) {
 	no := false
 	yes := true
 	actionJob := func(requiresMise *bool) plan.Job {
-		return plan.Job{
+		job := plan.Job{
 			Actions:      []plan.ActionLock{{ID: "a-0000000000000001"}},
-			Steps:        []plan.Step{{Kind: "uses", Action: &plan.ActionSelector{Lock: "a-0000000000000001"}}},
 			RequiresMise: requiresMise,
 		}
+		job.Program = &executionprogram.Program{Version: executionprogram.Version, Job: executionprogram.Job{Steps: []executionprogram.Step{cliActionStep("", "", "a-0000000000000001")}}}
+		return job
 	}
 	cacheJob := actionJob(&yes)
 	cacheJob.Actions[0].Source = "github"
@@ -74,7 +72,7 @@ func TestRunJobMiseRequirementUsesCompilerDecisionAndFailsClosed(t *testing.T) {
 		job  plan.Job
 		want bool
 	}{
-		{name: "shell plan does not resolve mise", job: plan.Job{Steps: []plan.Step{{Kind: "run"}}}},
+		{name: "shell plan does not resolve mise", job: plan.Job{Program: &executionprogram.Program{Version: executionprogram.Version, Job: executionprogram.Job{Steps: []executionprogram.Step{cliRunStep("", "true")}}}}},
 		{name: "native plan does not resolve mise", job: actionJob(&no)},
 		{name: "JavaScript plan resolves mise", job: actionJob(&yes), want: true},
 		{name: "cache client plan resolves mise", job: cacheJob, want: true},
@@ -97,10 +95,7 @@ func TestRunJobCallGuardSkipsActionJobBeforePreparingRuntimeMise(t *testing.T) {
 		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
 		SourceDigest: "sha256:" + strings.Repeat("a", 64),
 	}}
-	job.Steps = []plan.Step{{
-		ID: "local", Kind: "uses", Uses: "./actions/build",
-		Action: &plan.ActionSelector{Lock: "a-0000000000000001"},
-	}}
+	job.Program.Job.Steps = []executionprogram.Step{cliActionStep("local", "./actions/build", "a-0000000000000001")}
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
 	t.Setenv("BUILDKITE_GHA_MISE", filepath.Join(t.TempDir(), "missing-mise"))
@@ -133,9 +128,9 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 		Event:        plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
 		Target:       plan.Target{StepKey: "gha-cli", Queue: "ubuntu-latest"},
 		Outputs:      map[string]string{"result": "${{ steps.produce.outputs.result }}"},
-		Steps:        []plan.Step{{ID: "produce", Kind: "run", Command: `echo "result=cli-ok" >> "$GITHUB_OUTPUT"`}},
 		RequiresMise: &requiresMise,
 	}
+	job.Program = &executionprogram.Program{Version: executionprogram.Version, Job: executionprogram.Job{Steps: []executionprogram.Step{cliRunStep("produce", `echo "result=cli-ok" >> "$GITHUB_OUTPUT"`)}}}
 	attachCLIExecutionProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
@@ -256,7 +251,7 @@ func TestRunJobHydratesNeedsAndPublishesAuthoritativeResult(t *testing.T) {
 		NeedOutputs: map[string][]plan.NeedOutput{"producer": {{Name: "result", StepKey: producerStep, Output: "result"}}},
 	}}
 	job.Env = map[string]string{"RESULT": "${{ needs.producer.outputs.result }}"}
-	job.Steps = []plan.Step{{ID: "consume", Kind: "run", Command: `test "$RESULT" = "hydrated"`}}
+	job.Program.Job.Steps = []executionprogram.Step{cliRunStep("consume", `test "$RESULT" = "hydrated"`)}
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
 
@@ -322,7 +317,7 @@ func TestRunJobPublishesSummaryAsAdvisoryJobAnnotation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			job := cliRunJobPlan()
-			job.Steps[0].Command = test.command
+			job.Program.Job.Steps[0].Run.Command.Source = test.command
 			planPath, planDigest := writeCLIJobPlan(t, job)
 			setCLIJobIdentity(t, job, planDigest)
 			runner := &cliCaptureRunner{failAnnotation: test.failAnnotation}
@@ -479,7 +474,7 @@ func TestRunJobPublishesWorkflowCommandsAsAdvisoryJobAnnotations(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			job := cliRunJobPlan()
-			job.Steps[0].Command = test.command
+			job.Program.Job.Steps[0].Run.Command.Source = test.command
 			planPath, planDigest := writeCLIJobPlan(t, job)
 			setCLIJobIdentity(t, job, planDigest)
 			runner := &cliCaptureRunner{failAnnotation: test.failAnnotation}
@@ -556,7 +551,7 @@ func TestRunJobPublishesEveryTerminalResultAfterCancellation(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			job := cliRunJobPlan()
 			job.Condition = test.condition
-			job.Steps[0].Command = test.command
+			job.Program.Job.Steps[0].Run.Command.Source = test.command
 			if test.tolerate {
 				job.Schema = plan.Schema
 				job.ContinueOnError = true
@@ -730,7 +725,7 @@ func TestRunJobFailsWhenAuthoritativePublicationFails(t *testing.T) {
 
 func TestRunJobTelemetryClassifiesExecutionFailure(t *testing.T) {
 	job := cliRunJobPlan()
-	job.Steps[0].Command = "exit 7"
+	job.Program.Job.Steps[0].Run.Command.Source = "exit 7"
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
 	events := captureCommandTelemetry(t)
@@ -749,8 +744,8 @@ func TestRunJobTelemetryClassifiesExecutionFailure(t *testing.T) {
 
 func TestRunJobTelemetryClassifiesUnsupportedShell(t *testing.T) {
 	job := cliRunJobPlan()
-	job.Steps[0].Shell = "pwsh"
-	job.Steps[0].Command = "Get-Location"
+	job.Program.Job.Steps[0].Run.Shell.Source = "pwsh"
+	job.Program.Job.Steps[0].Run.Command.Source = "Get-Location"
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
 	events := captureCommandTelemetry(t)
@@ -795,7 +790,7 @@ func TestRunJobCanceledSecretDoesNotClassifyUnavailable(t *testing.T) {
 
 func TestRunJobPublishesBoundedFailureForUnrepresentableOutputs(t *testing.T) {
 	job := cliRunJobPlan()
-	job.Steps[0].Command = `printf 'summary from malformed result\n' >> "$GITHUB_STEP_SUMMARY"`
+	job.Program.Job.Steps[0].Run.Command.Source = `printf 'summary from malformed result\n' >> "$GITHUB_STEP_SUMMARY"`
 	job.Outputs = make(map[string]string, transport.MaxResultOutputs+1)
 	for i := 0; i <= transport.MaxResultOutputs; i++ {
 		job.Outputs[fmt.Sprintf("output_%02d", i)] = "value"
@@ -886,9 +881,9 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 		Event:                plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
 		Target:               plan.Target{StepKey: "gha-missing", Queue: "gha-runtime"},
 		RequiredCapabilities: []string{},
-		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
 		RequiresMise:         &requiresMise,
 	}
+	job.Program = &executionprogram.Program{Version: executionprogram.Version, Job: executionprogram.Job{Steps: []executionprogram.Step{cliRunStep("step-1", "true")}}}
 	attachCLIExecutionProgram(&job)
 	encoded, err := plan.Encode(job)
 	if err != nil {
@@ -944,7 +939,7 @@ func TestHydrateEventPayloadDownloadsFromExactImporterJob(t *testing.T) {
 
 func cliRunJobPlan() plan.Job {
 	requiresMise := false
-	return plan.Job{
+	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
 			Version:            "dev",
@@ -959,12 +954,17 @@ func cliRunJobPlan() plan.Job {
 		Event:                plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
 		Target:               plan.Target{StepKey: "gha-cli", Queue: "gha-runtime"},
 		RequiredCapabilities: []string{},
-		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
 		RequiresMise:         &requiresMise,
 	}
+	job.Program = &executionprogram.Program{Version: executionprogram.Version, Job: executionprogram.Job{Steps: []executionprogram.Step{cliRunStep("step-1", "true")}}}
+	return job
 }
 
 func attachCLIExecutionProgram(job *plan.Job) {
+	var steps []executionprogram.Step
+	if job.Program != nil {
+		steps = append([]executionprogram.Step(nil), job.Program.Job.Steps...)
+	}
 	actions := map[string]executionprogram.Action{}
 	for _, lock := range job.Actions {
 		action := executionprogram.Action{Runtime: "node24", Main: "index.js", PreIf: cliProgramSite(""), PostIf: cliProgramSite("")}
@@ -983,35 +983,20 @@ func attachCLIExecutionProgram(job *plan.Job) {
 	for i, guard := range job.CallGuards {
 		normalized.Job.Guards[i].Condition = cliProgramSite(guard.Condition)
 	}
-	normalized.Job.Steps = make([]executionprogram.Step, len(job.Steps))
-	for i := range job.Steps {
-		step := &job.Steps[i]
-		projected := executionprogram.Step{ID: step.ID, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Env: cliProgramBindings(step.Env), Condition: cliProgramSite(step.Condition), ContinueOnError: executionprogram.BoolControl{Literal: step.ContinueOnError}, TimeoutMinutes: executionprogram.NumberControl{Literal: step.TimeoutMinutes}, Name: cliProgramSite(step.Name)}
-		if step.ContinueOnErrorExpression != "" {
-			value := cliProgramSite(step.ContinueOnErrorExpression)
-			projected.ContinueOnError.Expression = &value
-		}
-		if step.TimeoutMinutesExpression != "" {
-			value := cliProgramSite(step.TimeoutMinutesExpression)
-			projected.TimeoutMinutes.Expression = &value
-		}
-		switch step.Kind {
-		case "run":
-			projected.Run = &executionprogram.Run{Command: cliProgramSite(step.Command), Shell: cliProgramSite(step.Shell), WorkingDirectory: cliProgramSite(step.WorkingDirectory)}
-		case "uses":
-			projected.Invocation = &executionprogram.Invocation{Uses: cliProgramSite(step.Uses), With: cliProgramBindings(step.With)}
-			if step.Action != nil {
-				projected.Invocation.Lock = step.Action.Lock
-			}
-		}
-		normalized.Job.Steps[i] = projected
-		step.Execution = &normalized.Job.Steps[i]
-	}
+	normalized.Job.Steps = steps
 	if job.Container != nil {
 		normalized.Job.Container = &executionprogram.Container{Image: cliProgramSite(job.Container.Image), Env: cliProgramBindings(job.Container.Env), Ports: cliProgramSites(job.Container.Ports)}
 	}
 	normalized.DeriveSiteSemantics()
 	job.Program = &normalized
+}
+
+func cliRunStep(id, command string) executionprogram.Step {
+	return executionprogram.Step{ID: id, Kind: "run", Run: &executionprogram.Run{Command: cliProgramSite(command)}}
+}
+
+func cliActionStep(id, uses, lock string) executionprogram.Step {
+	return executionprogram.Step{ID: id, Kind: "uses", Invocation: &executionprogram.Invocation{Uses: cliProgramSite(uses), Lock: lock}}
 }
 
 func cliProgramSite(source string) executionprogram.Site {

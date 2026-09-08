@@ -20,6 +20,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/program"
 	"go.yaml.in/yaml/v4"
 )
 
@@ -783,7 +784,7 @@ func TestUnprivilegedUploadAllowsPublicAndDockerfileActionCapabilities(t *testin
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Workflow:             plan.Workflow{LogicalJobID: "action-job"},
 			RequiredCapabilities: capabilities,
-			Steps:                []plan.Step{{ID: "action", Kind: "uses", Uses: "owner/example@commit"}},
+			Program:              &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{{ID: "action", Kind: "uses", Invocation: &program.Invocation{Uses: program.Site{Source: "owner/example@commit"}}}}}},
 		}, Authorization: compiler.PlanAuthorization{DockerCapabilitySources: []string{"dockerfile-actions"}}}}}
 		if err := validateUnprivilegedBundle(bundle); err != nil {
 			t.Fatalf("validateUnprivilegedBundle(%v) error = %v", capabilities, err)
@@ -965,14 +966,14 @@ func TestUnprivilegedUploadDoesNotBroadenKnownServiceActionIdentity(t *testing.T
 
 func TestBundleUsesActionsDetectsStepsAndLocks(t *testing.T) {
 	for _, job := range []plan.Job{
-		{Steps: []plan.Step{{Kind: "uses"}}},
+		{Program: &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{{Kind: "uses", Invocation: &program.Invocation{}}}}}},
 		{Actions: []plan.ActionLock{{ID: "a-deadbeefdeadbeef"}}},
 	} {
 		if !bundleUsesActions(compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: job}}}) {
 			t.Fatalf("bundleUsesActions() = false for %#v", job)
 		}
 	}
-	if bundleUsesActions(compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{Steps: []plan.Step{{Kind: "run"}}}}}}) {
+	if bundleUsesActions(compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{Program: &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{{Kind: "run", Run: &program.Run{}}}}}}}}}) {
 		t.Fatal("bundleUsesActions() = true for shell-only plan")
 	}
 }
@@ -980,12 +981,12 @@ func TestBundleUsesActionsDetectsStepsAndLocks(t *testing.T) {
 func TestUnprivilegedUploadAllowsCapabilityFreeConcurrentShellSteps(t *testing.T) {
 	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 		Workflow: plan.Workflow{LogicalJobID: "concurrent-job"},
-		Steps: []plan.Step{
-			{ID: "background", Kind: "run", Command: "true", Background: true},
+		Program: &program.Program{Version: program.Version, Job: program.Job{Steps: []program.Step{
+			{ID: "background", Kind: "run", Run: &program.Run{Command: program.Site{Source: "true"}}, Background: true},
 			{ID: "wait", Kind: "wait", Targets: []string{"background"}},
 			{ID: "wait-all", Kind: "wait-all"},
 			{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
-		},
+		}}},
 	}}}}
 	if err := validateUnprivilegedBundle(bundle); err != nil {
 		t.Fatalf("validateUnprivilegedBundle() error = %v", err)

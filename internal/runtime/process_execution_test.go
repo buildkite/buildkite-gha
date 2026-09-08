@@ -13,8 +13,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 func TestCancellationTerminatesChildProcessGroup(t *testing.T) {
@@ -198,7 +196,7 @@ func TestExplicitCancelTerminatesBackgroundProcessGroup(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 	pidFile := filepath.Join(workspace, "child.pid")
 	ready := filepath.Join(workspace, "background.ready")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
 		{ID: "background", Kind: "run", Background: true, Command: `(trap '' INT TERM; sleep 30) & echo $! > "$PID_FILE"; touch "$READY"; wait`},
 		{ID: "await-start", Kind: "run", Command: `while [ ! -f "$READY" ]; do sleep 0.01; done`},
 		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
