@@ -1300,40 +1300,43 @@ Alternate repositories, tags, non-event dynamic commits, GitHub Enterprise Serve
 
 ### Upload artifact action
 
-**🟡 Supported subset.** These root `actions/upload-artifact` actions use a native Buildkite ZIP adapter:
+**🟡 Supported subset.** Resolved commits in the frozen upstream release and `main` snapshots use a native Buildkite ZIP adapter. These principal releases remain named compatibility points:
 
 | Release | Commit |
 | --- | --- |
 | v1.0.0 | [`3446296876d12d4e3a0f3145a3c87e67bf0a16b5`](https://github.com/actions/upload-artifact/tree/3446296876d12d4e3a0f3145a3c87e67bf0a16b5) |
 | v2.3.1 | [`82c141cc518b40d92cc801eee768e7aafc9c2fa2`](https://github.com/actions/upload-artifact/tree/82c141cc518b40d92cc801eee768e7aafc9c2fa2) |
 | v3.2.1 | [`ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5`](https://github.com/actions/upload-artifact/tree/ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5) |
+| v4.6.0 | [`65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08`](https://github.com/actions/upload-artifact/tree/65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08) |
 | v4.6.2 | [`ea165f8d65b6e75b540449e92b4886f43607fa02`](https://github.com/actions/upload-artifact/tree/ea165f8d65b6e75b540449e92b4886f43607fa02) |
 | v5.0.0 | [`330a01c490aca151604b8cf639adc76d48f6c5d4`](https://github.com/actions/upload-artifact/tree/330a01c490aca151604b8cf639adc76d48f6c5d4) |
 | v6.0.0 | [`b7c566a772e6b6bfb58ed0dc250532a479d7789f`](https://github.com/actions/upload-artifact/tree/b7c566a772e6b6bfb58ed0dc250532a479d7789f) |
 | v7.0.1 | [`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`](https://github.com/actions/upload-artifact/tree/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a) |
 
-The v1.0.0, v2.3.1, and v3.2.1 commits match the floating legacy major tags used on github.com. Other known legacy commits are unsupported, including v3.2.2, which upstream publishes only as a GitHub Enterprise Server security backport and deprecates on github.com. Every known admitted release accepts only its declared inputs.
+Each snapshotted commit retains the inputs, outputs, hidden-file default, and v1 path behavior declared by its upstream contract. For example, v4.0.0 accepts `compression-level` but rejects the later `overwrite` and `include-hidden-files` inputs, and exposes `artifact-id` without the later `artifact-digest`. The v3.2.2 and v3.2.2-node20 commits remain unsupported because upstream publishes them only as GitHub Enterprise Server security backports and deprecates them on github.com.
 
-An unknown lowercase 40-hex immutable commit uses the stable v7.0.1 contract as a compatibility fallback. Compilation emits one `W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK` warning for each distinct unknown commit. The fallback can differ from the commit's upstream manifest, but it does not widen the native adapter or execute upstream JavaScript. Malformed commits remain unsupported. Compilation emits `W_UPLOAD_ARTIFACT_LEGACY_RELEASE` for known v1 through v3 commits to recommend v4 or later.
+An immutable commit absent from the snapshot uses the stable v7.0.1 contract as a compatibility fallback. Compilation emits one `W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK` warning for each distinct unknown commit. The fallback can differ from the commit's upstream manifest, but it does not widen the native adapter or execute upstream JavaScript. Malformed commits remain unsupported. Compilation emits `W_UPLOAD_ARTIFACT_LEGACY_RELEASE` for the principal v1 through v3 releases to recommend v4 or later.
+
+Maintainers can refresh the frozen tags, branches, and per-commit profiles with `go generate ./internal/action/integration`. Regeneration records only manifests whose inputs and outputs fit the bounded adapter. Other valid resolved SHAs continue to use the fallback.
 
 | Input | Supported values |
 | --- | --- |
-| `name` | v1.0.0: required. v2.3.1 and later: defaults to `artifact`. |
-| `path` | Required. v1.0.0 accepts one literal file or directory. v2.3.1 and later accept literal paths or bounded `*`, `?`, character-class, and `**` file globs. |
-| `if-no-files-found` | v2.3.1 and later: `warn`, `error`, or `ignore`. v1.0.0 fails when its literal path is missing and uploads an empty existing directory. |
-| `retention-days` | v2.3.1 and later: nonnegative integer; advisory only. |
-| `compression-level` | v4.6.2 and later: `0` through `9`. |
-| `overwrite` | v4.6.2 and later: omitted or `false`. |
-| `include-hidden-files` | v3.2.1 and later. v1.0.0 and v2.3.1 include hidden paths by default. |
-| `archive` | v7.0.1 only; omitted or `true`. |
+| `name` | Required by v1 runner-plugin contracts. Later contracts default to `artifact`. |
+| `path` | Required. v1 runner-plugin contracts accept one literal file or directory. Later contracts accept literal paths or bounded `*`, `?`, character-class, and `**` file globs. |
+| `if-no-files-found` | When declared: `warn`, `error`, or `ignore`. The v1 runner-plugin contract fails when its literal path is missing and uploads an empty existing directory. |
+| `retention-days` | When declared: nonnegative integer; advisory only. |
+| `compression-level` | When declared: `0` through `9`. |
+| `overwrite` | When declared: omitted or `false`. |
+| `include-hidden-files` | When declared: GitHub Actions boolean, default `false`. Earlier contracts without this input retain hidden paths. |
+| `archive` | When declared: omitted or `true`. |
 
-Unsupported path forms include exclusions, symlinks, absolute paths, traversal, braces, extglobs, leading glob comments, and special files. At most 32 path roots may be selected. For v3.2.1 and later, hidden path segments remain excluded unless explicitly enabled.
+Unsupported path forms include exclusions, symlinks, absolute paths, traversal, braces, extglobs, leading glob comments, and special files. At most 32 path roots may be selected. Contracts that declare `include-hidden-files` exclude hidden path segments unless explicitly enabled.
 
 An artifact may contain at most 10,000 files. `buildkite-gha` does not impose a source or ZIP byte limit; the Buildkite Agent and configured artifact storage enforce their limits. A job may publish 64 artifacts.
 
 Downloads verify the recorded archive size and digest before staging every member. File-count, path, format, and filesystem limits protect extraction; there is no separate fixed expansion-byte policy.
 
-For v4.6.2 and later, the adapter sets `artifact-id` and `artifact-digest`; `artifact-url` is empty because no GitHub run-scoped URL exists. The v1 through v3 releases expose no outputs. Merge, raw upload, overwrite, and effective retention control are unsupported.
+The adapter sets `artifact-id` and `artifact-digest` only when the snapshotted or fallback contract declares them. `artifact-url` remains empty because no GitHub run-scoped URL exists. Merge, raw upload, overwrite, and effective retention control are unsupported.
 
 ### Download artifact action
 

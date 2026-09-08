@@ -533,7 +533,7 @@ func unknownUploadArtifactCommitWarning(position workflow.Position, commit strin
 		Code:   "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK",
 		Line:   position.Line,
 		Column: position.Column,
-		Message: fmt.Sprintf("actions/upload-artifact resolved to immutable commit %s, which is outside the exact admission set. The native adapter is using the supported %s contract instead; it still restricts names, paths, archive mode, overwrite, hidden files, sizes, and outputs, and does not run the upstream action JavaScript.",
+		Message: fmt.Sprintf("actions/upload-artifact resolved to immutable commit %s, which is absent from the frozen per-commit snapshot. The native adapter is using the supported %s contract instead; it still restricts names, paths, archive mode, overwrite, hidden files, sizes, and outputs, and does not run the upstream action JavaScript.",
 			commit, actionintegration.UploadArtifactFallbackContractRelease),
 	}
 }
