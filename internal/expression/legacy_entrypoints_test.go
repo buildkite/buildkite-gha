@@ -11,10 +11,6 @@ func EvaluateCompile(expr Expression, context CompileContext) (any, error) {
 	return evaluateCompile(expr, context)
 }
 
-func EvaluateCompileAvailable(expr Expression, context CompileContext) (any, bool, error) {
-	return evaluateCompileAvailable(expr, context)
-}
-
 func EvaluateCompileCondition(source string, context CompileContext) (bool, error) {
 	return evaluateCompileCondition(source, context)
 }
@@ -46,8 +42,6 @@ func SecretReferences(source string) ([]string, error) { return secretReferences
 func ConditionSecretReferences(source string) ([]string, error) {
 	return conditionSecretReferences(source)
 }
-
-func ReferencesStatusFunction(source string) (bool, error) { return referencesStatusFunction(source) }
 
 func ValidateReusableInputDefault(source string) error { return validateReusableInputDefault(source) }
 
@@ -81,14 +75,6 @@ func Evaluate(source string, context Context) (string, error) {
 	return evaluateDirectTemplate(source, context)
 }
 
-func EvaluateValue(source string, context Context) (any, error) {
-	return evaluateRuntimeValue(source, context)
-}
-
-func EvaluateObject(source string, context Context) ([]ObjectEntry, error) {
-	return evaluateObject(source, context)
-}
-
 func EvaluateStep(source string, context Context) (string, error) {
 	return evaluateStep(source, context)
 }
@@ -96,8 +82,6 @@ func EvaluateStep(source string, context Context) (string, error) {
 func EvaluateStepControl(source string, context Context) (any, error) {
 	return evaluateStepControl(source, context)
 }
-
-func ValidateStepControl(source string) error { return validateStepControl(source) }
 
 func EvaluateJobEnvironment(source string, context Context) (string, error) {
 	return evaluateJobEnvironment(source, context)
@@ -137,16 +121,8 @@ func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 	return evaluateConditionLegacy(source, context)
 }
 
-func ValidateServiceRuntimeTemplate(source string) error {
-	return validateServiceRuntimeTemplate(source)
-}
-
 func ValidateServiceCredentialTemplate(source string) error {
 	return validateServiceCredentialTemplate(source)
-}
-
-func ValidateServiceMapRuntimeExpression(source string) error {
-	return validateServiceMapExpression(source)
 }
 
 func ReferencesGitHubToken(source string) (bool, error) {
@@ -169,14 +145,6 @@ func ReferencesJobStatus(source string) (bool, error) { return templateReference
 
 func ReferencesGitHubEvent(source string) (bool, error) {
 	return conditionReferencesCompileEvent(source)
-}
-
-func ConditionReferencesGitHubEventPayload(source string) (bool, error) {
-	return conditionReferencesEventPayload(source)
-}
-
-func TemplateReferencesGitHubEvent(source string) (bool, error) {
-	return templateReferencesEventPayload(source)
 }
 
 func ConditionUsesContext(source, contextName string) (bool, error) {

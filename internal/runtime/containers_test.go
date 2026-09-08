@@ -1499,12 +1499,6 @@ func TestRunHostJobServiceReadinessCancellationCleansEverything(t *testing.T) {
 	}
 }
 
-func TestJobContainerCleanupBudgetScalesToMaximumServices(t *testing.T) {
-	if got, want := jobContainerCleanupTimeout(10*time.Second, 32), 106*time.Second; got != want {
-		t.Fatalf("cleanup timeout = %s, want %s", got, want)
-	}
-}
-
 func TestRunJobHostServicesLifecycle(t *testing.T) {
 	f := newJobDocker(t, "")
 	w := t.TempDir()

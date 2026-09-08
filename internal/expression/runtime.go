@@ -93,47 +93,9 @@ func evaluateDirectTemplate(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateDirectRuntimeNode)
 }
 
-func evaluateRuntimeValue(source string, context Context) (any, error) {
-	body, err := expressionBody(source)
-	if err != nil {
-		return nil, err
-	}
-	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
-	if parseErr != nil {
-		return nil, fmt.Errorf("invalid expression: %w", parseErr)
-	}
-	if call, ok := node.(*actionlint.FuncCallNode); ok && strings.EqualFold(call.Callee, "fromJSON") && len(call.Args) == 1 {
-		value, err := evaluateDirectRuntimeNode(call.Args[0], context)
-		if err != nil {
-			return nil, err
-		}
-		text, ok := value.(string)
-		if !ok {
-			return nil, fmt.Errorf("fromJSON argument resolved to %T, want string", value)
-		}
-		decoder := json.NewDecoder(strings.NewReader(text))
-		decoder.UseNumber()
-		var decoded any
-		if err := decoder.Decode(&decoded); err != nil {
-			return nil, fmt.Errorf("fromJSON: %w", err)
-		}
-		if err := decoder.Decode(new(any)); err != io.EOF {
-			return nil, fmt.Errorf("fromJSON: unexpected trailing content")
-		}
-		return decoded, nil
-	}
-	return evaluateDirectRuntimeNode(node, context)
-}
-
 type ObjectEntry struct {
 	Name  string
 	Value any
-}
-
-// evaluateObject evaluates one fromJSON expression while retaining JSON object
-// order for surfaces, such as services, where declaration order is observable.
-func evaluateObject(source string, context Context) ([]ObjectEntry, error) {
-	return evaluateRuntimeObject(source, context)
 }
 
 func evaluateRuntimeObject(source string, context Context) ([]ObjectEntry, error) {
@@ -217,20 +179,6 @@ func evaluateStepControl(expression string, context Context) (any, error) {
 		return nil, fmt.Errorf("invalid expression: %w", parseErr)
 	}
 	return evaluateStepRuntimeExpression(node, context, true, true, nil)
-}
-
-// validateStepControl validates every branch of a typed workflow step control
-// without resolving runtime values.
-func validateStepControl(expression string) error {
-	body, err := expressionBody(expression)
-	if err != nil {
-		return err
-	}
-	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
-	if parseErr != nil {
-		return fmt.Errorf("invalid expression: %w", parseErr)
-	}
-	return validateStepRuntimeExpression(node, true, true, nil)
 }
 
 // evaluateJobEnvironment evaluates a job-level environment template.

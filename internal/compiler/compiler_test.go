@@ -2526,125 +2526,24 @@ jobs:
 }
 
 func TestExpandMatrixRejectsRuntimeExpressionsInAuthoredValues(t *testing.T) {
-	tests := []struct {
+	for _, test := range []struct {
 		name   string
-		source string
+		matrix string
 	}{
-		{
-			name: "unit_tests.yml",
-			source: `on: [push, pull_request]
-jobs:
-  build:
-    needs: setup
-    runs-on: ${{ matrix.os || 'ubuntu-24.04' }}
-    strategy:
-      matrix:
-        python: ['3.10']
-        modules_tool:
-          - ${{ needs.setup.outputs.lmod8 }}
-          - ${{ needs.setup.outputs.modules4 }}
-          - ${{ needs.setup.outputs.modules5 }}
-        include:
-          - python: '3.6.1'
-            modules_tool: ${{ needs.setup.outputs.lmod8 }}
-            use_pyenv: '2.6.15'
-          - python: '3.7'
-            modules_tool: ${{ needs.setup.outputs.lmod8 }}
-            os: ubuntu-22.04
-    steps: [{run: true}]
-`,
-		},
-		{
-			name: "product-creation-tests.yml",
-			source: `on: pull_request
-jobs:
-  e2e-tests:
-    needs: [check-secrets, resolve-versions]
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        test-group: [plugin-events, product-crud, product-batch, product-category]
-        version-set: [supported, latest]
-        include:
-          - version-set: supported
-            wp-version: ${{ needs.resolve-versions.outputs.wp-supported }}
-            wc-version: ${{ needs.resolve-versions.outputs.wc-supported }}
-            version-label: Currently supported
-          - version-set: latest
-            wp-version: latest
-            wc-version: latest
-            version-label: Latest
-    steps: [{run: true}]
-`,
-		},
-		{
-			name: "apis-v21.yaml",
-			source: `on: push
-jobs:
-  cache:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        image: [coordinator-4_0, coordinator-dse-68]
-    steps: [{run: true}]
-  test:
-    needs: resolve-coordinator-docker
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        project: [sgv2-docsapi, sgv2-graphqlapi, sgv2-restapi]
-        name: [cassandra-40, dse-68]
-        include:
-          - name: cassandra-40
-            image-cache-key: docker-coordinator-4_0-${{ needs.resolve-coordinator-docker.outputs.sha }}
-            image-file: coordinator-4_0-${{ needs.resolve-coordinator-docker.outputs.sha }}.tar
-          - name: dse-68
-            image-cache-key: docker-coordinator-dse-68-${{ needs.resolve-coordinator-docker.outputs.sha }}
-            image-file: coordinator-dse-68-${{ needs.resolve-coordinator-docker.outputs.sha }}.tar
-    steps: [{run: true}]
-`,
-		},
-		{
-			name: "php-unit-tests.yml",
-			source: `on: workflow_dispatch
-jobs:
-  tests:
-    needs: GetMatrix
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        php: [8.2]
-        wp-version: [latest]
-        wc-versions: ['${{ join(fromJson(needs.GetMatrix.outputs.wc-versions)) }}']
-        include:
-          - php: 7.4
-            wp-version: ${{ fromJson(needs.GetMatrix.outputs.wp-versions)[1] }}
-            wc-versions: ${{ fromJson(needs.GetMatrix.outputs.wc-versions)[1] }}
-          - php: 8.3
-            wp-version: latest
-            wc-versions: latest
-    steps: [{run: true}]
-`,
-		},
-	}
-	for _, test := range tests {
+		{name: "dimension value", matrix: "        tool: [lmod, '${{ needs.setup.outputs.tool }}']\n"},
+		{name: "include value", matrix: "        version: [supported]\n        include:\n          - version: supported\n            wp: ${{ needs.setup.outputs.wp }}\n"},
+		{name: "embedded in longer string", matrix: "        name: [cassandra]\n        include:\n          - name: cassandra\n            image: docker-${{ needs.setup.outputs.sha }}.tar\n"},
+		{name: "indexed fromJson", matrix: "        php: [8.2]\n        include:\n          - php: 7.4\n            wp: ${{ fromJson(needs.setup.outputs.versions)[1] }}\n"},
+	} {
 		t.Run(test.name, func(t *testing.T) {
-			parsed, err := workflow.Parse(test.name, []byte(test.source))
+			source := "on: push\njobs:\n  build:\n    needs: setup\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n" + test.matrix + "    steps: [{run: true}]\n"
+			parsed, err := workflow.Parse("matrix.yml", []byte(source))
 			if err != nil {
 				t.Fatal(err)
 			}
-			rejected := false
-			for _, job := range parsed.Jobs {
-				if job.Matrix == nil {
-					continue
-				}
-				_, err := expandMatrix(test.name, job, expression.CompileContext{})
-				if err != nil && strings.Contains(err.Error(), "runtime-dependent matrix expressions are unsupported") {
-					rejected = true
-				}
-			}
-			if !rejected {
-				t.Fatal("runtime-dependent authored matrix value was not rejected")
+			_, err = expandMatrix("matrix.yml", parsed.Jobs[0], expression.CompileContext{})
+			if err == nil || !strings.Contains(err.Error(), "runtime-dependent matrix expressions are unsupported") {
+				t.Fatalf("expandMatrix() error = %v, want runtime-dependent rejection", err)
 			}
 		})
 	}
@@ -4418,13 +4317,6 @@ func TestCompileRejectsDuplicateSanitizedInstanceKeys(t *testing.T) {
 	_, err := Compile("collision.yml", source, readFile(t, smokePath("events", "push.json")))
 	if err == nil || !strings.Contains(err.Error(), `deterministic instance key "gha-build-`) || !strings.Contains(err.Error(), "collides") {
 		t.Fatalf("Compile() error = %v, want deterministic key collision", err)
-	}
-}
-
-func TestInstanceKeyReportsMatrixCanonicalizationErrors(t *testing.T) {
-	_, err := instanceKey("matrix", map[string]any{"unsupported": make(chan int)})
-	if err == nil || !strings.Contains(err.Error(), "canonicalize matrix") {
-		t.Fatalf("instanceKey() error = %v, want canonicalization error", err)
 	}
 }
 

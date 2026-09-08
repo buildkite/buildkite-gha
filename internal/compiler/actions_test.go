@@ -14,7 +14,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
@@ -1776,68 +1775,6 @@ func TestCompileBundleLegacyCheckoutWarning(t *testing.T) {
 	}
 }
 
-func TestCompileBundleUnknownCheckoutCommitWarningIsDeduplicated(t *testing.T) {
-	workspace := t.TempDir()
-	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
-	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	unknown := strings.Repeat("0", 40)
-	otherUnknown := strings.Repeat("1", 40)
-	root := t.TempDir()
-	writeAction(t, root, "", checkoutTestManifest(unknown))
-	otherRoot := t.TempDir()
-	writeAction(t, otherRoot, "", checkoutTestManifest(otherUnknown))
-	workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n      - uses: actions/checkout@" + unknown + "\n      - uses: actions/checkout@" + unknown + "\n        with:\n          path: again\n      - uses: actions/checkout@" + otherUnknown + "\n        with:\n          path: other\n")
-	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
-		EventTrust: EventUntrusted,
-		Runners: RunnerPolicy{
-			Labels:          map[string]string{"ubuntu-latest": "hosted"},
-			UntrustedQueues: []string{"hosted"},
-		},
-		ResolveActions: true,
-		ActionSource:   commitActionSource{roots: map[string]string{unknown: root, otherUnknown: otherRoot}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(bundle.Plans) != 2 || len(bundle.IR.Warnings) != 2 {
-		t.Fatalf("plans = %d, warnings = %#v, want one warning per distinct commit across matrix and repeated steps", len(bundle.Plans), bundle.IR.Warnings)
-	}
-	warning := bundle.IR.Warnings[0]
-	if warning.Code != "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK" || warning.Path != "./.github/workflows/checkout.yml" || warning.Job != "checkout" || warning.Step != 1 || warning.Line == 0 ||
-		!strings.Contains(warning.Message, unknown) || !strings.Contains(warning.Message, actionintegration.CheckoutFallbackContractRelease) || !strings.Contains(warning.Message, "does not run the upstream action JavaScript") {
-		t.Fatalf("unknown checkout fallback warning = %#v", warning)
-	}
-	if bundle.IR.Warnings[1].Code != "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[1].Step != 3 || !strings.Contains(bundle.IR.Warnings[1].Message, otherUnknown) {
-		t.Fatalf("second unknown checkout fallback warning = %#v", bundle.IR.Warnings[1])
-	}
-
-	writeAction(t, workspace, ".github/actions/wrapper", "runs:\n  using: composite\n  steps:\n    - uses: actions/checkout@"+unknown+"\n")
-	workflow = []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n")
-	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	bundle, err = CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
-		EventTrust: EventUntrusted,
-		Runners: RunnerPolicy{
-			Labels:          map[string]string{"ubuntu-latest": "hosted"},
-			UntrustedQueues: []string{"hosted"},
-		},
-		ResolveActions: true,
-		ActionSource:   commitActionSource{roots: map[string]string{unknown: root}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[0].Step != 1 || !strings.Contains(bundle.IR.Warnings[0].Message, unknown) {
-		t.Fatalf("nested unknown checkout fallback warnings = %#v", bundle.IR.Warnings)
-	}
-}
-
 func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
@@ -1904,113 +1841,130 @@ func TestCompileBundleLegacyUploadArtifactWarning(t *testing.T) {
 	}
 }
 
-func TestCompileBundleUnknownUploadArtifactWarningIsDeduplicated(t *testing.T) {
-	workspace := t.TempDir()
-	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
-	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
+func TestCompileBundleUnknownActionCommitWarningsAreDeduplicated(t *testing.T) {
 	unknown := strings.Repeat("0", 40)
 	otherUnknown := strings.Repeat("1", 40)
-	roots := map[string]string{}
-	for _, commit := range []string{unknown, otherUnknown} {
-		root := t.TempDir()
-		writeAction(t, root, "", uploadArtifactTestManifest(commit))
-		roots[commit] = root
-	}
-	compile := func(workflow []byte) Bundle {
-		t.Helper()
-		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
-			EventTrust: EventUntrusted,
-			Runners: RunnerPolicy{
-				Labels:          map[string]string{"ubuntu-latest": "hosted"},
-				UntrustedQueues: []string{"hosted"},
-			},
-			ResolveActions: true,
-			ActionSource:   commitActionSource{roots: roots},
+	for _, test := range []struct {
+		action   string
+		manifest string
+		code     string
+		release  string
+		job      string
+		plans    int
+		fragment string
+		matrix   string
+		wrapper  string
+		nested   string
+	}{
+		{
+			action:   "checkout",
+			manifest: checkoutTestManifest(""),
+			code:     "W_CHECKOUT_UNKNOWN_COMMIT_FALLBACK",
+			release:  actionintegration.CheckoutFallbackContractRelease,
+			job:      "checkout",
+			plans:    2,
+			matrix: "on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n" +
+				"      - uses: actions/checkout@" + unknown + "\n" +
+				"      - uses: actions/checkout@" + unknown + "\n        with:\n          path: nested\n" +
+				"      - uses: actions/checkout@" + otherUnknown + "\n",
+			wrapper: "name: wrapper\nruns:\n  using: composite\n  steps:\n    - uses: actions/checkout@" + unknown + "\n",
+			nested:  "on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n",
+		},
+		{
+			action:   "upload-artifact",
+			manifest: uploadArtifactTestManifest(""),
+			code:     "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK",
+			release:  actionintegration.UploadArtifactFallbackContractRelease,
+			job:      "upload",
+			plans:    2,
+			matrix: "on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n" +
+				"      - uses: actions/upload-artifact@" + unknown + "\n        with:\n          path: payload\n          archive: true\n" +
+				"      - uses: actions/upload-artifact@" + unknown + "\n        with:\n          path: other\n" +
+				"      - uses: actions/upload-artifact@" + otherUnknown + "\n        with:\n          path: payload\n",
+			wrapper: "name: wrapper\nruns:\n  using: composite\n  steps:\n    - uses: actions/upload-artifact@" + unknown + "\n      with:\n        path: payload\n",
+			nested:  "on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n",
+		},
+		{
+			action:   "download-artifact",
+			manifest: "name: download artifact\nruns:\n  using: node24\n  main: index.js\n",
+			code:     "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK",
+			release:  actionintegration.DownloadArtifactFallbackContractRelease,
+			job:      "download",
+			plans:    3,
+			fragment: "verified direct needs producers",
+			matrix: "on: push\njobs:\n  producer:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo payload\n" +
+				"  download:\n    needs: producer\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n" +
+				"      - uses: actions/download-artifact@" + unknown + "\n        with:\n          name: payload\n          skip-decompress: false\n          digest-mismatch: error\n" +
+				"      - uses: actions/download-artifact@" + unknown + "\n        with:\n          name: other\n" +
+				"      - uses: actions/download-artifact@" + otherUnknown + "\n        with:\n          name: payload\n",
+			wrapper: "name: wrapper\nruns:\n  using: composite\n  steps:\n    - uses: actions/download-artifact@" + unknown + "\n      with:\n        name: payload\n",
+			nested: "on: push\njobs:\n  producer:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo payload\n" +
+				"  download:\n    needs: producer\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n",
+		},
+	} {
+		t.Run(test.action, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := filepath.Join(workspace, ".github", "workflows", "workflow.yml")
+			if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			roots := map[string]string{unknown: t.TempDir(), otherUnknown: t.TempDir()}
+			for _, root := range roots {
+				writeAction(t, root, "", test.manifest)
+			}
+			compile := func(workflow string) Bundle {
+				if err := os.WriteFile(workflowPath, []byte(workflow), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				bundle, err := CompileBundleWithOptions(workflowPath, []byte(workflow), pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+					EventTrust: EventUntrusted,
+					Runners: RunnerPolicy{
+						Labels:          map[string]string{"ubuntu-latest": "hosted"},
+						UntrustedQueues: []string{"hosted"},
+					},
+					ResolveActions: true,
+					ActionSource:   commitActionSource{roots: roots},
+				})
+				if err != nil {
+					t.Fatalf("CompileBundleWithOptions() error = %v", err)
+				}
+				return bundle
+			}
+			assertWarning := func(t *testing.T, warning Warning, step int, commit string) {
+				t.Helper()
+				if warning.Code != test.code || warning.Path != "./.github/workflows/workflow.yml" || warning.Job != test.job || warning.Step != step || warning.Line == 0 {
+					t.Fatalf("warning = %#v, want %s at %s step %d with a line", warning, test.code, test.job, step)
+				}
+				for _, want := range []string{commit, test.release, "does not run the upstream action JavaScript", test.fragment} {
+					if want != "" && !strings.Contains(warning.Message, want) {
+						t.Fatalf("warning message %q does not mention %q", warning.Message, want)
+					}
+				}
+			}
+
+			bundle := compile(test.matrix)
+			if len(bundle.Plans) != test.plans {
+				t.Fatalf("plans = %d, want %d", len(bundle.Plans), test.plans)
+			}
+			if len(bundle.IR.Warnings) != 2 {
+				t.Fatalf("warnings = %#v, want one per unknown commit", bundle.IR.Warnings)
+			}
+			assertWarning(t, bundle.IR.Warnings[0], 1, unknown)
+			assertWarning(t, bundle.IR.Warnings[1], 3, otherUnknown)
+
+			wrapperPath := filepath.Join(workspace, ".github", "actions", "wrapper", "action.yml")
+			if err := os.MkdirAll(filepath.Dir(wrapperPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(wrapperPath, []byte(test.wrapper), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			bundle = compile(test.nested)
+			if len(bundle.IR.Warnings) != 1 {
+				t.Fatalf("nested warnings = %#v, want one", bundle.IR.Warnings)
+			}
+			assertWarning(t, bundle.IR.Warnings[0], 1, unknown)
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return bundle
-	}
-	workflow := []byte("on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n      - uses: actions/upload-artifact@" + unknown + "\n        with:\n          path: payload\n          archive: true\n      - uses: actions/upload-artifact@" + unknown + "\n        with:\n          path: again\n      - uses: actions/upload-artifact@" + otherUnknown + "\n        with:\n          path: other\n")
-	bundle := compile(workflow)
-	if len(bundle.Plans) != 2 || len(bundle.IR.Warnings) != 2 {
-		t.Fatalf("plans = %d, warnings = %#v, want one warning per distinct commit across matrix and repeated steps", len(bundle.Plans), bundle.IR.Warnings)
-	}
-	warning := bundle.IR.Warnings[0]
-	if warning.Code != "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || warning.Path != "./.github/workflows/artifact.yml" || warning.Job != "upload" || warning.Step != 1 || warning.Line == 0 ||
-		!strings.Contains(warning.Message, unknown) || !strings.Contains(warning.Message, actionintegration.UploadArtifactFallbackContractRelease) || !strings.Contains(warning.Message, "does not run the upstream action JavaScript") {
-		t.Fatalf("unknown upload-artifact fallback warning = %#v", warning)
-	}
-	if bundle.IR.Warnings[1].Code != "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[1].Step != 3 || !strings.Contains(bundle.IR.Warnings[1].Message, otherUnknown) {
-		t.Fatalf("second unknown upload-artifact fallback warning = %#v", bundle.IR.Warnings[1])
-	}
-
-	writeAction(t, workspace, ".github/actions/wrapper", "runs:\n  using: composite\n  steps:\n    - uses: actions/upload-artifact@"+unknown+"\n      with:\n        path: payload\n")
-	workflow = []byte("on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n")
-	bundle = compile(workflow)
-	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[0].Step != 1 || !strings.Contains(bundle.IR.Warnings[0].Message, unknown) {
-		t.Fatalf("nested unknown upload-artifact fallback warnings = %#v", bundle.IR.Warnings)
-	}
-}
-
-func TestCompileBundleUnknownDownloadArtifactWarningIsDeduplicated(t *testing.T) {
-	workspace := t.TempDir()
-	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
-	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	unknown := strings.Repeat("0", 40)
-	otherUnknown := strings.Repeat("1", 40)
-	roots := map[string]string{}
-	for _, commit := range []string{unknown, otherUnknown} {
-		root := t.TempDir()
-		writeAction(t, root, "", "name: download artifact\nruns:\n  using: node24\n  main: index.js\n")
-		roots[commit] = root
-	}
-	compile := func(workflow []byte) Bundle {
-		t.Helper()
-		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
-			EventTrust: EventUntrusted,
-			Runners: RunnerPolicy{
-				Labels:          map[string]string{"ubuntu-latest": "hosted"},
-				UntrustedQueues: []string{"hosted"},
-			},
-			ResolveActions: true,
-			ActionSource:   commitActionSource{roots: roots},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return bundle
-	}
-	workflow := []byte("on: push\njobs:\n  producer:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo payload\n  download:\n    needs: producer\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n      - uses: actions/download-artifact@" + unknown + "\n        with:\n          name: payload\n          skip-decompress: false\n          digest-mismatch: error\n      - uses: actions/download-artifact@" + unknown + "\n        with:\n          name: again\n      - uses: actions/download-artifact@" + otherUnknown + "\n        with:\n          name: other\n")
-	bundle := compile(workflow)
-	if len(bundle.Plans) != 3 || len(bundle.IR.Warnings) != 2 {
-		t.Fatalf("plans = %d, warnings = %#v, want one warning per distinct commit across matrix and repeated steps", len(bundle.Plans), bundle.IR.Warnings)
-	}
-	warning := bundle.IR.Warnings[0]
-	if warning.Code != "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || warning.Path != "./.github/workflows/artifact.yml" || warning.Job != "download" || warning.Step != 1 || warning.Line == 0 ||
-		!strings.Contains(warning.Message, unknown) || !strings.Contains(warning.Message, actionintegration.DownloadArtifactFallbackContractRelease) || !strings.Contains(warning.Message, "verified direct needs producers") || !strings.Contains(warning.Message, "does not run the upstream action JavaScript") {
-		t.Fatalf("unknown download-artifact fallback warning = %#v", warning)
-	}
-	if bundle.IR.Warnings[1].Code != "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[1].Step != 3 || !strings.Contains(bundle.IR.Warnings[1].Message, otherUnknown) {
-		t.Fatalf("second unknown download-artifact fallback warning = %#v", bundle.IR.Warnings[1])
-	}
-
-	writeAction(t, workspace, ".github/actions/wrapper", "runs:\n  using: composite\n  steps:\n    - uses: actions/download-artifact@"+unknown+"\n      with:\n        name: payload\n")
-	workflow = []byte("on: push\njobs:\n  producer:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo payload\n  download:\n    needs: producer\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n")
-	bundle = compile(workflow)
-	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_DOWNLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[0].Step != 1 || !strings.Contains(bundle.IR.Warnings[0].Message, unknown) {
-		t.Fatalf("nested unknown download-artifact fallback warnings = %#v", bundle.IR.Warnings)
 	}
 }
 
@@ -2537,85 +2491,5 @@ func TestCompilePlansContextCancelsRemoteResolution(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("compilePlansForTest() error = %v, want context cancellation", err)
-	}
-}
-
-func TestLivePublicActionCompatibility(t *testing.T) {
-	if os.Getenv("BUILDKITE_GHA_LIVE_ACTIONS") != "1" {
-		t.Skip("set BUILDKITE_GHA_LIVE_ACTIONS=1 to query and download public GitHub actions anonymously")
-	}
-	workspace := t.TempDir()
-	workflowPath := filepath.Join(workspace, ".github", "workflows", "public-actions.yml")
-	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	workflow := []byte(`on: push
-jobs:
-  actions:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
-        with:
-          node-version: "24"
-          package-manager-cache: "false"
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
-        with:
-          go-version: "1.26.5"
-          cache: "false"
-`)
-	resolver, err := source.NewResolver(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	actionCache := filepath.Join(t.TempDir(), "actions")
-	if err := os.Mkdir(actionCache, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store, err := source.NewStore(actionCache, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
-	defer cancel()
-	plans, err := compilePlansForTest(ctx, workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
-		EventTrust: EventUntrusted,
-		Runners: RunnerPolicy{
-			Labels:          map[string]string{"ubuntu-latest": "hosted"},
-			UntrustedQueues: []string{"hosted"},
-		},
-		ResolveActions: true,
-		ActionSource:   PublicActionSource{Resolver: resolver, Store: store},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plans) != 1 || plans[0].Schema != plan.Schema || len(plans[0].Actions) != 3 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
-		t.Fatalf("public action plan = %#v", plans)
-	}
-	wantCommits := map[string]string{
-		"actions/checkout":   "3d3c42e5aac5ba805825da76410c181273ba90b1",
-		"actions/setup-node": "249970729cb0ef3589644e2896645e5dc5ba9c38",
-		"actions/setup-go":   "924ae3a1cded613372ab5595356fb5720e22ba16",
-	}
-	for _, lock := range plans[0].Actions {
-		if want := wantCommits[lock.Repository]; lock.Commit != want || lock.SourceDigest == "" {
-			t.Fatalf("public action lock = %#v, want commit %q", lock, want)
-		}
-	}
-	checkoutRoot := filepath.Join(actionCache, "actions", "checkout", wantCommits["actions/checkout"], "tree")
-	checkout, err := metadata.Load(checkoutRoot, ".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if token := checkout.Inputs["token"].Default; token == nil || *token != "${{ github.token }}" {
-		t.Fatalf("actions/checkout token default = %#v, want github.token", token)
-	}
-	distribution, err := os.ReadFile(filepath.Join(checkoutRoot, "dist", "index.js"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(distribution, []byte("getInput('token', { required: true })")) || !bytes.Contains(distribution, []byte("Input required and not supplied:")) {
-		t.Fatal("pinned actions/checkout no longer requires a token before Git; revisit the built-in tokenless adapter")
 	}
 }

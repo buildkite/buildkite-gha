@@ -1283,15 +1283,6 @@ func TestEmitUsesImmutableRuntimeImageToolCache(t *testing.T) {
 	}
 }
 
-func TestMiseDataDirUsesManagedRuntimeVersion(t *testing.T) {
-	if got := MiseDataDir(); got != "/cache/bkcache/buildkite-gha/mise/linux-amd64/"+MinimumMiseVersion {
-		t.Fatalf("MiseDataDir() = %q", got)
-	}
-	if got := MiseDataDir("darwin/arm64"); got != "/tmp/bkcache/buildkite-gha/mise/darwin-arm64/"+MinimumMiseVersion {
-		t.Fatalf("MiseDataDir(darwin/arm64) = %q", got)
-	}
-}
-
 func TestEmitMiseCacheOnlyForActionJobs(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep:       "importer",

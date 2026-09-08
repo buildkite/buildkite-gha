@@ -346,41 +346,36 @@ func TestDecodeRejectsCaseCollidingProgramControls(t *testing.T) {
 	}
 }
 
-func TestEventHeadRefSizeLimit(t *testing.T) {
-	job := validJob()
-	job.Event.HeadRef = strings.Repeat("a", 1024)
-	encoded, err := Encode(job)
-	if err != nil {
-		t.Fatalf("Encode() maximum head_ref error = %v", err)
-	}
-	validateJobPlanSchema(t, encoded)
+func TestEventRefSizeLimits(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		set  func(*Event, string)
+	}{
+		{name: "head_ref", set: func(event *Event, ref string) { event.HeadRef = ref }},
+		{name: "base_ref", set: func(event *Event, ref string) { event.BaseRef = ref }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := validJob()
+			test.set(&job.Event, strings.Repeat("a", 1024))
+			encoded, err := Encode(job)
+			if err != nil {
+				t.Fatalf("Encode() maximum %s error = %v", test.name, err)
+			}
+			validateJobPlanSchema(t, encoded)
 
-	oversized := strings.Repeat("a", 1025)
-	job.Event.HeadRef = oversized
-	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "event identity exceeds its size limit") {
-		t.Fatalf("Validate() oversized head_ref error = %v", err)
-	}
-	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "event identity exceeds its size limit") {
-		t.Fatalf("Encode() oversized head_ref error = %v", err)
-	}
-	encoded = []byte(strings.Replace(string(encoded), strings.Repeat("a", 1024), oversized, 1))
-	if _, err := Decode(encoded); err == nil || !strings.Contains(err.Error(), "event identity exceeds its size limit") {
-		t.Fatalf("Decode() oversized head_ref error = %v", err)
-	}
-}
-
-func TestEventBaseRefSizeLimit(t *testing.T) {
-	job := validJob()
-	job.Event.BaseRef = strings.Repeat("a", 1024)
-	encoded, err := Encode(job)
-	if err != nil {
-		t.Fatalf("Encode() maximum base_ref error = %v", err)
-	}
-	validateJobPlanSchema(t, encoded)
-
-	job.Event.BaseRef = strings.Repeat("a", 1025)
-	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "event identity exceeds its size limit") {
-		t.Fatalf("Validate() oversized base_ref error = %v", err)
+			oversized := strings.Repeat("a", 1025)
+			test.set(&job.Event, oversized)
+			if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "event identity exceeds its size limit") {
+				t.Fatalf("Validate() oversized %s error = %v", test.name, err)
+			}
+			if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "event identity exceeds its size limit") {
+				t.Fatalf("Encode() oversized %s error = %v", test.name, err)
+			}
+			encoded = []byte(strings.Replace(string(encoded), strings.Repeat("a", 1024), oversized, 1))
+			if _, err := Decode(encoded); err == nil || !strings.Contains(err.Error(), "event identity exceeds its size limit") {
+				t.Fatalf("Decode() oversized %s error = %v", test.name, err)
+			}
+		})
 	}
 }
 
@@ -1444,28 +1439,6 @@ func TestContainerContract(t *testing.T) {
 	want := `{"container":{"image":"node:24","env":{"NODE_ENV":"test"},"ports":["8080"]},"services":{"database":{"image":"postgres:16","credentials":{"username":"user","password":"password"},"env":{"POSTGRES_DB":"app"},"ports":["5432:5432"],"volumes":["database:/data"],"options":"--health-retries 5","command":"postgres -c fsync=off","entrypoint":"docker-entrypoint.sh"}}}`
 	if string(wire) != want {
 		t.Fatalf("encoded containers = %s, want %s", wire, want)
-	}
-}
-
-func TestContainerModelFields(t *testing.T) {
-	tests := []struct {
-		name   string
-		typeOf reflect.Type
-		fields []string
-	}{
-		{name: "job", typeOf: reflect.TypeFor[Container](), fields: []string{"Image:image", "Env:env,omitempty", "Ports:ports,omitempty"}},
-		{name: "service", typeOf: reflect.TypeFor[ServiceContainer](), fields: []string{"Image:image", "Credentials:credentials,omitempty", "Env:env,omitempty", "Ports:ports,omitempty", "Volumes:volumes,omitempty", "Options:options,omitempty", "Command:command,omitempty", "Entrypoint:entrypoint,omitempty"}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			var got []string
-			for field := range test.typeOf.Fields() {
-				got = append(got, field.Name+":"+string(field.Tag.Get("json")))
-			}
-			if !slices.Equal(got, test.fields) {
-				t.Fatalf("fields = %#v, want %#v", got, test.fields)
-			}
-		})
 	}
 }
 

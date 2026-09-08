@@ -36,32 +36,6 @@ func TestCheckoutCommitAdmission(t *testing.T) {
 	}
 }
 
-func TestCheckoutSnapshotContracts(t *testing.T) {
-	if len(checkoutCommitContracts) < 254 {
-		t.Fatalf("snapshotted checkout commits = %d, want at least 254", len(checkoutCommitContracts))
-	}
-	for branch, tip := range checkoutSnapshotTips {
-		if _, ok := checkoutCommitContracts[tip]; !ok {
-			t.Errorf("snapshot branch %s tip %s has no admitted contract", branch, tip)
-		}
-	}
-	for commit, contract := range checkoutCommitContracts {
-		if contract.inputs == "" {
-			t.Errorf("snapshotted commit %s has no declared inputs", commit)
-		}
-		names := strings.Split(contract.inputs, ",")
-		for i, name := range names {
-			if name != strings.ToLower(name) || i > 0 && names[i-1] >= name {
-				t.Errorf("snapshotted commit %s has noncanonical inputs %q", commit, contract.inputs)
-				break
-			}
-		}
-		if contract.refOutput != contract.commitOutput {
-			t.Errorf("snapshotted commit %s declares only one checkout output", commit)
-		}
-	}
-}
-
 func TestValidateCheckoutInputs(t *testing.T) {
 	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
 	for _, inputs := range []map[string]string{

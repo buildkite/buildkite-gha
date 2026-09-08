@@ -8,48 +8,20 @@ import (
 	"testing"
 )
 
-func TestPositionalWalkerVisitsAndTransformsEverySiteExactlyOnce(t *testing.T) {
+func TestPositionalWalkerVisitsAndTransformsEverySiteFieldExactlyOnce(t *testing.T) {
+	var program Program
 	marker := 0
-	site := func() Site {
-		marker++
-		return Site{Source: strings.Repeat("x", marker)}
-	}
-	binding := func() Binding { return Binding{Name: "value", Value: site()} }
-	boolExpression, numberExpression, dynamicServices := site(), site(), site()
-	program := Program{Version: Version, Job: Job{
-		Guards: []Guard{{Condition: site()}}, Condition: site(), Env: []Binding{binding()},
-		Defaults:  Defaults{Shell: site(), WorkingDirectory: site()},
-		Container: &Container{Image: site(), Env: []Binding{binding()}, Ports: []Site{site()}},
-		Services: Services{Static: []Service{{Name: "db", Container: ServiceContainer{
-			Image: site(), Credentials: &ContainerCredentials{Username: site(), Password: site()},
-			Env: []Binding{binding()}, Ports: []Site{site()}, Volumes: []Site{site()},
-			Options: site(), Command: site(), Entrypoint: site(),
-		}}}, Dynamic: &dynamicServices},
-		Steps: []Step{
-			{ID: "run", Env: []Binding{binding()}, Condition: site(), ContinueOnError: BoolControl{Expression: &boolExpression}, TimeoutMinutes: NumberControl{Expression: &numberExpression}, Name: site(), Run: &Run{Command: site(), Shell: site(), WorkingDirectory: site()}},
-			{ID: "uses", Condition: site(), Name: site(), Invocation: &Invocation{Uses: site(), With: []Binding{binding()}}},
-		},
-		Outputs: []Binding{binding()},
-	}, Actions: map[string]Action{
-		"node":   {Runtime: "node24", Inputs: []ActionInput{{Name: "value", Default: sitePointer(site())}}, Outputs: []ActionOutput{{Name: "value", Value: site()}}, PreIf: site(), PostIf: site(), Env: []Binding{binding()}},
-		"docker": {Runtime: "docker", Args: []Site{site()}},
-		"composite": {Runtime: "composite", Steps: []ActionStep{
-			{Name: site(), Condition: site(), Env: []Binding{binding()}, Run: &ActionRun{Command: site()}, Shell: site(), WorkingDirectory: site()},
-			{Name: site(), Condition: site(), Invocation: &Invocation{Uses: site(), With: []Binding{binding()}}, Shell: site(), WorkingDirectory: site()},
-		}},
-	}}
+	populateSiteFields(reflect.ValueOf(&program).Elem(), &marker)
 
-	walked := map[string]int{}
+	walked := make(map[string]int, marker)
 	if err := program.walkSites(func(site *Site) error {
-		if site.Source != "" {
-			walked[site.Source]++
-		}
+		walked[site.Source]++
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if len(walked) != marker {
-		t.Fatalf("walked %d populated positions, want %d", len(walked), marker)
+		t.Fatalf("walker visited %d of %d reflected Site fields", len(walked), marker)
 	}
 	for source, count := range walked {
 		if count != 1 {
@@ -72,11 +44,9 @@ func TestPositionalWalkerVisitsAndTransformsEverySiteExactlyOnce(t *testing.T) {
 	}
 	seen := 0
 	if err := transformed.walkSites(func(site *Site) error {
-		if site.Source != "" {
-			seen++
-			if !strings.HasSuffix(site.Source, "!") {
-				t.Fatalf("site %q was not transformed", site.Source)
-			}
+		seen++
+		if !strings.HasSuffix(site.Source, "!") {
+			t.Fatalf("site %q was not transformed", site.Source)
 		}
 		return nil
 	}); err != nil {
@@ -85,27 +55,13 @@ func TestPositionalWalkerVisitsAndTransformsEverySiteExactlyOnce(t *testing.T) {
 	if seen != marker {
 		t.Fatalf("transformed walk visited %d positions, want %d", seen, marker)
 	}
-}
-
-func TestPositionalWalkerCoversEverySiteField(t *testing.T) {
-	var program Program
-	marker := 0
-	populateSiteFields(reflect.ValueOf(&program).Elem(), &marker)
-
-	walked := make(map[string]int, marker)
 	if err := program.walkSites(func(site *Site) error {
-		walked[site.Source]++
+		if strings.HasSuffix(site.Source, "!") {
+			t.Fatalf("TransformSites mutated the original site %q", site.Source)
+		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
-	}
-	if len(walked) != marker {
-		t.Fatalf("walker visited %d of %d reflected Site fields", len(walked), marker)
-	}
-	for source, count := range walked {
-		if count != 1 {
-			t.Fatalf("site %q walked %d times", source, count)
-		}
 	}
 }
 
@@ -179,5 +135,3 @@ func TestValidateDerivesSiteSemanticsInPlace(t *testing.T) {
 		t.Fatalf("InventoryAuthority() after Validate() = %v", err)
 	}
 }
-
-func sitePointer(site Site) *Site { return &site }

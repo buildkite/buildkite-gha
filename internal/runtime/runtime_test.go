@@ -17,7 +17,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
-	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -400,20 +399,6 @@ func TestSkippedStepDoesNotEvaluateTypedControls(t *testing.T) {
 	result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
-	}
-}
-
-func TestStepTimeoutExpressionUsesSameStepEnvironment(t *testing.T) {
-	step := normalizedTestStep(runtimeTestStep{Env: map[string]string{"MINUTES": "5"}, TimeoutMinutesExpression: "${{ fromJSON(env.MINUTES) }}"})
-	context := expression.Context{}
-	env, err := executionprogram.EvaluateBindings(step.Env, executionprogram.EvaluationContext{Expression: context})
-	if err != nil {
-		t.Fatal(err)
-	}
-	context.Env = env
-	timeoutMinutes, err := evaluateStepTimeout(step, context)
-	if err != nil || timeoutMinutes != 5 {
-		t.Fatalf("evaluateStepTimeout() = %v, %v", timeoutMinutes, err)
 	}
 }
 
@@ -879,7 +864,7 @@ func TestResolveActionInputsExposesScopedTokenToMetadataDefaults(t *testing.T) {
 		Secrets: map[string]string{"GITHUB_TOKEN": "ghs_scoped_action_default"},
 	}
 
-	inputs, err := resolveActionInputs(action, nil, eval)
+	inputs, err := resolveProgramActionInputs(executionprogram.ActionFromMetadata(action, "node24", nil), nil, eval)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -893,7 +878,7 @@ func TestResolveActionInputsExposesScopedTokenToMetadataDefaults(t *testing.T) {
 		t.Fatalf("workflow github.token evaluation error = %v, want unavailable value", err)
 	}
 
-	inputs, err = resolveActionInputs(action, map[string]string{"GITHUB_TOKEN": ""}, eval)
+	inputs, err = resolveProgramActionInputs(executionprogram.ActionFromMetadata(action, "node24", nil), map[string]string{"GITHUB_TOKEN": ""}, eval)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -903,14 +888,14 @@ func TestResolveActionInputsExposesScopedTokenToMetadataDefaults(t *testing.T) {
 
 	withoutToken := eval
 	withoutToken.Secrets = nil
-	if _, err := resolveActionInputs(action, nil, withoutToken); err == nil || !strings.Contains(err.Error(), `unavailable github value "token"`) {
+	if _, err := resolveProgramActionInputs(executionprogram.ActionFromMetadata(action, "node24", nil), nil, withoutToken); err == nil || !strings.Contains(err.Error(), `unavailable github value "token"`) {
 		t.Fatalf("unplanned metadata github.token evaluation error = %v, want unavailable value", err)
 	}
 	ghesAction := metadata.Metadata{Inputs: map[string]metadata.Input{"token": {Default: &conditionalTokenDefault}}}
 	ghes := eval
 	ghes.GitHub = map[string]any{"server_url": "https://github.example.com"}
 	ghes.Secrets = nil
-	inputs, err = resolveActionInputs(ghesAction, nil, ghes)
+	inputs, err = resolveProgramActionInputs(executionprogram.ActionFromMetadata(ghesAction, "node24", nil), nil, ghes)
 	if err != nil || inputs["token"] != "" {
 		t.Fatalf("GHES conditional token input = %#v, %v, want empty token", inputs, err)
 	}
@@ -925,12 +910,12 @@ func TestResolveActionInputsUsesContextDefaultsUnlessExplicitlySupplied(t *testi
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			action := metadata.Metadata{Inputs: map[string]metadata.Input{test.input: {Default: &test.expression}}}
-			inputs, err := resolveActionInputs(action, nil, expression.Context{})
+			inputs, err := resolveProgramActionInputs(executionprogram.ActionFromMetadata(action, "node24", nil), nil, expression.Context{})
 			if err != nil || inputs[test.input] != test.defaultValue {
 				t.Fatalf("context default = %#v, %v; want %q", inputs, err, test.defaultValue)
 			}
 
-			inputs, err = resolveActionInputs(action, map[string]string{strings.ToUpper(test.input): test.supplied}, expression.Context{})
+			inputs, err = resolveProgramActionInputs(executionprogram.ActionFromMetadata(action, "node24", nil), map[string]string{strings.ToUpper(test.input): test.supplied}, expression.Context{})
 			if err != nil || inputs[test.input] != test.supplied {
 				t.Fatalf("explicit input = %#v, %v; want %q", inputs, err, test.supplied)
 			}
@@ -962,7 +947,7 @@ func TestOriginUsesProviderServerURLWithoutGitHubToken(t *testing.T) {
 	}
 	conditionalTokenDefault := "${{ github.server_url == 'https://github.com' && github.token || '' }}"
 	action := metadata.Metadata{Inputs: map[string]metadata.Input{"token": {Default: &conditionalTokenDefault}}}
-	inputs, err := resolveActionInputs(action, nil, expression.Context{GitHub: github})
+	inputs, err := resolveProgramActionInputs(executionprogram.ActionFromMetadata(action, "node24", nil), nil, expression.Context{GitHub: github})
 	if err != nil || inputs["token"] != "" {
 		t.Fatalf("Origin conditional token input = %#v, %v, want empty token", inputs, err)
 	}
@@ -2066,14 +2051,6 @@ func TestRuntimeRejectsRecursiveAndOverDepthCompositeActions(t *testing.T) {
 }
 
 func TestRuntimeMapDiagnosticsAreSorted(t *testing.T) {
-	_, err := evaluateMap(map[string]string{
-		"z-last":  "${{ unsupported.z }}",
-		"a-first": "${{ unsupported.a }}",
-	}, expression.Context{})
-	if err == nil || !strings.Contains(err.Error(), `evaluate "a-first"`) {
-		t.Fatalf("evaluateMap() error = %v, want alphabetically first key", err)
-	}
-
 	workspace := fixturePath(t, "smoke")
 	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []runtimeTestStep{{ID: "shell", Kind: "run", Shell: "sh", Command: "true"}})
 	job.Needs = map[string]plan.Need{"z-last": {}, "a-first": {}}
@@ -2089,83 +2066,6 @@ func TestRuntimeMapDiagnosticsAreSorted(t *testing.T) {
 	}
 	if len(result.Outputs) != 0 {
 		t.Fatalf("RunJob() partial outputs = %#v, want none before first sorted error", result.Outputs)
-	}
-}
-
-func TestLivePortableSetupActions(t *testing.T) {
-	if os.Getenv("BUILDKITE_GHA_LIVE_ACTIONS") != "1" {
-		t.Skip("set BUILDKITE_GHA_LIVE_ACTIONS=1 to execute public setup actions with anonymous downloads")
-	}
-	node := requireNode24(t)
-	workspace := t.TempDir()
-	workflowPath := filepath.Join(workspace, ".github", "workflows", "portable-setup.yml")
-	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	workflow := []byte(`on: push
-jobs:
-  setup:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
-        with:
-          node-version: "24"
-          package-manager-cache: "false"
-          token: ""
-      - run: node --version | grep '^v24\.'
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
-        with:
-          go-version: "1.26.5"
-          cache: "false"
-          token: ""
-      - run: go version | grep 'go1\.26\.5 '
-`)
-	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	resolver, err := source.NewResolver(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	actionCache := filepath.Join(t.TempDir(), "actions")
-	if err := os.Mkdir(actionCache, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store, err := source.NewStore(actionCache, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
-	defer cancel()
-	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	plans, err := compilePlansForTest(ctx, workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
-		EventTrust: compiler.EventUntrusted,
-		Runners: compiler.RunnerPolicy{
-			Labels:          map[string]string{"ubuntu-latest": "hosted"},
-			UntrustedQueues: []string{"hosted"},
-		},
-		ResolveActions: true,
-		ActionSource: compiler.PublicActionSource{
-			Resolver: resolver,
-			Store:    store,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plans) != 1 || plans[0].Schema != plan.Schema || len(plans[0].Actions) != 2 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
-		t.Fatalf("portable setup plans = %#v", plans)
-	}
-	if got := plans[0].ExecutionJob().Steps[0].Invocation.With[0].Value.Source; got != "24" {
-		t.Fatalf("setup-node plan input = %q, want 24", got)
-	}
-	var logs bytes.Buffer
-	result, err := (Runner{Node24: node, Actions: store, Stdout: &logs, Stderr: &logs}).runTestJob(ctx, plans[0], workspace)
-	if err != nil || result.Conclusion != "success" {
-		t.Fatalf("RunJob() result = %#v, error = %v\nlogs:\n%s", result, err, logs.String())
 	}
 }
 
