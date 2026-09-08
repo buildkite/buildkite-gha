@@ -8,6 +8,69 @@ import (
 	"testing"
 )
 
+func TestParseIssueTypes(t *testing.T) {
+	for _, event := range []string{"issues", "issue_comment"} {
+		for _, types := range []string{"", "    types: []\n", "    types: [ # empty\n    ]\n", "    types: [edited]\n"} {
+			t.Run(event+"/"+types, func(t *testing.T) {
+				source := "on:\n  " + event + ":\n" + types + "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+				parsed, err := Parse("types.yml", []byte(source))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var want []string
+				if strings.Contains(types, "edited") {
+					want = []string{"edited"}
+				}
+				if len(parsed.Triggers) != 1 || !reflect.DeepEqual(parsed.Triggers[0].Types, want) || parsed.Triggers[0].Position != (Position{Line: 2, Column: 3}) {
+					t.Fatalf("triggers = %#v, want types %#v at 2:3", parsed.Triggers, want)
+				}
+				if parsed.Jobs[0].Span.Start.Line != 4+strings.Count(types, "\n") {
+					t.Fatalf("job source position changed: %#v", parsed.Jobs[0].Span)
+				}
+			})
+		}
+	}
+}
+
+func TestParseEmptyIssueTypesTogether(t *testing.T) {
+	for _, on := range []string{
+		`on: {issues: {types: []}, issue_comment: {types: []}}`,
+		`'on': {'issues': {types: &empty []}, 'issue_comment': {types: *empty}}`,
+		`on: {issues: &trigger {types: []}, issue_comment: *trigger}`,
+	} {
+		parsed, err := Parse("types.yml", []byte(on+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(parsed.Triggers) != 2 || parsed.Triggers[0].Types != nil || parsed.Triggers[1].Types != nil {
+			t.Fatalf("triggers = %#v, want two default-all triggers", parsed.Triggers)
+		}
+	}
+}
+
+func TestParseEmptyIssueTypesPreservesDiagnostics(t *testing.T) {
+	for _, test := range []struct{ on, want string }{
+		{"issues: {types: []}\n  pull_request: {types: []}", `"types" section should not be empty`},
+		{"issue_comment: {types: []}\n  release: {types: []}", `"types" section should not be empty`},
+		{"issues: {types: []}\n  merge_group: {types: []}", `"types" section should not be empty`},
+		{"issues: {types: &empty []}\n  pull_request: {types: *empty}", `"types" section should not be empty`},
+		{"issues: {types: {}}", "sequence"},
+		{"issue_comment: {types: null}", "should not be empty"},
+		{"issues: {types: ''}", "should not be empty"},
+		{"issue_comment: {types: [[]]}", "scalar"},
+		{"issues: {types: [], unexpected: true}", `unexpected key "unexpected"`},
+		{"issues: {types: &empty []}", `anchor "empty" is defined but not used`},
+		{"issues: {types: []}\n  issue_comment: {types: []}", `types.yml:7:12: "steps" section should not be empty`},
+	} {
+		t.Run(test.on, func(t *testing.T) {
+			source := "on:\n  " + test.on + "\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: []\n"
+			if _, err := Parse("types.yml", []byte(source)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestParseSmokeWorkflowsIntoOwnedModel(t *testing.T) {
 	for _, name := range []string{"shell.yml", "ci.yml", "artifact.yml"} {
 		t.Run(name, func(t *testing.T) {
