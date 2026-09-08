@@ -1097,6 +1097,22 @@ them back. Directory matches include descendants, hidden files match normally,
 and overlapping patterns hash each path once. Matching is case-insensitive only
 on Windows. An empty match returns an empty string.
 
+On Linux, literal paths use direct lookups. macOS and Windows enumerate directory
+names to preserve platform-specific matching. Each positive pattern searches
+below its literal directory prefix, then walks recursively from its first
+wildcard. For example, `packages/service/*.go` searches under `packages/service`,
+while `packages/s*/value` searches under `packages`. Negative patterns filter
+matches but do not prune traversal, since later patterns can re-include files.
+The entry limit counts inspected entries, including nonmatches, rather than the
+size of the workspace.
+
+Each call has an execution budget covering traversal, matching, sorting, hashing,
+and verification. An earlier step or job deadline still applies. Cancellation is
+checked between operations; it cannot interrupt a blocked filesystem call.
+Entry-limit and execution-budget errors list the positive patterns being searched
+and recommend more specific paths to reduce traversal and hashing. The budget is
+shared across those patterns.
+
 For each file, `hashFiles()` calculates SHA-256 over its contents. It then hashes
 the concatenated binary digests in lexical path order. GitHub Runner does not
 specify glob traversal order, so a multi-file digest can differ when GitHub's
@@ -1595,7 +1611,8 @@ hosted-toolchains images provide. macOS images are unsupported.
 | Uploaded source data or ZIP | No `buildkite-gha` limit; subject to Buildkite Agent and storage limits |
 | Job summary | 1 MiB |
 | `hashFiles()` patterns | 255 per call; 1 KiB each; 64 KiB total |
-| `hashFiles()` workspace entries | 100,000 per call |
+| `hashFiles()` inspected entries | 1,000,000 per call |
+| `hashFiles()` execution budget | 30 seconds per call |
 | `hashFiles()` matched files | 10,000 per call |
 | `hashFiles()` selected bytes | 1 GiB per call |
 
