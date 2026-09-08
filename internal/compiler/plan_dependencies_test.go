@@ -15,7 +15,7 @@ func TestBuildPlanDependenciesOwnsGraphToPlanBoundary(t *testing.T) {
 		NeedGroups:   map[string][]string{"build": {"build-1"}},
 		NeedOutputs:  map[string][]NeedOutput{"build": {output}},
 		DeferredInputs: map[string]DeferredInput{
-			"digest": {Sources: []string{"build-1"}, Outputs: []NeedOutput{output}},
+			"digest": {Template: "sha256:${{ needs.build.outputs.digest }}", NeedGroups: map[string][]string{"build": {"build-1"}}, NeedOutputs: map[string][]NeedOutput{"build": {output}}},
 		},
 		CallGuards: []CallGuard{{
 			Condition:   "success()",
@@ -46,7 +46,8 @@ func TestBuildPlanDependenciesOwnsGraphToPlanBoundary(t *testing.T) {
 	if !reflect.DeepEqual(buildPlanNeedOutputs(instance), map[string][]plan.NeedOutput{"build": {output}}) {
 		t.Fatalf("need outputs were not preserved")
 	}
-	if !reflect.DeepEqual(deferred["digest"], plan.DeferredInput{Sources: []plan.NeedSource{wantSource}, Outputs: []plan.NeedOutput{output}}) {
+	wantDeferred := plan.DeferredInput{Template: "sha256:${{ needs.build.outputs.digest }}", NeedSources: map[string][]plan.NeedSource{"build": {wantSource}}, NeedOutputs: map[string][]plan.NeedOutput{"build": {output}}}
+	if !reflect.DeepEqual(deferred["digest"], wantDeferred) {
 		t.Fatalf("deferred input = %#v", deferred["digest"])
 	}
 	if len(guards) != 1 {

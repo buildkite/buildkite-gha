@@ -1645,7 +1645,12 @@ jobs:
 		t.Fatalf("forwarded deferred input = %#v", ir.Jobs)
 	}
 	deferred := ir.Jobs[1].DeferredInputs["subjects"]
-	if !reflect.DeepEqual(deferred.Sources, []string{ir.Jobs[0].Key}) || !reflect.DeepEqual(deferred.Outputs, []NeedOutput{{Name: "value", StepKey: ir.Jobs[0].Key, Output: "hashes"}}) {
+	want := DeferredInput{
+		Template:    "${{ needs.hash.outputs.hashes }}",
+		NeedGroups:  map[string][]string{"hash": {ir.Jobs[0].Key}},
+		NeedOutputs: map[string][]NeedOutput{"hash": {{Name: "hashes", StepKey: ir.Jobs[0].Key, Output: "hashes"}}},
+	}
+	if !reflect.DeepEqual(deferred, want) {
 		t.Fatalf("forwarded deferred binding = %#v", deferred)
 	}
 	if !reflect.DeepEqual(ir.Jobs[1].CallGuards[0].DeferredInputs["subjects"], deferred) {
@@ -1707,8 +1712,107 @@ jobs:
 	}
 	consumer := ir.Jobs[2]
 	deferred := consumer.DeferredInputs["subject"]
-	if len(consumer.Needs) != 2 || len(deferred.Sources) != 2 || len(deferred.Outputs) != 1 || !slices.Equal(consumer.Needs, deferred.Sources) {
+	if len(consumer.Needs) != 2 || len(deferred.NeedGroups["produce"]) != 2 || len(deferred.NeedOutputs["produce"]) != 1 || !slices.Equal(consumer.Needs, deferred.NeedGroups["produce"]) {
 		t.Fatalf("consumer dependencies = %#v, deferred input = %#v", consumer.Needs, deferred)
+	}
+}
+
+func TestCompileDeferredInputEmbedsNeedsOutputsInLargerValue(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      flavor: ${{ steps.meta.outputs.flavor }}
+    steps:
+      - id: meta
+        run: |
+          echo tag=v4.3.0 >> "$GITHUB_OUTPUT"
+          echo flavor=latest >> "$GITHUB_OUTPUT"
+  produce:
+    uses: ./.github/workflows/producer.yml
+  build-image:
+    needs: [meta, produce]
+    uses: ./.github/workflows/build.yml
+    with:
+      tags: |
+        type=raw,value=${{ needs.Meta.outputs.tag }}
+        type=raw,value=${{ github.ref_name }}-${{ needs.produce.outputs.subject }}
+      flavor: ${{ format('latest={0}', needs.meta.outputs.flavor) }}
+      push: true
+`)
+	writeWorkflow(t, repository, "producer.yml", `on:
+  workflow_call:
+    outputs:
+      subject:
+        value: ${{ jobs.outputter.outputs.subject }}
+jobs:
+  outputter:
+    runs-on: ubuntu-latest
+    outputs:
+      subject: ${{ steps.value.outputs.subject }}
+    steps:
+      - id: value
+        run: echo subject=value >> "$GITHUB_OUTPUT"
+`)
+	writeWorkflow(t, repository, "build.yml", `on:
+  workflow_call:
+    inputs:
+      tags: {type: string, required: true}
+      flavor: {type: string, required: false}
+      push: {type: boolean, required: true}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ inputs.tags }}" "${{ inputs.flavor }}" ${{ inputs.push }}
+`)
+
+	plans, err := compilePlansForTest(t.Context(), callerPath, readFile(t, callerPath), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 3 {
+		t.Fatalf("plans = %d, want meta, producer, and build", len(plans))
+	}
+	meta, producer, build := plans[0], plans[1], plans[2]
+	digest := func(job plan.Job) string {
+		encoded, err := plan.Encode(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return transport.Digest(encoded)
+	}
+	metaSource := plan.NeedSource{StepKey: meta.Target.StepKey, PlanDigest: digest(meta)}
+	producerSource := plan.NeedSource{StepKey: producer.Target.StepKey, PlanDigest: digest(producer)}
+	want := map[string]plan.DeferredInput{
+		"tags": {
+			Template:    "type=raw,value=${{ needs.meta.outputs.tag }}\ntype=raw,value=main-${{ needs.produce.outputs.subject }}\n",
+			NeedSources: map[string][]plan.NeedSource{"meta": {metaSource}, "produce": {producerSource}},
+			NeedOutputs: map[string][]plan.NeedOutput{
+				"meta":    {{Name: "tag", StepKey: meta.Target.StepKey, Output: "tag"}},
+				"produce": {{Name: "subject", StepKey: producer.Target.StepKey, Output: "subject"}},
+			},
+		},
+		"flavor": {
+			Template:    "${{ format('latest={0}', needs.meta.outputs.flavor) }}",
+			NeedSources: map[string][]plan.NeedSource{"meta": {metaSource}},
+			NeedOutputs: map[string][]plan.NeedOutput{"meta": {{Name: "flavor", StepKey: meta.Target.StepKey, Output: "flavor"}}},
+		},
+	}
+	if !reflect.DeepEqual(build.DeferredInputs, want) {
+		t.Fatalf("deferred inputs = %#v, want %#v", build.DeferredInputs, want)
+	}
+	if build.Inputs["push"] != true || len(build.Inputs) != 1 {
+		t.Fatalf("static inputs = %#v", build.Inputs)
+	}
+	if !slices.Equal(build.Dependencies, []string{meta.Target.StepKey, producer.Target.StepKey}) || len(build.NeedOutputs["meta"]) != 0 || len(build.NeedOutputs["produce"]) != 0 {
+		t.Fatalf("build dependencies = %#v, needs outputs = %#v", build.Dependencies, build.NeedOutputs)
+	}
+	if build.Steps[0].Command != `echo "${{ inputs.tags }}" "${{ inputs.flavor }}" true` {
+		t.Fatalf("callee step = %#v", build.Steps[0])
 	}
 }
 
@@ -1953,7 +2057,7 @@ jobs:
 			t.Fatalf("Compile() error = %v, want source-located runtime input rejection", err)
 		}
 		var finding *ProcessingFinding
-		if !errors.As(err, &finding) || finding.Message != `Reusable workflow input "target" references job "prepare", but the call does not list it in needs. Add "prepare" to the reusable-workflow call's needs.` || !strings.Contains(finding.Detail, `Reusable-workflow input "target" is not statically resolvable`) || !strings.Contains(finding.Detail, `unsupported compile-time context "needs"`) {
+		if !errors.As(err, &finding) || finding.Message != `Reusable workflow input "target" references job "prepare", but the call does not list it in needs. Add "prepare" to the reusable-workflow call's needs.` || !strings.Contains(finding.Detail, `Reusable-workflow input "target" is not statically resolvable`) || !strings.Contains(finding.Detail, `expression references job "prepare", which the call does not list in needs`) {
 			t.Fatalf("Compile() finding = %#v", finding)
 		}
 	})
@@ -1973,7 +2077,7 @@ jobs:
     needs: prepare
     uses: ./.github/workflows/reusable.yml
     with:
-      target: prefix-${{ needs.prepare.outputs.target }}
+      target: prefix-${{ needs.prepare.result }}
 `)
 		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
@@ -1981,10 +2085,95 @@ jobs:
 			t.Fatal("Compile() error = nil, want unsupported needs input finding")
 		}
 		var finding *ProcessingFinding
-		wantMessage := `Reusable workflow input "target" uses a needs expression in an unsupported form. Pass the whole value as exactly ${{ needs.<job>.outputs.<name> }}, with nothing around it. Only string inputs can take a needs value, and Buildkite resolves it before the called job runs, so the reference has to be the entire value rather than part of a larger expression. If you need a computed input from job outputs, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`
-		wantDetail := `Reusable-workflow input "target" is not statically resolvable: unsupported compile-time context "needs"`
+		wantMessage := `Reusable workflow input "target" uses a needs expression in an unsupported form: reusable-workflow input needs reference "needs.prepare.result" must be needs.<job>.outputs.<name>. Reference job outputs as needs.<job>.outputs.<name>, list each job in the call's needs, and keep the rest of the value resolvable before jobs run (literals, github, vars, matrix, and static inputs). Only string inputs can take a needs value; Buildkite resolves the referenced outputs before the called job runs.`
+		wantDetail := `Reusable-workflow input "target" is not statically resolvable: reusable-workflow input needs reference "needs.prepare.result" must be needs.<job>.outputs.<name>`
 		if !errors.As(err, &finding) || finding.Message != wantMessage || finding.Detail != wantDetail || finding.Path != "./.github/workflows/caller.yml" || finding.Line != 14 || finding.Column != 15 || finding.Job != "call" {
 			t.Fatalf("Compile() finding = %#v", finding)
+		}
+	})
+
+	t.Run("needs input mixed with runtime value", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.value.outputs.target }}
+    steps:
+      - id: value
+        run: echo target=test >> "$GITHUB_OUTPUT"
+  call:
+    needs: prepare
+    uses: ./.github/workflows/reusable.yml
+    with:
+      target: ${{ needs.prepare.outputs.target }}-${{ github.run_id }}
+`)
+		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		var finding *ProcessingFinding
+		if err == nil || !errors.As(err, &finding) || !strings.HasPrefix(finding.Message, `Reusable workflow input "target" uses a needs expression in an unsupported form: compile-time expression references unavailable value "github.run_id".`) {
+			t.Fatalf("Compile() finding = %#v", finding)
+		}
+	})
+
+	t.Run("needs input compounds forwarded parent input", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.value.outputs.target }}
+    steps:
+      - id: value
+        run: echo target=test >> "$GITHUB_OUTPUT"
+  call:
+    needs: prepare
+    uses: ./.github/workflows/middle.yml
+    with:
+      target: ${{ needs.prepare.outputs.target }}
+`)
+		writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      target: prefix-${{ inputs.target }}
+`)
+		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		var finding *ProcessingFinding
+		wantMessage := `Reusable workflow input "target" combines parent input "target", which carries a needs value, with other text. Forward it as exactly ${{ inputs.target }}, or compute the value where the needs output is referenced directly.`
+		if err == nil || !errors.As(err, &finding) || finding.Message != wantMessage || finding.Path != "./.github/workflows/caller.yml" || finding.Line != 12 || finding.Job != "call" {
+			t.Fatalf("Compile() finding = %#v", finding)
+		}
+	})
+
+	t.Run("needs input into non-string input", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      count: ${{ steps.value.outputs.count }}
+    steps:
+      - id: value
+        run: echo count=1 >> "$GITHUB_OUTPUT"
+  call:
+    needs: prepare
+    uses: ./.github/workflows/reusable.yml
+    with:
+      count: ${{ needs.prepare.outputs.count }}0
+`)
+		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      count:\n        type: number\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), `deferred reusable-workflow input "count" must be string`) || !strings.Contains(err.Error(), "./.github/workflows/caller.yml:14:14") {
+			t.Fatalf("Compile() error = %v, want non-string deferred input rejection", err)
 		}
 	})
 

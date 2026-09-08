@@ -131,9 +131,9 @@ func (e *jobGraphExpansion) orderJobs() {
 		job := sourced.Job
 		for _, guard := range sourced.callGuards {
 			job.Needs = append(job.Needs, bindingMembers(guard.needBindings)...)
-			job.Needs = append(job.Needs, bindingMembers(guard.inputs.deferred)...)
+			job.Needs = append(job.Needs, deferredInputMembers(guard.inputs.deferred)...)
 		}
-		job.Needs = append(job.Needs, bindingMembers(sourced.inputs.deferred)...)
+		job.Needs = append(job.Needs, deferredInputMembers(sourced.inputs.deferred)...)
 		sort.Strings(job.Needs)
 		job.Needs = slices.Compact(job.Needs)
 		e.topologyJobs[sourced.ID] = job
@@ -385,11 +385,11 @@ func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any
 }
 
 func (e *jobGraphExpansion) jobBlocked(sourced sourcedJob) bool {
-	if bindingsFailed(sourced.needBindings, e.failedJobs) || bindingsFailed(sourced.inputs.deferred, e.failedJobs) {
+	if bindingsFailed(sourced.needBindings, e.failedJobs) || deferredInputsFailed(sourced.inputs.deferred, e.failedJobs) {
 		return true
 	}
 	for _, guard := range sourced.callGuards {
-		if bindingsFailed(guard.needBindings, e.failedJobs) || bindingsFailed(guard.inputs.deferred, e.failedJobs) {
+		if bindingsFailed(guard.needBindings, e.failedJobs) || deferredInputsFailed(guard.inputs.deferred, e.failedJobs) {
 			return true
 		}
 	}
@@ -402,6 +402,15 @@ func bindingsFailed(bindings map[string]needBinding, failedJobs map[string]bool)
 			if failedJobs[member] {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func deferredInputsFailed(inputs map[string]deferredInput, failedJobs map[string]bool) bool {
+	for _, input := range inputs {
+		if bindingsFailed(input.needs, failedJobs) {
+			return true
 		}
 	}
 	return false
@@ -481,50 +490,22 @@ func (e *jobGraphExpansion) projectNeedOutputs(sourced sourcedJob, need string, 
 	instance.NeedOutputs[need] = projected
 }
 
-func resolveDeferredInputBindings(bindings map[string]needBinding, byLogicalID map[string][]JobInstance) (map[string]DeferredInput, []string, error) {
-	if len(bindings) == 0 {
+func resolveDeferredInputBindings(inputs map[string]deferredInput, byLogicalID map[string][]JobInstance) (map[string]DeferredInput, []string, error) {
+	if len(inputs) == 0 {
 		return nil, nil, nil
 	}
-	resolved := make(map[string]DeferredInput, len(bindings))
+	resolved := make(map[string]DeferredInput, len(inputs))
 	var dependencies []string
-	for _, name := range sortedKeys(bindings) {
-		input, err := resolveDeferredInputBinding(bindings[name], byLogicalID)
+	for _, name := range sortedKeys(inputs) {
+		input := inputs[name]
+		groups, outputs, inputDependencies, err := resolveCallGuardBindings(input.needs, byLogicalID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("input %q: %w", name, err)
 		}
-		resolved[name] = input
-		dependencies = append(dependencies, input.Sources...)
+		resolved[name] = DeferredInput{Template: input.template, NeedGroups: groups, NeedOutputs: outputs}
+		dependencies = append(dependencies, inputDependencies...)
 	}
 	return resolved, dependencies, nil
-}
-
-func resolveDeferredInputBinding(binding needBinding, byLogicalID map[string][]JobInstance) (DeferredInput, error) {
-	var deferred DeferredInput
-	for _, member := range binding.members {
-		producers := byLogicalID[member]
-		if len(producers) == 0 {
-			return DeferredInput{}, fmt.Errorf("source job %q has no expanded instances", member)
-		}
-		for _, producer := range producers {
-			deferred.Sources = append(deferred.Sources, producer.Key)
-		}
-	}
-	sort.Strings(deferred.Sources)
-	deferred.Sources = slices.Compact(deferred.Sources)
-	if len(deferred.Sources) > plan.MaxNeedProducers {
-		return DeferredInput{}, fmt.Errorf("has %d producers, maximum is %d", len(deferred.Sources), plan.MaxNeedProducers)
-	}
-	for _, output := range binding.outputs {
-		producers := byLogicalID[output.member]
-		if len(deferred.Outputs)+len(producers) > plan.MaxNeedOutputs {
-			return DeferredInput{}, fmt.Errorf("output %q expands beyond the maximum of %d projections", output.output, plan.MaxNeedOutputs)
-		}
-		for _, producer := range producers {
-			deferred.Outputs = append(deferred.Outputs, NeedOutput{Name: output.name, StepKey: producer.Key, Output: output.output})
-		}
-	}
-	sortNeedOutputs(deferred.Outputs)
-	return deferred, nil
 }
 
 func resolveCallGuardBindings(bindings map[string]needBinding, byLogicalID map[string][]JobInstance) (map[string][]string, map[string][]NeedOutput, []string, error) {

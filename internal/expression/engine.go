@@ -34,6 +34,7 @@ const (
 	ProfileStepControl           ProfileID = "step-control"
 	ProfileRuntimeTemplate       ProfileID = "runtime-template"
 	ProfileServiceTemplate       ProfileID = "service-template"
+	ProfileDeferredInput         ProfileID = "deferred-input"
 	ProfileServiceCredential     ProfileID = "service-credential"
 	ProfileServiceMap            ProfileID = "service-map"
 	ProfileActionInputDefault    ProfileID = "action-input-default"
@@ -101,6 +102,7 @@ const (
 	semanticsReusableStepControl
 	semanticsRuntimeTemplate
 	semanticsServiceTemplate
+	semanticsDeferredInput
 	semanticsServiceCredential
 	semanticsServiceMap
 	semanticsActionInputDefault
@@ -135,6 +137,7 @@ var profiles = map[ProfileID]Profile{
 	ProfileReusableStepControl:   {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: profileFunctions("hashFiles"), Missing: MissingNull, Token: TokenWorkflowContext, semantics: semanticsReusableStepControl},
 	ProfileRuntimeTemplate:       {Form: FormTemplate, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Missing: MissingEmpty, Token: TokenDirect, semantics: semanticsRuntimeTemplate},
 	ProfileServiceTemplate:       {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsServiceTemplate},
+	ProfileDeferredInput:         {Form: FormTemplate, Scope: ScopeCall, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDeferredInput},
 	ProfileServiceCredential:     {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "secrets", "vars"}, Missing: MissingEmpty, Token: TokenDirect, semantics: semanticsServiceCredential},
 	ProfileServiceMap:            {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: FunctionSet{"fromJSON"}, Missing: MissingError, Token: TokenDenied, semantics: semanticsServiceMap},
 	ProfileActionInputDefault:    {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsActionInputDefault},
@@ -402,6 +405,8 @@ func (Engine) Validate(site Site) (Validation, error) {
 		err = visitTemplateExpressions(site.Source, validateRuntimeReferenceNode)
 	case semanticsServiceTemplate:
 		err = visitTemplateExpressions(site.Source, validateServiceRuntimeNode)
+	case semanticsDeferredInput:
+		err = visitTemplateExpressions(site.Source, validateDeferredInputNode)
 	case semanticsServiceCredential:
 		err = visitTemplateExpressions(site.Source, validateServiceCredentialNode)
 	case semanticsServiceMap:
@@ -555,7 +560,7 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 		value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
 	case semanticsJobOutput:
 		value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
-	case semanticsStepTemplate:
+	case semanticsStepTemplate, semanticsDeferredInput:
 		value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
 	case semanticsStepControl, semanticsReusableStepControl:
 		var node actionlint.ExprNode
