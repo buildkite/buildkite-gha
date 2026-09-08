@@ -68,20 +68,20 @@ for the called repository. Git inherits the importer's credential helpers,
 configuration, and environment. Credentials come only from credential helpers:
 terminal prompts and askpass programs (`GIT_ASKPASS`, `core.askPass`,
 `SSH_ASKPASS`) are disabled, so a denied repository fails instead of running
-or waiting on a prompt program, and inherited `http.extraHeader` values,
-including host-scoped `http.<url>.extraHeader` values, are reset so a token
-stored as a header is not sent to a repository the helper did not authorize.
-Each invocation allows only the HTTPS transport, refuses redirects, verifies
-TLS, and checks received objects. These values are pinned for the exact
-repository URL, and Git environment variables that would relax them, such as
-`GIT_SSL_NO_VERIFY` and `GIT_ALLOW_PROTOCOL`, are removed, so inherited
-configuration cannot weaken them. `GIT_EXEC_PATH` and the `GIT_DIR` family are
-also removed, so Git runs its remote helpers from its own installation and
-writes only to the private repository created for the fetch. That repository
-is created with an empty init template and every command ignores replace refs,
-so an inherited template cannot seed refs or objects that substitute another
-tree for the pinned commit. The importer expands the URL with
-`git ls-remote --get-url` before fetching and stops if an inherited
+or waiting on a prompt program, and inherited `http.extraHeader` and
+`http.cookieFile` values, including host-scoped `http.<url>.*` values, are
+reset so a token stored as a header or cookie is not sent to a repository the
+helper did not authorize. Each invocation allows only the HTTPS transport,
+refuses redirects, verifies TLS, and checks received objects. These values are
+pinned for the exact repository URL, and Git environment variables that would
+relax them, such as `GIT_SSL_NO_VERIFY` and `GIT_ALLOW_PROTOCOL`, are removed,
+so inherited configuration cannot weaken them. `GIT_EXEC_PATH` and the
+`GIT_DIR` family are also removed, so Git runs its remote helpers from its own
+installation and writes only to the private repository created for the fetch.
+That repository is created with an empty init template and every command
+ignores replace refs, so an inherited template cannot seed refs or objects
+that substitute another tree for the pinned commit. The importer expands the
+URL with `git ls-remote --get-url` before fetching and stops if an inherited
 `url.<base>.insteadOf` rewrite changed it, so the request and the credential
 helper lookup stay on `github.com`. The Buildkite Agent repository-provider
 helper requests access for the exact repository; operators can also configure

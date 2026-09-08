@@ -783,10 +783,11 @@ func runGit(ctx context.Context, executable, repository string, stdout io.Writer
 // followed so credentials stay with the requested host, received objects are
 // checked, replace refs never substitute objects for the pinned commit, and the
 // credential helper receives the repository path so Buildkite authorizes the
-// exact repository. Inherited http.extraHeader values are dropped so a token
-// stored as a header cannot reach a repository the helper did not authorize.
-// Credential helpers themselves are inherited from the importer's Git
-// configuration; nothing here supplies or captures one.
+// exact repository. Inherited http.extraHeader values are dropped and no
+// http.cookieFile is read, so a token stored as a header or cookie cannot
+// reach a repository the helper did not authorize. Credential helpers
+// themselves are inherited from the importer's Git configuration; nothing here
+// supplies or captures one.
 func gitBaseArgs() []string {
 	return []string{
 		"--no-replace-objects",
@@ -795,6 +796,7 @@ func gitBaseArgs() []string {
 		"-c", "credential.interactive=false",
 		"-c", "credential.useHttpPath=true",
 		"-c", "http.extraHeader=",
+		"-c", "http.cookieFile=", "-c", "http.saveCookies=false",
 		"-c", "http.followRedirects=false",
 		"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
 		"-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true",
@@ -806,12 +808,14 @@ func gitBaseArgs() []string {
 // precedence over the generic keys in gitBaseArgs; an exact-URL command-line
 // value is the longest possible match and, on a tie, the last one applied. An
 // empty extraHeader value resets the list Git collected from inherited
-// configuration, so only the credential helper can attach credentials.
+// configuration and an empty cookieFile reads no cookies, so only the
+// credential helper can attach credentials.
 func gitRemoteArgs(remote string) []string {
 	return []string{
 		"-c", "http." + remote + ".followRedirects=false",
 		"-c", "http." + remote + ".sslVerify=true",
 		"-c", "http." + remote + ".extraHeader=",
+		"-c", "http." + remote + ".cookieFile=", "-c", "http." + remote + ".saveCookies=false",
 		"-c", "credential." + remote + ".useHttpPath=true",
 	}
 }

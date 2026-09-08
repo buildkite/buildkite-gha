@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1340,12 +1341,13 @@ func TestGitRepositorySourceDeniedAuthenticationDoesNotRunAskpass(t *testing.T) 
 	}
 }
 
-// TestGitRepositorySourceDropsInheritedExtraHeaders covers an importer whose
-// global configuration attaches an Authorization header to every request for a
-// host. Git would send that header to any repository named by workflow YAML
-// without consulting the credential helper, so the fetch boundary must reset
-// both the generic and the URL-scoped header lists.
-func TestGitRepositorySourceDropsInheritedExtraHeaders(t *testing.T) {
+// TestGitRepositorySourceDropsInheritedExtraHeadersAndCookies covers an
+// importer whose global configuration attaches an Authorization header and a
+// cookie file to every request for a host. Git would send both to any
+// repository named by workflow YAML without consulting the credential helper,
+// so the fetch boundary must reset the generic and URL-scoped header lists and
+// cookie files.
+func TestGitRepositorySourceDropsInheritedExtraHeadersAndCookies(t *testing.T) {
 	git, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
@@ -1355,10 +1357,13 @@ func TestGitRepositorySourceDropsInheritedExtraHeaders(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "home"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	var authorizations atomic.Int32
+	var authorizations, cookies atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "" {
 			authorizations.Add(1)
+		}
+		if r.Header.Get("Cookie") != "" {
+			cookies.Add(1)
 		}
 		http.NotFound(w, r)
 	}))
@@ -1371,8 +1376,17 @@ func TestGitRepositorySourceDropsInheritedExtraHeaders(t *testing.T) {
 	remote := server.URL + "/o/r.git"
 	runSourceGit(t, git, "", "config", "--global", "http."+server.URL+"/.extraHeader", "Authorization: Bearer inherited-token")
 	runSourceGit(t, git, "", "config", "--global", "--add", "http.extraHeader", "Authorization: Bearer generic-token")
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookieFile := filepath.Join(root, "cookies.txt")
+	if err := os.WriteFile(cookieFile, []byte(serverURL.Hostname()+"\tFALSE\t/\tTRUE\t0\tprivate-auth\tinherited-cookie\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runSourceGit(t, git, "", "config", "--global", "http."+server.URL+"/.cookieFile", cookieFile)
 
-	// Without the fetch boundary, Git sends the inherited header.
+	// Without the fetch boundary, Git sends the inherited header and cookie.
 	scratch := t.TempDir()
 	runSourceGit(t, git, "", "init", "--bare", "--quiet", scratch)
 	control := exec.CommandContext(t.Context(), git, append(append([]string{"-C", scratch}, trust...), "fetch", "--quiet", "--", remote, "main")...)
@@ -1380,10 +1394,11 @@ func TestGitRepositorySourceDropsInheritedExtraHeaders(t *testing.T) {
 	if err := control.Run(); err == nil {
 		t.Fatal("fetch from a denying server succeeded")
 	}
-	if authorizations.Load() == 0 {
-		t.Fatal("inherited extraHeader should reach the server without the fetch boundary")
+	if authorizations.Load() == 0 || cookies.Load() == 0 {
+		t.Fatalf("inherited credentials without the fetch boundary: Authorization %d, Cookie %d, want both", authorizations.Load(), cookies.Load())
 	}
 	authorizations.Store(0)
+	cookies.Store(0)
 
 	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git), func(c *config) error {
 		c.gitTestRemoteBase = server.URL + "/"
@@ -1400,8 +1415,8 @@ func TestGitRepositorySourceDropsInheritedExtraHeaders(t *testing.T) {
 	if !errors.As(err, &notPublic) {
 		t.Fatalf("Resolve() error = %v, want non-enumerating denial", err)
 	}
-	if got := authorizations.Load(); got != 0 {
-		t.Fatalf("requests carrying an inherited Authorization header = %d, want 0", got)
+	if authorizations.Load() != 0 || cookies.Load() != 0 {
+		t.Fatalf("requests carrying inherited credentials: Authorization %d, Cookie %d, want 0", authorizations.Load(), cookies.Load())
 	}
 }
 
