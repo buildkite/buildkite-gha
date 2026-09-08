@@ -78,6 +78,12 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			return usageError(stderr, "upload: %s is no longer supported; configure runner profiles with --runner-queue and --runner-image, or with the plugin runners array", retired)
 		}
 	}
+	if uploadArguments.environmentSource == nil {
+		uploadArguments.environmentSource = environmentSourceFromAgent(uploadArguments.clientVersion)
+	}
+	if uploadArguments.variableSource == nil {
+		uploadArguments.variableSource = variableSourceFromAgent(uploadArguments.clientVersion)
+	}
 	out := newProcessingOutput(ctx, "upload", "text", stderr, stderr, agent)
 	out.plugin = uploadArguments.pluginAcquisition != nil
 	if uploadArguments.telemetry != nil {
@@ -173,13 +179,14 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	defer cleanupAnonymousSource()
 	sourceSwitch := &repositorySourceSwitch{source: anonymousSource}
 	repositorySource := compiler.MemoizeRepositorySource(sourceSwitch)
-	for _, input := range workflows {
+	for i, input := range workflows {
 		if input.ReusableOnly {
 			continue
 		}
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.RepositorySource = repositorySource
 		validation, validationErr := compiler.ValidateWithOptionsContext(ctx, input.Path, input.Source, validationOptions)
+		workflows[i].ReferencesVars = validation.ReferencesVars
 		if validation.RuntimeMatrixBoundary {
 			report := compatibility.InitialProcessingReport(input.Path, hostedProfile, false, validation, validationErr)
 			report.Result = "incompatible"
@@ -263,6 +270,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		workflows[i].RunName = runName
 	}
+	vars := resolveUploadVariables(ctx, uploadArguments.variableSource, workflows, processingReports, effectiveEvent.Event)
 	validations := make([]compiler.Report, len(workflows))
 	validationErrs := make([]error, len(workflows))
 	for i, input := range workflows {
@@ -272,29 +280,35 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.StepKeyNamespace = input.StepKeyNamespace
 		validationOptions.RepositorySource = repositorySource
+		validationOptions.Vars = vars
 		validations[i], validationErrs[i] = compiler.ValidateEventWithOptionsContext(ctx, input.Path, input.Source, effectiveEvent.Source, validationOptions)
 	}
-	runnerSelectors, runnerWarnings, err := suggestedRunnerTargets(ctx, validations, uploadArguments.runnerTargets, uploadArguments.clientVersion)
+	runnerResolution, err := suggestedRunnerTargets(ctx, validations, uploadArguments.runnerTargets, uploadArguments.clientVersion)
 	if err != nil {
 		if ctx.Err() != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", ctx.Err())
 			return 1
 		}
+		// The built-in presets keep the import moving, but they may target a
+		// queue this cluster lacks, so the degradation must be visible.
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: warning: runner resolution unavailable (%v); using built-in runner presets\n", err)
+		out.annotateRunnerResolutionUnavailable(ctx, err)
 	}
-	if len(runnerSelectors) != 0 {
-		uploadArguments.runnerSelectors = runnerSelectors
+	if !runnerResolution.empty() {
+		uploadArguments.runnerResolution = runnerResolution
 		for i, input := range workflows {
 			if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 				continue
 			}
 			validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
-			applyRunnerSelectors(&validationOptions, runnerSelectors)
+			applyRunnerResolution(&validationOptions, runnerResolution)
 			validationOptions.StepKeyNamespace = input.StepKeyNamespace
 			validationOptions.RepositorySource = repositorySource
+			validationOptions.Vars = vars
 			validations[i], validationErrs[i] = compiler.ValidateEventWithOptionsContext(ctx, input.Path, input.Source, effectiveEvent.Source, validationOptions)
 		}
 	}
-	out.annotateRunnerResolutionWarnings(ctx, runnerWarnings)
+	out.annotateRunnerResolutionWarnings(ctx, runnerResolution.warnings)
 	for i, input := range workflows {
 		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 			continue
@@ -317,12 +331,13 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		return 1
 	}
 	importerDistribution := runtimeDistribution{contents: executableContents, digest: distributionDigest}
+	seedUploadEnvironmentResolutions(ctx, uploadArguments.environmentSource, workflows, validations, processingReports, effectiveEvent.Event)
 	requiredPlatforms := make(map[compiler.Platform]bool, 2)
 	for i, input := range workflows {
 		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 			continue
 		}
-		platforms, platformErr := requiredRuntimePlatforms(ctx, input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets, uploadArguments.runnerSelectors, repositorySource)
+		platforms, platformErr := requiredRuntimePlatforms(ctx, input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets, uploadArguments.runnerResolution, repositorySource, uploadArguments.environmentSource, vars)
 		if platformErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", platformErr)
 			return 1
@@ -337,7 +352,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", acquireErr)
 			return 1
 		}
-		return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, importerJobID, processingReports, out, runtimeDistributions, repositorySource, authentication)
+		return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, importerJobID, processingReports, out, runtimeDistributions, repositorySource, authentication, vars)
 	}
 	requiredDistributionPaths := make(map[compiler.Platform]string, len(requiredPlatforms))
 	for platform := range requiredPlatforms {
@@ -366,10 +381,10 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: runtime distribution for %s is required by the selected workflows\n", platform)
 		return 1
 	}
-	return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, importerJobID, processingReports, out, runtimeDistributions, repositorySource, authentication)
+	return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, importerJobID, processingReports, out, runtimeDistributions, repositorySource, authentication, vars)
 }
 
-func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent, workflows []workflowInput, effectiveEvent effectiveEventSelection, executablePath, distributionDigest, importerStep, importerJobID string, processingReports []compatibility.ProcessingReport, out processingOutput, runtimeDistributions map[compiler.Platform]runtimeDistribution, repositorySource compiler.RepositorySource, authentication *actionSourceAuthentication) int {
+func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent, workflows []workflowInput, effectiveEvent effectiveEventSelection, executablePath, distributionDigest, importerStep, importerJobID string, processingReports []compatibility.ProcessingReport, out processingOutput, runtimeDistributions map[compiler.Platform]runtimeDistribution, repositorySource compiler.RepositorySource, authentication *actionSourceAuthentication, vars compiler.VariableSources) int {
 	runtimeDigests := make(map[compiler.Platform]string, len(runtimeDistributions))
 	for platform, runtimeDistribution := range runtimeDistributions {
 		runtimeDigests[platform] = runtimeDistribution.digest
@@ -422,7 +437,24 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			failureArtifacts = append(failureArtifacts, artifacts...)
 			continue
 		}
-		preflight, err := compileHostedNamespacedWithActionCache(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, bundleCompilerStep, "", uploadArguments.runnerTargets, uploadArguments.runnerSelectors, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, "", repositorySource, authentication)
+		compileWorkflow := func(vars compiler.VariableSources) (hostedCompilation, error) {
+			return compileHostedNamespacedWithActionCache(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, bundleCompilerStep, "", uploadArguments.runnerTargets, uploadArguments.runnerResolution, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, "", repositorySource, authentication, uploadArguments.environmentSource, vars)
+		}
+		preflight, err := compileWorkflow(vars)
+		if err == nil {
+			actionVars, again, varsErr := resolveActionVariables(ctx, uploadArguments.variableSource, effectiveEvent.Event, input.ReferencesVars, preflight.Bundle)
+			if varsErr != nil {
+				processingReports[i].AddEnvironmentFailure(varsErr.Error())
+				processingReports[i].Result = "indeterminate"
+				failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks)
+				generatedWorkflows = append(generatedWorkflows, failed)
+				failureArtifacts = append(failureArtifacts, artifacts...)
+				continue
+			}
+			if again {
+				preflight, err = compileWorkflow(actionVars)
+			}
+		}
 		applyHostedPreflight(&processingReports[i], preflight)
 		if err != nil {
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
@@ -552,7 +584,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: upload pipeline: %v\n", err)
 			return 1
 		}
-		out.annotateSkippedWorkflows(ctx, effectiveEvent.Event.Event, effectiveEvent.BuildSource, allSkipped, skippedWorkflows)
+		out.annotateSkippedWorkflows(ctx, effectiveEvent.Event.Event, allSkipped, skippedWorkflows)
 		_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %d workflows using %s with importer %s.\n", jobCount, len(generatedWorkflows), executablePath, importerStep)
 		return 0
 	}
@@ -574,7 +606,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	out.annotateSkippedWorkflows(ctx, effectiveEvent.Event.Event, effectiveEvent.BuildSource, allSkipped, skippedWorkflows)
+	out.annotateSkippedWorkflows(ctx, effectiveEvent.Event.Event, allSkipped, skippedWorkflows)
 	_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %d workflows using %s with importer %s.\n", jobCount, len(generatedWorkflows), executablePath, importerStep)
 	return 0
 }
@@ -649,10 +681,12 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 	return transport.Artifact{Path: path, Digest: digest, Contents: encoded}
 }
 
-func requiredRuntimePlatforms(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerSelectors []compiler.RunnerSelector, repositorySource compiler.RepositorySource) (map[compiler.Platform]bool, error) {
+func requiredRuntimePlatforms(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerResolution agentRunnerResolution, repositorySource compiler.RepositorySource, environmentSource compiler.EnvironmentSource, vars compiler.VariableSources) (map[compiler.Platform]bool, error) {
 	options := hostedOptions(groupLabel, configuredTargets, nil)
-	applyRunnerSelectors(&options, runnerSelectors)
+	options.Vars = vars
+	applyRunnerResolution(&options, runnerResolution)
 	options.RepositorySource = repositorySource
+	options.EnvironmentSource = environmentSource
 	preflight, err := compiler.CompileWithOptionsContext(ctx, workflowPath, workflowSource, eventSource, options)
 	if err != nil {
 		return nil, err
@@ -681,6 +715,9 @@ type workflowInput struct {
 	TriggerCondition, SkipReason, AnnotationReason  string
 	PathFiltersError                                string
 	ReusableOnly, Applicable                        bool
+	// ReferencesVars records whether the event-independent validation found
+	// any vars reference in the workflow or a reusable workflow it calls.
+	ReferencesVars bool
 }
 
 func resolveWorkflowOperands(operands []string) ([]workflowInput, []string, error) {
@@ -821,8 +858,10 @@ type parsedUploadArgs struct {
 	clientVersion            string
 	runtimeDistributionPaths map[compiler.Platform]string
 	runnerTargets            map[string]compiler.RunnerTarget
-	runnerSelectors          []compiler.RunnerSelector
+	runnerResolution         agentRunnerResolution
 	oidc                     *plan.OIDCConfiguration
+	environmentSource        compiler.EnvironmentSource
+	variableSource           variableSource
 	experimentalRunnerUser   bool
 	pluginAcquisition        *pluginRuntimeAcquisition
 	importerPlatform         compiler.Platform

@@ -1,7 +1,6 @@
 package workflow
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -140,20 +139,68 @@ func TestParseKeepsWorkflowAndJobExpressionSurfacesSeparate(t *testing.T) {
 	}
 }
 
-func TestParseRejectsGitHubEnvironment(t *testing.T) {
-	_, err := Parse("environment.yml", []byte("on: push\njobs:\n  deploy:\n    environment: production\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
-	want := `environment.yml:4:5: GitHub environments and environment secrets are unsupported. Remove the environment key from job "deploy". Approvals, deployment records, and protection rules are unavailable. Move environment secrets into Buildkite secrets and reference them by name. If you need GitHub environments, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize support`
-	if err == nil || err.Error() != want {
-		t.Fatalf("Parse() error = %q, want %q", err, want)
+func TestParseGitHubEnvironment(t *testing.T) {
+	parsed, err := Parse("environment.yml", []byte("on: push\njobs:\n  deploy:\n    environment: production\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	var blocker interface {
-		CompatibilityBlocker() (string, string)
+	if parsed.Jobs[0].Environment != "production" {
+		t.Fatalf("Parse() environment = %q, want %q", parsed.Jobs[0].Environment, "production")
 	}
-	if !errors.As(err, &blocker) {
-		t.Fatalf("Parse() error has no compatibility blocker: %v", err)
+
+	// The url is used only for GitHub deployment records, which are never
+	// created, so the mapping form is accepted and the url ignored.
+	parsed, err = Parse("environment.yml", []byte("on: push\njobs:\n  deploy:\n    environment:\n      name: production\n      url: https://example.com\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if kind, detail := blocker.CompatibilityBlocker(); kind != "environment" || detail != "production" {
-		t.Fatalf("compatibility blocker = %q / %q", kind, detail)
+	if parsed.Jobs[0].Environment != "production" {
+		t.Fatalf("Parse() environment = %q, want %q", parsed.Jobs[0].Environment, "production")
+	}
+
+	for _, test := range []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "expression name",
+			source: "on: push\njobs:\n  deploy:\n    environment: ${{ github.ref_name }}\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "environment names that use expressions are unsupported; use a literal environment name",
+		},
+		{
+			name:   "reusable workflow call",
+			source: "on: push\njobs:\n  deploy:\n    environment: production\n    uses: ./.github/workflows/deploy.yml\n",
+			want:   `"environment" is not available`,
+		},
+		{
+			name:   "blank name",
+			source: "on: push\njobs:\n  deploy:\n    environment: \" \"\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "environment requires a literal name",
+		},
+		{
+			name:   "control characters",
+			source: "on: push\njobs:\n  deploy:\n    environment: \"prod\\nuction\"\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "environment name must be at most 255 characters without control characters",
+		},
+		{
+			name:   "name longer than 255 characters",
+			source: "on: push\njobs:\n  deploy:\n    environment: " + strings.Repeat("e", 256) + "\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "environment name must be at most 255 characters without control characters",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Parse("environment.yml", []byte(test.source)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+
+	// The 255-character limit counts characters, not UTF-8 bytes, matching
+	// GitHub: 255 two-byte characters are 510 bytes and remain valid.
+	multibyte := "on: push\njobs:\n  deploy:\n    environment: " + strings.Repeat("é", 255) + "\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	if _, err := Parse("environment.yml", []byte(multibyte)); err != nil {
+		t.Fatalf("Parse() with a 255-character multibyte environment name failed: %v", err)
 	}
 }
 

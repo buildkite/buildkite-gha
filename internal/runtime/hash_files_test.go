@@ -37,6 +37,7 @@ func TestHashWorkspaceFilesConformance(t *testing.T) {
 	}{
 		{name: "known digest and stable order", patterns: []string{"*.txt"}, contents: []string{"alpha", "bravo"}},
 		{name: "multiple patterns", patterns: []string{"a.txt", "nested/*.txt"}, contents: []string{"alpha", "charlie", "skip"}},
+		{name: "literal search order", patterns: []string{"b.txt", "a.txt", "b.txt"}, contents: []string{"alpha", "bravo"}},
 		{name: "ordered negation", patterns: []string{"**", "!nested/**"}, contents: []string{"dot-directory", "hidden", "alpha", "bravo", "braces"}},
 		{name: "ordered re-inclusion", patterns: []string{"**", "!nested/**", "nested/c.txt"}, contents: []string{"dot-directory", "hidden", "alpha", "bravo", "braces", "charlie"}},
 		{name: "later exclusion", patterns: []string{"nested/c.txt", "!nested/**"}},
@@ -283,7 +284,7 @@ func TestHashWorkspaceFilesEnforcesEveryBound(t *testing.T) {
 		{name: "total pattern length", patterns: []string{"one", "two"}, limits: withHashLimits(base, func(l *hashFilesLimits) { l.totalPatternBytes = 5 }), want: "exceed 5 total bytes"},
 		{name: "matched files", patterns: []string{"*"}, limits: withHashLimits(base, func(l *hashFilesLimits) { l.matches = 1 }), want: "more than 1 files"},
 		{name: "hashed bytes", patterns: []string{"*"}, limits: withHashLimits(base, func(l *hashFilesLimits) { l.bytes = 2 }), want: "selected bytes exceed 2"},
-		{name: "workspace entries", patterns: []string{"missing"}, limits: withHashLimits(base, func(l *hashFilesLimits) { l.entries = 1 }), want: "more than 1 entries"},
+		{name: "workspace entries", patterns: []string{"missing*"}, limits: withHashLimits(base, func(l *hashFilesLimits) { l.entries = 1 }), want: "more than 1 entries"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, test.patterns, test.limits, false)
@@ -301,8 +302,134 @@ func TestHashWorkspaceFilesBoundsSingleDirectoryEnumeration(t *testing.T) {
 	}
 	limits := defaultHashFilesLimits
 	limits.entries = 10
-	if _, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"missing"}, limits, false); err == nil || !strings.Contains(err.Error(), "more than 10 entries") {
+	if _, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"missing*"}, limits, false); err == nil || !strings.Contains(err.Error(), "more than 10 entries") {
 		t.Fatalf("single-directory entry bound error = %v", err)
+	}
+}
+
+func TestHashWorkspaceFilesPrunesUnrelatedEntries(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "packages/service/value", "value")
+	for i := range 30 {
+		writeFixtureFile(t, workspace, fmt.Sprintf("unrelated-%02d", i), "ignored")
+		writeFixtureFile(t, workspace, fmt.Sprintf("packages/other/entry-%02d", i), "ignored")
+	}
+	for _, patterns := range [][]string{
+		{"packages/service/value"},
+		{"packages/service/*"},
+		{"packages/service/**"},
+		{"packages/service/", "!packages/**", "packages/service/value"},
+	} {
+		limits := defaultHashFilesLimits
+		limits.entries = 5
+		if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+			limits.entries = 40 // These platforms enumerate to preserve path spelling.
+		}
+		limits.beforeDirectoryOpen = func(name string) {
+			if name == "packages/other" {
+				t.Fatal("opened an unrelated subtree")
+			}
+		}
+		got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, patterns, limits, false)
+		if err != nil || got != githubHash("value") {
+			t.Fatalf("hashFiles(%v) = %q, %v", patterns, got, err)
+		}
+	}
+	limits := defaultHashFilesLimits
+	limits.entries = 1
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		limits.entries = 40
+	}
+	for _, patterns := range [][]string{{"missing"}, {"!**"}, {"# comment"}} {
+		if got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, patterns, limits, false); err != nil || got != "" {
+			t.Fatalf("hashFiles(%v) = %q, %v", patterns, got, err)
+		}
+	}
+}
+
+func TestHashWorkspaceFilesPruningPreservesMatches(t *testing.T) {
+	workspace := t.TempDir()
+	for _, name := range []string{"root", "a/value", "a/nested/value", "b/value", "b/deep/c/value", "c/other", ".hidden/value", "literal/{name}"} {
+		writeFixtureFile(t, workspace, name, name)
+	}
+	for _, pattern := range []string{"a", "a/", "a/*", "*/value", "[ab]/value", "**/value", "a/**/value", "*/**/c/*", ".hidden", "literal/{name}", "A/VALUE", `a\/value`, "a[/]value", "a[!x]value", "a[.-0]value"} {
+		for _, insensitive := range []bool{false, true} {
+			got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{pattern}, defaultHashFilesLimits, insensitive)
+			// An excluded broad positive forces a full walk while leaving the
+			// selected set unchanged, providing an oracle for traversal pruning.
+			want, wantErr := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"**", "!**", pattern}, defaultHashFilesLimits, insensitive)
+			if err != nil || wantErr != nil || got != want {
+				t.Fatalf("pattern %q (insensitive %v): %q, %v; full walk %q, %v", pattern, insensitive, got, err, want, wantErr)
+			}
+		}
+	}
+}
+
+func TestHashWorkspaceFilesCharacterClassesAcrossDirectories(t *testing.T) {
+	for _, prefix := range []string{"", "packages/", "literal{}/"} {
+		t.Run(prefix, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeFixtureFile(t, workspace, prefix+"a/value", "value")
+			for _, pattern := range []string{"a[/]value", "a[!x]value", "a[.-0]value"} {
+				got, err := hashWorkspaceFiles(t.Context(), workspace, []string{prefix + pattern})
+				if err != nil || got != githubHash("value") {
+					t.Fatalf("hashFiles(%q) = %q, %v; want %q", prefix+pattern, got, err, githubHash("value"))
+				}
+			}
+		})
+	}
+}
+
+func TestHashWorkspaceFilesExecutionBudget(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "nested/value", "value")
+	for _, phase := range []string{"traversal", "hashing", "verification"} {
+		t.Run(phase, func(t *testing.T) {
+			limits := defaultHashFilesLimits
+			limits.duration = 20 * time.Millisecond
+			pause := func(string) { time.Sleep(2 * limits.duration) }
+			switch phase {
+			case "traversal":
+				limits.beforeDirectoryOpen = pause
+			case "hashing":
+				limits.beforeOpen = pause
+			case "verification":
+				limits.afterFileHash = pause
+			}
+			got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"nested/value", "!nested/skip", "other/*.txt"}, limits, false)
+			if got != "" || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "hashFiles exceeded its 20ms execution limit") {
+				t.Fatalf("budget result = %q, %v", got, err)
+			}
+			wantHint := `positive patterns ["nested/value" "other/*.txt"]; use more specific paths to reduce traversal and hashing`
+			if !strings.Contains(err.Error(), wantHint) {
+				t.Fatalf("budget error = %v, want %q", err, wantHint)
+			}
+		})
+	}
+	for _, expired := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(t.Context())
+		if expired {
+			cancel()
+			ctx, cancel = context.WithTimeout(t.Context(), -time.Second)
+		}
+		cancel()
+		_, err := hashWorkspaceFiles(ctx, workspace, []string{"missing"})
+		if !errors.Is(err, ctx.Err()) || strings.Contains(err.Error(), "execution limit") {
+			t.Fatalf("parent cancellation = %v, want %v", err, ctx.Err())
+		}
+	}
+}
+
+func TestHashWorkspaceFilesEntryBudgetDiagnostic(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "nested/value", "value")
+	writeFixtureFile(t, workspace, "other/value.txt", "value")
+	limits := defaultHashFilesLimits
+	limits.entries = 1
+	got, err := hashWorkspaceFilesWithLimits(t.Context(), workspace, []string{"nested/*", "!nested/skip", "other/*.txt"}, limits, false)
+	want := `hashFiles traversal inspected more than 1 entries while searching positive patterns ["nested/*" "other/*.txt"]; use more specific paths to reduce traversal and hashing`
+	if got != "" || err == nil || err.Error() != want {
+		t.Fatalf("entry budget result = %q, %v; want %q", got, err, want)
 	}
 }
 

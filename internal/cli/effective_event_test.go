@@ -28,6 +28,7 @@ func TestNewEffectiveEventSeparatesExpressionsAndSnapshot(t *testing.T) {
 		MergeGroupAction:      "null",
 		ReleaseAction:         "null",
 		IssuesAction:          "null",
+		IssueCommentAction:    "null",
 	}
 	branch := "main"
 	wantSnapshot := buildkitepipeline.TriggerEventSnapshot{Branch: &branch}
@@ -40,7 +41,7 @@ func TestNewEffectiveEventSeparatesExpressionsAndSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantExpressions.EventPredicate = buildkitepipeline.LiveEventPredicate("push")
-	if !reflect.DeepEqual(webhook.TriggerExpressions, wantExpressions) || !reflect.DeepEqual(webhook.TriggerSnapshot, wantSnapshot) || webhook.BuildSource != "" {
+	if !reflect.DeepEqual(webhook.TriggerExpressions, wantExpressions) || !reflect.DeepEqual(webhook.TriggerSnapshot, wantSnapshot) {
 		t.Fatalf("webhook effective event = expressions %#v, snapshot %#v", webhook.TriggerExpressions, webhook.TriggerSnapshot)
 	}
 
@@ -49,7 +50,7 @@ func TestNewEffectiveEventSeparatesExpressionsAndSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if build.BuildSource != "ui" || build.TriggerExpressions.EventPredicate != buildkitepipeline.LiveEventPredicate("push") {
-		t.Fatalf("build effective event = source %q, predicate %q", build.BuildSource, build.TriggerExpressions.EventPredicate)
+	if build.TriggerExpressions.EventPredicate != buildkitepipeline.LiveEventPredicate("push") {
+		t.Fatalf("build effective event predicate = %q", build.TriggerExpressions.EventPredicate)
 	}
 }

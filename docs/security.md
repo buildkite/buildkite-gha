@@ -18,7 +18,9 @@ access by itself.
 | Runner or runner group | The Buildkite queue selects the agent environment. Use a disposable host or equivalent whole-job isolation. |
 | Job | A native Buildkite command job. All workflow steps share its workspace and Buildkite identity. |
 | `permissions` and `GITHUB_TOKEN` | Top-level workflow permissions and Buildkite's workflow-token policy determine whether Buildkite issues a scoped token. GitHub repository and organization defaults are not inherited. |
-| Repository and environment secrets | Static secret names resolve through Buildkite Secrets when the destination job's identity and Secret access policy allow them. GitHub environment, event, and fork scoping are not inherited. |
+| Repository and environment secrets | Static secret names resolve through Buildkite Secrets when the destination job's identity and Secret access policy allow them. Environment-defined secret names resolve to `<ENVIRONMENT>_<NAME>` Buildkite secrets; event and fork scoping are not inherited. |
+| Environment protection rules | Required reviewers become a Buildkite block step that any user who can unblock the pipeline may approve. Reviewer lists, self-review prevention, wait timers, branch policies, and custom rules are not enforced; unsupported rules fail the compile. |
+| Repository, organization, and environment variables | The Buildkite backend reads them from GitHub with its own credentials; values are copied into the job plan artifact as `organization_vars`, `repository_vars`, and `environment_vars`. They are configuration, not secrets: anyone who can read build artifacts can read them. |
 | OIDC | Actions use Buildkite-issued tokens and claims. Cloud trust policies must trust Buildkite rather than GitHub. |
 
 The [compatibility reference](compatibility.md) says what works. This page says
@@ -164,7 +166,11 @@ tokens only when those build-creation paths are trusted.
 ### Workflow secrets
 
 Workflow secrets are Buildkite secrets available to the destination job. They
-are not GitHub repository, environment, event, or fork-scoped secrets.
+are not GitHub repository, environment, event, or fork-scoped secrets. Jobs
+with a GitHub environment resolve environment-defined secret names to
+`<ENVIRONMENT>_<NAME>` Buildkite secrets; Buildkite Secret access policies
+remain the authorization boundary. See [deployment
+environments](compatibility.md#deployment-environments).
 
 `secrets: inherit` lets a local reusable-workflow call place that callee job's
 statically referenced secret names in its plan. It is one hop, and every nested
@@ -185,6 +191,27 @@ same job identity can also run `buildkite-agent secret get`.
 `GITHUB_TOKEN` stays on its separate workflow-token boundary. Forwarding it to
 a declared alias preserves that scoped token boundary; it never requests an
 ordinary Buildkite secret.
+
+### Variables
+
+GitHub Actions variables (`${{ vars.NAME }}`) are configuration values, not
+secrets. The Buildkite backend reads them from GitHub with its own
+credentials, restricted to the pipeline's configured repository, and the
+importer copies the repository and organization scopes into every job plan
+and each declared environment's variables into the plans of the jobs that
+declare it. A plan artifact (`.buildkite-gha/plans/<digest>.json`) therefore
+contains plaintext values, readable by anyone who can read the build's
+artifacts, and `compile --format ir-json` run inside a job prints both scopes
+to stdout, and so to the job log, whenever the workflow references `vars`.
+Store sensitive values as secrets instead. A value used in a compile-time
+field, such as a job name, matrix
+value, or runner label, also appears where that field does: in the pipeline
+YAML and in a compile diagnostic that quotes the field. Runtime references,
+processing reports, and resolution errors never carry values; they name
+variables only. A job
+sees the scopes GitHub gives each position, and a name no scope defines
+evaluates as empty rather than exposing another repository's value. See [repository and organization
+variables](compatibility.md#repository-and-organization-variables).
 
 ### OIDC
 

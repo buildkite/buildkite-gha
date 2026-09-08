@@ -155,8 +155,9 @@ func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 	job.Dependencies = []string{"gha-prepare"}
 	job.DeferredInputs = map[string]DeferredInput{
 		"subject": {
-			Sources: []NeedSource{{StepKey: "gha-prepare", PlanDigest: digest}},
-			Outputs: []NeedOutput{{Name: "value", StepKey: "gha-prepare", Output: "subject"}},
+			Template:    "type=raw,value=${{ needs.prepare.outputs.subject }}",
+			NeedSources: map[string][]NeedSource{"prepare": {{StepKey: "gha-prepare", PlanDigest: digest}}},
+			NeedOutputs: map[string][]NeedOutput{"prepare": {{Name: "subject", StepKey: "gha-prepare", Output: "subject"}}},
 		},
 	}
 	job.CallGuards = []CallGuard{{
@@ -170,8 +171,9 @@ func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 		},
 		DeferredInputs: map[string]DeferredInput{
 			"subject": {
-				Sources: []NeedSource{{StepKey: "gha-prepare", PlanDigest: digest}},
-				Outputs: []NeedOutput{{Name: "value", StepKey: "gha-prepare", Output: "subject"}},
+				Template:    "type=raw,value=${{ needs.prepare.outputs.subject }}",
+				NeedSources: map[string][]NeedSource{"prepare": {{StepKey: "gha-prepare", PlanDigest: digest}}},
+				NeedOutputs: map[string][]NeedOutput{"prepare": {{Name: "subject", StepKey: "gha-prepare", Output: "subject"}}},
 			},
 		},
 	}}
@@ -196,6 +198,77 @@ func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 	job.CallGuards[0].NeedSources["prepare"][0].PlanDigest = "sha256:tampered"
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "producer identity") {
 		t.Fatalf("Validate() tampered call producer error = %v", err)
+	}
+}
+
+func TestDeferredInputTemplateValidation(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("1", 64)
+	source := NeedSource{StepKey: "gha-prepare", PlanDigest: digest}
+	valid := DeferredInput{
+		Template:    "type=raw,value=${{ needs.prepare.outputs.tag }}\ntype=raw,value=${{ format('{0}-{1}', needs.Prepare.outputs.tag, needs.prepare.outputs.flavor) }}",
+		NeedSources: map[string][]NeedSource{"prepare": {source}},
+		NeedOutputs: map[string][]NeedOutput{"prepare": {{Name: "flavor", StepKey: "gha-prepare", Output: "flavor"}, {Name: "tag", StepKey: "gha-prepare", Output: "tag"}}},
+	}
+	for _, test := range []struct {
+		name         string
+		dependencies []string
+		edit         func(input *DeferredInput)
+		want         string
+	}{
+		{name: "valid", edit: func(*DeferredInput) {}},
+		{name: "empty template", edit: func(input *DeferredInput) { input.Template = "" }, want: "has an invalid template"},
+		{name: "no needs reference", edit: func(input *DeferredInput) { input.Template = "literal ${{ github.ref }}" }, want: "template"},
+		{name: "need result", edit: func(input *DeferredInput) { input.Template = "${{ needs.prepare.result }}" }, want: "needs.<job>.outputs.<name>"},
+		{name: "whole outputs", edit: func(input *DeferredInput) { input.Template = "${{ toJSON(needs.prepare.outputs) }}" }, want: `unsupported runtime expression "needs.prepare.outputs"`},
+		{name: "unbound prerequisite", edit: func(input *DeferredInput) { input.Template = "${{ needs.other.outputs.tag }}" }, want: `references unbound prerequisite "other"`},
+		{
+			name:         "unread prerequisite",
+			dependencies: []string{"gha-other", "gha-prepare"},
+			edit: func(input *DeferredInput) {
+				input.NeedSources = map[string][]NeedSource{"prepare": {source}, "other": {{StepKey: "gha-other", PlanDigest: digest}}}
+			},
+			want: `binds prerequisite "other" that its template does not read`,
+		},
+		{
+			name: "producer is not a dependency",
+			edit: func(input *DeferredInput) {
+				input.NeedSources = map[string][]NeedSource{"prepare": {{StepKey: "gha-missing", PlanDigest: digest}}}
+			},
+			want: "is not a dependency",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := validJob()
+			job.Dependencies = []string{"gha-prepare"}
+			if test.dependencies != nil {
+				job.Dependencies = test.dependencies
+			}
+			input := DeferredInput{Template: valid.Template, NeedSources: map[string][]NeedSource{}, NeedOutputs: map[string][]NeedOutput{}}
+			for need, sources := range valid.NeedSources {
+				input.NeedSources[need] = append([]NeedSource(nil), sources...)
+			}
+			for need, outputs := range valid.NeedOutputs {
+				input.NeedOutputs[need] = append([]NeedOutput(nil), outputs...)
+			}
+			test.edit(&input)
+			job.DeferredInputs = map[string]DeferredInput{"tags": input}
+			synchronizeExecutionProgram(&job)
+			err := job.Validate()
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				encoded, err := Encode(job)
+				if err != nil {
+					t.Fatal(err)
+				}
+				validateJobPlanSchema(t, encoded)
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -1670,4 +1743,92 @@ func TestContainerImageGrammarMatchesSchema(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateBoundsVarsPerScope(t *testing.T) {
+	job := validJob()
+	job.OrganizationVars = manyVars(1000)
+	job.RepositoryVars = map[string]string{"AWS_REGION": "eu-west-1", "empty": "", "CERT_PEM": strings.Repeat("x", 48<<10)}
+	job.EnvironmentVars = map[string]string{"aws_region": "us-east-1"}
+	if err := job.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want GitHub-shaped vars accepted", err)
+	}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded.OrganizationVars, job.OrganizationVars) || !reflect.DeepEqual(decoded.RepositoryVars, job.RepositoryVars) || !reflect.DeepEqual(decoded.EnvironmentVars, job.EnvironmentVars) {
+		t.Fatalf("decoded vars = %#v, %#v, %#v", decoded.OrganizationVars, decoded.RepositoryVars, decoded.EnvironmentVars)
+	}
+	for name, testCase := range map[string]struct {
+		set  func(*Job, map[string]string)
+		vars map[string]string
+		want string
+	}{
+		"invalid name":          {setEnvironmentVars, map[string]string{"AWS-REGION": "x"}, `invalid environment variable name "AWS-REGION"`},
+		"case collision":        {setRepositoryVars, map[string]string{"Region": "a", "REGION": "b"}, "repeats case-insensitive repository variable"},
+		"oversized value":       {setOrganizationVars, map[string]string{"CERT_PEM": strings.Repeat("x", 48<<10+1)}, `organization variable "CERT_PEM" exceeds its size limit`},
+		"oversized total":       {setEnvironmentVars, oversizedVars(), "environment vars exceed their size limit"},
+		"too many environment":  {setEnvironmentVars, manyVars(101), "environment vars exceed their size limit"},
+		"too many repository":   {setRepositoryVars, manyVars(501), "repository vars exceed their size limit"},
+		"too many organization": {setOrganizationVars, manyVars(1001), "organization vars exceed their size limit"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			job := validJob()
+			testCase.set(&job, testCase.vars)
+			if err := job.Validate(); err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, testCase.want)
+			}
+		})
+	}
+}
+
+func setOrganizationVars(job *Job, vars map[string]string) { job.OrganizationVars = vars }
+func setRepositoryVars(job *Job, vars map[string]string)   { job.RepositoryVars = vars }
+func setEnvironmentVars(job *Job, vars map[string]string)  { job.EnvironmentVars = vars }
+
+// TestJobVarsPositions proves the two vars contexts a plan yields: repository
+// variables override organization variables before the environment applies,
+// and environment variables override both in runner-evaluated positions,
+// replacing differently spelled names.
+func TestJobVarsPositions(t *testing.T) {
+	job := Job{
+		OrganizationVars: map[string]string{"REGION": "org", "ORG_ONLY": "org", "tier": "org"},
+		RepositoryVars:   map[string]string{"region": "repo", "REPO_ONLY": "repo"},
+		EnvironmentVars:  map[string]string{"Region": "env", "TIER": "env"},
+	}
+	before := map[string]string{"region": "repo", "ORG_ONLY": "org", "tier": "org", "REPO_ONLY": "repo"}
+	if got := job.VarsBeforeEnvironment(); !reflect.DeepEqual(got, before) {
+		t.Fatalf("VarsBeforeEnvironment() = %#v, want %#v", got, before)
+	}
+	all := map[string]string{"Region": "env", "ORG_ONLY": "org", "TIER": "env", "REPO_ONLY": "repo"}
+	if got := job.Vars(); !reflect.DeepEqual(got, all) {
+		t.Fatalf("Vars() = %#v, want %#v", got, all)
+	}
+	if got := (Job{}).Vars(); got != nil {
+		t.Fatalf("Vars() without variables = %#v, want nil", got)
+	}
+	if got := MergeVars(nil, map[string]string{}); got != nil {
+		t.Fatalf("MergeVars() of empty scopes = %#v, want nil", got)
+	}
+}
+
+func oversizedVars() map[string]string {
+	vars := map[string]string{}
+	for i := range 11 {
+		vars[fmt.Sprintf("VAR_%d", i)] = strings.Repeat("x", 48<<10)
+	}
+	return vars
+}
+
+func manyVars(count int) map[string]string {
+	vars := make(map[string]string, count)
+	for i := range count {
+		vars[fmt.Sprintf("VAR_%d", i)] = "x"
+	}
+	return vars
 }

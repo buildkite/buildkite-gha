@@ -17,6 +17,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/program"
 )
@@ -261,11 +262,15 @@ type ServiceContainer struct {
 	Entrypoint  string                `json:"entrypoint,omitempty"`
 }
 
-// DeferredInput binds one string workflow_call input to exact, verified
-// prerequisite outputs. The runtime resolves it before evaluating callee fields.
+// DeferredInput is one string workflow_call input whose value embeds caller
+// needs outputs. Template contains only needs.<job>.outputs.<name> references
+// to the logical prerequisites in NeedSources, each hydrated from exact,
+// verified producer outputs. The runtime renders it before evaluating callee
+// fields; the callee never sees the caller's needs context.
 type DeferredInput struct {
-	Sources []NeedSource `json:"sources"`
-	Outputs []NeedOutput `json:"outputs,omitempty"`
+	Template    string                  `json:"template"`
+	NeedSources map[string][]NeedSource `json:"need_sources"`
+	NeedOutputs map[string][]NeedOutput `json:"need_outputs"`
 }
 
 // GitHubToken describes one synthetic secrets.GITHUB_TOKEN value. Workflow is
@@ -306,7 +311,9 @@ type Job struct {
 	Inputs               map[string]any           `json:"inputs,omitempty"`
 	DeferredInputs       map[string]DeferredInput `json:"deferred_inputs,omitempty"`
 	DeferredInputValues  map[string]any           `json:"-"`
-	Vars                 map[string]string        `json:"vars,omitempty"`
+	OrganizationVars     map[string]string        `json:"organization_vars,omitempty"`
+	RepositoryVars       map[string]string        `json:"repository_vars,omitempty"`
+	EnvironmentVars      map[string]string        `json:"environment_vars,omitempty"`
 	Dependencies         []string                 `json:"dependencies,omitempty"`
 	NeedSources          map[string][]NeedSource  `json:"need_sources,omitempty"`
 	NeedOutputs          map[string][]NeedOutput  `json:"need_outputs,omitempty"`
@@ -627,6 +634,19 @@ func (job Job) Validate() error {
 	}
 	if err := validateInputs(job.Inputs); err != nil {
 		return err
+	}
+	for _, scope := range []struct {
+		name  string
+		vars  map[string]string
+		limit int
+	}{
+		{"organization", job.OrganizationVars, organizationVarsLimit},
+		{"repository", job.RepositoryVars, repositoryVarsLimit},
+		{"environment", job.EnvironmentVars, environmentVarsLimit},
+	} {
+		if err := validateVars(scope.name, scope.vars, scope.limit); err != nil {
+			return err
+		}
 	}
 	capabilities := make(map[string]struct{}, len(job.RequiredCapabilities))
 	if !sort.StringsAreSorted(job.RequiredCapabilities) {
@@ -954,6 +974,83 @@ func validateInputs(inputs map[string]any) error {
 	return nil
 }
 
+// GitHub's documented variable limits: variables per scope, bytes per value,
+// and bytes of names and values per scope.
+const (
+	organizationVarsLimit = 1000
+	repositoryVarsLimit   = 500
+	environmentVarsLimit  = 100
+	varValueByteLimit     = 48 << 10
+	varsByteLimit         = 256 << 10
+)
+
+// validateVars bounds one scope of the job's variables by GitHub's limits.
+// Names follow GitHub's case-insensitive identifier rules, and the runtime
+// matches names case-insensitively, so case-colliding names are invalid here.
+func validateVars(scope string, vars map[string]string, limit int) error {
+	if len(vars) > limit {
+		return fmt.Errorf("job plan %s vars exceed their size limit", scope)
+	}
+	names := make(map[string]struct{}, len(vars))
+	total := 0
+	for name, value := range vars {
+		if !secretNamePattern.MatchString(name) {
+			return fmt.Errorf("job plan has invalid %s variable name %q", scope, name)
+		}
+		normalized := strings.ToUpper(name)
+		if _, exists := names[normalized]; exists {
+			return fmt.Errorf("job plan repeats case-insensitive %s variable %q", scope, name)
+		}
+		names[normalized] = struct{}{}
+		if len(value) > varValueByteLimit {
+			return fmt.Errorf("job plan %s variable %q exceeds its size limit", scope, name)
+		}
+		total += len(name) + len(value)
+	}
+	if total > varsByteLimit {
+		return fmt.Errorf("job plan %s vars exceed their size limit", scope)
+	}
+	return nil
+}
+
+// OrganizationVars, RepositoryVars, and EnvironmentVars hold the job's GitHub
+// Actions configuration variables by scope. VarsBeforeEnvironment is the vars
+// context of positions GitHub evaluates before the job's environment applies:
+// reusable-workflow call guards and jobs.<id>.if. Repository variables
+// override organization variables.
+func (job Job) VarsBeforeEnvironment() map[string]string {
+	return MergeVars(job.OrganizationVars, job.RepositoryVars)
+}
+
+// Vars is the vars context of every runner-evaluated position: job env,
+// defaults, outputs, services, steps, and action inputs. Environment
+// variables override repository variables, which override organization
+// variables.
+func (job Job) Vars() map[string]string {
+	return MergeVars(job.OrganizationVars, job.RepositoryVars, job.EnvironmentVars)
+}
+
+// MergeVars lays each later scope over the earlier ones. GitHub variable
+// names are case-insensitive, so an overriding variable replaces a name
+// spelled differently. The result is nil when no scope defines a variable.
+func MergeVars(scopes ...map[string]string) map[string]string {
+	var merged map[string]string
+	for _, scope := range scopes {
+		for name, value := range scope {
+			if merged == nil {
+				merged = map[string]string{}
+			}
+			for existing := range merged {
+				if strings.EqualFold(existing, name) {
+					delete(merged, existing)
+				}
+			}
+			merged[name] = value
+		}
+	}
+	return merged
+}
+
 func validateDeferredInputs(inputs map[string]any, deferred map[string]DeferredInput, dependencies map[string]struct{}) (map[string]struct{}, error) {
 	if len(inputs)+len(deferred) > 25 {
 		return nil, fmt.Errorf("inputs exceed their size limit")
@@ -972,43 +1069,61 @@ func validateDeferredInputs(inputs map[string]any, deferred map[string]DeferredI
 			return nil, fmt.Errorf("repeats input %q", name)
 		}
 		names[lowerName] = struct{}{}
-		if len(input.Sources) == 0 || len(input.Sources) > MaxNeedProducers {
-			return nil, fmt.Errorf("input %q has no valid producers", name)
+		if input.Template == "" || len(input.Template) > 65536 || !utf8.ValidString(input.Template) || strings.ContainsRune(input.Template, 0) {
+			return nil, fmt.Errorf("input %q has an invalid template", name)
 		}
-		producers := make(map[string]struct{}, len(input.Sources))
-		for i, source := range input.Sources {
-			if !targetPattern.MatchString(source.StepKey) || !digestPattern.MatchString(source.PlanDigest) || i > 0 && input.Sources[i-1].StepKey >= source.StepKey {
-				return nil, fmt.Errorf("input %q has invalid, repeated, or unsorted producer identity", name)
-			}
-			key := strings.ToLower(source.StepKey)
-			if _, exists := dependencies[key]; !exists {
-				return nil, fmt.Errorf("input %q producer %q is not a dependency", name, source.StepKey)
-			}
-			producers[key] = struct{}{}
-			sourced[key] = struct{}{}
+		references, err := expression.DeferredInputReferences(input.Template)
+		if err != nil {
+			return nil, fmt.Errorf("input %q has an invalid template: %w", name, err)
 		}
-		if len(input.Outputs) > MaxNeedOutputs {
-			return nil, fmt.Errorf("input %q has too many output projections", name)
+		if len(references) == 0 {
+			return nil, fmt.Errorf("input %q template reads no prerequisite output", name)
 		}
-		for i, output := range input.Outputs {
-			if output.Name != "value" || !targetPattern.MatchString(output.StepKey) || !targetPattern.MatchString(output.Output) {
-				return nil, fmt.Errorf("input %q has invalid output projection", name)
+		inputSourced, err := validateLogicalNeeds(input.NeedSources, input.NeedOutputs, dependencies)
+		if err != nil {
+			return nil, fmt.Errorf("input %q %w", name, err)
+		}
+		referenced := make(map[string]struct{}, len(references))
+		for _, reference := range references {
+			lowerJob := strings.ToLower(reference.Job)
+			if _, exists := lowerKey(input.NeedSources, lowerJob); !exists {
+				return nil, fmt.Errorf("input %q template references unbound prerequisite %q", name, reference.Job)
 			}
-			if _, exists := producers[strings.ToLower(output.StepKey)]; !exists {
-				return nil, fmt.Errorf("input %q output selects unknown producer %q", name, output.StepKey)
+			referenced[lowerJob] = struct{}{}
+		}
+		for need := range input.NeedSources {
+			if _, exists := referenced[strings.ToLower(need)]; !exists {
+				return nil, fmt.Errorf("input %q binds prerequisite %q that its template does not read", name, need)
 			}
-			if i > 0 && compareNeedOutput(input.Outputs[i-1], output) >= 0 {
-				return nil, fmt.Errorf("input %q output projections must be unique and sorted", name)
-			}
+		}
+		for dependency := range inputSourced {
+			sourced[dependency] = struct{}{}
 		}
 	}
 	return sourced, nil
 }
 
+func lowerKey[V any](values map[string]V, lowerName string) (V, bool) {
+	for name, value := range values {
+		if strings.ToLower(name) == lowerName {
+			return value, true
+		}
+	}
+	var zero V
+	return zero, false
+}
+
 func validateCallGuardNeeds(guard CallGuard, dependencies map[string]struct{}) (map[string]struct{}, error) {
+	return validateLogicalNeeds(guard.NeedSources, guard.NeedOutputs, dependencies)
+}
+
+// validateLogicalNeeds checks one caller-scoped set of logical prerequisites:
+// every producer is a job dependency owned by exactly one prerequisite, and
+// every output projection selects one of that prerequisite's producers.
+func validateLogicalNeeds(needSources map[string][]NeedSource, needOutputs map[string][]NeedOutput, dependencies map[string]struct{}) (map[string]struct{}, error) {
 	sourced := make(map[string]struct{})
-	names := make(map[string]map[string]struct{}, len(guard.NeedSources))
-	for name, sources := range guard.NeedSources {
+	names := make(map[string]map[string]struct{}, len(needSources))
+	for name, sources := range needSources {
 		if len(name) > 255 || !logicalJobIDPattern.MatchString(name) || len(sources) == 0 || len(sources) > MaxNeedProducers {
 			return nil, fmt.Errorf("contains invalid prerequisite %q", name)
 		}
@@ -1033,8 +1148,8 @@ func validateCallGuardNeeds(guard CallGuard, dependencies map[string]struct{}) (
 		}
 		names[lowerName] = steps
 	}
-	seenOutputNeeds := make(map[string]struct{}, len(guard.NeedOutputs))
-	for name, outputs := range guard.NeedOutputs {
+	seenOutputNeeds := make(map[string]struct{}, len(needOutputs))
+	for name, outputs := range needOutputs {
 		lowerName := strings.ToLower(name)
 		producers, exists := names[lowerName]
 		if !exists {

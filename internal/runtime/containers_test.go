@@ -1238,6 +1238,25 @@ func TestEvaluateServicesDoesNotHideErrorsBehindEmptyImage(t *testing.T) {
 	}
 }
 
+// TestEvaluateProgramServicesResolvesCredentialVarsWithEnvironment proves a
+// residual credential vars reference reads the job's environment-merged vars
+// context, the value the compiler could not know.
+func TestEvaluateProgramServicesResolvesCredentialVarsWithEnvironment(t *testing.T) {
+	job := plan.Job{
+		RepositoryVars:  map[string]string{"REGISTRY_USER": "repository-user"},
+		EnvironmentVars: map[string]string{"registry_user": "environment-user"},
+	}
+	services, _, err := evaluateProgramServices(testProgramServices(map[string]plan.ServiceContainer{
+		"private": {Image: "registry.example.test/team/app:1", Credentials: &plan.ContainerCredentials{Username: "${{ vars.REGISTRY_USER }}", Password: "${{ secrets.REGISTRY_PASSWORD }}"}},
+	}), expression.Context{Vars: job.Vars(), Secrets: map[string]string{"REGISTRY_PASSWORD": "registry-password"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials := services["private"].Credentials; credentials == nil || credentials.Username != "environment-user" || credentials.Password != "registry-password" {
+		t.Fatalf("credentials = %#v, want the environment value over the repository value", credentials)
+	}
+}
+
 func testProgramServices(services map[string]plan.ServiceContainer) executionprogram.Services {
 	result := executionprogram.Services{Static: make([]executionprogram.Service, 0, len(services))}
 	for _, name := range sortedKeys(services) {
