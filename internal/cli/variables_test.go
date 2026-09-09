@@ -227,31 +227,71 @@ func TestRunUploadSkipsVariableResolutionWithoutReferences(t *testing.T) {
 	}
 }
 
-// TestRunUploadTreatsAbsentVariableScopesAsEmpty proves a backend without the
-// variables endpoint (404) leaves the scopes empty: runtime references keep
-// evaluating to empty strings and the upload succeeds. Compile-time fields
-// that need a value still fail as they did before.
+// undefinedVariablesWorkflow reads a variable no scope defines in a
+// compile-time field with a literal fallback, as failover runner selection
+// does, and in a runtime step.
+const undefinedVariablesWorkflow = `on: push
+jobs:
+  test:
+    runs-on: ${{ vars.CI_FAILOVER_LINUX || 'ubuntu-latest' }}
+    steps:
+      - run: echo "${{ vars.AWS_REGION }}"
+`
+
+// agentEmptyVariablesHandler answers github-actions/variables with status
+// and, for 200, a repository and organization that define no variables. It
+// counts requests.
+func agentEmptyVariablesHandler(t *testing.T, status int) (http.HandlerFunc, *int) {
+	t.Helper()
+	requests := new(int)
+	return func(w http.ResponseWriter, r *http.Request) {
+		*requests++
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/github-actions/variables") {
+			t.Errorf("variables request = %s %s", r.Method, r.URL.Path)
+		}
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+			return
+		}
+		_, _ = w.Write([]byte(`{"repository_variables":[],"organization_variables":[]}`))
+	}, requests
+}
+
+// TestRunUploadTreatsAbsentVariableScopesAsEmpty proves that a backend
+// without the variables endpoint (404) and a repository that defines no
+// variables (200 with empty scopes) both resolve every vars reference to an
+// empty string, in compile-time fields and at runtime, so the upload succeeds
+// with the literal fallback runner. Without a source the same compile-time
+// reference fails; TestRunCompileResolvesVariablesThroughAgent covers it.
 func TestRunUploadTreatsAbsentVariableScopesAsEmpty(t *testing.T) {
 	requireImporterHost(t)
-	variables, variableRequests := agentVariablesHandler(t, http.StatusNotFound, "")
-	agent, _ := agentStub(t, "job-secret", http.StatusOK, variables)
-	setAgentResolutionEnvironment(t, agent.URL)
-	t.Setenv("BUILDKITE", "true")
-	t.Setenv("BUILDKITE_STEP_KEY", "variables-agent-absent-importer")
-	eventPath := pushEventPath(t)
-	workflows := writeUploadWorkflows(t, map[string]string{"plain.yml": "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"${{ vars.AWS_REGION }}\"\n"})
+	for name, status := range map[string]int{"endpoint absent": http.StatusNotFound, "scopes empty": http.StatusOK} {
+		t.Run(name, func(t *testing.T) {
+			variables, variableRequests := agentEmptyVariablesHandler(t, status)
+			agent, _ := agentStub(t, "job-secret", http.StatusOK, variables)
+			setAgentResolutionEnvironment(t, agent.URL)
+			t.Setenv("BUILDKITE", "true")
+			t.Setenv("BUILDKITE_STEP_KEY", "variables-agent-absent-importer")
+			eventPath := pushEventPath(t)
+			workflows := writeUploadWorkflows(t, map[string]string{"plain.yml": undefinedVariablesWorkflow})
 
-	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
-	var stdout, stderr bytes.Buffer
-	if code := run(append([]string{"upload", "--event-path", eventPath}, workflows...), &stdout, &stderr, "dev", runner); code != 0 {
-		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
-	}
-	if *variableRequests != 1 {
-		t.Fatalf("variables requests = %d, want 1", *variableRequests)
-	}
-	plans := uploadedPlans(t, runner)
-	if len(plans["test"]) != 1 || len(plans["test"][0].Vars()) != 0 {
-		t.Fatalf("uploaded plans = %v", plans)
+			runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
+			var stdout, stderr bytes.Buffer
+			if code := run(append([]string{"upload", "--event-path", eventPath}, workflows...), &stdout, &stderr, "dev", runner); code != 0 {
+				t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+			}
+			if *variableRequests != 1 {
+				t.Fatalf("variables requests = %d, want 1", *variableRequests)
+			}
+			plans := uploadedPlans(t, runner)
+			if len(plans["test"]) != 1 || len(plans["test"][0].Vars()) != 0 {
+				t.Fatalf("uploaded plans = %v", plans)
+			}
+			pipeline := string(runner.commands[len(runner.commands)-1].stdin)
+			if !strings.Contains(pipeline, defaultNobleRunnerImage) {
+				t.Fatalf("pipeline did not select the literal fallback runner ubuntu-latest:\n%s", pipeline)
+			}
+		})
 	}
 }
 

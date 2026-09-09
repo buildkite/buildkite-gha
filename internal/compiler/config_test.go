@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -339,6 +340,72 @@ jobs:
 	}
 	if len(ir.Jobs) != 1 || !slices.Equal(ir.Jobs[0].RunsOn, []string{"self-hosted", "custom-linux"}) || ir.Jobs[0].Queue != target.Queue || ir.Jobs[0].RuntimeImage != target.Image {
 		t.Fatalf("expression-selected runner = %#v", ir.Jobs)
+	}
+}
+
+// TestResolvedEmptyVariableScopesEvaluateAsEmptyStrings proves the difference
+// between "no variable source" and "a source that defines no variable": the
+// same runs-on fallback expression fails to compile without a source and
+// falls back to its literal when a source resolved empty scopes, as it does
+// on GitHub for a repository without that variable.
+func TestResolvedEmptyVariableScopesEvaluateAsEmptyStrings(t *testing.T) {
+	workflow := []byte(`on: push
+jobs:
+  test:
+    name: build-${{ vars.CI_FAILOVER_LINUX }}
+    runs-on: ${{ vars.CI_FAILOVER_LINUX || 'ubuntu-24.04' }}
+    steps:
+      - run: true
+`)
+	compile := func(vars VariableSources) (IR, error) {
+		compiled, err := CompileWithOptions("fallback.yml", workflow, pushEvent(t), Options{
+			EventTrust: EventTrusted,
+			Vars:       vars,
+			Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-24.04": "linux"}},
+		})
+		if err != nil {
+			return IR{}, err
+		}
+		var ir IR
+		if err := json.Unmarshal(compiled, &ir); err != nil {
+			t.Fatal(err)
+		}
+		return ir, nil
+	}
+
+	if _, err := compile(VariableSources{}); err == nil || !strings.Contains(err.Error(), `unavailable value "vars.ci_failover_linux"`) {
+		t.Fatalf("CompileWithOptions() without a variable source error = %v, want unavailable value", err)
+	}
+	for name, vars := range map[string]VariableSources{
+		"resolved nil scopes":   {Resolved: true},
+		"resolved empty scopes": {Resolved: true, Organization: map[string]string{}, Repository: map[string]string{}},
+		"resolved other names":  {Resolved: true, Repository: map[string]string{"OTHER": "value"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ir, err := compile(vars)
+			if err != nil {
+				t.Fatalf("CompileWithOptions() = %v", err)
+			}
+			if len(ir.Jobs) != 1 || ir.Jobs[0].Label != "build-" || !slices.Equal(ir.Jobs[0].RunsOn, []string{"ubuntu-24.04"}) || ir.Jobs[0].Queue != "linux" {
+				t.Fatalf("compiled job = %#v, want the literal fallback runner and an empty variable in the name", ir.Jobs)
+			}
+		})
+	}
+}
+
+func TestVariableSourcesCompileTimeVars(t *testing.T) {
+	if vars := (VariableSources{}).CompileTimeVars(); vars != nil {
+		t.Fatalf("CompileTimeVars() without a source = %#v, want nil", vars)
+	}
+	if vars := (VariableSources{Repository: map[string]string{}}).CompileTimeVars(); vars != nil {
+		t.Fatalf("CompileTimeVars() with unresolved empty scopes = %#v, want nil", vars)
+	}
+	if vars := (VariableSources{Resolved: true}).CompileTimeVars(); vars == nil || len(vars) != 0 {
+		t.Fatalf("CompileTimeVars() with resolved empty scopes = %#v, want an empty map", vars)
+	}
+	vars := VariableSources{Resolved: true, Organization: map[string]string{"REGION": "org", "Registry": "ghcr"}, Repository: map[string]string{"region": "repo"}}.CompileTimeVars()
+	if !maps.Equal(vars, map[string]string{"region": "repo", "Registry": "ghcr"}) {
+		t.Fatalf("CompileTimeVars() = %#v, want repository over organization with case-insensitive override", vars)
 	}
 }
 
