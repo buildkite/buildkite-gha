@@ -56,15 +56,15 @@ var catalog = map[Identity]catalogEntry{
 	},
 	{Source: "github", Repository: "actions/cache"}: {
 		descriptor:     Descriptor{Service: ServiceCache},
-		validateCommit: validateCacheCommit,
+		validateCommit: validateCacheCommitFor(""),
 	},
 	{Source: "github", Repository: "actions/cache", Path: "restore"}: {
 		descriptor:     Descriptor{Service: ServiceCache},
-		validateCommit: validateCacheCommit,
+		validateCommit: validateCacheCommitFor("restore"),
 	},
 	{Source: "github", Repository: "actions/cache", Path: "save"}: {
 		descriptor:     Descriptor{Service: ServiceCache},
-		validateCommit: validateCacheCommit,
+		validateCommit: validateCacheCommitFor("save"),
 	},
 	{Source: "github", Repository: "actions/upload-artifact"}: {
 		descriptor:     Descriptor{Adapter: AdapterUploadArtifactBuildkite},

@@ -551,6 +551,17 @@ func unknownUploadArtifactCommitWarning(position workflow.Position, commit strin
 	}
 }
 
+func substitutedCacheCommitWarning(position workflow.Position, substitution CacheSubstitution) Warning {
+	action, _, _ := strings.Cut(substitution.Reference, "@")
+	return Warning{
+		Code:   "W_CACHE_UNKNOWN_COMMIT_SUBSTITUTED",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("%s resolved to commit %s, which is not in the frozen actions/cache snapshot admitted to the Buildkite cache-v2 service. The audited %s release (%s) runs instead. Pin %s@%s to remove this warning.",
+			substitution.Reference, substitution.ResolvedCommit, substitution.Release, substitution.Commit, action, substitution.Commit),
+	}
+}
+
 func legacyUploadArtifactWarning(position workflow.Position, release string) Warning {
 	return Warning{
 		Code:    "W_UPLOAD_ARTIFACT_LEGACY_RELEASE",

@@ -49,9 +49,10 @@ independent of GitHub-only artifact, cache, token, or OIDC services.
 The frozen `actions/upload-artifact` snapshot and exact-name
 `actions/download-artifact` commits use bounded native adapters. Unknown
 immutable artifact commits use their adapters' documented fallback contracts.
-The exact audited cache-v2-capable `actions/cache` release commits are
-also admitted by this profile. This compile/admission evidence does not prove a
-hosted cache roundtrip. Unpublished, withdrawn, older cache-v1, artifact merge,
+The frozen cache-v2-capable `actions/cache` snapshot commits are also
+admitted by this profile; other `actions/cache` commits run the newest
+audited release for their major with a warning. This compile/admission
+evidence does not prove a hosted cache roundtrip. Artifact merge,
 broad download, and unsupported artifact commits remain rejected. The profile leaves unknown
 generic service dependencies as an explicit warning rather than guessing from
 arbitrary action source. Runtime-pass job and service container fixtures are
