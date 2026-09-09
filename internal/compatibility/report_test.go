@@ -18,16 +18,16 @@ func TestProcessingReportKeepsSourceReferencesOutOfJSON(t *testing.T) {
 	const display = "owner/shared/.github/workflows/build.yml@v1"
 	want := compiler.WorkflowSourceReference{Repository: "owner/shared", Path: ".github/workflows/build.yml", Commit: strings.Repeat("a", 40)}
 	report := InitialProcessingReport("ci.yml", "hosted", false, compiler.Report{
-		RemoteSources: map[string]compiler.WorkflowSourceReference{display: want},
+		Sources: map[string]compiler.WorkflowSourceReference{display: want},
 	}, fmt.Errorf("invalid workflow"))
-	if report.RemoteSources[display] != want {
-		t.Fatalf("lost remote source reference: %v", report.RemoteSources)
+	if report.Sources[display] != want {
+		t.Fatalf("lost remote source reference: %v", report.Sources)
 	}
 	var encoded bytes.Buffer
 	if err := WriteProcessing(&encoded, "json", report); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(encoded.String(), want.Commit) || strings.Contains(encoded.String(), "RemoteSources") {
+	if strings.Contains(encoded.String(), want.Commit) || strings.Contains(encoded.String(), `"Sources"`) {
 		t.Fatalf("source references changed report JSON: %s", encoded.String())
 	}
 }

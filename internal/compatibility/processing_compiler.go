@@ -18,7 +18,7 @@ var locatedDiagnosticPattern = regexp.MustCompile(`^(.+):(\d+):(\d+): (.*)$`)
 // diagnostics, and warnings.
 func InitialProcessingReport(path, profile string, eventEvaluated bool, report compiler.Report, processingErr error) ProcessingReport {
 	out := NewProcessingReport(path, profile)
-	out.RemoteSources = report.RemoteSources
+	out.Sources = report.Sources
 	out.LogicalJobs = report.LogicalJobs
 	out.Instances = report.Instances
 	out.Compile = Stage{Result: "compilable", LogicalJobs: report.LogicalJobs, Instances: report.Instances}

@@ -74,8 +74,8 @@ type ActionResult struct {
 // ProcessingReport records all safely discoverable results. Artifacts are
 // deliberately excluded so reports cannot expose event or downloaded content.
 type ProcessingReport struct {
-	// RemoteSources is process-local link evidence, not part of the report schema.
-	RemoteSources map[string]compiler.WorkflowSourceReference `json:"-"`
+	// Sources is process-local source evidence, not part of the report schema.
+	Sources map[string]compiler.WorkflowSourceReference `json:"-"`
 
 	Schema      string            `json:"schema"`
 	Workflow    string            `json:"workflow"`

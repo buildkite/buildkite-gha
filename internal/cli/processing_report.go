@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -54,7 +55,8 @@ type sourceLinkContext struct {
 	repository         string
 	sha                string
 	workflowSourceRoot string
-	remoteSources      map[string]compiler.WorkflowSourceReference
+	sources            map[string]compiler.WorkflowSourceReference
+	localLinks         map[string]string
 }
 
 func sourceLinksForEvent(event compiler.Event) sourceLinkContext {
@@ -81,14 +83,62 @@ func (c sourceLinkContext) link(path string, line int) string {
 	return link
 }
 
-func (c sourceLinkContext) remoteLink(path string, line int) string {
-	source, ok := c.remoteSources[path]
-	if !ok || !git.ValidObjectID(source.Commit) {
+func (c sourceLinkContext) sourceLink(path string, line int) string {
+	source, ok := c.sources[path]
+	if !ok {
+		return ""
+	}
+	if source.LocalPath != "" {
+		link, cached := c.localLinks[source.LocalPath+source.Digest]
+		if !cached {
+			link = c.verifiedLocalLink(source)
+			if c.localLinks != nil {
+				c.localLinks[source.LocalPath+source.Digest] = link
+			}
+		}
+		if link != "" && line > 0 {
+			link += fmt.Sprintf("#L%d", line)
+		}
+		return link
+	}
+	if !git.ValidObjectID(source.Commit) {
 		return ""
 	}
 	// Public reusable workflows are fetched from GitHub, not the caller's
 	// provider. Never substitute the caller's repository, SHA, or server URL.
 	return (sourceLinkContext{serverURL: "https://github.com", repository: source.Repository, sha: source.Commit}).link(source.Path, line)
+}
+
+func (c sourceLinkContext) verifiedLocalLink(source compiler.WorkflowSourceReference) string {
+	if !git.ValidObjectID(c.sha) || c.serverURL == "" || c.repository == "" || source.Digest == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), processingAnnotationTimeout)
+	defer cancel()
+	root := os.Getenv("BUILDKITE_BUILD_CHECKOUT_PATH")
+	if root == "" {
+		output, err := boundedCommandOutput(exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel"), 4096)
+		if err != nil {
+			return ""
+		}
+		root = strings.TrimSpace(string(output))
+	}
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return ""
+	}
+	path, err := filepath.Rel(root, source.LocalPath)
+	if err != nil || filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	path = filepath.ToSlash(path)
+	command := exec.CommandContext(ctx, "git", "-C", root, "cat-file", "blob", c.sha+":"+path)
+	command.Env = append(os.Environ(), "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0")
+	committed, err := boundedCommandOutput(command, compiler.MaxReusableWorkflowBytes)
+	if err != nil || transport.Digest(committed) != source.Digest {
+		return ""
+	}
+	return c.link(path, 0)
 }
 
 func newProcessingOutput(ctx context.Context, command, format string, reports, stderr io.Writer, agent transport.Agent) processingOutput {
@@ -297,7 +347,10 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 
 func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bodyLimit int, truncationNotice string, includeHeading bool) (style, body string) {
 	report.Finalize()
-	sourceLinks.remoteSources = report.RemoteSources
+	sourceLinks.sources = report.Sources
+	if sourceLinks.localLinks == nil {
+		sourceLinks.localLinks = make(map[string]string)
+	}
 	style = "warning"
 	diagnostics := make([]compatibility.Diagnostic, 0, len(report.Diagnostics))
 	for _, diagnostic := range report.Diagnostics {
@@ -331,7 +384,7 @@ func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLin
 		sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
 	}
 	out.WriteString("<p>")
-	out.WriteString(annotationSourcePath(workflowPath, 0, 0, workflowLinkable, sourceLinks))
+	out.WriteString(annotationSourcePath(report.Workflow, workflowPath, 0, 0, sourceLinks))
 	out.WriteString("</p>\n")
 	rows := make([]string, len(diagnostics))
 	bodyBytes := out.Len()
@@ -449,11 +502,11 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 		context = append(context, "Action "+annotationCode(diagnostic.Action))
 	}
 	if diagnostic.Location != nil {
-		path, linkable := diagnostic.Location.Path, false
-		if _, remote := sourceLinks.remoteSources[path]; !remote {
-			path, linkable = processingAnnotationWorkflowPath(path, sourceLinks.workflowSourceRoot)
+		path := diagnostic.Location.Path
+		if source := sourceLinks.sources[path]; source.Repository == "" {
+			path, _ = processingAnnotationWorkflowPath(path, sourceLinks.workflowSourceRoot)
 		}
-		context = append(context, annotationSourcePath(path, diagnostic.Location.Line, diagnostic.Location.Column, linkable, sourceLinks))
+		context = append(context, annotationSourcePath(diagnostic.Location.Path, path, diagnostic.Location.Line, diagnostic.Location.Column, sourceLinks))
 	}
 	if diagnostic.Job != "" {
 		context = append(context, "Job "+annotationCode(diagnostic.Job))
@@ -486,7 +539,7 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 	return out.String()
 }
 
-func annotationSourcePath(path string, line, column int, linkable bool, sourceLinks sourceLinkContext) string {
+func annotationSourcePath(sourcePath, path string, line, column int, sourceLinks sourceLinkContext) string {
 	display := path
 	if line > 0 {
 		display += fmt.Sprintf(":%d", line)
@@ -495,10 +548,7 @@ func annotationSourcePath(path string, line, column int, linkable bool, sourceLi
 		}
 	}
 	code := annotationCode(display)
-	if link := sourceLinks.remoteLink(path, line); link != "" {
-		return `<a href="` + html.EscapeString(link) + `">` + code + `</a>`
-	}
-	if link := sourceLinks.link(path, line); linkable && link != "" {
+	if link := sourceLinks.sourceLink(sourcePath, line); link != "" {
 		return `<a href="` + html.EscapeString(link) + `">` + code + `</a>`
 	}
 	return code
@@ -619,8 +669,8 @@ func validatedProcessingReportWithOptions(ctx context.Context, out processingOut
 // applyHostedPreflight folds hosted preflight evidence and any admission
 // grant into the report.
 func applyHostedPreflight(report *compatibility.ProcessingReport, preflight hostedCompilation) {
-	if preflight.Bundle.IR.RemoteSources != nil {
-		report.RemoteSources = preflight.Bundle.IR.RemoteSources
+	if preflight.Bundle.IR.Sources != nil {
+		report.Sources = preflight.Bundle.IR.Sources
 	}
 	report.ApplyEvidence(preflight.Bundle.Processing)
 	report.ApplyWarnings(report.Workflow, preflight.Bundle.IR.Warnings)

@@ -38,6 +38,56 @@ type failureArtifactPlugin struct {
 
 type failureStepPlugins []map[string]failureArtifactPlugin
 
+func TestGeneratedFailureLinksOnlyTheParsedLocalRevision(t *testing.T) {
+	repository := t.TempDir()
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	const path = "ci.yml"
+	const committed = "on: push\njobs: [\n"
+	const edited = "on: push\njobs: {\n"
+	if err := os.WriteFile(path, []byte(committed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture := compatibility.NewProcessingReport(path, "")
+	sha := commitDiagnosticSources(t, repository, &fixture)
+	for _, test := range []struct {
+		name, parsed, rendered, revision string
+		linked                           bool
+	}{
+		{"unchanged", committed, committed, sha, true},
+		{"changed after parsing", committed, edited, sha, true},
+		{"edited then restored", edited, committed, sha, false},
+		{"missing revision", committed, committed, strings.Repeat("f", 40), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(test.parsed), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := compiler.ParseWorkflow(path, []byte(test.parsed))
+			if err == nil {
+				t.Fatal("expected invalid YAML")
+			}
+			report := compatibility.InitialProcessingReport(path, "", false, parsed, err)
+			if err := os.WriteFile(path, []byte(test.rendered), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, artifacts := generatedFailure(report, sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: test.revision})
+			log, annotation := string(artifacts[0].Contents), string(artifacts[1].Contents)
+			if !strings.Contains(log, "Error source: ci.yml:") || !strings.Contains(annotation, "ci.yml:") {
+				t.Fatalf("lost location: log=%q annotation=%q", log, annotation)
+			}
+			target := "https://github.com/owner/repo/blob/" + sha + "/ci.yml#L"
+			if test.linked {
+				if !strings.Contains(log, "\x1b]1339;url='"+target) || !strings.Contains(annotation, `href="`+target) {
+					t.Fatalf("lost verified link: log=%q annotation=%q", log, annotation)
+				}
+			} else if strings.Contains(log, "\x1b]1339;") || strings.Contains(annotation, "href=") {
+				t.Fatalf("linked unverified content: log=%q annotation=%q", log, annotation)
+			}
+		})
+	}
+}
+
 func TestGeneratedFailureLinksFetchedRevisionInsteadOfCallerOrTag(t *testing.T) {
 	const display = "owner/shared/.github/workflows/build's.yml@v2"
 	const commit = "1234567890abcdef1234567890abcdef12345678"
@@ -45,7 +95,7 @@ func TestGeneratedFailureLinksFetchedRevisionInsteadOfCallerOrTag(t *testing.T) 
 	report := compatibility.NewProcessingReport("ci.yml", "hosted")
 	// Use the same preflight-to-report path as upload, not a renderer-only map.
 	applyHostedPreflight(&report, hostedCompilation{Bundle: compiler.Bundle{IR: compiler.IR{
-		RemoteSources: map[string]compiler.WorkflowSourceReference{display: {
+		Sources: map[string]compiler.WorkflowSourceReference{display: {
 			Repository: "owner/shared", Path: ".github/workflows/build's.yml", Commit: commit,
 		}},
 	}}})
@@ -61,7 +111,7 @@ func TestGeneratedFailureLinksFetchedRevisionInsteadOfCallerOrTag(t *testing.T) 
 		t.Fatalf("annotation lost remote source link: %s", annotation)
 	}
 	for _, invalid := range []string{"", "v2"} {
-		report.RemoteSources[display] = compiler.WorkflowSourceReference{Repository: "owner/shared", Path: ".github/workflows/build's.yml", Commit: invalid}
+		report.Sources[display] = compiler.WorkflowSourceReference{Repository: "owner/shared", Path: ".github/workflows/build's.yml", Commit: invalid}
 		_, artifacts = generatedFailure(report, caller)
 		if strings.Contains(string(artifacts[0].Contents), "\x1b]1339;") || strings.Contains(string(artifacts[1].Contents), "href=") {
 			t.Fatalf("invented source link for revision %q: %s", invalid, artifacts)
@@ -1450,8 +1500,9 @@ func TestFailureCheckSummaryUsesAnnotationMarkupAndLinks(t *testing.T) {
 		Level: "error", Message: "runner is unsupported", Job: "test",
 		Location: &compatibility.SourceLocation{Path: ".github/workflows/hello.yml", Line: 100, Column: 3},
 	})
-	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
-	want := `<a href="https://github.com/owner/repo/blob/abc123/.github/workflows/hello.yml#L100"><code>.github/workflows/hello.yml:100:3</code></a>`
+	sha := commitDiagnosticSources(t, repository, &report)
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: sha}
+	want := `<a href="https://github.com/owner/repo/blob/` + sha + `/.github/workflows/hello.yml#L100"><code>.github/workflows/hello.yml:100:3</code></a>`
 
 	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/hello.yml", Identity: "ci"}, "push", report, sourceLinks)
 	annotation := string(artifacts[1].Contents)

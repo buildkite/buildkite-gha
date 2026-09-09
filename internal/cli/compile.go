@@ -100,8 +100,8 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 				bundle, compileErr = compiler.CompileBundleContext(ctx, workflowPath, source, event, version, digest, "gha-importer", options)
 			}
 		}
-		if bundle.IR.RemoteSources != nil {
-			processingReport.RemoteSources = bundle.IR.RemoteSources
+		if bundle.IR.Sources != nil {
+			processingReport.Sources = bundle.IR.Sources
 		}
 		processingReport.ApplyEvidence(bundle.Processing)
 		err = compileErr

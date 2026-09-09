@@ -1592,6 +1592,39 @@ func TestProcessingAnnotationsUseActiveBoundedContext(t *testing.T) {
 	}
 }
 
+func commitDiagnosticSources(t *testing.T, repository string, report *compatibility.ProcessingReport) string {
+	t.Helper()
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "workflow fixture"}} {
+		if output, err := gitCommand(repository, args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	sha, err := gitCommand(repository, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{report.Workflow}
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Location != nil {
+			paths = append(paths, diagnostic.Location.Path)
+		}
+	}
+	report.Sources = make(map[string]compiler.WorkflowSourceReference)
+	for _, path := range paths {
+		relative, _ := processingAnnotationWorkflowPath(path, processingWorkflowSourceRoot(report.Workflow))
+		absolute, err := filepath.EvalSymlinks(filepath.Join(repository, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents, err := os.ReadFile(absolute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report.Sources[path] = compiler.WorkflowSourceReference{LocalPath: absolute, Digest: transport.Digest(contents)}
+	}
+	return strings.TrimSpace(string(sha))
+}
+
 func TestEventBackedCommandsLinkEarlyWorkflowDiagnostics(t *testing.T) {
 	repository := t.TempDir()
 	workflowPath := filepath.Join(repository, ".github", "workflows", "broken.yml")
@@ -1606,6 +1639,16 @@ func TestEventBackedCommandsLinkEarlyWorkflowDiagnostics(t *testing.T) {
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_STEP_KEY", "importer")
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	report := compatibility.NewProcessingReport(workflowPath, "")
+	sha := commitDiagnosticSources(t, repository, &report)
+	eventBytes, err := os.ReadFile(eventPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventBytes = bytes.ReplaceAll(eventBytes, []byte(strings.Repeat("a", 40)), []byte(sha))
+	if err := os.WriteFile(eventPath, eventBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, command := range []string{"validate", "upload"} {
 		t.Run(command, func(t *testing.T) {
@@ -1617,7 +1660,7 @@ func TestEventBackedCommandsLinkEarlyWorkflowDiagnostics(t *testing.T) {
 			if len(runner.commands) != 1 {
 				t.Fatalf("commands = %#v, want one annotation", runner.commands)
 			}
-			want := `href="https://github.com/buildkite/buildkite-gha/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/broken.yml`
+			want := `href="https://github.com/buildkite/buildkite-gha/blob/` + sha + `/.github/workflows/broken.yml`
 			if !strings.Contains(string(runner.commands[0].stdin), want) {
 				t.Fatalf("annotation = %q, want linked workflow path %q", runner.commands[0].stdin, want)
 			}
@@ -1735,12 +1778,16 @@ func TestProcessingAnnotationResolvesPathsFromBelowCheckoutRoot(t *testing.T) {
 		Level: "error", Message: "invalid workflow",
 		Location: &compatibility.SourceLocation{Path: "workflows/hello.yml", Line: 100, Column: 3},
 	})
-	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+	sha := commitDiagnosticSources(t, repository, &report)
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: sha}
 
-	_, body := processingAnnotation(report, sourceLinks)
-	want := `href="https://github.com/owner/repo/blob/abc123/.github/workflows/hello.yml#L100"`
-	if !strings.Contains(body, want) {
-		t.Fatalf("annotation = %q, want %q", body, want)
+	want := `href="https://github.com/owner/repo/blob/` + sha + `/.github/workflows/hello.yml#L100"`
+	for _, checkout := range []string{repository, ""} {
+		t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", checkout)
+		_, body := processingAnnotation(report, sourceLinks)
+		if !strings.Contains(body, want) {
+			t.Fatalf("annotation = %q, want %q", body, want)
+		}
 	}
 }
 
@@ -1763,10 +1810,11 @@ func TestProcessingAnnotationResolvesCompilerLocationsFromCheckoutRoot(t *testin
 		Level: "error", Message: "invalid reusable workflow",
 		Location: &compatibility.SourceLocation{Path: "./.github/workflows/build-security.yml", Line: 35, Column: 13},
 	})
-	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+	sha := commitDiagnosticSources(t, repository, &report)
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: sha}
 
 	_, body := processingAnnotation(report, sourceLinks)
-	want := `<a href="https://github.com/owner/repo/blob/abc123/.github/workflows/build-security.yml#L35"><code>.github/workflows/build-security.yml:35:13</code></a>`
+	want := `<a href="https://github.com/owner/repo/blob/` + sha + `/.github/workflows/build-security.yml#L35"><code>.github/workflows/build-security.yml:35:13</code></a>`
 	if !strings.Contains(body, want) {
 		t.Fatalf("annotation = %q, want %q", body, want)
 	}
@@ -1790,8 +1838,9 @@ func TestProcessingDiagnosticsRetainNestedWorkflowSourceRoot(t *testing.T) {
 		Level: "error", Message: "invalid reusable workflow",
 		Location: &compatibility.SourceLocation{Path: "./.github/workflows/build-security.yml", Line: 35, Column: 13},
 	})
-	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
-	wantLink := "https://github.com/owner/repo/blob/abc123/nested/.github/workflows/build-security.yml#L35"
+	sha := commitDiagnosticSources(t, repository, &report)
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: sha}
+	wantLink := "https://github.com/owner/repo/blob/" + sha + "/nested/.github/workflows/build-security.yml#L35"
 
 	_, annotation := processingAnnotation(report, sourceLinks)
 	_, summary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
@@ -1816,12 +1865,13 @@ func TestProcessingAnnotationLinksWorkflowLocationsToSource(t *testing.T) {
 		Level: "error", Message: "invalid workflow",
 		Location: &compatibility.SourceLocation{Path: ".github/workflows/hello world.yml", Line: 100, Column: 3},
 	})
-	sourceLinks := sourceLinkContext{serverURL: "https://github.example.com", repository: "owner/repo", sha: "abc123"}
+	sha := commitDiagnosticSources(t, repository, &report)
+	sourceLinks := sourceLinkContext{serverURL: "https://github.example.com", repository: "owner/repo", sha: sha}
 
 	_, body := processingAnnotation(report, sourceLinks)
 	for _, want := range []string{
-		`<a href="https://github.example.com/owner/repo/blob/abc123/.github/workflows/hello%20world.yml"><code>.github/workflows/hello world.yml</code></a>`,
-		`<a href="https://github.example.com/owner/repo/blob/abc123/.github/workflows/hello%20world.yml#L100"><code>.github/workflows/hello world.yml:100:3</code></a>`,
+		`<a href="https://github.example.com/owner/repo/blob/` + sha + `/.github/workflows/hello%20world.yml"><code>.github/workflows/hello world.yml</code></a>`,
+		`<a href="https://github.example.com/owner/repo/blob/` + sha + `/.github/workflows/hello%20world.yml#L100"><code>.github/workflows/hello world.yml:100:3</code></a>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("annotation = %q, want %q", body, want)
@@ -1912,10 +1962,11 @@ func TestProcessingDiagnosticsLinkThroughCheckoutRootSymlink(t *testing.T) {
 		Level: "error", Message: "invalid workflow",
 		Location: &compatibility.SourceLocation{Path: filepath.Join(checkout, "ci.yml"), Line: 1, Column: 1},
 	})
-	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+	sha := commitDiagnosticSources(t, checkout, &report)
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: sha}
 
 	_, annotation := processingAnnotation(report, sourceLinks)
-	if want := `href="https://github.com/owner/repo/blob/abc123/ci.yml#L1"`; !strings.Contains(annotation, want) {
+	if want := `href="https://github.com/owner/repo/blob/` + sha + `/ci.yml#L1"`; !strings.Contains(annotation, want) {
 		t.Fatalf("checkout symlink location was not linked: annotation=%q want=%q", annotation, want)
 	}
 }

@@ -74,6 +74,26 @@ func (s *fakeReusableRepositorySource) references() []actionsource.Reference {
 	return append([]actionsource.Reference(nil), s.calls...)
 }
 
+func TestLocalDiagnosticSourcesSurviveNestedWorkflowFailure(t *testing.T) {
+	root := t.TempDir()
+	caller := writeWorkflow(t, root, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/broken.yml\n")
+	broken := writeWorkflow(t, root, "broken.yml", "on: workflow_call\njobs: [\n")
+	canonical, err := filepath.EvalSymlinks(broken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := WorkflowSourceReference{LocalPath: canonical, Digest: transport.Digest(readFile(t, broken))}
+	const display = "./.github/workflows/broken.yml"
+	report, err := ValidateWithOptionsContext(t.Context(), caller, readFile(t, caller), defaultOptions())
+	if err == nil || report.Sources[display] != want || report.Sources[caller].Digest != transport.Digest(readFile(t, caller)) {
+		t.Fatalf("validation lost source identity: sources=%v err=%v", report.Sources, err)
+	}
+	ir, err := CompileIRWithOptionsContext(t.Context(), caller, readFile(t, caller), pushEvent(t), defaultOptions())
+	if err == nil || ir.Sources[display] != want || ir.Sources[caller].Digest != transport.Digest(readFile(t, caller)) {
+		t.Fatalf("compilation lost source identity: sources=%v err=%v", ir.Sources, err)
+	}
+}
+
 func TestRemoteDiagnosticSourcesSurviveNestedWorkflowFailure(t *testing.T) {
 	callerRoot, remoteRoot := t.TempDir(), t.TempDir()
 	caller := writeWorkflow(t, callerRoot, "caller.yml", "on: push\njobs:\n  call:\n    uses: owner/shared/.github/workflows/callee.yml@v2\n")
@@ -85,18 +105,18 @@ func TestRemoteDiagnosticSourcesSurviveNestedWorkflowFailure(t *testing.T) {
 	want := WorkflowSourceReference{Repository: "owner/shared", Path: ".github/workflows/broken.yml", Commit: fake.commits["owner/shared"]}
 	const display = "owner/shared/.github/workflows/broken.yml@v2"
 	report, err := ValidateWithOptionsContext(t.Context(), caller, readFile(t, caller), options)
-	if err == nil || !strings.Contains(err.Error(), display) || report.RemoteSources[display] != want {
-		t.Fatalf("validation lost failing source: sources=%v err=%v", report.RemoteSources, err)
+	if err == nil || !strings.Contains(err.Error(), display) || report.Sources[display] != want {
+		t.Fatalf("validation lost failing source: sources=%v err=%v", report.Sources, err)
 	}
 	ir, err := CompileIRWithOptionsContext(t.Context(), caller, readFile(t, caller), pushEvent(t), options)
-	if err == nil || ir.JobGraphComplete || ir.RemoteSources[display] != want {
-		t.Fatalf("compilation lost failing source: sources=%v err=%v", ir.RemoteSources, err)
+	if err == nil || ir.JobGraphComplete || ir.Sources[display] != want {
+		t.Fatalf("compilation lost failing source: sources=%v err=%v", ir.Sources, err)
 	}
 	encoded, err := json.Marshal(ir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), want.Commit) || strings.Contains(string(encoded), "RemoteSources") {
+	if strings.Contains(string(encoded), want.Commit) || strings.Contains(string(encoded), `"Sources"`) {
 		t.Fatalf("diagnostic provenance leaked into serialized IR: %s", encoded)
 	}
 }

@@ -21,12 +21,35 @@ const (
 	MaxReusableWorkflowBytes = 1 << 20
 )
 
-// WorkflowSourceReference identifies a fetched public GitHub workflow for
-// diagnostic links, independently of its human-readable requested ref.
+// WorkflowSourceReference identifies the bytes parsed for diagnostic links.
+// LocalPath and Digest identify local input; Repository and Commit identify
+// fetched public GitHub input independently of its requested ref.
 type WorkflowSourceReference struct {
 	Repository string
 	Path       string
 	Commit     string
+	LocalPath  string
+	Digest     string
+}
+
+func localSourceReference(path string, source []byte) WorkflowSourceReference {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return WorkflowSourceReference{}
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return WorkflowSourceReference{}
+	}
+	return WorkflowSourceReference{LocalPath: canonical, Digest: "sha256:" + sha256Sum(source)}
+}
+
+func retainRootSource(sources map[string]WorkflowSourceReference, path string, source []byte) map[string]WorkflowSourceReference {
+	if sources == nil {
+		sources = make(map[string]WorkflowSourceReference)
+	}
+	sources[path] = localSourceReference(path, source)
+	return sources
 }
 
 // RemoteWorkflowSource is immutable provenance for a public reusable workflow.
@@ -91,12 +114,16 @@ func localReusableWorkflowSource(workflowPath string) (reusableWorkflowSource, e
 
 func (resolver *reusableResolver) loadReusableWorkflow(ctx context.Context, parent reusableWorkflowSource, uses string) (loaded reusableWorkflowSource, source []byte, err error) {
 	defer func() {
-		if err == nil && loaded.remote != nil {
-			if resolver.scan.remoteSources == nil {
-				resolver.scan.remoteSources = make(map[string]WorkflowSourceReference)
+		if err == nil {
+			if resolver.scan.sources == nil {
+				resolver.scan.sources = make(map[string]WorkflowSourceReference)
 			}
-			resolver.scan.remoteSources[loaded.displayPath] = WorkflowSourceReference{
-				Repository: loaded.identity.repository, Path: loaded.identity.path, Commit: loaded.identity.commit,
+			if loaded.remote != nil {
+				resolver.scan.sources[loaded.displayPath] = WorkflowSourceReference{
+					Repository: loaded.identity.repository, Path: loaded.identity.path, Commit: loaded.identity.commit,
+				}
+			} else {
+				resolver.scan.sources[loaded.displayPath] = localSourceReference(filepath.Join(loaded.repositoryRoot, loaded.identity.path), source)
 			}
 		}
 	}()

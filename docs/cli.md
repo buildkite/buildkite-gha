@@ -243,9 +243,14 @@ For fetched public reusable workflows, source locations in annotations link
 to the resolved commit and line in the source repository, including nested
 local calls inside that repository. Generated failure logs include the same
 URL and a Buildkite `Open source` hyperlink. If the source could not be fetched,
-the CLI keeps the location without guessing a revision. Local workflow
-annotations retain their existing event-revision links; generated logs do not
-yet link local files.
+the CLI keeps the location without guessing a revision.
+
+Local workflow links use the event's commit only when its file in the checkout's
+Git object database matches the bytes parsed. This includes local reusable
+workflows and early syntax errors. Annotations and generated failure logs keep
+the location without a link for edited inputs, unavailable revisions, files
+outside the checkout, or files larger than the 1 MiB verification limit. Changes
+on disk after parsing do not change which source revision the diagnostic links to.
 
 Profile validation applies upload's trigger policy before compilation.
 `not-applicable` means the workflow does not declare the selected event and
