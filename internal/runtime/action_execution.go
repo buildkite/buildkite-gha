@@ -1456,6 +1456,7 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string, 
 		"GITHUB_WORKSPACE":    workspace,
 		"RUNNER_OS":           runner["os"],
 		"RUNNER_ARCH":         runner["arch"],
+		"RUNNER_ENVIRONMENT":  runner["environment"],
 		"RUNNER_TEMP":         runnerTemp,
 		"RUNNER_TOOL_CACHE":   toolCache,
 	}
@@ -1471,9 +1472,9 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string, 
 func canonicalRunnerContext(goos, goarch string) (map[string]string, error) {
 	switch {
 	case goos == "linux" && goarch == "amd64":
-		return map[string]string{"os": "Linux", "arch": "X64"}, nil
+		return map[string]string{"os": "Linux", "arch": "X64", "environment": expression.RunnerEnvironment}, nil
 	case goos == "darwin" && goarch == "arm64":
-		return map[string]string{"os": "macOS", "arch": "ARM64"}, nil
+		return map[string]string{"os": "macOS", "arch": "ARM64", "environment": expression.RunnerEnvironment}, nil
 	default:
 		return nil, errUnsupportedf("unsupported runner platform %s/%s", goos, goarch)
 	}
@@ -1597,6 +1598,7 @@ func isRuntimeContextEnvironment(name string) bool {
 		"GITHUB_WORKFLOW_SHA",
 		"GITHUB_WORKSPACE",
 		"RUNNER_ARCH",
+		"RUNNER_ENVIRONMENT",
 		"RUNNER_OS",
 		"RUNNER_TEMP",
 		"RUNNER_TOOL_CACHE":
