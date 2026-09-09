@@ -232,8 +232,12 @@ Warnings and errors become job-scoped Buildkite annotations. A failure that
 aborts `validate`, `compile`, or upload attaches to the current job. Generated
 failure steps attach their own diagnostics. Their logs identify the root
 workflow and each diagnostic's source location, job, matrix instance, action,
-and step when available. If the CLI cannot publish an
-annotation, it warns without changing the command result.
+and step when available. Failure logs use bold red errors, amber warnings,
+and cyan workflow/source context, with blank lines between diagnostics.
+They share annotations' human-readable explanations; internal diagnostic codes
+remain in structured reports and telemetry rather than generated failure logs.
+If the CLI cannot publish an annotation, it warns without changing the command
+result.
 
 Profile validation applies upload's trigger policy before compilation.
 `not-applicable` means the workflow does not declare the selected event and

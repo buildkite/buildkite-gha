@@ -778,11 +778,21 @@ func generatedFailure(report compatibility.ProcessingReport, sourceLinks sourceL
 	report.Diagnostics = append([]compatibility.Diagnostic(nil), report.Diagnostics...)
 	report.Finalize()
 	workflowPath, _ := processingAnnotationWorkflowPath(report.Workflow, "")
-	messages := []string{"Workflow: " + workflowPath}
+	messages := []string{
+		"\x1b[1;31mWorkflow import failed\x1b[0m",
+		"\x1b[1;36mWorkflow: " + workflowPath + "\x1b[0m",
+	}
 	for _, diagnostic := range report.Diagnostics {
-		message := diagnostic.Message
-		if diagnostic.Code != "" {
-			message = "[" + diagnostic.Code + "] " + message
+		heading, explanation := annotationDiagnosticPresentation(diagnostic)
+		colour := "\x1b[1;31m"
+		severity := "Error: "
+		if diagnostic.Level == "warning" {
+			colour = "\x1b[1;33m"
+			severity = "Warning: "
+		}
+		message := colour + severity + heading + "\x1b[0m"
+		if len(explanation) != 0 {
+			message += "\n  " + strings.Join(explanation, " ")
 		}
 		var attribution []string
 		if diagnostic.Job != "" {
@@ -802,22 +812,23 @@ func generatedFailure(report compatibility.ProcessingReport, sourceLinks sourceL
 		}
 		if diagnostic.Location != nil {
 			location := diagnostic.Location
-			message += "\n  Error source: " + location.Path
+			message += "\n  \x1b[36mError source: " + location.Path
 			if location.Line > 0 {
 				message += fmt.Sprintf(":%d", location.Line)
 				if location.Column > 0 {
 					message += fmt.Sprintf(":%d", location.Column)
 				}
 			}
+			message += "\x1b[0m"
 		}
 		if diagnostic.Detail != "" {
 			message += "\n  detail: " + diagnostic.Detail
 		}
-		messages = append(messages, message)
+		messages = append(messages, "\n"+message)
 	}
 	_, annotation := processingAnnotation(report, sourceLinks)
 	_, checkSummary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
-	messageArtifact := generatedFailureArtifact("messages", ".txt", "\x1b[31m"+strings.Join(messages, "\n")+"\x1b[0m\n")
+	messageArtifact := generatedFailureArtifact("messages", ".txt", strings.Join(messages, "\n")+"\x1b[0m\n")
 	annotationArtifact := generatedFailureArtifact("annotations", ".html", annotation)
 	failure := &buildkitepipeline.Failure{
 		AnnotationPath: annotationArtifact.Path,

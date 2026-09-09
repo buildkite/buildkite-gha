@@ -41,7 +41,7 @@ type failureStepPlugins []map[string]failureArtifactPlugin
 func TestGeneratedFailureRetainsWorkflowAndDiagnosticSources(t *testing.T) {
 	report := compatibility.NewProcessingReport(".github/workflows/ci.yml", "hosted")
 	report.Diagnostics = []compatibility.Diagnostic{
-		{Level: "error", Code: "E_ACTION_RESOLUTION", Message: "Local action could not be found",
+		{Level: "error", Code: "E_ACTION_RESOLUTION", Message: `Action "./.github/actions/check" could not be resolved: local action could not be found. Check that the action directory exists.`,
 			Job: "build.test", Instance: "test-linux", Step: 2, Action: "./.github/actions/check",
 			Location: &compatibility.SourceLocation{Path: ".github/workflows/build.yml", Line: 35, Column: 5}, Detail: "action.yml is missing"},
 		{Level: "error", Code: "E_PROFILE", Message: "Another job was rejected", Job: "publish",
@@ -58,11 +58,12 @@ func TestGeneratedFailureRetainsWorkflowAndDiagnosticSources(t *testing.T) {
 			annotation = string(artifact.Contents)
 		}
 	}
+	message = strings.NewReplacer("\x1b[1;31m", "", "\x1b[1;36m", "", "\x1b[36m", "", "\x1b[0m", "").Replace(message)
 	for _, want := range []string{
 		"Workflow: .github/workflows/ci.yml",
-		"[E_ACTION_RESOLUTION] Local action could not be found {job=build.test, instance=test-linux, action=./.github/actions/check, step=2}\n  Error source: .github/workflows/build.yml:35:5\n  detail: action.yml is missing",
-		"[E_PROFILE] Another job was rejected {job=publish}\n  Error source: .github/workflows/publish.yml:19",
-		"[E_ENVIRONMENT] Source unavailable",
+		"Error: Local action could not be found.\n  Check that the action directory exists. {job=build.test, instance=test-linux, action=./.github/actions/check, step=2}\n  Error source: .github/workflows/build.yml:35:5\n  detail: action.yml is missing",
+		"Error: Another job was rejected {job=publish}\n  Error source: .github/workflows/publish.yml:19",
+		"Error: Source unavailable",
 	} {
 		if !strings.Contains(message, want) {
 			t.Errorf("failure log missing %q: %s", want, message)
@@ -71,7 +72,12 @@ func TestGeneratedFailureRetainsWorkflowAndDiagnosticSources(t *testing.T) {
 	if strings.Count(message, "Error source:") != 2 || strings.Contains(message, ":19:0") {
 		t.Errorf("failure log invents source coordinates: %s", message)
 	}
-	for _, want := range []string{".github/workflows/ci.yml", ".github/workflows/build.yml:35:5", ".github/workflows/publish.yml:19", "./.github/actions/check", "action.yml is missing"} {
+	for _, diagnostic := range report.Diagnostics {
+		if strings.Contains(message, diagnostic.Code) {
+			t.Errorf("failure log exposes internal code %q: %s", diagnostic.Code, message)
+		}
+	}
+	for _, want := range []string{".github/workflows/ci.yml", ".github/workflows/build.yml:35:5", ".github/workflows/publish.yml:19", "./.github/actions/check", "action.yml is missing", "Local action could not be found.", "Check that the action directory exists."} {
 		if !strings.Contains(annotation, want) {
 			t.Errorf("annotation missing %q: %s", want, annotation)
 		}
@@ -1239,7 +1245,7 @@ fi
 	output, err := command.CombinedOutput()
 	plainIndex := strings.Index(string(output), "Runner label has no")
 	annotationIndex := strings.Index(string(output), `<h2 class="h4 mb2">Workflow could not be run</h2>`)
-	logPrefix := "\x1b[31m"
+	logPrefix := "\x1b[1;31mWorkflow import failed\x1b[0m"
 	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || !strings.HasPrefix(string(output), logPrefix) || plainIndex == -1 || annotationIndex <= plainIndex {
 		t.Fatalf("compiler failure command output/error = %q / %v", output, err)
 	}
@@ -1256,8 +1262,17 @@ func TestFailedGeneratedWorkflowIncludesWarnings(t *testing.T) {
 	)
 
 	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/ci.yml", Identity: "ci", TriggerCondition: "false"}, "push", report, sourceLinkContext{})
-	if workflow.Condition != "" || workflow.Failure == nil || len(artifacts) != 2 || workflow.Failure.MessagePath != artifacts[0].Path || workflow.Failure.AnnotationPath != artifacts[1].Path || !bytes.HasPrefix(artifacts[0].Contents, []byte("\x1b[31m")) || !bytes.HasSuffix(artifacts[0].Contents, []byte("\x1b[0m\n")) || !strings.Contains(string(artifacts[1].Contents), `<h2 class="h4 mb2">Workflow could not be run</h2>`) || !strings.Contains(string(artifacts[1].Contents), "<strong>runner is unsupported</strong>") || !strings.Contains(string(artifacts[1].Contents), "<strong>cancel-in-progress is ignored</strong>") || !strings.Contains(string(artifacts[1].Contents), "<p>") || strings.Contains(workflow.Failure.Summary, "<h2") || !strings.Contains(workflow.Failure.Summary, "<p>") {
+	if workflow.Condition != "" || workflow.Failure == nil || len(artifacts) != 2 || workflow.Failure.MessagePath != artifacts[0].Path || workflow.Failure.AnnotationPath != artifacts[1].Path || !bytes.HasPrefix(artifacts[0].Contents, []byte("\x1b[1;31m")) || !bytes.HasSuffix(artifacts[0].Contents, []byte("\x1b[0m\n")) || !strings.Contains(string(artifacts[1].Contents), `<h2 class="h4 mb2">Workflow could not be run</h2>`) || !strings.Contains(string(artifacts[1].Contents), "<strong>runner is unsupported</strong>") || !strings.Contains(string(artifacts[1].Contents), "<strong>cancel-in-progress is ignored</strong>") || !strings.Contains(string(artifacts[1].Contents), "<p>") || strings.Contains(workflow.Failure.Summary, "<h2") || !strings.Contains(workflow.Failure.Summary, "<p>") {
 		t.Fatalf("failure = %#v", workflow.Failure)
+	}
+	for _, want := range []string{
+		"\x1b[1;36mWorkflow: ci.yml\x1b[0m",
+		"\n\n\x1b[1;31mError: runner is unsupported\x1b[0m {job=test}",
+		"\n\n\x1b[1;33mWarning: cancel-in-progress is ignored\x1b[0m",
+	} {
+		if !bytes.Contains(artifacts[0].Contents, []byte(want)) {
+			t.Errorf("failure log missing severity styling or reset %q: %q", want, artifacts[0].Contents)
+		}
 	}
 }
 
@@ -1801,7 +1816,7 @@ jobs:
 	}
 	generatorMessage := string(failureArtifactForStep(generator.plugins, runner.uploaded, "messages"))
 	uploadMessage := string(failureArtifactForStep(upload.plugins, runner.uploaded, "messages"))
-	if strings.Count(generatorMessage, "[E_ACTION_RESOLUTION]") != 2 || strings.Contains(generatorMessage, "missing-upload") || strings.Count(uploadMessage, "[E_ACTION_RESOLUTION]") != 1 || strings.Contains(uploadMessage, "missing-generator") {
+	if strings.Count(generatorMessage, "Error: ") != 2 || strings.Contains(generatorMessage, "missing-upload") || strings.Count(uploadMessage, "Error: ") != 1 || strings.Contains(uploadMessage, "missing-generator") {
 		t.Fatalf("scoped failure messages = generator %q, upload %q", generatorMessage, uploadMessage)
 	}
 	var independentPlans int
