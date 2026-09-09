@@ -353,10 +353,8 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 	if err := gitCommand(root, "check-ref-format", "refs/heads/"+baseRef).Run(); err != nil {
 		return nil, nil, fmt.Errorf("buildkite pull request base branch is invalid")
 	}
-	for _, commit := range []struct{ label, sha string }{{"base", baseSHA}, {"head", headSHA}} {
-		if err := gitCommand(root, "cat-file", "-e", commit.sha+"^{commit}").Run(); err != nil {
-			return nil, nil, fmt.Errorf("pull request %s commit is unavailable in the local checkout", commit.label)
-		}
+	if err := gitCommand(root, "cat-file", "-e", headSHA+"^{commit}").Run(); err != nil {
+		return nil, nil, fmt.Errorf("pull request head commit is unavailable in the local checkout")
 	}
 	checkoutSHA, err := gitCommand(root, "rev-parse", "--verify", "HEAD^{commit}").Output()
 	if err != nil || strings.TrimSpace(string(checkoutSHA)) != headSHA {
@@ -377,6 +375,9 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 			continue
 		}
 		workflows[i].PathFiltersIdentityVerified = true
+	}
+	if err := gitCommand(root, "cat-file", "-e", baseSHA+"^{commit}").Run(); err != nil {
+		return nil, pathEvaluationErrors(workflows, event.Event, workflowErrors, "pull request base commit is unavailable in the local checkout"), nil
 	}
 	shallowBytes, err := gitCommand(root, "rev-parse", "--is-shallow-repository").Output()
 	if err != nil || strings.TrimSpace(string(shallowBytes)) != "false" {
