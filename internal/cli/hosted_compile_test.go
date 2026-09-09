@@ -38,6 +38,10 @@ func TestHostedCompileRequestOptionsCarryEveryInputExactlyOnce(t *testing.T) {
 		OIDC:                 oidc,
 		EnvironmentSource:    stubEnvironmentSource{},
 		Vars:                 vars,
+		RuntimeMatrixRows:    map[string][]map[string]any{"test": {{"os": "ubuntu-latest"}}},
+		RuntimeMatrixActionLocks: []plan.ActionLock{
+			{ID: "actions/checkout@v4", Source: "github", Repository: "actions/checkout", RequestedRef: "v4", Commit: strings.Repeat("c", 40)},
+		},
 	}
 
 	// The expected options are written out from the hosted policy, not
@@ -48,14 +52,16 @@ func TestHostedCompileRequestOptionsCarryEveryInputExactlyOnce(t *testing.T) {
 	wantTargets["ubuntu-latest"] = compiler.RunnerTarget{Platform: compiler.PlatformLinuxAMD64, Queue: "linux"}
 	wantQueues := []string{"linux", defaultMacOSRunnerQueue, "gpu"}
 	want := compiler.Options{
-		EventTrust:           compiler.EventUntrusted,
-		EventFile:            true,
-		GroupLabel:           "CI",
-		RuntimeDistributions: request.RuntimeDistributions,
-		StepKeyNamespace:     "ci",
-		OIDC:                 oidc,
-		EnvironmentSource:    stubEnvironmentSource{},
-		Vars:                 vars,
+		EventTrust:               compiler.EventUntrusted,
+		EventFile:                true,
+		GroupLabel:               "CI",
+		RuntimeDistributions:     request.RuntimeDistributions,
+		StepKeyNamespace:         "ci",
+		OIDC:                     oidc,
+		EnvironmentSource:        stubEnvironmentSource{},
+		Vars:                     vars,
+		RuntimeMatrixRows:        request.RuntimeMatrixRows,
+		RuntimeMatrixActionLocks: request.RuntimeMatrixActionLocks,
 		Runners: compiler.RunnerPolicy{
 			Targets:                    wantTargets,
 			AllowUntrustedDefaultQueue: true,
@@ -72,15 +78,17 @@ func TestHostedCompileRequestOptionsCarryEveryInputExactlyOnce(t *testing.T) {
 		t.Errorf("options() = %#v\nwant %#v", got, want)
 	}
 
-	// Validation shares the runner policy, namespace, variables, and
-	// repository source with compilation and omits only the inputs that
-	// shape plans rather than admission.
+	// Validation shares the runner policy, namespace, variables, matrix
+	// rows, and repository source with compilation and omits only the
+	// inputs that shape plans rather than admission; the rows stay because
+	// they decide which jobs exist and which runners they name.
 	wantValidation := want
 	wantValidation.EventFile = false
 	wantValidation.GroupLabel = ""
 	wantValidation.RuntimeDistributions = nil
 	wantValidation.OIDC = nil
 	wantValidation.EnvironmentSource = nil
+	wantValidation.RuntimeMatrixActionLocks = nil
 	gotValidation := request.validationOptions()
 	if !sameStringSet(gotValidation.Runners.UntrustedQueues, wantQueues) {
 		t.Errorf("validation untrusted queues = %q, want %q", gotValidation.Runners.UntrustedQueues, wantQueues)
@@ -229,6 +237,26 @@ func TestCompiledJobsLeaveUnplannedInstancesWithoutDigest(t *testing.T) {
 	}
 	if got := compiledJobs(bundle); !reflect.DeepEqual(got, want) {
 		t.Fatalf("compiledJobs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestCompiledJobEqualIgnoresNeedsOrderOnly(t *testing.T) {
+	job := compiledJob{Key: "test-linux", LogicalJob: "test", Needs: []string{"build", "lint"}, PlanDigest: "sha256:1"}
+	reordered := job
+	reordered.Needs = []string{"lint", "build"}
+	if !job.equal(reordered) {
+		t.Fatal("needs order reported as a different instance")
+	}
+	for name, other := range map[string]compiledJob{
+		"key":          {Key: "test-macos", LogicalJob: "test", Needs: []string{"build", "lint"}, PlanDigest: "sha256:1"},
+		"logical job":  {Key: "test-linux", LogicalJob: "tests", Needs: []string{"build", "lint"}, PlanDigest: "sha256:1"},
+		"plan digest":  {Key: "test-linux", LogicalJob: "test", Needs: []string{"build", "lint"}, PlanDigest: "sha256:2"},
+		"missing need": {Key: "test-linux", LogicalJob: "test", Needs: []string{"build"}, PlanDigest: "sha256:1"},
+		"extra need":   {Key: "test-linux", LogicalJob: "test", Needs: []string{"build", "lint", "lint"}, PlanDigest: "sha256:1"},
+	} {
+		if job.equal(other) {
+			t.Errorf("%s change reported as the same instance", name)
+		}
 	}
 }
 

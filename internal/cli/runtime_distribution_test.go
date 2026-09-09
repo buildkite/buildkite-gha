@@ -111,7 +111,7 @@ jobs:
 		"ubuntu-latest": {Queue: "linux", Platform: compiler.PlatformLinuxAMD64},
 		"macos-latest":  {Queue: "macos", Platform: compiler.PlatformDarwinARM64},
 	}
-	platforms, admissionErr, err := requiredRuntimePlatforms(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: source, EventSource: event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("1", 64), RunnerTargets: targets})
+	platforms, _, admissionErr, err := requiredRuntimePlatforms(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: source, EventSource: event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("1", 64), RunnerTargets: targets})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ jobs:
 		"ubuntu-latest": {Queue: "linux", Platform: compiler.PlatformLinuxAMD64},
 		"macos-latest":  {Queue: "macos", Platform: compiler.PlatformDarwinARM64},
 	}
-	platforms, admissionErr, err := requiredRuntimePlatforms(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: source, EventSource: event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("1", 64), RunnerTargets: targets})
+	platforms, _, admissionErr, err := requiredRuntimePlatforms(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: source, EventSource: event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("1", 64), RunnerTargets: targets})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestRequiredRuntimePlatformsFailsClosedBeforePartialAdmission(t *testing.T)
 			{Job: plan.Job{Workflow: plan.Workflow{LogicalJobID: "rejected"}, Target: plan.Target{StepKey: "rejected"}, RequiredCapabilities: []string{"privileged-container"}}},
 		},
 	}
-	platforms, admissionErr, err := runtimePlatformsForBundle(bundle)
+	platforms, _, admissionErr, err := runtimePlatformsForBundle(bundle)
 	if err != nil {
 		t.Fatal(err)
 	}

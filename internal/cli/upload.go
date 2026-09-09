@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -363,7 +364,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if request == nil || processingReportHasErrors(processingReports[i]) {
 			continue
 		}
-		platforms, admissionErr, platformErr := requiredRuntimePlatforms(ctx, *request)
+		platforms, deferred, admissionErr, platformErr := requiredRuntimePlatforms(ctx, *request)
 		if platformErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", platformErr)
 			return 1
@@ -371,6 +372,11 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		preparationAdmissionFailures[i] = admissionErr
 		for platform := range platforms {
 			requiredPlatforms[platform] = true
+		}
+		if deferred {
+			for platform := range deferredRuntimePlatforms(uploadArguments) {
+				requiredPlatforms[platform] = true
+			}
 		}
 	}
 	if uploadArguments.pluginAcquisition != nil {
@@ -421,6 +427,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	planArtifacts := make([]compiler.PlanArtifact, 0)
 	var eventArtifact *transport.Artifact
 	failureArtifacts := make([]transport.Artifact, 0)
+	continuationArtifacts := make([]transport.Artifact, 0)
+	// Every continuation of this upload shares one event source artifact.
+	var continuationEvent *transport.Artifact
 	jobCount := 0
 	bundleCompilerStep := importerStep
 	if bundleCompilerStep == "" {
@@ -479,7 +488,13 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 				processingReports[i].AddEnvironmentFailure(varsErr.Error())
 				processingReports[i].Result = "indeterminate"
 				preflight.Bundle = failedPartialBundle(preflight.Bundle)
-				failed, artifacts := failedExpandedGeneratedWorkflow(ctx, input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks, preflight.Bundle, false)
+				if !partialUploadPreservesGraph(preflight.Bundle) {
+					explainWholeWorkflowFailure(&processingReports[i], preflight.Bundle)
+				}
+				failed, artifacts := failedGeneratedWorkflow(ctx, input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks)
+				if partialUploadPreservesGraph(preflight.Bundle) {
+					failed, artifacts = failedExpandedGeneratedWorkflow(ctx, input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks, preflight.Bundle, false)
+				}
 				generatedWorkflows = append(generatedWorkflows, failed)
 				failureArtifacts = append(failureArtifacts, artifacts...)
 				jobCount += len(failed.Jobs)
@@ -501,13 +516,17 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
 			var failure *hostedFailure
 			if errors.As(err, &failure) && failure.Kind == hostedEvaluationFailure {
+				if !partialUploadPreservesGraph(preflight.Bundle) {
+					explainWholeWorkflowFailure(&processingReports[i], preflight.Bundle)
+				}
 				failed, artifacts := failedGeneratedWorkflow(ctx, input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks)
-				if preflight.JobGraphComplete && len(preflight.Bundle.IR.Jobs) != 0 {
+				var runnablePlans []compiler.PlanArtifact
+				if preflight.JobGraphComplete && len(preflight.Bundle.IR.Jobs) != 0 && partialUploadPreservesGraph(preflight.Bundle) {
 					failed, artifacts = failedExpandedGeneratedWorkflow(ctx, input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks, preflight.Bundle, true)
+					runnablePlans = runnablePlanArtifacts(preflight.Bundle)
 				}
 				generatedWorkflows = append(generatedWorkflows, failed)
 				failureArtifacts = append(failureArtifacts, artifacts...)
-				runnablePlans := runnablePlanArtifacts(preflight.Bundle)
 				planArtifacts = append(planArtifacts, runnablePlans...)
 				if len(runnablePlans) != 0 && preflight.Bundle.EventArtifact != nil {
 					if eventArtifact != nil && (eventArtifact.Path != preflight.Bundle.EventArtifact.Path || eventArtifact.Digest != preflight.Bundle.EventArtifact.Digest || !bytes.Equal(eventArtifact.Contents, preflight.Bundle.EventArtifact.Contents)) {
@@ -535,6 +554,30 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		generated.GroupKey = "gha-workflow-" + input.Identity
 		generated.Event = effectiveEvent.Event.Event
 		generated.Condition = input.TriggerCondition
+		if len(bundle.IR.Continuations) != 0 {
+			if importerJobID == "" {
+				return usageError(stderr, "upload: BUILDKITE_JOB_ID is required when a workflow defers a matrix to a job output")
+			}
+			// request holds the variables the admitted compile used, so the
+			// continuation records the inputs that produced this bundle.
+			event, artifacts, steps, continuationErr := buildContinuationArtifacts(continuationInputs{
+				request: request, bundle: bundle, importer: importerJobID, buildCommit: os.Getenv("BUILDKITE_COMMIT"),
+				workflow: input, groupLabel: label, checkName: checkName, event: effectiveEvent,
+				runnerUser: uploadArguments.experimentalRunnerUser, privateReusable: uploadArguments.privateReusableWorkflows,
+			})
+			if continuationErr != nil {
+				_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %s: %v\n", input.CanonicalPath, continuationErr)
+				return 1
+			}
+			if continuationEvent != nil && continuationEvent.Digest != event.Digest {
+				_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: compiled workflows produced different continuation event artifacts")
+				return 1
+			}
+			continuationEvent = &event
+			continuationArtifacts = append(continuationArtifacts, artifacts...)
+			generated.Jobs = append(generated.Jobs, steps...)
+			jobCount += len(steps)
+		}
 		generatedWorkflows = append(generatedWorkflows, generated)
 		if input.AnnotationReason != "" {
 			events := make([]string, len(input.Triggers))
@@ -602,6 +645,18 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	for _, artifact := range failureArtifacts {
 		if _, exists := artifactPaths[artifact.Path]; exists {
 			continue
+		}
+		artifactPaths[artifact.Path] = struct{}{}
+		artifacts = append(artifacts, artifact)
+	}
+	if continuationEvent != nil {
+		artifactPaths[continuationEvent.Path] = struct{}{}
+		artifacts = append(artifacts, *continuationEvent)
+	}
+	for _, artifact := range continuationArtifacts {
+		if _, exists := artifactPaths[artifact.Path]; exists {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: duplicate aggregate artifact path %q\n", artifact.Path)
+			return 1
 		}
 		artifactPaths[artifact.Path] = struct{}{}
 		artifacts = append(artifacts, artifact)
@@ -685,6 +740,37 @@ func sameExpandedJobGraph(left, right compiler.Bundle) bool {
 	return slices.EqualFunc(compiledJobs(left), compiledJobs(right), func(before, after compiledJob) bool {
 		return before.Key == after.Key && slices.Equal(before.Needs, after.Needs)
 	})
+}
+
+// partialUploadPreservesGraph reports whether a workflow that failed
+// preparation can still be uploaded job by job, with each failed job rendered
+// as a failing step and the rest left runnable. A workflow that defers a
+// matrix cannot: its continuation step and deferred jobs are emitted only by
+// a complete compilation, so a per-job upload would drop them and the build
+// could pass without ever running them. Such a workflow fails as a whole.
+func partialUploadPreservesGraph(bundle compiler.Bundle) bool {
+	return len(bundle.IR.Continuations) == 0
+}
+
+// explainWholeWorkflowFailure records why a workflow that defers a matrix
+// fails as a whole instead of job by job, so the failure step names the jobs
+// the deferred uploads would have run.
+func explainWholeWorkflowFailure(report *compatibility.ProcessingReport, bundle compiler.Bundle) {
+	if len(bundle.IR.Continuations) != 0 {
+		report.SetStage(workflowprocessing.StagePipeline, compatibility.Failed)
+	}
+	for _, continuation := range bundle.IR.Continuations {
+		quoted := make([]string, len(continuation.Jobs))
+		for i, job := range continuation.Jobs {
+			quoted[i] = strconv.Quote(job)
+		}
+		report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+			Level: "error", Code: workflowprocessing.CodePipelineGeneration, Category: "compatibility", Stage: workflowprocessing.StagePipeline,
+			Job: continuation.Descriptor.Job,
+			Message: fmt.Sprintf("jobs %s are compiled and uploaded by step %q after job %q finishes, so this workflow cannot be uploaded job by job; every job fails until the workflow compiles as a whole",
+				strings.Join(quoted, ", "), continuation.StepKey, continuation.Descriptor.ProducerJob),
+		})
+	}
 }
 
 func runnablePlanArtifacts(bundle compiler.Bundle) []compiler.PlanArtifact {
@@ -837,10 +923,10 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 
 // requiredRuntimePlatforms compiles the request once before any runtime
 // distribution is acquired, with the importer's own digest standing in for
-// every platform, to learn which platforms the planned jobs need and whether
-// hosted admission would reject the workflow. The plans it produces are
-// discarded.
-func requiredRuntimePlatforms(ctx context.Context, request hostedCompileRequest) (map[compiler.Platform]bool, error, error) {
+// every platform, to learn which platforms the planned jobs need, whether the
+// workflow defers jobs to a continuation, and whether hosted admission would
+// reject the workflow. The plans it produces are discarded.
+func requiredRuntimePlatforms(ctx context.Context, request hostedCompileRequest) (map[compiler.Platform]bool, bool, error, error) {
 	request.RuntimeDistributions = map[compiler.Platform]string{
 		compiler.PlatformLinuxAMD64:  request.DistributionDigest,
 		compiler.PlatformDarwinARM64: request.DistributionDigest,
@@ -853,10 +939,11 @@ func requiredRuntimePlatforms(ctx context.Context, request hostedCompileRequest)
 	return runtimePlatformsForBundle(bundle)
 }
 
-func runtimePlatformsForBundle(bundle compiler.Bundle) (map[compiler.Platform]bool, error, error) {
+func runtimePlatformsForBundle(bundle compiler.Bundle) (map[compiler.Platform]bool, bool, error, error) {
 	platforms := make(map[compiler.Platform]bool, 2)
+	deferred := len(bundle.IR.Continuations) != 0
 	if err := validateUnprivilegedBundle(bundle); err != nil {
-		return platforms, err, nil
+		return platforms, deferred, err, nil
 	}
 	for _, job := range bundle.IR.Jobs {
 		if bundle.JobOutcomes[job.Key] != compiler.JobPlanned {
@@ -864,7 +951,24 @@ func runtimePlatformsForBundle(bundle compiler.Bundle) (map[compiler.Platform]bo
 		}
 		platforms[job.Platform] = true
 	}
-	return platforms, nil, nil
+	return platforms, deferred, nil, nil
+}
+
+// deferredRuntimePlatforms lists the platforms whose runtime distribution the
+// importer can provide for jobs whose runs-on is unknown until a producer job
+// runs. A continuation fails closed when a deferred job needs a platform that
+// is not in this set.
+func deferredRuntimePlatforms(uploadArguments parsedUploadArgs) map[compiler.Platform]bool {
+	platforms := map[compiler.Platform]bool{uploadArguments.importerPlatform: true}
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
+		if _, configured := uploadArguments.runtimeDistributionPaths[platform]; configured {
+			platforms[platform] = true
+		}
+		if acquisition := uploadArguments.pluginAcquisition; acquisition != nil && (stableVersionPattern.MatchString(acquisition.version) || os.Getenv(pluginDevRuntimeEnvironment(platform)) != "") {
+			platforms[platform] = true
+		}
+	}
+	return platforms
 }
 
 type workflowInput struct {

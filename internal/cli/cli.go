@@ -55,6 +55,8 @@ func run(args []string, stdout, stderr io.Writer, clientVersion string, agentRun
 				return upload(args[1:], stdout, stderr, clientVersion, transport.Agent{Runner: agentRunner})
 			case "run-job":
 				return runJob(args[1:], stdout, stderr, version, clientVersion, transport.Agent{Runner: agentRunner})
+			case "continue":
+				return continueUpload(args[1:], stdout, stderr, version, clientVersion, transport.Agent{Runner: agentRunner})
 			default:
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: %s: not implemented\n", args[0])
 				return 1
