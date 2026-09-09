@@ -512,6 +512,15 @@ func workflowCancellationWarning(position workflow.Position) Warning {
 	}
 }
 
+func guardedReusableConcurrencyWarning(position workflow.Position, calleePath string) Warning {
+	return Warning{
+		Code:    "W_REUSABLE_WORKFLOW_CONCURRENCY_ENTERED_BEFORE_CALL_CONDITION",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: fmt.Sprintf("The call condition depends on runtime values, so Buildkite enters the concurrency group of reusable workflow %q before it knows whether the call runs. When the condition is false, the skipped jobs still wait for the group and hold it until they finish. GitHub never enters the group for a skipped call. Write the condition with github, inputs, or event values only, which resolve during compilation, if the wait matters.", calleePath),
+	}
+}
+
 func legacyCheckoutWarning(position workflow.Position, release string, defaultsToFullHistory bool) Warning {
 	generation := "v2"
 	if defaultsToFullHistory {
