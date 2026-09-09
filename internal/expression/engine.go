@@ -819,8 +819,29 @@ func (Engine) Truthy(value any) bool {
 	return githubTruthy(value)
 }
 
+// RunnerEnvironment is the constant runner.environment value. GitHub's service
+// supplies it to the runner (system.runnerEnvironment): github-hosted for
+// runners GitHub provisions, self-hosted for every runner registered by anyone
+// else, regardless of runs-on labels. A Buildkite agent, hosted or
+// self-hosted, is never GitHub-provisioned, so every queue reports
+// self-hosted. Popular actions compare the exact strings, so a third value
+// would match neither branch.
+const RunnerEnvironment = "self-hosted"
+
+// constantReferences are context values that are the same for every queue,
+// event, and job. Abstract analysis always knows them, so a branch guarded on
+// another value is provably unreachable in both planning and the runtime.
+var constantReferences = map[string]any{
+	"runner.environment": RunnerEnvironment,
+}
+
+// canonicalAbstractReferences lower-cases planning-known references and adds
+// the constants every analysis knows. Caller values win over constants.
 func canonicalAbstractReferences(source map[string]any) map[string]any {
-	result := make(map[string]any, len(source))
+	result := make(map[string]any, len(source)+len(constantReferences))
+	for name, value := range constantReferences {
+		result[name] = value
+	}
 	for name, value := range source {
 		result[strings.ToLower(name)] = value
 	}

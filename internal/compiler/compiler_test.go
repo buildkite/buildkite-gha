@@ -1406,6 +1406,50 @@ jobs:
 	}
 }
 
+func TestCompileDefersRunnerEnvironmentToRuntime(t *testing.T) {
+	plans, err := compilePlansForTest(t.Context(), "runner-environment.yml", []byte(`on: push
+jobs:
+  node-compat:
+    runs-on: ubuntu-latest
+    if: runner.environment != ''
+    steps:
+      - if: runner.environment == 'github-hosted'
+        run: echo hosted
+        env:
+          RUNNER_KIND: ${{ runner.environment }}
+      - if: runner.environment == 'self-hosted'
+        run: echo self-hosted
+`), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("plans = %#v", plans)
+	}
+	steps := plans[0].Program.Job.Steps
+	if len(steps) != 2 || steps[0].Condition.Source != "runner.environment == 'github-hosted'" || steps[1].Condition.Source != "runner.environment == 'self-hosted'" {
+		t.Fatalf("step conditions were not preserved for runtime evaluation: %#v", steps)
+	}
+	if got := testBindingSources(steps[0].Env)["RUNNER_KIND"]; got != "${{ runner.environment }}" {
+		t.Fatalf("step env RUNNER_KIND = %q, want the runtime expression preserved", got)
+	}
+	if plans[0].Program.Job.Condition.Source != "runner.environment != ''" {
+		t.Fatalf("job condition = %q", plans[0].Program.Job.Condition.Source)
+	}
+
+	_, err = compilePlansForTest(t.Context(), "runner-name.yml", []byte(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - if: runner.name == 'x'
+        run: true
+`), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), defaultOptions())
+	if err == nil || !strings.Contains(err.Error(), "runner.environment") {
+		t.Fatalf("Compile() runner.name error = %v, want the supported runner properties listed", err)
+	}
+}
+
 func TestCompileRejectsUnavailableReusableCallConditionContexts(t *testing.T) {
 	for _, contextName := range []string{"matrix.target", "strategy.job-index", "secrets.TOKEN", "env.FLAG", "runner.os", "steps.build.outcome"} {
 		t.Run(contextName, func(t *testing.T) {

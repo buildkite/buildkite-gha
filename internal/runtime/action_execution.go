@@ -218,6 +218,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		return jobResult, fmt.Errorf("analyze workflow reachability: %w", err)
 	}
 	r.reachableSteps = reachability.Steps
+	r.reachableLocks = reachableActionLocks(job, executionJob.Steps, r.reachableSteps)
 	runCtx := ctx
 	cancelJob := func() {}
 	if job.TimeoutMinutes > 0 {
@@ -401,10 +402,11 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	if containerSpec != nil {
 		// Remote children of workspace composites are already present in the
 		// immutable lock graph even when the workspace action itself must remain
-		// lazy. Materialize every remote lock now because bind mounts cannot be
-		// added after the persistent container is created.
+		// lazy. Materialize every reachable remote lock now because bind mounts
+		// cannot be added after the persistent container is created. Locks that
+		// only known-false steps select stay on disk untouched.
 		for _, lock := range job.Actions {
-			if lock.Source != "github" || usesNativeAdapter(lock) {
+			if lock.Source != "github" || usesNativeAdapter(lock) || !r.lockReachable(lock.ID) {
 				continue
 			}
 			action, _, resolveErr := actions.resolve(runCtx, plan.ActionSelector{Lock: lock.ID})
@@ -419,9 +421,9 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 				return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, entrypointErr))
 			}
 		}
-		for _, step := range executionJob.Steps {
+		for stepIndex, step := range executionJob.Steps {
 			selector, ok := stepActionSelector(step)
-			if step.Kind != "uses" || !ok {
+			if step.Kind != "uses" || !ok || !r.stepReachable(stepIndex) {
 				continue
 			}
 			if source, sourceErr := actions.source(selector); sourceErr != nil {
@@ -519,7 +521,7 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 			if step.Kind != "uses" {
 				continue
 			}
-			if stepIndex < len(r.reachableSteps) && !r.reachableSteps[stepIndex] {
+			if !r.stepReachable(stepIndex) {
 				continue
 			}
 			selector, ok := stepActionSelector(step)
@@ -1456,6 +1458,7 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string, 
 		"GITHUB_WORKSPACE":    workspace,
 		"RUNNER_OS":           runner["os"],
 		"RUNNER_ARCH":         runner["arch"],
+		"RUNNER_ENVIRONMENT":  runner["environment"],
 		"RUNNER_TEMP":         runnerTemp,
 		"RUNNER_TOOL_CACHE":   toolCache,
 	}
@@ -1471,9 +1474,9 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string, 
 func canonicalRunnerContext(goos, goarch string) (map[string]string, error) {
 	switch {
 	case goos == "linux" && goarch == "amd64":
-		return map[string]string{"os": "Linux", "arch": "X64"}, nil
+		return map[string]string{"os": "Linux", "arch": "X64", "environment": expression.RunnerEnvironment}, nil
 	case goos == "darwin" && goarch == "arm64":
-		return map[string]string{"os": "macOS", "arch": "ARM64"}, nil
+		return map[string]string{"os": "macOS", "arch": "ARM64", "environment": expression.RunnerEnvironment}, nil
 	default:
 		return nil, errUnsupportedf("unsupported runner platform %s/%s", goos, goarch)
 	}
@@ -1597,6 +1600,7 @@ func isRuntimeContextEnvironment(name string) bool {
 		"GITHUB_WORKFLOW_SHA",
 		"GITHUB_WORKSPACE",
 		"RUNNER_ARCH",
+		"RUNNER_ENVIRONMENT",
 		"RUNNER_OS",
 		"RUNNER_TEMP",
 		"RUNNER_TOOL_CACHE":
@@ -1663,7 +1667,8 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 	for _, lock := range actions.job.Actions {
 		// A native adapter replaces the admitted action's execution entirely,
 		// so its source tree is never mounted or classified for the container.
-		if usesNativeAdapter(lock) {
+		// A lock only known-false steps select is never executed either.
+		if usesNativeAdapter(lock) || !r.lockReachable(lock.ID) {
 			continue
 		}
 		entry := actions.locks[lock.ID]
@@ -2307,6 +2312,50 @@ func evaluatePlanStepWith(step executionprogram.Step, context expression.Context
 		return nil, nil
 	}
 	return executionprogram.EvaluateBindings(step.Invocation.With, executionprogram.EvaluationContext{Expression: context})
+}
+
+// stepReachable reports whether the reachability pass left the step's
+// condition possibly true. Steps the pass did not classify stay reachable.
+func (r *jobRun) stepReachable(stepIndex int) bool {
+	return stepIndex >= len(r.reachableSteps) || r.reachableSteps[stepIndex]
+}
+
+// lockReachable reports whether a reachable step selects the lock, directly
+// or through composite children. Before the reachability pass runs, every
+// lock is reachable.
+func (r *jobRun) lockReachable(lockID string) bool {
+	return r.reachableLocks == nil || r.reachableLocks[lockID]
+}
+
+// reachableActionLocks closes the lock graph over the action steps the
+// reachability pass kept. Job setup consults it so a step whose condition is
+// known false, such as runner.environment == 'github-hosted', never pulls a
+// prebuilt image or materializes a source tree it will not execute.
+func reachableActionLocks(job plan.Job, steps []executionprogram.Step, reachableSteps []bool) map[string]bool {
+	locks := make(map[string]plan.ActionLock, len(job.Actions))
+	for _, lock := range job.Actions {
+		locks[lock.ID] = lock
+	}
+	reachable := make(map[string]bool, len(job.Actions))
+	var visit func(id string)
+	visit = func(id string) {
+		if reachable[id] {
+			return
+		}
+		reachable[id] = true
+		for _, child := range locks[id].Children {
+			visit(child.Lock)
+		}
+	}
+	for stepIndex, step := range steps {
+		if step.Kind != "uses" || stepIndex < len(reachableSteps) && !reachableSteps[stepIndex] {
+			continue
+		}
+		if selector, ok := stepActionSelector(step); ok {
+			visit(selector.Lock)
+		}
+	}
+	return reachable
 }
 
 func stepActionSelector(step executionprogram.Step) (plan.ActionSelector, bool) {

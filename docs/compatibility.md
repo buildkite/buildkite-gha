@@ -1011,7 +1011,7 @@ Conditions support computed object indexes, numeric array indexes, whole
 | Context | Job `if` | Step `if` |
 | --- | --- | --- |
 | `github.actor`, `github.base_ref`, `github.event_name`, `github.head_ref`, `github.ref`, `github.ref_name`, `github.ref_type`, `github.repository`, `github.repository_owner`, `github.sha`, `github.workflow_ref`, `github.workflow_sha` | ✅ Yes | ✅ Yes |
-| `runner.os`, `runner.arch` | ✅ Yes | ✅ Yes |
+| `runner.os`, `runner.arch`, `runner.environment` | ✅ Yes | ✅ Yes |
 | `runner.temp` | ❌ No | ✅ Yes |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
 | `matrix.<name>` | ✅ Yes | ✅ Yes |
@@ -1091,6 +1091,21 @@ another function, remain unsupported. These limits do not apply to access
 rooted at `github.event`.
 
 `runner.os` and `runner.arch` resolve to `Linux`/`X64` or `macOS`/`ARM64`.
+`runner.environment` is always `self-hosted`. GitHub's service assigns
+`github-hosted` only to runners GitHub provisions and `self-hosted` to every
+runner registered by someone else, including managed providers such as Depot,
+Namespace, and actions-runner-controller; the runner never derives it from
+`runs-on` labels. A Buildkite agent is in the same class whether it runs on
+Buildkite hosted agents or your own infrastructure. There is no third value
+and no override: actions such as `github/codeql-action` compare the exact
+strings, so an unknown value would skip their self-hosted cleanup while also
+missing hosted-only behavior. Steps that gate on
+`runner.environment == 'github-hosted'` therefore skip on every queue: the
+compiler and runtime treat the value as known, so an action behind that gate
+is never prepared: job setup does not download its source or pull its prebuilt
+Docker image, its `pre` and `post` hooks never run, and its `github.token`
+default grants no token authority. Review such steps if they select a proxy,
+cache, or credential path that your agents need.
 After runner setup, step runtime fields and job outputs can also use
 `runner.temp`, which resolves to the canonical temporary directory exposed as
 `RUNNER_TEMP`. Other runner fields and compile-time positions that require
@@ -1619,7 +1634,9 @@ The runtime sets `GITHUB_WORKFLOW` to the workflow's top-level `name`. If the wo
 
 Linux labels use the corresponding Noble or Jammy hosted-toolchains image.
 macOS agents must provide tools used by shell steps. These images do not provide GitHub image parity. The runtime
-sets `RUNNER_OS` and `RUNNER_ARCH` to `Linux`/`X64` or `macOS`/`ARM64`.
+sets `RUNNER_OS` and `RUNNER_ARCH` to `Linux`/`X64` or `macOS`/`ARM64`, and
+`RUNNER_ENVIRONMENT` to `self-hosted`. Workflow and step environment entries
+cannot override these values.
 
 `RUNNER_TOOL_CACHE` is job-private unless the Linux job selects an immutable
 image with `/opt/hostedtoolcache`, which the default and configured

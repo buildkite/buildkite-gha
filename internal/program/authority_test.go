@@ -144,6 +144,32 @@ func TestWorkflowReachabilityKeepsCallerScopedGuardValuesUnknown(t *testing.T) {
 	}
 }
 
+func TestWorkflowReachabilityKnowsRunnerEnvironmentIsSelfHosted(t *testing.T) {
+	condition := func(source string) Site {
+		return Site{Source: source, Surface: SurfaceStepCondition, Result: ResultBoolean, Provenance: ProvenanceWorkflow, Purpose: PurposeExpression}
+	}
+	workflow := Program{Version: Version, Job: Job{
+		Condition: Site{Surface: SurfaceJobCondition, Result: ResultBoolean, Provenance: ProvenanceWorkflow, Purpose: PurposeExpression},
+		Steps: []Step{
+			{Condition: condition("runner.environment == 'github-hosted'")},
+			{Condition: condition("runner.environment == 'self-hosted'")},
+			{Condition: condition("runner.os == 'Linux'")},
+		},
+	}}
+	reachability, err := WorkflowReachability(workflow, expression.AbstractValues{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reachability.Job || reachability.Steps[0] || !reachability.Steps[1] || !reachability.Steps[2] {
+		t.Fatalf("reachability = %#v, want github-hosted step unreachable, self-hosted step reachable, runner.os step unknown", reachability)
+	}
+	workflow.Job.Condition.Source = "runner.environment == 'github-hosted'"
+	reachability, err = WorkflowReachability(workflow, expression.AbstractValues{})
+	if err != nil || reachability.Job || reachability.Steps[1] {
+		t.Fatalf("github-hosted job reachability = %#v, %v; want the whole job unreachable", reachability, err)
+	}
+}
+
 func TestWorkflowReachabilityUsesSharedGuardValues(t *testing.T) {
 	workflow := Program{Version: Version, Job: Job{
 		Guards:    []Guard{{Condition: Site{Source: "vars.ENABLED != 'yes'", Surface: SurfaceCallCondition, Result: ResultBoolean, Provenance: ProvenanceWorkflow, Purpose: PurposeExpression}}},

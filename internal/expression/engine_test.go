@@ -240,6 +240,68 @@ func TestEngineValidateConditionAttributesEarlySecretReferenceError(t *testing.T
 	}
 }
 
+func TestEngineAnalysisKnowsRunnerEnvironmentWithoutCallerValues(t *testing.T) {
+	engine := NewEngine()
+	for _, test := range []struct {
+		name  string
+		site  Site
+		known bool
+		value any
+		token GitHubTokenEffect
+	}{
+		{
+			name:  "step condition github-hosted is known false",
+			site:  Site{Source: "runner.environment == 'github-hosted'", Profile: ProfileStepCondition, Result: ResultBoolean, Purpose: PurposeExpression},
+			known: true, value: false,
+		},
+		{
+			name:  "job condition self-hosted is known true",
+			site:  Site{Source: "RUNNER.Environment == 'self-hosted'", Profile: ProfileJobCondition, Result: ResultBoolean, Purpose: PurposeExpression},
+			known: true, value: true,
+		},
+		{
+			name: "runner.os stays queue-dependent",
+			site: Site{Source: "runner.os == 'Linux'", Profile: ProfileStepCondition, Result: ResultBoolean, Purpose: PurposeExpression},
+		},
+		{
+			name:  "workflow action input excludes the github-hosted token branch",
+			site:  Site{Source: "${{ runner.environment == 'github-hosted' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput},
+			known: true, value: "",
+		},
+		{
+			name:  "workflow action input keeps the self-hosted token branch",
+			site:  Site{Source: "${{ runner.environment == 'self-hosted' && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput},
+			token: GitHubTokenDirect,
+		},
+		{
+			name:  "action input default excludes the github-hosted token branch",
+			site:  Site{Source: "${{ runner.environment == 'github-hosted' && github.token || '' }}", Profile: ProfileActionInputDefault, Result: ResultString, Purpose: PurposeExpression},
+			known: true, value: "",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			analysis, err := engine.Analyze(test.site, AbstractValues{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if analysis.Value.Known != test.known || (test.known && analysis.Value.Value != test.value) {
+				t.Fatalf("Analyze() value = %#v, want known=%v value=%#v", analysis.Value, test.known, test.value)
+			}
+			if analysis.Effects.GitHubToken != test.token {
+				t.Fatalf("Analyze() token effects = %v, want %v", analysis.Effects.GitHubToken, test.token)
+			}
+		})
+	}
+	// Action metadata defaults are analyzed outside Engine.Analyze and must
+	// know the same constant.
+	if requires, err := actionInputDefaultRequiresGitHubToken("${{ runner.environment == 'github-hosted' && github.token || '' }}", "https://github.com"); err != nil || requires {
+		t.Fatalf("github-hosted default requires token = %v, %v; want false", requires, err)
+	}
+	if requires, err := actionInputDefaultRequiresGitHubToken("${{ runner.environment == 'self-hosted' && github.token || '' }}", "https://github.com"); err != nil || !requires {
+		t.Fatalf("self-hosted default requires token = %v, %v; want true", requires, err)
+	}
+}
+
 func TestEngineTemplateAnalysisExcludesKnownFalseTokenBranch(t *testing.T) {
 	engine := NewEngine()
 	site := Site{Source: "${{ false && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}

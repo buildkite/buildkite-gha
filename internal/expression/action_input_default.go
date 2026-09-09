@@ -127,10 +127,10 @@ func actionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, er
 	}
 	requiresToken := false
 	err = visitTemplateExpressions(template, func(expression actionlint.ExprNode) error {
-		analysis, analysisErr := analyzeActionInputDefault(expression, map[string]any{
+		analysis, analysisErr := analyzeActionInputDefault(expression, canonicalAbstractReferences(map[string]any{
 			"github.server_url": serverURL,
 			"job.check_run_id":  "",
-		})
+		}))
 		if analysisErr != nil {
 			// Runtime-dependent evaluation failures previously fell back to
 			// conservative authority. Preserve that behavior while the

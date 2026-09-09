@@ -59,7 +59,7 @@ type prebuiltDockerBackend struct {
 func (r *jobRun) preparePrebuiltDockerActions(ctx context.Context, processor *commandOutputProcessor, actions *actionLockResolver) (_ *prebuiltDockerBackend, err error) {
 	images := map[string]string{}
 	for _, lock := range actions.job.Actions {
-		if lock.DockerImage != "" {
+		if lock.DockerImage != "" && r.lockReachable(lock.ID) {
 			images[lock.DockerImage] = ""
 		}
 	}

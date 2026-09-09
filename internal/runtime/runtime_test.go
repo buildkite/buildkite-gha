@@ -335,6 +335,156 @@ jobs:
 	}
 }
 
+func TestRunnerEnvironmentIsSelfHostedAtRuntime(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "hosted", Kind: "run", Condition: "runner.environment == 'github-hosted'", Command: "echo must-not-run"},
+		{ID: "self", Kind: "run", Condition: "runner.environment == 'self-hosted'", Env: map[string]string{"RUNNER_KIND": "${{ runner.environment }}"}, Command: `test "$RUNNER_ENVIRONMENT" = self-hosted && test "$RUNNER_KIND" = self-hosted && echo ran-self-hosted`},
+		{ID: "verify", Kind: "run", Condition: "steps.hosted.conclusion == 'skipped' && steps.self.conclusion == 'success'", Command: "echo verified-conclusions"},
+	})
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" || strings.Contains(logs.String(), "must-not-run") || !strings.Contains(logs.String(), "ran-self-hosted") || !strings.Contains(logs.String(), "verified-conclusions") {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+}
+
+// A remote action gated on runner.environment == 'github-hosted' must not be
+// materialized or have its pre hook run: the runtime knows the value is
+// self-hosted before any action is prepared. The self-hosted gate proves the
+// same lock still prepares and runs every phase.
+func TestGitHubHostedGatedActionSkipsEveryLifecyclePhase(t *testing.T) {
+	node := requireNode24(t)
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "root/action.yml", "name: root\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	for _, phase := range []string{"pre", "main", "post"} {
+		writeFixtureFile(t, remote, "root/"+phase+".js", fmt.Sprintf("require('node:fs').appendFileSync(process.env.PHASE_LOG, %q)\n", phase+"\n"))
+	}
+	digest := digestTree(t, remote)
+	rootID := remoteLifecycleLockID(1)
+	for _, test := range []struct {
+		condition string
+		calls     int
+		phases    string
+	}{
+		{condition: "runner.environment == 'github-hosted'", calls: 0, phases: ""},
+		{condition: "runner.environment == 'self-hosted'", calls: 1, phases: "pre\nmain\npost\n"},
+	} {
+		t.Run(test.condition, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: runner environment lifecycle\n")
+			phaseLog := filepath.Join(t.TempDir(), "phases.log")
+			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
+				ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID},
+				Condition: test.condition, Env: map[string]string{"PHASE_LOG": phaseLog},
+			}})
+			job.RequiredCapabilities = []string{"network"}
+			job.Actions = []plan.ActionLock{remoteLifecycleLock(rootID, "root", digest, nil)}
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+			var logs bytes.Buffer
+			result, err := (Runner{Actions: materializer, Node24: node, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+			}
+			if materializer.calls != test.calls {
+				t.Fatalf("materializations = %d, want %d", materializer.calls, test.calls)
+			}
+			data, err := os.ReadFile(phaseLog)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if string(data) != test.phases {
+				t.Fatalf("lifecycle phases = %q, want %q", data, test.phases)
+			}
+		})
+	}
+}
+
+// TestGitHubHostedGatedPrebuiltDockerActionIsNotPulled proves job setup
+// consults reachability before pulling prebuilt Docker action images, so an
+// action gated on runner.environment == 'github-hosted' costs no registry
+// traffic while a sibling gated on 'self-hosted' still gets its image.
+func TestGitHubHostedGatedPrebuiltDockerActionIsNotPulled(t *testing.T) {
+	requireLinuxAMD64(t)
+	fake := newFakeDocker(t, "success")
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/prebuilt.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: prebuilt gates\n")
+	hostedImage := "ghcr.io/example/hosted@sha256:" + strings.Repeat("d", 64)
+	selfHostedImage := "ghcr.io/example/self-hosted@sha256:" + strings.Repeat("b", 64)
+	locks := make([]plan.ActionLock, 0, 2)
+	steps := make([]runtimeTestStep, 0, 2)
+	for i, gate := range []struct{ name, environment, image string }{
+		{name: "hosted", environment: "github-hosted", image: hostedImage},
+		{name: "self-hosted", environment: "self-hosted", image: selfHostedImage},
+	} {
+		actionPath := ".github/actions/" + gate.name
+		writeFixtureFile(t, workspace, actionPath+"/action.yml", "name: "+gate.name+"\nruns:\n  using: docker\n  image: docker://"+gate.image+"\n")
+		lockID := fmt.Sprintf("a-%016x", i+1)
+		locks = append(locks, plan.ActionLock{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath)), DockerImage: gate.image})
+		steps = append(steps, runtimeTestStep{
+			ID: gate.name, Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID},
+			Condition: "runner.environment == '" + gate.environment + "'",
+		})
+	}
+	job := runtimePlan(t, workspace, workflowPath, steps)
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Actions = locks
+	result, err := (Runner{Docker: fake.path}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	calls := fake.calls(t)
+	if callIndex(calls, "pull", hostedImage) >= 0 {
+		t.Fatalf("github-hosted gated image was pulled: %#v", calls)
+	}
+	pull, run := callIndex(calls, "pull", selfHostedImage), callIndex(calls, "run")
+	if pull < 0 || run < pull {
+		t.Fatalf("self-hosted gated image was not pulled before execution: %#v", calls)
+	}
+}
+
+// TestReachableActionLocksClosesOverCompositeChildren proves lock
+// reachability follows composite children and keeps a child shared with a
+// reachable parent even when another parent is known false.
+func TestReachableActionLocksClosesOverCompositeChildren(t *testing.T) {
+	child := func(id string) map[string]plan.ActionSelector {
+		return map[string]plan.ActionSelector{"owner/repo/" + id + "@v1": {Lock: id}}
+	}
+	job := plan.Job{Actions: []plan.ActionLock{
+		{ID: "live", Children: child("shared")},
+		{ID: "dead", Children: map[string]plan.ActionSelector{"s": {Lock: "shared"}, "o": {Lock: "dead-only"}}},
+		{ID: "shared", Children: child("grandchild")},
+		{ID: "grandchild"},
+		{ID: "dead-only"},
+		{ID: "unclassified"},
+	}}
+	steps := []executionprogram.Step{
+		normalizeRuntimeTestStep(runtimeTestStep{ID: "live", Kind: "uses", Uses: "owner/repo/live@v1", Action: &plan.ActionSelector{Lock: "live"}}),
+		normalizeRuntimeTestStep(runtimeTestStep{ID: "dead", Kind: "uses", Uses: "owner/repo/dead@v1", Action: &plan.ActionSelector{Lock: "dead"}}),
+		normalizeRuntimeTestStep(runtimeTestStep{ID: "run", Kind: "run", Command: "true"}),
+		normalizeRuntimeTestStep(runtimeTestStep{ID: "unclassified", Kind: "uses", Uses: "owner/repo/unclassified@v1", Action: &plan.ActionSelector{Lock: "unclassified"}}),
+	}
+	// The reachability pass classified only the first three steps; the fourth
+	// stays reachable by default.
+	got := reachableActionLocks(job, steps, []bool{true, false, true})
+	want := map[string]bool{"live": true, "shared": true, "grandchild": true, "unclassified": true}
+	if !maps.Equal(got, want) {
+		t.Fatalf("reachableActionLocks() = %v, want %v", got, want)
+	}
+	r := &jobRun{}
+	if !r.lockReachable("dead") || !r.stepReachable(1) {
+		t.Fatal("every lock and step must stay reachable before the reachability pass runs")
+	}
+	r.reachableLocks, r.reachableSteps = got, []bool{true, false, true}
+	if r.lockReachable("dead") || r.lockReachable("dead-only") || r.stepReachable(1) || !r.stepReachable(3) {
+		t.Fatalf("reachability lookups = locks dead=%v dead-only=%v, steps 1=%v 3=%v", r.lockReachable("dead"), r.lockReachable("dead-only"), r.stepReachable(1), r.stepReachable(3))
+	}
+}
+
 func TestFailureConditionsAndCancellation(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -1428,7 +1578,7 @@ func TestCanonicalRunnerContext(t *testing.T) {
 		{goos: "darwin", goarch: "arm64", os: "macOS", arch: "ARM64"},
 	} {
 		got, err := canonicalRunnerContext(test.goos, test.goarch)
-		if err != nil || got["os"] != test.os || got["arch"] != test.arch {
+		if err != nil || got["os"] != test.os || got["arch"] != test.arch || got["environment"] != "self-hosted" {
 			t.Errorf("canonicalRunnerContext(%s, %s) = %#v, %v", test.goos, test.goarch, got, err)
 		}
 	}
@@ -1451,9 +1601,9 @@ func TestValidateHostRejectsDockerOnDarwin(t *testing.T) {
 }
 
 func TestRunnerEnvironmentIsProtected(t *testing.T) {
-	base := map[string]string{"RUNNER_OS": "Linux", "RUNNER_ARCH": "X64"}
-	got := mergeStepEnvironment(base, map[string]string{"RUNNER_OS": "overridden", "RUNNER_ARCH": "overridden"})
-	if got["RUNNER_OS"] != "Linux" || got["RUNNER_ARCH"] != "X64" {
+	base := map[string]string{"RUNNER_OS": "Linux", "RUNNER_ARCH": "X64", "RUNNER_ENVIRONMENT": "self-hosted"}
+	got := mergeStepEnvironment(base, map[string]string{"RUNNER_OS": "overridden", "RUNNER_ARCH": "overridden", "RUNNER_ENVIRONMENT": "github-hosted"})
+	if got["RUNNER_OS"] != "Linux" || got["RUNNER_ARCH"] != "X64" || got["RUNNER_ENVIRONMENT"] != "self-hosted" {
 		t.Fatalf("runner environment was overridden: %#v", got)
 	}
 }
