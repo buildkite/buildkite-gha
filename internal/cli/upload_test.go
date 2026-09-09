@@ -2077,6 +2077,7 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_STEP_KEY", "path-filter-importer")
+	t.Setenv("BUILDKITE_BUILD_URL", "https://buildkite.com/acme/widgets/builds/42")
 	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
 	t.Setenv("BUILDKITE_COMMIT", head)
 	t.Setenv("BUILDKITE_BRANCH", "contributor:feature")
@@ -2101,7 +2102,19 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 			Steps     []any  `yaml:"steps"`
 		} `yaml:"steps"`
 	}
-	pipelineCommand := runner.commands[len(runner.commands)-1]
+	var pipelineCommand cliCommand
+	var annotation []byte
+	for _, command := range runner.commands {
+		if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation"}) {
+			pipelineCommand = command
+		}
+		if len(command.args) > 0 && command.args[0] == "annotate" {
+			annotation = command.stdin
+		}
+	}
+	if !bytes.Contains(annotation, []byte("Changed paths do not match this workflow")) {
+		t.Fatalf("missing path-filter skip annotation: %s", annotation)
+	}
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
