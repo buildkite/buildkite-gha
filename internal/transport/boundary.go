@@ -167,6 +167,19 @@ func (a Agent) GetMetadataBounded(ctx context.Context, key string, limit int) ([
 	return nil, fmt.Errorf("get Buildkite metadata %q: %w", key, err)
 }
 
+// GetStepAttribute reads one attribute of a step already in the build by its
+// step key. A continuation uses it to confirm that a rejected duplicate upload
+// was its own earlier upload.
+func (a Agent) GetStepAttribute(ctx context.Context, stepKey, attribute string) ([]byte, error) {
+	if !keyPattern.MatchString(stepKey) {
+		return nil, fmt.Errorf("invalid step key %q", stepKey)
+	}
+	if !keyPattern.MatchString(attribute) {
+		return nil, fmt.Errorf("invalid step attribute %q", attribute)
+	}
+	return a.run(ctx, []string{"step", "get", attribute, "--step", stepKey}, nil)
+}
+
 func (a Agent) UploadPipeline(ctx context.Context, pipeline []byte) error {
 	_, err := a.run(ctx, []string{"pipeline", "upload", "--no-interpolation"}, pipeline)
 	return err

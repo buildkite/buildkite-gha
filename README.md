@@ -2,7 +2,7 @@
 
 Run GitHub Actions workflows as native Buildkite jobs without creating a GitHub Actions run.
 
-`buildkite-gha` turns each supported workflow job and static matrix entry into a Buildkite job. Steps run in a compatibility runtime inside that job. Buildkite owns scheduling, logs, retries, cancellation, and the build UI.
+`buildkite-gha` turns each supported workflow job and matrix entry into a Buildkite job. A matrix taken from another job's output expands inside the build after that job runs. Steps run in a compatibility runtime inside that job. Buildkite owns scheduling, logs, retries, cancellation, and the build UI.
 
 > [!IMPORTANT]
 > `buildkite-gha` is an experimental pre-1.0 preview. The released plugin path supports Linux x86-64 and native macOS arm64. The production path supports local and public actions, static Buildkite job-accessible secrets, and narrowly scoped, job-bound checkout, `GITHUB_TOKEN`, OIDC, artifact, and cache integrations. Private actions and GitHub-issued OIDC claims are unsupported.
@@ -101,7 +101,7 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 | --- | --- |
 | Linux x86-64 and native macOS arm64 jobs using `bash`, `sh`, `python`, or an installed custom shell | Windows, Linux arm64, or macOS x86-64 |
 | Local and public JavaScript and composite actions; verified Dockerfile and public prebuilt-image actions on Linux | Private actions, private container images, and Docker actions on macOS |
-| Static matrices, `needs`, outputs, and local, public, or approved private reusable workflows | Dynamic reusable calls, matrices, and expressions outside the documented subset |
+| Static matrices, matrices from `fromJSON(needs.<job>.outputs.<name>)`, `needs`, outputs, and local, public, or approved private reusable workflows | Dynamic reusable calls, matrices, and expressions outside the documented subset |
 | Exact-commit checkout, including managed private repository access | GitHub-issued OIDC claims or protected queues |
 | Deployment environments with required-reviewer approval gates and environment secret names; repository, organization, and environment variables | Environment wait timers, branch policies, custom protection rules, or deployment records |
 | Static Buildkite job-accessible secrets, including declared aliases in local reusable workflows | Dynamic secret access or remote reusable-workflow secret forwarding |

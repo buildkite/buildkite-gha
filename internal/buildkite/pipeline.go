@@ -16,6 +16,7 @@ import (
 
 const planDirectory = ".buildkite-gha/plans"
 const distributionDirectory = ".buildkite-gha/distributions"
+const continuationDirectory = ".buildkite-gha/continuations"
 const maxConcurrencyGroupLength = 200
 const runtimeCacheName = "buildkite-gha"
 const runtimeCacheRoot = "/cache/bkcache/buildkite-gha"
@@ -101,6 +102,26 @@ type Pipeline struct {
 	DisableRunnerUser  bool
 	Jobs               []Job
 	Workflows          []Workflow
+	// Continuation marks the deferred upload made by a continuation step from
+	// inside an already uploaded workflow group. Its workflows carry no
+	// GroupKey, so Buildkite merges the group by label, and its jobs may
+	// depend on ExistingSteps that the initial upload created.
+	Continuation bool
+	// ExistingSteps are step keys already present in the build that a
+	// continuation upload may depend on or reference as approval gates.
+	ExistingSteps []string
+	// DistributionProducer is the job whose artifacts hold the runtime
+	// distributions when it differs from ArtifactProducer. A continuation
+	// upload reuses the distributions the importer uploaded.
+	DistributionProducer string
+}
+
+// ContinuationStep describes a deferred upload step. It runs after a matrix
+// producer job, reads the producer's verified output, and uploads the jobs
+// whose matrix that output defines. ArtifactDigest addresses the continuation
+// artifact that carries everything the deferred compile needs.
+type ContinuationStep struct {
+	ArtifactDigest string
 }
 
 // Workflow is one independently conditioned workflow group in an aggregate
@@ -184,6 +205,29 @@ type Job struct {
 	ConcurrencyGroup   string
 	Concurrency        int
 	ConcurrencyGates   []ConcurrencyGate
+	// Continuation turns the job into a deferred upload step instead of a
+	// workflow job. Queue, Platform, DistributionDigest, and RuntimeImage
+	// select where it runs; PlanDigest stays empty.
+	Continuation *ContinuationStep
+}
+
+// ContinuationPath returns the fixed path for one content-addressed
+// continuation artifact.
+func ContinuationPath(digest string) (string, error) {
+	if !digestPattern.MatchString(digest) {
+		return "", fmt.Errorf("invalid continuation digest %q", digest)
+	}
+	return continuationDirectory + "/" + strings.TrimPrefix(digest, "sha256:") + ".json", nil
+}
+
+// ContinuationEventPath returns the fixed path of the event source every
+// continuation of one upload shares, so the event is uploaded once however
+// many matrices a workflow defers.
+func ContinuationEventPath(digest string) (string, error) {
+	if !digestPattern.MatchString(digest) {
+		return "", fmt.Errorf("invalid continuation event digest %q", digest)
+	}
+	return continuationDirectory + "/events/" + strings.TrimPrefix(digest, "sha256:") + ".json", nil
 }
 
 // PlanPath returns the fixed local path for a content-addressed job plan.
@@ -216,6 +260,22 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	if !identifierPattern.MatchString(artifactProducer) {
 		return nil, fmt.Errorf("invalid artifact producer %q", artifactProducer)
 	}
+	if pipeline.DistributionProducer != "" && !identifierPattern.MatchString(pipeline.DistributionProducer) {
+		return nil, fmt.Errorf("invalid distribution producer %q", pipeline.DistributionProducer)
+	}
+	if pipeline.Continuation && !keylessAggregate {
+		return nil, fmt.Errorf("continuation upload requires keyless aggregate workflows")
+	}
+	if len(pipeline.ExistingSteps) != 0 && !pipeline.Continuation {
+		return nil, fmt.Errorf("existing steps require a continuation upload")
+	}
+	existingSteps := make(map[string]bool, len(pipeline.ExistingSteps))
+	for _, key := range pipeline.ExistingSteps {
+		if !validStepKey(key) {
+			return nil, fmt.Errorf("invalid existing step key %q", key)
+		}
+		existingSteps[key] = true
+	}
 	workflows := pipeline.Workflows
 	if aggregate {
 		if len(pipeline.Jobs) != 0 || pipeline.GroupLabel != "" || pipeline.ConcurrencyGate != nil || len(pipeline.ApprovalGates) != 0 {
@@ -247,14 +307,19 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if workflow.GroupLabel == "" {
 				return nil, fmt.Errorf("workflow %d requires a group label", i+1)
 			}
-			if !validStepKey(workflow.GroupKey) {
+			if pipeline.Continuation && workflow.GroupKey != "" {
+				return nil, fmt.Errorf("continuation workflow %d must not set a group key", i+1)
+			}
+			if !pipeline.Continuation && !validStepKey(workflow.GroupKey) {
 				return nil, fmt.Errorf("workflow %d has invalid group key %q", i+1, workflow.GroupKey)
 			}
 			if workflow.Event == "" {
 				return nil, fmt.Errorf("workflow %q requires an event name", workflow.GroupKey)
 			}
 			preparationOnly := preparationJobsOnly(workflow.Jobs)
-			if workflow.Failure == nil && workflow.Condition == "" && workflow.SkipReason == "" && !preparationOnly {
+			// A continuation runs only after the initial group's trigger
+			// condition admitted the producer, so it carries none.
+			if workflow.Failure == nil && workflow.Condition == "" && workflow.SkipReason == "" && !preparationOnly && !pipeline.Continuation {
 				return nil, fmt.Errorf("workflow %q requires a trigger condition or skip reason", workflow.GroupKey)
 			}
 			if workflow.Failure == nil && workflow.Condition != "" && workflow.SkipReason != "" {
@@ -263,10 +328,12 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if workflow.Failure == nil && utf8.RuneCountInString(workflow.SkipReason) > maxSkipReasonLength {
 				return nil, fmt.Errorf("workflow %q skip reason exceeds %d characters", workflow.GroupKey, maxSkipReasonLength)
 			}
-			if owner, exists := usedKeys[workflow.GroupKey]; exists {
+			if owner, exists := usedKeys[workflow.GroupKey]; exists && workflow.GroupKey != "" {
 				return nil, fmt.Errorf("workflow group key %q collides with %s", workflow.GroupKey, owner)
 			}
-			usedKeys[workflow.GroupKey] = "workflow group"
+			if workflow.GroupKey != "" {
+				usedKeys[workflow.GroupKey] = "workflow group"
+			}
 		}
 		if workflow.Failure != nil {
 			if !validArtifactPath(workflow.Failure.AnnotationPath) {
@@ -282,7 +349,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				return nil, fmt.Errorf("workflow %d failure cannot include jobs or a concurrency gate", i+1)
 			}
 		}
-		jobs, err := orderJobs(pipeline.CompilerStep, workflow.Jobs)
+		jobs, err := orderJobs(pipeline.CompilerStep, workflow.Jobs, existingSteps)
 		if err != nil {
 			return nil, err
 		}
@@ -308,7 +375,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if job.ApprovalGate == "" {
 				continue
 			}
-			if _, declared := approvalGates[job.ApprovalGate]; !declared {
+			if _, declared := approvalGates[job.ApprovalGate]; !declared && !existingSteps[job.ApprovalGate] {
 				return nil, fmt.Errorf("job %q references undeclared approval gate %q", job.Key, job.ApprovalGate)
 			}
 			approvalGates[job.ApprovalGate] = true
@@ -322,6 +389,9 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if owner, exists := usedKeys[job.Key]; exists {
 				return nil, fmt.Errorf("generated step key %q collides with %s", job.Key, owner)
 			}
+			if existingSteps[job.Key] {
+				return nil, fmt.Errorf("generated step key %q collides with an existing step", job.Key)
+			}
 			usedKeys[job.Key] = "generated job"
 			if aggregate {
 				checkLabel := job.CheckLabel
@@ -333,7 +403,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				}
 				checkLabels[checkLabel] = job.Key
 			}
-			if job.Failure == nil && job.SkipReason == "" {
+			if job.Failure == nil && job.SkipReason == "" && job.Continuation == nil {
 				if owner, exists := usedDigests[job.PlanDigest]; exists {
 					return nil, fmt.Errorf("jobs %q and %q share plan digest %s", owner, job.Key, job.PlanDigest)
 				}
@@ -344,6 +414,12 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			for _, job := range jobs {
 				if job.Concurrency > 0 && job.ConcurrencyGroup == workflow.ConcurrencyGate.Group {
 					return nil, fmt.Errorf("workflow concurrency gate shares group with member job %q", job.Key)
+				}
+				// The closing marker waits for the steps of this upload only.
+				// Jobs a deferred upload adds later would run after the group
+				// is released.
+				if job.Continuation != nil {
+					return nil, fmt.Errorf("workflow concurrency gate cannot hold deferred upload step %q", job.Key)
 				}
 			}
 		}
@@ -414,6 +490,10 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 	artifactProducer := pipeline.ArtifactProducer
 	if artifactProducer == "" {
 		artifactProducer = pipeline.CompilerStep
+	}
+	distributionProducer := pipeline.DistributionProducer
+	if distributionProducer == "" {
+		distributionProducer = artifactProducer
 	}
 	if failure := workflow.Failure; failure != nil {
 		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(":github: workflow · "+workflow.GroupLabel))
@@ -539,7 +619,11 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if platform == "darwin/arm64" && runtimeImage != "" {
 			return fmt.Errorf("job %q cannot select a container runtime image on darwin/arm64", job.Key)
 		}
-		_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(":github: job · "+job.Label))
+		stepLabel := ":github: job · " + job.Label
+		if job.Continuation != nil {
+			stepLabel = ":github: matrix · " + job.Label
+		}
+		_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(stepLabel))
 		_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))
 		if runtimeImage != "" {
 			_, _ = fmt.Fprintf(out, "%simage: %s\n", attributeIndent, yamlScalar(runtimeImage))
@@ -550,11 +634,38 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			`bootstrap_exit() { bootstrap_status=$?; if [ "$bootstrap_status" -ne 0 ]; then echo "^^^ +++"; fi; if [ -n "${bootstrap_dir:-}" ]; then rm -rf -- "$bootstrap_dir" || true; fi; exit "$bootstrap_status"; }`,
 			"trap bootstrap_exit EXIT",
 			`bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`,
-			"buildkite-agent artifact download " + shellQuote(distributionPath) + ` "$bootstrap_dir" --step ` + shellQuote(artifactProducer),
+			"buildkite-agent artifact download " + shellQuote(distributionPath) + ` "$bootstrap_dir" --step ` + shellQuote(distributionProducer),
 			"distribution=\"$bootstrap_dir/" + distributionPath + `"`,
 			`if command -v sha256sum >/dev/null 2>&1; then actual_distribution_digest="$(sha256sum "$distribution" | awk '{print "sha256:" $1}')"; elif command -v shasum >/dev/null 2>&1; then actual_distribution_digest="$(shasum -a 256 "$distribution" | awk '{print "sha256:" $1}')"; else echo 'buildkite-gha: no SHA-256 tool available' >&2; exit 1; fi`,
 			"test \"$actual_distribution_digest\" = " + shellQuote(distributionDigest),
 			`chmod 0500 "$distribution"`,
+		}
+		if job.Continuation != nil {
+			// The continuation step only needs buildkite-agent and the
+			// distribution, so it skips the runner-user bootstrap. It reads the
+			// continuation artifact and the producer's result from the importer
+			// and producer jobs, then uploads the expanded jobs.
+			commands = append(commands, `"$distribution" continue --continuation-digest `+shellQuote(job.Continuation.ArtifactDigest)+" --continuation-producer "+shellQuote(artifactProducer))
+			_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(strings.Join(commands, "\n")))
+			if workflow.Aggregate {
+				checkLabel := job.CheckLabel
+				if checkLabel == "" {
+					checkLabel = job.Label
+				}
+				emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, job.Key, checkLabel, "", "")
+			}
+			if job.Queue != "" {
+				_, _ = fmt.Fprintf(out, "%sagents:\n", attributeIndent)
+				_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
+			}
+			// The continuation keeps the default checkout: it recompiles the
+			// workflow, and local reusable workflows, from the repository at
+			// the build commit and verifies the workflow digest the importer
+			// recorded. Retries are safe because a replayed upload is
+			// rejected by Buildkite for its duplicate step keys and the
+			// continuation then confirms the earlier upload instead.
+			emitJobDependencies(out, attributeIndent, workflow, job, gateOpenKeys, pipeline.CompilerStep)
+			continue
 		}
 		experimentalRunnerUser := !pipeline.DisableRunnerUser && platform == "linux/amd64"
 		runJob := `"$distribution" run-job --plan-digest ` + shellQuote(job.PlanDigest) + " --plan-producer " + shellQuote(artifactProducer)
@@ -849,7 +960,7 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
-func orderJobs(compilerStep string, input []Job) ([]Job, error) {
+func orderJobs(compilerStep string, input []Job, existingSteps map[string]bool) ([]Job, error) {
 	jobs := make(map[string]Job, len(input))
 	digests := make(map[string]string, len(input))
 	indegree := make(map[string]int, len(input))
@@ -861,7 +972,7 @@ func orderJobs(compilerStep string, input []Job) ([]Job, error) {
 		if _, exists := jobs[job.Key]; exists {
 			return nil, fmt.Errorf("duplicate generated step key %q", job.Key)
 		}
-		if job.Failure == nil && job.SkipReason == "" {
+		if job.Failure == nil && job.SkipReason == "" && job.Continuation == nil {
 			if other, exists := digests[job.PlanDigest]; exists {
 				return nil, fmt.Errorf("jobs %q and %q share plan digest %s", other, job.Key, job.PlanDigest)
 			}
@@ -880,6 +991,10 @@ func orderJobs(compilerStep string, input []Job) ([]Job, error) {
 	for key, job := range jobs {
 		for _, dependency := range job.Dependencies {
 			if _, exists := jobs[dependency]; !exists {
+				if existingSteps[dependency] {
+					indegree[key]--
+					continue
+				}
 				return nil, fmt.Errorf("job %q has unknown dependency %q", key, dependency)
 			}
 			dependents[dependency] = append(dependents[dependency], key)
@@ -938,11 +1053,25 @@ func validateJob(compilerStep string, job Job) error {
 	if job.Queue != "" && !identifierPattern.MatchString(job.Queue) {
 		return fmt.Errorf("job %q has invalid queue %q", job.Key, job.Queue)
 	}
-	if !preparationResult {
+	switch {
+	case job.Continuation != nil:
+		if preparationResult {
+			return fmt.Errorf("job %q continuation cannot carry a preparation result", job.Key)
+		}
+		if _, err := ContinuationPath(job.Continuation.ArtifactDigest); err != nil {
+			return fmt.Errorf("job %q: %w", job.Key, err)
+		}
+		if job.PlanDigest != "" || job.EventPayload || job.ApprovalGate != "" || job.RequiresMise || job.Cache != nil || job.Concurrency != 0 || job.ConcurrencyGroup != "" || len(job.ConcurrencyGates) != 0 || job.SoftFail {
+			return fmt.Errorf("job %q continuation cannot include workflow job configuration", job.Key)
+		}
+		if len(job.Dependencies) == 0 {
+			return fmt.Errorf("job %q continuation requires its producer dependency", job.Key)
+		}
+	case !preparationResult:
 		if _, err := PlanPath(job.PlanDigest); err != nil {
 			return fmt.Errorf("job %q: %w", job.Key, err)
 		}
-	} else if job.PlanDigest != "" || job.Queue != "" || job.Platform != "" || job.DistributionDigest != "" || job.RuntimeImage != "" || job.EventPayload || job.ApprovalGate != "" || job.RequiresMise || job.Cache != nil || job.Concurrency != 0 || job.ConcurrencyGroup != "" || len(job.ConcurrencyGates) != 0 {
+	case job.PlanDigest != "" || job.Queue != "" || job.Platform != "" || job.DistributionDigest != "" || job.RuntimeImage != "" || job.EventPayload || job.ApprovalGate != "" || job.RequiresMise || job.Cache != nil || job.Concurrency != 0 || job.ConcurrencyGroup != "" || len(job.ConcurrencyGates) != 0:
 		return fmt.Errorf("job %q preparation result cannot include runnable job configuration", job.Key)
 	}
 	if job.Concurrency < 0 {
