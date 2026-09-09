@@ -252,6 +252,16 @@ the location without a link for edited inputs, unavailable revisions, files
 outside the checkout, or files larger than the 1 MiB verification limit. Changes
 on disk after parsing do not change which source revision the diagnostic links to.
 
+Annotations and generated failure logs include a real configuration excerpt
+where safe: literal action/workflow references in `uses`, standard Ubuntu,
+Windows, or macOS `runs-on` labels, and built-in step `shell` names. Excerpts
+retain the parsed line numbers and mark the offending line with `>`.
+Only eligible adjacent lines are included. Scripts, `env`, `with`, comments,
+expressions, aliases, malformed YAML, and other unclassified content are omitted.
+Capture is limited to 240 bytes per line and 16 KiB per workflow; excerpts are
+excluded from JSON reports and telemetry. At annotation size limits, the excerpt
+is dropped before shortening the explanation.
+
 Profile validation applies upload's trigger policy before compilation.
 `not-applicable` means the workflow does not declare the selected event and
 would become a skipped top-level step. Malformed event data is incompatible. An

@@ -829,6 +829,9 @@ func generatedFailure(report compatibility.ProcessingReport, sourceLinks sourceL
 				message += "\n  " + link + " \x1b]1339;url='" + link + "';content='Open source'\a"
 			}
 		}
+		if excerpt := sourceLinks.excerpt(diagnostic); excerpt != "" {
+			message += "\n\x1b[36m" + excerpt + "\x1b[0m"
+		}
 		if diagnostic.Detail != "" {
 			message += "\n  detail: " + diagnostic.Detail
 		}

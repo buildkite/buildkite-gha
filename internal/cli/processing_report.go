@@ -57,6 +57,14 @@ type sourceLinkContext struct {
 	workflowSourceRoot string
 	sources            map[string]compiler.WorkflowSourceReference
 	localLinks         map[string]string
+	omitExcerpts       bool
+}
+
+func (c sourceLinkContext) excerpt(diagnostic compatibility.Diagnostic) string {
+	if c.omitExcerpts || diagnostic.Location == nil {
+		return ""
+	}
+	return c.sources[diagnostic.Location.Path].Excerpt.Excerpt(diagnostic.Location.Line)
 }
 
 func sourceLinksForEvent(event compiler.Event) sourceLinkContext {
@@ -463,6 +471,10 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 	detail := diagnostic.Detail
 	message := diagnostic.Message
 	row := renderProcessingDiagnostic(diagnostic, sourceLinks)
+	if len(row) > limit {
+		sourceLinks.omitExcerpts = true
+		row = renderProcessingDiagnostic(diagnostic, sourceLinks)
+	}
 	for len(row) > limit && detail != "" {
 		end := max(0, len(detail)-(len(row)-limit))
 		for end > 0 && !utf8.ValidString(detail[:end]) {
@@ -530,6 +542,11 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 			out.WriteString(detail)
 			out.WriteString("</p>\n")
 		}
+	}
+	if excerpt := sourceLinks.excerpt(diagnostic); excerpt != "" {
+		out.WriteString("<pre><code>")
+		out.WriteString(html.EscapeString(excerpt))
+		out.WriteString("</code></pre>\n")
 	}
 	if diagnostic.Detail != "" {
 		out.WriteString("<details><summary>Diagnostic detail</summary><p>")

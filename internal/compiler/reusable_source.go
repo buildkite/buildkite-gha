@@ -30,18 +30,21 @@ type WorkflowSourceReference struct {
 	Commit     string
 	LocalPath  string
 	Digest     string
+	Excerpt    *workflow.DiagnosticSource
 }
 
 func localSourceReference(path string, source []byte) WorkflowSourceReference {
+	reference := WorkflowSourceReference{Excerpt: workflow.CaptureDiagnosticSource(source)}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		return WorkflowSourceReference{}
+		return reference
 	}
 	canonical, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
-		return WorkflowSourceReference{}
+		return reference
 	}
-	return WorkflowSourceReference{LocalPath: canonical, Digest: "sha256:" + sha256Sum(source)}
+	reference.LocalPath, reference.Digest = canonical, "sha256:"+sha256Sum(source)
+	return reference
 }
 
 func retainRootSource(sources map[string]WorkflowSourceReference, path string, source []byte) map[string]WorkflowSourceReference {
@@ -121,6 +124,7 @@ func (resolver *reusableResolver) loadReusableWorkflow(ctx context.Context, pare
 			if loaded.remote != nil {
 				resolver.scan.sources[loaded.displayPath] = WorkflowSourceReference{
 					Repository: loaded.identity.repository, Path: loaded.identity.path, Commit: loaded.identity.commit,
+					Excerpt: workflow.CaptureDiagnosticSource(source),
 				}
 			} else {
 				resolver.scan.sources[loaded.displayPath] = localSourceReference(filepath.Join(loaded.repositoryRoot, loaded.identity.path), source)
