@@ -266,9 +266,9 @@ when it runs inside a Buildkite job.
 ```
 
 The snapshot supplies compile-time context. Plans retain the event name,
-repository, refs, SHA, actor, and a payload digest. If a job needs whole or
-runtime-selected `github.event` access, upload stores one content-addressed
-payload artifact for the build and marks the plan to load it at runtime.
+repository, refs, SHA, actor, and a payload digest. Upload stores the snapshot's
+payload once as a content-addressed artifact and marks each job to load it for
+[`GITHUB_EVENT_PATH`](compatibility.md#event-file), even without event expressions.
 
 The snapshot is compatibility data, not authorization.
 
@@ -489,10 +489,11 @@ valid JSON object no larger than 25 MiB. Malformed, unreadable, or oversized
 data stops upload instead of falling back. Buildkite's repository mapping,
 commit, and ref remain authoritative.
 
-Raw webhook data is not retained in generated plans or pipeline YAML. When a
-job needs whole or runtime-selected `github.event` access, upload retains one
-content-addressed event artifact so that the job and its retries can evaluate
-the expression. Event data cannot grant queues, secrets, or tokens.
+Raw webhook data is not embedded in generated plans or pipeline YAML. Upload
+retains one content-addressed event artifact for linked webhooks and explicit
+snapshots, so every job and its retries can read the [event file](compatibility.md#event-file).
+For reduced fallback snapshots, it retains the artifact only when runtime event
+expressions require it. Event data cannot grant queues, secrets, or tokens.
 
 The selected snapshot establishes one event for applicability, compilation,
 group conditions, provider-check names, and explicit run-name evaluation. An

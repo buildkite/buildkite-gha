@@ -440,7 +440,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			continue
 		}
 		compileWorkflow := func(vars compiler.VariableSources) (hostedCompilation, error) {
-			return compileHostedNamespacedWithActionCache(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, bundleCompilerStep, "", uploadArguments.runnerTargets, uploadArguments.runnerResolution, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, "", repositorySource, authentication, uploadArguments.environmentSource, vars)
+			return compileHostedNamespacedWithActionCache(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, bundleCompilerStep, "", uploadArguments.runnerTargets, uploadArguments.runnerResolution, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, "", repositorySource, authentication, uploadArguments.environmentSource, vars, effectiveEvent.Origin != effectiveEventFromBuild)
 		}
 		preflight, err := compileWorkflow(vars)
 		preflight, err = failClosedForPreparationAdmission(preflight, err, preparationAdmissionFailures[i])

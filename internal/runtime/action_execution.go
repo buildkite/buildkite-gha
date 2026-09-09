@@ -362,6 +362,14 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			return jobResult, fmt.Errorf("make Docker runner temp writable: %w", err)
 		}
 	}
+	var eventPath string
+	if job.Event.PayloadFile {
+		eventPath, err = newEventFile(job.Event, job.HasCapability("docker"))
+		if err != nil {
+			return jobResult, err
+		}
+		defer func() { _ = os.RemoveAll(filepath.Dir(eventPath)) }()
+	}
 	toolCache := r.ToolCache
 	if toolCache == "" {
 		toolCache = filepath.Join(runnerTemp, "tool-cache")
@@ -439,6 +447,9 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 				return tolerateJobSetupFailure(runCtx, job, jobResult, mountErr)
 			}
 		}
+		if eventPath != "" {
+			containerMounts = append(containerMounts, containerMount{host: filepath.Dir(eventPath), target: containerEventDirectory, readonly: true})
+		}
 		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, containerSpec, services, evaluatedServiceOrder, containerMounts...)
 		if setupErr != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
@@ -469,6 +480,9 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		runnerContext["temp"] = r.jobContainer.containerPath(runnerTemp)
 	}
 	runtimeEnv := standardEnvironment(job, workspace, runnerTemp, toolCache, r.RunIdentity)
+	if eventPath != "" {
+		runtimeEnv["GITHUB_EVENT_PATH"] = eventPath
+	}
 	jobResult.Env = mergeStepEnvironment(runtimeEnv, jobEnv)
 	if r.jobContainer != nil && !explicitJobPATH {
 		jobResult.Env["PATH"] = r.jobContainer.imagePATH
@@ -1585,6 +1599,7 @@ func isRuntimeContextEnvironment(name string) bool {
 	case "GITHUB_ACTIONS",
 		"GITHUB_ACTOR",
 		"GITHUB_EVENT_NAME",
+		"GITHUB_EVENT_PATH",
 		"GITHUB_JOB",
 		"GITHUB_REF",
 		"GITHUB_REPOSITORY",

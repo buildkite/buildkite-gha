@@ -76,6 +76,7 @@ func TestCheckoutInputsRoundTripDeterministically(t *testing.T) {
 func TestEventPayloadArtifactRoundTripAndValidation(t *testing.T) {
 	job := validJob()
 	job.Event.PayloadArtifact = true
+	job.Event.PayloadFile = true
 	payload := []byte(`{"action":"opened","pull_request":{"number":42}}`)
 	job.Event.PayloadDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(payload))
 
@@ -85,7 +86,7 @@ func TestEventPayloadArtifactRoundTripAndValidation(t *testing.T) {
 	}
 	validateJobPlanSchema(t, encoded)
 	decoded, err := Decode(encoded)
-	if err != nil || !decoded.Event.PayloadArtifact || decoded.Event.Payload != nil {
+	if err != nil || !decoded.Event.PayloadArtifact || !decoded.Event.PayloadFile || decoded.Event.Payload != nil {
 		t.Fatalf("Decode() payload artifact = %#v, %v", decoded.Event, err)
 	}
 	decodedPayload, err := DecodeEventPayload(payload, job.Event.PayloadDigest)
@@ -102,6 +103,10 @@ func TestEventPayloadArtifactRoundTripAndValidation(t *testing.T) {
 	empty, err := DecodeEventPayload([]byte(`{}`), fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(`{}`))))
 	if err != nil || len(empty) != 0 {
 		t.Fatalf("DecodeEventPayload() empty = %#v, %v", empty, err)
+	}
+	job.Event.PayloadArtifact = false
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "event file requires a payload artifact") {
+		t.Fatalf("event file without transport error = %v", err)
 	}
 }
 

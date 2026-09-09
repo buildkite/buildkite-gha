@@ -1070,8 +1070,8 @@ empty string. Event values cannot introduce new `${{ ... }}` regions. A job
 that still needs whole, projected, or dynamically indexed `github.event`
 access loads the digest-verified event artifact uploaded by the exact importer
 job. This preserves the original event for runtime use and retries without
-duplicating it across immutable plans. Other jobs keep only event identity and
-a payload digest.
+duplicating it across immutable plans. Jobs with an [event file](#event-file)
+also load this artifact, even without event expressions.
 
 Job-level expressions support the same operators and pure functions with these field-specific contexts:
 
@@ -1143,7 +1143,7 @@ The runtime retains this bounded `github` context:
 | `workspace` | The workspace directory: the fixed job-container mount for container jobs, the host checkout directory otherwise. Exposed as `GITHUB_WORKSPACE`. |
 | `run_id`, `run_number`, `run_attempt` | Buildkite build identity: the build ID, the build number, and the retry count plus one. Exposed as `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`, and `GITHUB_RUN_ATTEMPT`. Referencing them outside a Buildkite build is an error, and GitHub run URLs or API calls built from them do not resolve because no GitHub Actions run exists. |
 | `token` | Available only in an authorized step expression. |
-| `event` | The immutable, digest-verified event payload, loaded only for jobs that need runtime event access. |
+| `event` | The immutable, digest-verified event payload, loaded for runtime event expressions or an [event file](#event-file). |
 
 This is not the full GitHub context.
 
@@ -1183,6 +1183,27 @@ directories. A matched symlink or other non-regular file fails the step.
 
 GitHub Runner can hash a file symlink and has an optional symlink-following
 mode. This runtime deliberately does neither.
+
+### Event file
+
+When upload receives a linked webhook or an explicit `--event-path` snapshot,
+`GITHUB_EVENT_PATH` points to a job-scoped JSON file containing its complete
+`payload` object, not the snapshot wrapper. JSON formatting may differ from the
+original. The reduced fallback synthesized from Buildkite environment variables
+does not create this file.
+
+The file is available to shell steps, JavaScript pre/main/post hooks, nested
+composites, and Docker actions. Job containers and Docker actions receive a
+read-only mount with a container-local path. The file lives outside the checkout
+and writable runner temp, survives through post hooks, and is removed at job
+teardown. Job and step environment overrides cannot replace the runtime path.
+`github.event_path` expressions are not supported.
+
+```yaml
+- run: jq -e '.issue.number == 42' "$GITHUB_EVENT_PATH" >/dev/null
+```
+
+Event retention follows the [event payload security boundary](security.md#source-and-event-checks).
 
 ### Compile-time expressions
 

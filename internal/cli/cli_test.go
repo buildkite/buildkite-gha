@@ -638,6 +638,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 // the workflow as a failed check inside the uploaded pipeline instead of
 // aborting before the event and repository variables are known.
 func TestCommandsKeepValidatedRuntimeMatrixIncompatible(t *testing.T) {
+	t.Setenv("BUILDKITE_JOB_ID", "")
 	workflow := filepath.Join(t.TempDir(), "dynamic.yml")
 	if err := os.WriteFile(workflow, []byte(`on: push
 jobs:

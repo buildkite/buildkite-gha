@@ -169,6 +169,10 @@ type Options struct {
 	Runners    RunnerPolicy
 	EventTrust EventTrust
 	OIDC       *plan.OIDCConfiguration
+	// EventFile exposes the supplied payload through GITHUB_EVENT_PATH in every
+	// generated job. Set only for webhook or explicit snapshot input, not an
+	// event synthesized from the Buildkite environment. This grants no authority.
+	EventFile bool
 	// RepositorySource resolves public repositories used by static remote
 	// reusable-workflow calls. Callers should share one memoized source for the
 	// complete validate, compile, and upload operation.
