@@ -10,6 +10,7 @@ buildkite-gha requires Buildkite agent v3.129 or newer.
 The released plugin supports Linux x86-64 and native macOS arm64 importers and
 jobs. It sets the matching `runner.os` and `runner.arch` values. Runner labels
 select a platform; they do not promise GitHub image, toolchain, or Xcode parity.
+It sets `runner.environment` to `self-hosted` on every platform.
 
 Generated Linux jobs use a dedicated `runner` user and need `buildkite-gha`
 v0.13.7 or newer. Use `experimental-runner-user: false` temporarily if an image
@@ -1026,7 +1027,7 @@ Conditions support computed object indexes, numeric array indexes, whole
 | Context | Job `if` | Step `if` |
 | --- | --- | --- |
 | `github.actor`, `github.base_ref`, `github.event_name`, `github.head_ref`, `github.ref`, `github.ref_name`, `github.ref_type`, `github.repository`, `github.repository_owner`, `github.sha`, `github.workflow_ref`, `github.workflow_sha` | ✅ Yes | ✅ Yes |
-| `runner.os`, `runner.arch` | ✅ Yes | ✅ Yes |
+| `runner.os`, `runner.arch`, `runner.environment` | ✅ Yes | ✅ Yes |
 | `runner.temp` | ❌ No | ✅ Yes |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
 | `matrix.<name>` | ✅ Yes | ✅ Yes |
@@ -1106,6 +1107,10 @@ another function, remain unsupported. These limits do not apply to access
 rooted at `github.event`.
 
 `runner.os` and `runner.arch` resolve to `Linux`/`X64` or `macOS`/`ARM64`.
+`runner.environment` resolves to `self-hosted`. GitHub assigns this value to
+runners registered outside GitHub, including managed providers. Buildkite
+agents are in the same class whether they use hosted agents or your own
+infrastructure.
 After runner setup, step runtime fields and job outputs can also use
 `runner.temp`, which resolves to the canonical temporary directory exposed as
 `RUNNER_TEMP`. Other runner fields and compile-time positions that require
@@ -1642,7 +1647,9 @@ The runtime sets `GITHUB_WORKFLOW` to the workflow's top-level `name`. If the wo
 
 Linux labels use the corresponding Noble or Jammy hosted-toolchains image.
 macOS agents must provide tools used by shell steps. These images do not provide GitHub image parity. The runtime
-sets `RUNNER_OS` and `RUNNER_ARCH` to `Linux`/`X64` or `macOS`/`ARM64`.
+sets `RUNNER_OS` and `RUNNER_ARCH` to `Linux`/`X64` or `macOS`/`ARM64`, and
+`RUNNER_ENVIRONMENT` to `self-hosted`. Workflow and step environment entries
+cannot override these values.
 
 `RUNNER_TOOL_CACHE` is job-private unless the Linux job selects an immutable
 image with `/opt/hostedtoolcache`, which the default and configured

@@ -222,6 +222,42 @@ func TestRunnerDirectReferencesWorkAcrossRuntimeEvaluationSurfaces(t *testing.T)
 	}
 }
 
+func TestRunnerEnvironmentIsAvailableOnEveryRuntimeSurface(t *testing.T) {
+	runner := map[string]string{"os": "Linux", "arch": "X64", "environment": "self-hosted"}
+	if got, err := Evaluate("${{ runner.environment }}", Context{Runner: runner}); err != nil || got != "self-hosted" {
+		t.Fatalf("Evaluate() = %q, %v", got, err)
+	}
+	if got, err := EvaluateStep("${{ RUNNER.Environment }}", Context{Runner: runner}); err != nil || got != "self-hosted" {
+		t.Fatalf("EvaluateStep() = %q, %v", got, err)
+	}
+	for _, test := range []struct {
+		condition string
+		want      bool
+	}{
+		{"runner.environment == 'self-hosted'", true},
+		{"runner.environment == 'github-hosted'", false},
+		{"runner.environment != 'github-hosted' && runner.os == 'Linux'", true},
+	} {
+		if got, err := EvaluateCondition(test.condition, ConditionContext{Runner: runner}); err != nil || got != test.want {
+			t.Fatalf("EvaluateCondition(%q) = %v, %v; want %v", test.condition, got, err, test.want)
+		}
+	}
+	for _, scope := range []ConditionScope{JobCondition, StepCondition} {
+		if err := ValidateCondition("runner.environment == 'github-hosted'", scope); err != nil {
+			t.Fatalf("ValidateCondition() scope %v runner.environment = %v", scope, err)
+		}
+	}
+	if err := ValidateCondition("runner.name == 'x'", StepCondition); err == nil || !strings.Contains(err.Error(), "runner.environment") {
+		t.Fatalf("ValidateCondition() runner.name error = %v, want the supported list to name runner.environment", err)
+	}
+	if got, err := EvaluateActionInputDefault("${{ runner.environment == 'github-hosted' && 'hosted' || 'self' }}", Context{Runner: runner}); err != nil || got != "self" {
+		t.Fatalf("EvaluateActionInputDefault() = %q, %v", got, err)
+	}
+	if _, err := Evaluate("${{ runner.environment }}", Context{Runner: map[string]string{"os": "Linux"}}); err == nil {
+		t.Fatal("Evaluate() resolved runner.environment without a runner context value")
+	}
+}
+
 func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *testing.T) {
 	for _, template := range []string{
 		"${{ github.server_url == 'https://github.com' && github.token || '' }}",

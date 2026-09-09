@@ -819,6 +819,9 @@ func (Engine) Truthy(value any) bool {
 	return githubTruthy(value)
 }
 
+// RunnerEnvironment is the runner.environment value for Buildkite agents.
+const RunnerEnvironment = "self-hosted"
+
 func canonicalAbstractReferences(source map[string]any) map[string]any {
 	result := make(map[string]any, len(source))
 	for name, value := range source {
