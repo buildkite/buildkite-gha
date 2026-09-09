@@ -183,16 +183,15 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if input.ReusableOnly {
 			continue
 		}
+		// This event-independent pass only scans the workflow graph, including
+		// reusable callees, for variable references. It has no event payload
+		// and no variable source, so its findings are placeholder artifacts;
+		// the event validation below reports every workflow with the real
+		// event and resolved variables.
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.RepositorySource = repositorySource
-		validation, validationErr := compiler.ValidateWithOptionsContext(ctx, input.Path, input.Source, validationOptions)
+		validation, _ := compiler.ValidateWithOptionsContext(ctx, input.Path, input.Source, validationOptions)
 		workflows[i].ReferencesVars = validation.ReferencesVars
-		if validation.RuntimeMatrixBoundary {
-			report := compatibility.InitialProcessingReport(input.Path, hostedProfile, false, validation, validationErr)
-			report.Result = "incompatible"
-			_ = out.write(ctx, report)
-			return 1
-		}
 	}
 	if eventPath == "" {
 		eventSource, eventOrigin, eventLoadErr = loadEffectiveEventSource(ctx, eventPath, agent)
