@@ -722,9 +722,13 @@ combined). Its rejection, rate limit (10 requests per job per hour), or
 GitHub outage fails the compile of every workflow that references `vars` with
 the backend's error and any `Retry-After` delay; other workflows still upload.
 A backend without the endpoint, or an organization that has opted out,
-returns 404, which leaves both scopes empty rather than failing the compile.
-Outside a Buildkite job, `compile` has no variable source, so the scopes are
-empty.
+returns 404, which resolves both scopes as empty rather than failing the
+compile. A repository and organization that define no variables resolve the
+same way. Either way every `vars` name evaluates to an empty string, in
+compile-time fields too, so `runs-on: ${{ vars.FAILOVER_RUNNER ||
+'ubuntu-latest' }}` selects `ubuntu-latest`. Outside a Buildkite job,
+`compile` has no variable source: runtime references evaluate to empty
+strings, and compile-time fields that reference `vars` fail to compile.
 
 Each job's plan carries the scopes as `organization_vars`, `repository_vars`,
 and, for jobs that declare an environment, `environment_vars`. The compiler

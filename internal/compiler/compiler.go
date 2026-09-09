@@ -285,7 +285,7 @@ func ValidateEventWithOptionsContext(ctx context.Context, path string, source, e
 		}, errors.Join(parseErr, eventErr, optionsErr)
 	}
 	event.Trust = options.EventTrust
-	context := compileContext(event, plan.MergeVars(options.Vars.Organization, options.Vars.Repository), path, parsed.Name)
+	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	_, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
@@ -354,7 +354,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	}
 	event.Trust = options.EventTrust
 	organizationVars, repositoryVars := cloneMap(options.Vars.Organization), cloneMap(options.Vars.Repository)
-	context := compileContext(event, plan.MergeVars(organizationVars, repositoryVars), path, parsed.Name)
+	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	runName, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
