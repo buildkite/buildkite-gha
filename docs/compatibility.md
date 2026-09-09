@@ -280,10 +280,11 @@ Admission fails when the evidence is unsafe or incomplete, including:
 - more than 1,000 pushed commits or 300 changed files
 - renames, combined additions and deletions, malformed Git output, or invalid
   patterns
-- no local match
 
-GitHub may run after a 1,000-commit or diff-timeout fallback. The importer does
-not grant that admission without matching changed-path evidence.
+A verified local nonmatch produces an explicit skipped workflow step without
+executing workflow jobs. The importer uses the local diff result; it does not
+reproduce GitHub's 1,000-commit or diff-timeout fallback that can run a workflow
+without matching changed paths.
 
 Tag pushes do not evaluate path filters, matching GitHub. Explicit and generated event snapshots, and Buildkite environment fallbacks, cannot admit push path filters because they are not linked webhook evidence.
 
@@ -314,13 +315,14 @@ pull requests. It does not call GitHub or use Buildkite `if_changed`.
 
 | Admitted | Rejected |
 | --- | --- |
-| A matching added, modified, deleted, or type-changed path | No local match |
+| A matching added, modified, deleted, or type-changed path | Unavailable changed-path evidence |
 | A copied destination that matches | A rename, or a diff containing both additions and deletions |
 | At most 300 changed files from complete local history | Missing or shallow history, multiple merge bases, or more than 300 files |
 | Matching webhook, PR head checkout, and workflow data | Unrelated history, mismatched identity or workflow, path or pattern containing a backslash, invalid pattern, or malformed Git output |
 
-A local non-match is rejected because GitHub does not report whether its diff
-timed out and ran the workflow anyway.
+A verified local nonmatch, including an empty diff or changes all excluded by
+`paths-ignore`, produces an explicit skipped workflow step without executing
+workflow jobs. GitHub's unobservable diff-timeout fallback is not reproduced.
 
 An unsupported or inexact filter replaces only the affected workflow with a
 failing step. It never broadens when the workflow runs.

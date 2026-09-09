@@ -239,18 +239,16 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if workflows[i].ReusableOnly {
 			continue
 		}
-		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
+		workflowEvent := effectiveEvent
+		if workflows[i].PathFiltersError != "" {
+			workflowEvent.TriggerSnapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{UnavailableReason: workflows[i].PathFiltersError}
+		}
+		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, workflowEvent)
 		switch {
 		case triggerErr != nil:
 			workflows[i].Applicable = true
 			workflows[i].TriggerCondition = effectiveEvent.TriggerExpressions.EventPredicate
 			processingReports[i] = triggerFailureProcessingReport(workflows[i], triggerErr)
-		case workflows[i].PathFiltersError != "" && selection.AnnotationReason == "":
-			workflows[i].Applicable = true
-			workflows[i].TriggerCondition = effectiveEvent.TriggerExpressions.EventPredicate
-			processingReports[i] = triggerFailureProcessingReport(workflows[i], &buildkitepipeline.UnsupportedPathFiltersError{
-				Event: effectiveEvent.Event.Event, Reason: workflows[i].PathFiltersError,
-			})
 		default:
 			workflows[i].Applicable = selection.Applicable
 			workflows[i].TriggerCondition = selection.Condition
