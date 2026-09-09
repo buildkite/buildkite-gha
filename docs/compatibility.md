@@ -38,7 +38,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. `workflow_call` is supported for composition. |
 | [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64. The Agent API can map compatible selectors to hosted Linux or native macOS arm64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
-| [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
+| [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Whole matrices or `include` lists from `fromJSON(needs.<job>.outputs.<name>)` expand inside the build. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `python`, and custom shell templates. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local, public, and approved private GitHub workflows with static inputs, string inputs that embed needs outputs, and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. Private access requires a separate importer opt-in and existing Git access. |
@@ -107,7 +107,8 @@ path fails because the server claimed that exact workflow selected the build.
 Every present path must be a regular, tracked `.yml` or `.yaml` file inside the
 repository. Directories, tracked files missing from the checkout, outside paths,
 symlinks, and globs fail. A custom importer may upload one explicit regular
-workflow from outside the repository.
+workflow from outside the repository, or an untracked one, unless it holds a
+[matrix from a job output](#matrices-from-job-outputs).
 
 Before assigning workflow identities and job keys, upload canonicalizes, sorts,
 and deduplicates the paths.
@@ -145,10 +146,10 @@ with a failing top-level step. The step:
 - limits the check summary to 65,535 bytes
 - exits with status 1
 
-Other workflows continue compiling. A matrix derived from `needs` outputs,
-including one inside a called reusable workflow, fails only its own workflow
-after the event and repository variables resolve, so it never reports `vars`
-values as unavailable or blocks other workflows. Missing or untracked
+Other workflows continue compiling. An unsupported matrix derived from `needs`
+outputs, including one inside a called reusable workflow, fails only its own
+workflow after the event and repository variables resolve, so it never reports
+`vars` values as unavailable or blocks other workflows. Missing or untracked
 configured paths are omitted before the transaction. Invalid path states,
 parse, event-input, admission, artifact, and upload failures still abort the
 complete transaction.
@@ -416,7 +417,9 @@ diagnostics, and their dependants are skipped. Independent jobs keep their
 compiled plans and run normally. The items keep their normal labels, keys,
 checks, and `needs` links. A runnable job is never emitted unless every job it
 needs also has a plan. If compilation fails before the complete graph is known,
-upload uses one workflow-level failing item instead.
+or the workflow takes a matrix from a job output (see
+[Matrices from job outputs](#matrices-from-job-outputs)), upload uses one
+workflow-level failing item instead.
 
 For a local call with `secrets: inherit`, each flattened callee job requests only the static ordinary secret names referenced by that job or its workflow-authored action inputs. Inheritance is one hop: an omitted nested `secrets: inherit` removes ordinary secret authority from every job below that edge. It does not affect direct caller jobs or `GITHUB_TOKEN`.
 
@@ -833,8 +836,8 @@ errors never carry values. See
 
 | Key | Status | Behavior |
 | --- | --- | --- |
-| `matrix` | 🟡 Supported subset | Literal rows. Authored values and expression-valued definitions can use compile-time `github`, `event`, reusable-workflow `inputs`, and `fromJSON` values. |
-| `include`, `exclude` | 🟡 Supported subset | Literal combinations or expressions that resolve to arrays of objects during compilation. |
+| `matrix` | 🟡 Supported subset | Literal rows. Authored values and expression-valued definitions can use compile-time `github`, `event`, reusable-workflow `inputs`, and `fromJSON` values. A whole matrix can be `fromJSON(needs.<job>.outputs.<name>)`; see [Matrices from job outputs](#matrices-from-job-outputs). |
+| `include`, `exclude` | 🟡 Supported subset | Literal combinations or expressions that resolve to arrays of objects during compilation. A whole `include` list can be `fromJSON(needs.<job>.outputs.<name>)`. |
 | `max-parallel` | 🟡 Supported subset | Literal value on ordinary job matrices. Reusable-workflow call matrices with more than one instance are rejected because flattening cannot preserve invocation-level parallelism. |
 | `fail-fast` | ➖ Accepted, no effect | A failed matrix entry does not cancel its siblings. |
 
@@ -866,31 +869,153 @@ called workflows, including nested calls. Each call instance receives its
 concrete `matrix` values and each called workflow receives its declared
 `inputs` before its matrix expands.
 
-A job may expand to at most 256 instances. All matrix values must be available
-before Buildkite pipeline generation. Expressions derived from `needs` outputs
-or `steps` require jobs to run before the final graph can be generated, so they
-remain unsupported:
+A job may expand to at most 256 instances.
+
+#### Matrices from job outputs
+
+**🟡 Supported subset.** A matrix whose whole `matrix` or whole `include` list
+is exactly `fromJSON(needs.<job>.outputs.<name>)` expands after the producing
+job runs:
 
 ```yaml
+plan:
+  runs-on: ubuntu-latest
+  outputs:
+    matrix: ${{ steps.plan.outputs.matrix }}
+  steps:
+    - id: plan
+      run: echo 'matrix=[{"target":"amd64","runner":"ubuntu-latest"}]' >> "$GITHUB_OUTPUT"
 build:
   needs: plan
   runs-on: ${{ matrix.runner }}
   strategy:
     matrix:
       include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+publish:
+  needs: build
+  runs-on: ubuntu-latest
 ```
 
-```
-E_MATRIX_INVALID matrix values come from a job output that exists only after that job runs; buildkite-gha cannot expand this matrix yet (https://github.com/buildkite/buildkite-gha/issues/130)
-  detail: the matrix reference is valid, but expanding it needs a second pipeline upload after the producing job finishes, which buildkite-gha does not perform yet
-```
+The initial upload creates `plan` and one deferred step,
+`:github: matrix · build`, with check `build (matrix)`. That step waits for
+`plan`, reads the verified `matrix` output, expands it with the static-matrix
+rules, recompiles only `build` and the jobs that transitively need it, such as
+`publish`, and uploads them into the same workflow group. Every other job is
+uploaded once, up front. The deferred step reports `W_MATRIX_DEFERRED` at
+compile time and leaves the deferred jobs `not-evaluated` in processing
+reports, so `validate` and `compile --format ir-json` show the graph shape
+while `compile` cannot render the pipeline YAML for the workflow. See
+[Expand a matrix inside the build](cli.md#expand-a-matrix-inside-the-build).
 
-The compiler recognizes exactly `fromJSON(needs.<job>.outputs.<name>)` as the
-whole `matrix` or the whole `include` list, and the `detail` line says whether
-the reference itself is valid or why it is not. Support is tracked in
-[issue #130](https://github.com/buildkite/buildkite-gha/issues/130). Until
-then, move the expansion into the workflow: list the combinations statically,
-or read them from `inputs` or the event payload with `fromJSON`.
+The expanded jobs are identical to the jobs a literal matrix with the same rows
+produces: same step keys, labels, checks, `needs`, and outputs. Row values
+reach `runs-on`, `name`, `if`, `env`, and steps exactly as static matrix values
+do, and nothing else. `runs-on: ${{ matrix.runner }}` resolves through the
+importer's explicit runner mappings or the same Agent API resolution as static
+jobs, with the same admission, capability, and token rules, so a producer
+cannot select an unmapped queue, widen permissions, or change anything outside
+matrix values. The deferred step also reads remote reusable workflows and
+actions the way the importer did, including through Git when
+`private-reusable-workflows` is enabled.
+
+Limits and rejected shapes:
+
+- The producer must be a job with exactly one instance, so it has no matrix or
+  a matrix that expands to one row, and its output must be declared in
+  `outputs`. The output value is JSON of at most 1 KiB, the
+  [job output limit](#key-limits),
+  so a large matrix must stay compact. Rows are objects of scalar values with
+  at most 64 properties each; the expansion honours the 256-instance and
+  1,024-job limits.
+- The deferred uploads of a workflow share the jobs the 1,024-job limit leaves
+  after the jobs uploaded up front, in equal parts: with 4 static jobs and 2
+  needs-derived matrices, each deferred step may upload at most 510 jobs,
+  counting the consumer's rows and every instance of its dependents. The share
+  is recorded at upload time, so the deferred steps together cannot grow the
+  build past the limit whatever the producers publish. A producer output that
+  needs more than the share fails the deferred step before it uploads
+  anything, and a share too small for the jobs a deferred step already
+  promises fails the workflow with `E_MATRIX_INVALID` at upload time.
+- An output that is missing, not JSON, the wrong shape, has zero rows, exceeds a
+  limit, or names a runner that fails compilation or admission fails the
+  deferred step, and the dependent jobs never run. The step prints the
+  compile diagnostics.
+- A workflow may hold several needs-derived matrices, each with its own
+  deferred step, as long as their subgraphs stay apart: a job may need at most
+  one deferred matrix, a deferred matrix cannot need another deferred job, and
+  a called workflow with workflow-level `concurrency` can neither hold a
+  needs-derived matrix nor need a deferred job. These fail the workflow with
+  `E_MATRIX_INVALID` at upload time.
+- The step keys of the deferred step, of the consumer's placeholder, of every
+  statically known instance of a deferred dependent, and of the approval gate
+  of every environment a deferred job declares are reserved at upload time. A
+  key that collides with another job's key or gate, such as a static or
+  deferred job `build-matrix` next to a needs-derived matrix `build`, a
+  deferred job whose static matrix has duplicate rows, or a job whose id equals
+  an approval gate key, fails the workflow with `E_MATRIX_INVALID` before
+  anything runs, instead of failing the later upload or letting a job stand in
+  for an approval gate. Only the keys the deferred jobs will take are reserved:
+  a reusable-workflow job `call.publish` with a matrix does not block a static
+  job `call-publish`.
+- The deferred step reads the workflow again from a checkout of the build
+  commit, so the workflow must be a tracked file inside the repository whose
+  content at that commit (`BUILDKITE_COMMIT`, or `HEAD` when the agent did not
+  resolve it) is the content the importer compiled. A custom importer that
+  uploads one workflow from outside the repository, an untracked or only
+  staged file, or a file edited since the commit fails the upload when that
+  workflow holds a needs-derived matrix, before anything runs.
+- Deferred jobs that deploy to a protected environment use the same approval
+  gate as static jobs. When no static job created the gate, the first deferred
+  step to upload creates it and later deferred steps reference it. A step whose
+  upload was rejected because another step created a shared gate in the
+  meantime uploads again, referencing that gate and still creating the gates
+  only it uses.
+- The importer records the workflow event once per upload, as one artifact
+  shared by every deferred step, so many needs-derived matrices do not multiply
+  the artifact size.
+- When the producer fails or is cancelled, the deferred step uploads skipped
+  placeholders for the deferred jobs: one for the consumer, and one per
+  statically known matrix instance of each dependent, under the keys and check
+  names a static expansion would use. Dependents with `if: always()` are
+  skipped as well; they cannot run because their matrix is unknown.
+- The deferred step recompiles the workflow from the checkout at the build
+  commit with the event, variables, runner mappings, and OIDC settings the
+  importer recorded, and requires the result to reproduce the jobs the
+  importer uploaded, to leave the workflow's other deferred matrices exactly
+  as recorded, and to compile every deferred job from the workflow source the
+  importer recorded for it: the same file content and, for a reusable
+  workflow from another repository, the same commit. Any difference, such as a
+  reusable-workflow tag that now resolves to another commit, fails the step
+  with instructions to retry the whole build.
+- The initial upload resolves the actions the deferred jobs use, so an action
+  that cannot be resolved fails the workflow before anything runs, and records
+  each resolved commit and source digest in the continuation. The deferred
+  jobs use those revisions: a public action tag that moves between the initial
+  upload and the deferred step does not change them, and a local action whose
+  files changed in the checkout fails the step.
+- Repository and organization variables are resolved once, at upload time, when
+  any job of the workflow reads `vars` in the workflow file or in an action it
+  uses, deferred jobs included. The scopes are recorded in the continuation,
+  so a deferred job whose action defaults an input to `${{ vars.REGION }}`
+  sees the same value a static job would, and the deferred step never
+  requests variables itself.
+- A workflow that holds a needs-derived matrix is never uploaded job by job.
+  When any of its jobs fails compilation, such as a job whose local action is
+  missing, the whole workflow is replaced with one failing step,
+  `E_PIPELINE_GENERATION` names the deferred jobs, and no job of the workflow
+  runs. A per-job upload would keep only the static jobs and drop the deferred
+  steps, so the build could pass without them. Without a needs-derived
+  matrix, only the failed job is replaced and independent jobs run; see
+  [Reusable workflows](#reusable-workflows).
+- Retrying the deferred step is safe: a replayed upload is rejected by
+  Buildkite because its step keys already exist, and the step then confirms
+  the earlier upload. Retrying the producer job after the deferred step ran
+  makes its result ambiguous, so retry the whole build instead. See
+  [Results, retries, and cancellation](#results-retries-and-cancellation).
+
+The `detail` line of `E_MATRIX_INVALID` says why a reference is not supported.
+Matrices derived from `steps` or from anything other than exactly one
+`fromJSON(needs.<job>.outputs.<name>)` remain unsupported.
 
 ### Containers and services
 
@@ -1740,7 +1865,7 @@ hosted-toolchains images provide. macOS images are unsupported.
 ### Results, retries, and cancellation
 
 - A runtime-skipped Actions job appears successful in Buildkite while publishing a logical `skipped` result for downstream imported jobs.
-- Retry the whole build if a producer result or artifact becomes ambiguous.
+- Retry the whole build if a producer result or artifact becomes ambiguous. A deferred matrix step may be retried on its own; retrying its producer job after the matrix expanded requires a new build.
 - Cancellation targets the complete process tree: `SIGINT`, `SIGTERM` after 7.5 seconds, then `SIGKILL` after another 2.5 seconds.
 - Summary or annotation publication failure produces a warning and does not change a completed job result.
 

@@ -35,6 +35,19 @@ type IR struct {
 	RepositoryVars   map[string]string `json:"repository_vars,omitempty"`
 	Execution        ExecutionBoundary `json:"execution"`
 	Jobs             []JobInstance     `json:"jobs"`
+	// Continuations are the deferred uploads that expand needs-derived
+	// matrices after their producer jobs run. Their jobs are absent from Jobs
+	// until a continuation recompiles the workflow with RuntimeMatrixRows.
+	Continuations []RuntimeMatrixContinuation `json:"continuations,omitempty"`
+	// deferredActions lists, per continuation consumer job ID, the `uses`
+	// steps of its deferred jobs. It is process-local input to
+	// resolveContinuationActions, which records the resulting locks on the
+	// continuation.
+	deferredActions map[string][]deferredAction
+	// deferredActionsReferenceVars records that a resolved action of a
+	// deferred job reads the vars context, so ActionsReferenceVars can report
+	// it although the deferred jobs have no plans in the bundle.
+	deferredActionsReferenceVars bool
 	// JobGraphComplete distinguishes a complete expanded graph from the
 	// partial instances retained when expansion fails. It is process-local
 	// evidence and is not part of serialized compiler output.
@@ -177,8 +190,11 @@ type Report struct {
 	// reusable workflow it calls reads the vars context. Callers resolve
 	// repository and organization variables before compiling only when it is
 	// set, so workflows without vars references cost no resolution request.
-	ReferencesVars        bool
-	RuntimeMatrices       []RuntimeMatrixDescriptor
+	ReferencesVars  bool
+	RuntimeMatrices []RuntimeMatrixDescriptor
+	// Continuations lists the deferred uploads that expand needs-derived
+	// matrices after their producer jobs run. Their jobs are not in Jobs.
+	Continuations         []RuntimeMatrixContinuation
 	ParsedJobs            []ParsedJob
 	NotEvaluatedJobs      map[string]bool
 	NotEvaluatedInstances map[string]bool
@@ -389,7 +405,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 			Supported: true,
 			Reason:    "run-job rejects unsupported shells and local actions",
 		},
-		Jobs: expanded.instances, JobGraphComplete: jobGraphComplete, Sources: expanded.sources,
+		Jobs: expanded.instances, Continuations: expanded.continuations, deferredActions: expanded.deferredActions, JobGraphComplete: jobGraphComplete, Sources: expanded.sources,
 	}
 	return ir, errors.Join(runNameErr, concurrencyErr, cancellationErr, expandErr)
 }

@@ -138,7 +138,8 @@ func agentStub(t *testing.T, jobToken string, status int, variables http.Handler
 			return
 		}
 		*requests++
-		if r.URL.Path != "/jobs/11111111-1111-4111-8111-111111111111/github-actions/environments" {
+		// The job-scoped endpoint names the job whose token is in use.
+		if r.URL.Path != "/jobs/"+os.Getenv("BUILDKITE_JOB_ID")+"/github-actions/environments" {
 			t.Errorf("agent path = %q", r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Token "+jobToken {

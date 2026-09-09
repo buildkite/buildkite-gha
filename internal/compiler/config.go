@@ -200,6 +200,19 @@ type Options struct {
 	// workflows are compiled into one Buildkite pipeline. Empty preserves the
 	// legacy single-workflow keys.
 	StepKeyNamespace string
+	// RuntimeMatrixRows supplies, per consumer job ID, the matrix rows that a
+	// producer job output resolved to at run time. Callers validate the rows
+	// with ExpandRuntimeMatrixOutput first. A consumer without rows becomes a
+	// continuation: it and every job depending on it are compiled later by a
+	// deferred pipeline upload instead of failing compilation.
+	RuntimeMatrixRows map[string][]map[string]any
+	// RuntimeMatrixActionLocks pins remote actions to the commits an earlier
+	// compilation resolved, as RuntimeMatrixContinuation.ActionLocks records
+	// them. A deferred upload sets it so the jobs it expands use exactly the
+	// action revisions the initial compilation admitted, even when a mutable
+	// ref such as a tag moved in between. Refs the locks do not cover resolve
+	// as usual.
+	RuntimeMatrixActionLocks []plan.ActionLock
 }
 
 func defaultOptions() Options {

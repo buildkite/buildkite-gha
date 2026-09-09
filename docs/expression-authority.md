@@ -180,6 +180,11 @@ The following boundaries are deliberate:
   expression semantics.
 - The normalized program and its action graph remain covered by the job-plan
   digest.
+- A matrix taken from a job output does not add an expression position.
+  The deferred step turns the verified output into ordinary `matrix` values
+  and runs the same compiler, so authority analysis, admission, and plan
+  digests for the expanded jobs are those of a static matrix with the same
+  rows.
 
 This architecture does not broaden expression syntax, allow dynamic secret
 access, make private actions available, or weaken immutable source

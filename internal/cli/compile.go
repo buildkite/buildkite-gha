@@ -108,6 +108,16 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 		err = compileErr
 		result = bundle.Pipeline
 		warnings = bundle.IR.Warnings
+		if err == nil && len(bundle.IR.Continuations) != 0 {
+			// The workflow compiles, but its deferred upload steps exist only
+			// in the pipeline that upload emits inside a build, so a rendered
+			// single-workflow pipeline would omit jobs.
+			processingReport.Result = "compilable"
+			_ = out.write(ctx, processingReport)
+			writeCompilerWarnings(stderr, "compile", workflowPath, warnings)
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: job %q takes its matrix from a job output, so upload expands it with a deferred step inside the build; the pipeline format cannot render it. Use --format ir-json to inspect the compiled graph.\n", bundle.IR.Continuations[0].Descriptor.Job)
+			return 1
+		}
 	}
 	if err != nil {
 		processingReport.AddFailure(workflowPath, workflowprocessing.StagePlans, workflowprocessing.CodePlanConstruction, "compatibility", err)

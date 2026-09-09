@@ -73,6 +73,26 @@ func writeUploadWorkflowRepository(t *testing.T, sources map[string]string) stri
 	return repository
 }
 
+// commitUploadWorkflows commits everything staged in a repository written by
+// writeUploadWorkflowRepository, so the workflows exist at the checked-out
+// commit as they do in a Buildkite build checkout.
+func commitUploadWorkflows(t *testing.T, repository string) {
+	t.Helper()
+	args := []string{"-C", repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "workflows"}
+	if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+}
+
+// writeCommittedUploadWorkflows is writeUploadWorkflows for workflows that
+// defer a matrix to a job output: upload requires those to be committed.
+func writeCommittedUploadWorkflows(t *testing.T, sources map[string]string) []string {
+	t.Helper()
+	repository := writeUploadWorkflowRepository(t, sources)
+	commitUploadWorkflows(t, repository)
+	return enterUploadWorkflows(t, repository, sources)
+}
+
 func writeUploadEvent(t *testing.T, directory, event, ref string, payload map[string]any) string {
 	t.Helper()
 	source, err := json.Marshal(map[string]any{
@@ -127,6 +147,16 @@ type cliCaptureRunner struct {
 	dataByPath     map[string][]byte
 	uploaded       map[string][]byte
 	contextErrors  []error
+	// pipelineUploadErr fails every `pipeline upload`, as Buildkite does when
+	// a step key in the upload already exists in the build.
+	pipelineUploadErr error
+	// pipelineUploadHook sees every `pipeline upload` before it succeeds and
+	// may reject it, for example to stand in for another job whose upload
+	// landed first.
+	pipelineUploadHook func(pipeline []byte) error
+	// stepAttributes answers `step get <attribute> --step <key>` for steps
+	// that already exist in the build; unknown steps fail.
+	stepAttributes map[string]map[string]string
 }
 
 type cliActionSourceTokenProvider struct {
@@ -166,6 +196,23 @@ func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []str
 	}
 	if name == "git" && slices.Equal(args, []string{"rev-parse", "HEAD"}) {
 		return bytes.Clone(r.gitOutput), r.gitErr
+	}
+	if slices.Equal(args, []string{"pipeline", "upload", "--no-interpolation"}) {
+		if r.pipelineUploadErr != nil {
+			return nil, r.pipelineUploadErr
+		}
+		if r.pipelineUploadHook != nil {
+			if err := r.pipelineUploadHook(stdin); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(args) == 5 && args[0] == "step" && args[1] == "get" && args[3] == "--step" {
+		value, ok := r.stepAttributes[args[4]][args[2]]
+		if !ok {
+			return nil, errors.New("step not found")
+		}
+		return []byte(value + "\n"), nil
 	}
 	if slices.Equal(args, []string{"meta-data", "get", "buildkite:webhook"}) {
 		if r.webhookErr != nil {

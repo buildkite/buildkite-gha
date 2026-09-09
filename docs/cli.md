@@ -11,7 +11,8 @@ to validate a workflow, inspect generated output, or build a custom importer.
 | `compile` | Render pipeline YAML or compiler IR without uploading it. |
 | `upload` | Upload workflows from a custom importer. |
 
-`run-job` is an internal command. Do not invoke it directly.
+`run-job` and `continue` are internal commands that generated steps run. Do
+not invoke them directly.
 
 ## Before you begin
 
@@ -342,6 +343,17 @@ option.
 
 `compile` does not upload the executable, plans, or pipeline, so piping its YAML directly to `buildkite-agent pipeline upload` is incomplete.
 
+A workflow with a
+[matrix from a job output](compatibility.md#matrices-from-job-outputs) has jobs
+that only exist after a deferred step runs inside the build, so `compile`
+renders its IR but not its pipeline YAML:
+
+```
+buildkite-gha: compile: job "build" takes its matrix from a job output, so upload expands it with a deferred step inside the build; the pipeline format cannot render it. Use --format ir-json to inspect the compiled graph.
+```
+
+The IR lists the deferred step and its jobs under `continuations`.
+
 ## Upload from a custom importer
 
 `upload` is the public in-build command for custom importers:
@@ -622,6 +634,65 @@ has no direct-upload default.
 supported.
 
 The deprecated `--runtime-queue hosted` argument is accepted as a no-op for compatibility with plugin releases that pass it. Other values are rejected.
+
+### Expand a matrix inside the build
+
+When a workflow takes a matrix from a job output, `upload` creates one deferred
+step per such job in addition to the static jobs. The importer needs
+`BUILDKITE_JOB_ID` for this, and every runtime platform the expanded jobs may
+need must already be configured with `--runtime-distribution`; a row that
+selects an unconfigured platform fails the deferred step. The importer
+resolves repository and organization variables when any job of the workflow,
+deferred or not, reads `vars` in the workflow or in an action it uses, and
+records the scopes for the deferred steps. Such a workflow is never uploaded
+job by job: when any of its jobs fails compilation, the whole workflow is
+replaced with one failing step, because a partial upload would drop the
+deferred steps.
+
+The deferred step downloads the importer's executable, then runs the internal
+command:
+
+```sh
+buildkite-gha continue \
+  --continuation-digest sha256:<digest> \
+  --continuation-producer <importer-job-id>
+```
+
+`continue` runs inside a Buildkite job with `BUILDKITE=true`,
+`BUILDKITE_BUILD_ID`, `BUILDKITE_JOB_ID`, and the default checkout. It:
+
+1. downloads the continuation artifact the importer wrote, verifies its
+   digest, compiler version, and importer, and checks that the workflow in the
+   checkout is byte-for-byte the one the importer compiled; the artifact also
+   records the action revisions and the variable scopes the importer resolved
+   for the deferred jobs, so `continue` never requests variables itself
+2. reads the producer job's verified result through the same manifest path
+   that `needs` outputs use; when the producer did not succeed, it uploads
+   skipped placeholder steps for the deferred jobs and exits 0
+3. expands the output with the static-matrix rules and limits, checks that the
+   rows and the dependents fit the share of the 1,024-job limit the artifact
+   records for this step (see
+   [Matrices from job outputs](compatibility.md#matrices-from-job-outputs)),
+   recompiles the
+   workflow with the recorded event, variables, runner mappings, OIDC, and
+   `private-reusable-workflows` settings, reads remote reusable workflows and
+   actions through the same repository source as `upload`, resolves runners
+   through the Agent API as `upload` does,
+   requires the jobs the importer uploaded to compile identically, requires
+   each deferred job to come from the workflow source the importer recorded,
+   including the commit of a reusable workflow from another repository, and
+   pins each deferred job's actions to the recorded revisions
+4. uploads the plans and a pipeline holding only the deferred jobs, whose
+   `depends_on` reference the steps already in the build
+
+Buildkite rejects an upload whose step keys already exist. When that happens,
+`continue` confirms through `buildkite-agent step get` that each expected step
+carries the plan it just compiled and exits 0, so retrying the deferred step
+never duplicates jobs. Any other failure exits 1 with:
+
+```
+Retry the whole build to expand this matrix again. If the matrix producer job was retried, only a new build can expand it.
+```
 
 ### Run Linux jobs as a non-root user
 

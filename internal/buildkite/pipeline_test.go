@@ -1243,3 +1243,117 @@ func TestPlanPathIsContentAddressed(t *testing.T) {
 func testDigest(contents string) string {
 	return transport.Digest([]byte(contents))
 }
+
+func TestEmitContinuationStepAndDeferredUpload(t *testing.T) {
+	importer := "22222222-2222-4222-8222-222222222222"
+	producerJob := "33333333-3333-4333-8333-333333333333"
+	continuationDigest := testDigest("continuation")
+	initial, err := Emit(Pipeline{
+		ArtifactProducer:   importer,
+		DistributionDigest: testDigest("distribution"),
+		EventProvider:      "github",
+		DisableRunnerUser:  true,
+		Workflows: []Workflow{{
+			GroupLabel: "CI", GroupKey: "workflow-ci", Event: "push", Condition: "true",
+			ConcurrencyGate: &ConcurrencyGate{Group: "buildkite-gha/concurrency/ci"},
+			Jobs: []Job{
+				{Key: "gha-plan", Label: "plan", PlanDigest: testDigest("plan")},
+				{Key: "gha-build-matrix", Label: "build", CheckLabel: "build (matrix)", Queue: "hosted", Dependencies: []string{"gha-plan"}, Continuation: &ContinuationStep{ArtifactDigest: continuationDigest}},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type dependency struct {
+		Step         string `yaml:"step"`
+		AllowFailure bool   `yaml:"allow_failure"`
+	}
+	type step struct {
+		Key       string       `yaml:"key"`
+		Label     string       `yaml:"label"`
+		Command   string       `yaml:"command"`
+		DependsOn []dependency `yaml:"depends_on"`
+		Plugins   []map[string]map[string]any
+	}
+	var document struct {
+		Steps []struct {
+			Group string `yaml:"group"`
+			Key   string `yaml:"key"`
+			Steps []step `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(initial, &document); err != nil {
+		t.Fatalf("parse initial upload: %v\n%s", err, initial)
+	}
+	var continuation, finish *step
+	for i := range document.Steps[0].Steps {
+		if document.Steps[0].Steps[i].Key == "gha-build-matrix" {
+			continuation = &document.Steps[0].Steps[i]
+		}
+		if strings.HasPrefix(document.Steps[0].Steps[i].Key, "gha-concurrency-finish-") {
+			finish = &document.Steps[0].Steps[i]
+		}
+	}
+	if continuation == nil || finish == nil {
+		t.Fatalf("initial upload lacks the continuation or finish step:\n%s", initial)
+	}
+	// The continuation step waits for the producer even when it fails, so it
+	// can upload skipped placeholders, and enters the concurrency gate like
+	// any other job of the workflow.
+	if continuation.Label != ":github: matrix · build" || len(continuation.DependsOn) != 2 || continuation.DependsOn[1].Step != "gha-plan" || !continuation.DependsOn[1].AllowFailure || !strings.HasPrefix(continuation.DependsOn[0].Step, "gha-concurrency-start-") {
+		t.Fatalf("continuation dependencies = %#v", continuation.DependsOn)
+	}
+	wantCommand := "continue --continuation-digest '" + continuationDigest + "' --continuation-producer '" + importer + "'"
+	if !strings.Contains(continuation.Command, wantCommand) || strings.Contains(continuation.Command, "run-job") {
+		t.Fatalf("continuation command = %q, want it to run %q and no job", continuation.Command, wantCommand)
+	}
+	var gated bool
+	for _, dependency := range finish.DependsOn {
+		gated = gated || dependency.Step == "gha-build-matrix"
+	}
+	if !gated {
+		t.Fatalf("concurrency finish step does not wait for the continuation step: %#v", finish.DependsOn)
+	}
+
+	deferred, err := Emit(Pipeline{
+		ArtifactProducer:     producerJob,
+		DistributionProducer: importer,
+		DistributionDigest:   testDigest("distribution"),
+		EventProvider:        "github",
+		DisableRunnerUser:    true,
+		Continuation:         true,
+		ExistingSteps:        []string{"gha-plan", "gha-lint"},
+		Workflows: []Workflow{{
+			GroupLabel: "CI", Event: "push",
+			Jobs: []Job{
+				{Key: "gha-build-a", Label: "build (a)", PlanDigest: testDigest("plan-a"), Dependencies: []string{"gha-plan"}},
+				{Key: "gha-publish", Label: "publish", PlanDigest: testDigest("plan-publish"), Dependencies: []string{"gha-build-a", "gha-lint"}},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(deferred, &document); err != nil {
+		t.Fatalf("parse deferred upload: %v\n%s", err, deferred)
+	}
+	if len(document.Steps) != 1 || document.Steps[0].Group != ":github: workflow · CI" || document.Steps[0].Key != "" || len(document.Steps[0].Steps) != 2 {
+		t.Fatalf("deferred upload must be one keyless group holding only the deferred jobs:\n%s", deferred)
+	}
+	build, publish := document.Steps[0].Steps[0], document.Steps[0].Steps[1]
+	if len(build.DependsOn) != 1 || build.DependsOn[0].Step != "gha-plan" || len(publish.DependsOn) != 2 || publish.DependsOn[0].Step != "gha-build-a" || publish.DependsOn[1].Step != "gha-lint" {
+		t.Fatalf("deferred dependencies = %#v / %#v", build.DependsOn, publish.DependsOn)
+	}
+	if !strings.Contains(build.Command, "--plan-producer '"+producerJob+"'") || !strings.Contains(build.Command, "artifact download 'buildkite-gha/runtimes") && !strings.Contains(build.Command, "--step '"+importer+"'") {
+		t.Fatalf("deferred job must read plans from the continuation job and distributions from the importer:\n%s", build.Command)
+	}
+
+	_, err = Emit(Pipeline{
+		ArtifactProducer: producerJob, DistributionDigest: testDigest("distribution"), EventProvider: "github", Continuation: true,
+		Workflows: []Workflow{{GroupLabel: "CI", Event: "push", Jobs: []Job{{Key: "gha-publish", Label: "publish", PlanDigest: testDigest("plan"), Dependencies: []string{"gha-lint"}}}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), `unknown dependency "gha-lint"`) {
+		t.Fatalf("continuation upload accepted an undeclared existing step: %v", err)
+	}
+}

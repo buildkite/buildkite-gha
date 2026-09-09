@@ -104,7 +104,7 @@ func TestCompileBundleRejectsRunnerCacheForJobContainer(t *testing.T) {
 	}
 }
 
-func TestCompileBundleDoesNotActivateValidatedRuntimeMatrixWithoutFencing(t *testing.T) {
+func TestCompileBundleDefersRuntimeMatrixWithoutSingleWorkflowPipeline(t *testing.T) {
 	source := []byte(`on: push
 jobs:
   producer:
@@ -126,14 +126,24 @@ jobs:
       - run: echo "${{ matrix.steps }}"
 `)
 	bundle, err := CompileBundle("runtime-matrix.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "needs a second pipeline upload") {
+	if err != nil {
 		t.Fatalf("CompileBundle() error = %v", err)
 	}
-	if len(bundle.Plans) != 0 || len(bundle.Pipeline) != 0 {
-		t.Fatalf("unsafe runtime matrix produced %d plans and %d pipeline bytes", len(bundle.Plans), len(bundle.Pipeline))
+	// Only the producer is planned now; the consumer's plans are built by the
+	// continuation once the producer output exists.
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Workflow.LogicalJobID != "producer" {
+		t.Fatalf("plans = %#v", bundle.Plans)
 	}
 	if len(bundle.IR.Jobs) != 1 || bundle.IR.Jobs[0].LogicalJobID != "producer" {
-		t.Fatalf("partial safe IR jobs = %#v", bundle.IR.Jobs)
+		t.Fatalf("static IR jobs = %#v", bundle.IR.Jobs)
+	}
+	if len(bundle.IR.Continuations) != 1 || bundle.IR.Continuations[0].StepKey != "gha-generated-matrix" || strings.Join(bundle.IR.Continuations[0].Jobs, ",") != "generated" {
+		t.Fatalf("continuations = %#v", bundle.IR.Continuations)
+	}
+	// A single-workflow pipeline would silently omit the deferred jobs, so
+	// only the aggregate upload emits one.
+	if len(bundle.Pipeline) != 0 || len(bundle.GeneratedWorkflow.Jobs) != 1 || !bundle.Processing.PipelineGenerated {
+		t.Fatalf("pipeline = %q, generated jobs = %#v, processing = %#v", bundle.Pipeline, bundle.GeneratedWorkflow.Jobs, bundle.Processing)
 	}
 }
 

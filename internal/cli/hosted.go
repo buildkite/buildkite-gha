@@ -7,6 +7,8 @@ import (
 	"io"
 	"maps"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -221,6 +223,14 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 	options.OIDC = oidc
 	options.EnvironmentSource = environmentSource
 	options.Vars = vars
+	return compileHostedBundle(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, options, actionCacheDir, sharedActionSource, actionAuthentication)
+}
+
+// compileHostedBundle compiles one workflow with fully prepared hosted options.
+// The importer and a continuation share it so that a deferred upload applies
+// the same action resolution, admission, and pipeline generation as the
+// initial upload.
+func compileHostedBundle(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep string, options compiler.Options, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
 	repositorySource := sharedActionSource
 	cleanup := func() {}
 	if repositorySource == nil {
@@ -293,6 +303,25 @@ func failedPartialBundle(bundle compiler.Bundle) compiler.Bundle {
 		bundle.JobOutcomes[instance.Key] = compiler.JobFailed
 	}
 	return bundle
+}
+
+// privateRepositorySourceOptions returns the source options that let remote
+// reusable workflows be read through the agent's Git credentials when the
+// plugin's private-reusable-workflows setting is on. The importer and a
+// continuation must use the same options so a deferred upload reads the same
+// repositories the initial upload did.
+func privateRepositorySourceOptions(privateReusableWorkflows bool) ([]actionsource.Option, error) {
+	if !privateReusableWorkflows {
+		return nil, nil
+	}
+	git, err := exec.LookPath("git")
+	if err == nil {
+		git, err = filepath.Abs(git)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve Git executable: %w", err)
+	}
+	return []actionsource.Option{actionsource.WithGitRepositorySource(git)}, nil
 }
 
 func newHostedActionSource(ctx context.Context, actionCacheDir, clientVersion string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), error) {

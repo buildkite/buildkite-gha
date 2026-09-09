@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -189,33 +191,42 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
-	t.Run("validate json blocker", func(t *testing.T) {
+	t.Run("validate json defers a needs-derived matrix", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "dynamic.yml")
 		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  prepare:\n    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.matrix.outputs.value }}\n    steps:\n      - id: matrix\n        run: true\n  build:\n    needs: prepare\n    runs-on: ubuntu-latest\n    strategy:\n      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}\n    steps:\n      - run: true\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
-		if code := Run([]string{"validate", "--format", "json", workflow}, &stdout, &stderr, "dev"); code != 1 {
-			t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+		if code := Run([]string{"validate", "--format", "json", workflow}, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, want 0; stderr = %q", code, stderr.String())
 		}
 		var report compatibility.ProcessingReport
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeMatrixInvalid {
+		if report.Result != "compilable" || report.Instances != 1 || len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "warning" || report.Diagnostics[0].Code != "W_MATRIX_DEFERRED" {
 			t.Fatalf("report = %#v", report)
+		}
+		results := map[string]string{}
+		for _, job := range report.Jobs {
+			if job.Instance == "" {
+				results[job.ID] = job.Result
+			}
+		}
+		if results["prepare"] != compatibility.Passed || results["build"] != compatibility.NotEvaluated {
+			t.Fatalf("job results = %#v", results)
 		}
 
 		stdout.Reset()
 		stderr.Reset()
-		if code := Run([]string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev"); code != 1 {
-			t.Fatalf("profile Run() code = %d, want 1; stderr = %q", code, stderr.String())
+		if code := Run([]string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("profile Run() code = %d, want 0; stderr = %q", code, stderr.String())
 		}
 		var profileReport compatibility.ProcessingReport
 		if err := json.Unmarshal(stdout.Bytes(), &profileReport); err != nil {
 			t.Fatal(err)
 		}
-		if profileReport.Result != "incompatible" || profileReport.Compile.Result != "incompatible" || profileReport.Admission.Result != "not-evaluated" || len(profileReport.Diagnostics) != 1 || profileReport.Diagnostics[0].Code != compiler.CodeMatrixInvalid {
+		if profileReport.Result != "admitted" || profileReport.Compile.Instances != 1 || profileReport.Admission.Result != "admitted" {
 			t.Fatalf("profile report = %#v", profileReport)
 		}
 	})
@@ -632,12 +643,12 @@ func TestRunValidateAndCompile(t *testing.T) {
 	})
 }
 
-// TestCommandsKeepValidatedRuntimeMatrixIncompatible proves a needs-derived
-// matrix stays an ordinary incompatibility: validate and compile exit 1 with
-// the diagnostic and never emit a runtime-matrix artifact, and upload reports
-// the workflow as a failed check inside the uploaded pipeline instead of
-// aborting before the event and repository variables are known.
-func TestCommandsKeepValidatedRuntimeMatrixIncompatible(t *testing.T) {
+// TestCommandsDeferNeedsDerivedMatrix proves a needs-derived matrix is
+// deferred rather than rejected: validate passes with a warning, compile
+// refuses to emit a single-workflow pipeline that would silently drop the
+// deferred jobs but still emits IR, and upload adds the deferred upload step
+// and its continuation artifact to the pipeline.
+func TestCommandsDeferNeedsDerivedMatrix(t *testing.T) {
 	t.Setenv("BUILDKITE_JOB_ID", "")
 	workflow := filepath.Join(t.TempDir(), "dynamic.yml")
 	if err := os.WriteFile(workflow, []byte(`on: push
@@ -663,60 +674,187 @@ jobs:
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "gha-importer")
+
+	t.Run("validate", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{}
+		if code := run([]string{"validate", "--format", "json", workflow}, &stdout, &stderr, "dev", runner); code != 0 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("validate made Buildkite calls: %#v", runner.commands)
+		}
+		if !strings.Contains(stdout.String(), "W_MATRIX_DEFERRED") || strings.Contains(stdout.String(), "E_MATRIX_INVALID") {
+			t.Fatalf("validate output = %q", stdout.String())
+		}
+	})
+
+	t.Run("compile pipeline", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{}
+		if code := run([]string{"compile", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if stdout.Len() != 0 || !strings.Contains(stderr.String(), "deferred step") {
+			t.Fatalf("compile wrote stdout = %q, stderr = %q", stdout.String(), stderr.String())
+		}
+	})
+
+	t.Run("compile IR", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"compile", "--format", "ir-json", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 0 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		var ir compiler.IR
+		if err := json.Unmarshal(stdout.Bytes(), &ir); err != nil {
+			t.Fatal(err)
+		}
+		if len(ir.Jobs) != 1 || ir.Jobs[0].Key != "gha-producer" || len(ir.Continuations) != 1 || ir.Continuations[0].StepKey != "gha-generated-matrix" || !slices.Equal(ir.Continuations[0].Jobs, []string{"generated"}) {
+			t.Fatalf("compile IR = %s", stdout.String())
+		}
+	})
+
+	// upload reads the workflow again from the checkout when the producer has
+	// finished, so the deferred matrix is only accepted for workflows inside
+	// the repository.
+	source, err := os.ReadFile(workflow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absoluteEventPath, err := filepath.Abs(eventPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noBuildkiteWrites := func(t *testing.T, runner *cliCaptureRunner) {
+		t.Helper()
+		for _, command := range runner.commands {
+			if command.args[0] == "pipeline" || command.args[0] == "artifact" {
+				t.Fatalf("rejected upload reached Buildkite: %#v", runner.commands)
+			}
+		}
+	}
+
+	t.Run("upload without job identity", func(t *testing.T) {
+		requireImporterHost(t)
+		checkoutWorkflow := writeUploadWorkflows(t, map[string]string{"build.yml": string(source)})[0]
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
+		if code := run([]string{"upload", "--event-path", absoluteEventPath, checkoutWorkflow}, &stdout, &stderr, "dev", runner); code != 2 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "BUILDKITE_JOB_ID is required when a workflow defers a matrix") {
+			t.Fatalf("stderr = %q", stderr.String())
+		}
+		noBuildkiteWrites(t, runner)
+	})
+
+	t.Run("upload from outside the repository", func(t *testing.T) {
+		requireImporterHost(t)
+		t.Setenv("BUILDKITE_JOB_ID", "0192f7d0-0000-7000-8000-000000000001")
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
+		if code := run([]string{"upload", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), `is outside the repository checkout, so its matrices cannot be expanded from a job output`) {
+			t.Fatalf("stderr = %q", stderr.String())
+		}
+		noBuildkiteWrites(t, runner)
+	})
+
+	// A one-operand upload accepts a workflow inside the repository whether or
+	// not git tracks it, but the deferred upload reopens the file from a fresh
+	// checkout of the build commit, so a workflow that is untracked, only
+	// staged, or edited since the commit fails before the producer runs and
+	// before anything reaches Buildkite.
+	git := func(t *testing.T, repository string, args ...string) {
+		t.Helper()
+		args = append([]string{"-C", repository, "-c", "user.name=Test", "-c", "user.email=test@example.com"}, args...)
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	write := func(t *testing.T, workflowPath string, content []byte) {
+		t.Helper()
+		if err := os.WriteFile(workflowPath, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, test := range []struct {
-		name string
-		args []string
+		name, want string
+		prepare    func(t *testing.T, repository, workflowPath string)
 	}{
-		{name: "validate", args: []string{"validate", "--format", "json", workflow}},
-		{name: "compile pipeline", args: []string{"compile", "--event-path", eventPath, workflow}},
-		{name: "compile IR", args: []string{"compile", "--format", "ir-json", "--event-path", eventPath, workflow}},
+		{name: "upload of an untracked workflow", want: `"dynamic.yml" is not tracked by git, so its matrices cannot be expanded`, prepare: func(t *testing.T, _, workflowPath string) {
+			t.Helper()
+			write(t, workflowPath, source)
+		}},
+		{name: "upload of a staged workflow", want: `"dynamic.yml" is not committed at HEAD, so its matrices cannot be expanded`, prepare: func(t *testing.T, repository, workflowPath string) {
+			t.Helper()
+			write(t, workflowPath, source)
+			git(t, repository, "add", "dynamic.yml")
+		}},
+		{name: "upload of a workflow with staged edits", want: `"dynamic.yml" differs from the file committed at HEAD, so its matrices cannot be expanded`, prepare: func(t *testing.T, repository, workflowPath string) {
+			t.Helper()
+			write(t, workflowPath, []byte("on: push\njobs: {}\n"))
+			git(t, repository, "add", "dynamic.yml")
+			git(t, repository, "commit", "-qm", "workflow")
+			write(t, workflowPath, source)
+			git(t, repository, "add", "dynamic.yml")
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			requireImporterHost(t)
+			repository := writeUploadWorkflowRepository(t, nil)
+			t.Chdir(repository)
+			t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+			t.Setenv("BUILDKITE_COMMIT", "")
+			t.Setenv("BUILDKITE_JOB_ID", "0192f7d0-0000-7000-8000-000000000001")
+			test.prepare(t, repository, filepath.Join(repository, "dynamic.yml"))
 			var stdout, stderr bytes.Buffer
-			runner := &cliCaptureRunner{}
-			if code := run(test.args, &stdout, &stderr, "dev", runner); code != 1 {
+			runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
+			if code := run([]string{"upload", "--event-path", absoluteEventPath, "dynamic.yml"}, &stdout, &stderr, "dev", runner); code != 1 {
 				t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 			}
-			if len(runner.commands) != 0 {
-				t.Fatalf("runtime matrix command made Buildkite calls: %#v", runner.commands)
+			if !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), test.want)
 			}
-			output := stdout.String() + stderr.String()
-			if !strings.Contains(output, "incompatible") || strings.Contains(output, "runtime_matrices") || strings.Contains(output, compiler.RuntimeMatrixSchemaV1) {
-				t.Fatalf("command output = %q", output)
-			}
-			if test.name != "validate" && stdout.Len() != 0 {
-				t.Fatalf("unsafe command wrote stdout = %q", stdout.String())
-			}
+			noBuildkiteWrites(t, runner)
 		})
 	}
 
 	t.Run("upload", func(t *testing.T) {
 		requireImporterHost(t)
+		checkoutWorkflow := writeCommittedUploadWorkflows(t, map[string]string{"build.yml": string(source)})[0]
+		t.Setenv("BUILDKITE_JOB_ID", "0192f7d0-0000-7000-8000-000000000001")
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
-		if code := run([]string{"upload", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev", runner); code != 0 {
+		if code := run([]string{"upload", "--event-path", absoluteEventPath, checkoutWorkflow}, &stdout, &stderr, "dev", runner); code != 0 {
 			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 		}
 		output := stdout.String() + stderr.String()
-		for _, want := range []string{"Result: incompatible", "[E_MATRIX_INVALID]", "Uploaded 0 jobs from 1 workflows"} {
-			if !strings.Contains(output, want) {
-				t.Fatalf("upload output missing %q:\n%s", want, output)
+		if !strings.Contains(output, "Uploaded 2 jobs from 1 workflows") || strings.Contains(output, "E_MATRIX_INVALID") || strings.Contains(output, "incompatible") {
+			t.Fatalf("upload output:\n%s", output)
+		}
+		var continuations, events int
+		for path := range runner.uploaded {
+			switch {
+			case strings.HasPrefix(path, ".buildkite-gha/continuations/events/"):
+				events++
+			case strings.HasPrefix(path, ".buildkite-gha/continuations/"):
+				continuations++
 			}
 		}
-		if strings.Contains(output, "runtime_matrices") || strings.Contains(output, compiler.RuntimeMatrixSchemaV1) {
-			t.Fatalf("upload emitted a runtime matrix artifact: %q", output)
+		if continuations != 1 || events != 1 {
+			t.Fatalf("uploaded artifacts = %v, want one continuation and one shared event", slices.Sorted(maps.Keys(runner.uploaded)))
 		}
-		var pipelineUploads int
-		for _, command := range runner.commands {
-			if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation"}) {
-				pipelineUploads++
-				if !strings.Contains(string(command.stdin), `title: "Workflow could not be run"`) {
-					t.Fatalf("uploaded pipeline does not carry the failed workflow check:\n%s", command.stdin)
-				}
+		pipeline := string(runner.commands[len(runner.commands)-1].stdin)
+		for _, want := range []string{`label: ":github: matrix · generated"`, `key: "gha-generated-matrix"`, `build.yml / generated (matrix) (push)"`, "continue --continuation-digest 'sha256:", "--continuation-producer '0192f7d0-0000-7000-8000-000000000001'", `- step: "gha-producer"`} {
+			if !strings.Contains(pipeline, want) {
+				t.Fatalf("pipeline missing %q:\n%s", want, pipeline)
 			}
 		}
-		if pipelineUploads != 1 {
-			t.Fatalf("pipeline uploads = %d, want 1: %#v", pipelineUploads, runner.commands)
+		if strings.Contains(pipeline, `title: "Workflow could not be run"`) || strings.Contains(pipeline, `key: "gha-generated"`) {
+			t.Fatalf("pipeline reports the deferred workflow as failed or names the consumer:\n%s", pipeline)
 		}
 	})
 }
@@ -740,7 +878,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     strategy:
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.prepare.outputs.missing) }}
     steps:
       - run: true
   bad-condition:
@@ -868,7 +1006,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     strategy:
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.prepare.outputs.missing) }}
     steps:
       - run: true
   downstream:
@@ -1087,38 +1225,101 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - run: true
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
-		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+		t.Fatalf("Run() code = %d, want 0; stderr = %q", code, stderr.String())
 	}
 	var report compatibility.ProcessingReport
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Diagnostics) != 1 {
-		t.Fatalf("diagnostics = %#v", report.Diagnostics)
+	if report.Result != "compilable" || len(report.Diagnostics) != 1 {
+		t.Fatalf("report = %#v", report)
 	}
 	diagnostic := report.Diagnostics[0]
-	if diagnostic.Code != compiler.CodeMatrixInvalid || diagnostic.Job != "build" || diagnostic.Location == nil || diagnostic.Location.Line != 15 || diagnostic.Location.Column != 18 {
+	if diagnostic.Level != "warning" || diagnostic.Code != "W_MATRIX_DEFERRED" || diagnostic.Job != "build" || diagnostic.Location == nil || diagnostic.Location.Line != 15 || diagnostic.Location.Column != 18 {
 		t.Fatalf("diagnostic = %#v", diagnostic)
 	}
-	if !strings.Contains(diagnostic.Message, "matrix values come from a job output") || !strings.Contains(diagnostic.Message, "https://github.com/buildkite/buildkite-gha/issues/130") {
-		t.Fatalf("message = %q", diagnostic.Message)
-	}
-	if !strings.Contains(diagnostic.Detail, "needs a second pipeline upload after the producing job finishes") {
-		t.Fatalf("detail = %q", diagnostic.Detail)
+	for _, want := range []string{`output "matrix" of job "plan"`, `jobs "build", "publish"`, `step "gha-build-matrix"`} {
+		if !strings.Contains(diagnostic.Message, want) {
+			t.Fatalf("message %q lacks %q", diagnostic.Message, want)
+		}
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"validate", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
-		t.Fatalf("Run() text code = %d, want 1; stderr = %q", code, stderr.String())
+	if code := Run([]string{"validate", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+		t.Fatalf("Run() text code = %d, want 0; stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "[E_MATRIX_INVALID] matrix values come from a job output") || !strings.Contains(stdout.String(), "\n  detail: the matrix reference is valid") {
+	if !strings.Contains(stdout.String(), "[W_MATRIX_DEFERRED]") || !strings.Contains(stdout.String(), "job publish: not-evaluated") {
 		t.Fatalf("text report = %q", stdout.String())
+	}
+
+	// A job that needs two deferred consumers would have to join two
+	// continuation uploads, which is the one shape the deferral rejects.
+	unsupportedPath := filepath.Join(t.TempDir(), "two-matrices.yml")
+	if err := os.WriteFile(unsupportedPath, []byte(`on: push
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      linux: ${{ steps.plan.outputs.linux }}
+      macos: ${{ steps.plan.outputs.macos }}
+    steps:
+      - id: plan
+        run: true
+  linux:
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.linux) }}
+    steps:
+      - run: true
+  macos:
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.macos) }}
+    steps:
+      - run: true
+  publish:
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"validate", "--format", "json", unsupportedPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	report = compatibility.ProcessingReport{}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	var errors []compatibility.Diagnostic
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Level == "error" {
+			errors = append(errors, diagnostic)
+		}
+	}
+	if len(errors) != 1 || errors[0].Code != compiler.CodeMatrixInvalid || errors[0].Job != "publish" {
+		t.Fatalf("diagnostics = %#v", report.Diagnostics)
+	}
+	if !strings.Contains(errors[0].Message, "does not meet its requirements") || !strings.Contains(errors[0].Detail, `depends on needs-derived matrices "linux" and "macos"`) {
+		t.Fatalf("diagnostic = %#v", errors[0])
 	}
 }
 
