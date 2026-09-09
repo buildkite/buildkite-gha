@@ -240,16 +240,11 @@ func TestEngineValidateConditionAttributesEarlySecretReferenceError(t *testing.T
 	}
 }
 
-func TestEngineAnalysisDefersRunnerEnvironmentToRuntime(t *testing.T) {
+func TestEngineAnalysisTreatsRunnerEnvironmentAsConstant(t *testing.T) {
 	engine := NewEngine()
-	condition, err := engine.Analyze(Site{
-		Source:  "runner.environment == 'github-hosted'",
-		Profile: ProfileStepCondition,
-		Result:  ResultBoolean,
-		Purpose: PurposeExpression,
-	}, AbstractValues{})
-	if err != nil || condition.Value.Known {
-		t.Fatalf("Analyze() condition = %#v, %v; want runtime-dependent", condition, err)
+	condition, err := engine.Analyze(Site{Source: "runner.environment == 'github-hosted'", Profile: ProfileStepCondition, Result: ResultBoolean, Purpose: PurposeExpression}, AbstractValues{References: map[string]any{"runner.environment": "github-hosted"}})
+	if err != nil || !condition.Value.Known || condition.Value.Value != false {
+		t.Fatalf("Analyze() condition = %#v, %v; want known false", condition, err)
 	}
 	token, err := engine.Analyze(Site{
 		Source:  "${{ runner.environment == 'github-hosted' && github.token || '' }}",
@@ -257,8 +252,14 @@ func TestEngineAnalysisDefersRunnerEnvironmentToRuntime(t *testing.T) {
 		Result:  ResultString,
 		Purpose: PurposeWorkflowActionInput,
 	}, AbstractValues{})
-	if err != nil || token.Effects.GitHubToken != GitHubTokenDirect {
-		t.Fatalf("Analyze() token effects = %v, %v; want conservative authority", token.Effects.GitHubToken, err)
+	if err != nil || !token.Value.Known || token.Value.Value != "" || token.Effects.GitHubToken != 0 {
+		t.Fatalf("Analyze() token branch = %#v, %v; want known empty value without authority", token, err)
+	}
+	if requires, err := actionInputDefaultRequiresGitHubToken("${{ runner.environment == 'github-hosted' && github.token || '' }}", "https://github.com"); err != nil || requires {
+		t.Fatalf("github-hosted default requires token = %v, %v; want false", requires, err)
+	}
+	if requires, err := actionInputDefaultRequiresGitHubToken("${{ runner.environment == 'self-hosted' && github.token || '' }}", "https://github.com"); err != nil || !requires {
+		t.Fatalf("self-hosted default requires token = %v, %v; want true", requires, err)
 	}
 }
 

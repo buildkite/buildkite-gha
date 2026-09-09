@@ -218,6 +218,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		return jobResult, fmt.Errorf("analyze workflow reachability: %w", err)
 	}
 	r.reachableSteps = reachability.Steps
+	r.reachableLocks = reachableActionLocks(job, executionJob.Steps, r.reachableSteps)
 	runCtx := ctx
 	cancelJob := func() {}
 	if job.TimeoutMinutes > 0 {
@@ -401,10 +402,10 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	if containerSpec != nil {
 		// Remote children of workspace composites are already present in the
 		// immutable lock graph even when the workspace action itself must remain
-		// lazy. Materialize every remote lock now because bind mounts cannot be
-		// added after the persistent container is created.
+		// lazy. Materialize every reachable remote lock now because bind mounts
+		// cannot be added after the persistent container is created.
 		for _, lock := range job.Actions {
-			if lock.Source != "github" || usesNativeAdapter(lock) {
+			if lock.Source != "github" || usesNativeAdapter(lock) || !r.lockReachable(lock.ID) {
 				continue
 			}
 			action, _, resolveErr := actions.resolve(runCtx, plan.ActionSelector{Lock: lock.ID})
@@ -419,9 +420,9 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 				return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, entrypointErr))
 			}
 		}
-		for _, step := range executionJob.Steps {
+		for stepIndex, step := range executionJob.Steps {
 			selector, ok := stepActionSelector(step)
-			if step.Kind != "uses" || !ok {
+			if step.Kind != "uses" || !ok || !r.stepReachable(stepIndex) {
 				continue
 			}
 			if source, sourceErr := actions.source(selector); sourceErr != nil {
@@ -519,7 +520,7 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 			if step.Kind != "uses" {
 				continue
 			}
-			if stepIndex < len(r.reachableSteps) && !r.reachableSteps[stepIndex] {
+			if !r.stepReachable(stepIndex) {
 				continue
 			}
 			selector, ok := stepActionSelector(step)
@@ -1665,7 +1666,7 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 	for _, lock := range actions.job.Actions {
 		// A native adapter replaces the admitted action's execution entirely,
 		// so its source tree is never mounted or classified for the container.
-		if usesNativeAdapter(lock) {
+		if usesNativeAdapter(lock) || !r.lockReachable(lock.ID) {
 			continue
 		}
 		entry := actions.locks[lock.ID]
@@ -2309,6 +2310,44 @@ func evaluatePlanStepWith(step executionprogram.Step, context expression.Context
 		return nil, nil
 	}
 	return executionprogram.EvaluateBindings(step.Invocation.With, executionprogram.EvaluationContext{Expression: context})
+}
+
+// stepReachable defaults to reachable when a planning pass did not classify
+// the step.
+func (r *jobRun) stepReachable(stepIndex int) bool {
+	return stepIndex >= len(r.reachableSteps) || r.reachableSteps[stepIndex]
+}
+
+func (r *jobRun) lockReachable(lockID string) bool {
+	return r.reachableLocks == nil || r.reachableLocks[lockID]
+}
+
+// reachableActionLocks closes the lock graph over reachable action steps.
+func reachableActionLocks(job plan.Job, steps []executionprogram.Step, reachableSteps []bool) map[string]bool {
+	locks := make(map[string]plan.ActionLock, len(job.Actions))
+	for _, lock := range job.Actions {
+		locks[lock.ID] = lock
+	}
+	reachable := make(map[string]bool, len(job.Actions))
+	var visit func(id string)
+	visit = func(id string) {
+		if reachable[id] {
+			return
+		}
+		reachable[id] = true
+		for _, child := range locks[id].Children {
+			visit(child.Lock)
+		}
+	}
+	for stepIndex, step := range steps {
+		if step.Kind != "uses" || stepIndex < len(reachableSteps) && !reachableSteps[stepIndex] {
+			continue
+		}
+		if selector, ok := stepActionSelector(step); ok {
+			visit(selector.Lock)
+		}
+	}
+	return reachable
 }
 
 func stepActionSelector(step executionprogram.Step) (plan.ActionSelector, bool) {

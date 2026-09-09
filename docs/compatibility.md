@@ -1111,6 +1111,11 @@ rooted at `github.event`.
 runners registered outside GitHub, including managed providers. Buildkite
 agents are in the same class whether they use hosted agents or your own
 infrastructure.
+The compiler also treats this value as constant. An action behind
+`runner.environment == 'github-hosted'` is unreachable, so job setup does not
+download its source, pull its image, mount it, or run its `pre` and `post`
+hooks. A `github.token` reference that is reachable only through that condition
+does not grant token authority.
 After runner setup, step runtime fields and job outputs can also use
 `runner.temp`, which resolves to the canonical temporary directory exposed as
 `RUNNER_TEMP`. Other runner fields and compile-time positions that require

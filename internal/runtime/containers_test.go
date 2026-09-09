@@ -3045,3 +3045,34 @@ func liveDockerOwnedResources(t *testing.T, docker string) []string {
 	slices.Sort(resources)
 	return resources
 }
+
+func TestGitHubHostedGatedRemoteActionIsNotMaterializedForContainerJob(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: gated remote container actions\n")
+	remote := t.TempDir()
+	for _, name := range []string{"hosted", "self-hosted"} {
+		writeFixtureFile(t, remote, name+"/action.yml", "name: "+name+"\nruns:\n  using: node24\n  main: main.js\n")
+		writeFixtureFile(t, remote, name+"/main.js", `require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, "ran=`+name+`\n")
+`)
+	}
+	digest := digestTree(t, remote)
+	hostedID, selfHostedID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []runtimeTestStep{
+		{ID: "hosted", Kind: "uses", Uses: remoteLifecycleUses("hosted"), Action: &plan.ActionSelector{Lock: hostedID}, Condition: "runner.environment == 'github-hosted'"},
+		{ID: "self-hosted", Kind: "uses", Uses: remoteLifecycleUses("self-hosted"), Action: &plan.ActionSelector{Lock: selfHostedID}, Condition: "runner.environment == 'self-hosted'"},
+	})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(hostedID, "hosted", digest, nil), remoteLifecycleLock(selfHostedID, "self-hosted", digest, nil)}
+	job.Outputs = map[string]string{"ran": "${{ steps.self-hosted.outputs.ran }}"}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "self-hosted"), SourceDigest: digest}}
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: requireNode24(t), Actions: materializer}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Outputs["ran"] != "self-hosted" {
+		t.Fatalf("container job result = %#v, error = %v", result, err)
+	}
+	if materializer.calls != 1 {
+		t.Fatalf("remote materialization calls = %d, want 1 for the self-hosted gate only", materializer.calls)
+	}
+}

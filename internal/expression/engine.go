@@ -823,10 +823,11 @@ func (Engine) Truthy(value any) bool {
 const RunnerEnvironment = "self-hosted"
 
 func canonicalAbstractReferences(source map[string]any) map[string]any {
-	result := make(map[string]any, len(source))
+	result := make(map[string]any, len(source)+1)
 	for name, value := range source {
 		result[strings.ToLower(name)] = value
 	}
+	result["runner.environment"] = RunnerEnvironment
 	return result
 }
 

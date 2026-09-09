@@ -1044,6 +1044,8 @@ runs:
 		{name: "step", condition: "        if: false\n"},
 		{name: "job", jobIf: "    if: false\n"},
 		{name: "matrix", condition: "        if: matrix.enabled\n"},
+		{name: "github-hosted step", condition: "        if: runner.environment == 'github-hosted'\n"},
+		{name: "github-hosted job", jobIf: "    if: runner.environment == 'github-hosted'\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			matrix := ""
@@ -1079,6 +1081,12 @@ jobs:
 `)
 	if err == nil || !strings.Contains(err.Error(), "no effective permissions") {
 		t.Fatalf("runtime-dependent action condition error = %v, want conservative token authority", err)
+	}
+	for _, condition := range []string{"runner.environment == 'self-hosted'", "runner.os == 'Linux'"} {
+		_, err := compile("on: push\npermissions: {}\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/token\n        if: " + condition + "\n        with:\n          deploy_key: ${{ secrets.DEPLOY_KEY }}\n")
+		if err == nil || !strings.Contains(err.Error(), "no effective permissions") {
+			t.Fatalf("condition %q error = %v, want retained token authority", condition, err)
+		}
 	}
 }
 
