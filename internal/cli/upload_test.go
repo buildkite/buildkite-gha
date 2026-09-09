@@ -2027,12 +2027,14 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	workflowJobs := "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	workflowSource := "on:\n  pull_request:\n    paths: [\"src/**\"]\n" + workflowJobs
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"ci.yml":          "name: CI\n" + workflowSource,
-		"mismatch.yml":    "name: Original\n" + workflowSource,
-		"ignore.yml":      "name: Ignore docs\non:\n  pull_request:\n    paths-ignore: [\"docs/**\"]\n" + workflowJobs,
-		"plain.yml":       "name: Unfiltered\non: pull_request\n" + workflowJobs,
-		"skip-path.yml":   "name: Skip paths\non:\n  pull_request:\n    branches: [main]\n    types: [opened]\n    paths: [\"src/**\", \"!src/main.go\"]\n" + workflowJobs,
-		"skip-ignore.yml": "name: Skip ignored\non:\n  pull_request:\n    paths-ignore: [\"src/**\"]\n" + workflowJobs,
+		"ci.yml":                "name: CI\n" + workflowSource,
+		"mismatch.yml":          "name: Original\n" + workflowSource,
+		"ignore.yml":            "name: Ignore docs\non:\n  pull_request:\n    paths-ignore: [\"docs/**\"]\n" + workflowJobs,
+		"plain.yml":             "name: Unfiltered\non: pull_request\n" + workflowJobs,
+		"skip-path.yml":         "name: Skip paths\non:\n  pull_request:\n    branches: [main]\n    types: [opened]\n    paths: [\"src/**\", \"!src/main.go\"]\n" + workflowJobs,
+		"skip-ignore.yml":       "name: Skip ignored\non:\n  pull_request:\n    paths-ignore: [\"src/**\"]\n" + workflowJobs,
+		"z-mismatch-action.yml": "name: Original action\n" + workflowSource,
+		"z-mismatch-branch.yml": "name: Original branch\n" + workflowSource,
 	})
 	runGit := func(args ...string) string {
 		t.Helper()
@@ -2059,6 +2061,12 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	head := runGit("rev-parse", "HEAD")
 	if err := os.WriteFile(filepath.Join(repository, ".github", "workflows", "mismatch.yml"), []byte("name: Local mismatch\n"+strings.ReplaceAll(workflowSource, "src/**", "docs/**")), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	for name, filter := range map[string]string{"action": "types: [closed]", "branch": "branches: [other]"} {
+		source := "name: Local mismatch\non:\n  pull_request:\n    paths: [\"src/**\"]\n    " + filter + "\n" + workflowJobs
+		if err := os.WriteFile(filepath.Join(repository, ".github", "workflows", "z-mismatch-"+name+".yml"), []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	webhook, err := json.Marshal(map[string]any{
 		"action": "opened", "number": 42,
@@ -2089,7 +2097,7 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	t.Setenv("BUILDKITE_GITHUB_EVENT", "pull_request")
 	runner := &cliCaptureRunner{webhook: webhook}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", ".github/workflows/ci.yml", ".github/workflows/mismatch.yml", ".github/workflows/ignore.yml", ".github/workflows/plain.yml", ".github/workflows/skip-path.yml", ".github/workflows/skip-ignore.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+	if code := run([]string{"upload", ".github/workflows/ci.yml", ".github/workflows/mismatch.yml", ".github/workflows/ignore.yml", ".github/workflows/plain.yml", ".github/workflows/skip-path.yml", ".github/workflows/skip-ignore.yml", ".github/workflows/z-mismatch-action.yml", ".github/workflows/z-mismatch-branch.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 	}
 	var pipeline struct {
@@ -2118,11 +2126,13 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 6 || pipeline.Steps[0].Group != ":github: workflow · CI" || strings.Contains(pipeline.Steps[0].Condition, "false") || len(pipeline.Steps[0].Steps) != 1 {
+	if len(pipeline.Steps) != 8 || pipeline.Steps[0].Group != ":github: workflow · CI" || strings.Contains(pipeline.Steps[0].Condition, "false") || len(pipeline.Steps[0].Steps) != 1 {
 		t.Fatalf("path-filter pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
-	if failure := pipeline.Steps[2]; failure.Label != ":github: workflow · Local mismatch" || !isGeneratedFailureCommand(failure.Command) || failure.Group != "" || len(failure.Steps) != 0 || failure.Skip != "" {
-		t.Fatalf("workflow mismatch failure = %#v\n%s", failure, pipelineCommand.stdin)
+	for _, index := range []int{2, 6, 7} {
+		if failure := pipeline.Steps[index]; failure.Label != ":github: workflow · Local mismatch" || !isGeneratedFailureCommand(failure.Command) || failure.Group != "" || len(failure.Steps) != 0 || failure.Skip != "" {
+			t.Fatalf("workflow mismatch failure = %#v\n%s", failure, pipelineCommand.stdin)
+		}
 	}
 	for i, name := range map[int]string{1: "Ignore docs", 3: "Unfiltered"} {
 		step := pipeline.Steps[i]
@@ -2130,7 +2140,7 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 			t.Fatalf("workflow %s should run: %#v", name, step)
 		}
 	}
-	for _, step := range pipeline.Steps[4:] {
+	for _, step := range pipeline.Steps[4:6] {
 		if step.Skip != "Changed paths do not match this workflow's path filters" || step.Command != "" || step.Group != "" || len(step.Steps) != 0 {
 			t.Fatalf("nonmatching workflow must skip without generated jobs: %#v", step)
 		}

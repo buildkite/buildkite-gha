@@ -239,11 +239,10 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if workflows[i].ReusableOnly {
 			continue
 		}
-		workflowEvent := effectiveEvent
+		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
 		if workflows[i].PathFiltersError != "" {
-			workflowEvent.TriggerSnapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{UnavailableReason: workflows[i].PathFiltersError}
+			triggerErr = &buildkitepipeline.UnsupportedPathFiltersError{Event: effectiveEvent.Event.Event, Reason: workflows[i].PathFiltersError}
 		}
-		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, workflowEvent)
 		switch {
 		case triggerErr != nil:
 			workflows[i].Applicable = true
