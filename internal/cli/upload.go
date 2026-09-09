@@ -777,7 +777,8 @@ func processingReportForExpandedJob(report compatibility.ProcessingReport, insta
 func generatedFailure(report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (*buildkitepipeline.Failure, []transport.Artifact) {
 	report.Diagnostics = append([]compatibility.Diagnostic(nil), report.Diagnostics...)
 	report.Finalize()
-	messages := make([]string, 0, len(report.Diagnostics))
+	workflowPath, _ := processingAnnotationWorkflowPath(report.Workflow, "")
+	messages := []string{"Workflow: " + workflowPath}
 	for _, diagnostic := range report.Diagnostics {
 		message := diagnostic.Message
 		if diagnostic.Code != "" {
@@ -787,11 +788,27 @@ func generatedFailure(report compatibility.ProcessingReport, sourceLinks sourceL
 		if diagnostic.Job != "" {
 			attribution = append(attribution, "job="+diagnostic.Job)
 		}
+		if diagnostic.Instance != "" {
+			attribution = append(attribution, "instance="+diagnostic.Instance)
+		}
+		if diagnostic.Action != "" {
+			attribution = append(attribution, "action="+diagnostic.Action)
+		}
 		if diagnostic.Step != 0 {
 			attribution = append(attribution, fmt.Sprintf("step=%d", diagnostic.Step))
 		}
 		if len(attribution) != 0 {
 			message += " {" + strings.Join(attribution, ", ") + "}"
+		}
+		if diagnostic.Location != nil {
+			location := diagnostic.Location
+			message += "\n  Error source: " + location.Path
+			if location.Line > 0 {
+				message += fmt.Sprintf(":%d", location.Line)
+				if location.Column > 0 {
+					message += fmt.Sprintf(":%d", location.Column)
+				}
+			}
 		}
 		if diagnostic.Detail != "" {
 			message += "\n  detail: " + diagnostic.Detail

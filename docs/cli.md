@@ -230,7 +230,9 @@ earlier stage blocks a later one, the later stage is `not-evaluated`, not
 
 Warnings and errors become job-scoped Buildkite annotations. A failure that
 aborts `validate`, `compile`, or upload attaches to the current job. Generated
-failure steps attach their own diagnostics. If the CLI cannot publish an
+failure steps attach their own diagnostics. Their logs identify the root
+workflow and each diagnostic's source location, job, matrix instance, action,
+and step when available. If the CLI cannot publish an
 annotation, it warns without changing the command result.
 
 Profile validation applies upload's trigger policy before compilation.

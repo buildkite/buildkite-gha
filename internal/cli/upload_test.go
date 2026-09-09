@@ -38,6 +38,46 @@ type failureArtifactPlugin struct {
 
 type failureStepPlugins []map[string]failureArtifactPlugin
 
+func TestGeneratedFailureRetainsWorkflowAndDiagnosticSources(t *testing.T) {
+	report := compatibility.NewProcessingReport(".github/workflows/ci.yml", "hosted")
+	report.Diagnostics = []compatibility.Diagnostic{
+		{Level: "error", Code: "E_ACTION_RESOLUTION", Message: "Local action could not be found",
+			Job: "build.test", Instance: "test-linux", Step: 2, Action: "./.github/actions/check",
+			Location: &compatibility.SourceLocation{Path: ".github/workflows/build.yml", Line: 35, Column: 5}, Detail: "action.yml is missing"},
+		{Level: "error", Code: "E_PROFILE", Message: "Another job was rejected", Job: "publish",
+			Location: &compatibility.SourceLocation{Path: ".github/workflows/publish.yml", Line: 19}},
+		{Level: "error", Code: "E_ENVIRONMENT", Message: "Source unavailable"},
+	}
+	failure, artifacts := generatedFailure(report, sourceLinkContext{})
+	var message, annotation string
+	for _, artifact := range artifacts {
+		switch artifact.Path {
+		case failure.MessagePath:
+			message = string(artifact.Contents)
+		case failure.AnnotationPath:
+			annotation = string(artifact.Contents)
+		}
+	}
+	for _, want := range []string{
+		"Workflow: .github/workflows/ci.yml",
+		"[E_ACTION_RESOLUTION] Local action could not be found {job=build.test, instance=test-linux, action=./.github/actions/check, step=2}\n  Error source: .github/workflows/build.yml:35:5\n  detail: action.yml is missing",
+		"[E_PROFILE] Another job was rejected {job=publish}\n  Error source: .github/workflows/publish.yml:19",
+		"[E_ENVIRONMENT] Source unavailable",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("failure log missing %q: %s", want, message)
+		}
+	}
+	if strings.Count(message, "Error source:") != 2 || strings.Contains(message, ":19:0") {
+		t.Errorf("failure log invents source coordinates: %s", message)
+	}
+	for _, want := range []string{".github/workflows/ci.yml", ".github/workflows/build.yml:35:5", ".github/workflows/publish.yml:19", "./.github/actions/check", "action.yml is missing"} {
+		if !strings.Contains(annotation, want) {
+			t.Errorf("annotation missing %q: %s", want, annotation)
+		}
+	}
+}
+
 func isGeneratedFailureCommand(command string) bool {
 	return command == `cat .buildkite-gha-failure-message.txt
 buildkite-agent annotate --scope=job --style=error < .buildkite-gha-failure-annotation.html
