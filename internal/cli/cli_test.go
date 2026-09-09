@@ -1674,7 +1674,7 @@ func TestProcessingAnnotationIsBoundedAndEscapesHTML(t *testing.T) {
 		Level: "error", Code: "E_TEST", Message: `line one
 <script>*unsafe*</script> "quoted" ` + strings.Repeat("界", processingAnnotationBodyLimit),
 	})
-	style, body := processingAnnotation(report, sourceLinkContext{})
+	style, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	if style != "error" || len(body) > processingAnnotationBodyLimit || !utf8.ValidString(body) {
 		t.Fatalf("style = %q, bytes = %d, valid UTF-8 = %v", style, len(body), utf8.ValidString(body))
 	}
@@ -1694,7 +1694,7 @@ func TestProcessingAnnotationPreservesLongerRepositoryURLs(t *testing.T) {
 		Level: "error", Code: "E_TEST", Message: "Unsupported action. Use a supported version from " + docsURL + ".",
 	}
 
-	body := renderProcessingDiagnostic(diagnostic, sourceLinkContext{})
+	body := renderProcessingDiagnostic(t.Context(), diagnostic, sourceLinkContext{})
 	if !strings.Contains(body, docsURL) || strings.Contains(body, `href="https://github.com/buildkite/buildkite-gha"`) {
 		t.Fatalf("annotation = %q, want intact documentation URL", body)
 	}
@@ -1705,7 +1705,7 @@ func TestProcessingAnnotationOmitsUnknownActionRuntime(t *testing.T) {
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
 		Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Message: "Action runtime behavior was not evaluated.",
 	})
-	style, body := processingAnnotation(report, sourceLinkContext{})
+	style, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	if style != "" || body != "" {
 		t.Fatalf("processingAnnotation() = %q, %q, want no Buildkite annotation", style, body)
 	}
@@ -1714,7 +1714,7 @@ func TestProcessingAnnotationOmitsUnknownActionRuntime(t *testing.T) {
 func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "")
 	probe := compatibility.Diagnostic{Level: "warning", Code: "W_LARGE", Message: "a"}
-	probeRow := renderProcessingDiagnostic(probe, sourceLinkContext{})
+	probeRow := renderProcessingDiagnostic(t.Context(), probe, sourceLinkContext{})
 	prefixBytes := len("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n") +
 		len("<p>") + len(annotationCode(report.Workflow)) + len("</p>\n")
 	messageBytes := processingAnnotationBodyLimit - prefixBytes - len(processingAnnotationNotice)/2 - (len(probeRow) - len(probe.Message))
@@ -1723,7 +1723,7 @@ func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
 		compatibility.Diagnostic{Level: "warning", Code: "W_OMITTED", Message: "omitted diagnostic"},
 	)
 
-	_, body := processingAnnotation(report, sourceLinkContext{})
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	if len(body) > processingAnnotationBodyLimit || !strings.Contains(body, "Additional diagnostics omitted") {
 		t.Fatalf("annotation bytes = %d, notice present = %v", len(body), strings.Contains(body, "Additional diagnostics omitted"))
 	}
@@ -1735,9 +1735,9 @@ func TestProcessingAnnotationDropsDetailBeforeTruncatingMessage(t *testing.T) {
 	}
 	withoutDetail := diagnostic
 	withoutDetail.Detail = ""
-	want := renderProcessingDiagnostic(withoutDetail, sourceLinkContext{})
+	want := renderProcessingDiagnostic(t.Context(), withoutDetail, sourceLinkContext{})
 
-	got := renderProcessingDiagnosticWithin(diagnostic, len(want), sourceLinkContext{})
+	got := renderProcessingDiagnosticWithin(t.Context(), diagnostic, len(want), sourceLinkContext{})
 	if got != want || strings.Contains(got, "<details") {
 		t.Fatalf("bounded diagnostic = %q, want primary message without detail %q", got, want)
 	}
@@ -1753,7 +1753,7 @@ func TestProcessingAnnotationUsesRepositoryRelativeWorkflowPath(t *testing.T) {
 		Location: &compatibility.SourceLocation{Path: workflowPath, Line: 4, Column: 2},
 	})
 
-	_, body := processingAnnotation(report, sourceLinkContext{})
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	wantWorkflow := "<p><code>.github/workflows/test-image-build.yml</code></p>"
 	wantLocation := "<code>.github/workflows/test-image-build.yml:4:2</code>"
 	if !strings.Contains(body, wantWorkflow) || !strings.Contains(body, wantLocation) || strings.Contains(body, repository) {
@@ -1784,7 +1784,7 @@ func TestProcessingAnnotationResolvesPathsFromBelowCheckoutRoot(t *testing.T) {
 	want := `href="https://github.com/owner/repo/blob/` + sha + `/.github/workflows/hello.yml#L100"`
 	for _, checkout := range []string{repository, ""} {
 		t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", checkout)
-		_, body := processingAnnotation(report, sourceLinks)
+		_, body := processingAnnotation(t.Context(), report, sourceLinks)
 		if !strings.Contains(body, want) {
 			t.Fatalf("annotation = %q, want %q", body, want)
 		}
@@ -1813,7 +1813,7 @@ func TestProcessingAnnotationResolvesCompilerLocationsFromCheckoutRoot(t *testin
 	sha := commitDiagnosticSources(t, repository, &report)
 	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: sha}
 
-	_, body := processingAnnotation(report, sourceLinks)
+	_, body := processingAnnotation(t.Context(), report, sourceLinks)
 	want := `<a href="https://github.com/owner/repo/blob/` + sha + `/.github/workflows/build-security.yml#L35"><code>.github/workflows/build-security.yml:35:13</code></a>`
 	if !strings.Contains(body, want) {
 		t.Fatalf("annotation = %q, want %q", body, want)
@@ -1842,8 +1842,8 @@ func TestProcessingDiagnosticsRetainNestedWorkflowSourceRoot(t *testing.T) {
 	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: sha}
 	wantLink := "https://github.com/owner/repo/blob/" + sha + "/nested/.github/workflows/build-security.yml#L35"
 
-	_, annotation := processingAnnotation(report, sourceLinks)
-	_, summary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
+	_, annotation := processingAnnotation(t.Context(), report, sourceLinks)
+	_, summary := processingAnnotationWithin(t.Context(), report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
 	if !strings.Contains(annotation, `href="`+wantLink+`"`) || !strings.Contains(summary, `href="`+wantLink+`"`) {
 		t.Fatalf("nested workflow location was not retained: annotation=%q summary=%q", annotation, summary)
 	}
@@ -1868,7 +1868,7 @@ func TestProcessingAnnotationLinksWorkflowLocationsToSource(t *testing.T) {
 	sha := commitDiagnosticSources(t, repository, &report)
 	sourceLinks := sourceLinkContext{serverURL: "https://github.example.com", repository: "owner/repo", sha: sha}
 
-	_, body := processingAnnotation(report, sourceLinks)
+	_, body := processingAnnotation(t.Context(), report, sourceLinks)
 	for _, want := range []string{
 		`<a href="https://github.example.com/owner/repo/blob/` + sha + `/.github/workflows/hello%20world.yml"><code>.github/workflows/hello world.yml</code></a>`,
 		`<a href="https://github.example.com/owner/repo/blob/` + sha + `/.github/workflows/hello%20world.yml#L100"><code>.github/workflows/hello world.yml:100:3</code></a>`,
@@ -1913,8 +1913,8 @@ func TestProcessingDiagnosticsDoNotLinkPathsOutsideCheckout(t *testing.T) {
 	})
 	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
 
-	_, annotation := processingAnnotation(report, sourceLinks)
-	_, summary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
+	_, annotation := processingAnnotation(t.Context(), report, sourceLinks)
+	_, summary := processingAnnotationWithin(t.Context(), report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
 	if strings.Contains(annotation, "href=") || strings.Contains(summary, "href=") {
 		t.Fatalf("outside path was linked: annotation=%q summary=%q", annotation, summary)
 	}
@@ -1939,8 +1939,8 @@ func TestProcessingDiagnosticsDoNotLinkSymlinksOutsideCheckout(t *testing.T) {
 	})
 	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
 
-	_, annotation := processingAnnotation(report, sourceLinks)
-	_, summary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
+	_, annotation := processingAnnotation(t.Context(), report, sourceLinks)
+	_, summary := processingAnnotationWithin(t.Context(), report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
 	if strings.Contains(annotation, "href=") || strings.Contains(summary, "href=") {
 		t.Fatalf("outside symlink was linked: annotation=%q summary=%q", annotation, summary)
 	}
@@ -1965,7 +1965,7 @@ func TestProcessingDiagnosticsLinkThroughCheckoutRootSymlink(t *testing.T) {
 	sha := commitDiagnosticSources(t, checkout, &report)
 	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: sha}
 
-	_, annotation := processingAnnotation(report, sourceLinks)
+	_, annotation := processingAnnotation(t.Context(), report, sourceLinks)
 	if want := `href="https://github.com/owner/repo/blob/` + sha + `/ci.yml#L1"`; !strings.Contains(annotation, want) {
 		t.Fatalf("checkout symlink location was not linked: annotation=%q want=%q", annotation, want)
 	}
@@ -1977,7 +1977,7 @@ func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
 		Level: "warning", Code: "W_TEST", Message: "ci.yml:4:23: warning message",
 		Location: &compatibility.SourceLocation{Path: "ci.yml", Line: 4, Column: 23},
 	})
-	_, body := processingAnnotation(report, sourceLinkContext{})
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	if count := strings.Count(body, "ci.yml:4:23"); count != 1 {
 		t.Fatalf("annotation location count = %d, want 1: %q", count, body)
 	}
@@ -2001,7 +2001,7 @@ func TestProcessingAnnotationRendersJobPermissionWarningGuidance(t *testing.T) {
 		Code: "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS", Path: report.Workflow, Line: 5, Column: 3, Job: "build",
 		Message: "Job-level permissions are ignored for GITHUB_TOKEN. The top-level workflow permissions apply instead. This job's token has contents: read. Move this job's permissions block to the workflow top level. If you need per-job permissions, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
 	}})
-	_, body := processingAnnotation(report, sourceLinkContext{})
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	want := `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>
 <p><code>.github/workflows/ci.yml</code></p>
 <p><strong>Job-level permissions are ignored for GITHUB_TOKEN.</strong></p>
@@ -2030,7 +2030,7 @@ func TestProcessingAnnotationPresentsActionFailureAsAConciseCard(t *testing.T) {
 		Job:     "test", Instance: "gha-test-a1b2", Action: "actions/setup-java@v4", Step: 2,
 	})
 
-	_, body := processingAnnotation(report, sourceLinkContext{})
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	for _, want := range []string{
 		`<p><strong>Action metadata uses unsupported field &#34;deprecationMessage&#34;</strong></p>`,
 		"<p>Action <code>actions/setup-java@v4</code> · Job <code>test</code> · Step 2</p>",
@@ -2117,7 +2117,7 @@ func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testin
 	if err := compatibility.WriteProcessing(&textOutput, "text", report); err != nil {
 		t.Fatal(err)
 	}
-	_, annotation := processingAnnotation(report, sourceLinkContext{})
+	_, annotation := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	if strings.Count(textOutput.String(), message) != 1 || strings.Count(textOutput.String(), "detail: "+detail) != 1 ||
 		strings.Count(annotation, `Job &#34;test&#34; needs GITHUB_TOKEN, but its workflow path is unsupported.`) != 1 ||
 		strings.Count(annotation, `Move the workflow under .github/workflows.`) != 1 ||

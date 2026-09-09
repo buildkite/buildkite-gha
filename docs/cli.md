@@ -234,8 +234,11 @@ failure steps attach their own diagnostics. Their logs identify the root
 workflow and each diagnostic's source location, job, matrix instance, action,
 and step when available. Failure logs use bold red errors, amber warnings,
 and cyan workflow/source context, with blank lines between diagnostics.
-They share annotations' human-readable explanations; internal diagnostic codes
-remain in structured reports and telemetry rather than generated failure logs.
+Importer logs and generated failure logs share annotations' human-readable
+explanations, source excerpts, and diagnostic details. Internal diagnostic codes
+remain in structured reports and telemetry rather than these logs. Warning-only
+importer output uses an amber `Workflow diagnostics` heading. Untrusted terminal
+control characters are removed without changing the underlying report data.
 If the CLI cannot publish an annotation, it warns without changing the command
 result.
 

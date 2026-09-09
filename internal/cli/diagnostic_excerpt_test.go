@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"html"
 	"os"
 	"path/filepath"
@@ -28,7 +29,7 @@ func TestDiagnosticExcerptsUseCapturedInputOnBothSurfaces(t *testing.T) {
 	if err := os.WriteFile(path, []byte("changed after parsing"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, artifacts := generatedFailure(report, sourceLinkContext{})
+	_, artifacts := generatedFailure(t.Context(), report, sourceLinkContext{})
 	const excerpt = "> 6 |       - uses: ./.github/actions/missing"
 	if !strings.Contains(string(artifacts[0].Contents), excerpt) || !strings.Contains(string(artifacts[1].Contents), "<pre><code>"+html.EscapeString(excerpt)+"</code></pre>") {
 		t.Fatalf("missing original excerpt: %s", artifacts)
@@ -46,8 +47,89 @@ func TestDiagnosticExcerptsUseCapturedInputOnBothSurfaces(t *testing.T) {
 		t.Fatalf("excerpt leaked into report JSON: %s", &encoded)
 	}
 	context := sourceLinkContext{sources: report.Sources}
-	without := renderProcessingDiagnostic(report.Diagnostics[0], sourceLinkContext{})
-	if got := renderProcessingDiagnosticWithin(report.Diagnostics[0], len(without), context); got != without {
+	without := renderProcessingDiagnostic(t.Context(), report.Diagnostics[0], sourceLinkContext{})
+	if got := renderProcessingDiagnosticWithin(t.Context(), report.Diagnostics[0], len(without), context); got != without {
 		t.Fatalf("excerpt displaced primary message: %q", got)
+	}
+}
+
+func TestPluginProcessingUsesSharedDiagnosticLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ci.yml")
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: owner/action@v1\n")
+	parsed, err := compiler.ParseWorkflow(path, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := compatibility.InitialProcessingReport(path, "", false, parsed, nil)
+	report.Diagnostics = []compatibility.Diagnostic{
+		{Level: "warning", Code: "W_TEST", Message: "Runner may not work. Choose a supported runner.", Detail: "warning detail", Job: "test",
+			Location: &compatibility.SourceLocation{Path: path, Line: 6, Column: 9}},
+		{Level: "error", Code: "E_TEST", Message: "Runner cannot be used. Choose ubuntu-latest.", Detail: "error detail", Action: "owner/action@v1"},
+	}
+
+	before, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := writePluginProcessing(t.Context(), &output, report, sourceLinkContext{}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("renderer mutated report JSON:\nbefore %s\nafter  %s", before, after)
+	}
+	got := output.String()
+	for _, want := range []string{"Workflow diagnostics", "Warning: Runner may not work.", "Choose a supported runner.", "warning detail", "Error: Runner cannot be used.", "Choose ubuntu-latest.", "error detail", "action=owner/action@v1", "> 6 |       - uses: owner/action@v1", "Compilation:", "Admission:"} {
+		if strings.Count(got, want) != 1 {
+			t.Errorf("output count for %q = %d, want 1: %q", want, strings.Count(got, want), got)
+		}
+	}
+	if !strings.HasPrefix(got, "^^^ +++\n") || strings.Contains(got, "W_TEST") || strings.Contains(got, "E_TEST") {
+		t.Errorf("plugin output has wrong framing or exposes codes: %q", got)
+	}
+}
+
+func TestPluginProcessingFiltersUnknownRuntimeAndUsesNeutralWarningHeading(t *testing.T) {
+	report := compatibility.NewProcessingReport("ci.yml", "")
+	report.Diagnostics = []compatibility.Diagnostic{
+		{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Message: "hidden"},
+		{Level: "warning", Code: "W_TEST", Message: "Visible warning."},
+	}
+	var output bytes.Buffer
+	if err := writePluginProcessing(t.Context(), &output, report, sourceLinkContext{}); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	if !strings.Contains(got, "Workflow diagnostics") || strings.Contains(got, "failed") || strings.Contains(got, "hidden") || strings.Contains(got, "^^^ +++") || strings.Contains(got, "Compilation:") {
+		t.Fatalf("warning output = %q", got)
+	}
+	report.Diagnostics = report.Diagnostics[:1]
+	output.Reset()
+	if err := writePluginProcessing(t.Context(), &output, report, sourceLinkContext{}); err != nil || output.Len() != 0 {
+		t.Fatalf("filtered-only output = %q, error = %v", output.String(), err)
+	}
+}
+
+func TestProcessingLogSanitizesTerminalControls(t *testing.T) {
+	report := compatibility.NewProcessingReport("ci\x1b]8;;https://evil.example\a.yml", "")
+	report.Diagnostics = []compatibility.Diagnostic{{
+		Level: "error", Message: "bad\x1b[31m message\a\u202e. More context.", Detail: "detail\x1b]8;;https://evil.example\a",
+		Job: "job\x1b[2J", Action: "action\a", Location: &compatibility.SourceLocation{Path: "path\x1b]8;;https://evil.example\a", Line: 1},
+	}}
+	messages, _ := processingLog(t.Context(), report, sourceLinkContext{}, "Workflow diagnostics")
+	got := strings.Join(messages, "\n")
+	for _, sequence := range []string{"\x1b]8", "\x1b[31m", "\x1b[2J", "\a", "\u202e"} {
+		if strings.Contains(got, sequence) {
+			t.Errorf("processing log retained unsafe sequence %q: %q", sequence, got)
+		}
+	}
+	for _, want := range []string{"Error: bad[31m message.", "More context.", "detail]8;;https://evil.example", "job=job[2J", "action=action", "Error source: path]8;;https://evil.example:1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("processing log lost ordinary text %q: %q", want, got)
+		}
 	}
 }

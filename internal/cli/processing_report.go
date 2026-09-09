@@ -91,7 +91,7 @@ func (c sourceLinkContext) link(path string, line int) string {
 	return link
 }
 
-func (c sourceLinkContext) sourceLink(path string, line int) string {
+func (c sourceLinkContext) sourceLink(ctx context.Context, path string, line int) string {
 	source, ok := c.sources[path]
 	if !ok {
 		return ""
@@ -99,7 +99,7 @@ func (c sourceLinkContext) sourceLink(path string, line int) string {
 	if source.LocalPath != "" {
 		link, cached := c.localLinks[source.LocalPath+source.Digest]
 		if !cached {
-			link = c.verifiedLocalLink(source)
+			link = c.verifiedLocalLink(ctx, source)
 			if c.localLinks != nil {
 				c.localLinks[source.LocalPath+source.Digest] = link
 			}
@@ -117,11 +117,11 @@ func (c sourceLinkContext) sourceLink(path string, line int) string {
 	return (sourceLinkContext{serverURL: "https://github.com", repository: source.Repository, sha: source.Commit}).link(source.Path, line)
 }
 
-func (c sourceLinkContext) verifiedLocalLink(source compiler.WorkflowSourceReference) string {
+func (c sourceLinkContext) verifiedLocalLink(parent context.Context, source compiler.WorkflowSourceReference) string {
 	if !git.ValidObjectID(c.sha) || c.serverURL == "" || c.repository == "" || source.Digest == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), processingAnnotationTimeout)
+	ctx, cancel := context.WithTimeout(parent, processingAnnotationTimeout)
 	defer cancel()
 	root := os.Getenv("BUILDKITE_BUILD_CHECKOUT_PATH")
 	if root == "" {
@@ -166,7 +166,7 @@ func (o processingOutput) write(ctx context.Context, report compatibility.Proces
 	}
 	var err error
 	if o.plugin {
-		err = writePluginProcessing(o.reports, report)
+		err = writePluginProcessing(ctx, o.reports, report, o.sourceLinks)
 	} else {
 		err = compatibility.WriteProcessing(o.reports, o.format, report)
 	}
@@ -196,45 +196,18 @@ func (o processingOutput) writeV3(ctx context.Context, report compatibility.Proc
 	return nil
 }
 
-func writePluginProcessing(w io.Writer, report compatibility.ProcessingReport) error {
-	report.Finalize()
-	workflow, _ := processingAnnotationWorkflowPath(report.Workflow, "")
-	failed := processingReportHasErrors(report)
+func writePluginProcessing(ctx context.Context, w io.Writer, report compatibility.ProcessingReport, sourceLinks sourceLinkContext) error {
+	messages, failed := processingLog(ctx, report, sourceLinks, "Workflow diagnostics")
+	if len(messages) == 0 {
+		return nil
+	}
 	if failed {
 		if _, err := fmt.Fprintln(w, "^^^ +++"); err != nil {
 			return err
 		}
 	}
-	for _, level := range []string{"error", "warning"} {
-		for _, diagnostic := range report.Diagnostics {
-			if diagnostic.Level != level {
-				continue
-			}
-			marker := "!"
-			if level == "error" {
-				marker = "x"
-			}
-			metadata := []string{"workflow=" + workflow}
-			if diagnostic.Stage != "" {
-				metadata = append(metadata, "stage="+string(diagnostic.Stage))
-			}
-			if diagnostic.Job != "" {
-				metadata = append(metadata, "job="+diagnostic.Job)
-			}
-			if diagnostic.Action != "" {
-				metadata = append(metadata, "action="+diagnostic.Action)
-			}
-			if diagnostic.Step != 0 {
-				metadata = append(metadata, fmt.Sprintf("step=%d", diagnostic.Step))
-			}
-			location := ""
-			if diagnostic.Location != nil {
-				location = fmt.Sprintf(" (%s:%d:%d)", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)
-			}
-			if _, err := fmt.Fprintf(w, "%s [%s] %s%s {%s}\n", marker, diagnostic.Code, diagnostic.Message, location, strings.Join(metadata, ", ")); err != nil {
-				return err
-			}
-		}
+	if _, err := fmt.Fprintln(w, strings.Join(messages, "\n")+"\x1b[0m"); err != nil {
+		return err
 	}
 	if failed {
 		_, err := fmt.Fprintf(w, "Compilation: %s. Admission: %s.\n", report.Compile.Result, report.Admission.Result)
@@ -243,11 +216,100 @@ func writePluginProcessing(w io.Writer, report compatibility.ProcessingReport) e
 	return nil
 }
 
+func processingLog(ctx context.Context, report compatibility.ProcessingReport, sourceLinks sourceLinkContext, heading string) ([]string, bool) {
+	report.Jobs = append([]compatibility.JobResult(nil), report.Jobs...)
+	report.Actions = append([]compatibility.ActionResult(nil), report.Actions...)
+	report.Diagnostics = append([]compatibility.Diagnostic(nil), report.Diagnostics...)
+	report.Finalize()
+	sourceLinks.sources = report.Sources
+	if sourceLinks.localLinks == nil {
+		sourceLinks.localLinks = make(map[string]string)
+	}
+	workflowPath, _ := processingAnnotationWorkflowPath(report.Workflow, "")
+	messages := []string{
+		"\x1b[1;31m" + heading + "\x1b[0m",
+		"\x1b[1;36mWorkflow: " + terminalText(workflowPath) + "\x1b[0m",
+	}
+	failed := false
+	diagnosticCount := 0
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Code == "W_ACTION_RUNTIME_UNKNOWN" || diagnostic.Level != "warning" && diagnostic.Level != "error" {
+			continue
+		}
+		diagnosticCount++
+		if diagnostic.Level == "error" {
+			failed = true
+		}
+		heading, explanation := annotationDiagnosticPresentation(diagnostic)
+		colour, severity := "\x1b[1;31m", "Error: "
+		if diagnostic.Level == "warning" {
+			colour, severity = "\x1b[1;33m", "Warning: "
+		}
+		message := colour + severity + terminalText(heading) + "\x1b[0m"
+		if len(explanation) != 0 {
+			message += "\n  " + terminalText(strings.Join(explanation, " "))
+		}
+		var attribution []string
+		if diagnostic.Job != "" {
+			attribution = append(attribution, "job="+terminalText(diagnostic.Job))
+		}
+		if diagnostic.Instance != "" {
+			attribution = append(attribution, "instance="+terminalText(diagnostic.Instance))
+		}
+		if diagnostic.Action != "" {
+			attribution = append(attribution, "action="+terminalText(diagnostic.Action))
+		}
+		if diagnostic.Step != 0 {
+			attribution = append(attribution, fmt.Sprintf("step=%d", diagnostic.Step))
+		}
+		if len(attribution) != 0 {
+			message += " {" + strings.Join(attribution, ", ") + "}"
+		}
+		if diagnostic.Location != nil {
+			location := diagnostic.Location
+			message += "\n  \x1b[36mError source: " + terminalText(location.Path)
+			if location.Line > 0 {
+				message += fmt.Sprintf(":%d", location.Line)
+				if location.Column > 0 {
+					message += fmt.Sprintf(":%d", location.Column)
+				}
+			}
+			message += "\x1b[0m"
+			if link := sourceLinks.sourceLink(ctx, location.Path, location.Line); link != "" {
+				message += "\n  " + link + " \x1b]1339;url='" + link + "';content='Open source'\a"
+			}
+		}
+		if excerpt := sourceLinks.excerpt(diagnostic); excerpt != "" {
+			message += "\n\x1b[36m" + terminalText(excerpt) + "\x1b[0m"
+		}
+		if diagnostic.Detail != "" {
+			message += "\n  detail: " + terminalText(diagnostic.Detail)
+		}
+		messages = append(messages, "\n"+message)
+	}
+	if diagnosticCount == 0 {
+		return nil, false
+	}
+	if !failed {
+		messages[0] = "\x1b[1;33m" + heading + "\x1b[0m"
+	}
+	return messages, failed
+}
+
+func terminalText(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || !unicode.Is(unicode.Cc, r) && !unicode.Is(unicode.Cf, r) {
+			return r
+		}
+		return -1
+	}, value)
+}
+
 func (o processingOutput) annotate(parent context.Context, report compatibility.ProcessingReport) {
 	if o.annotationJob == "" {
 		return
 	}
-	style, body := processingAnnotation(report, o.sourceLinks)
+	style, body := processingAnnotation(parent, report, o.sourceLinks)
 	if body == "" {
 		return
 	}
@@ -349,11 +411,11 @@ func skippedWorkflowsAnnotation(event string, allSkipped bool, workflows []skipp
 	return out.String()
 }
 
-func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (style, body string) {
-	return processingAnnotationWithin(report, sourceLinks, processingAnnotationBodyLimit, processingAnnotationNotice, true)
+func processingAnnotation(ctx context.Context, report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (style, body string) {
+	return processingAnnotationWithin(ctx, report, sourceLinks, processingAnnotationBodyLimit, processingAnnotationNotice, true)
 }
 
-func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bodyLimit int, truncationNotice string, includeHeading bool) (style, body string) {
+func processingAnnotationWithin(ctx context.Context, report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bodyLimit int, truncationNotice string, includeHeading bool) (style, body string) {
 	report.Finalize()
 	sourceLinks.sources = report.Sources
 	if sourceLinks.localLinks == nil {
@@ -392,12 +454,12 @@ func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLin
 		sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
 	}
 	out.WriteString("<p>")
-	out.WriteString(annotationSourcePath(report.Workflow, workflowPath, 0, 0, sourceLinks))
+	out.WriteString(annotationSourcePath(ctx, report.Workflow, workflowPath, 0, 0, sourceLinks))
 	out.WriteString("</p>\n")
 	rows := make([]string, len(diagnostics))
 	bodyBytes := out.Len()
 	for i, diagnostic := range diagnostics {
-		rows[i] = renderProcessingDiagnostic(diagnostic, sourceLinks)
+		rows[i] = renderProcessingDiagnostic(ctx, diagnostic, sourceLinks)
 		bodyBytes += len(rows[i])
 	}
 	if bodyBytes <= bodyLimit {
@@ -410,7 +472,7 @@ func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLin
 	remaining := bodyLimit - out.Len() - len(truncationNotice)
 	for i, row := range rows {
 		if len(row) > remaining {
-			if row = renderProcessingDiagnosticWithin(diagnostics[i], remaining, sourceLinks); row != "" {
+			if row = renderProcessingDiagnosticWithin(ctx, diagnostics[i], remaining, sourceLinks); row != "" {
 				out.WriteString(row)
 			}
 			out.WriteString(truncationNotice)
@@ -467,13 +529,13 @@ func processingAnnotationWorkflowPath(path, workflowSourceRoot string) (display 
 	return display, false
 }
 
-func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit int, sourceLinks sourceLinkContext) string {
+func renderProcessingDiagnosticWithin(ctx context.Context, diagnostic compatibility.Diagnostic, limit int, sourceLinks sourceLinkContext) string {
 	detail := diagnostic.Detail
 	message := diagnostic.Message
-	row := renderProcessingDiagnostic(diagnostic, sourceLinks)
+	row := renderProcessingDiagnostic(ctx, diagnostic, sourceLinks)
 	if len(row) > limit {
 		sourceLinks.omitExcerpts = true
-		row = renderProcessingDiagnostic(diagnostic, sourceLinks)
+		row = renderProcessingDiagnostic(ctx, diagnostic, sourceLinks)
 	}
 	for len(row) > limit && detail != "" {
 		end := max(0, len(detail)-(len(row)-limit))
@@ -486,7 +548,7 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 			diagnostic.Detail = detail[:end] + "…"
 		}
 		detail = detail[:end]
-		row = renderProcessingDiagnostic(diagnostic, sourceLinks)
+		row = renderProcessingDiagnostic(ctx, diagnostic, sourceLinks)
 	}
 	for len(row) > limit && message != "" {
 		end := max(0, len(message)-(len(row)-limit))
@@ -495,7 +557,7 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 		}
 		diagnostic.Message = message[:end] + "…"
 		message = message[:end]
-		row = renderProcessingDiagnostic(diagnostic, sourceLinks)
+		row = renderProcessingDiagnostic(ctx, diagnostic, sourceLinks)
 	}
 	if len(row) > limit {
 		return ""
@@ -503,7 +565,7 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 	return row
 }
 
-func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks sourceLinkContext) string {
+func renderProcessingDiagnostic(ctx context.Context, diagnostic compatibility.Diagnostic, sourceLinks sourceLinkContext) string {
 	heading, details := annotationDiagnosticPresentation(diagnostic)
 	var out strings.Builder
 	out.WriteString("<p><strong>")
@@ -518,7 +580,7 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 		if source := sourceLinks.sources[path]; source.Repository == "" {
 			path, _ = processingAnnotationWorkflowPath(path, sourceLinks.workflowSourceRoot)
 		}
-		context = append(context, annotationSourcePath(diagnostic.Location.Path, path, diagnostic.Location.Line, diagnostic.Location.Column, sourceLinks))
+		context = append(context, annotationSourcePath(ctx, diagnostic.Location.Path, path, diagnostic.Location.Line, diagnostic.Location.Column, sourceLinks))
 	}
 	if diagnostic.Job != "" {
 		context = append(context, "Job "+annotationCode(diagnostic.Job))
@@ -556,7 +618,7 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 	return out.String()
 }
 
-func annotationSourcePath(sourcePath, path string, line, column int, sourceLinks sourceLinkContext) string {
+func annotationSourcePath(ctx context.Context, sourcePath, path string, line, column int, sourceLinks sourceLinkContext) string {
 	display := path
 	if line > 0 {
 		display += fmt.Sprintf(":%d", line)
@@ -565,7 +627,7 @@ func annotationSourcePath(sourcePath, path string, line, column int, sourceLinks
 		}
 	}
 	code := annotationCode(display)
-	if link := sourceLinks.sourceLink(sourcePath, line); link != "" {
+	if link := sourceLinks.sourceLink(ctx, sourcePath, line); link != "" {
 		return `<a href="` + html.EscapeString(link) + `">` + code + `</a>`
 	}
 	return code

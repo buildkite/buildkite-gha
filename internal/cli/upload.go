@@ -434,7 +434,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			continue
 		}
 		if processingReportHasErrors(processingReports[i]) {
-			failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks)
+			failed, artifacts := failedGeneratedWorkflow(ctx, input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks)
 			generatedWorkflows = append(generatedWorkflows, failed)
 			failureArtifacts = append(failureArtifacts, artifacts...)
 			continue
@@ -450,7 +450,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 				processingReports[i].AddEnvironmentFailure(varsErr.Error())
 				processingReports[i].Result = "indeterminate"
 				preflight.Bundle = failedPartialBundle(preflight.Bundle)
-				failed, artifacts := failedExpandedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks, preflight.Bundle, false)
+				failed, artifacts := failedExpandedGeneratedWorkflow(ctx, input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks, preflight.Bundle, false)
 				generatedWorkflows = append(generatedWorkflows, failed)
 				failureArtifacts = append(failureArtifacts, artifacts...)
 				jobCount += len(failed.Jobs)
@@ -472,9 +472,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
 			var failure *hostedFailure
 			if errors.As(err, &failure) && failure.Kind == hostedEvaluationFailure {
-				failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks)
+				failed, artifacts := failedGeneratedWorkflow(ctx, input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks)
 				if preflight.JobGraphComplete && len(preflight.Bundle.IR.Jobs) != 0 {
-					failed, artifacts = failedExpandedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks, preflight.Bundle, true)
+					failed, artifacts = failedExpandedGeneratedWorkflow(ctx, input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks, preflight.Bundle, true)
 				}
 				generatedWorkflows = append(generatedWorkflows, failed)
 				failureArtifacts = append(failureArtifacts, artifacts...)
@@ -555,7 +555,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 				uploadArguments.telemetry.addReportDiagnostics(processingReports[i])
 			}
 			if out.plugin {
-				_ = writePluginProcessing(stdout, processingReports[i])
+				_ = writePluginProcessing(ctx, stdout, processingReports[i], out.sourceLinks)
 			} else {
 				_ = compatibility.WriteProcessing(stdout, "text", processingReports[i])
 			}
@@ -682,13 +682,13 @@ func processingReportHasErrors(report compatibility.ProcessingReport) bool {
 	return false
 }
 
-func failedGeneratedWorkflow(input workflowInput, event string, report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (buildkitepipeline.Workflow, []transport.Artifact) {
+func failedGeneratedWorkflow(ctx context.Context, input workflowInput, event string, report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (buildkitepipeline.Workflow, []transport.Artifact) {
 	checkName := input.Name
 	if checkName == "" {
 		checkName = input.CanonicalPath
 	}
 	label := workflowGroupLabel(checkName, input.RunName)
-	failure, artifacts := generatedFailure(report, sourceLinks)
+	failure, artifacts := generatedFailure(ctx, report, sourceLinks)
 	workflow := buildkitepipeline.Workflow{
 		GroupLabel: label,
 		CheckName:  checkName,
@@ -699,7 +699,7 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 	return workflow, artifacts
 }
 
-func failedExpandedGeneratedWorkflow(input workflowInput, event string, report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bundle compiler.Bundle, keepRunnable bool) (buildkitepipeline.Workflow, []transport.Artifact) {
+func failedExpandedGeneratedWorkflow(ctx context.Context, input workflowInput, event string, report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bundle compiler.Bundle, keepRunnable bool) (buildkitepipeline.Workflow, []transport.Artifact) {
 	ir := bundle.IR
 	checkName := ir.Workflow.Name
 	if checkName == "" {
@@ -729,7 +729,7 @@ func failedExpandedGeneratedWorkflow(input workflowInput, event string, report c
 				workflow.Jobs[i] = job
 				continue
 			}
-			failure, generated := generatedFailure(report, sourceLinks)
+			failure, generated := generatedFailure(ctx, report, sourceLinks)
 			workflow.Jobs[i].Failure = failure
 			workflow.Jobs[i].SoftFail = instance.ContinueOnError
 			artifacts = append(artifacts, generated...)
@@ -738,7 +738,7 @@ func failedExpandedGeneratedWorkflow(input workflowInput, event string, report c
 			if !processingReportHasErrors(jobReport) {
 				jobReport = report
 			}
-			failure, generated := generatedFailure(jobReport, sourceLinks)
+			failure, generated := generatedFailure(ctx, jobReport, sourceLinks)
 			workflow.Jobs[i].Failure = failure
 			workflow.Jobs[i].SoftFail = instance.ContinueOnError
 			artifacts = append(artifacts, generated...)
@@ -774,71 +774,13 @@ func processingReportForExpandedJob(report compatibility.ProcessingReport, insta
 	return filtered
 }
 
-func generatedFailure(report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (*buildkitepipeline.Failure, []transport.Artifact) {
-	report.Diagnostics = append([]compatibility.Diagnostic(nil), report.Diagnostics...)
-	report.Finalize()
-	sourceLinks.sources = report.Sources
+func generatedFailure(ctx context.Context, report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (*buildkitepipeline.Failure, []transport.Artifact) {
 	if sourceLinks.localLinks == nil {
 		sourceLinks.localLinks = make(map[string]string)
 	}
-	workflowPath, _ := processingAnnotationWorkflowPath(report.Workflow, "")
-	messages := []string{
-		"\x1b[1;31mWorkflow import failed\x1b[0m",
-		"\x1b[1;36mWorkflow: " + workflowPath + "\x1b[0m",
-	}
-	for _, diagnostic := range report.Diagnostics {
-		heading, explanation := annotationDiagnosticPresentation(diagnostic)
-		colour := "\x1b[1;31m"
-		severity := "Error: "
-		if diagnostic.Level == "warning" {
-			colour = "\x1b[1;33m"
-			severity = "Warning: "
-		}
-		message := colour + severity + heading + "\x1b[0m"
-		if len(explanation) != 0 {
-			message += "\n  " + strings.Join(explanation, " ")
-		}
-		var attribution []string
-		if diagnostic.Job != "" {
-			attribution = append(attribution, "job="+diagnostic.Job)
-		}
-		if diagnostic.Instance != "" {
-			attribution = append(attribution, "instance="+diagnostic.Instance)
-		}
-		if diagnostic.Action != "" {
-			attribution = append(attribution, "action="+diagnostic.Action)
-		}
-		if diagnostic.Step != 0 {
-			attribution = append(attribution, fmt.Sprintf("step=%d", diagnostic.Step))
-		}
-		if len(attribution) != 0 {
-			message += " {" + strings.Join(attribution, ", ") + "}"
-		}
-		if diagnostic.Location != nil {
-			location := diagnostic.Location
-			message += "\n  \x1b[36mError source: " + location.Path
-			if location.Line > 0 {
-				message += fmt.Sprintf(":%d", location.Line)
-				if location.Column > 0 {
-					message += fmt.Sprintf(":%d", location.Column)
-				}
-			}
-			message += "\x1b[0m"
-			if link := sourceLinks.sourceLink(location.Path, location.Line); link != "" {
-				// Keep the URL readable in terminals that ignore Buildkite's OSC.
-				message += "\n  " + link + " \x1b]1339;url='" + link + "';content='Open source'\a"
-			}
-		}
-		if excerpt := sourceLinks.excerpt(diagnostic); excerpt != "" {
-			message += "\n\x1b[36m" + excerpt + "\x1b[0m"
-		}
-		if diagnostic.Detail != "" {
-			message += "\n  detail: " + diagnostic.Detail
-		}
-		messages = append(messages, "\n"+message)
-	}
-	_, annotation := processingAnnotation(report, sourceLinks)
-	_, checkSummary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
+	messages, _ := processingLog(ctx, report, sourceLinks, "Workflow import failed")
+	_, annotation := processingAnnotation(ctx, report, sourceLinks)
+	_, checkSummary := processingAnnotationWithin(ctx, report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
 	messageArtifact := generatedFailureArtifact("messages", ".txt", strings.Join(messages, "\n")+"\x1b[0m\n")
 	annotationArtifact := generatedFailureArtifact("annotations", ".html", annotation)
 	failure := &buildkitepipeline.Failure{
