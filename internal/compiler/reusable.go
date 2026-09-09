@@ -135,11 +135,12 @@ type reusableResolver struct {
 }
 
 // workflowScan is what static discovery learns about a workflow and every
-// reusable workflow it reaches, independent of the event: whether a runtime
-// matrix boundary exists and whether any expression reads the vars context.
+// reusable workflow it reaches: fetched source revisions, runtime matrix
+// boundaries, and whether any expression reads the vars context.
 type workflowScan struct {
 	runtimeMatrixBoundary bool
 	referencesVars        bool
+	remoteSources         map[string]WorkflowSourceReference
 }
 
 func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource) ([]sourcedJob, []Warning, workflowScan, error) {

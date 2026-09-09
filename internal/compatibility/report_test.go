@@ -14,6 +14,24 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
+func TestProcessingReportKeepsSourceReferencesOutOfJSON(t *testing.T) {
+	const display = "owner/shared/.github/workflows/build.yml@v1"
+	want := compiler.WorkflowSourceReference{Repository: "owner/shared", Path: ".github/workflows/build.yml", Commit: strings.Repeat("a", 40)}
+	report := InitialProcessingReport("ci.yml", "hosted", false, compiler.Report{
+		RemoteSources: map[string]compiler.WorkflowSourceReference{display: want},
+	}, fmt.Errorf("invalid workflow"))
+	if report.RemoteSources[display] != want {
+		t.Fatalf("lost remote source reference: %v", report.RemoteSources)
+	}
+	var encoded bytes.Buffer
+	if err := WriteProcessing(&encoded, "json", report); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(encoded.String(), want.Commit) || strings.Contains(encoded.String(), "RemoteSources") {
+		t.Fatalf("source references changed report JSON: %s", encoded.String())
+	}
+}
+
 func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	report := NewProcessingReport("ci.yml", "hosted")
 	definitions := workflowprocessing.StageDefinitions()

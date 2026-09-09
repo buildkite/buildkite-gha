@@ -15,6 +15,7 @@ import (
 type jobGraphExpansionResult struct {
 	instances             []JobInstance
 	candidates            []JobInstance
+	remoteSources         map[string]WorkflowSourceReference
 	runtimeMatrixBoundary bool
 	referencesVars        bool
 	runtimeMatrices       []RuntimeMatrixDescriptor
@@ -69,7 +70,8 @@ func processingJobs(path string, parsed *workflow.Workflow, resolved []sourcedJo
 
 func jobGraphExpansionReport(expanded jobGraphExpansionResult, warnings []Warning) Report {
 	return Report{
-		LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates),
+		RemoteSources: expanded.remoteSources,
+		LogicalJobs:   len(expanded.jobs), Instances: len(expanded.candidates),
 		Jobs: expanded.candidates, RuntimeMatrixBoundary: expanded.runtimeMatrixBoundary, ReferencesVars: expanded.referencesVars,
 		RuntimeMatrices: expanded.runtimeMatrices, ParsedJobs: expanded.jobs, Warnings: append(warnings, expanded.warnings...),
 		NotEvaluatedJobs: expanded.notEvaluatedJobs, NotEvaluatedInstances: expanded.notEvaluatedInstances,
@@ -85,12 +87,13 @@ func expandJobGraph(ctx context.Context, path string, source []byte, parsed *wor
 		for _, job := range parsed.Jobs {
 			notEvaluatedJobs[job.ID] = true
 		}
-		return jobGraphExpansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs, runtimeMatrixBoundary: scan.runtimeMatrixBoundary, referencesVars: scan.referencesVars, warnings: warnings}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
+		return jobGraphExpansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs, runtimeMatrixBoundary: scan.runtimeMatrixBoundary, referencesVars: scan.referencesVars, remoteSources: scan.remoteSources, warnings: warnings}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
 	}
 	expansion := jobGraphExpansion{
 		path: path, context: context, options: options,
 		result: jobGraphExpansionResult{
-			jobs: processingJobs(path, parsed, resolved), runtimeMatrixBoundary: scan.runtimeMatrixBoundary, referencesVars: scan.referencesVars, warnings: warnings,
+			remoteSources: scan.remoteSources,
+			jobs:          processingJobs(path, parsed, resolved), runtimeMatrixBoundary: scan.runtimeMatrixBoundary, referencesVars: scan.referencesVars, warnings: warnings,
 			notEvaluatedJobs: make(map[string]bool), notEvaluatedInstances: make(map[string]bool),
 		},
 		acceptedIndex:  make(map[string]int, len(resolved)),

@@ -21,6 +21,14 @@ const (
 	MaxReusableWorkflowBytes = 1 << 20
 )
 
+// WorkflowSourceReference identifies a fetched public GitHub workflow for
+// diagnostic links, independently of its human-readable requested ref.
+type WorkflowSourceReference struct {
+	Repository string
+	Path       string
+	Commit     string
+}
+
 // RemoteWorkflowSource is immutable provenance for a public reusable workflow.
 // Digest on the containing workflow identifies the selected file; SourceDigest
 // identifies the complete repository tree.
@@ -81,7 +89,17 @@ func localReusableWorkflowSource(workflowPath string) (reusableWorkflowSource, e
 	}, nil
 }
 
-func (resolver *reusableResolver) loadReusableWorkflow(ctx context.Context, parent reusableWorkflowSource, uses string) (reusableWorkflowSource, []byte, error) {
+func (resolver *reusableResolver) loadReusableWorkflow(ctx context.Context, parent reusableWorkflowSource, uses string) (loaded reusableWorkflowSource, source []byte, err error) {
+	defer func() {
+		if err == nil && loaded.remote != nil {
+			if resolver.scan.remoteSources == nil {
+				resolver.scan.remoteSources = make(map[string]WorkflowSourceReference)
+			}
+			resolver.scan.remoteSources[loaded.displayPath] = WorkflowSourceReference{
+				Repository: loaded.identity.repository, Path: loaded.identity.path, Commit: loaded.identity.commit,
+			}
+		}
+	}()
 	if strings.Contains(uses, "${{") {
 		return reusableWorkflowSource{}, nil, &ProcessingFinding{
 			Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",

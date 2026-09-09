@@ -600,6 +600,9 @@ func validatedProcessingReportWithOptions(ctx context.Context, out processingOut
 // applyHostedPreflight folds hosted preflight evidence and any admission
 // grant into the report.
 func applyHostedPreflight(report *compatibility.ProcessingReport, preflight hostedCompilation) {
+	if preflight.Bundle.IR.RemoteSources != nil {
+		report.RemoteSources = preflight.Bundle.IR.RemoteSources
+	}
 	report.ApplyEvidence(preflight.Bundle.Processing)
 	report.ApplyWarnings(report.Workflow, preflight.Bundle.IR.Warnings)
 	if preflight.Admitted {
