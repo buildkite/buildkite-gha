@@ -210,6 +210,28 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 			}
 		}
 	}
+	planned := make(map[string]bool, len(plans))
+	for _, job := range plans {
+		planned[job.Target.StepKey] = true
+	}
+	warnedCacheSubstitution := map[string]bool{}
+	for _, evaluation := range bundle.Processing.Actions {
+		instance, exists := instances[evaluation.Instance]
+		if !exists || !planned[evaluation.Instance] || evaluation.Step > len(instance.Steps) {
+			continue
+		}
+		for _, substitution := range evaluation.CacheSubstitutions {
+			if warnedCacheSubstitution[substitution.ResolvedCommit] {
+				continue
+			}
+			warnedCacheSubstitution[substitution.ResolvedCommit] = true
+			warning := substitutedCacheCommitWarning(instance.Steps[evaluation.Step-1].Span.Start, substitution)
+			warning.Path = instance.SourcePath
+			warning.Job = instance.LogicalJobID
+			warning.Step = evaluation.Step
+			bundle.IR.Warnings = append(bundle.IR.Warnings, warning)
+		}
+	}
 	warnedReusablePermissions := false
 	warnedJobPermissions := false
 	for _, job := range plans {

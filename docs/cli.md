@@ -32,6 +32,9 @@ Jobs with JavaScript actions need `mise`. The runtime checks
 `BUILDKITE_GHA_MISE`, then `PATH`, then downloads a verified managed copy.
 Shell-only, native-adapter, and Docker-only jobs do not need it.
 
+When a managed cache is configured, the runtime installs Node there rather
+than reusing system-wide mise installations.
+
 Managed Node binaries require glibc 2.28 or newer. The Go CLI has no glibc requirement.
 
 ## Validate a workflow

@@ -728,9 +728,13 @@ combined). Its rejection, rate limit (10 requests per job per hour), or
 GitHub outage fails the compile of every workflow that references `vars` with
 the backend's error and any `Retry-After` delay; other workflows still upload.
 A backend without the endpoint, or an organization that has opted out,
-returns 404, which leaves both scopes empty rather than failing the compile.
-Outside a Buildkite job, `compile` has no variable source, so the scopes are
-empty.
+returns 404, which resolves both scopes as empty rather than failing the
+compile. A repository and organization that define no variables resolve the
+same way. Either way every `vars` name evaluates to an empty string, in
+compile-time fields too, so `runs-on: ${{ vars.FAILOVER_RUNNER ||
+'ubuntu-latest' }}` selects `ubuntu-latest`. Outside a Buildkite job,
+`compile` has no variable source: runtime references evaluate to empty
+strings, and compile-time fields that reference `vars` fail to compile.
 
 Each job's plan carries the scopes as `organization_vars`, `repository_vars`,
 and, for jobs that declare an environment, `environment_vars`. The compiler
@@ -1431,7 +1435,7 @@ Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP v
 
 ### Cache action
 
-**🟡 Supported subset.** The exact releases below run their stock cache-v2 clients against the Buildkite Results service. Root, `restore`, and `save` entry points are supported.
+**🟡 Supported subset.** Immutable commits captured from frozen upstream tags and the `main` and `releases/v5` branches are admitted when their root, `restore`, and `save` bundles all speak the cache-v2 protocol the Buildkite Results service implements. The snapshot covers historical development and release commits from v3.4.0 and v4.2.0 onward, including untagged `main` commits. The admitted release commits run their stock cache-v2 clients; these principal releases are named in diagnostics:
 
 | Release | Commit | Node | `@actions/cache` |
 | --- | --- | --- | --- |
@@ -1457,7 +1461,15 @@ Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP v
 
 The v3 releases use managed Node 16 and emit its standard deprecation warning. Node 20 declarations run with managed Node 24. Every admitted bundle selects cache v2 from `ACTIONS_CACHE_SERVICE_V2`, uses `ACTIONS_RESULTS_URL` and a job-scoped runtime token, and preserves the root restore/post-save lifecycle and separate entry points. A non-routable `ACTIONS_CACHE_URL` satisfies the legacy availability gate; cache traffic still uses `ACTIONS_RESULTS_URL`. Their tar with zstd-or-gzip archive versioning is compatible across releases.
 
-v3.4.1 is excluded because [its upstream release warns that it was published with an incorrect SHA](https://github.com/actions/cache/releases/tag/v3.4.1). Releases before v3.4.0 and v4.2.0 bundle cache-v1 clients. Floating tags, prereleases, unknown commits, and future releases require a source and bundled-dependency audit before admission.
+The snapshot admits a commit only when every bundle it runs selects cache v2 and embeds one `@actions/cache` client version of 4.0.0 or later. Commits before v3.4.0 and v4.2.0 bundle cache-v1 clients and are absent. v3.4.1 is snapshotted but excluded because [its upstream release warns that it was published with an incorrect SHA](https://github.com/actions/cache/releases/tag/v3.4.1).
+
+A resolved commit outside the snapshot does not run. `actions/cache` runs upstream JavaScript with a job-scoped cache token, so an unaudited bundle could act on the cache service. Instead, the compiler runs the newest principal release for the requested major version (`v5` or `v5.2.0` runs v5.1.0), or v6.1.0 when the ref names no admitted major, a branch, or a bare commit. The plan records the requested ref and the substitute commit, and compilation emits one `W_CACHE_UNKNOWN_COMMIT_SUBSTITUTED` warning per distinct resolved commit:
+
+```text
+actions/cache@v6 resolved to commit <resolved-commit>, which is not in the frozen actions/cache snapshot admitted to the Buildkite cache-v2 service. The audited v6.1.0 release (55cc8345863c7cc4c66a329aec7e433d2d1c52a9) runs instead. Pin actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 to remove this warning.
+```
+
+The substitute must resolve to its recorded commit, or compilation fails. Substitution keeps floating `v3` through `v6` refs working when upstream publishes a release after the last regeneration, and it also covers pre-cache-v2 releases, withdrawn v3.4.1, and pinned unknown commits. The substitute is a different upstream bundle from the one requested, so pin a listed commit to run an exact release. Maintainers refresh the frozen refs and per-commit profiles with `go generate ./internal/action/integration`.
 
 Hosted runtime proof covers v6.1.0 and a v3.4.0 producer with a v6.1.0
 consumer. [Build 1173](https://buildkite.com/buildkite/buildkite-gha/builds/1173)

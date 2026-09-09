@@ -27,6 +27,8 @@ type fakeActionSource struct {
 	root   string
 	calls  map[string]int
 	commit string
+	// pinned makes every ref, including exact SHAs, resolve to commit.
+	pinned bool
 }
 
 type contextActionSource struct{}
@@ -69,7 +71,7 @@ func (f *fakeActionSource) Fetch(_ context.Context, r source.Reference) (source.
 	f.calls[r.Raw]++
 	d, err := source.DigestTree(filepath.Join(f.root, r.Path))
 	commit := strings.Repeat("a", 40)
-	if f.commit != "" {
+	if f.commit != "" && (f.pinned || len(r.Ref) != 40 || strings.Trim(strings.ToLower(r.Ref), "0123456789abcdef") != "") {
 		commit = f.commit
 	} else if len(r.Ref) == 40 && strings.Trim(strings.ToLower(r.Ref), "0123456789abcdef") == "" {
 		commit = strings.ToLower(r.Ref)
@@ -173,7 +175,9 @@ func (s commitActionSource) Fetch(_ context.Context, r source.Reference) (source
 	if !ok {
 		return source.Resolved{}, source.Materialized{}, fmt.Errorf("no fixture tree for ref %q", r.Ref)
 	}
-	d, err := source.DigestTree(filepath.Join(root, r.Path))
+	// Digest the whole repository tree like the real store so sub-actions of
+	// one repository share a pin.
+	d, err := source.DigestTree(root)
 	return source.Resolved{Reference: r, Commit: commit}, source.Materialized{RepositoryRoot: root, ActionRoot: filepath.Join(root, r.Path), SourceDigest: d}, err
 }
 
@@ -1410,14 +1414,49 @@ func TestCompileActionLocksAllowsOnlyAuditedCacheCommits(t *testing.T) {
 		t.Fatalf("version-ref cache lock = %#v", locks)
 	}
 
+	// Refs that resolve outside the frozen snapshot run the newest audited
+	// release for the requested major, or v6.1.0 when the major has none.
 	resolved := strings.Repeat("a", 40)
-	_, _, _, _, err = compileActionLocks(t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v6"})
-	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), actionintegration.CacheV3Commit) || !strings.Contains(err.Error(), actionintegration.CacheV4Commit) || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
-		t.Fatalf("unsupported actions/cache commit error = %v", err)
+	for _, test := range []struct {
+		uses, requestedRef, substitute string
+	}{
+		{"actions/cache@v6", "v6", actionintegration.CacheCommit},
+		{"actions/cache@v5", "v5", actionintegration.CacheV5Commit},
+		{"actions/cache/restore@v4", "v4", actionintegration.CacheV4Commit},
+		{"actions/cache/save@v3", "v3", actionintegration.CacheV3Commit},
+		{"actions/cache@v2.1.7", "v2.1.7", actionintegration.CacheCommit},
+		{"actions/cache@main", "main", actionintegration.CacheCommit},
+		{"actions/cache@" + strings.Repeat("0", 40), strings.Repeat("0", 40), actionintegration.CacheCommit},
+	} {
+		fake := &fakeActionSource{root: remote, calls: map[string]int{}}
+		_, locks, capabilities, _, err := compileActionLocks(t.Context(), workspace, fake, []string{test.uses})
+		if err != nil {
+			t.Fatalf("%s: %v", test.uses, err)
+		}
+		if len(locks) != 1 || locks[0].RequestedRef != test.requestedRef || locks[0].Commit != test.substitute || !reflect.DeepEqual(capabilities, []string{"network"}) {
+			t.Fatalf("%s substituted lock = %#v", test.uses, locks)
+		}
+		action, _, _ := strings.Cut(test.uses, "@")
+		if fake.calls[action+"@"+test.substitute] != 1 {
+			t.Fatalf("%s did not fetch the substitute release exactly once: %v", test.uses, fake.calls)
+		}
 	}
-	_, _, _, _, err = compileActionLocks(t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v5"})
-	if err == nil || !strings.Contains(err.Error(), "actions/cache@v5 resolved to commit "+resolved) {
-		t.Fatalf("moved actions/cache v5 error = %v", err)
+
+	// v3.4.1 is a snapshotted cache-v2 commit that upstream withdrew.
+	withdrawn := "58c1e461ab4154b5b12d40cb0e84792b845ab8ba"
+	_, locks, _, _, err = compileActionLocks(t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: withdrawn}, []string{"actions/cache@v3.4.1"})
+	if err != nil || len(locks) != 1 || locks[0].Commit != actionintegration.CacheV3Commit || locks[0].RequestedRef != "v3.4.1" {
+		t.Fatalf("withdrawn actions/cache v3.4.1 lock = %#v, err = %v", locks, err)
+	}
+
+	// A substitute that fetches a different commit or fails to fetch is fatal.
+	_, _, _, _, err = compileActionLocks(t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: resolved, pinned: true}, []string{"actions/cache@v6"})
+	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), "substitute v6.1.0 resolved to "+resolved) {
+		t.Fatalf("moved substitute error = %v", err)
+	}
+	_, _, _, _, err = compileActionLocks(t.Context(), workspace, commitActionSource{roots: map[string]string{resolved: remote}}, []string{"actions/cache@" + resolved})
+	if err == nil || !strings.Contains(err.Error(), "fetch substitute v6.1.0 ("+actionintegration.CacheCommit+")") {
+		t.Fatalf("unfetchable substitute error = %v", err)
 	}
 }
 
@@ -1956,6 +1995,84 @@ func TestCompileBundleUnknownUploadArtifactWarningIsDeduplicated(t *testing.T) {
 	bundle = compile(workflow)
 	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_UPLOAD_ARTIFACT_UNKNOWN_COMMIT_FALLBACK" || bundle.IR.Warnings[0].Step != 1 || !strings.Contains(bundle.IR.Warnings[0].Message, unknown) {
 		t.Fatalf("nested unknown upload-artifact fallback warnings = %#v", bundle.IR.Warnings)
+	}
+}
+
+func TestCompileBundleUnknownCacheCommitSubstitutionWarningIsDeduplicated(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "cache.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unknown := strings.Repeat("0", 40)
+	otherUnknown := strings.Repeat("1", 40)
+	roots := map[string]string{}
+	for _, commit := range []string{unknown, otherUnknown, actionintegration.CacheCommit} {
+		root := t.TempDir()
+		for _, path := range []string{"", "restore", "save"} {
+			writeAction(t, root, path, "name: cache\nruns:\n  using: node24\n  main: index.js\n")
+		}
+		roots[commit] = root
+	}
+	compile := func(workflow []byte) Bundle {
+		t.Helper()
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions: true,
+			ActionSource:   commitActionSource{roots: roots},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bundle
+	}
+	workflow := []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n      - uses: actions/cache@" + unknown + "\n        with:\n          path: deps\n          key: deps-${{ matrix.target }}\n      - uses: actions/cache/restore@" + unknown + "\n        with:\n          path: again\n          key: again\n      - uses: actions/cache/save@" + otherUnknown + "\n        with:\n          path: other\n          key: other\n")
+	bundle := compile(workflow)
+	if len(bundle.Plans) != 2 || len(bundle.IR.Warnings) != 2 {
+		t.Fatalf("plans = %d, warnings = %#v, want one warning per distinct commit across matrix and repeated steps", len(bundle.Plans), bundle.IR.Warnings)
+	}
+	warning := bundle.IR.Warnings[0]
+	if warning.Code != "W_CACHE_UNKNOWN_COMMIT_SUBSTITUTED" || warning.Path != "./.github/workflows/cache.yml" || warning.Job != "build" || warning.Step != 1 || warning.Line == 0 ||
+		!strings.Contains(warning.Message, "actions/cache@"+unknown+" resolved to commit "+unknown) || !strings.Contains(warning.Message, "The audited v6.1.0 release ("+actionintegration.CacheCommit+") runs instead") || !strings.Contains(warning.Message, "Pin actions/cache@"+actionintegration.CacheCommit) {
+		t.Fatalf("unknown cache substitution warning = %#v", warning)
+	}
+	if bundle.IR.Warnings[1].Code != "W_CACHE_UNKNOWN_COMMIT_SUBSTITUTED" || bundle.IR.Warnings[1].Step != 3 || !strings.Contains(bundle.IR.Warnings[1].Message, "actions/cache/save@"+otherUnknown) || !strings.Contains(bundle.IR.Warnings[1].Message, "Pin actions/cache/save@"+actionintegration.CacheCommit) {
+		t.Fatalf("second unknown cache substitution warning = %#v", bundle.IR.Warnings[1])
+	}
+	for _, plan := range bundle.Plans {
+		if len(plan.Job.Actions) != 3 {
+			t.Fatalf("plan actions = %#v", plan.Job.Actions)
+		}
+		for _, lock := range plan.Job.Actions {
+			requested := unknown
+			if lock.Path == "save" {
+				requested = otherUnknown
+			}
+			if lock.Repository != "actions/cache" || lock.RequestedRef != requested || lock.Commit != actionintegration.CacheCommit {
+				t.Fatalf("substituted lock = %#v, want requested %s running %s", lock, requested, actionintegration.CacheCommit)
+			}
+		}
+	}
+
+	writeAction(t, workspace, ".github/actions/wrapper", "runs:\n  using: composite\n  steps:\n    - uses: actions/cache@"+unknown+"\n      with:\n        path: deps\n        key: deps\n")
+	workflow = []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n")
+	bundle = compile(workflow)
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_CACHE_UNKNOWN_COMMIT_SUBSTITUTED" || bundle.IR.Warnings[0].Step != 1 || !strings.Contains(bundle.IR.Warnings[0].Message, unknown) {
+		t.Fatalf("nested unknown cache substitution warnings = %#v", bundle.IR.Warnings)
+	}
+
+	// Snapshot commits run as requested without a warning.
+	workflow = []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/cache@" + actionintegration.CacheCommit + "\n        with:\n          path: deps\n          key: deps\n")
+	bundle = compile(workflow)
+	if len(bundle.IR.Warnings) != 0 || len(bundle.Plans) != 1 || len(bundle.Plans[0].Job.Actions) != 1 || bundle.Plans[0].Job.Actions[0].Commit != actionintegration.CacheCommit {
+		t.Fatalf("snapshot cache commit warnings = %#v, actions = %#v", bundle.IR.Warnings, bundle.Plans[0].Job.Actions)
 	}
 }
 
