@@ -3904,7 +3904,7 @@ jobs:
 	}
 }
 
-func TestValidateRetainsDependentCandidateAsNotEvaluatedAfterMatrixFailure(t *testing.T) {
+func TestValidateDefersRuntimeMatrixConsumerAndDependentsToOneContinuation(t *testing.T) {
 	source := []byte(`on: push
 jobs:
   prepare:
@@ -3927,18 +3927,21 @@ jobs:
     steps:
       - run: true
 `)
-	report, err := Validate("failed-prerequisite.yml", source)
-	if err == nil || !strings.Contains(err.Error(), "needs a second pipeline upload after the producing job finishes") {
+	report, err := Validate("deferred-prerequisite.yml", source)
+	if err != nil {
 		t.Fatalf("Validate() error = %v", err)
-	}
-	if strings.Contains(err.Error(), "has no expanded instances") {
-		t.Fatalf("Validate() added cascading graph failure: %v", err)
 	}
 	if len(report.RuntimeMatrices) != 1 || report.RuntimeMatrices[0].Shape != RuntimeMatrixShapeObject || report.RuntimeMatrices[0].ProducerJob != "prepare" || report.RuntimeMatrices[0].ProducerStepKey != "gha-prepare" || report.RuntimeMatrices[0].ProducerOutput != "matrix" {
 		t.Fatalf("runtime matrix descriptors = %#v", report.RuntimeMatrices)
 	}
-	if !report.NotEvaluatedJobs["downstream"] || !report.NotEvaluatedInstances["gha-downstream"] {
+	if len(report.Continuations) != 1 || report.Continuations[0].StepKey != "gha-upstream-matrix" || strings.Join(report.Continuations[0].Jobs, ",") != "upstream,downstream" {
+		t.Fatalf("continuations = %#v", report.Continuations)
+	}
+	if !report.NotEvaluatedJobs["upstream"] || !report.NotEvaluatedJobs["downstream"] || report.NotEvaluatedInstances["gha-downstream"] {
 		t.Fatalf("not-evaluated ledger = jobs %#v, instances %#v", report.NotEvaluatedJobs, report.NotEvaluatedInstances)
+	}
+	if len(report.Jobs) != 1 || report.Jobs[0].Key != "gha-prepare" {
+		t.Fatalf("static instances = %#v", report.Jobs)
 	}
 }
 
@@ -3963,10 +3966,10 @@ jobs:
       - run: echo "${{ matrix.artifact_key }}"
 `)
 	report, err := Validate(".github/workflows/ci-backend.yml", source)
-	if err == nil || !strings.Contains(err.Error(), "needs a second pipeline upload") {
+	if err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	if len(report.RuntimeMatrices) != 1 {
+	if len(report.RuntimeMatrices) != 1 || len(report.Continuations) != 1 || report.Continuations[0].StepKey != "gha-django-matrix" {
 		t.Fatalf("runtime matrix descriptors = %#v", report.RuntimeMatrices)
 	}
 	descriptor := report.RuntimeMatrices[0]
@@ -4002,11 +4005,11 @@ jobs:
 `)
 
 	report, err := Validate(callerPath, readFile(t, callerPath))
-	if err == nil || !strings.Contains(err.Error(), "needs a second pipeline upload") {
+	if err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	if len(report.RuntimeMatrices) != 1 {
-		t.Fatalf("runtime matrix descriptors = %#v", report.RuntimeMatrices)
+	if len(report.RuntimeMatrices) != 1 || len(report.Continuations) != 1 || report.Continuations[0].StepKey != "gha-delegated-generated-matrix" {
+		t.Fatalf("runtime matrix descriptors = %#v, continuations = %#v", report.RuntimeMatrices, report.Continuations)
 	}
 	descriptor := report.RuntimeMatrices[0]
 	if descriptor.Job != "delegated.generated" || descriptor.ProducerJob != "delegated.producer" || descriptor.ProducerStepKey != "gha-delegated-producer" || descriptor.ProducerOutput != "include" || descriptor.SourcePath != "./.github/workflows/reusable.yml" {
@@ -4054,15 +4057,14 @@ jobs:
       - run: echo "${{ matrix.target }}"
 `)
 	report, err := Validate(callerPath, readFile(t, callerPath))
-	if err == nil || !strings.Contains(err.Error(), runtimeMatrixDeferredReason) || strings.Contains(err.Error(), "complete matrix definition") {
+	if err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
 	if len(report.RuntimeMatrices) != 1 || report.RuntimeMatrices[0].Job != "delegated.build" || report.RuntimeMatrices[0].Shape != RuntimeMatrixShapeInclude {
 		t.Fatalf("runtime matrix descriptors = %#v", report.RuntimeMatrices)
 	}
-	var finding *ProcessingFinding
-	if !errors.As(err, &finding) || finding.Code != CodeMatrixInvalid || finding.Message != runtimeMatrixDeferredMessage || finding.Detail != runtimeMatrixDeferredReason || finding.Blocker != "expression" || finding.Job != "delegated.build" || finding.Line != 23 || finding.Column != 18 {
-		t.Fatalf("runtime matrix finding = %#v", finding)
+	if len(report.Continuations) != 1 || report.Continuations[0].Descriptor.Job != "delegated.build" || report.Continuations[0].Descriptor.Source.Start.Line != 23 || report.Continuations[0].Descriptor.Source.Start.Column != 18 {
+		t.Fatalf("continuations = %#v", report.Continuations)
 	}
 }
 
@@ -4131,11 +4133,11 @@ jobs:
 `)
 
 	report, err := Validate(callerPath, readFile(t, callerPath))
-	if err == nil || !strings.Contains(err.Error(), "needs a second pipeline upload") {
+	if err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	if len(report.RuntimeMatrices) != 1 {
-		t.Fatalf("runtime matrix descriptors = %#v", report.RuntimeMatrices)
+	if len(report.RuntimeMatrices) != 1 || len(report.Continuations) != 1 {
+		t.Fatalf("runtime matrix descriptors = %#v, continuations = %#v", report.RuntimeMatrices, report.Continuations)
 	}
 	descriptor := report.RuntimeMatrices[0]
 	if descriptor.Job != "generated" || descriptor.ProducerJob != "producer.build" || descriptor.ProducerStepKey != "gha-producer-build" || descriptor.ProducerOutput != "matrix" {
