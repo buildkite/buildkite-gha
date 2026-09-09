@@ -347,7 +347,7 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Caller-visible aggregate results.
 - Outputs mapped directly from `jobs.<job>.outputs.<name>`.
 - Call-level `if` over caller `github`, `inputs`, direct `needs`, and status functions.
-- Workflow-level concurrency in local and public called workflows. Groups may use the called workflow's static inputs. Each static call-matrix instance gets its own workflow gate.
+- Workflow-level concurrency in local and public called workflows, including behind a call-level `if`. Groups may use the called workflow's static inputs. Each static call-matrix instance gets its own workflow gate. See [Concurrency](#concurrency).
 
 **❌ Unsupported:**
 
@@ -523,7 +523,15 @@ jobs:
       target: ${{ matrix.target }}
 ```
 
-Nested called workflows keep nested gates. Jobs within one called workflow remain parallel except for their declared `needs` and job-level concurrency. Calls with `if` or `needs`, and jobs or nested called workflows that reuse an enclosing workflow group, are unsupported because Buildkite cannot preserve GitHub's admission order for those cases.
+Nested called workflows keep nested gates. Jobs within one called workflow remain parallel except for their declared `needs` and job-level concurrency. Calls with `needs`, and jobs or nested called workflows that reuse an enclosing workflow group, are unsupported because Buildkite cannot preserve GitHub's admission order for those cases.
+
+A call with `if` keeps the called workflow's gate. Buildkite enters the group during compilation, before the runtime evaluates the condition, so exclusion is never weaker than on GitHub:
+
+| Call condition at compile time | Gate | Diagnostic |
+| --- | --- | --- |
+| True, such as `github.event_name == 'pull_request'` on a pull request | Emitted | None |
+| False, such as the same condition on a push | Omitted; the jobs skip without entering the group, as on GitHub | None |
+| Runtime-dependent, such as `vars.DEPLOY == 'true'` | Emitted; a skipped call still waits for the group and holds it until its jobs finish | `W_REUSABLE_WORKFLOW_CONCURRENCY_ENTERED_BEFORE_CALL_CONDITION` |
 
 Buildkite queues every waiting entry. It does not replace GitHub's existing pending entry. The `queue` key is unsupported.
 
