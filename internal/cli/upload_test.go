@@ -38,6 +38,37 @@ type failureArtifactPlugin struct {
 
 type failureStepPlugins []map[string]failureArtifactPlugin
 
+func TestGeneratedFailureLinksFetchedRevisionInsteadOfCallerOrTag(t *testing.T) {
+	const display = "owner/shared/.github/workflows/build's.yml@v2"
+	const commit = "1234567890abcdef1234567890abcdef12345678"
+	const target = "https://github.com/owner/shared/blob/" + commit + "/.github/workflows/build%27s.yml#L35"
+	report := compatibility.NewProcessingReport("ci.yml", "hosted")
+	// Use the same preflight-to-report path as upload, not a renderer-only map.
+	applyHostedPreflight(&report, hostedCompilation{Bundle: compiler.Bundle{IR: compiler.IR{
+		RemoteSources: map[string]compiler.WorkflowSourceReference{display: {
+			Repository: "owner/shared", Path: ".github/workflows/build's.yml", Commit: commit,
+		}},
+	}}})
+	report.Diagnostics = []compatibility.Diagnostic{{Level: "error", Message: "Invalid workflow",
+		Location: &compatibility.SourceLocation{Path: display, Line: 35, Column: 5}}}
+	caller := sourceLinkContext{serverURL: "https://github.example.com", repository: "caller/project", sha: strings.Repeat("b", 40)}
+	_, artifacts := generatedFailure(report, caller)
+	message, annotation := string(artifacts[0].Contents), string(artifacts[1].Contents)
+	if !strings.Contains(message, "\n  "+target+" \x1b]1339;url='"+target+"';content='Open source'\a") {
+		t.Fatalf("log lacks safe hyperlink and plain URL: %q", message)
+	}
+	if !strings.Contains(annotation, `<a href="`+target+`"><code>`+html.EscapeString(display)+`:35:5</code></a>`) {
+		t.Fatalf("annotation lost remote source link: %s", annotation)
+	}
+	for _, invalid := range []string{"", "v2"} {
+		report.RemoteSources[display] = compiler.WorkflowSourceReference{Repository: "owner/shared", Path: ".github/workflows/build's.yml", Commit: invalid}
+		_, artifacts = generatedFailure(report, caller)
+		if strings.Contains(string(artifacts[0].Contents), "\x1b]1339;") || strings.Contains(string(artifacts[1].Contents), "href=") {
+			t.Fatalf("invented source link for revision %q: %s", invalid, artifacts)
+		}
+	}
+}
+
 func TestGeneratedFailureRetainsWorkflowAndDiagnosticSources(t *testing.T) {
 	report := compatibility.NewProcessingReport(".github/workflows/ci.yml", "hosted")
 	report.Diagnostics = []compatibility.Diagnostic{

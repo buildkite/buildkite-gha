@@ -17,6 +17,7 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -53,6 +54,7 @@ type sourceLinkContext struct {
 	repository         string
 	sha                string
 	workflowSourceRoot string
+	remoteSources      map[string]compiler.WorkflowSourceReference
 }
 
 func sourceLinksForEvent(event compiler.Event) sourceLinkContext {
@@ -77,6 +79,16 @@ func (c sourceLinkContext) link(path string, line int) string {
 		link += fmt.Sprintf("#L%d", line)
 	}
 	return link
+}
+
+func (c sourceLinkContext) remoteLink(path string, line int) string {
+	source, ok := c.remoteSources[path]
+	if !ok || !git.ValidObjectID(source.Commit) {
+		return ""
+	}
+	// Public reusable workflows are fetched from GitHub, not the caller's
+	// provider. Never substitute the caller's repository, SHA, or server URL.
+	return (sourceLinkContext{serverURL: "https://github.com", repository: source.Repository, sha: source.Commit}).link(source.Path, line)
 }
 
 func newProcessingOutput(ctx context.Context, command, format string, reports, stderr io.Writer, agent transport.Agent) processingOutput {
@@ -285,6 +297,7 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 
 func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bodyLimit int, truncationNotice string, includeHeading bool) (style, body string) {
 	report.Finalize()
+	sourceLinks.remoteSources = report.RemoteSources
 	style = "warning"
 	diagnostics := make([]compatibility.Diagnostic, 0, len(report.Diagnostics))
 	for _, diagnostic := range report.Diagnostics {
@@ -436,7 +449,10 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 		context = append(context, "Action "+annotationCode(diagnostic.Action))
 	}
 	if diagnostic.Location != nil {
-		path, linkable := processingAnnotationWorkflowPath(diagnostic.Location.Path, sourceLinks.workflowSourceRoot)
+		path, linkable := diagnostic.Location.Path, false
+		if _, remote := sourceLinks.remoteSources[path]; !remote {
+			path, linkable = processingAnnotationWorkflowPath(path, sourceLinks.workflowSourceRoot)
+		}
 		context = append(context, annotationSourcePath(path, diagnostic.Location.Line, diagnostic.Location.Column, linkable, sourceLinks))
 	}
 	if diagnostic.Job != "" {
@@ -479,6 +495,9 @@ func annotationSourcePath(path string, line, column int, linkable bool, sourceLi
 		}
 	}
 	code := annotationCode(display)
+	if link := sourceLinks.remoteLink(path, line); link != "" {
+		return `<a href="` + html.EscapeString(link) + `">` + code + `</a>`
+	}
 	if link := sourceLinks.link(path, line); linkable && link != "" {
 		return `<a href="` + html.EscapeString(link) + `">` + code + `</a>`
 	}

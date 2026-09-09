@@ -239,6 +239,14 @@ remain in structured reports and telemetry rather than generated failure logs.
 If the CLI cannot publish an annotation, it warns without changing the command
 result.
 
+For fetched public reusable workflows, source locations in annotations link
+to the resolved commit and line in the source repository, including nested
+local calls inside that repository. Generated failure logs include the same
+URL and a Buildkite `Open source` hyperlink. If the source could not be fetched,
+the CLI keeps the location without guessing a revision. Local workflow
+annotations retain their existing event-revision links; generated logs do not
+yet link local files.
+
 Profile validation applies upload's trigger policy before compilation.
 `not-applicable` means the workflow does not declare the selected event and
 would become a skipped top-level step. Malformed event data is incompatible. An

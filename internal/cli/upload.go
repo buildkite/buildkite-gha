@@ -777,6 +777,7 @@ func processingReportForExpandedJob(report compatibility.ProcessingReport, insta
 func generatedFailure(report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (*buildkitepipeline.Failure, []transport.Artifact) {
 	report.Diagnostics = append([]compatibility.Diagnostic(nil), report.Diagnostics...)
 	report.Finalize()
+	sourceLinks.remoteSources = report.RemoteSources
 	workflowPath, _ := processingAnnotationWorkflowPath(report.Workflow, "")
 	messages := []string{
 		"\x1b[1;31mWorkflow import failed\x1b[0m",
@@ -820,6 +821,10 @@ func generatedFailure(report compatibility.ProcessingReport, sourceLinks sourceL
 				}
 			}
 			message += "\x1b[0m"
+			if link := sourceLinks.remoteLink(location.Path, location.Line); link != "" {
+				// Keep the URL readable in terminals that ignore Buildkite's OSC.
+				message += "\n  " + link + " \x1b]1339;url='" + link + "';content='Open source'\a"
+			}
 		}
 		if diagnostic.Detail != "" {
 			message += "\n  detail: " + diagnostic.Detail
