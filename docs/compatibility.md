@@ -324,6 +324,10 @@ A verified local nonmatch, including an empty diff or changes all excluded by
 `paths-ignore`, produces an explicit skipped workflow step without executing
 workflow jobs. GitHub's unobservable diff-timeout fallback is not reproduced.
 
+Once the filtered workflow is verified against the PR head, a branch or action
+exclusion retains its non-path condition even if diff history is unavailable.
+Workflow identity failures remain errors regardless of those exclusions.
+
 An unsupported or inexact filter replaces only the affected workflow with a
 failing step. It never broadens when the workflow runs.
 

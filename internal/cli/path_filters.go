@@ -362,7 +362,7 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 		return nil, nil, fmt.Errorf("pull request head SHA does not match the local checkout")
 	}
 	workflowErrors := make(map[string]string)
-	for _, input := range workflows {
+	for i, input := range workflows {
 		if !workflowUsesPathFilters(input, event.Event) {
 			continue
 		}
@@ -373,7 +373,9 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 		headSource, err := gitCommand(root, "cat-file", "blob", headSHA+":"+input.CanonicalPath).Output()
 		if err != nil || !bytes.Equal(headSource, input.Source) {
 			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q does not match the pull request head commit", input.CanonicalPath)
+			continue
 		}
+		workflows[i].PullRequestHeadVerified = true
 	}
 	shallowBytes, err := gitCommand(root, "rev-parse", "--is-shallow-repository").Output()
 	if err != nil || strings.TrimSpace(string(shallowBytes)) != "false" {
@@ -426,7 +428,7 @@ func gitTracksWorkflow(root string, input workflowInput) bool {
 
 func pathEvaluationErrors(workflows []workflowInput, event string, errors map[string]string, reason string) map[string]string {
 	for _, input := range workflows {
-		if workflowUsesPathFilters(input, event) {
+		if workflowUsesPathFilters(input, event) && errors[input.CanonicalPath] == "" {
 			errors[input.CanonicalPath] = reason
 		}
 	}

@@ -2028,6 +2028,8 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	workflowSource := "on:\n  pull_request:\n    paths: [\"src/**\"]\n" + workflowJobs
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"ci.yml":                "name: CI\n" + workflowSource,
+		"excluded-action.yml":   "name: Excluded action\non:\n  pull_request:\n    types: [closed]\n    paths: [\"src/**\"]\n" + workflowJobs,
+		"excluded-branch.yml":   "name: Excluded branch\non:\n  pull_request:\n    branches: [other]\n    paths: [\"src/**\"]\n" + workflowJobs,
 		"mismatch.yml":          "name: Original\n" + workflowSource,
 		"ignore.yml":            "name: Ignore docs\non:\n  pull_request:\n    paths-ignore: [\"docs/**\"]\n" + workflowJobs,
 		"plain.yml":             "name: Unfiltered\non: pull_request\n" + workflowJobs,
@@ -2145,6 +2147,47 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 			t.Fatalf("nonmatching workflow must skip without generated jobs: %#v", step)
 		}
 	}
+	t.Run("shallow history preserves verified non-path exclusions", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(repository, ".git", "shallow"), []byte(base+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runner := &cliCaptureRunner{webhook: webhook}
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"upload", ".github/workflows/ci.yml", ".github/workflows/excluded-action.yml", ".github/workflows/excluded-branch.yml", ".github/workflows/plain.yml", ".github/workflows/z-mismatch-action.yml", ".github/workflows/z-mismatch-branch.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+			t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+		}
+		pipeline.Steps = nil
+		for _, command := range runner.commands {
+			if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation"}) {
+				if err := yaml.Unmarshal(command.stdin, &pipeline); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if len(pipeline.Steps) != 6 {
+			t.Fatalf("shallow pipeline = %#v", pipeline.Steps)
+		}
+		for _, index := range []int{0, 4, 5} {
+			if step := pipeline.Steps[index]; !isGeneratedFailureCommand(step.Command) || step.Group != "" || step.Skip != "" {
+				t.Fatalf("selected unavailable paths and unverified workflows must fail: %#v", step)
+			}
+		}
+		for index, name := range map[int]string{1: "Excluded action", 2: "Excluded branch"} {
+			step := pipeline.Steps[index]
+			if step.Group != ":github: workflow · "+name || len(step.Steps) != 1 || step.Command != "" || step.Skip != "" {
+				t.Fatalf("verified excluded workflow must retain its condition: %#v", step)
+			}
+			if index == 1 && !strings.Contains(step.Condition, `"opened" == "closed"`) || index == 2 && !strings.Contains(step.Condition, `"main" =~ /^other$/`) {
+				t.Fatalf("missing non-path exclusion: %#v", step)
+			}
+		}
+		if step := pipeline.Steps[3]; step.Group != ":github: workflow · Unfiltered" || len(step.Steps) != 1 || strings.Contains(step.Condition, "false") {
+			t.Fatalf("unfiltered workflow must not need history: %#v", step)
+		}
+		if !strings.Contains(stdout.String(), "does not match the pull request head commit") || !strings.Contains(stdout.String(), "non-shallow checkout") {
+			t.Fatalf("must distinguish identity failures from unavailable history: %s", stdout.String())
+		}
+	})
 }
 
 func TestRunUploadEmitsReusableInputFailuresAsActionableFailingSteps(t *testing.T) {

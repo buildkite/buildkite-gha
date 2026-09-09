@@ -239,8 +239,12 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if workflows[i].ReusableOnly {
 			continue
 		}
-		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
+		workflowEvent := effectiveEvent
 		if workflows[i].PathFiltersError != "" {
+			workflowEvent.TriggerSnapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{UnavailableReason: workflows[i].PathFiltersError}
+		}
+		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, workflowEvent)
+		if workflows[i].PathFiltersError != "" && !workflows[i].PullRequestHeadVerified {
 			triggerErr = &buildkitepipeline.UnsupportedPathFiltersError{Event: effectiveEvent.Event.Event, Reason: workflows[i].PathFiltersError}
 		}
 		switch {
@@ -859,6 +863,7 @@ type workflowInput struct {
 	Triggers                                        []workflow.Trigger
 	TriggerCondition, SkipReason, AnnotationReason  string
 	PathFiltersError                                string
+	PullRequestHeadVerified                         bool
 	ReusableOnly, Applicable                        bool
 	// ReferencesVars records whether the event-independent validation found
 	// any vars reference in the workflow or a reusable workflow it calls.
