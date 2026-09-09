@@ -50,6 +50,13 @@ func loadEffectiveEventSource(ctx context.Context, eventPath string, agent trans
 		source, err := buildkiteWebhookEventSource(os.Getenv, webhook)
 		return source, effectiveEventFromWebhook, err
 	case errors.Is(metadataErr, transport.ErrMetadataUnavailable):
+		event, err := buildkiteGitHubEventName(os.Getenv)
+		if err != nil {
+			return nil, "", err
+		}
+		if event == "pull_request_review" || event == "pull_request_review_comment" {
+			return nil, "", fmt.Errorf("%s requires the original buildkite:webhook payload; rebuilds without it are unsupported", event)
+		}
 		source, err := buildkiteEventSource(os.Getenv)
 		return source, effectiveEventFromBuild, err
 	default:
@@ -77,16 +84,17 @@ func newEffectiveEvent(source []byte, origin effectiveEventOrigin) (effectiveEve
 
 func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerConditionExpressions, buildkitepipeline.TriggerEventSnapshot) {
 	expressions := buildkitepipeline.TriggerConditionExpressions{
-		EventPredicate:        "true",
-		Branch:                "null",
-		Tag:                   "null",
-		PullRequestBaseBranch: "null",
-		PullRequestAction:     "null",
-		MergeGroupBaseBranch:  "null",
-		MergeGroupAction:      "null",
-		ReleaseAction:         "null",
-		IssuesAction:          "null",
-		IssueCommentAction:    "null",
+		EventPredicate:          "true",
+		Branch:                  "null",
+		Tag:                     "null",
+		PullRequestBaseBranch:   "null",
+		PullRequestAction:       "null",
+		MergeGroupBaseBranch:    "null",
+		MergeGroupAction:        "null",
+		ReleaseAction:           "null",
+		IssuesAction:            "null",
+		IssueCommentAction:      "null",
+		PullRequestReviewAction: "null",
 	}
 	snapshot := buildkitepipeline.TriggerEventSnapshot{}
 	if branch, ok := strings.CutPrefix(event.Ref, "refs/heads/"); ok {
@@ -108,6 +116,8 @@ func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerCondit
 		snapshot.IssuesAction = &action
 		expressions.IssueCommentAction = triggerConditionLiteral(action)
 		snapshot.IssueCommentAction = &action
+		expressions.PullRequestReviewAction = triggerConditionLiteral(action)
+		snapshot.PullRequestReviewAction = &action
 	}
 	if pullRequest, ok := event.Payload["pull_request"].(map[string]any); ok {
 		if base, ok := pullRequest["base"].(map[string]any); ok {
