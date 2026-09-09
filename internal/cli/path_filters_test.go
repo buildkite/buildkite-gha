@@ -313,8 +313,8 @@ func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 		commit["sha"] = original
 	}
 	pullRequest["base"].(map[string]any)["sha"] = strings.Repeat("a", 40)
-	if _, _, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{input}, ""); err == nil || !strings.Contains(err.Error(), "base commit is unavailable") {
-		t.Fatalf("missing base object: %v", err)
+	if _, workflowErrors, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{input}, ""); err != nil || !strings.Contains(workflowErrors["ci.yml"], "base commit is unavailable") {
+		t.Fatalf("missing base object: %#v, %v", workflowErrors, err)
 	}
 	pullRequest["base"].(map[string]any)["sha"] = base
 	event.SHA = base

@@ -253,8 +253,11 @@ func TestTallyReports(t *testing.T) {
 	}
 	report := compatibility.ProcessingReportV3{
 		Schema: compatibility.ProcessingSchemaV3, Workflow: workflow, Profile: "hosted", Result: "admitted",
-		Validation:  validation,
-		Evaluations: []compatibility.EventEvaluation{{Event: "push", Source: "generated", Report: evaluation}},
+		Validation: validation,
+		Evaluations: []compatibility.EventEvaluation{
+			{Event: "push", Source: "generated", Report: evaluation},
+			{Event: "issue_comment", Source: "generated", Report: validation},
+		},
 	}
 	contents, err := json.Marshal(report)
 	if err != nil {
@@ -292,7 +295,7 @@ func TestTallyReports(t *testing.T) {
 	if tally.Repos != 2 || tally.MeasuredRepos != 1 || tally.CompatibleRepos != 1 || tally.ContextRequiredRepos != 1 || tally.UnparseableReports != 0 {
 		t.Fatalf("repository tally = %#v", tally)
 	}
-	if tally.ByFinding["E_EXAMPLE"] != 1 || tally.ByRepo["E_EXAMPLE"] != 1 || tally.Evaluations["push"] != 1 {
+	if tally.ByFinding["E_EXAMPLE"] != 1 || tally.ByRepo["E_EXAMPLE"] != 1 || tally.Evaluations["push"] != 1 || tally.Evaluations["issue_comment"] != 1 {
 		t.Fatalf("diagnostic tally = %#v", tally)
 	}
 	if tally.WorkflowResults["admitted"] != 1 || tally.WorkflowResults["context-required"] != 1 {

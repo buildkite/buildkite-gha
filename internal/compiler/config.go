@@ -84,6 +84,25 @@ const (
 type VariableSources struct {
 	Organization map[string]string
 	Repository   map[string]string
+	// Resolved reports that a variable source answered for the event
+	// repository, so an empty scope means the repository defines no variable
+	// rather than that no source was consulted. Compile-time fields resolve a
+	// name no scope defines to an empty string only when Resolved is true;
+	// without a source, such as compile outside a Buildkite job, the
+	// reference fails to compile. Runner-evaluated positions never need this
+	// distinction: their vars context is the job plan's scopes.
+	Resolved bool
+}
+
+// CompileTimeVars is the vars context of compile-time fields: repository over
+// organization variables. It is nil when no source resolved the scopes and a
+// non-nil, possibly empty, map when one did.
+func (sources VariableSources) CompileTimeVars() map[string]string {
+	merged := plan.MergeVars(sources.Organization, sources.Repository)
+	if merged == nil && sources.Resolved {
+		merged = map[string]string{}
+	}
+	return merged
 }
 
 // CacheVolume is one Buildkite Hosted cache volume attached to a runner target.

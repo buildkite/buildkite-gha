@@ -139,16 +139,20 @@ func selectWorkflowTrigger(triggers []workflow.Trigger, event effectiveEventSele
 		return workflowTriggerSelection{}, err
 	}
 	annotationReason := buildkitepipeline.TriggerEventSkipReason(triggers, event.Event.Event)
-	if applicable {
+	if annotationReason == "" {
 		annotationReason, err = buildkitepipeline.TriggerFilterMismatchReason(triggers, event.Event.Event, event.TriggerSnapshot)
 		if err != nil {
 			return workflowTriggerSelection{}, err
 		}
 	}
+	skipReason := ""
+	if !applicable {
+		skipReason = annotationReason
+	}
 	return workflowTriggerSelection{
 		Condition:        condition,
 		Applicable:       applicable,
-		SkipReason:       buildkitepipeline.TriggerEventSkipReason(triggers, event.Event.Event),
+		SkipReason:       skipReason,
 		AnnotationReason: annotationReason,
 	}, nil
 }

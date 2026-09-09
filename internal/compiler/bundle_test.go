@@ -1333,7 +1333,80 @@ jobs:
 	}
 }
 
-func TestCompileRejectsGuardedReusableWorkflowConcurrency(t *testing.T) {
+func TestCompileKeepsCalledWorkflowConcurrencyBehindCallCondition(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "build.yml", `on: workflow_call
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "ci.yml", `name: CI
+on: [push, pull_request]
+jobs:
+  python-runtime:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/build.yml
+`)
+	pullRequest := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "buildkite-gha"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha-smoke",
+  "payload": {"pull_request": {"base": {"ref": "main"}}}
+}`)
+	cancellation := Warning{
+		Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: 6, Column: 11, Job: "python-runtime",
+		Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+	}
+	tests := []struct {
+		name, condition, group string
+		event                  []byte
+		warnings               []Warning
+	}{
+		{name: "condition true keeps the gate", event: pullRequest, condition: "true", group: "CI-refs/pull/42/merge", warnings: []Warning{cancellation}},
+		{name: "condition false omits the gate", event: pushEvent(t), condition: "false"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			bundle, err := CompileBundle(caller, readFile(t, caller), test.event, "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bundle.IR.Jobs) != 2 {
+				t.Fatalf("compiled jobs = %#v, want both called jobs", bundle.IR.Jobs)
+			}
+			for _, job := range bundle.IR.Jobs {
+				if len(job.CallGuards) != 1 || job.CallGuards[0].Condition != test.condition {
+					t.Fatalf("job %q call guards = %#v, want condition %q", job.Key, job.CallGuards, test.condition)
+				}
+				switch {
+				case test.group == "" && len(job.ConcurrencyGates) != 0:
+					t.Fatalf("job %q gates = %#v, want none for a call that never runs", job.Key, job.ConcurrencyGates)
+				case test.group != "" && (len(job.ConcurrencyGates) != 1 || job.ConcurrencyGates[0].Group != test.group):
+					t.Fatalf("job %q gates = %#v, want group %q", job.Key, job.ConcurrencyGates, test.group)
+				}
+			}
+			if gated := bytes.Contains(bundle.Pipeline, []byte("Start reusable-workflow concurrency")); gated != (test.group != "") {
+				t.Fatalf("pipeline gate emitted = %t, want %t\n%s", gated, test.group != "", bundle.Pipeline)
+			}
+			if !reflect.DeepEqual(bundle.IR.Warnings, test.warnings) {
+				t.Fatalf("warnings = %#v, want %#v", bundle.IR.Warnings, test.warnings)
+			}
+		})
+	}
+}
+
+func TestCompileOmitsCalledWorkflowConcurrencyGateForLiteralFalseCall(t *testing.T) {
 	repository := t.TempDir()
 	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
 concurrency: deploy
@@ -1348,13 +1421,78 @@ jobs:
     if: false
     uses: ./.github/workflows/reusable.yml
 `)
-	_, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "called-workflow concurrency is unsupported for guarded reusable-workflow calls") {
-		t.Fatalf("CompileBundle() error = %v, want guarded concurrency rejection", err)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Jobs) != 1 || len(bundle.IR.Jobs[0].ConcurrencyGates) != 0 || bundle.IR.Jobs[0].CallGuards[0].Condition != "false" {
+		t.Fatalf("compiled jobs = %#v, want an ungated job that skips at runtime", bundle.IR.Jobs)
+	}
+	if len(bundle.IR.Warnings) != 0 || bytes.Contains(bundle.Pipeline, []byte("concurrency_group:")) {
+		t.Fatalf("warnings = %#v, pipeline:\n%s", bundle.IR.Warnings, bundle.Pipeline)
 	}
 }
 
-func TestCompileRejectsNestedReusableWorkflowConcurrencyUnderGuard(t *testing.T) {
+func TestCompileWarnsWhenRuntimeCallConditionKeepsCalledWorkflowConcurrency(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "deploy.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+concurrency:
+  group: deploy-${{ inputs.target }}
+  cancel-in-progress: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  deploy:
+    if: vars.DEPLOY == 'true'
+    strategy:
+      matrix:
+        target: [production, staging]
+    uses: ./.github/workflows/deploy.yml
+    with:
+      target: ${{ matrix.target }}
+`)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Jobs) != 2 {
+		t.Fatalf("compiled jobs = %#v, want one per matrix target", bundle.IR.Jobs)
+	}
+	for _, job := range bundle.IR.Jobs {
+		target := job.Inputs["target"].(string)
+		if len(job.ConcurrencyGates) != 1 || job.ConcurrencyGates[0].Group != "deploy-"+target {
+			t.Fatalf("job %q gates = %#v, want the called-workflow gate", job.Key, job.ConcurrencyGates)
+		}
+		if len(job.CallGuards) != 1 || job.CallGuards[0].Condition != "(vars.deploy == 'true')" {
+			t.Fatalf("job %q call guards = %#v, want the residual vars condition", job.Key, job.CallGuards)
+		}
+	}
+	want := []Warning{
+		{
+			Code: "W_REUSABLE_WORKFLOW_CONCURRENCY_ENTERED_BEFORE_CALL_CONDITION", Line: 8, Column: 11, Job: "deploy",
+			Message: `The call condition depends on runtime values, so Buildkite enters the concurrency group of reusable workflow "./.github/workflows/deploy.yml" before it knows whether the call runs. When the condition is false, the skipped jobs still wait for the group and hold it until they finish. GitHub never enters the group for a skipped call. Write the condition with github, inputs, or event values only, which resolve during compilation, if the wait matters.`,
+		},
+		{
+			Code: "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED", Line: 8, Column: 11, Job: "deploy",
+			Message: "cancel-in-progress is ignored, so superseded builds keep running. Buildkite handles this as a pipeline setting rather than in the workflow file. Turn on Cancel Intermediate Builds under Settings > Builds. It cancels earlier running builds on the same branch, rather than per concurrency group.",
+		},
+	}
+	if !reflect.DeepEqual(bundle.IR.Warnings, want) {
+		t.Fatalf("warnings = %#v, want one of each per call site", bundle.IR.Warnings)
+	}
+	if count := bytes.Count(bundle.Pipeline, []byte("Start reusable-workflow concurrency")); count != 2 {
+		t.Fatalf("pipeline reusable gates = %d, want one per matrix target\n%s", count, bundle.Pipeline)
+	}
+}
+
+func TestCompileInheritsCallConditionForNestedCalledWorkflowConcurrency(t *testing.T) {
 	repository := t.TempDir()
 	writeWorkflow(t, repository, "middle.yml", `on: workflow_call
 jobs:
@@ -1368,15 +1506,98 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: true}]
 `)
+	tests := []struct {
+		name, condition string
+		gated           bool
+		warnings        int
+	}{
+		{name: "known true", condition: "github.ref == 'refs/heads/main'", gated: true},
+		{name: "known false", condition: "github.ref == 'refs/heads/release'", gated: false},
+		{name: "runtime", condition: "vars.DEPLOY == 'true'", gated: true, warnings: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			caller := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    if: "+test.condition+"\n    uses: ./.github/workflows/middle.yml\n")
+			bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bundle.IR.Jobs) != 1 || (len(bundle.IR.Jobs[0].ConcurrencyGates) != 0) != test.gated {
+				t.Fatalf("compiled jobs = %#v, want gated %t", bundle.IR.Jobs, test.gated)
+			}
+			if len(bundle.IR.Warnings) != test.warnings {
+				t.Fatalf("warnings = %#v, want %d", bundle.IR.Warnings, test.warnings)
+			}
+			if test.warnings == 1 && (bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_CONCURRENCY_ENTERED_BEFORE_CALL_CONDITION" || bundle.IR.Warnings[0].Line != 5 || bundle.IR.Warnings[0].Job != "nested") {
+				t.Fatalf("warning = %#v, want the root call position and the nested call job", bundle.IR.Warnings[0])
+			}
+		})
+	}
+}
+
+func TestCompileKeepsEnclosingGateWhenNestedCallConditionIsFalse(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "inner.yml", `on: workflow_call
+concurrency: inner
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	writeWorkflow(t, repository, "outer.yml", `on: workflow_call
+concurrency: outer
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  inner:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/inner.yml
+`)
 	caller := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
   call:
-    if: github.ref == 'refs/heads/main'
-    uses: ./.github/workflows/middle.yml
+    uses: ./.github/workflows/outer.yml
+`)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Jobs) != 2 {
+		t.Fatalf("compiled jobs = %#v, want both flattened jobs", bundle.IR.Jobs)
+	}
+	for _, job := range bundle.IR.Jobs {
+		if len(job.ConcurrencyGates) != 1 || job.ConcurrencyGates[0].Group != "outer" {
+			t.Fatalf("job %q gates = %#v, want only the enclosing gate", job.Key, job.ConcurrencyGates)
+		}
+	}
+	if count := bytes.Count(bundle.Pipeline, []byte("Start reusable-workflow concurrency")); count != 1 {
+		t.Fatalf("pipeline reusable gates = %d, want the outer gate only\n%s", count, bundle.Pipeline)
+	}
+}
+
+func TestCompileStillRejectsGuardedReusableWorkflowConcurrencyWithPrerequisite(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+concurrency: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  call:
+    if: false
+    needs: prepare
+    uses: ./.github/workflows/reusable.yml
 `)
 	_, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "called-workflow concurrency is unsupported for guarded reusable-workflow calls") {
-		t.Fatalf("CompileBundle() error = %v, want inherited guarded concurrency rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "called-workflow concurrency is unsupported for reusable-workflow calls with prerequisites") {
+		t.Fatalf("CompileBundle() error = %v, want concurrency prerequisite rejection even for a call that never runs", err)
 	}
 }
 

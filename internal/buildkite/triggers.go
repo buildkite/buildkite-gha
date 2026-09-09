@@ -350,6 +350,15 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 				return fmt.Sprintf("Issue comment activity %q does not match this workflow's issue_comment activity filters.", *snapshot.IssueCommentAction), nil
 			}
 		}
+		if (trigger.Paths != nil || trigger.PathsIgnore != nil) && (event == "pull_request" || event == "push" && snapshot.Tag == nil) && snapshot.ChangedPaths.available() {
+			matches, err := pathFiltersMatch(snapshot.ChangedPaths.Paths, trigger.Paths, trigger.PathsIgnore)
+			if err != nil {
+				return "", err
+			}
+			if !matches {
+				return "Changed paths do not match this workflow's path filters", nil
+			}
+		}
 		return "", nil
 	}
 	return "", nil
@@ -483,10 +492,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 				return "", false, fmt.Errorf("push paths: %w", err)
 			}
 			if !matches {
-				return "", false, &UnsupportedPathFiltersError{
-					Event:  t.Event,
-					Reason: "local changed paths do not match, and GitHub's diff-timeout outcome is unavailable",
-				}
+				return "", false, nil
 			}
 		}
 		return strings.Join(parts, " && "), true, nil
@@ -531,6 +537,18 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		parts = append(parts, "("+strings.Join(actions, " || ")+")")
 		if pathFilters && selected {
+			if snapshot.PullRequestAction != nil && !slices.Contains(types, *snapshot.PullRequestAction) {
+				return strings.Join(parts, " && "), true, nil
+			}
+			if snapshot.PullRequestBaseBranch != nil {
+				matches, err := refFilterMatches(*snapshot.PullRequestBaseBranch, t.Branches, t.BranchesIgnore)
+				if err != nil {
+					return "", false, fmt.Errorf("pull_request branches: %w", err)
+				}
+				if !matches {
+					return strings.Join(parts, " && "), true, nil
+				}
+			}
 			if !snapshot.ChangedPaths.available() {
 				return "", false, &UnsupportedPathFiltersError{Event: t.Event, Reason: snapshot.ChangedPaths.UnavailableReason}
 			}
@@ -539,10 +557,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 				return "", false, fmt.Errorf("pull_request paths: %w", err)
 			}
 			if !matches {
-				return "", false, &UnsupportedPathFiltersError{
-					Event:  t.Event,
-					Reason: "local changed paths do not match, and GitHub's diff-timeout outcome is unavailable",
-				}
+				return "", false, nil
 			}
 		}
 		return strings.Join(parts, " && "), true, nil

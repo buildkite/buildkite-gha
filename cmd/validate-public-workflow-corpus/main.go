@@ -38,6 +38,7 @@ var supportedEvents = map[string]bool{
 	"merge_group":       true,
 	"release":           true,
 	"issues":            true,
+	"issue_comment":     true,
 	"workflow_dispatch": true,
 	"schedule":          true,
 }

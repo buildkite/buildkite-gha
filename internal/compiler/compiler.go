@@ -285,7 +285,7 @@ func ValidateEventWithOptionsContext(ctx context.Context, path string, source, e
 		}, errors.Join(parseErr, eventErr, optionsErr)
 	}
 	event.Trust = options.EventTrust
-	context := compileContext(event, plan.MergeVars(options.Vars.Organization, options.Vars.Repository), path, parsed.Name)
+	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	_, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
@@ -354,7 +354,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	}
 	event.Trust = options.EventTrust
 	organizationVars, repositoryVars := cloneMap(options.Vars.Organization), cloneMap(options.Vars.Repository)
-	context := compileContext(event, plan.MergeVars(organizationVars, repositoryVars), path, parsed.Name)
+	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	runName, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
@@ -512,6 +512,15 @@ func workflowCancellationWarning(position workflow.Position) Warning {
 	}
 }
 
+func guardedReusableConcurrencyWarning(position workflow.Position, calleePath string) Warning {
+	return Warning{
+		Code:    "W_REUSABLE_WORKFLOW_CONCURRENCY_ENTERED_BEFORE_CALL_CONDITION",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: fmt.Sprintf("The call condition depends on runtime values, so Buildkite enters the concurrency group of reusable workflow %q before it knows whether the call runs. When the condition is false, the skipped jobs still wait for the group and hold it until they finish. GitHub never enters the group for a skipped call. Write the condition with github, inputs, or event values only, which resolve during compilation, if the wait matters.", calleePath),
+	}
+}
+
 func legacyCheckoutWarning(position workflow.Position, release string, defaultsToFullHistory bool) Warning {
 	generation := "v2"
 	if defaultsToFullHistory {
@@ -548,6 +557,17 @@ func unknownUploadArtifactCommitWarning(position workflow.Position, commit strin
 		Column: position.Column,
 		Message: fmt.Sprintf("actions/upload-artifact resolved to immutable commit %s, which is absent from the frozen per-commit snapshot. The native adapter is using the supported %s contract instead; it still restricts names, paths, archive mode, overwrite, hidden files, sizes, and outputs, and does not run the upstream action JavaScript.",
 			commit, actionintegration.UploadArtifactFallbackContractRelease),
+	}
+}
+
+func substitutedCacheCommitWarning(position workflow.Position, substitution CacheSubstitution) Warning {
+	action, _, _ := strings.Cut(substitution.Reference, "@")
+	return Warning{
+		Code:   "W_CACHE_UNKNOWN_COMMIT_SUBSTITUTED",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("%s resolved to commit %s, which is not in the frozen actions/cache snapshot admitted to the Buildkite cache-v2 service. The audited %s release (%s) runs instead. Pin %s@%s to remove this warning.",
+			substitution.Reference, substitution.ResolvedCommit, substitution.Release, substitution.Commit, action, substitution.Commit),
 	}
 }
 

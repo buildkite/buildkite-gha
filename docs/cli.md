@@ -32,6 +32,9 @@ Jobs with JavaScript actions need `mise`. The runtime checks
 `BUILDKITE_GHA_MISE`, then `PATH`, then downloads a verified managed copy.
 Shell-only, native-adapter, and Docker-only jobs do not need it.
 
+When a managed cache is configured, the runtime installs Node there rather
+than reusing system-wide mise installations.
+
 Managed Node binaries require glibc 2.28 or newer. The Go CLI has no glibc requirement.
 
 ## Validate a workflow
@@ -513,8 +516,9 @@ A top-level workflow that does not declare the event becomes a skipped step with
 no plan artifacts. If none apply, upload succeeds with a skipped-only pipeline.
 
 For an applicable workflow, only the selected event contributes a group
-condition. Supported branch, tag, path, base-branch, and activity filters add
-their constraints. Conditions from different events are never combined.
+condition. Supported branch, tag, base-branch, and activity filters add their
+constraints. A verified path-filter nonmatch becomes a skipped step without
+workflow jobs or plan artifacts. Conditions from different events are never combined.
 
 Unsupported or uncertain filters replace only the affected workflow with a
 failing step. Push and pull-request path filters need a linked webhook and a
