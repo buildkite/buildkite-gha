@@ -256,6 +256,11 @@ Supported `pull_request` activity types are `assigned`, `unassigned`, `labeled`,
 
 GitHub defines seven release activities: `published`, `unpublished`, `created`, `edited`, `deleted`, `prereleased`, and `released`. A bare `on: release` selects all seven, so it cannot map exactly to Buildkite's three delivered activities and is unsupported.
 
+For push and pull-request path filters, once the workflow and checkout are
+verified against the webhook commit, non-path exclusions retain their branch
+or action conditions even if diff history is unavailable. Identity failures
+remain errors regardless of those exclusions.
+
 #### Push path filters
 
 For a linked GitHub branch push, the importer binds the webhook repository,
@@ -323,10 +328,6 @@ pull requests. It does not call GitHub or use Buildkite `if_changed`.
 A verified local nonmatch, including an empty diff or changes all excluded by
 `paths-ignore`, produces an explicit skipped workflow step without executing
 workflow jobs. GitHub's unobservable diff-timeout fallback is not reproduced.
-
-Once the filtered workflow is verified against the PR head, a branch or action
-exclusion retains its non-path condition even if diff history is unavailable.
-Workflow identity failures remain errors regardless of those exclusions.
 
 An unsupported or inexact filter replaces only the affected workflow with a
 failing step. It never broadens when the workflow runs.

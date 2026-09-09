@@ -2190,6 +2190,110 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	})
 }
 
+func TestRunUploadPreservesVerifiedPushExclusionsWithUnavailableHistory(t *testing.T) {
+	requireImporterHost(t)
+	jobs := "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	filtered := "on:\n  push:\n    paths: ['src/**']\n"
+	excluded := filtered + "    branches: [other]\n"
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"ci.yml":       "name: CI\n" + filtered + jobs,
+		"excluded.yml": "name: Excluded\n" + excluded + jobs,
+		"mismatch.yml": "name: Mismatch\n" + filtered + jobs,
+		"plain.yml":    "name: Unfiltered\non: push\n" + jobs,
+	})
+	runGit := func(args ...string) string {
+		t.Helper()
+		output, err := exec.Command("git", append([]string{"-C", repository}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test")
+	runGit("commit", "-qm", "base")
+	base := runGit("rev-parse", "HEAD")
+	runGit("commit", "--allow-empty", "-qm", "head")
+	head := runGit("rev-parse", "HEAD")
+	runGit("remote", "add", "origin", "https://github.com/buildkite/buildkite-gha.git")
+	runGit("update-ref", "refs/remotes/origin/main", head)
+	if err := os.WriteFile(filepath.Join(repository, ".github/workflows/mismatch.yml"), []byte("name: Mismatch\n"+excluded+jobs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_KEY", "push-path-filter-importer")
+	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
+	t.Setenv("BUILDKITE_COMMIT", head)
+	t.Setenv("BUILDKITE_BRANCH", "main")
+	t.Setenv("BUILDKITE_TAG", "")
+	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
+	t.Setenv("BUILDKITE_SOURCE", "webhook")
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "push")
+	for _, history := range []string{"shallow", "missing before"} {
+		t.Run(history, func(t *testing.T) {
+			before := base
+			if history == "shallow" {
+				shallowPath := filepath.Join(repository, ".git/shallow")
+				if err := os.WriteFile(shallowPath, []byte(base+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Remove(shallowPath) })
+			} else {
+				before = strings.Repeat("f", 40)
+			}
+			webhook, err := json.Marshal(map[string]any{
+				"ref": "refs/heads/main", "before": before, "after": head,
+				"created": false, "deleted": false, "forced": false,
+				"commits":    []any{map[string]any{"id": head}},
+				"repository": map[string]any{"full_name": "buildkite/buildkite-gha"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &cliCaptureRunner{webhook: webhook}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"upload", ".github/workflows/ci.yml", ".github/workflows/excluded.yml", ".github/workflows/mismatch.yml", ".github/workflows/plain.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+				t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+			}
+			var pipeline struct {
+				Steps []struct {
+					Group     string `yaml:"group"`
+					Condition string `yaml:"if"`
+					Command   string `yaml:"command"`
+					Skip      string `yaml:"skip"`
+					Steps     []any  `yaml:"steps"`
+				} `yaml:"steps"`
+			}
+			for _, command := range runner.commands {
+				if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation"}) {
+					if err := yaml.Unmarshal(command.stdin, &pipeline); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if len(pipeline.Steps) != 4 {
+				t.Fatalf("push pipeline = %#v", pipeline.Steps)
+			}
+			for _, index := range []int{0, 2} {
+				if step := pipeline.Steps[index]; !isGeneratedFailureCommand(step.Command) || step.Skip != "" || step.Group != "" {
+					t.Fatalf("selected unavailable paths and unverified workflows must fail: %#v", step)
+				}
+			}
+			if step := pipeline.Steps[1]; step.Group != ":github: workflow · Excluded" || len(step.Steps) != 1 || !strings.Contains(step.Condition, `"main" =~ /^other$/`) {
+				t.Fatalf("verified excluded push must retain its branch condition: %#v", step)
+			}
+			if step := pipeline.Steps[3]; step.Group != ":github: workflow · Unfiltered" || len(step.Steps) != 1 {
+				t.Fatalf("unfiltered push must not need history: %#v", step)
+			}
+			if !strings.Contains(stdout.String(), "does not match the pushed commit") {
+				t.Fatalf("history failure must not overwrite workflow identity failure: %s", stdout.String())
+			}
+		})
+	}
+}
+
 func TestRunUploadEmitsReusableInputFailuresAsActionableFailingSteps(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{

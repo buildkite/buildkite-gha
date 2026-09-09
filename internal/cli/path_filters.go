@@ -49,14 +49,14 @@ func populateChangedPaths(snapshot *buildkitepipeline.TriggerEventSnapshot, even
 	}
 	if event.Event == "push" {
 		paths, workflowErrors, err := pushChangedPaths(event, workflows, checkoutPath)
+		for i := range workflows {
+			workflows[i].PathFiltersError = workflowErrors[workflows[i].CanonicalPath]
+		}
 		if err != nil {
 			setPathFiltersError(snapshot, workflows, event.Event, err.Error())
 			return
 		}
 		snapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{Paths: append([]string{}, paths...)}
-		for i := range workflows {
-			workflows[i].PathFiltersError = workflowErrors[workflows[i].CanonicalPath]
-		}
 		return
 	}
 	pullRequestNumber, err := strconv.Atoi(os.Getenv("BUILDKITE_PULL_REQUEST"))
@@ -112,10 +112,6 @@ func pushChangedPaths(event compiler.Event, workflows []workflowInput, checkoutP
 		return nil, nil, fmt.Errorf("locate checked-out git repository: %w", err)
 	}
 	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
-	shallowBytes, err := gitCommand(root, "rev-parse", "--is-shallow-repository").Output()
-	if err != nil || strings.TrimSpace(string(shallowBytes)) != "false" {
-		return nil, nil, fmt.Errorf("push path filters require a complete non-shallow checkout")
-	}
 	remoteURLBytes, err := gitCommand(root, "remote", "get-url", "origin").Output()
 	if err != nil {
 		return nil, nil, fmt.Errorf("push path filters require the local origin repository")
@@ -138,45 +134,8 @@ func pushChangedPaths(event compiler.Event, workflows []workflowInput, checkoutP
 		return nil, nil, fmt.Errorf("push after commit is unavailable in the local checkout")
 	}
 
-	webhookCommits, err := pushWebhookCommits(event.Payload)
-	if err != nil {
-		return nil, nil, err
-	}
-	diffBase := before
-	if created {
-		if forced {
-			return nil, nil, fmt.Errorf("new-branch push cannot also be forced")
-		}
-		diffBase, err = newBranchPushDiffBase(root, after, webhookCommits)
-		if err != nil {
-			return nil, nil, err
-		}
-	} else {
-		if err := gitCommand(root, "cat-file", "-e", before+"^{commit}").Run(); err != nil {
-			return nil, nil, fmt.Errorf("push before commit is unavailable in the local checkout")
-		}
-		isAncestor, err := gitIsAncestor(root, before, after)
-		if err != nil {
-			return nil, nil, fmt.Errorf("verify push force state: %w", err)
-		}
-		if forced == isAncestor {
-			return nil, nil, fmt.Errorf("webhook push forced state does not match local commit history")
-		}
-		commitsBytes, err := gitCommand(root, "rev-list", "--max-count=1001", before+".."+after).Output()
-		if err != nil {
-			return nil, nil, fmt.Errorf("list pushed commits: %w", err)
-		}
-		localCommits := strings.Fields(string(commitsBytes))
-		if len(localCommits) > maxGitHubPushCommits {
-			return nil, nil, fmt.Errorf("push exceeds GitHub's %d-commit path-filter diff bound", maxGitHubPushCommits)
-		}
-		if !sameCommitSet(localCommits, webhookCommits) {
-			return nil, nil, fmt.Errorf("webhook pushed commits do not match local commit history")
-		}
-	}
-
 	workflowErrors := make(map[string]string)
-	for _, input := range workflows {
+	for i, input := range workflows {
 		if !workflowUsesPathFilters(input, event.Event) {
 			continue
 		}
@@ -187,16 +146,58 @@ func pushChangedPaths(event compiler.Event, workflows []workflowInput, checkoutP
 		committedSource, err := gitCommand(root, "cat-file", "blob", after+":"+input.CanonicalPath).Output()
 		if err != nil || !bytes.Equal(committedSource, input.Source) {
 			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q does not match the pushed commit", input.CanonicalPath)
+			continue
+		}
+		workflows[i].PathFiltersIdentityVerified = true
+	}
+	shallowBytes, err := gitCommand(root, "rev-parse", "--is-shallow-repository").Output()
+	if err != nil || strings.TrimSpace(string(shallowBytes)) != "false" {
+		return nil, workflowErrors, fmt.Errorf("push path filters require a complete non-shallow checkout")
+	}
+	webhookCommits, err := pushWebhookCommits(event.Payload)
+	if err != nil {
+		return nil, workflowErrors, err
+	}
+	diffBase := before
+	if created {
+		if forced {
+			return nil, workflowErrors, fmt.Errorf("new-branch push cannot also be forced")
+		}
+		diffBase, err = newBranchPushDiffBase(root, after, webhookCommits)
+		if err != nil {
+			return nil, workflowErrors, err
+		}
+	} else {
+		if err := gitCommand(root, "cat-file", "-e", before+"^{commit}").Run(); err != nil {
+			return nil, workflowErrors, fmt.Errorf("push before commit is unavailable in the local checkout")
+		}
+		isAncestor, err := gitIsAncestor(root, before, after)
+		if err != nil {
+			return nil, workflowErrors, fmt.Errorf("verify push force state: %w", err)
+		}
+		if forced == isAncestor {
+			return nil, workflowErrors, fmt.Errorf("webhook push forced state does not match local commit history")
+		}
+		commitsBytes, err := gitCommand(root, "rev-list", "--max-count=1001", before+".."+after).Output()
+		if err != nil {
+			return nil, workflowErrors, fmt.Errorf("list pushed commits: %w", err)
+		}
+		localCommits := strings.Fields(string(commitsBytes))
+		if len(localCommits) > maxGitHubPushCommits {
+			return nil, workflowErrors, fmt.Errorf("push exceeds GitHub's %d-commit path-filter diff bound", maxGitHubPushCommits)
+		}
+		if !sameCommitSet(localCommits, webhookCommits) {
+			return nil, workflowErrors, fmt.Errorf("webhook pushed commits do not match local commit history")
 		}
 	}
 
 	output, err := boundedCommandOutput(gitCommand(root, "diff", "--name-status", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", diffBase, after), maxGitChangedPathBytes)
 	if err != nil {
-		return nil, nil, fmt.Errorf("list push changed paths: %w", err)
+		return nil, workflowErrors, fmt.Errorf("list push changed paths: %w", err)
 	}
 	paths, err := parseChangedPaths(output)
 	if err != nil {
-		return nil, nil, err
+		return nil, workflowErrors, err
 	}
 	return paths, workflowErrors, nil
 }
@@ -307,7 +308,7 @@ func gitIsAncestor(root, ancestor, descendant string) (bool, error) {
 func setPathFiltersError(snapshot *buildkitepipeline.TriggerEventSnapshot, workflows []workflowInput, event, reason string) {
 	snapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{UnavailableReason: reason}
 	for i := range workflows {
-		if workflowUsesPathFilters(workflows[i], event) {
+		if workflowUsesPathFilters(workflows[i], event) && workflows[i].PathFiltersError == "" {
 			workflows[i].PathFiltersError = reason
 		}
 	}
@@ -375,7 +376,7 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q does not match the pull request head commit", input.CanonicalPath)
 			continue
 		}
-		workflows[i].PullRequestHeadVerified = true
+		workflows[i].PathFiltersIdentityVerified = true
 	}
 	shallowBytes, err := gitCommand(root, "rev-parse", "--is-shallow-repository").Output()
 	if err != nil || strings.TrimSpace(string(shallowBytes)) != "false" {
