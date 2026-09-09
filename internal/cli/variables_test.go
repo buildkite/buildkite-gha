@@ -295,6 +295,82 @@ func TestRunUploadTreatsAbsentVariableScopesAsEmpty(t *testing.T) {
 	}
 }
 
+// TestRunUploadResolvesVariablesWhenAnotherWorkflowHasRuntimeMatrix proves a
+// workflow whose reusable callee derives its matrix from a job output does not
+// stop the upload before variables are resolved. The plain workflow's
+// `vars.*` runner fallback resolves through the agent and uploads, while the
+// runtime-matrix workflow becomes a failed check with the matrix diagnostic
+// instead of a spurious "unavailable value vars.*" error for the whole upload.
+func TestRunUploadResolvesVariablesWhenAnotherWorkflowHasRuntimeMatrix(t *testing.T) {
+	requireImporterHost(t)
+	variables, variableRequests := agentEmptyVariablesHandler(t, http.StatusOK)
+	agent, _ := agentStub(t, "job-secret", http.StatusOK, variables)
+	setAgentResolutionEnvironment(t, agent.URL)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "variables-runtime-matrix-importer")
+	eventPath := pushEventPath(t)
+	workflows := writeUploadWorkflows(t, map[string]string{
+		"build.yml": `on: push
+jobs:
+  lint:
+    runs-on: ${{ vars.CI_FAILOVER_LINUX || 'ubuntu-latest' }}
+    steps:
+      - run: true
+  build:
+    uses: ./.github/workflows/runtime-matrix.yml
+`,
+		"plain.yml": undefinedVariablesWorkflow,
+	})
+	if err := os.WriteFile(filepath.Join(".github", "workflows", "runtime-matrix.yml"), []byte(`on: workflow_call
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - id: matrix
+        run: echo 'matrix=[{"runner":"ubuntu-latest"}]' >> "$GITHUB_OUTPUT"
+  build:
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - run: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
+	var stdout, stderr bytes.Buffer
+	if code := run(append([]string{"upload", "--event-path", eventPath}, workflows...), &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if *variableRequests != 1 {
+		t.Fatalf("variables requests = %d, want 1", *variableRequests)
+	}
+	output := stdout.String() + stderr.String()
+	if strings.Contains(output, "vars.") {
+		t.Fatalf("upload reported a variables error although variables resolved:\n%s", output)
+	}
+	for _, want := range []string{"[E_MATRIX_INVALID]", "runtime-matrix.yml", "Uploaded 1 jobs from 2 workflows"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("upload output missing %q:\n%s", want, output)
+		}
+	}
+	plans := uploadedPlans(t, runner)
+	if len(plans) != 1 || len(plans["test"]) != 1 {
+		t.Fatalf("uploaded plans by job = %v, want only the plain workflow", plans)
+	}
+	pipeline := string(runner.commands[len(runner.commands)-1].stdin)
+	for _, want := range []string{defaultNobleRunnerImage, `label: ":github: workflow · .github/workflows/build.yml"`, `title: "Workflow could not be run"`} {
+		if !strings.Contains(pipeline, want) {
+			t.Fatalf("pipeline missing %q:\n%s", want, pipeline)
+		}
+	}
+}
+
 // TestRunUploadSurfacesVariableResolutionRateLimit proves a 429 fails every
 // workflow that reads vars with the backend's Retry-After delay, after one
 // request, while a workflow without vars references still uploads.

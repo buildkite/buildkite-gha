@@ -144,9 +144,13 @@ with a failing top-level step. The step:
 - limits the check summary to 65,535 bytes
 - exits with status 1
 
-Other workflows continue compiling. Missing or untracked configured paths are
-omitted before the transaction. Invalid path states, parse, event-input,
-admission, artifact, and upload failures still abort the complete transaction.
+Other workflows continue compiling. A matrix derived from `needs` outputs,
+including one inside a called reusable workflow, fails only its own workflow
+after the event and repository variables resolve, so it never reports `vars`
+values as unavailable or blocks other workflows. Missing or untracked
+configured paths are omitted before the transaction. Invalid path states,
+parse, event-input, admission, artifact, and upload failures still abort the
+complete transaction.
 Upload never publishes a partial pipeline.
 
 If a workflow has both a compiler error and a skip reason, the compiler error
