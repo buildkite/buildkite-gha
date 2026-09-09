@@ -17,7 +17,7 @@ func TestUnsupportedActionVersionsSeparateGuidanceFromAdmissionDetail(t *testing
 		{name: "checkout", reference: "actions/checkout@v3", validate: validateCheckoutCommit, wantDocs: "#checkout-action", wantBound: "native adapter"},
 		{name: "upload artifact", reference: "actions/upload-artifact@v6.0.2", validate: validateUploadArtifactCommit, wantDocs: "#upload-artifact-action", wantBound: "native adapter"},
 		{name: "download artifact", reference: "actions/download-artifact@v9", validate: validateDownloadArtifactCommit, wantDocs: "#download-artifact-action", wantBound: "native adapter"},
-		{name: "cache", reference: "actions/cache@v6.0.0", validate: validateCacheCommit, wantDocs: "#cache-action", wantBound: "cache-v2 service"},
+		{name: "cache", reference: "actions/cache@v6.0.0", validate: validateCacheCommitFor(""), wantDocs: "#cache-action", wantBound: "cache-v2 service"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
