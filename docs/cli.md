@@ -33,7 +33,8 @@ Jobs with JavaScript actions need `mise`. The runtime checks
 Shell-only, native-adapter, and Docker-only jobs do not need it.
 
 When a managed cache is configured, the runtime installs Node there rather
-than reusing system-wide mise installations.
+than reusing system-wide mise installations. The install directory remains
+pinned even when an agent's mise wrapper overrides `MISE_DATA_DIR`.
 
 Managed Node binaries require glibc 2.28 or newer. The Go CLI has no glibc requirement.
 

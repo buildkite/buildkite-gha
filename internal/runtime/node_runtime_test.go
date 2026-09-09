@@ -280,20 +280,33 @@ func TestManagedMiseCacheRefusesSymlinkedRemoval(t *testing.T) {
 }
 
 func TestManagedMiseNodeDoesNotReuseSystemInstallation(t *testing.T) {
-	root := canonicalTempDir(t)
-	dataDir := filepath.Join(root, "cache")
-	systemDir := filepath.Join(root, "system")
-	nodeBytes := fmt.Appendf(nil, "#!/bin/sh\nprintf 'v%s\\n'\n", Node24Version)
-	systemNode := filepath.Join(systemDir, "installs", "node", Node24Version, "bin", "node")
-	writeFixtureFile(t, systemDir, filepath.Join("installs", "node", Node24Version, "bin", "node"), string(nodeBytes))
-	if err := os.Mkdir(dataDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Model mise's automatic system fallback when the user installation is absent.
-	mise := filepath.Join(root, "mise")
-	script := fmt.Sprintf(`#!/bin/sh
+	for _, test := range []struct {
+		name    string
+		wrapper bool
+	}{
+		{name: "system fallback"},
+		{name: "wrapper overrides data directory", wrapper: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := canonicalTempDir(t)
+			dataDir := filepath.Join(root, "cache")
+			systemDir := filepath.Join(root, "system")
+			nodeBytes := fmt.Appendf(nil, "#!/bin/sh\nprintf 'v%s\\n'\n", Node24Version)
+			systemNode := filepath.Join(systemDir, "installs", "node", Node24Version, "bin", "node")
+			writeFixtureFile(t, systemDir, filepath.Join("installs", "node", Node24Version, "bin", "node"), string(nodeBytes))
+			if err := os.Mkdir(dataDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			wrapper := ""
+			if test.wrapper {
+				// Hosted macOS wraps mise with an unconditional data directory override.
+				wrapper = fmt.Sprintf("export MISE_DATA_DIR=%q\n", systemDir)
+			}
+			// Model mise's automatic system fallback when the user installation is absent.
+			mise := filepath.Join(root, "mise")
+			script := fmt.Sprintf(`#!/bin/sh
 set -eu
-installation="$MISE_DATA_DIR/installs/node/%s"
+%sinstallation="${MISE_INSTALLS_DIR:-$MISE_DATA_DIR/installs}/node/%s"
 system="${MISE_SYSTEM_DATA_DIR:-%s}/installs/node/%s"
 if [ ! -d "$installation" ] && [ -d "$system" ]; then
   installation="$system"
@@ -309,20 +322,23 @@ case "$2" in
   where) printf '%%s\n' "$installation" ;;
   *) exit 9 ;;
 esac
-`, Node24Version, systemDir, Node24Version, systemNode)
-	if err := os.WriteFile(mise, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("MISE_SYSTEM_DATA_DIR", systemDir)
-	digest := sha256.Sum256(nodeBytes)
-	runner := newJobRun(Runner{Mise: mise, MiseDataDir: dataDir, nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])}})
-	got, err := runner.discoverNode(t.Context(), 24, "")
-	want := filepath.Join(dataDir, "installs", "node", Node24Version, "bin", "node")
-	if err != nil || got != want {
-		t.Fatalf("discoverNode() = %q, %v; want managed Node %q", got, err, want)
-	}
-	if got, err := os.ReadFile(systemNode); err != nil || !bytes.Equal(got, nodeBytes) {
-		t.Fatalf("system Node changed: %q, %v", got, err)
+`, wrapper, Node24Version, systemDir, Node24Version, systemNode)
+			if err := os.WriteFile(mise, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("MISE_INSTALLS_DIR", filepath.Join(systemDir, "installs"))
+			t.Setenv("MISE_SYSTEM_DATA_DIR", systemDir)
+			digest := sha256.Sum256(nodeBytes)
+			runner := newJobRun(Runner{Mise: mise, MiseDataDir: dataDir, nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])}})
+			got, err := runner.discoverNode(t.Context(), 24, "")
+			want := filepath.Join(dataDir, "installs", "node", Node24Version, "bin", "node")
+			if err != nil || got != want {
+				t.Fatalf("discoverNode() = %q, %v; want managed Node %q", got, err, want)
+			}
+			if got, err := os.ReadFile(systemNode); err != nil || !bytes.Equal(got, nodeBytes) {
+				t.Fatalf("system Node changed: %q, %v", got, err)
+			}
+		})
 	}
 }
 
