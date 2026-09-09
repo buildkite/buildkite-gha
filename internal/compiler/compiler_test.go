@@ -3811,7 +3811,7 @@ jobs:
       - run: true
 `)
 	report, err := Validate("failed-prerequisite.yml", source)
-	if err == nil || !strings.Contains(err.Error(), "runtime matrix source is valid, but continuation upload is disabled") {
+	if err == nil || !strings.Contains(err.Error(), "needs a second pipeline upload after the producing job finishes") {
 		t.Fatalf("Validate() error = %v", err)
 	}
 	if strings.Contains(err.Error(), "has no expanded instances") {
@@ -3846,7 +3846,7 @@ jobs:
       - run: echo "${{ matrix.artifact_key }}"
 `)
 	report, err := Validate(".github/workflows/ci-backend.yml", source)
-	if err == nil || !strings.Contains(err.Error(), "continuation upload is disabled") {
+	if err == nil || !strings.Contains(err.Error(), "needs a second pipeline upload") {
 		t.Fatalf("Validate() error = %v", err)
 	}
 	if len(report.RuntimeMatrices) != 1 {
@@ -3885,7 +3885,7 @@ jobs:
 `)
 
 	report, err := Validate(callerPath, readFile(t, callerPath))
-	if err == nil || !strings.Contains(err.Error(), "continuation upload is disabled") {
+	if err == nil || !strings.Contains(err.Error(), "needs a second pipeline upload") {
 		t.Fatalf("Validate() error = %v", err)
 	}
 	if len(report.RuntimeMatrices) != 1 {
@@ -3894,6 +3894,88 @@ jobs:
 	descriptor := report.RuntimeMatrices[0]
 	if descriptor.Job != "delegated.generated" || descriptor.ProducerJob != "delegated.producer" || descriptor.ProducerStepKey != "gha-delegated-producer" || descriptor.ProducerOutput != "include" || descriptor.SourcePath != "./.github/workflows/reusable.yml" {
 		t.Fatalf("reusable runtime matrix descriptor = %#v", descriptor)
+	}
+}
+
+// TestValidateRecognizesRuntimeMatrixIncludeAfterInputSubstitution covers a
+// called workflow that receives inputs: input substitution clones the matrix
+// and must not turn the absent static include and exclude lists into a
+// reason to reject an otherwise valid needs-derived include matrix.
+func TestValidateRecognizesRuntimeMatrixIncludeAfterInputSubstitution(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      targets: linux
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      targets:
+        type: string
+        required: true
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        run: echo 'matrix=[]' >> "$GITHUB_OUTPUT"
+        env:
+          TARGETS: ${{ inputs.targets }}
+  build:
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - run: echo "${{ matrix.target }}"
+`)
+	report, err := Validate(callerPath, readFile(t, callerPath))
+	if err == nil || !strings.Contains(err.Error(), runtimeMatrixDeferredReason) || strings.Contains(err.Error(), "complete matrix definition") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if len(report.RuntimeMatrices) != 1 || report.RuntimeMatrices[0].Job != "delegated.build" || report.RuntimeMatrices[0].Shape != RuntimeMatrixShapeInclude {
+		t.Fatalf("runtime matrix descriptors = %#v", report.RuntimeMatrices)
+	}
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) || finding.Code != CodeMatrixInvalid || finding.Message != runtimeMatrixDeferredMessage || finding.Detail != runtimeMatrixDeferredReason || finding.Blocker != "expression" || finding.Job != "delegated.build" || finding.Line != 23 || finding.Column != 18 {
+		t.Fatalf("runtime matrix finding = %#v", finding)
+	}
+}
+
+func TestValidateReportsWhyRuntimeMatrixIncludeIsIncomplete(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        run: echo 'matrix=[]' >> "$GITHUB_OUTPUT"
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - run: true
+`)
+	report, err := Validate("mixed.yml", source)
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) || finding.Message != runtimeMatrixDeferredMessage || finding.Detail != "runtime matrix include output must be the complete matrix definition" {
+		t.Fatalf("Validate() error = %v, finding = %#v", err, finding)
+	}
+	if len(report.RuntimeMatrices) != 0 || !report.RuntimeMatrixBoundary {
+		t.Fatalf("report = %#v", report)
 	}
 }
 
@@ -3932,7 +4014,7 @@ jobs:
 `)
 
 	report, err := Validate(callerPath, readFile(t, callerPath))
-	if err == nil || !strings.Contains(err.Error(), "continuation upload is disabled") {
+	if err == nil || !strings.Contains(err.Error(), "needs a second pipeline upload") {
 		t.Fatalf("Validate() error = %v", err)
 	}
 	if len(report.RuntimeMatrices) != 1 {

@@ -158,9 +158,20 @@ func (e *jobGraphExpansion) expandMatrices() {
 			line, column := matrixErrorPosition(job, err)
 			if err == nil {
 				e.result.runtimeMatrices = append(e.result.runtimeMatrices, descriptor)
-				err = errors.New("runtime matrix source is valid, but continuation upload is disabled because Buildkite transport has no authoritative current-attempt fence and durable idempotency boundary")
+				err = errors.New(runtimeMatrixDeferredReason)
 			}
-			err = locatedJobError(sourced.path, job, line, column, err.Error())
+			// The reason quotes only job and output identifiers from the
+			// workflow, never event data, so it can travel in Detail.
+			e.diagnostics = append(e.diagnostics, &ProcessingFinding{
+				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
+				Blocker: "expression",
+				Path:    sourced.path, Line: line, Column: column, Job: job.ID,
+				Message: runtimeMatrixDeferredMessage, Detail: err.Error(),
+				Err: locatedJobError(sourced.path, job, line, column, err.Error()),
+			})
+			e.failedMatrices[id] = true
+			e.failedJobs[id] = true
+			continue
 		} else {
 			matrixContext := e.context
 			matrixContext.Inputs = sourced.inputs.values

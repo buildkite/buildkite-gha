@@ -1289,6 +1289,60 @@ func TestProcessingReportRedactsEventDerivedMatrixKeys(t *testing.T) {
 	}
 }
 
+func TestProcessingReportExplainsNeedsDerivedMatrix(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "runtime-matrix.yml")
+	if err := os.WriteFile(workflowPath, []byte(`on: push
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        run: echo 'matrix=[]' >> "$GITHUB_OUTPUT"
+  build:
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - run: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Diagnostics) != 1 {
+		t.Fatalf("diagnostics = %#v", report.Diagnostics)
+	}
+	diagnostic := report.Diagnostics[0]
+	if diagnostic.Code != compiler.CodeMatrixInvalid || diagnostic.Job != "build" || diagnostic.Location == nil || diagnostic.Location.Line != 15 || diagnostic.Location.Column != 18 {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+	if !strings.Contains(diagnostic.Message, "matrix values come from a job output") || !strings.Contains(diagnostic.Message, "https://github.com/buildkite/buildkite-gha/issues/130") {
+		t.Fatalf("message = %q", diagnostic.Message)
+	}
+	if !strings.Contains(diagnostic.Detail, "needs a second pipeline upload after the producing job finishes") {
+		t.Fatalf("detail = %q", diagnostic.Detail)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"validate", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() text code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "[E_MATRIX_INVALID] matrix values come from a job output") || !strings.Contains(stdout.String(), "\n  detail: the matrix reference is valid") {
+		t.Fatalf("text report = %q", stdout.String())
+	}
+}
+
 func TestProcessingReportRetainsReusableCalleeJobsAfterFailure(t *testing.T) {
 	root := t.TempDir()
 	workflowRoot := filepath.Join(root, ".github", "workflows")
