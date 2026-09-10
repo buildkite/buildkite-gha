@@ -91,7 +91,7 @@ workflow name or fallback path from `GITHUB_WORKFLOW`; the event from
 `GITHUB_EVENT_NAME`; and the commit from `GITHUB_WORKFLOW_SHA`. These values
 must match the repository and checked-out workflow. The Buildkite-prefixed path
 and event remain compatibility fallbacks, while `BUILDKITE_GITHUB_ACTION`
-supplies the pull request, issue, or comment action. Explicit plugin selection takes precedence
+supplies the event activity. Explicit plugin selection takes precedence
 over server workflow selection. Without either selection, the plugin fails.
 The server-selected importer does not need a step key. The plugin uploads its
 artifacts before the dynamic pipeline and scopes retrieval to the importer job
@@ -233,6 +233,11 @@ Review events require the original linked payload and matching immutable workflo
 identity, PR number, head SHA, head/base branches, and repository identities.
 They cannot fall back to a synthetic event on rebuilds without that payload.
 
+Pipeline Trigger release events also require the original linked payload and
+complete workflow ref/SHA identity. The repository, selected tag ref, Buildkite
+branch/tag, and payload tag must agree; the workflow SHA must equal the build's
+immutable peeled commit. Missing payloads on rebuilds fail explicitly.
+
 With the GitHub Code Access App, Buildkite resolves a release tag to its peeled
 commit before creating the build. Without it, the plugin resolves Buildkite's
 symbolic `HEAD` from the checkout as a compatibility fallback. The fallback
@@ -247,7 +252,7 @@ the group condition, and the provider-check suffix.
 | `push` | `branches`, `branches-ignore`, `tags`, and `tags-ignore`, including ordered negative patterns in an include list. Branch and tag filters select their corresponding ref kind. Matching `paths` and `paths-ignore` can be admitted for linked GitHub branch pushes when the bounded local-diff requirements below are met. |
 | `pull_request` | `branches` and `branches-ignore` match the base branch. Omitted `types` defaults to `opened`, `synchronize`, and `reopened`; explicitly listed activity types must map exactly to a supported Buildkite source action. Matching `paths` and `paths-ignore` can be admitted when the bounded local-diff requirements below are met. |
 | `merge_group` | Native Buildkite merge queue builds only. Enable merge queue builds and Merge groups webhook delivery in the pipeline's GitHub settings. `branches` and `branches-ignore` match the target branch. The only supported activity is `checks_requested`; other types and tag and workflow filters are rejected. `paths` and `paths-ignore` are ignored with a warning, matching GitHub, which does not evaluate path filters for `merge_group` events. The merge group ref and SHA identify the speculative queue commit. |
-| `release` | Native Buildkite release builds only. In the pipeline's GitHub settings, enable **Additional Webhooks** > **Releases** and use **Code** trigger mode. Connect the GitHub Code Access App for immutable server provenance and hosted release `GITHUB_TOKEN` issuance. `types` is required and may contain only `published`, `created`, and `released`; bare `release`, all other activity types, and branch, tag, path, and workflow filters are rejected. Draft `created` deliveries are rejected. The ref is `refs/tags/<tag_name>`. The SHA is the server-resolved peeled commit, or the checked-out commit for the compatibility fallback. |
+| `release` | Pipeline Triggers and native Buildkite release builds. Native builds require **Additional Webhooks** > **Releases** and **Code** trigger mode. Pipeline Triggers require a compatible server and the GitHub Code Access App to select the workflow at the immutable peeled tag commit. `types` is required and may contain only `published`, `created`, and `released`; bare `release`, all other activity types, and branch, tag, path, and workflow filters are rejected. All draft deliveries are rejected; publishing a prerelease with `published` is supported, unlike the `prereleased` activity. The ref is `refs/tags/<tag_name>`. The SHA is the server-resolved peeled commit, or the checked-out commit for the native compatibility fallback. Existing hosted release `GITHUB_TOKEN` policy is unchanged. |
 | `issues` | Omitted `types` or `types: []` accepts every GitHub Actions issue activity. Nonempty `types` may contain `opened`, `edited`, `deleted`, `transferred`, `pinned`, `unpinned`, `closed`, `reopened`, `assigned`, `unassigned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `milestoned`, `demilestoned`, `typed`, `untyped`, `field_added`, and `field_removed`. Unknown types and branch, tag, path, or workflow filters are rejected. In a GitHub Actions Pipeline Trigger build, Buildkite selects workflows and the checkout from the latest verified default-branch SHA; native issue-build settings, branch/path filters, and comment gating do not participate. Existing native Buildkite issue builds remain supported through linked webhook data and retain their own build-creation settings. |
 | `issue_comment` | Omitted `types` or `types: []` accepts `created`, `edited`, and `deleted`; nonempty `types` may contain those activities. Both issue and pull request conversation comments are supported. Unknown types and branch, tag, path, or workflow filters are rejected. GitHub Actions Pipeline Trigger builds select workflows and the checkout from the latest verified default-branch SHA and do not inherit native command-word, trusted-commenter, PR-only, branch, or path gating. |
 | `pull_request_review` | Pipeline Triggers support `submitted`, `edited`, and `dismissed`, all by default. Nonempty `types` selects activities, not review states. Use `if: github.event.review.state == 'approved'` on a job or step for approval-only execution. |

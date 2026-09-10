@@ -122,8 +122,8 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 				}
 				payload = map[string]any{"ref": ref}
 			}
-		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment":
-			if githubEvent == "issues" && getenv(pipelineTriggerWorkflowPathEnvironment) == "" &&
+		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "release":
+			if (githubEvent == "issues" || githubEvent == "release") && getenv(pipelineTriggerWorkflowPathEnvironment) == "" &&
 				getenv(githubWorkflowRefEnvironment) == "" && getenv(githubWorkflowSHAEnvironment) == "" {
 				break
 			}
@@ -303,6 +303,17 @@ func validateBuildkiteRelease(snapshot map[string]any, getenv func(string) strin
 	}
 	if tag != getenv("BUILDKITE_TAG") || tag != getenv("BUILDKITE_BRANCH") {
 		return fmt.Errorf("release webhook tag_name does not match BUILDKITE_TAG and BUILDKITE_BRANCH")
+	}
+	if getenv(pipelineTriggerWorkflowPathEnvironment) != "" {
+		if snapshot["ref"] != "refs/tags/"+tag {
+			return fmt.Errorf("release workflow ref does not match the Buildkite build tag")
+		}
+		repository, _ := payload["repository"].(map[string]any)
+		fullName, _ := repository["full_name"].(string)
+		_, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+		if err != nil || !strings.EqualFold(fullName, owner+"/"+name) {
+			return fmt.Errorf("release webhook repository does not match BUILDKITE_REPO")
+		}
 	}
 	snapshot["ref"] = "refs/tags/" + tag
 	return nil
