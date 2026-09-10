@@ -400,17 +400,16 @@ func TestRunUploadSurfacesVariableResolutionRateLimit(t *testing.T) {
 	if len(plans) != 1 || len(plans["test"]) != 1 {
 		t.Fatalf("uploaded plans by job = %v, want only the workflow without vars references", plans)
 	}
-	const want = "[E_ENVIRONMENT] variables: variable resolution requests are rate limited; retry after 3600 seconds"
+	const want = "Error: variables: variable resolution requests are rate limited; retry after 3600 seconds"
 	failures := 0
 	for path, content := range runner.uploaded {
 		if strings.HasPrefix(path, ".buildkite-gha/failures/messages/") && strings.Contains(string(content), want) {
 			failures++
 		}
 	}
-	// Both failing workflows carry the same message, so they share one
-	// content-addressed failure artifact.
-	if failures != 1 {
-		t.Fatalf("failure message artifacts with %q = %d, want 1:\n%s", want, failures, stderr.String())
+	// Each failure carries its own workflow attribution, even when the cause matches.
+	if failures != 2 {
+		t.Fatalf("failure message artifacts with %q = %d, want 2:\n%s", want, failures, stderr.String())
 	}
 	pipeline := string(runner.commands[len(runner.commands)-1].stdin)
 	for _, want := range []string{`label: ":github: workflow · .github/workflows/build.yml"`, `label: ":github: workflow · .github/workflows/deploy.yml"`, `title: "Workflow could not be run"`} {
@@ -538,7 +537,7 @@ func TestRunUploadResolvesVariablesForActionInputDefaults(t *testing.T) {
 			}
 			plans := uploadedPlans(t, runner)
 			if tc.status != http.StatusOK {
-				const want = "[E_ENVIRONMENT] variables: variable resolution requests are rate limited; retry after 60 seconds"
+				const want = "Error: variables: variable resolution requests are rate limited; retry after 60 seconds"
 				failures := 0
 				for path, content := range runner.uploaded {
 					if strings.HasPrefix(path, ".buildkite-gha/failures/messages/") && strings.Contains(string(content), want) {

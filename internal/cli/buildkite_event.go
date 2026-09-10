@@ -122,8 +122,8 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 				}
 				payload = map[string]any{"ref": ref}
 			}
-		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "release":
-			if (githubEvent == "issues" || githubEvent == "release") && getenv(pipelineTriggerWorkflowPathEnvironment) == "" &&
+		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "release", "merge_group":
+			if (githubEvent == "issues" || githubEvent == "release" || githubEvent == "merge_group") && getenv(pipelineTriggerWorkflowPathEnvironment) == "" &&
 				getenv(githubWorkflowRefEnvironment) == "" && getenv(githubWorkflowSHAEnvironment) == "" {
 				break
 			}
@@ -247,6 +247,17 @@ func validateBuildkiteMergeGroup(snapshot map[string]any, getenv func(string) st
 	}
 	if action, _ := payload["action"].(string); action != "checks_requested" {
 		return fmt.Errorf("merge_group webhook action must be checks_requested")
+	}
+	if getenv(pipelineTriggerWorkflowPathEnvironment) != "" {
+		if getenv("BUILDKITE_GITHUB_ACTION") != "checks_requested" || snapshot["ref"] != "refs/heads/"+getenv("BUILDKITE_BRANCH") {
+			return fmt.Errorf("merge_group workflow ref or action does not match the Buildkite build")
+		}
+		repository, _ := payload["repository"].(map[string]any)
+		fullName, _ := repository["full_name"].(string)
+		provider, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+		if err != nil || provider != "github" || !strings.EqualFold(fullName, owner+"/"+name) {
+			return fmt.Errorf("merge_group webhook repository does not match BUILDKITE_REPO")
+		}
 	}
 	ref, _ := snapshot["ref"].(string)
 	sha, _ := snapshot["sha"].(string)

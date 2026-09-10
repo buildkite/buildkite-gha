@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
@@ -21,6 +22,9 @@ func TestPluginReleasePipelineTriggerDiagnosticLinks(t *testing.T) {
 	t.Setenv(pluginConfigurationEnvironment, `{"experimental-runner-user":false}`)
 	setCLIPluginBuildkiteEnvironment(t, "")
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	fixture := compatibility.NewProcessingReport(".github/workflows/release.yml", "")
+	sha := commitDiagnosticSources(t, repository, &fixture)
+	t.Setenv("BUILDKITE_COMMIT", sha)
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_BRANCH", "v2.3.4")
 	t.Setenv("BUILDKITE_TAG", "v2.3.4")
@@ -32,7 +36,7 @@ func TestPluginReleasePipelineTriggerDiagnosticLinks(t *testing.T) {
 		t.Fatalf("plugin = %d: %s", code, &stderr)
 	}
 	for _, data := range runner.uploaded {
-		if bytes.Contains(data, []byte(`href="https://github.com/buildkite/buildkite-gha/blob/0123456789abcdef0123456789abcdef01234567/.github/workflows/release.yml#L`)) &&
+		if bytes.Contains(data, []byte(`href="https://github.com/buildkite/buildkite-gha/blob/`+sha+`/.github/workflows/release.yml#L`)) &&
 			bytes.Contains(data, []byte("cancel-in-progress is unsupported")) {
 			return
 		}
@@ -83,7 +87,7 @@ func TestPluginReleasePipelineTrigger(t *testing.T) {
 					}
 					resultPath := filepath.Join(t.TempDir(), "result.json")
 					stderr.Reset()
-					if code := run([]string{"run-job", "--plan", planPath, "--result", resultPath}, &stdout, &stderr, "dev", &cliCaptureRunner{dataByPath: runner.uploaded}); code != 0 {
+					if code := run([]string{"run-job", "--plan", planPath, "--artifact-producer", cliTestJobID, "--result", resultPath}, &stdout, &stderr, "dev", &cliCaptureRunner{dataByPath: runner.uploaded}); code != 0 {
 						t.Fatalf("run-job = %d: %s", code, &stderr)
 					}
 					marker, err := os.ReadFile(resultPath)

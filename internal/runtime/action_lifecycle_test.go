@@ -654,11 +654,13 @@ func TestJobTimeoutLimitsPostActionsToCleanupGrace(t *testing.T) {
 	writeFixtureFile(t, workspace, ".github/actions/slow/action.yml", "name: Job timeout post\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
 	writeFixtureFile(t, workspace, ".github/actions/slow/main.js", "")
 	writeFixtureFile(t, workspace, ".github/actions/slow/post.js", "")
+	mainStarted := filepath.Join(workspace, "main-started")
 	postStarted := filepath.Join(workspace, "post-started")
 	fakeNode := filepath.Join(workspace, "node24")
 	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
 set -eu
 if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+if [ "$(basename "$1")" = main.js ]; then : > "$MAIN_STARTED"; fi
 if [ "$(basename "$1")" = post.js ]; then : > "$POST_STARTED"; fi
 sleep 30
 `)
@@ -666,10 +668,11 @@ sleep 30
 		t.Fatal(err)
 	}
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "slow", Kind: "uses", Uses: "./.github/actions/slow"}})
-	// Leave enough of the job budget for process discovery on slower Darwin
-	// hosts; the post still has only the separate 250 ms cleanup grace.
-	job.TimeoutMinutes = 0.01
-	job.Env = map[string]string{"POST_STARTED": postStarted}
+	// The timeout includes action preparation and process discovery. Give those
+	// operations a realistic budget while keeping the post budget independently
+	// longer than the cleanup grace under test.
+	job.TimeoutMinutes = 0.05
+	job.Env = map[string]string{"MAIN_STARTED": mainStarted, "POST_STARTED": postStarted}
 	attachTestProgram(&job)
 	runner := Runner{
 		Node24: fakeNode, CleanupTimeout: 250 * time.Millisecond, PostActionTimeout: 3 * time.Second,
@@ -680,10 +683,13 @@ sleep 30
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
+	if _, err := os.Stat(mainStarted); err != nil {
+		t.Fatalf("job deadline expired before the main action started: %v", err)
+	}
 	if _, err := os.Stat(postStarted); err != nil {
 		t.Fatalf("post action did not start during cleanup grace: %v", err)
 	}
-	if elapsed := time.Since(started); elapsed > 2*time.Second {
+	if elapsed := time.Since(started); elapsed > durationMinutes(job.TimeoutMinutes)+time.Second {
 		t.Fatalf("job-timeout cleanup took %s, want cleanup grace rather than 3s post budget", elapsed)
 	}
 }
@@ -696,11 +702,13 @@ func TestCancellationStillRunsRegisteredPostAction(t *testing.T) {
 	writeFixtureFile(t, workspace, ".github/actions/cancel/action.yml", "name: Cancellation cleanup\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
 	writeFixtureFile(t, workspace, ".github/actions/cancel/main.js", "")
 	writeFixtureFile(t, workspace, ".github/actions/cancel/post.js", "")
+	mainStarted := filepath.Join(workspace, "main-started")
 	fakeNode := filepath.Join(workspace, "node24")
 	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
 set -eu
 if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
 if [ "$(basename "$1")" = post.js ]; then echo post-after-cancel; exit 0; fi
+: > "$MAIN_STARTED"
 sleep 30
 `)
 	if err := os.Chmod(fakeNode, 0o700); err != nil {
@@ -708,10 +716,35 @@ sleep 30
 	}
 	var logs bytes.Buffer
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{ID: "cancel", Kind: "uses", Uses: "./.github/actions/cancel"}})
-	ctx, cancel := context.WithTimeout(t.Context(), 600*time.Millisecond)
+	job.Env = map[string]string{"MAIN_STARTED": mainStarted}
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	result, err := (Runner{Node24: fakeNode, Stdout: &logs, Stderr: &logs}).runTestJob(ctx, job, workspace)
-	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" || !strings.Contains(logs.String(), "post-after-cancel") {
+	type runResult struct {
+		result JobResult
+		err    error
+	}
+	done := make(chan runResult, 1)
+	go func() {
+		result, err := (Runner{Node24: fakeNode, Stdout: &logs, Stderr: &logs}).runTestJob(ctx, job, workspace)
+		done <- runResult{result: result, err: err}
+	}()
+
+	for {
+		if _, err := os.Stat(mainStarted); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		select {
+		case completed := <-done:
+			t.Fatalf("RunJob() completed before main action startup: result = %#v, error = %v", completed.result, completed.err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	completed := <-done
+	result, err := completed.result, completed.err
+	if !errors.Is(err, context.Canceled) || result.Conclusion != "cancelled" || !strings.Contains(logs.String(), "post-after-cancel") {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
 }

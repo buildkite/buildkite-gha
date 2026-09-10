@@ -54,7 +54,7 @@ func loadEffectiveEventSource(ctx context.Context, eventPath string, agent trans
 		if err != nil {
 			return nil, "", err
 		}
-		if event == "pull_request_review" || event == "pull_request_review_comment" || (event == "release" && os.Getenv(pipelineTriggerWorkflowPathEnvironment) != "") {
+		if event == "pull_request_review" || event == "pull_request_review_comment" || ((event == "release" || event == "merge_group") && os.Getenv(pipelineTriggerWorkflowPathEnvironment) != "") {
 			return nil, "", fmt.Errorf("%s requires the original buildkite:webhook payload; rebuilds without it are unsupported", event)
 		}
 		source, err := buildkiteEventSource(os.Getenv)
@@ -201,6 +201,7 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 func triggerProcessingReport(path string, source []byte) compatibility.ProcessingReport {
 	parsed, _ := compiler.ParseWorkflow(path, source)
 	report := compatibility.NewProcessingReport(path, hostedProfile)
+	report.Sources = parsed.Sources
 	report.LogicalJobs = parsed.LogicalJobs
 	report.SetStage(workflowprocessing.StageWorkflowParsing, compatibility.Passed)
 	report.SetStage(workflowprocessing.StageEventValidation, compatibility.Passed)
