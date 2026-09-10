@@ -1597,6 +1597,79 @@ jobs:
 	}
 }
 
+func TestCompilePreservesStatusFunctionsAfterReusableInputSubstitution(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  enabled:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      enabled: true
+  disabled:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      enabled: false
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      enabled:
+        type: boolean
+        required: true
+jobs:
+  test:
+    if: always() && inputs.enabled
+    runs-on: ubuntu-latest
+    steps:
+      - if: ${{ !cancelled() && inputs.enabled }}
+        run: echo enabled
+      - if: failure() && inputs.enabled == true
+        run: echo failed
+`)
+
+	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %d, want one job for each reusable call", len(plans))
+	}
+	want := map[string][3]string{
+		"enabled.test":  {"${{ always() && true }}", "${{ !cancelled() && true }}", "${{ failure() && true == true }}"},
+		"disabled.test": {"${{ always() && false }}", "${{ !cancelled() && false }}", "${{ failure() && false == true }}"},
+	}
+	for _, job := range plans {
+		steps := job.Program.Job.Steps
+		got := [3]string{job.Condition, steps[0].Condition.Source, steps[1].Condition.Source}
+		expected, ok := want[job.Workflow.LogicalJobID]
+		if !ok || got != expected {
+			t.Errorf("conditions for %q = %#v, want %#v", job.Workflow.LogicalJobID, got, expected)
+		}
+	}
+}
+
+func TestCompileValidatesResidualReusableInputConditions(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		condition string
+		want      string
+	}{
+		{name: "unsupported function", condition: "unsupported() && inputs.enabled", want: `condition function "unsupported" is unsupported`},
+		{name: "unavailable context", condition: "secrets.TOKEN && inputs.enabled", want: `condition context "secrets" is unsupported`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			callerPath := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    with:\n      enabled: true\n")
+			writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      enabled: {type: boolean, required: true}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - if: ${{ "+test.condition+" }}\n        run: true\n")
+
+			_, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Compile() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestCompileForwardsIndexedStringInputToNestedReusableWorkflow(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push

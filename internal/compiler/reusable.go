@@ -527,7 +527,9 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 					if finding.Stage == StageWorkflowParsing {
 						return reusableResolution{}, err
 					}
-					message = finding.Message
+					if finding.Message != "" {
+						message = finding.Message
+					}
 					detail = finding.Detail
 				}
 				return reusableResolution{}, &ProcessingFinding{
@@ -1315,6 +1317,17 @@ func replaceSliceInputs(values []string, inputs map[string]any) []string {
 }
 
 func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInputs map[string]deferredInput) error {
+	reject := func(line, column int, message string) error {
+		return &ProcessingFinding{
+			Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
+			Path: path, Line: line, Column: column, Job: job.ID,
+			Message: message,
+			Err:     locatedJobError(path, job, line, column, message),
+		}
+	}
+	rejectJob := func(message string) error {
+		return reject(job.Span.Start.Line, job.Span.Start.Column, message)
+	}
 	jobValues := []string{job.Name}
 	jobRuntimeValues := []string{job.DefaultShell, job.DefaultWorkingDirectory}
 	jobRuntimeValues = appendMapValues(jobRuntimeValues, job.Env)
@@ -1352,7 +1365,7 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 			}
 			for _, value := range row.Values {
 				if containsInputExpression(value.Data) {
-					return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
+					return reject(value.Span.Start.Line, value.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
 				}
 			}
 		}
@@ -1360,36 +1373,36 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 			for _, combination := range combinations {
 				for _, value := range combination.Values {
 					if containsInputExpression(value.Data) {
-						return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
+						return reject(value.Span.Start.Line, value.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
 					}
 				}
 			}
 		}
 	}
 	if slices.ContainsFunc(jobValues, hasInputExpression) {
-		return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
+		return rejectJob("reusable-workflow input expression is not statically resolvable")
 	}
 	if hasUnresolvedConditionInput(job.If, deferredInputs) {
-		return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
+		return rejectJob("reusable-workflow input expression is not statically resolvable")
 	}
 	for _, value := range jobRuntimeValues {
 		if hasUnresolvedTemplateInput(value, deferredInputs) {
-			return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
+			return rejectJob("reusable-workflow input expression is not statically resolvable")
 		}
 	}
 	for _, step := range job.Steps {
 		if hasInputExpression(step.Uses) {
-			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow action reference input expression is not statically resolvable")
+			return reject(step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow action reference input expression is not statically resolvable")
 		}
 		if hasUnresolvedConditionInput(step.If, deferredInputs) {
-			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
+			return reject(step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
 		}
 		stepValues := []string{step.Name, step.Run, step.Shell, step.WorkingDirectory, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression}
 		stepValues = appendMapValues(stepValues, step.Env)
 		stepValues = appendMapValues(stepValues, step.With)
 		for _, value := range stepValues {
 			if hasUnresolvedTemplateInput(value, deferredInputs) {
-				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
+				return reject(step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
 			}
 		}
 	}
@@ -1552,10 +1565,20 @@ func replaceStaticInputCondition(value string, inputs map[string]any) string {
 		if !strings.Contains(value, "${{") {
 			usesInputs, err := referencesContext(value, expression.ProfileCompileStepCondition, "inputs", false)
 			if err == nil && usesInputs {
-				return replaceStaticInputs("${{ "+value+" }}", inputs)
+				value = "${{ " + value + " }}"
 			}
 		}
-		return replaceStaticInputs(value, inputs)
+		resolved, err := expression.SubstituteCompileInputs(value, inputs)
+		if err != nil || resolved == value {
+			return value
+		}
+		if reduced, err := reduceCompileSite(resolved, expression.ProfilePartialTemplate, expression.ResultString, expression.CompileContext{}); err == nil {
+			if reduced.Known {
+				return reduced.Value.(string)
+			}
+			return reduced.Source
+		}
+		return resolved
 	}
 	inputName := ""
 	for _, candidate := range match[1:] {
