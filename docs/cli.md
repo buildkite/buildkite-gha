@@ -232,8 +232,40 @@ earlier stage blocks a later one, the later stage is `not-evaluated`, not
 
 Warnings and errors become job-scoped Buildkite annotations. A failure that
 aborts `validate`, `compile`, or upload attaches to the current job. Generated
-failure steps attach their own diagnostics. If the CLI cannot publish an
-annotation, it warns without changing the command result.
+failure steps attach their own diagnostics. Their logs identify the root
+workflow and each diagnostic's source location, job, matrix instance, action,
+and step when available. Failure logs use bold red errors, amber warnings,
+and cyan workflow/source context, with blank lines between diagnostics.
+Importer logs and generated failure logs share annotations' human-readable
+explanations, source excerpts, and diagnostic details. Internal diagnostic codes
+remain in structured reports and telemetry rather than these logs. Warning-only
+importer output uses an amber `Workflow diagnostics` heading. Untrusted terminal
+control characters are removed without changing the underlying report data.
+If the CLI cannot publish an annotation, it warns without changing the command
+result.
+
+For fetched public reusable workflows, source locations in annotations link
+to the resolved commit and line in the source repository, including nested
+local calls inside that repository. Generated failure logs include the same
+URL and a Buildkite `Open source` hyperlink. If the source could not be fetched,
+the CLI keeps the location without guessing a revision.
+
+Local workflow links use the event's commit only when its file in the checkout's
+Git object database matches the bytes parsed. This includes local reusable
+workflows and early syntax errors. Annotations and generated failure logs keep
+the location without a link for edited inputs, unavailable revisions, files
+outside the checkout, or files larger than the 1 MiB verification limit. Changes
+on disk after parsing do not change which source revision the diagnostic links to.
+
+Annotations and generated failure logs include a real configuration excerpt
+where safe: literal action/workflow references in `uses`, standard Ubuntu,
+Windows, or macOS `runs-on` labels, and built-in step `shell` names. Excerpts
+retain the parsed line numbers and mark the offending line with `>`.
+Only eligible adjacent lines are included. Scripts, `env`, `with`, comments,
+expressions, aliases, malformed YAML, and other unclassified content are omitted.
+Capture is limited to 240 bytes per line and 16 KiB per workflow; excerpts are
+excluded from JSON reports and telemetry. At annotation size limits, the excerpt
+is dropped before shortening the explanation.
 
 Profile validation applies upload's trigger policy before compilation.
 `not-applicable` means the workflow does not declare the selected event and

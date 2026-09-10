@@ -8,6 +8,24 @@ import (
 	"testing"
 )
 
+func TestParseMissingStepExecutionHasExamplesAndLocation(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Check configuration\n")
+	_, err := Parse("ci.yml", source)
+	if err == nil {
+		t.Fatal("accepted a step without an execution field")
+	}
+	for _, want := range []string{"ci.yml:6:9:", "This step has nothing to execute.", "run: echo hello", "uses: actions/checkout@v4"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want %q", err, want)
+		}
+	}
+	for _, execution := range []string{"run: echo hello", "uses: actions/checkout@v4"} {
+		if _, err := Parse("ci.yml", append(source, []byte("        "+execution+"\n")...)); err != nil {
+			t.Errorf("suggested step shape %q failed: %v", execution, err)
+		}
+	}
+}
+
 func TestParseIssueTypes(t *testing.T) {
 	for _, event := range []string{"issues", "issue_comment"} {
 		for _, types := range []string{"", "    types: []\n", "    types: [ # empty\n    ]\n", "    types: [edited]\n"} {

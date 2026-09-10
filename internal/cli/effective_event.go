@@ -201,6 +201,7 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 func triggerProcessingReport(path string, source []byte) compatibility.ProcessingReport {
 	parsed, _ := compiler.ParseWorkflow(path, source)
 	report := compatibility.NewProcessingReport(path, hostedProfile)
+	report.Sources = parsed.Sources
 	report.LogicalJobs = parsed.LogicalJobs
 	report.SetStage(workflowprocessing.StageWorkflowParsing, compatibility.Passed)
 	report.SetStage(workflowprocessing.StageEventValidation, compatibility.Passed)

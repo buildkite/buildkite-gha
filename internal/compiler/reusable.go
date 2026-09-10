@@ -135,11 +135,12 @@ type reusableResolver struct {
 }
 
 // workflowScan is what static discovery learns about a workflow and every
-// reusable workflow it reaches, independent of the event: whether a runtime
-// matrix boundary exists and whether any expression reads the vars context.
+// reusable workflow it reaches: fetched source revisions, runtime matrix
+// boundaries, and whether any expression reads the vars context.
 type workflowScan struct {
 	runtimeMatrixBoundary bool
 	referencesVars        bool
+	sources               map[string]WorkflowSourceReference
 }
 
 func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource) ([]sourcedJob, []Warning, workflowScan, error) {
@@ -159,6 +160,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 				return nil, nil, scan, err
 			}
 		}
+		scan.sources = map[string]WorkflowSourceReference{sourcePath: localSourceReference(path, source)}
 		jobs := make([]sourcedJob, len(parsed.Jobs))
 		workflowJobs := make(map[string]workflow.Job, len(parsed.Jobs))
 		replacements := make(map[string]needBinding, len(parsed.Jobs))
@@ -194,6 +196,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 		warnedCancellation:       make(map[workflow.Position]bool),
 		warnedGuardedConcurrency: make(map[workflow.Position]bool),
 	}
+	resolver.scan.sources = map[string]WorkflowSourceReference{rootSource.displayPath: localSourceReference(path, source)}
 	defer func() {
 		for _, materialized := range resolver.materialized {
 			materialized.Release()
@@ -515,6 +518,10 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				detail := ""
 				var finding *ProcessingFinding
 				if errors.As(err, &finding) {
+					// A syntax failure belongs to the parsed file, not this call site.
+					if finding.Stage == StageWorkflowParsing {
+						return reusableResolution{}, err
+					}
 					message = finding.Message
 					detail = finding.Detail
 				}

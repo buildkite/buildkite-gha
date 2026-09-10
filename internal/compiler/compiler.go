@@ -39,6 +39,9 @@ type IR struct {
 	// partial instances retained when expansion fails. It is process-local
 	// evidence and is not part of serialized compiler output.
 	JobGraphComplete bool `json:"-"`
+	// Sources retains input identities for diagnostic presentation,
+	// including files whose parsing or graph expansion failed.
+	Sources map[string]WorkflowSourceReference `json:"-"`
 }
 
 // VarsBeforeEnvironment is the vars context GitHub evaluates before any job's
@@ -164,6 +167,7 @@ type NeedOutput = plan.NeedOutput
 
 // Report summarizes successful workflow validation.
 type Report struct {
+	Sources               map[string]WorkflowSourceReference
 	LogicalJobs           int
 	Instances             int
 	Warnings              []Warning
@@ -189,7 +193,8 @@ type ParsedJob struct {
 
 // ParseWorkflow reports only event-independent workflow syntax and job
 // identities. Later stages deliberately remain unevaluated.
-func ParseWorkflow(path string, source []byte) (Report, error) {
+func ParseWorkflow(path string, source []byte) (report Report, err error) {
+	defer func() { report.Sources = retainRootSource(report.Sources, path, source) }()
 	parsed, err := parseReusableWorkflow(path, source)
 	if err != nil {
 		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
@@ -211,7 +216,8 @@ func ValidateWithOptions(path string, source []byte, options Options) (Report, e
 
 // ValidateWithOptionsContext validates the static graph and permits
 // cancellation while resolving public reusable-workflow source.
-func ValidateWithOptionsContext(ctx context.Context, path string, source []byte, options Options) (Report, error) {
+func ValidateWithOptionsContext(ctx context.Context, path string, source []byte, options Options) (report Report, err error) {
+	defer func() { report.Sources = retainRootSource(report.Sources, path, source) }()
 	var optionsErr error
 	if err := options.validate(); err != nil {
 		optionsErr = &ProcessingFinding{
@@ -259,7 +265,8 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 
 // ValidateEventWithOptionsContext validates the graph and event while
 // permitting cancellation during public source resolution.
-func ValidateEventWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) (Report, error) {
+func ValidateEventWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) (report Report, err error) {
+	defer func() { report.Sources = retainRootSource(report.Sources, path, source) }()
 	var optionsErr error
 	if err := options.validate(); err != nil {
 		optionsErr = &ProcessingFinding{
@@ -336,7 +343,8 @@ func CompileIRWithOptionsContext(ctx context.Context, path string, source, event
 	return compile(ctx, path, source, eventSource, options)
 }
 
-func compile(ctx context.Context, path string, source, eventSource []byte, options Options) (IR, error) {
+func compile(ctx context.Context, path string, source, eventSource []byte, options Options) (ir IR, err error) {
+	defer func() { ir.Sources = retainRootSource(ir.Sources, path, source) }()
 	if err := options.validate(); err != nil {
 		return IR{}, &ProcessingFinding{
 			Code: CodeEnvironment, Category: "environment",
@@ -367,7 +375,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 		expandErr = resolveJobEnvironments(ctx, expanded.instances, event, options)
 	}
 	digest := sha256.Sum256(source)
-	ir := IR{
+	ir = IR{
 		Schema: schema,
 		Workflow: WorkflowSource{
 			Path: path, Name: parsed.Name, RunName: runName, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
@@ -381,7 +389,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 			Supported: true,
 			Reason:    "run-job rejects unsupported shells and local actions",
 		},
-		Jobs: expanded.instances, JobGraphComplete: jobGraphComplete,
+		Jobs: expanded.instances, JobGraphComplete: jobGraphComplete, Sources: expanded.sources,
 	}
 	return ir, errors.Join(runNameErr, concurrencyErr, cancellationErr, expandErr)
 }

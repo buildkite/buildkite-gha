@@ -1150,7 +1150,11 @@ func filterActionlintDiagnostics(path string, errs []*actionlint.Error, expected
 			matched[match] = true
 			continue
 		}
-		diagnostics = append(diagnostics, fmt.Errorf("%s:%d:%d: %s", path, actionlintErr.Line, actionlintErr.Column, actionlintErr.Message))
+		message := actionlintErr.Message
+		if message == missingStepExecutionDiagnostic {
+			message = `This step has nothing to execute. Add a script with "run", for example "run: echo hello", or an action with "uses", for example "uses: actions/checkout@v4".`
+		}
+		diagnostics = append(diagnostics, fmt.Errorf("%s:%d:%d: %s", path, actionlintErr.Line, actionlintErr.Column, message))
 	}
 	for i, ok := range matched {
 		if !ok {
