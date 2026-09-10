@@ -55,7 +55,7 @@ func TestPluginMergeGroupPipelineTrigger(t *testing.T) {
 						t.Fatal(err)
 					}
 					resultPath := filepath.Join(t.TempDir(), "result.json")
-					if code := run([]string{"run-job", "--plan", planPath, "--result", resultPath}, &stdout, &stderr, "dev", &cliCaptureRunner{dataByPath: runner.uploaded}); code != 0 {
+					if code := run([]string{"run-job", "--plan", planPath, "--artifact-producer", cliTestJobID, "--result", resultPath}, &stdout, &stderr, "dev", &cliCaptureRunner{dataByPath: runner.uploaded}); code != 0 {
 						t.Fatalf("run-job = %d: %s", code, &stderr)
 					}
 					result, err := os.ReadFile(resultPath)
