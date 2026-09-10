@@ -25,9 +25,9 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	// Ordinary CLI tests must never reach the ambient Agent API that a
-	// Buildkite job inherits; tests that need it set these explicitly.
-	for _, name := range []string{"BUILDKITE", "BUILDKITE_JOB_ID", "BUILDKITE_AGENT_ENDPOINT", "BUILDKITE_AGENT_ACCESS_TOKEN"} {
+	// Keep tests independent of the ambient Agent API and checkout path that a
+	// Buildkite job inherits; tests that need them set these explicitly.
+	for _, name := range []string{"BUILDKITE", "BUILDKITE_JOB_ID", "BUILDKITE_AGENT_ENDPOINT", "BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_BUILD_CHECKOUT_PATH"} {
 		_ = os.Unsetenv(name)
 	}
 	os.Exit(m.Run())
