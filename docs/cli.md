@@ -380,7 +380,7 @@ Actions Pipeline Trigger selection. The server also supplies:
 - `GITHUB_WORKFLOW_SHA`: the full commit used to match the workflow
 - `BUILDKITE_GITHUB_EVENT`: a compatibility duplicate of `GITHUB_EVENT_NAME`
 - `BUILDKITE_GITHUB_ACTION`: the event activity, including `checks_requested` for merge groups; push
-  and deployment events omit it
+  and deployment events, plus `create` and `delete`, omit it
 
 The `GITHUB_*` values take precedence when present. The plugin derives the
 selected path from `GITHUB_WORKFLOW_REF`, checks `GITHUB_WORKFLOW` against the

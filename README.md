@@ -197,7 +197,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--event` also supports `pull_request`, `merge_group`, `release`, `deployment`, `deployment_status`, `issues`, `issue_comment`, `pull_request_review`, `pull_request_review_comment`, `workflow_dispatch`, and `schedule`. Generated release validation uses one stable `published` snapshot, issues uses `opened`, review uses `submitted`, and both comment events use `created`. These are representative static validations, not proof of every activity. Generated snapshots are not equivalent to real payloads; use `--event-path` when exact payload data matters.
+`--event` also supports `pull_request`, `merge_group`, `release`, `deployment`, `deployment_status`, `create`, `delete`, `label`, `issues`, `issue_comment`, `pull_request_review`, `pull_request_review_comment`, `workflow_dispatch`, and `schedule`. Generated release validation uses one stable `published` snapshot, issues uses `opened`, review uses `submitted`, and labels and both comment events use `created`. Lifecycle snapshots represent branch creation/deletion, not tags. These are representative static validations, not proof of every activity. Generated snapshots are not equivalent to real payloads; use `--event-path` when exact payload data matters.
 
 Use `--all-events` to evaluate every declared supported event separately:
 
