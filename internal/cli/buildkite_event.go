@@ -123,7 +123,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 				}
 				payload = map[string]any{"ref": ref}
 			}
-		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "release", "merge_group", "deployment", "deployment_status":
+		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "release", "merge_group", "deployment", "deployment_status", "create", "delete":
 			if (githubEvent == "issues" || githubEvent == "release" || githubEvent == "merge_group") && getenv(pipelineTriggerWorkflowPathEnvironment) == "" &&
 				getenv(githubWorkflowRefEnvironment) == "" && getenv(githubWorkflowSHAEnvironment) == "" {
 				break
@@ -162,6 +162,17 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	repository := map[string]any{"owner": owner, "name": name, "clone_url": cloneURL}
 	if defaultBranch := strings.TrimSpace(getenv("BUILDKITE_PIPELINE_DEFAULT_BRANCH")); defaultBranch != "" {
 		repository["default_branch"] = defaultBranch
+	}
+	if event == "create" || event == "delete" {
+		if pullRequest != "" && pullRequest != "false" || branch != plan.EventRefName(ref) ||
+			(plan.EventRefType(ref) == "tag" && tag != branch) || (plan.EventRefType(ref) == "branch" && tag != "") {
+			return nil, fmt.Errorf("%s workflow ref does not match the Buildkite branch and tag", event)
+		}
+		if event == "delete" {
+			// The server resolved this branch at ingestion; neither pipeline settings
+			// nor the older webhook's repository metadata can replace that identity.
+			repository["default_branch"] = branch
+		}
 	}
 	snapshot := struct {
 		Provider string         `json:"provider"`

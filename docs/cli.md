@@ -78,7 +78,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--event` supports `push`, `pull_request`, `merge_group`, `release`, `deployment`, `deployment_status`, `issues`,
+`--event` supports `push`, `pull_request`, `merge_group`, `release`, `deployment`, `deployment_status`, `create`, `delete`, `issues`,
 `issue_comment`, `pull_request_review`, `pull_request_review_comment`,
 `workflow_dispatch`, and `schedule`. It requires
 `--profile hosted` and cannot be combined with `--event-path`.
@@ -372,7 +372,7 @@ Actions Pipeline Trigger selection. The server also supplies:
 
 - `GITHUB_EVENT_NAME`: `push`, `pull_request`, `issues`, `issue_comment`,
   `pull_request_review`, `pull_request_review_comment`, `release`, `merge_group`,
-  `deployment`, or `deployment_status`
+  `deployment`, `deployment_status`, `create`, or `delete`
 - `GITHUB_WORKFLOW`: the workflow `name`, or its repository-relative path when
   `name` is absent
 - `GITHUB_WORKFLOW_REF`:
@@ -380,7 +380,7 @@ Actions Pipeline Trigger selection. The server also supplies:
 - `GITHUB_WORKFLOW_SHA`: the full commit used to match the workflow
 - `BUILDKITE_GITHUB_EVENT`: a compatibility duplicate of `GITHUB_EVENT_NAME`
 - `BUILDKITE_GITHUB_ACTION`: the event activity, including `checks_requested` for merge groups; push
-  and deployment events omit it
+  and deployment events, plus `create` and `delete`, omit it
 
 The `GITHUB_*` values take precedence when present. The plugin derives the
 selected path from `GITHUB_WORKFLOW_REF`, checks `GITHUB_WORKFLOW` against the
@@ -566,7 +566,7 @@ explicit event is never replaced with live Buildkite fields.
 
 Linked webhook data can provide native `merge_group`, `release`, and `issues`
 events. GitHub Actions Pipeline Trigger identity additionally supports `merge_group`, `release`,
-`deployment`, `deployment_status`, `issues`, `issue_comment`, and PR review events without native event settings. Merge
+`deployment`, `deployment_status`, `create`, `delete`, `issues`, `issue_comment`, and PR review events without native event settings. Merge
 groups and releases need matching Buildkite refs, commits, and
 activity. Release also needs a valid payload and a tag matching `BUILDKITE_TAG`
 and `BUILDKITE_BRANCH`. Issue and comment payloads need a valid action, object
