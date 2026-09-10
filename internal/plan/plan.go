@@ -112,6 +112,7 @@ type Event struct {
 	Name            string          `json:"name"`
 	PayloadDigest   string          `json:"payload_digest"`
 	PayloadArtifact bool            `json:"payload_artifact,omitempty"`
+	PayloadFile     bool            `json:"payload_file,omitempty"`
 	Payload         *map[string]any `json:"-"`
 	Repository      string          `json:"repository,omitempty"`
 	Ref             string          `json:"ref,omitempty"`
@@ -591,6 +592,9 @@ func (job Job) Validate() error {
 	}
 	if (job.Event.Provider != "github" && job.Event.Provider != "cursor-origin") || job.Event.Name == "" || !digestPattern.MatchString(job.Event.PayloadDigest) {
 		return fmt.Errorf("job plan requires a supported event binding")
+	}
+	if job.Event.PayloadFile && !job.Event.PayloadArtifact {
+		return fmt.Errorf("job plan event file requires a payload artifact")
 	}
 	if len(job.Event.Repository) > 512 || len(job.Event.Ref) > 1024 || len(job.Event.HeadRef) > 1024 || len(job.Event.BaseRef) > 1024 || len(job.Event.SHA) > 128 || len(job.Event.Actor) > 256 {
 		return fmt.Errorf("job plan event identity exceeds its size limit")

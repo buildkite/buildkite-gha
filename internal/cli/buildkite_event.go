@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/git"
 )
 
@@ -121,8 +122,8 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 				}
 				payload = map[string]any{"ref": ref}
 			}
-		case "issues", "issue_comment":
-			if githubEvent == "issues" && getenv(pipelineTriggerWorkflowPathEnvironment) == "" &&
+		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "release":
+			if (githubEvent == "issues" || githubEvent == "release") && getenv(pipelineTriggerWorkflowPathEnvironment) == "" &&
 				getenv(githubWorkflowRefEnvironment) == "" && getenv(githubWorkflowSHAEnvironment) == "" {
 				break
 			}
@@ -212,6 +213,11 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 			return nil, err
 		}
 	}
+	if snapshot["event"] == "pull_request_review" || snapshot["event"] == "pull_request_review_comment" {
+		if err := validateBuildkiteReviewEvent(snapshot, getenv); err != nil {
+			return nil, err
+		}
+	}
 	result, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, fmt.Errorf("encode Buildkite webhook snapshot: %w", err)
@@ -298,6 +304,17 @@ func validateBuildkiteRelease(snapshot map[string]any, getenv func(string) strin
 	if tag != getenv("BUILDKITE_TAG") || tag != getenv("BUILDKITE_BRANCH") {
 		return fmt.Errorf("release webhook tag_name does not match BUILDKITE_TAG and BUILDKITE_BRANCH")
 	}
+	if getenv(pipelineTriggerWorkflowPathEnvironment) != "" {
+		if snapshot["ref"] != "refs/tags/"+tag {
+			return fmt.Errorf("release workflow ref does not match the Buildkite build tag")
+		}
+		repository, _ := payload["repository"].(map[string]any)
+		fullName, _ := repository["full_name"].(string)
+		_, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+		if err != nil || !strings.EqualFold(fullName, owner+"/"+name) {
+			return fmt.Errorf("release webhook repository does not match BUILDKITE_REPO")
+		}
+	}
 	snapshot["ref"] = "refs/tags/" + tag
 	return nil
 }
@@ -345,6 +362,49 @@ func validateBuildkiteIssueEvent(snapshot map[string]any, getenv func(string) st
 	ref, _ := snapshot["ref"].(string)
 	if ref != "refs/heads/"+getenv("BUILDKITE_BRANCH") {
 		return fmt.Errorf("%s webhook ref does not match the Buildkite build branch", event)
+	}
+	return nil
+}
+
+func validateBuildkiteReviewEvent(snapshot map[string]any, getenv func(string) string) error {
+	event := snapshot["event"].(string)
+	payload := snapshot["payload"].(map[string]any)
+	action, _ := payload["action"].(string)
+	if !buildkitepipeline.SupportedPullRequestReviewAction(event, action) || action != getenv("BUILDKITE_GITHUB_ACTION") {
+		return fmt.Errorf("%s webhook action is unsupported or does not match BUILDKITE_GITHUB_ACTION", event)
+	}
+	key := "review"
+	if event == "pull_request_review_comment" {
+		key = "comment"
+	}
+	object, _ := payload[key].(map[string]any)
+	if !positiveJSONInteger(object["id"]) {
+		return fmt.Errorf("%s webhook requires payload.%s.id", event, key)
+	}
+	pr, _ := payload["pull_request"].(map[string]any)
+	if !positiveJSONInteger(pr["number"]) || fmt.Sprint(pr["number"]) != getenv("BUILDKITE_PULL_REQUEST") {
+		return fmt.Errorf("%s webhook pull request number does not match BUILDKITE_PULL_REQUEST", event)
+	}
+	if snapshot["ref"] != "refs/pull/"+getenv("BUILDKITE_PULL_REQUEST")+"/merge" {
+		return fmt.Errorf("%s workflow ref does not match BUILDKITE_PULL_REQUEST", event)
+	}
+	head, _ := pr["head"].(map[string]any)
+	base, _ := pr["base"].(map[string]any)
+	if head["sha"] != snapshot["sha"] || head["ref"] != getenv("BUILDKITE_BRANCH") || base["ref"] != getenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH") {
+		return fmt.Errorf("%s webhook head SHA or branches do not match the Buildkite build", event)
+	}
+	provider, owner, name, _, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
+	if err != nil || provider != "github" {
+		return fmt.Errorf("%s webhook requires a GitHub repository", event)
+	}
+	repository, _ := payload["repository"].(map[string]any)
+	headRepository, _ := head["repo"].(map[string]any)
+	baseRepository, _ := base["repo"].(map[string]any)
+	for _, repo := range []map[string]any{repository, headRepository, baseRepository} {
+		fullName, _ := repo["full_name"].(string)
+		if !strings.EqualFold(fullName, owner+"/"+name) {
+			return fmt.Errorf("%s webhook requires the build repository for repository, PR head, and PR base; forks are unsupported", event)
+		}
 	}
 	return nil
 }

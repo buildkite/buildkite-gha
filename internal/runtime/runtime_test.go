@@ -335,6 +335,22 @@ jobs:
 	}
 }
 
+func TestRunnerEnvironmentIsSelfHostedAtRuntime(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "hosted", Kind: "run", Condition: "runner.environment == 'github-hosted'", Command: "echo must-not-run"},
+		{ID: "self", Kind: "run", Condition: "runner.environment == 'self-hosted'", Env: map[string]string{"RUNNER_KIND": "${{ runner.environment }}"}, Command: `test "$RUNNER_ENVIRONMENT" = self-hosted && test "$RUNNER_KIND" = self-hosted && echo ran-self-hosted`},
+		{ID: "verify", Kind: "run", Condition: "steps.hosted.conclusion == 'skipped' && steps.self.conclusion == 'success'", Command: "echo verified-conclusions"},
+	})
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" || strings.Contains(logs.String(), "must-not-run") || !strings.Contains(logs.String(), "ran-self-hosted") || !strings.Contains(logs.String(), "verified-conclusions") {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+}
+
 func TestFailureConditionsAndCancellation(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -1428,7 +1444,7 @@ func TestCanonicalRunnerContext(t *testing.T) {
 		{goos: "darwin", goarch: "arm64", os: "macOS", arch: "ARM64"},
 	} {
 		got, err := canonicalRunnerContext(test.goos, test.goarch)
-		if err != nil || got["os"] != test.os || got["arch"] != test.arch {
+		if err != nil || got["os"] != test.os || got["arch"] != test.arch || got["environment"] != "self-hosted" {
 			t.Errorf("canonicalRunnerContext(%s, %s) = %#v, %v", test.goos, test.goarch, got, err)
 		}
 	}
@@ -1451,9 +1467,9 @@ func TestValidateHostRejectsDockerOnDarwin(t *testing.T) {
 }
 
 func TestRunnerEnvironmentIsProtected(t *testing.T) {
-	base := map[string]string{"RUNNER_OS": "Linux", "RUNNER_ARCH": "X64"}
-	got := mergeStepEnvironment(base, map[string]string{"RUNNER_OS": "overridden", "RUNNER_ARCH": "overridden"})
-	if got["RUNNER_OS"] != "Linux" || got["RUNNER_ARCH"] != "X64" {
+	base := map[string]string{"RUNNER_OS": "Linux", "RUNNER_ARCH": "X64", "RUNNER_ENVIRONMENT": "self-hosted"}
+	got := mergeStepEnvironment(base, map[string]string{"RUNNER_OS": "overridden", "RUNNER_ARCH": "overridden", "RUNNER_ENVIRONMENT": "github-hosted"})
+	if got["RUNNER_OS"] != "Linux" || got["RUNNER_ARCH"] != "X64" || got["RUNNER_ENVIRONMENT"] != "self-hosted" {
 		t.Fatalf("runner environment was overridden: %#v", got)
 	}
 }

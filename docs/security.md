@@ -90,15 +90,24 @@ Explicit and generated event snapshots provide compatibility context. They do
 not authorize path-filter admission, queues, secrets, or tokens.
 
 The compiler resolves ordinary scalar `github.event.*` references before it
-creates a plan. If a job needs the whole event or a property selected at
-runtime, the importer uploads one content-addressed event payload artifact for
-the build. Plans retain only its digest and whether the job needs it. Runtime
-jobs download the artifact from the exact importer job and verify its digest.
-This keeps matrix plans small and lets retries use the original event.
+creates a plan. For linked webhooks and explicit event snapshots, the importer
+uploads one content-addressed payload artifact for every job's
+[`GITHUB_EVENT_PATH`](compatibility.md#event-file), even when no expression reads
+the event. Reduced fallback snapshots are retained only when runtime event
+expressions need them. Plans retain the digest and transport/file markers, not
+the payload. Runtime jobs download from the exact importer job and verify the
+digest. This keeps matrix plans small and lets retries use the original event.
 
 The artifact is limited to 25 MiB and follows the Buildkite build's artifact
 access and retention settings. It is not redacted or a secret store: anyone
 who can download the artifact can read user-provided values in the event.
+
+The runtime does not log event file contents. It creates a separate directory
+per job and removes it after post hooks. Host files are owner-readable;
+Docker jobs permit other image users to read the file through a read-only mount.
+The event directory is not writable by those users and is outside the writable
+checkout and runner temp. This does not isolate mutually untrusted steps within
+one job or processes sharing the runner's user account.
 
 The snapshot remains untrusted input. The compiler does not add issued tokens,
 resolved secrets, registry credentials, OIDC tokens, or internal admission

@@ -19,16 +19,17 @@ func TestNewEffectiveEventSeparatesExpressionsAndSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantExpressions := buildkitepipeline.TriggerConditionExpressions{
-		EventPredicate:        "true",
-		Branch:                `"main"`,
-		Tag:                   "null",
-		PullRequestBaseBranch: "null",
-		PullRequestAction:     "null",
-		MergeGroupBaseBranch:  "null",
-		MergeGroupAction:      "null",
-		ReleaseAction:         "null",
-		IssuesAction:          "null",
-		IssueCommentAction:    "null",
+		EventPredicate:          "true",
+		Branch:                  `"main"`,
+		Tag:                     "null",
+		PullRequestBaseBranch:   "null",
+		PullRequestAction:       "null",
+		MergeGroupBaseBranch:    "null",
+		MergeGroupAction:        "null",
+		ReleaseAction:           "null",
+		IssuesAction:            "null",
+		IssueCommentAction:      "null",
+		PullRequestReviewAction: "null",
 	}
 	branch := "main"
 	wantSnapshot := buildkitepipeline.TriggerEventSnapshot{Branch: &branch}

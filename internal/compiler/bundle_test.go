@@ -2269,6 +2269,24 @@ jobs:
 			t.Fatalf("plan %q embedded the event payload", artifact.Path)
 		}
 	}
+	options := DefaultOptions()
+	options.EventFile = true
+	withFile, err := CompileBundleWithOptions("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withFile.EventArtifact == nil || !bytes.Equal(withFile.EventArtifact.Contents, bundle.EventArtifact.Contents) {
+		t.Fatal("event file transport did not retain the complete original payload")
+	}
+	for _, artifact := range withFile.Plans {
+		decoded, err := plan.Decode(artifact.Contents)
+		if err != nil || !decoded.Event.PayloadFile || !decoded.Event.PayloadArtifact || decoded.Event.Payload != nil {
+			t.Fatalf("event file plan = %#v, %v", decoded.Event, err)
+		}
+		if len(decoded.RequiredSecrets) != 0 || decoded.GitHubToken != nil {
+			t.Fatal("event file granted credential authority")
+		}
+	}
 }
 
 func TestCompileBundleEventPayloadAuthorityFollowsReducedProgramReachability(t *testing.T) {

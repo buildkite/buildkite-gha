@@ -299,8 +299,8 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	if artifactCommand.name != "buildkite-agent" || !slices.Equal(artifactCommand.args, wantArtifactArgs) {
 		t.Fatalf("artifact command = %#v, want cwd %q and args %#v", artifactCommand, root, wantArtifactArgs)
 	}
-	if len(runner.uploaded) != 4 {
-		t.Fatalf("uploaded artifacts = %#v, want distribution and three plans", runner.uploaded)
+	if len(runner.uploaded) != 5 {
+		t.Fatalf("uploaded artifacts = %#v, want distribution, event, and three plans", runner.uploaded)
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatalf("temporary artifact root still exists: %v", err)
@@ -355,7 +355,7 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 		}
 		if !strings.HasPrefix(step.Command, "set -euo pipefail\n") ||
 			!strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
-			!strings.Contains(step.Command, `--step 'shell-upload-importer'`) ||
+			!strings.Contains(step.Command, "--step '"+cliTestJobID+"'") ||
 			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
 			!strings.Contains(step.Command, `sha256sum "$plan"`) ||
 			!strings.Contains(step.Command, `sudo -n --preserve-env --user runner`) ||
@@ -431,8 +431,8 @@ func TestRunUploadPublishesMixedRuntimeDistributions(t *testing.T) {
 			artifactUploads[command.args[2]]++
 		}
 	}
-	if len(runner.uploaded) != 4 {
-		t.Fatalf("uploaded artifact count = %d, want two runtimes and two plans", len(runner.uploaded))
+	if len(runner.uploaded) != 5 {
+		t.Fatalf("uploaded artifact count = %d, want two runtimes, event, and two plans", len(runner.uploaded))
 	}
 	for path, count := range artifactUploads {
 		if count != 1 {
@@ -442,7 +442,7 @@ func TestRunUploadPublishesMixedRuntimeDistributions(t *testing.T) {
 
 	planRuntime := map[string]string{}
 	for path, contents := range runner.uploaded {
-		if !strings.HasSuffix(path, ".json") {
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			continue
 		}
 		job, err := plan.Decode(contents)
@@ -808,7 +808,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 	}
 	planCount := 0
 	for path, contents := range runner.uploaded {
-		if !strings.HasSuffix(path, ".json") {
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			continue
 		}
 		job, err := plan.Decode(contents)
@@ -932,7 +932,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	}
 	planCount := 0
 	for path := range runner.uploaded {
-		if strings.HasSuffix(path, ".json") {
+		if strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			planCount++
 		}
 	}
@@ -1174,7 +1174,7 @@ func TestRunUploadIsolatesExplicitEffectiveEventsBeforeCompilation(t *testing.T)
 				t.Fatalf("stdout = %q", stdout.String())
 			}
 			for path, contents := range runner.uploaded {
-				if !strings.HasSuffix(path, ".json") {
+				if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 					continue
 				}
 				job, err := plan.Decode(contents)
@@ -2209,10 +2209,16 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	workflowJobs := "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	workflowSource := "on:\n  pull_request:\n    paths: [\"src/**\"]\n" + workflowJobs
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"ci.yml":       "name: CI\n" + workflowSource,
-		"mismatch.yml": "name: Original\n" + workflowSource,
-		"ignore.yml":   "name: Ignore docs\non:\n  pull_request:\n    paths-ignore: [\"docs/**\"]\n" + workflowJobs,
-		"plain.yml":    "name: Unfiltered\non: pull_request\n" + workflowJobs,
+		"ci.yml":                "name: CI\n" + workflowSource,
+		"excluded-action.yml":   "name: Excluded action\non:\n  pull_request:\n    types: [closed]\n    paths: [\"src/**\"]\n" + workflowJobs,
+		"excluded-branch.yml":   "name: Excluded branch\non:\n  pull_request:\n    branches: [other]\n    paths: [\"src/**\"]\n" + workflowJobs,
+		"mismatch.yml":          "name: Original\n" + workflowSource,
+		"ignore.yml":            "name: Ignore docs\non:\n  pull_request:\n    paths-ignore: [\"docs/**\"]\n" + workflowJobs,
+		"plain.yml":             "name: Unfiltered\non: pull_request\n" + workflowJobs,
+		"skip-path.yml":         "name: Skip paths\non:\n  pull_request:\n    branches: [main]\n    types: [opened]\n    paths: [\"src/**\", \"!src/main.go\"]\n" + workflowJobs,
+		"skip-ignore.yml":       "name: Skip ignored\non:\n  pull_request:\n    paths-ignore: [\"src/**\"]\n" + workflowJobs,
+		"z-mismatch-action.yml": "name: Original action\n" + workflowSource,
+		"z-mismatch-branch.yml": "name: Original branch\n" + workflowSource,
 	})
 	runGit := func(args ...string) string {
 		t.Helper()
@@ -2237,8 +2243,14 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	runGit("add", "src/main.go")
 	runGit("commit", "-qm", "head")
 	head := runGit("rev-parse", "HEAD")
-	if err := os.WriteFile(filepath.Join(repository, ".github", "workflows", "mismatch.yml"), []byte("name: Local mismatch\n"+workflowSource), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(repository, ".github", "workflows", "mismatch.yml"), []byte("name: Local mismatch\n"+strings.ReplaceAll(workflowSource, "src/**", "docs/**")), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	for name, filter := range map[string]string{"action": "types: [closed]", "branch": "branches: [other]"} {
+		source := "name: Local mismatch\non:\n  pull_request:\n    paths: [\"src/**\"]\n    " + filter + "\n" + workflowJobs
+		if err := os.WriteFile(filepath.Join(repository, ".github", "workflows", "z-mismatch-"+name+".yml"), []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	webhook, err := json.Marshal(map[string]any{
 		"action": "opened", "number": 42,
@@ -2257,6 +2269,7 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_STEP_KEY", "path-filter-importer")
+	t.Setenv("BUILDKITE_BUILD_URL", "https://buildkite.com/acme/widgets/builds/42")
 	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
 	t.Setenv("BUILDKITE_COMMIT", head)
 	t.Setenv("BUILDKITE_BRANCH", "contributor:feature")
@@ -2268,7 +2281,7 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	t.Setenv("BUILDKITE_GITHUB_EVENT", "pull_request")
 	runner := &cliCaptureRunner{webhook: webhook}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", ".github/workflows/ci.yml", ".github/workflows/mismatch.yml", ".github/workflows/ignore.yml", ".github/workflows/plain.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+	if code := run([]string{"upload", ".github/workflows/ci.yml", ".github/workflows/mismatch.yml", ".github/workflows/ignore.yml", ".github/workflows/plain.yml", ".github/workflows/skip-path.yml", ".github/workflows/skip-ignore.yml", ".github/workflows/z-mismatch-action.yml", ".github/workflows/z-mismatch-branch.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 	}
 	var pipeline struct {
@@ -2277,24 +2290,200 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 			Label     string `yaml:"label"`
 			Condition string `yaml:"if"`
 			Command   string `yaml:"command"`
+			Skip      string `yaml:"skip"`
 			Steps     []any  `yaml:"steps"`
 		} `yaml:"steps"`
 	}
-	pipelineCommand := runner.commands[len(runner.commands)-1]
+	var pipelineCommand cliCommand
+	var annotation []byte
+	for _, command := range runner.commands {
+		if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation"}) {
+			pipelineCommand = command
+		}
+		if len(command.args) > 0 && command.args[0] == "annotate" {
+			annotation = command.stdin
+		}
+	}
+	if !bytes.Contains(annotation, []byte("Changed paths do not match this workflow")) {
+		t.Fatalf("missing path-filter skip annotation: %s", annotation)
+	}
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 4 || pipeline.Steps[0].Group != ":github: workflow · CI" || strings.Contains(pipeline.Steps[0].Condition, "false") || len(pipeline.Steps[0].Steps) != 1 {
+	if len(pipeline.Steps) != 8 || pipeline.Steps[0].Group != ":github: workflow · CI" || strings.Contains(pipeline.Steps[0].Condition, "false") || len(pipeline.Steps[0].Steps) != 1 {
 		t.Fatalf("path-filter pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
-	if failure := pipeline.Steps[2]; failure.Label != ":github: workflow · Local mismatch" || !isGeneratedFailureCommand(failure.Command) || failure.Group != "" || len(failure.Steps) != 0 {
-		t.Fatalf("workflow mismatch failure = %#v\n%s", failure, pipelineCommand.stdin)
+	for _, index := range []int{2, 6, 7} {
+		if failure := pipeline.Steps[index]; failure.Label != ":github: workflow · Local mismatch" || !isGeneratedFailureCommand(failure.Command) || failure.Group != "" || len(failure.Steps) != 0 || failure.Skip != "" {
+			t.Fatalf("workflow mismatch failure = %#v\n%s", failure, pipelineCommand.stdin)
+		}
 	}
 	for i, name := range map[int]string{1: "Ignore docs", 3: "Unfiltered"} {
 		step := pipeline.Steps[i]
 		if step.Group != ":github: workflow · "+name || len(step.Steps) != 1 || strings.Contains(step.Condition, "false") {
 			t.Fatalf("workflow %s should run: %#v", name, step)
 		}
+	}
+	for _, step := range pipeline.Steps[4:6] {
+		if step.Skip != "Changed paths do not match this workflow's path filters" || step.Command != "" || step.Group != "" || len(step.Steps) != 0 {
+			t.Fatalf("nonmatching workflow must skip without generated jobs: %#v", step)
+		}
+	}
+	for _, history := range []string{"shallow", "missing base"} {
+		t.Run(history+" preserves verified non-path exclusions", func(t *testing.T) {
+			webhook := webhook
+			historyReason := "non-shallow checkout"
+			if history == "shallow" {
+				shallowPath := filepath.Join(repository, ".git", "shallow")
+				if err := os.WriteFile(shallowPath, []byte(base+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Remove(shallowPath) })
+			} else {
+				webhook = bytes.ReplaceAll(webhook, []byte(base), []byte(strings.Repeat("f", 40)))
+				historyReason = "base commit is unavailable"
+			}
+			runner := &cliCaptureRunner{webhook: webhook}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"upload", ".github/workflows/ci.yml", ".github/workflows/excluded-action.yml", ".github/workflows/excluded-branch.yml", ".github/workflows/plain.yml", ".github/workflows/z-mismatch-action.yml", ".github/workflows/z-mismatch-branch.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+				t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+			}
+			pipeline.Steps = nil
+			for _, command := range runner.commands {
+				if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation"}) {
+					if err := yaml.Unmarshal(command.stdin, &pipeline); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if len(pipeline.Steps) != 6 {
+				t.Fatalf("shallow pipeline = %#v", pipeline.Steps)
+			}
+			for _, index := range []int{0, 4, 5} {
+				if step := pipeline.Steps[index]; !isGeneratedFailureCommand(step.Command) || step.Group != "" || step.Skip != "" {
+					t.Fatalf("selected unavailable paths and unverified workflows must fail: %#v", step)
+				}
+			}
+			for index, name := range map[int]string{1: "Excluded action", 2: "Excluded branch"} {
+				step := pipeline.Steps[index]
+				if step.Group != ":github: workflow · "+name || len(step.Steps) != 1 || step.Command != "" || step.Skip != "" {
+					t.Fatalf("verified excluded workflow must retain its condition: %#v", step)
+				}
+				if index == 1 && !strings.Contains(step.Condition, `"opened" == "closed"`) || index == 2 && !strings.Contains(step.Condition, `"main" =~ /^other$/`) {
+					t.Fatalf("missing non-path exclusion: %#v", step)
+				}
+			}
+			if step := pipeline.Steps[3]; step.Group != ":github: workflow · Unfiltered" || len(step.Steps) != 1 || strings.Contains(step.Condition, "false") {
+				t.Fatalf("unfiltered workflow must not need history: %#v", step)
+			}
+			if !strings.Contains(stdout.String(), "does not match the pull request head commit") || !strings.Contains(stdout.String(), historyReason) {
+				t.Fatalf("must distinguish identity failures from unavailable history: %s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestRunUploadPreservesVerifiedPushExclusionsWithUnavailableHistory(t *testing.T) {
+	requireImporterHost(t)
+	jobs := "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	filtered := "on:\n  push:\n    paths: ['src/**']\n"
+	excluded := filtered + "    branches: [other]\n"
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"ci.yml":       "name: CI\n" + filtered + jobs,
+		"excluded.yml": "name: Excluded\n" + excluded + jobs,
+		"mismatch.yml": "name: Mismatch\n" + filtered + jobs,
+		"plain.yml":    "name: Unfiltered\non: push\n" + jobs,
+	})
+	runGit := func(args ...string) string {
+		t.Helper()
+		output, err := exec.Command("git", append([]string{"-C", repository}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test")
+	runGit("commit", "-qm", "base")
+	base := runGit("rev-parse", "HEAD")
+	runGit("commit", "--allow-empty", "-qm", "head")
+	head := runGit("rev-parse", "HEAD")
+	runGit("remote", "add", "origin", "https://github.com/buildkite/buildkite-gha.git")
+	runGit("update-ref", "refs/remotes/origin/main", head)
+	if err := os.WriteFile(filepath.Join(repository, ".github/workflows/mismatch.yml"), []byte("name: Mismatch\n"+excluded+jobs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_KEY", "push-path-filter-importer")
+	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
+	t.Setenv("BUILDKITE_COMMIT", head)
+	t.Setenv("BUILDKITE_BRANCH", "main")
+	t.Setenv("BUILDKITE_TAG", "")
+	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
+	t.Setenv("BUILDKITE_SOURCE", "webhook")
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "push")
+	for _, history := range []string{"shallow", "missing before"} {
+		t.Run(history, func(t *testing.T) {
+			before := base
+			if history == "shallow" {
+				shallowPath := filepath.Join(repository, ".git/shallow")
+				if err := os.WriteFile(shallowPath, []byte(base+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Remove(shallowPath) })
+			} else {
+				before = strings.Repeat("f", 40)
+			}
+			webhook, err := json.Marshal(map[string]any{
+				"ref": "refs/heads/main", "before": before, "after": head,
+				"created": false, "deleted": false, "forced": false,
+				"commits":    []any{map[string]any{"id": head}},
+				"repository": map[string]any{"full_name": "buildkite/buildkite-gha"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &cliCaptureRunner{webhook: webhook}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"upload", ".github/workflows/ci.yml", ".github/workflows/excluded.yml", ".github/workflows/mismatch.yml", ".github/workflows/plain.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+				t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+			}
+			var pipeline struct {
+				Steps []struct {
+					Group     string `yaml:"group"`
+					Condition string `yaml:"if"`
+					Command   string `yaml:"command"`
+					Skip      string `yaml:"skip"`
+					Steps     []any  `yaml:"steps"`
+				} `yaml:"steps"`
+			}
+			for _, command := range runner.commands {
+				if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation"}) {
+					if err := yaml.Unmarshal(command.stdin, &pipeline); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if len(pipeline.Steps) != 4 {
+				t.Fatalf("push pipeline = %#v", pipeline.Steps)
+			}
+			for _, index := range []int{0, 2} {
+				if step := pipeline.Steps[index]; !isGeneratedFailureCommand(step.Command) || step.Skip != "" || step.Group != "" {
+					t.Fatalf("selected unavailable paths and unverified workflows must fail: %#v", step)
+				}
+			}
+			if step := pipeline.Steps[1]; step.Group != ":github: workflow · Excluded" || len(step.Steps) != 1 || !strings.Contains(step.Condition, `"main" =~ /^other$/`) {
+				t.Fatalf("verified excluded push must retain its branch condition: %#v", step)
+			}
+			if step := pipeline.Steps[3]; step.Group != ":github: workflow · Unfiltered" || len(step.Steps) != 1 {
+				t.Fatalf("unfiltered push must not need history: %#v", step)
+			}
+			if !strings.Contains(stdout.String(), "does not match the pushed commit") {
+				t.Fatalf("history failure must not overwrite workflow identity failure: %s", stdout.String())
+			}
+		})
 	}
 }
 
@@ -2529,7 +2718,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	}
 	compiledReusable := false
 	for path, contents := range runner.uploaded {
-		if !strings.HasSuffix(path, ".json") {
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			continue
 		}
 		job, err := plan.Decode(contents)
@@ -2621,7 +2810,7 @@ func TestRunUploadUsesExplicitTargetQueueAndRunnerUserDefault(t *testing.T) {
 
 	planCount := 0
 	for path, contents := range runner.uploaded {
-		if !strings.HasSuffix(path, ".json") {
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			continue
 		}
 		job, err := plan.Decode(contents)
@@ -2864,7 +3053,7 @@ func TestRunUploadDerivesOriginEvent(t *testing.T) {
 	}
 }
 
-func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
+func TestRunUploadRetainsWebhookOutsideJobPlans(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "webhook.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-${{ github.event.marker }}\n    steps:\n      - run: echo selected\n"), 0o600); err != nil {
@@ -2880,7 +3069,7 @@ func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
 	t.Setenv("BUILDKITE_BUILD_AUTHOR", "Build Author")
 	t.Setenv("BUILDKITE_GITHUB_EVENT", "pull_request")
-	rawSecret := "raw-webhook-value-must-not-be-retained"
+	rawSecret := "raw-webhook-value-must-not-be-logged"
 	runner := &cliCaptureRunner{webhook: fmt.Appendf(nil, "{\"action\":\"opened\",\"marker\":\"latest\",\"private\":\"%s\",\"pull_request\":{\"base\":{\"ref\":\"main\"}},\"ref\":\"refs/heads/trigger\",\"after\":\"%s\",\"repository\":{\"full_name\":\"other/trigger\"},\"sender\":{\"login\":\"octocat\"}}", rawSecret, strings.Repeat("b", 40))}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"upload", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
@@ -2889,7 +3078,10 @@ func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 	if len(runner.commands) == 0 || !slices.Equal(runner.commands[0].args, []string{"meta-data", "get", "buildkite:webhook"}) {
 		t.Fatalf("commands = %#v, want metadata read first", runner.commands)
 	}
-	metadataReads, planCount := 0, 0
+	if strings.Contains(stdout.String()+stderr.String(), rawSecret) {
+		t.Fatal("webhook payload leaked to logs")
+	}
+	metadataReads, planCount, eventCount := 0, 0, 0
 	for _, command := range runner.commands {
 		if slices.Equal(command.args, []string{"meta-data", "get", "buildkite:webhook"}) {
 			metadataReads++
@@ -2899,7 +3091,14 @@ func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 		}
 	}
 	for path, contents := range runner.uploaded {
-		if !strings.HasSuffix(path, ".json") {
+		if strings.HasPrefix(path, ".buildkite-gha/events/") {
+			eventCount++
+			if !bytes.Contains(contents, []byte(rawSecret)) {
+				t.Fatal("event artifact omitted original payload")
+			}
+			continue
+		}
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			continue
 		}
 		if bytes.Contains(contents, []byte(rawSecret)) {
@@ -2910,19 +3109,19 @@ func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 			t.Fatal(err)
 		}
 		planCount++
-		if job.Event.Name != "pull_request" || job.Event.Repository != "buildkite/buildkite-gha" || job.Event.Ref != "refs/heads/executed" || job.Event.SHA != sha || job.Event.Actor != "octocat" {
+		if !job.Event.PayloadFile || !job.Event.PayloadArtifact || job.Event.Name != "pull_request" || job.Event.Repository != "buildkite/buildkite-gha" || job.Event.Ref != "refs/heads/executed" || job.Event.SHA != sha || job.Event.Actor != "octocat" {
 			t.Fatalf("webhook plan = %#v", job)
 		}
 	}
-	if metadataReads != 1 || planCount != 1 {
-		t.Fatalf("metadata reads = %d, plans = %d", metadataReads, planCount)
+	if metadataReads != 1 || planCount != 1 || eventCount != 1 {
+		t.Fatalf("metadata reads = %d, plans = %d, events = %d", metadataReads, planCount, eventCount)
 	}
 }
 
 func TestRunUploadStoresRuntimeEventOnceForExactImporterJob(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "runtime-event.yml")
-	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        part: [one, two]\n    steps:\n      - run: echo '${{ toJSON(github.event) }}'\n"), 0o600); err != nil {
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        part: [one, two]\n    steps:\n      - run: test -s \"$GITHUB_EVENT_PATH\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sha := strings.Repeat("a", 40)
@@ -2954,7 +3153,7 @@ func TestRunUploadStoresRuntimeEventOnceForExactImporterJob(t *testing.T) {
 				t.Fatalf("plan %q embedded the event payload", path)
 			}
 			job, err := plan.Decode(contents)
-			if err != nil || !job.Event.PayloadArtifact {
+			if err != nil || !job.Event.PayloadArtifact || !job.Event.PayloadFile {
 				t.Fatalf("plan event artifact marker = %#v, %v", job.Event, err)
 			}
 		}
@@ -2975,6 +3174,7 @@ func TestRunUploadStoresRuntimeEventOnceForExactImporterJob(t *testing.T) {
 
 func TestRunUploadRejectsInvalidWebhookMetadata(t *testing.T) {
 	requireImporterHost(t)
+	t.Setenv("BUILDKITE_JOB_ID", "") // Exercise stderr reporting without annotations.
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "webhook-importer")
@@ -3153,7 +3353,7 @@ func TestRunUploadAllowsCompilerVerifiedLocalDockerfileAction(t *testing.T) {
 	}
 	var job plan.Job
 	for path, contents := range runner.uploaded {
-		if !strings.HasSuffix(path, ".json") {
+		if !strings.HasPrefix(path, ".buildkite-gha/plans/") {
 			continue
 		}
 		decoded, err := plan.Decode(contents)

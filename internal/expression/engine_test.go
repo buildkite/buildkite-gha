@@ -240,6 +240,28 @@ func TestEngineValidateConditionAttributesEarlySecretReferenceError(t *testing.T
 	}
 }
 
+func TestEngineAnalysisDefersRunnerEnvironmentToRuntime(t *testing.T) {
+	engine := NewEngine()
+	condition, err := engine.Analyze(Site{
+		Source:  "runner.environment == 'github-hosted'",
+		Profile: ProfileStepCondition,
+		Result:  ResultBoolean,
+		Purpose: PurposeExpression,
+	}, AbstractValues{})
+	if err != nil || condition.Value.Known {
+		t.Fatalf("Analyze() condition = %#v, %v; want runtime-dependent", condition, err)
+	}
+	token, err := engine.Analyze(Site{
+		Source:  "${{ runner.environment == 'github-hosted' && github.token || '' }}",
+		Profile: ProfileStepTemplate,
+		Result:  ResultString,
+		Purpose: PurposeWorkflowActionInput,
+	}, AbstractValues{})
+	if err != nil || token.Effects.GitHubToken != GitHubTokenDirect {
+		t.Fatalf("Analyze() token effects = %v, %v; want conservative authority", token.Effects.GitHubToken, err)
+	}
+}
+
 func TestEngineTemplateAnalysisExcludesKnownFalseTokenBranch(t *testing.T) {
 	engine := NewEngine()
 	site := Site{Source: "${{ false && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString, Purpose: PurposeWorkflowActionInput}

@@ -183,16 +183,15 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if input.ReusableOnly {
 			continue
 		}
+		// This event-independent pass only scans the workflow graph, including
+		// reusable callees, for variable references. It has no event payload
+		// and no variable source, so its findings are placeholder artifacts;
+		// the event validation below reports every workflow with the real
+		// event and resolved variables.
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.RepositorySource = repositorySource
-		validation, validationErr := compiler.ValidateWithOptionsContext(ctx, input.Path, input.Source, validationOptions)
+		validation, _ := compiler.ValidateWithOptionsContext(ctx, input.Path, input.Source, validationOptions)
 		workflows[i].ReferencesVars = validation.ReferencesVars
-		if validation.RuntimeMatrixBoundary {
-			report := compatibility.InitialProcessingReport(input.Path, hostedProfile, false, validation, validationErr)
-			report.Result = "incompatible"
-			_ = out.write(ctx, report)
-			return 1
-		}
 	}
 	if eventPath == "" {
 		eventSource, eventOrigin, eventLoadErr = loadEffectiveEventSource(ctx, eventPath, agent)
@@ -215,6 +214,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		return 1
 	}
+	out.sourceLinks = sourceLinksForEvent(effectiveEvent.Event)
 	authentication := importerJobActionSourceAuthentication(stderr, uploadArguments.clientVersion)
 	var sourceOptions []actionsource.Option
 	if effectiveEvent.Event.Provider == "github" {
@@ -239,18 +239,19 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if workflows[i].ReusableOnly {
 			continue
 		}
-		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
+		workflowEvent := effectiveEvent
+		if workflows[i].PathFiltersError != "" {
+			workflowEvent.TriggerSnapshot.ChangedPaths = buildkitepipeline.ChangedPathEvaluation{UnavailableReason: workflows[i].PathFiltersError}
+		}
+		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, workflowEvent)
+		if workflows[i].PathFiltersError != "" && !workflows[i].PathFiltersIdentityVerified {
+			triggerErr = &buildkitepipeline.UnsupportedPathFiltersError{Event: effectiveEvent.Event.Event, Reason: workflows[i].PathFiltersError}
+		}
 		switch {
 		case triggerErr != nil:
 			workflows[i].Applicable = true
 			workflows[i].TriggerCondition = effectiveEvent.TriggerExpressions.EventPredicate
 			processingReports[i] = triggerFailureProcessingReport(workflows[i], triggerErr)
-		case workflows[i].PathFiltersError != "" && selection.AnnotationReason == "":
-			workflows[i].Applicable = true
-			workflows[i].TriggerCondition = effectiveEvent.TriggerExpressions.EventPredicate
-			processingReports[i] = triggerFailureProcessingReport(workflows[i], &buildkitepipeline.UnsupportedPathFiltersError{
-				Event: effectiveEvent.Event.Event, Reason: workflows[i].PathFiltersError,
-			})
 		default:
 			workflows[i].Applicable = selection.Applicable
 			workflows[i].TriggerCondition = selection.Condition
@@ -440,7 +441,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			continue
 		}
 		compileWorkflow := func(vars compiler.VariableSources) (hostedCompilation, error) {
-			return compileHostedNamespacedWithActionCache(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, bundleCompilerStep, "", uploadArguments.runnerTargets, uploadArguments.runnerResolution, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, "", repositorySource, authentication, uploadArguments.environmentSource, vars)
+			return compileHostedNamespacedWithActionCache(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, bundleCompilerStep, "", uploadArguments.runnerTargets, uploadArguments.runnerResolution, runtimeDigests, input.StepKeyNamespace, uploadArguments.oidc, "", repositorySource, authentication, uploadArguments.environmentSource, vars, effectiveEvent.Origin != effectiveEventFromBuild)
 		}
 		preflight, err := compileWorkflow(vars)
 		preflight, err = failClosedForPreparationAdmission(preflight, err, preparationAdmissionFailures[i])
@@ -843,6 +844,7 @@ type workflowInput struct {
 	Triggers                                        []workflow.Trigger
 	TriggerCondition, SkipReason, AnnotationReason  string
 	PathFiltersError                                string
+	PathFiltersIdentityVerified                     bool
 	ReusableOnly, Applicable                        bool
 	// ReferencesVars records whether the event-independent validation found
 	// any vars reference in the workflow or a reusable workflow it calls.

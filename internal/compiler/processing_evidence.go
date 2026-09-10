@@ -8,6 +8,22 @@ type ActionEvaluation struct {
 	Reference string
 	Step      int
 	Passed    bool
+	// CacheSubstitutions lists actions/cache references reachable from this
+	// step whose resolved commit was replaced by an audited release.
+	CacheSubstitutions []CacheSubstitution
+}
+
+// CacheSubstitution records one actions/cache reference that resolved to a
+// commit outside the frozen cache-v2 snapshot and runs an audited release
+// instead.
+type CacheSubstitution struct {
+	// Reference is the requested action, such as actions/cache@v6.
+	Reference string
+	// ResolvedCommit is the commit the requested ref resolved to.
+	ResolvedCommit string
+	// Commit and Release identify the audited substitute that runs.
+	Commit  string
+	Release string
 }
 
 // JobEvaluation records whether plan construction ran for one instance.

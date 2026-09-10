@@ -33,7 +33,8 @@ Jobs with JavaScript actions need `mise`. The runtime checks
 Shell-only, native-adapter, and Docker-only jobs do not need it.
 
 When a managed cache is configured, the runtime installs Node there rather
-than reusing system-wide mise installations.
+than reusing system-wide mise installations. The install directory remains
+pinned even when an agent's mise wrapper overrides `MISE_DATA_DIR`.
 
 Managed Node binaries require glibc 2.28 or newer. The Go CLI has no glibc requirement.
 
@@ -78,14 +79,15 @@ buildkite-gha validate \
 ```
 
 `--event` supports `push`, `pull_request`, `merge_group`, `release`, `issues`,
-`issue_comment`, `workflow_dispatch`, and `schedule`. It requires
+`issue_comment`, `pull_request_review`, `pull_request_review_comment`,
+`workflow_dispatch`, and `schedule`. It requires
 `--profile hosted` and cannot be combined with `--event-path`.
 
 The generated snapshot contains an example repository and the minimum event
 fields. It is useful for a quick check, but it is not a real payload. The
 release snapshot represents one stable, non-prerelease `published` event. The
-issues snapshot represents `opened`, and the issue-comment snapshot represents
-`created`. Use
+issues snapshot represents `opened`, review represents `submitted`, and both
+comment events represent `created`. Use
 `--event-path` when exact refs, activity, repository identity, or payload fields
 matter.
 
@@ -298,9 +300,9 @@ when it runs inside a Buildkite job.
 ```
 
 The snapshot supplies compile-time context. Plans retain the event name,
-repository, refs, SHA, actor, and a payload digest. If a job needs whole or
-runtime-selected `github.event` access, upload stores one content-addressed
-payload artifact for the build and marks the plan to load it at runtime.
+repository, refs, SHA, actor, and a payload digest. Upload stores the snapshot's
+payload once as a content-addressed artifact and marks each job to load it for
+[`GITHUB_EVENT_PATH`](compatibility.md#event-file), even without event expressions.
 
 The snapshot is compatibility data, not authorization.
 
@@ -364,14 +366,15 @@ Actions Pipeline Trigger builds. Most users should configure an explicit
 Without an explicit selector, `BUILDKITE_GITHUB_WORKFLOW_PATH` marks a GitHub
 Actions Pipeline Trigger selection. The server also supplies:
 
-- `GITHUB_EVENT_NAME`: `push`, `pull_request`, `issues`, or `issue_comment`
+- `GITHUB_EVENT_NAME`: `push`, `pull_request`, `issues`, `issue_comment`,
+  `pull_request_review`, `pull_request_review_comment`, or `release`
 - `GITHUB_WORKFLOW`: the workflow `name`, or its repository-relative path when
   `name` is absent
 - `GITHUB_WORKFLOW_REF`:
   `<owner>/<repo>/<repository-relative-path>@<event-ref>`
 - `GITHUB_WORKFLOW_SHA`: the full commit used to match the workflow
 - `BUILDKITE_GITHUB_EVENT`: a compatibility duplicate of `GITHUB_EVENT_NAME`
-- `BUILDKITE_GITHUB_ACTION`: the pull request, issue, or comment action; push
+- `BUILDKITE_GITHUB_ACTION`: the pull request, issue, comment, or release action; push
   events omit it
 
 The `GITHUB_*` values take precedence when present. The plugin derives the
@@ -381,11 +384,20 @@ commit. A malformed preferred value fails instead of falling back.
 For pull requests, `GITHUB_WORKFLOW_REF` and imported jobs' `GITHUB_REF` retain
 `refs/pull/<number>/merge`, while `GITHUB_WORKFLOW_SHA`, `GITHUB_SHA`, and the
 Buildkite checkout use the pull request head commit.
+Review and inline review-comment events use the same PR-head contract. They
+require both workflow identity fields and the original `buildkite:webhook`
+payload. The PR number, head SHA, head/base branches, activity, and all three
+repository identities must agree with the build. Missing payloads (including
+rebuilds without retained webhook data) fail closed, not as synthetic PR events.
 For `issues` and `issue_comment`, the ref is the current repository default
 branch and the SHA is its server-verified tip. Both identity fields are
 required. The linked payload action and repository must match the Buildkite
 environment, and `issue_comment` accepts both issue and pull request
 conversation comments.
+For `release`, both workflow identity fields and the original linked payload
+are required. The ref identifies the release tag; the SHA identifies its
+server-resolved peeled commit. Repository, tag, branch, and supported non-draft
+activity must agree. See [release compatibility](compatibility.md#names-and-triggers).
 `BUILDKITE_GITHUB_WORKFLOW_PATH` remains the path fallback because GitHub has no
 `GITHUB_WORKFLOW_PATH`. `BUILDKITE_GITHUB_ACTION` remains the action source
 because GitHub's `GITHUB_ACTION` has a different meaning. An explicit
@@ -521,18 +533,19 @@ valid JSON object no larger than 25 MiB. Malformed, unreadable, or oversized
 data stops upload instead of falling back. Buildkite's repository mapping,
 commit, and ref remain authoritative.
 
-Raw webhook data is not retained in generated plans or pipeline YAML. When a
-job needs whole or runtime-selected `github.event` access, upload retains one
-content-addressed event artifact so that the job and its retries can evaluate
-the expression. Event data cannot grant queues, secrets, or tokens.
+Raw webhook data is not embedded in generated plans or pipeline YAML. Upload
+retains one content-addressed event artifact for linked webhooks and explicit
+snapshots, so every job and its retries can read the [event file](compatibility.md#event-file).
+For reduced fallback snapshots, it retains the artifact only when runtime event
+expressions require it. Event data cannot grant queues, secrets, or tokens.
 
 The selected snapshot establishes one event for applicability, compilation,
 group conditions, provider-check names, and explicit run-name evaluation. An
 explicit event is never replaced with live Buildkite fields.
 
 Linked webhook data can provide native `merge_group`, `release`, and `issues`
-events. GitHub Actions Pipeline Trigger identity additionally supports `issues`
-and `issue_comment` without native Buildkite issue/comment settings. Merge
+events. GitHub Actions Pipeline Trigger identity additionally supports `release`,
+`issues`, `issue_comment`, and PR review events without native event settings. Merge
 groups and releases need matching Buildkite refs, commits, and
 activity. Release also needs a valid payload and a tag matching `BUILDKITE_TAG`
 and `BUILDKITE_BRANCH`. Issue and comment payloads need a valid action, object
@@ -547,8 +560,9 @@ A top-level workflow that does not declare the event becomes a skipped step with
 no plan artifacts. If none apply, upload succeeds with a skipped-only pipeline.
 
 For an applicable workflow, only the selected event contributes a group
-condition. Supported branch, tag, path, base-branch, and activity filters add
-their constraints. Conditions from different events are never combined.
+condition. Supported branch, tag, base-branch, and activity filters add their
+constraints. A verified path-filter nonmatch becomes a skipped step without
+workflow jobs or plan artifacts. Conditions from different events are never combined.
 
 Unsupported or uncertain filters replace only the affected workflow with a
 failing step. Push and pull-request path filters need a linked webhook and a

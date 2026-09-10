@@ -437,6 +437,14 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandOutputProcesso
 	if action.Workspace != "" {
 		args = append(args, "--mount", "type=bind,source="+action.Workspace+",target=/github/workspace", "--mount", "type=bind,source="+action.runnerTemp+",target=/github/runner_temp", "--workdir", "/github/workspace")
 	}
+	eventPath := r.runtimeEnv["GITHUB_EVENT_PATH"]
+	if eventPath != "" {
+		eventDir := filepath.Dir(eventPath)
+		if err := validateDockerMountPath(eventDir); err != nil {
+			return result, err
+		}
+		args = append(args, "--mount", "type=bind,source="+eventDir+",target="+containerEventDirectory+",readonly", "--env", "GITHUB_EVENT_PATH="+containerEventPath)
+	}
 	var siblingPaths *jobContainerBackend
 	if r.jobContainer != nil {
 		siblingPaths = &jobContainerBackend{mounts: []containerMount{
@@ -447,6 +455,9 @@ func (r *jobRun) runDocker(ctx context.Context, processor *commandOutputProcesso
 		}}
 	}
 	for _, name := range sortedKeys(action.Env) {
+		if name == "GITHUB_EVENT_PATH" && eventPath != "" {
+			continue
+		}
 		if isCacheServiceEnvironment(name) || isIDTokenEnvironment(name) || name == "RUNNER_TOOL_CACHE" || (name == "PATH" && !action.explicitPATH) || name == "GITHUB_WORKSPACE" || name == "RUNNER_TEMP" {
 			continue
 		}

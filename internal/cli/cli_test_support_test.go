@@ -25,11 +25,15 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	// Keep tests independent of the ambient Agent API and checkout path that a
-	// Buildkite job inherits; tests that need them set these explicitly.
-	for _, name := range []string{"BUILDKITE", "BUILDKITE_JOB_ID", "BUILDKITE_AGENT_ENDPOINT", "BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_BUILD_CHECKOUT_PATH"} {
+	// Ordinary CLI tests must never reach the ambient Agent API that a
+	// Buildkite job inherits or enable skipped-workflow annotations through its
+	// build URL; tests that need these set them explicitly.
+	for _, name := range []string{"BUILDKITE", "BUILDKITE_JOB_ID", "BUILDKITE_BUILD_URL", "BUILDKITE_AGENT_ENDPOINT", "BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_BUILD_CHECKOUT_PATH"} {
 		_ = os.Unsetenv(name)
 	}
+	// Event artifacts bind to an exact importer job, including file-only readers.
+	// Keep a deterministic producer without configuring an Agent API connection.
+	_ = os.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	os.Exit(m.Run())
 }
 
