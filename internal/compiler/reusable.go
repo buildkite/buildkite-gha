@@ -131,7 +131,8 @@ type reusableResolver struct {
 	warnedCancellation map[workflow.Position]bool
 	// warnedGuardedConcurrency records the root call positions whose
 	// runtime-decided guard already produced a concurrency wait warning.
-	warnedGuardedConcurrency map[workflow.Position]bool
+	warnedGuardedConcurrency      map[workflow.Position]bool
+	warnedPrerequisiteConcurrency map[workflow.Position]bool
 }
 
 // workflowScan is what static discovery learns about a workflow and every
@@ -193,8 +194,9 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 	resolver := reusableResolver{
 		workspaceRoot: rootSource.repositoryRoot, repositorySource: newMemoizedActionSource(repositorySource), stack: []reusableSourceIdentity{rootSource.identity}, context: context,
 		rootPermissions: effectivePermissions(nil, parsed.Permissions, nil, false), scan: scan,
-		warnedCancellation:       make(map[workflow.Position]bool),
-		warnedGuardedConcurrency: make(map[workflow.Position]bool),
+		warnedCancellation:            make(map[workflow.Position]bool),
+		warnedGuardedConcurrency:      make(map[workflow.Position]bool),
+		warnedPrerequisiteConcurrency: make(map[workflow.Position]bool),
 	}
 	resolver.scan.sources = map[string]WorkflowSourceReference{rootSource.displayPath: localSourceReference(path, source)}
 	defer func() {
@@ -483,9 +485,6 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				if err != nil {
 					return reusableResolution{}, err
 				}
-				if len(needs) != 0 {
-					return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "called-workflow concurrency is unsupported for reusable-workflow calls with prerequisites")
-				}
 				// A call guard that is already false never runs the called
 				// workflow, so GitHub never enters its group; the skipped jobs
 				// must not wait for or hold the gate. Every other guard keeps
@@ -496,6 +495,12 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				guardKnown, guardValue := staticCallGuardValue(calleeGuards)
 				if !guardKnown || guardValue {
 					calleeConcurrencyGates = append(append([]WorkflowConcurrencyGate(nil), concurrencyGates...), WorkflowConcurrencyGate{ID: callNamespace, Group: group})
+					if len(needs) != 0 && !resolver.warnedPrerequisiteConcurrency[calleeCallPosition] {
+						resolver.warnedPrerequisiteConcurrency[calleeCallPosition] = true
+						warning := prerequisiteReusableConcurrencyWarning(calleeCallPosition)
+						warning.Job = job.ID
+						resolver.warnings = append(resolver.warnings, warning)
+					}
 					if !guardKnown && !resolver.warnedGuardedConcurrency[calleeCallPosition] {
 						resolver.warnedGuardedConcurrency[calleeCallPosition] = true
 						warning := guardedReusableConcurrencyWarning(calleeCallPosition, calleeSource.displayPath)

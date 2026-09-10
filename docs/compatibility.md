@@ -573,11 +573,15 @@ jobs:
       target: ${{ matrix.target }}
 ```
 
-Nested called workflows keep nested gates. Jobs within one called workflow remain parallel except for their declared `needs` and job-level concurrency. Calls with `needs`, and jobs or nested called workflows that reuse an enclosing workflow group, are unsupported because Buildkite cannot preserve GitHub's admission order for those cases.
+Nested called workflows keep nested gates. Jobs within one called workflow remain parallel except for their declared `needs` and job-level concurrency. Jobs or nested called workflows that reuse an enclosing workflow group remain unsupported.
 
-A call with `if` keeps the called workflow's gate. Buildkite enters the group during compilation, before the runtime evaluates the condition, so exclusion is never weaker than on GitHub:
+Calls with `needs` are supported when their prerequisites have no concurrency or statically disjoint groups. The compiler checks transitive prerequisites, matrix instances, and nested reusable-workflow groups. A prerequisite sharing the called workflow's group, an unresolved group, or a cycle involving gate dependencies and Buildkite's ordered concurrency queues is rejected. For example, `needs: prepare` is supported for a called workflow in group `deploy` when `prepare` has no concurrency or uses a separate group such as `build`.
 
-| Call condition at compile time | Gate | Diagnostic |
+The opening gate waits for every external prerequisite, including failed or skipped jobs, so runtime conditions still decide whether the call runs. Buildkite reserves the gate's queue position at pipeline upload, before those prerequisites finish; GitHub admits the called workflow afterward. A later call or build using the group can therefore wait behind an earlier call whose prerequisites are unfinished. `W_REUSABLE_WORKFLOW_CONCURRENCY_QUEUED_BEFORE_PREREQUISITES` reports this difference once per root call. Mutual exclusion is preserved. This analysis covers the generated pipeline, not dependencies introduced by other pipelines or later manual uploads.
+
+A call with `if` keeps the called workflow's gate unless its condition is already false. Buildkite reserves the group at pipeline upload, before the runtime evaluates the condition:
+
+| Call condition at compile time | Gate | Condition diagnostic |
 | --- | --- | --- |
 | True, such as `github.event_name == 'pull_request'` on a pull request | Emitted | None |
 | False, such as the same condition on a push | Omitted; the jobs skip without entering the group, as on GitHub | None |
