@@ -373,6 +373,19 @@ func (r *Resolver) gitRepositorySource(ref Reference) bool {
 	return ref.RepositoryRoot && r.cfg.git != ""
 }
 
+// gitFallbackError reports whether an anonymous GitHub API failure leaves a
+// repository-root reference to the Git repository source. Not-found, denied,
+// and rate-limited responses all leave repository access undecided: the event
+// repository never receives the action-source token, so its shared anonymous
+// quota can run out while the importer's own Git credentials still authorize
+// the fetch. Other errors, and every error when the Git source is disabled,
+// are returned unchanged.
+func gitFallbackError(err error) bool {
+	var notPublic *NotPublicError
+	var rateLimited *RateLimitError
+	return errors.As(err, &notPublic) || errors.As(err, &rateLimited)
+}
+
 // ResolutionSnapshotID identifies the immutable mutable-ref generation.
 func (r *Resolver) ResolutionSnapshotID() string {
 	if r == nil || r.cfg.resolutionSnapshot == nil {
@@ -387,13 +400,22 @@ func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved,
 	}
 	if r.cfg.credential != nil && r.cfg.credential.token != "" {
 		if err := ensurePublic(ctx, r.client, r.cfg, ref); err != nil {
-			var notPublic *NotPublicError
-			if !errors.As(err, &notPublic) || !r.gitRepositorySource(ref) {
+			if !gitFallbackError(err) || !r.gitRepositorySource(ref) {
 				return Resolved{}, err
 			}
 			return resolveWithGit(ctx, r.cfg, ref)
 		}
 	}
+	resolved, err := r.resolveMutableViaAPI(ctx, ref)
+	if gitFallbackError(err) && r.gitRepositorySource(ref) {
+		return resolveWithGit(ctx, r.cfg, ref)
+	}
+	return resolved, err
+}
+
+// resolveMutableViaAPI resolves a tag, branch, or commit-ish through the
+// GitHub API, trying tag and branch refs before the commits endpoint.
+func (r *Resolver) resolveMutableViaAPI(ctx context.Context, ref Reference) (Resolved, error) {
 	for _, kind := range []string{"tags", "heads"} {
 		var v struct {
 			Object struct {
@@ -414,12 +436,7 @@ func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved,
 			return Resolved{}, err
 		}
 	}
-	resolved, err := r.resolveCommit(ctx, ref)
-	var notPublic *NotPublicError
-	if errors.As(err, &notPublic) && r.gitRepositorySource(ref) {
-		return resolveWithGit(ctx, r.cfg, ref)
-	}
-	return resolved, err
+	return r.resolveCommit(ctx, ref)
 }
 func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, error) {
 	var v struct {
@@ -557,6 +574,13 @@ func resolveWithGit(ctx context.Context, cfg config, ref Reference) (Resolved, e
 func fetchWithGit(ctx context.Context, cfg config, ref Reference, requestedRef string) (string, func(), error) {
 	cleanup := func() {}
 	if !ref.RepositoryRoot || cfg.git == "" {
+		return "", cleanup, &NotPublicError{}
+	}
+	// The requested value is passed to git fetch as a refspec. check-ref-format
+	// below rejects the other refspec metacharacters (":", "^", "*", and a
+	// leading "-") but accepts a leading "+", which git fetch would strip as the
+	// force marker and then fetch the remaining ref instead of the literal name.
+	if strings.HasPrefix(requestedRef, "+") {
 		return "", cleanup, &NotPublicError{}
 	}
 	if err := runGit(ctx, cfg.git, "", io.Discard, "check-ref-format", "--allow-onelevel", requestedRef); err != nil {
@@ -1173,8 +1197,7 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) (bo
 		return false, fmt.Errorf("archive URL denied")
 	}
 	err := s.downloadArchive(ctx, u, dst)
-	var notPublic *NotPublicError
-	if !errors.As(err, &notPublic) || !r.Reference.RepositoryRoot || s.cfg.git == "" {
+	if !gitFallbackError(err) || !r.Reference.RepositoryRoot || s.cfg.git == "" {
 		return false, err
 	}
 	if err := s.extractGitRepository(ctx, r, dst); err != nil {

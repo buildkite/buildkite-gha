@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1494,16 +1495,19 @@ func TestGitRepositorySourceRejectsRefspecBeforeFetch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const maliciousRef = "refs/heads/*:refs/heads/*"
-	ref, err := Parse("o/r/.github/workflows/ci.yml@" + maliciousRef)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ref.RepositoryRoot = true
-	_, err = resolver.Resolve(t.Context(), ref)
-	var notPublic *NotPublicError
-	if !errors.As(err, &notPublic) || strings.Contains(err.Error(), maliciousRef) {
-		t.Fatalf("Resolve() error = %v, want non-enumerating invalid-ref denial", err)
+	// check-ref-format accepts a leading "+", which git fetch would treat as
+	// the force marker rather than part of the requested ref.
+	for _, maliciousRef := range []string{"refs/heads/*:refs/heads/*", "+refs/heads/main", "+main"} {
+		ref, err := Parse("o/r/.github/workflows/ci.yml@" + maliciousRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref.RepositoryRoot = true
+		_, err = resolver.Resolve(t.Context(), ref)
+		var notPublic *NotPublicError
+		if !errors.As(err, &notPublic) || strings.Contains(err.Error(), maliciousRef) {
+			t.Fatalf("Resolve(%q) error = %v, want non-enumerating invalid-ref denial", maliciousRef, err)
+		}
 	}
 	log, err := os.ReadFile(invocations)
 	if err != nil {
@@ -1511,6 +1515,97 @@ func TestGitRepositorySourceRejectsRefspecBeforeFetch(t *testing.T) {
 	}
 	if strings.Contains(string(log), " fetch ") {
 		t.Fatalf("invalid ref reached Git fetch: %s", log)
+	}
+}
+
+// TestGitRepositorySourceFetchesLiteralRefOnly proves a "+main" request does
+// not resolve the fixture's main branch: without the prefix check, git fetch
+// strips "+" as the force marker and fetches main.
+func TestGitRepositorySourceFetchesLiteralRefOnly(t *testing.T) {
+	git, _, remote, commit := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), withGitFixtureSource(git, remote))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	if resolved, err := resolver.Resolve(t.Context(), ref); err != nil || resolved.Commit != commit {
+		t.Fatalf("Resolve(main) = %#v, %v, want %s", resolved, err, commit)
+	}
+	forced, _ := Parse("o/r/.github/workflows/ci.yml@+main")
+	forced.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), forced)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) || resolved.Commit != "" {
+		t.Fatalf("Resolve(+main) = %#v, %v, want non-enumerating denial", resolved, err)
+	}
+}
+
+// TestGitRepositorySourceFallsBackWhenAnonymousAPIIsRateLimited covers the
+// event repository: it never receives the action-source token, so its shared
+// anonymous API quota can be exhausted while the importer's Git credentials
+// still authorize the fetch. Rate limits stay visible when the Git source is
+// disabled or the reference is not a repository root.
+func TestGitRepositorySourceFallsBackWhenAnonymousAPIIsRateLimited(t *testing.T) {
+	git, _, remote, commit := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	var authorized atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			authorized.Add(1)
+		}
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	option := withGitFixtureSource(git, remote)
+	eventRepository := WithGitHubActionSourceTokenProvider("o/r", func(context.Context) (string, error) { return "action-source-token", nil })
+
+	resolver, err := NewResolver(server.Client(), endpoint, option, eventRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != commit {
+		t.Fatalf("Resolve() = %#v, %v, want Git fallback to %s", resolved, err, commit)
+	}
+	if authorized.Load() != 0 {
+		t.Fatalf("event repository requests carried the action-source token %d times", authorized.Load())
+	}
+	resolved.Reference, err = PinReference(ref, resolved.Commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(t.TempDir(), server.Client(), endpoint, option, eventRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatalf("Materialize() error = %v, want Git fallback after rate-limited archive download", err)
+	}
+	materialized.Release()
+
+	var rate *RateLimitError
+	disabled, err := NewResolver(server.Client(), endpoint, eventRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := disabled.Resolve(t.Context(), ref); !errors.As(err, &rate) || rate.Reset.IsZero() {
+		t.Fatalf("disabled Git source error = %v, want rate limit", err)
+	}
+	action, _ := Parse("o/r/action@v1")
+	if _, err := resolver.Resolve(t.Context(), action); !errors.As(err, &rate) {
+		t.Fatalf("action reference error = %v, want rate limit without Git fallback", err)
 	}
 }
 

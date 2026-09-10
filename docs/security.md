@@ -63,8 +63,11 @@ credentials the job can receive.
 
 Private reusable workflows use the separate, default-off
 `private-reusable-workflows` importer setting. After anonymous access fails,
-the importer passes Git a canonical credential-free `https://github.com/` URL
-for the called repository. Git inherits the importer's credential helpers,
+including when GitHub's shared anonymous API quota is exhausted, the importer
+passes Git a canonical credential-free `https://github.com/` URL for the
+called repository and the requested ref as one literal ref name; refspec
+syntax, including a leading `+`, is rejected before Git runs. Git inherits
+the importer's credential helpers,
 configuration, and environment. Credentials come only from credential helpers:
 terminal prompts and askpass programs (`GIT_ASKPASS`, `core.askPass`,
 `SSH_ASKPASS`) are disabled, so a denied repository fails instead of running
