@@ -74,6 +74,11 @@ func parseEvent(source []byte) (Event, error) {
 	if input.Payload == nil {
 		input.Payload = map[string]any{}
 	}
+	if input.Event == "label" {
+		if err := validateLabelEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
 	if input.Event == "create" || input.Event == "delete" {
 		if err := validateRefLifecycleEvent(input.Provider, input.Event, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
 			return Event{}, err
@@ -98,6 +103,30 @@ func parseEvent(source []byte) (Event, error) {
 		Provider: input.Provider, Event: input.Event, Repository: input.Repository,
 		Ref: input.Ref, SHA: input.SHA, Actor: input.Actor, Payload: input.Payload,
 	}, nil
+}
+
+func validateLabelEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	id, _ := repo["id"].(json.Number)
+	number, err := id.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("label requires the original repository identity and a full commit SHA")
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("label must execute the resolved default branch")
+	}
+	label, _ := payload["label"].(map[string]any)
+	id, _ = label["id"].(json.Number)
+	number, err = id.Int64()
+	_, named := label["name"].(string)
+	if err != nil || number <= 0 || !named {
+		return fmt.Errorf("label requires payload.label id and name")
+	}
+	if action := payload["action"]; action != "created" && action != "edited" && action != "deleted" {
+		return fmt.Errorf("label action must be created, edited, or deleted")
+	}
+	return nil
 }
 
 func validateRefLifecycleEvent(provider, event string, repository Repository, ref, sha string, payload map[string]any) error {
