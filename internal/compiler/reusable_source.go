@@ -21,6 +21,40 @@ const (
 	MaxReusableWorkflowBytes = 1 << 20
 )
 
+// WorkflowSourceReference identifies the bytes parsed for diagnostic links.
+// LocalPath and Digest identify local input; Repository and Commit identify
+// fetched GitHub input independently of its requested ref.
+type WorkflowSourceReference struct {
+	Repository string
+	Path       string
+	Commit     string
+	LocalPath  string
+	Digest     string
+	Excerpt    *workflow.DiagnosticSource
+}
+
+func localSourceReference(path string, source []byte) WorkflowSourceReference {
+	reference := WorkflowSourceReference{Excerpt: workflow.CaptureDiagnosticSource(source)}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return reference
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return reference
+	}
+	reference.LocalPath, reference.Digest = canonical, "sha256:"+sha256Sum(source)
+	return reference
+}
+
+func retainRootSource(sources map[string]WorkflowSourceReference, path string, source []byte) map[string]WorkflowSourceReference {
+	if sources == nil {
+		sources = make(map[string]WorkflowSourceReference)
+	}
+	sources[path] = localSourceReference(path, source)
+	return sources
+}
+
 // RemoteWorkflowSource is immutable provenance for a remote reusable workflow.
 // Digest on the containing workflow identifies the selected file; SourceDigest
 // identifies the complete repository tree.
@@ -81,7 +115,22 @@ func localReusableWorkflowSource(workflowPath string) (reusableWorkflowSource, e
 	}, nil
 }
 
-func (resolver *reusableResolver) loadReusableWorkflow(ctx context.Context, parent reusableWorkflowSource, uses string) (reusableWorkflowSource, []byte, error) {
+func (resolver *reusableResolver) loadReusableWorkflow(ctx context.Context, parent reusableWorkflowSource, uses string) (loaded reusableWorkflowSource, source []byte, err error) {
+	defer func() {
+		if err == nil {
+			if resolver.scan.sources == nil {
+				resolver.scan.sources = make(map[string]WorkflowSourceReference)
+			}
+			if loaded.remote != nil {
+				resolver.scan.sources[loaded.displayPath] = WorkflowSourceReference{
+					Repository: loaded.identity.repository, Path: loaded.identity.path, Commit: loaded.identity.commit,
+					Excerpt: workflow.CaptureDiagnosticSource(source),
+				}
+			} else {
+				resolver.scan.sources[loaded.displayPath] = localSourceReference(filepath.Join(loaded.repositoryRoot, loaded.identity.path), source)
+			}
+		}
+	}()
 	if strings.Contains(uses, "${{") {
 		return reusableWorkflowSource{}, nil, &ProcessingFinding{
 			Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
@@ -245,7 +294,10 @@ func readReusableWorkflowFile(workflowPath string) ([]byte, error) {
 	return source, nil
 }
 
-func parseReusableWorkflow(workflowPath string, source []byte) (*workflow.Workflow, error) {
+func parseReusableWorkflow(workflowPath string, source []byte) (parsed *workflow.Workflow, err error) {
+	defer func() {
+		err = attributedProcessingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", workflowPath, 0, 0, "", "", "", 0, err)
+	}()
 	if len(source) > MaxReusableWorkflowBytes {
 		return nil, fmt.Errorf("%s: workflow exceeds %d-byte limit", workflowPath, MaxReusableWorkflowBytes)
 	}

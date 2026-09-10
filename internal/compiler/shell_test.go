@@ -190,12 +190,12 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || len(plans[0].Steps) != 3 {
+	if len(plans) != 1 || len(plans[0].Program.Job.Steps) != 3 {
 		t.Fatalf("compiled plans = %#v", plans)
 	}
 	for i, want := range []string{"bash -l {0}", "Rscript {0}", "julia --color=yes {0}"} {
-		if plans[0].Steps[i].Shell != want {
-			t.Fatalf("step %d shell = %q, want %q", i+1, plans[0].Steps[i].Shell, want)
+		if plans[0].Program.Job.Steps[i].Run.Shell.Source != want {
+			t.Fatalf("step %d shell = %q, want %q", i+1, plans[0].Program.Job.Steps[i].Run.Shell.Source, want)
 		}
 	}
 }
@@ -215,7 +215,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || len(plans[0].Steps) != 1 || plans[0].Steps[0].Shell != "${{ env.SHELL }}" {
+	if len(plans) != 1 || len(plans[0].Program.Job.Steps) != 1 || plans[0].Program.Job.Steps[0].Run.Shell.Source != "${{ env.SHELL }}" {
 		t.Fatalf("compiled plans = %#v", plans)
 	}
 }

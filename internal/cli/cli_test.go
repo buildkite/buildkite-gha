@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -29,6 +28,71 @@ const (
 	stageExpressions     = compiler.StageExpressions
 	stageResolution      = compiler.StageResolution
 )
+
+func TestRunEmptyIssueTypesNativeFixtures(t *testing.T) {
+	requireImporterHost(t)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "empty-types-importer")
+	// Exact workflows accepted by native GitHub in the September 2026 production
+	// verification, but rejected by the released importer before compilation.
+	for _, test := range []struct{ event, fixture string }{
+		{"issues", "empty-issues.yml"}, {"issue_comment", "empty-comment.yml"},
+	} {
+		t.Run(test.event, func(t *testing.T) {
+			source, err := os.ReadFile(filepath.Join("testdata", test.fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, types := range []string{"[]", "omitted", "[edited]", "[deleted]"} {
+				t.Run(types, func(t *testing.T) {
+					workflowSource := strings.Replace(string(source), "types: []", "types: "+types, 1)
+					if types == "omitted" {
+						workflowSource = strings.Replace(string(source), "    types: []\n", "", 1)
+					}
+					dir := t.TempDir()
+					workflowPath := filepath.Join(dir, test.fixture)
+					if err := os.WriteFile(workflowPath, []byte(workflowSource), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					var stdout, stderr bytes.Buffer
+					if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+						t.Fatalf("validate code = %d, stdout = %s, stderr = %s", code, &stdout, &stderr)
+					}
+					eventPath := writeUploadEvent(t, dir, test.event, "refs/heads/main", map[string]any{
+						"action": "edited", "issue": map[string]any{"number": 1, "title": "GHA production e2e 20260908-0337 regression"},
+						"comment": map[string]any{"id": 2},
+					})
+					stdout.Reset()
+					stderr.Reset()
+					if code := Run([]string{"compile", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+						t.Fatalf("compile code = %d, stdout = %s, stderr = %s", code, &stdout, &stderr)
+					}
+					// Upload selects workflows from the snapshot; compile emits jobs.
+					runner := &cliCaptureRunner{}
+					if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+						t.Fatalf("upload code = %d, stderr = %s", code, &stderr)
+					}
+					var pipeline struct {
+						Steps []struct {
+							Condition string `yaml:"if"`
+							Skip      any    `yaml:"skip"`
+						} `yaml:"steps"`
+					}
+					if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+						t.Fatal(err)
+					}
+					want := "(true)"
+					if types == "[edited]" || types == "[deleted]" {
+						want = `(true && ("edited" == "` + strings.Trim(types, "[]") + `"))`
+					}
+					if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != nil || pipeline.Steps[0].Condition != want {
+						t.Fatalf("unexpected snapshot selection: %#v", pipeline.Steps)
+					}
+				})
+			}
+		})
+	}
+}
 
 func TestRunValidateAndCompile(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
@@ -90,24 +154,6 @@ func TestRunValidateAndCompile(t *testing.T) {
 					t.Fatalf("report = %#v, want trigger failure containing %q", report, test.want)
 				}
 			})
-		}
-	})
-
-	t.Run("validate rejects empty issues activities", func(t *testing.T) {
-		workflow := filepath.Join(t.TempDir(), "issues.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  issues:\n    types: []\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		var stdout, stderr bytes.Buffer
-		if code := Run([]string{"validate", "--format", "json", workflow}, &stdout, &stderr, "dev"); code != 1 {
-			t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
-		}
-		var report compatibility.ProcessingReport
-		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
-			t.Fatal(err)
-		}
-		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || !strings.Contains(report.Diagnostics[0].Message, `"types" section should not be empty`) {
-			t.Fatalf("report = %#v", report)
 		}
 	})
 
@@ -586,7 +632,13 @@ func TestRunValidateAndCompile(t *testing.T) {
 	})
 }
 
-func TestCommandsKeepValidatedRuntimeMatrixIncompatibleWithoutUpload(t *testing.T) {
+// TestCommandsKeepValidatedRuntimeMatrixIncompatible proves a needs-derived
+// matrix stays an ordinary incompatibility: validate and compile exit 1 with
+// the diagnostic and never emit a runtime-matrix artifact, and upload reports
+// the workflow as a failed check inside the uploaded pipeline instead of
+// aborting before the event and repository variables are known.
+func TestCommandsKeepValidatedRuntimeMatrixIncompatible(t *testing.T) {
+	t.Setenv("BUILDKITE_JOB_ID", "")
 	workflow := filepath.Join(t.TempDir(), "dynamic.yml")
 	if err := os.WriteFile(workflow, []byte(`on: push
 jobs:
@@ -618,13 +670,8 @@ jobs:
 		{name: "validate", args: []string{"validate", "--format", "json", workflow}},
 		{name: "compile pipeline", args: []string{"compile", "--event-path", eventPath, workflow}},
 		{name: "compile IR", args: []string{"compile", "--format", "ir-json", "--event-path", eventPath, workflow}},
-		{name: "upload", args: []string{"upload", "--event-path", eventPath, workflow}},
-		{name: "upload before event metadata", args: []string{"upload", workflow}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if test.args[0] == "upload" {
-				requireImporterHost(t)
-			}
 			var stdout, stderr bytes.Buffer
 			runner := &cliCaptureRunner{}
 			if code := run(test.args, &stdout, &stderr, "dev", runner); code != 1 {
@@ -643,254 +690,33 @@ jobs:
 		})
 	}
 
-	invalidWorkflow := filepath.Join(t.TempDir(), "invalid-dynamic.yml")
-	if err := os.WriteFile(invalidWorkflow, []byte(`on: push
-jobs:
-  producer:
-    runs-on: ubuntu-latest
-    steps:
-      - run: true
-  generated:
-    needs: producer
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include: ${{ fromJSON(needs.producer.outputs.missing) }}
-    steps:
-      - run: true
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Run("invalid boundary before event metadata", func(t *testing.T) {
+	t.Run("upload", func(t *testing.T) {
 		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
-		runner := &cliCaptureRunner{}
-		if code := run([]string{"upload", invalidWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
+		runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
+		if code := run([]string{"upload", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev", runner); code != 0 {
 			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 		}
-		if len(runner.commands) != 0 {
-			t.Fatalf("invalid runtime matrix boundary made Buildkite calls: %#v", runner.commands)
+		output := stdout.String() + stderr.String()
+		for _, want := range []string{"Result: incompatible", "[E_MATRIX_INVALID]", "Uploaded 0 jobs from 1 workflows"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("upload output missing %q:\n%s", want, output)
+			}
 		}
-		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_MATRIX_INVALID]") {
-			t.Fatalf("upload stderr = %q", stderr.String())
+		if strings.Contains(output, "runtime_matrices") || strings.Contains(output, compiler.RuntimeMatrixSchemaV1) {
+			t.Fatalf("upload emitted a runtime matrix artifact: %q", output)
 		}
-	})
-
-	repository := t.TempDir()
-	workflowDirectory := filepath.Join(repository, ".github", "workflows")
-	if err := os.MkdirAll(workflowDirectory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	graphFailureWorkflow := filepath.Join(workflowDirectory, "dynamic-with-graph-failure.yml")
-	if err := os.WriteFile(graphFailureWorkflow, []byte(`on: push
-jobs:
-  producer:
-    runs-on: ubuntu-latest
-    outputs:
-      include: ${{ steps.matrix.outputs.include }}
-    steps:
-      - id: matrix
-        run: true
-  generated:
-    needs: producer
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include: ${{ fromJSON(needs.producer.outputs.include) }}
-    steps:
-      - run: true
-  missing-reusable:
-    uses: ./.github/workflows/missing.yml
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Run("exact boundary survives an earlier graph failure", func(t *testing.T) {
-		requireImporterHost(t)
-		var stdout, stderr bytes.Buffer
-		runner := &cliCaptureRunner{}
-		if code := run([]string{"upload", graphFailureWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
-			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		var pipelineUploads int
+		for _, command := range runner.commands {
+			if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation"}) {
+				pipelineUploads++
+				if !strings.Contains(string(command.stdin), `title: "Workflow could not be run"`) {
+					t.Fatalf("uploaded pipeline does not carry the failed workflow check:\n%s", command.stdin)
+				}
+			}
 		}
-		if len(runner.commands) != 0 {
-			t.Fatalf("runtime matrix boundary with graph failure made Buildkite calls: %#v", runner.commands)
-		}
-		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_GRAPH_INVALID]") {
-			t.Fatalf("upload stderr = %q", stderr.String())
-		}
-	})
-
-	reusableBoundaryWorkflow := filepath.Join(workflowDirectory, "reusable-boundary-with-graph-failure.yml")
-	if err := os.WriteFile(reusableBoundaryWorkflow, []byte(`on: push
-jobs:
-  a-invalid-reusable:
-    uses: ./.github/workflows/not-callable-order.yml
-  z-runtime-matrix:
-    uses: ./.github/workflows/runtime-matrix.yml
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(workflowDirectory, "not-callable-order.yml"), []byte(`on: push
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - run: true
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(workflowDirectory, "runtime-matrix.yml"), []byte(`on: workflow_call
-jobs:
-  producer:
-    runs-on: ubuntu-latest
-    outputs:
-      include: ${{ steps.matrix.outputs.include }}
-    steps:
-      - id: matrix
-        run: true
-  generated:
-    needs: producer
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include: ${{ fromJSON(needs.producer.outputs.include) }}
-    steps:
-      - run: true
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Run("reusable boundary discovery does not depend on fail-fast order", func(t *testing.T) {
-		requireImporterHost(t)
-		var stdout, stderr bytes.Buffer
-		runner := &cliCaptureRunner{}
-		if code := run([]string{"upload", reusableBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
-			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
-		}
-		if len(runner.commands) != 0 {
-			t.Fatalf("reusable runtime matrix boundary with graph failure made Buildkite calls: %#v", runner.commands)
-		}
-		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_GRAPH_INVALID]") {
-			t.Fatalf("upload stderr = %q", stderr.String())
-		}
-	})
-
-	sharedBoundaryWorkflow := filepath.Join(workflowDirectory, "shared-boundary-with-depth-failure.yml")
-	if err := os.WriteFile(sharedBoundaryWorkflow, []byte(`on: push
-jobs:
-  a-deep:
-    uses: ./.github/workflows/deep-1.yml
-  z-shared:
-    uses: ./.github/workflows/shared.yml
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for i, next := range []string{"deep-2.yml", "deep-3.yml", "shared.yml"} {
-		name := fmt.Sprintf("deep-%d.yml", i+1)
-		if err := os.WriteFile(filepath.Join(workflowDirectory, name), fmt.Appendf(nil, `on: workflow_call
-jobs:
-  delegated:
-    uses: ./.github/workflows/%s
-`, next), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(workflowDirectory, "shared.yml"), []byte(`on: workflow_call
-jobs:
-  delegated:
-    uses: ./.github/workflows/runtime-matrix.yml
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Run("shared boundary is rescanned when reached at a shallower depth", func(t *testing.T) {
-		requireImporterHost(t)
-		var stdout, stderr bytes.Buffer
-		runner := &cliCaptureRunner{}
-		if code := run([]string{"upload", sharedBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
-			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
-		}
-		if len(runner.commands) != 0 {
-			t.Fatalf("shared runtime matrix boundary with graph failure made Buildkite calls: %#v", runner.commands)
-		}
-		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_GRAPH_INVALID]") || !strings.Contains(stderr.String(), "job a-deep: failed") {
-			t.Fatalf("upload stderr = %q", stderr.String())
-		}
-	})
-
-	depthBoundaryWorkflow := filepath.Join(workflowDirectory, "depth-boundary-with-graph-failure.yml")
-	if err := os.WriteFile(depthBoundaryWorkflow, []byte(`on: push
-jobs:
-  a-invalid-reusable:
-    uses: ./.github/workflows/not-callable-order.yml
-  z-deep:
-    uses: ./.github/workflows/depth-1.yml
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for i, next := range []string{"depth-2.yml", "depth-3.yml", "depth-4.yml", "runtime-matrix.yml"} {
-		name := fmt.Sprintf("depth-%d.yml", i+1)
-		if err := os.WriteFile(filepath.Join(workflowDirectory, name), fmt.Appendf(nil, `on: workflow_call
-jobs:
-  delegated:
-    uses: ./.github/workflows/%s
-`, next), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Run("depth-limited reusable discovery stops before event metadata", func(t *testing.T) {
-		requireImporterHost(t)
-		var stdout, stderr bytes.Buffer
-		runner := &cliCaptureRunner{}
-		if code := run([]string{"upload", depthBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
-			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
-		}
-		if len(runner.commands) != 0 {
-			t.Fatalf("depth-limited runtime matrix discovery made Buildkite calls: %#v", runner.commands)
-		}
-		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_GRAPH_INVALID]") || !strings.Contains(stderr.String(), "job a-invalid-reusable: failed") {
-			t.Fatalf("upload stderr = %q", stderr.String())
-		}
-	})
-
-	malformedBoundaryWorkflow := filepath.Join(workflowDirectory, "malformed-boundary-with-graph-failure.yml")
-	if err := os.WriteFile(malformedBoundaryWorkflow, []byte(`on: push
-jobs:
-  a-not-callable:
-    uses: ./.github/workflows/not-callable.yml
-  z-malformed:
-    uses: ./.github/workflows/malformed-runtime-matrix.yml
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(workflowDirectory, "not-callable.yml"), []byte(`on: push
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - run: true
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(workflowDirectory, "malformed-runtime-matrix.yml"), []byte(`on: workflow_call
-jobs:
-  generated:
-    strategy:
-      matrix:
-        include: ${{ fromJSON(needs.producer.outputs.include) }}
-    invalid: [
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Run("incomplete reusable discovery stops before event metadata", func(t *testing.T) {
-		requireImporterHost(t)
-		var stdout, stderr bytes.Buffer
-		runner := &cliCaptureRunner{}
-		if code := run([]string{"upload", malformedBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
-			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
-		}
-		if len(runner.commands) != 0 {
-			t.Fatalf("incomplete runtime matrix discovery made Buildkite calls: %#v", runner.commands)
-		}
-		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_GRAPH_INVALID]") || !strings.Contains(stderr.String(), "job a-not-callable: failed") {
-			t.Fatalf("upload stderr = %q", stderr.String())
+		if pipelineUploads != 1 {
+			t.Fatalf("pipeline uploads = %d, want 1: %#v", pipelineUploads, runner.commands)
 		}
 	})
 }
@@ -1545,6 +1371,39 @@ func TestProcessingAnnotationsUseActiveBoundedContext(t *testing.T) {
 	}
 }
 
+func commitDiagnosticSources(t *testing.T, repository string, report *compatibility.ProcessingReport) string {
+	t.Helper()
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "workflow fixture"}} {
+		if output, err := gitCommand(repository, args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	sha, err := gitCommand(repository, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{report.Workflow}
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Location != nil {
+			paths = append(paths, diagnostic.Location.Path)
+		}
+	}
+	report.Sources = make(map[string]compiler.WorkflowSourceReference)
+	for _, path := range paths {
+		relative, _ := processingAnnotationWorkflowPath(path, processingWorkflowSourceRoot(report.Workflow))
+		absolute, err := filepath.EvalSymlinks(filepath.Join(repository, relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents, err := os.ReadFile(absolute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report.Sources[path] = compiler.WorkflowSourceReference{LocalPath: absolute, Digest: transport.Digest(contents)}
+	}
+	return strings.TrimSpace(string(sha))
+}
+
 func TestEventBackedCommandsLinkEarlyWorkflowDiagnostics(t *testing.T) {
 	repository := t.TempDir()
 	workflowPath := filepath.Join(repository, ".github", "workflows", "broken.yml")
@@ -1559,6 +1418,16 @@ func TestEventBackedCommandsLinkEarlyWorkflowDiagnostics(t *testing.T) {
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_STEP_KEY", "importer")
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	report := compatibility.NewProcessingReport(workflowPath, "")
+	sha := commitDiagnosticSources(t, repository, &report)
+	eventBytes, err := os.ReadFile(eventPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventBytes = bytes.ReplaceAll(eventBytes, []byte(strings.Repeat("a", 40)), []byte(sha))
+	if err := os.WriteFile(eventPath, eventBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, command := range []string{"validate", "upload"} {
 		t.Run(command, func(t *testing.T) {
@@ -1570,7 +1439,7 @@ func TestEventBackedCommandsLinkEarlyWorkflowDiagnostics(t *testing.T) {
 			if len(runner.commands) != 1 {
 				t.Fatalf("commands = %#v, want one annotation", runner.commands)
 			}
-			want := `href="https://github.com/buildkite/buildkite-gha/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/broken.yml`
+			want := `href="https://github.com/buildkite/buildkite-gha/blob/` + sha + `/.github/workflows/broken.yml`
 			if !strings.Contains(string(runner.commands[0].stdin), want) {
 				t.Fatalf("annotation = %q, want linked workflow path %q", runner.commands[0].stdin, want)
 			}
@@ -1584,7 +1453,7 @@ func TestProcessingAnnotationIsBoundedAndEscapesHTML(t *testing.T) {
 		Level: "error", Code: "E_TEST", Message: `line one
 <script>*unsafe*</script> "quoted" ` + strings.Repeat("界", processingAnnotationBodyLimit),
 	})
-	style, body := processingAnnotation(report, sourceLinkContext{})
+	style, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	if style != "error" || len(body) > processingAnnotationBodyLimit || !utf8.ValidString(body) {
 		t.Fatalf("style = %q, bytes = %d, valid UTF-8 = %v", style, len(body), utf8.ValidString(body))
 	}
@@ -1604,7 +1473,7 @@ func TestProcessingAnnotationPreservesLongerRepositoryURLs(t *testing.T) {
 		Level: "error", Code: "E_TEST", Message: "Unsupported action. Use a supported version from " + docsURL + ".",
 	}
 
-	body := renderProcessingDiagnostic(diagnostic, sourceLinkContext{})
+	body := renderProcessingDiagnostic(t.Context(), diagnostic, sourceLinkContext{})
 	if !strings.Contains(body, docsURL) || strings.Contains(body, `href="https://github.com/buildkite/buildkite-gha"`) {
 		t.Fatalf("annotation = %q, want intact documentation URL", body)
 	}
@@ -1615,7 +1484,7 @@ func TestProcessingAnnotationOmitsUnknownActionRuntime(t *testing.T) {
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
 		Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Message: "Action runtime behavior was not evaluated.",
 	})
-	style, body := processingAnnotation(report, sourceLinkContext{})
+	style, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	if style != "" || body != "" {
 		t.Fatalf("processingAnnotation() = %q, %q, want no Buildkite annotation", style, body)
 	}
@@ -1624,7 +1493,7 @@ func TestProcessingAnnotationOmitsUnknownActionRuntime(t *testing.T) {
 func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "")
 	probe := compatibility.Diagnostic{Level: "warning", Code: "W_LARGE", Message: "a"}
-	probeRow := renderProcessingDiagnostic(probe, sourceLinkContext{})
+	probeRow := renderProcessingDiagnostic(t.Context(), probe, sourceLinkContext{})
 	prefixBytes := len("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n") +
 		len("<p>") + len(annotationCode(report.Workflow)) + len("</p>\n")
 	messageBytes := processingAnnotationBodyLimit - prefixBytes - len(processingAnnotationNotice)/2 - (len(probeRow) - len(probe.Message))
@@ -1633,7 +1502,7 @@ func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
 		compatibility.Diagnostic{Level: "warning", Code: "W_OMITTED", Message: "omitted diagnostic"},
 	)
 
-	_, body := processingAnnotation(report, sourceLinkContext{})
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	if len(body) > processingAnnotationBodyLimit || !strings.Contains(body, "Additional diagnostics omitted") {
 		t.Fatalf("annotation bytes = %d, notice present = %v", len(body), strings.Contains(body, "Additional diagnostics omitted"))
 	}
@@ -1645,9 +1514,9 @@ func TestProcessingAnnotationDropsDetailBeforeTruncatingMessage(t *testing.T) {
 	}
 	withoutDetail := diagnostic
 	withoutDetail.Detail = ""
-	want := renderProcessingDiagnostic(withoutDetail, sourceLinkContext{})
+	want := renderProcessingDiagnostic(t.Context(), withoutDetail, sourceLinkContext{})
 
-	got := renderProcessingDiagnosticWithin(diagnostic, len(want), sourceLinkContext{})
+	got := renderProcessingDiagnosticWithin(t.Context(), diagnostic, len(want), sourceLinkContext{})
 	if got != want || strings.Contains(got, "<details") {
 		t.Fatalf("bounded diagnostic = %q, want primary message without detail %q", got, want)
 	}
@@ -1663,7 +1532,7 @@ func TestProcessingAnnotationUsesRepositoryRelativeWorkflowPath(t *testing.T) {
 		Location: &compatibility.SourceLocation{Path: workflowPath, Line: 4, Column: 2},
 	})
 
-	_, body := processingAnnotation(report, sourceLinkContext{})
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	wantWorkflow := "<p><code>.github/workflows/test-image-build.yml</code></p>"
 	wantLocation := "<code>.github/workflows/test-image-build.yml:4:2</code>"
 	if !strings.Contains(body, wantWorkflow) || !strings.Contains(body, wantLocation) || strings.Contains(body, repository) {
@@ -1688,12 +1557,16 @@ func TestProcessingAnnotationResolvesPathsFromBelowCheckoutRoot(t *testing.T) {
 		Level: "error", Message: "invalid workflow",
 		Location: &compatibility.SourceLocation{Path: "workflows/hello.yml", Line: 100, Column: 3},
 	})
-	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+	sha := commitDiagnosticSources(t, repository, &report)
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: sha}
 
-	_, body := processingAnnotation(report, sourceLinks)
-	want := `href="https://github.com/owner/repo/blob/abc123/.github/workflows/hello.yml#L100"`
-	if !strings.Contains(body, want) {
-		t.Fatalf("annotation = %q, want %q", body, want)
+	want := `href="https://github.com/owner/repo/blob/` + sha + `/.github/workflows/hello.yml#L100"`
+	for _, checkout := range []string{repository, ""} {
+		t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", checkout)
+		_, body := processingAnnotation(t.Context(), report, sourceLinks)
+		if !strings.Contains(body, want) {
+			t.Fatalf("annotation = %q, want %q", body, want)
+		}
 	}
 }
 
@@ -1716,10 +1589,11 @@ func TestProcessingAnnotationResolvesCompilerLocationsFromCheckoutRoot(t *testin
 		Level: "error", Message: "invalid reusable workflow",
 		Location: &compatibility.SourceLocation{Path: "./.github/workflows/build-security.yml", Line: 35, Column: 13},
 	})
-	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+	sha := commitDiagnosticSources(t, repository, &report)
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: sha}
 
-	_, body := processingAnnotation(report, sourceLinks)
-	want := `<a href="https://github.com/owner/repo/blob/abc123/.github/workflows/build-security.yml#L35"><code>.github/workflows/build-security.yml:35:13</code></a>`
+	_, body := processingAnnotation(t.Context(), report, sourceLinks)
+	want := `<a href="https://github.com/owner/repo/blob/` + sha + `/.github/workflows/build-security.yml#L35"><code>.github/workflows/build-security.yml:35:13</code></a>`
 	if !strings.Contains(body, want) {
 		t.Fatalf("annotation = %q, want %q", body, want)
 	}
@@ -1743,11 +1617,12 @@ func TestProcessingDiagnosticsRetainNestedWorkflowSourceRoot(t *testing.T) {
 		Level: "error", Message: "invalid reusable workflow",
 		Location: &compatibility.SourceLocation{Path: "./.github/workflows/build-security.yml", Line: 35, Column: 13},
 	})
-	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
-	wantLink := "https://github.com/owner/repo/blob/abc123/nested/.github/workflows/build-security.yml#L35"
+	sha := commitDiagnosticSources(t, repository, &report)
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: sha}
+	wantLink := "https://github.com/owner/repo/blob/" + sha + "/nested/.github/workflows/build-security.yml#L35"
 
-	_, annotation := processingAnnotation(report, sourceLinks)
-	_, summary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
+	_, annotation := processingAnnotation(t.Context(), report, sourceLinks)
+	_, summary := processingAnnotationWithin(t.Context(), report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
 	if !strings.Contains(annotation, `href="`+wantLink+`"`) || !strings.Contains(summary, `href="`+wantLink+`"`) {
 		t.Fatalf("nested workflow location was not retained: annotation=%q summary=%q", annotation, summary)
 	}
@@ -1769,12 +1644,13 @@ func TestProcessingAnnotationLinksWorkflowLocationsToSource(t *testing.T) {
 		Level: "error", Message: "invalid workflow",
 		Location: &compatibility.SourceLocation{Path: ".github/workflows/hello world.yml", Line: 100, Column: 3},
 	})
-	sourceLinks := sourceLinkContext{serverURL: "https://github.example.com", repository: "owner/repo", sha: "abc123"}
+	sha := commitDiagnosticSources(t, repository, &report)
+	sourceLinks := sourceLinkContext{serverURL: "https://github.example.com", repository: "owner/repo", sha: sha}
 
-	_, body := processingAnnotation(report, sourceLinks)
+	_, body := processingAnnotation(t.Context(), report, sourceLinks)
 	for _, want := range []string{
-		`<a href="https://github.example.com/owner/repo/blob/abc123/.github/workflows/hello%20world.yml"><code>.github/workflows/hello world.yml</code></a>`,
-		`<a href="https://github.example.com/owner/repo/blob/abc123/.github/workflows/hello%20world.yml#L100"><code>.github/workflows/hello world.yml:100:3</code></a>`,
+		`<a href="https://github.example.com/owner/repo/blob/` + sha + `/.github/workflows/hello%20world.yml"><code>.github/workflows/hello world.yml</code></a>`,
+		`<a href="https://github.example.com/owner/repo/blob/` + sha + `/.github/workflows/hello%20world.yml#L100"><code>.github/workflows/hello world.yml:100:3</code></a>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("annotation = %q, want %q", body, want)
@@ -1816,8 +1692,8 @@ func TestProcessingDiagnosticsDoNotLinkPathsOutsideCheckout(t *testing.T) {
 	})
 	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
 
-	_, annotation := processingAnnotation(report, sourceLinks)
-	_, summary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
+	_, annotation := processingAnnotation(t.Context(), report, sourceLinks)
+	_, summary := processingAnnotationWithin(t.Context(), report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
 	if strings.Contains(annotation, "href=") || strings.Contains(summary, "href=") {
 		t.Fatalf("outside path was linked: annotation=%q summary=%q", annotation, summary)
 	}
@@ -1842,8 +1718,8 @@ func TestProcessingDiagnosticsDoNotLinkSymlinksOutsideCheckout(t *testing.T) {
 	})
 	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
 
-	_, annotation := processingAnnotation(report, sourceLinks)
-	_, summary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
+	_, annotation := processingAnnotation(t.Context(), report, sourceLinks)
+	_, summary := processingAnnotationWithin(t.Context(), report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
 	if strings.Contains(annotation, "href=") || strings.Contains(summary, "href=") {
 		t.Fatalf("outside symlink was linked: annotation=%q summary=%q", annotation, summary)
 	}
@@ -1865,10 +1741,11 @@ func TestProcessingDiagnosticsLinkThroughCheckoutRootSymlink(t *testing.T) {
 		Level: "error", Message: "invalid workflow",
 		Location: &compatibility.SourceLocation{Path: filepath.Join(checkout, "ci.yml"), Line: 1, Column: 1},
 	})
-	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+	sha := commitDiagnosticSources(t, checkout, &report)
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: sha}
 
-	_, annotation := processingAnnotation(report, sourceLinks)
-	if want := `href="https://github.com/owner/repo/blob/abc123/ci.yml#L1"`; !strings.Contains(annotation, want) {
+	_, annotation := processingAnnotation(t.Context(), report, sourceLinks)
+	if want := `href="https://github.com/owner/repo/blob/` + sha + `/ci.yml#L1"`; !strings.Contains(annotation, want) {
 		t.Fatalf("checkout symlink location was not linked: annotation=%q want=%q", annotation, want)
 	}
 }
@@ -1879,7 +1756,7 @@ func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
 		Level: "warning", Code: "W_TEST", Message: "ci.yml:4:23: warning message",
 		Location: &compatibility.SourceLocation{Path: "ci.yml", Line: 4, Column: 23},
 	})
-	_, body := processingAnnotation(report, sourceLinkContext{})
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	if count := strings.Count(body, "ci.yml:4:23"); count != 1 {
 		t.Fatalf("annotation location count = %d, want 1: %q", count, body)
 	}
@@ -1903,7 +1780,7 @@ func TestProcessingAnnotationRendersJobPermissionWarningGuidance(t *testing.T) {
 		Code: "W_JOB_GITHUB_TOKEN_USES_WORKFLOW_PERMISSIONS", Path: report.Workflow, Line: 5, Column: 3, Job: "build",
 		Message: "Job-level permissions are ignored for GITHUB_TOKEN. The top-level workflow permissions apply instead. This job's token has contents: read. Move this job's permissions block to the workflow top level. If you need per-job permissions, log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it.",
 	}})
-	_, body := processingAnnotation(report, sourceLinkContext{})
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	want := `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>
 <p><code>.github/workflows/ci.yml</code></p>
 <p><strong>Job-level permissions are ignored for GITHUB_TOKEN.</strong></p>
@@ -1932,7 +1809,7 @@ func TestProcessingAnnotationPresentsActionFailureAsAConciseCard(t *testing.T) {
 		Job:     "test", Instance: "gha-test-a1b2", Action: "actions/setup-java@v4", Step: 2,
 	})
 
-	_, body := processingAnnotation(report, sourceLinkContext{})
+	_, body := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	for _, want := range []string{
 		`<p><strong>Action metadata uses unsupported field &#34;deprecationMessage&#34;</strong></p>`,
 		"<p>Action <code>actions/setup-java@v4</code> · Job <code>test</code> · Step 2</p>",
@@ -2019,7 +1896,7 @@ func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testin
 	if err := compatibility.WriteProcessing(&textOutput, "text", report); err != nil {
 		t.Fatal(err)
 	}
-	_, annotation := processingAnnotation(report, sourceLinkContext{})
+	_, annotation := processingAnnotation(t.Context(), report, sourceLinkContext{})
 	if strings.Count(textOutput.String(), message) != 1 || strings.Count(textOutput.String(), "detail: "+detail) != 1 ||
 		strings.Count(annotation, `Job &#34;test&#34; needs GITHUB_TOKEN, but its workflow path is unsupported.`) != 1 ||
 		strings.Count(annotation, `Move the workflow under .github/workflows.`) != 1 ||

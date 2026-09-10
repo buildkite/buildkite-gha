@@ -41,8 +41,9 @@ func variableSourceFromAgent(clientVersion string) variableSource {
 // every result, including failures, per repository, so one upload of many
 // workflows consumes one request against the backend's per-job budget and
 // retried compiles fail consistently without new requests. A 404 means the
-// backend offers no repository or organization scope; it memoizes as empty
-// scopes so names no scope defines keep evaluating as empty strings.
+// backend offers no repository or organization scope; it memoizes as resolved
+// empty scopes so names no scope defines evaluate as empty strings in
+// compile-time fields as well as at runtime.
 type agentVariableSource struct {
 	resolver *gharuntime.AgentVariableResolver
 
@@ -66,10 +67,11 @@ func (a *agentVariableSource) ResolveVariables(ctx context.Context, owner, repos
 	result := agentVariableResolution{}
 	switch {
 	case errors.Is(err, gharuntime.ErrVariablesUnavailable):
+		result.vars = compiler.VariableSources{Resolved: true}
 	case err != nil:
 		result.err = fmt.Errorf("variables: %w", err)
 	default:
-		result.vars = compiler.VariableSources{Repository: snapshot.Repository, Organization: snapshot.Organization}
+		result.vars = compiler.VariableSources{Repository: snapshot.Repository, Organization: snapshot.Organization, Resolved: true}
 	}
 	a.resolved[repo] = result
 	return result.vars, result.err

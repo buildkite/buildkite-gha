@@ -20,12 +20,15 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
 type fakeActionSource struct {
 	root   string
 	calls  map[string]int
 	commit string
+	// pinned makes every ref, including exact SHAs, resolve to commit.
+	pinned bool
 }
 
 type contextActionSource struct{}
@@ -68,7 +71,7 @@ func (f *fakeActionSource) Fetch(_ context.Context, r source.Reference) (source.
 	f.calls[r.Raw]++
 	d, err := source.DigestTree(filepath.Join(f.root, r.Path))
 	commit := strings.Repeat("a", 40)
-	if f.commit != "" {
+	if f.commit != "" && (f.pinned || len(r.Ref) != 40 || strings.Trim(strings.ToLower(r.Ref), "0123456789abcdef") != "") {
 		commit = f.commit
 	} else if len(r.Ref) == 40 && strings.Trim(strings.ToLower(r.Ref), "0123456789abcdef") == "" {
 		commit = strings.ToLower(r.Ref)
@@ -172,7 +175,9 @@ func (s commitActionSource) Fetch(_ context.Context, r source.Reference) (source
 	if !ok {
 		return source.Resolved{}, source.Materialized{}, fmt.Errorf("no fixture tree for ref %q", r.Ref)
 	}
-	d, err := source.DigestTree(filepath.Join(root, r.Path))
+	// Digest the whole repository tree like the real store so sub-actions of
+	// one repository share a pin.
+	d, err := source.DigestTree(root)
 	return source.Resolved{Reference: r, Commit: commit}, source.Materialized{RepositoryRoot: root, ActionRoot: filepath.Join(root, r.Path), SourceDigest: d}, err
 }
 
@@ -212,6 +217,66 @@ func TestActionResolutionMessageDistinguishesResolutionFailure(t *testing.T) {
 	want := `Action "owner/action@v1" could not be resolved: tag v1 was not found`
 	if got, detail, action := actionResolutionMessage("owner/action@v1", err); got != want || detail != "" || action != "owner/action@v1" {
 		t.Fatalf("actionResolutionMessage() = %q, %q, %q; want %q, empty detail, %q", got, detail, action, want, "owner/action@v1")
+	}
+}
+
+func TestActionResolutionMessageExplainsActionCreatedByEarlierStep(t *testing.T) {
+	reference := "slsa-framework/slsa-github-generator/.github/actions/generate-builder@v2.1.0"
+	action := "./__BUILDER_CHECKOUT_DIR__/.github/actions/privacy-check"
+	err := &actionChildError{
+		child: action,
+		err:   fmt.Errorf("compile action %q: resolve local action %q: %w", action, strings.TrimPrefix(action, "./"), os.ErrNotExist),
+	}
+	wantAction := "./.github/actions/privacy-check"
+	want := `Local action "./.github/actions/privacy-check" is unavailable during compilation. Local actions must already exist in the event repository; Buildkite cannot resolve one created by an earlier step, such as actions/checkout with path. Check in the action and reference its repository path, or use a public owner/repository/path@ref action. Buildkite reports this error on the affected expanded job, skips jobs that depend on it, and may run independently compiled jobs.`
+	wantDetail := `The local action is referenced by composite action "slsa-framework/slsa-github-generator/.github/actions/generate-builder@v2.1.0".`
+	if got, detail, resolvedAction := actionResolutionMessage(reference, err); got != want || detail != wantDetail || resolvedAction != wantAction {
+		t.Fatalf("actionResolutionMessage() = %q, %q, %q; want %q, %q, %q", got, detail, resolvedAction, want, wantDetail, wantAction)
+	}
+}
+
+func TestActionResolutionMessageRetainsMissingLocalActionPath(t *testing.T) {
+	action := "./vendor/.github/actions/privacy-check"
+	err := fmt.Errorf("compile action %q: resolve local action %q: %w", action, strings.TrimPrefix(action, "./"), os.ErrNotExist)
+	message, _, reportedAction := actionResolutionMessage(action, err)
+	if reportedAction != action || !strings.Contains(message, action) {
+		t.Fatalf("actionResolutionMessage() = %q, action %q; want original action path", message, reportedAction)
+	}
+}
+
+func TestActionResolutionMessageDoesNotMisclassifyMissingEntrypoint(t *testing.T) {
+	action := "./.github/actions/checked-in"
+	err := fmt.Errorf("compile action %q: JavaScript action main entry point %q: %w", action, "dist/index.js", os.ErrNotExist)
+	message, _, reportedAction := actionResolutionMessage(action, err)
+	if reportedAction != action || !strings.Contains(message, `JavaScript action main entry point "dist/index.js"`) || strings.Contains(message, "created by an earlier step") {
+		t.Fatalf("actionResolutionMessage() = %q, action %q; want missing entry point diagnostic", message, reportedAction)
+	}
+}
+
+func TestValidateActionResolutionsAttributesMissingCalledWorkflowAction(t *testing.T) {
+	reference := "./__BUILDER_CHECKOUT_DIR__/.github/actions/secure-download-artifact"
+	ir := IR{
+		Event: Event{Provider: "github"},
+		Jobs: []JobInstance{{
+			Key: "gha-call-remote-upload-assets", LogicalJobID: "call-remote.upload-assets",
+			SourcePath:     "slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0",
+			RepositoryRoot: t.TempDir(),
+			Steps:          []workflow.Step{{Kind: "uses", Uses: reference, Span: workflow.Span{Start: workflow.Position{Line: 281, Column: 15}}}},
+		}},
+	}
+	evidence, err := validateActionResolutions(t.Context(), ir, Options{})
+	if err == nil || len(evidence.Actions) != 1 || evidence.Actions[0].Passed {
+		t.Fatalf("validateActionResolutions() evidence = %#v, error = %v", evidence, err)
+	}
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) {
+		t.Fatalf("validateActionResolutions() error = %v, want processing finding", err)
+	}
+	if finding.Path != ir.Jobs[0].SourcePath || finding.Line != 281 || finding.Column != 15 || finding.Job != "call-remote.upload-assets" || finding.Instance != "gha-call-remote-upload-assets" || finding.Action != "./.github/actions/secure-download-artifact" || finding.Step != 1 {
+		t.Fatalf("missing local action attribution = %#v", finding)
+	}
+	if !strings.Contains(finding.Message, "created by an earlier step") || strings.Contains(finding.Message, "__BUILDER_CHECKOUT_DIR__") || strings.Contains(finding.Message, ir.Jobs[0].RepositoryRoot) || strings.Contains(finding.Message, "lstat") {
+		t.Fatalf("missing local action message = %q", finding.Message)
 	}
 }
 
@@ -1349,14 +1414,49 @@ func TestCompileActionLocksAllowsOnlyAuditedCacheCommits(t *testing.T) {
 		t.Fatalf("version-ref cache lock = %#v", locks)
 	}
 
+	// Refs that resolve outside the frozen snapshot run the newest audited
+	// release for the requested major, or v6.1.0 when the major has none.
 	resolved := strings.Repeat("a", 40)
-	_, _, _, _, err = compileActionLocks(t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v6"})
-	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), actionintegration.CacheV3Commit) || !strings.Contains(err.Error(), actionintegration.CacheV4Commit) || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
-		t.Fatalf("unsupported actions/cache commit error = %v", err)
+	for _, test := range []struct {
+		uses, requestedRef, substitute string
+	}{
+		{"actions/cache@v6", "v6", actionintegration.CacheCommit},
+		{"actions/cache@v5", "v5", actionintegration.CacheV5Commit},
+		{"actions/cache/restore@v4", "v4", actionintegration.CacheV4Commit},
+		{"actions/cache/save@v3", "v3", actionintegration.CacheV3Commit},
+		{"actions/cache@v2.1.7", "v2.1.7", actionintegration.CacheCommit},
+		{"actions/cache@main", "main", actionintegration.CacheCommit},
+		{"actions/cache@" + strings.Repeat("0", 40), strings.Repeat("0", 40), actionintegration.CacheCommit},
+	} {
+		fake := &fakeActionSource{root: remote, calls: map[string]int{}}
+		_, locks, capabilities, _, err := compileActionLocks(t.Context(), workspace, fake, []string{test.uses})
+		if err != nil {
+			t.Fatalf("%s: %v", test.uses, err)
+		}
+		if len(locks) != 1 || locks[0].RequestedRef != test.requestedRef || locks[0].Commit != test.substitute || !reflect.DeepEqual(capabilities, []string{"network"}) {
+			t.Fatalf("%s substituted lock = %#v", test.uses, locks)
+		}
+		action, _, _ := strings.Cut(test.uses, "@")
+		if fake.calls[action+"@"+test.substitute] != 1 {
+			t.Fatalf("%s did not fetch the substitute release exactly once: %v", test.uses, fake.calls)
+		}
 	}
-	_, _, _, _, err = compileActionLocks(t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v5"})
-	if err == nil || !strings.Contains(err.Error(), "actions/cache@v5 resolved to commit "+resolved) {
-		t.Fatalf("moved actions/cache v5 error = %v", err)
+
+	// v3.4.1 is a snapshotted cache-v2 commit that upstream withdrew.
+	withdrawn := "58c1e461ab4154b5b12d40cb0e84792b845ab8ba"
+	_, locks, _, _, err = compileActionLocks(t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: withdrawn}, []string{"actions/cache@v3.4.1"})
+	if err != nil || len(locks) != 1 || locks[0].Commit != actionintegration.CacheV3Commit || locks[0].RequestedRef != "v3.4.1" {
+		t.Fatalf("withdrawn actions/cache v3.4.1 lock = %#v, err = %v", locks, err)
+	}
+
+	// A substitute that fetches a different commit or fails to fetch is fatal.
+	_, _, _, _, err = compileActionLocks(t.Context(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: resolved, pinned: true}, []string{"actions/cache@v6"})
+	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), "substitute v6.1.0 resolved to "+resolved) {
+		t.Fatalf("moved substitute error = %v", err)
+	}
+	_, _, _, _, err = compileActionLocks(t.Context(), workspace, commitActionSource{roots: map[string]string{resolved: remote}}, []string{"actions/cache@" + resolved})
+	if err == nil || !strings.Contains(err.Error(), "fetch substitute v6.1.0 ("+actionintegration.CacheCommit+")") {
+		t.Fatalf("unfetchable substitute error = %v", err)
 	}
 }
 
@@ -1418,8 +1518,9 @@ jobs:
 		t.Fatalf("plan schemas = %#v, want current plans", []string{first[0].Schema, first[1].Schema, first[2].Schema})
 	}
 	actionJob := first[0]
-	if len(actionJob.Actions) != 3 || actionJob.Steps[0].Action == nil || actionJob.Steps[1].Action == nil || actionJob.Steps[2].Action == nil || *actionJob.Steps[1].Action != *actionJob.Steps[2].Action {
-		t.Fatalf("action locks/selectors = %#v / %#v", actionJob.Actions, actionJob.Steps)
+	steps := actionJob.Program.Job.Steps
+	if len(actionJob.Actions) != 3 || steps[0].Invocation.Lock == "" || steps[1].Invocation.Lock == "" || steps[2].Invocation.Lock == "" || steps[1].Invocation.Lock != steps[2].Invocation.Lock {
+		t.Fatalf("action locks/selectors = %#v / %#v", actionJob.Actions, steps)
 	}
 	if fake.calls["Owner/Repo@v1"] != 2 {
 		t.Fatalf("remote calls = %d, want one per independent compilation", fake.calls["Owner/Repo@v1"])
@@ -1478,7 +1579,7 @@ jobs:
 	if !reflect.DeepEqual(first, second) {
 		t.Fatal("workspace action plans are not deterministic")
 	}
-	if len(first) != 1 || first[0].Schema != plan.Schema || len(first[0].Actions) != 1 || first[0].Actions[0].Source != "workspace" || first[0].Steps[0].Action == nil {
+	if len(first) != 1 || first[0].Schema != plan.Schema || len(first[0].Actions) != 1 || first[0].Actions[0].Source != "workspace" || first[0].Program.Job.Steps[0].Invocation.Lock == "" {
 		t.Fatalf("workspace action plan = %#v", first)
 	}
 }
@@ -1897,6 +1998,84 @@ func TestCompileBundleUnknownUploadArtifactWarningIsDeduplicated(t *testing.T) {
 	}
 }
 
+func TestCompileBundleUnknownCacheCommitSubstitutionWarningIsDeduplicated(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "cache.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unknown := strings.Repeat("0", 40)
+	otherUnknown := strings.Repeat("1", 40)
+	roots := map[string]string{}
+	for _, commit := range []string{unknown, otherUnknown, actionintegration.CacheCommit} {
+		root := t.TempDir()
+		for _, path := range []string{"", "restore", "save"} {
+			writeAction(t, root, path, "name: cache\nruns:\n  using: node24\n  main: index.js\n")
+		}
+		roots[commit] = root
+	}
+	compile := func(workflow []byte) Bundle {
+		t.Helper()
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bundle, err := CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions: true,
+			ActionSource:   commitActionSource{roots: roots},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bundle
+	}
+	workflow := []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        target: [one, two]\n    steps:\n      - uses: actions/cache@" + unknown + "\n        with:\n          path: deps\n          key: deps-${{ matrix.target }}\n      - uses: actions/cache/restore@" + unknown + "\n        with:\n          path: again\n          key: again\n      - uses: actions/cache/save@" + otherUnknown + "\n        with:\n          path: other\n          key: other\n")
+	bundle := compile(workflow)
+	if len(bundle.Plans) != 2 || len(bundle.IR.Warnings) != 2 {
+		t.Fatalf("plans = %d, warnings = %#v, want one warning per distinct commit across matrix and repeated steps", len(bundle.Plans), bundle.IR.Warnings)
+	}
+	warning := bundle.IR.Warnings[0]
+	if warning.Code != "W_CACHE_UNKNOWN_COMMIT_SUBSTITUTED" || warning.Path != "./.github/workflows/cache.yml" || warning.Job != "build" || warning.Step != 1 || warning.Line == 0 ||
+		!strings.Contains(warning.Message, "actions/cache@"+unknown+" resolved to commit "+unknown) || !strings.Contains(warning.Message, "The audited v6.1.0 release ("+actionintegration.CacheCommit+") runs instead") || !strings.Contains(warning.Message, "Pin actions/cache@"+actionintegration.CacheCommit) {
+		t.Fatalf("unknown cache substitution warning = %#v", warning)
+	}
+	if bundle.IR.Warnings[1].Code != "W_CACHE_UNKNOWN_COMMIT_SUBSTITUTED" || bundle.IR.Warnings[1].Step != 3 || !strings.Contains(bundle.IR.Warnings[1].Message, "actions/cache/save@"+otherUnknown) || !strings.Contains(bundle.IR.Warnings[1].Message, "Pin actions/cache/save@"+actionintegration.CacheCommit) {
+		t.Fatalf("second unknown cache substitution warning = %#v", bundle.IR.Warnings[1])
+	}
+	for _, plan := range bundle.Plans {
+		if len(plan.Job.Actions) != 3 {
+			t.Fatalf("plan actions = %#v", plan.Job.Actions)
+		}
+		for _, lock := range plan.Job.Actions {
+			requested := unknown
+			if lock.Path == "save" {
+				requested = otherUnknown
+			}
+			if lock.Repository != "actions/cache" || lock.RequestedRef != requested || lock.Commit != actionintegration.CacheCommit {
+				t.Fatalf("substituted lock = %#v, want requested %s running %s", lock, requested, actionintegration.CacheCommit)
+			}
+		}
+	}
+
+	writeAction(t, workspace, ".github/actions/wrapper", "runs:\n  using: composite\n  steps:\n    - uses: actions/cache@"+unknown+"\n      with:\n        path: deps\n        key: deps\n")
+	workflow = []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/wrapper\n")
+	bundle = compile(workflow)
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_CACHE_UNKNOWN_COMMIT_SUBSTITUTED" || bundle.IR.Warnings[0].Step != 1 || !strings.Contains(bundle.IR.Warnings[0].Message, unknown) {
+		t.Fatalf("nested unknown cache substitution warnings = %#v", bundle.IR.Warnings)
+	}
+
+	// Snapshot commits run as requested without a warning.
+	workflow = []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/cache@" + actionintegration.CacheCommit + "\n        with:\n          path: deps\n          key: deps\n")
+	bundle = compile(workflow)
+	if len(bundle.IR.Warnings) != 0 || len(bundle.Plans) != 1 || len(bundle.Plans[0].Job.Actions) != 1 || bundle.Plans[0].Job.Actions[0].Commit != actionintegration.CacheCommit {
+		t.Fatalf("snapshot cache commit warnings = %#v, actions = %#v", bundle.IR.Warnings, bundle.Plans[0].Job.Actions)
+	}
+}
+
 func TestCompileBundleUnknownDownloadArtifactWarningIsDeduplicated(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
@@ -2137,7 +2316,9 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		t.Fatalf("conditional v6 matrix produced %d plans, want 2", len(plans))
 	}
 	for _, job := range plans {
-		if job.Steps[0].Condition != "matrix.mode == 'test'" || job.Steps[0].With["name"] != "${{ github.sha }}" || job.Steps[0].With["path"] != "./artifacts.tar.gz" || job.Actions[0].Commit != actionintegration.UploadArtifactV6Commit {
+		step := job.Program.Job.Steps[0]
+		with := testBindingSources(step.Invocation.With)
+		if step.Condition.Source != "matrix.mode == 'test'" || with["name"] != "${{ github.sha }}" || with["path"] != "./artifacts.tar.gz" || job.Actions[0].Commit != actionintegration.UploadArtifactV6Commit {
 			t.Fatalf("conditional v6 matrix plan = %#v", job)
 		}
 	}
@@ -2184,7 +2365,7 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 		t.Fatalf("download-artifact v5 pattern plans = %#v, %v", plans, err)
 	}
 	plans, err = compile(actionintegration.DownloadArtifactV5Commit, "    needs: producer\n", "        with:\n          pattern: '{junit-results-backend,product-junit-results}-*'\n          path: out\n          merge-multiple: true\n")
-	if err != nil || len(plans) != 2 || plans[1].Steps[0].With["pattern"] != "{junit-results-backend,product-junit-results}-*" {
+	if err != nil || len(plans) != 2 || testBindingSources(plans[1].Program.Job.Steps[0].Invocation.With)["pattern"] != "{junit-results-backend,product-junit-results}-*" {
 		t.Fatalf("download-artifact PostHog pattern plans = %#v, %v", plans, err)
 	}
 
@@ -2275,7 +2456,8 @@ jobs:
 		t.Fatalf("plans = %d, want two producers and two consumers", len(plans))
 	}
 	for i, producer := range plans[:2] {
-		if producer.Workflow.LogicalJobID != "producer" || len(producer.Steps) != 1 || producer.Steps[0].Condition != "matrix.publish" || producer.Matrix["publish"] != (i == 0) {
+		steps := producer.Program.Job.Steps
+		if producer.Workflow.LogicalJobID != "producer" || len(steps) != 1 || steps[0].Condition.Source != "matrix.publish" || producer.Matrix["publish"] != (i == 0) {
 			t.Fatalf("producer %d = %#v", i, producer)
 		}
 	}
@@ -2283,7 +2465,9 @@ jobs:
 		if consumer.Workflow.LogicalJobID != "consumer" || consumer.Matrix["shard"] != []string{"one", "two"}[i] || len(consumer.NeedSources["producer"]) != 2 {
 			t.Fatalf("consumer %d fan-in = %#v", i, consumer)
 		}
-		if len(consumer.Steps) != 1 || consumer.Steps[0].With["name"] != "${{ github.sha }}" || consumer.Steps[0].With["path"] != "./" || len(consumer.Actions) != 1 || consumer.Actions[0].Commit != actionintegration.DownloadArtifactV7Commit {
+		steps := consumer.Program.Job.Steps
+		with := testBindingSources(steps[0].Invocation.With)
+		if len(steps) != 1 || with["name"] != "${{ github.sha }}" || with["path"] != "./" || len(consumer.Actions) != 1 || consumer.Actions[0].Commit != actionintegration.DownloadArtifactV7Commit {
 			t.Fatalf("consumer %d download = %#v", i, consumer)
 		}
 	}

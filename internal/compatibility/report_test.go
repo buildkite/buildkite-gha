@@ -14,6 +14,24 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
+func TestProcessingReportKeepsSourceReferencesOutOfJSON(t *testing.T) {
+	const display = "owner/shared/.github/workflows/build.yml@v1"
+	want := compiler.WorkflowSourceReference{Repository: "owner/shared", Path: ".github/workflows/build.yml", Commit: strings.Repeat("a", 40)}
+	report := InitialProcessingReport("ci.yml", "hosted", false, compiler.Report{
+		Sources: map[string]compiler.WorkflowSourceReference{display: want},
+	}, fmt.Errorf("invalid workflow"))
+	if report.Sources[display] != want {
+		t.Fatalf("lost remote source reference: %v", report.Sources)
+	}
+	var encoded bytes.Buffer
+	if err := WriteProcessing(&encoded, "json", report); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(encoded.String(), want.Commit) || strings.Contains(encoded.String(), `"Sources"`) {
+		t.Fatalf("source references changed report JSON: %s", encoded.String())
+	}
+}
+
 func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	report := NewProcessingReport("ci.yml", "hosted")
 	definitions := workflowprocessing.StageDefinitions()
@@ -131,6 +149,9 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 		EventEvaluation{Event: "pull_request", Source: "generated", Report: pullRequest},
 		EventEvaluation{Event: "issues", Source: "generated", Report: push},
 	)
+	for _, event := range []string{"merge_group", "release", "issue_comment", "pull_request_review", "pull_request_review_comment", "workflow_dispatch", "schedule"} {
+		report.Evaluations = append(report.Evaluations, EventEvaluation{Event: event, Source: "generated", Report: push})
+	}
 
 	var encoded bytes.Buffer
 	if err := WriteProcessingV3(&encoded, "json", report); err != nil {
@@ -140,7 +161,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Schema != ProcessingSchemaV3 || decoded.Result != "incompatible" || decoded.Status != Failed || len(decoded.Evaluations) != 3 || decoded.Evaluations[0].Report.Result != "admitted" || decoded.Evaluations[1].Report.Result != "incompatible" {
+	if decoded.Schema != ProcessingSchemaV3 || decoded.Result != "incompatible" || decoded.Status != Failed || len(decoded.Evaluations) != 10 || decoded.Evaluations[0].Report.Result != "admitted" || decoded.Evaluations[1].Report.Result != "incompatible" {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
 	v2Source, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v2.schema.json"))

@@ -95,7 +95,14 @@ func (r Runner) miseEnv() map[string]string {
 	if r.MiseDataDir == "" {
 		return nil
 	}
-	return map[string]string{"MISE_DATA_DIR": r.MiseDataDir}
+	// Newer mise versions reuse system installs even with --no-config. Keep
+	// that lookup inside our cache so installation and validation share a root.
+	// Pin installs separately because agent wrappers can override MISE_DATA_DIR.
+	return map[string]string{
+		"MISE_DATA_DIR":        r.MiseDataDir,
+		"MISE_INSTALLS_DIR":    filepath.Join(r.MiseDataDir, "installs"),
+		"MISE_SYSTEM_DATA_DIR": r.MiseDataDir,
+	}
 }
 
 func (r *jobRun) installAndVerifyMiseNode(ctx context.Context, major int, mise string) (string, error) {

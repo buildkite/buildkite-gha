@@ -256,8 +256,8 @@ func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(strin
 	if event == "" {
 		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT is required", githubEventNameEnvironment)
 	}
-	if event != "push" && event != "pull_request" && event != "issues" && event != "issue_comment" {
-		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT must be push, pull_request, issues, or issue_comment", githubEventNameEnvironment)
+	if event != "push" && event != "pull_request" && event != "issues" && event != "issue_comment" && event != "pull_request_review" && event != "pull_request_review_comment" && event != "release" && event != "merge_group" {
+		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT must be push, pull_request, issues, issue_comment, pull_request_review, pull_request_review_comment, release, or merge_group", githubEventNameEnvironment)
 	}
 
 	workflowName := getenv(githubWorkflowEnvironment)
@@ -276,7 +276,7 @@ func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(strin
 	if workflowSHA != "" && !git.ValidObjectID(workflowSHA) {
 		return nil, nil, fmt.Errorf("%s must be a full lowercase 40-hex commit", githubWorkflowSHAEnvironment)
 	}
-	if (event == "issues" || event == "issue_comment") && (getenv(githubWorkflowRefEnvironment) == "" || workflowSHA == "") {
+	if (event == "issues" || event == "issue_comment" || event == "pull_request_review" || event == "pull_request_review_comment" || event == "release" || event == "merge_group") && (getenv(githubWorkflowRefEnvironment) == "" || workflowSHA == "") {
 		return nil, nil, fmt.Errorf("%s and %s are required for %s", githubWorkflowRefEnvironment, githubWorkflowSHAEnvironment, event)
 	}
 	return []string{selectedPath}, &pipelineTriggerWorkflow{Name: workflowName, SHA: workflowSHA}, nil
@@ -319,7 +319,7 @@ func pipelineTriggerEventRef(event, ref string) bool {
 				return value != ""
 			}
 		}
-	case "pull_request":
+	case "pull_request", "pull_request_review", "pull_request_review_comment":
 		number, ok := strings.CutPrefix(ref, "refs/pull/")
 		if !ok {
 			return false
@@ -327,9 +327,12 @@ func pipelineTriggerEventRef(event, ref string) bool {
 		number, ok = strings.CutSuffix(number, "/merge")
 		parsed, err := strconv.Atoi(number)
 		return ok && err == nil && parsed > 0 && strconv.Itoa(parsed) == number
-	case "issues", "issue_comment":
+	case "issues", "issue_comment", "merge_group":
 		branch, ok := strings.CutPrefix(ref, "refs/heads/")
 		return ok && branch != ""
+	case "release":
+		tag, ok := strings.CutPrefix(ref, "refs/tags/")
+		return ok && tag != ""
 	}
 	return false
 }

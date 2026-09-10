@@ -704,7 +704,8 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		Program:              &workflowProgram,
 		Actions:              actions.locks,
 	}
-	job.Event.PayloadArtifact = actions.requiresEventPayload
+	job.Event.PayloadFile = b.options.EventFile
+	job.Event.PayloadArtifact = actions.requiresEventPayload || job.Event.PayloadFile
 	job.RequiresMise = &actions.requiresMise
 	return job
 }

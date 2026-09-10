@@ -26,7 +26,7 @@ func TestVerifyWorkflowDoesNotReadRemoteCalleeFromCallerWorkspace(t *testing.T) 
 
 func TestRunJobRejectsWorkflowDigestMismatch(t *testing.T) {
 	workspace := fixturePath(t, "smoke")
-	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "local", Kind: "uses", Uses: "./actions/javascript"}})
+	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []runtimeTestStep{{ID: "local", Kind: "uses", Uses: "./actions/javascript"}})
 	job.Workflow.Digest = "sha256:" + strings.Repeat("0", 64)
 	if _, err := (Runner{}).runTestJob(t.Context(), job, workspace); err == nil || !strings.Contains(err.Error(), "workflow digest mismatch") {
 		t.Fatalf("RunJob() error = %v, want workflow digest mismatch", err)

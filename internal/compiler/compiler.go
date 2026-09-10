@@ -35,6 +35,13 @@ type IR struct {
 	RepositoryVars   map[string]string `json:"repository_vars,omitempty"`
 	Execution        ExecutionBoundary `json:"execution"`
 	Jobs             []JobInstance     `json:"jobs"`
+	// JobGraphComplete distinguishes a complete expanded graph from the
+	// partial instances retained when expansion fails. It is process-local
+	// evidence and is not part of serialized compiler output.
+	JobGraphComplete bool `json:"-"`
+	// Sources retains input identities for diagnostic presentation,
+	// including files whose parsing or graph expansion failed.
+	Sources map[string]WorkflowSourceReference `json:"-"`
 }
 
 // VarsBeforeEnvironment is the vars context GitHub evaluates before any job's
@@ -160,6 +167,7 @@ type NeedOutput = plan.NeedOutput
 
 // Report summarizes successful workflow validation.
 type Report struct {
+	Sources               map[string]WorkflowSourceReference
 	LogicalJobs           int
 	Instances             int
 	Warnings              []Warning
@@ -185,7 +193,8 @@ type ParsedJob struct {
 
 // ParseWorkflow reports only event-independent workflow syntax and job
 // identities. Later stages deliberately remain unevaluated.
-func ParseWorkflow(path string, source []byte) (Report, error) {
+func ParseWorkflow(path string, source []byte) (report Report, err error) {
+	defer func() { report.Sources = retainRootSource(report.Sources, path, source) }()
 	parsed, err := parseReusableWorkflow(path, source)
 	if err != nil {
 		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
@@ -207,7 +216,8 @@ func ValidateWithOptions(path string, source []byte, options Options) (Report, e
 
 // ValidateWithOptionsContext validates the static graph and permits
 // cancellation while resolving public reusable-workflow source.
-func ValidateWithOptionsContext(ctx context.Context, path string, source []byte, options Options) (Report, error) {
+func ValidateWithOptionsContext(ctx context.Context, path string, source []byte, options Options) (report Report, err error) {
+	defer func() { report.Sources = retainRootSource(report.Sources, path, source) }()
 	var optionsErr error
 	if err := options.validate(); err != nil {
 		optionsErr = &ProcessingFinding{
@@ -255,7 +265,8 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 
 // ValidateEventWithOptionsContext validates the graph and event while
 // permitting cancellation during public source resolution.
-func ValidateEventWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) (Report, error) {
+func ValidateEventWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) (report Report, err error) {
+	defer func() { report.Sources = retainRootSource(report.Sources, path, source) }()
 	var optionsErr error
 	if err := options.validate(); err != nil {
 		optionsErr = &ProcessingFinding{
@@ -281,7 +292,7 @@ func ValidateEventWithOptionsContext(ctx context.Context, path string, source, e
 		}, errors.Join(parseErr, eventErr, optionsErr)
 	}
 	event.Trust = options.EventTrust
-	context := compileContext(event, plan.MergeVars(options.Vars.Organization, options.Vars.Repository), path, parsed.Name)
+	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	_, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
@@ -310,7 +321,7 @@ func CompileWithOptions(path string, source, eventSource []byte, options Options
 // CompileWithOptionsContext compiles a workflow and permits cancellation while
 // resolving public reusable-workflow source.
 func CompileWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) ([]byte, error) {
-	ir, err := compile(ctx, path, source, eventSource, options)
+	ir, err := CompileIRWithOptionsContext(ctx, path, source, eventSource, options)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +335,16 @@ func CompileWithOptionsContext(ctx context.Context, path string, source, eventSo
 	return out.Bytes(), nil
 }
 
-func compile(ctx context.Context, path string, source, eventSource []byte, options Options) (IR, error) {
+// CompileIRWithOptionsContext returns the owned compiler IR even when a
+// failure occurs after static job expansion. Callers may use that partial
+// result for diagnostics and may compile unaffected jobs separately. Every
+// retained plan still requires normal admission before execution.
+func CompileIRWithOptionsContext(ctx context.Context, path string, source, eventSource []byte, options Options) (IR, error) {
+	return compile(ctx, path, source, eventSource, options)
+}
+
+func compile(ctx context.Context, path string, source, eventSource []byte, options Options) (ir IR, err error) {
+	defer func() { ir.Sources = retainRootSource(ir.Sources, path, source) }()
 	if err := options.validate(); err != nil {
 		return IR{}, &ProcessingFinding{
 			Code: CodeEnvironment, Category: "environment",
@@ -342,7 +362,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	}
 	event.Trust = options.EventTrust
 	organizationVars, repositoryVars := cloneMap(options.Vars.Organization), cloneMap(options.Vars.Repository)
-	context := compileContext(event, plan.MergeVars(organizationVars, repositoryVars), path, parsed.Name)
+	context := compileContext(event, options.Vars.CompileTimeVars(), path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
 	runName, runNameErr := resolveWorkflowRunName(path, parsed, context)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
@@ -350,11 +370,12 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
 	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
-	if expandErr == nil {
+	jobGraphComplete := expandErr == nil
+	if jobGraphComplete {
 		expandErr = resolveJobEnvironments(ctx, expanded.instances, event, options)
 	}
 	digest := sha256.Sum256(source)
-	ir := IR{
+	ir = IR{
 		Schema: schema,
 		Workflow: WorkflowSource{
 			Path: path, Name: parsed.Name, RunName: runName, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
@@ -368,7 +389,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 			Supported: true,
 			Reason:    "run-job rejects unsupported shells and local actions",
 		},
-		Jobs: expanded.instances,
+		Jobs: expanded.instances, JobGraphComplete: jobGraphComplete, Sources: expanded.sources,
 	}
 	return ir, errors.Join(runNameErr, concurrencyErr, cancellationErr, expandErr)
 }
@@ -499,6 +520,15 @@ func workflowCancellationWarning(position workflow.Position) Warning {
 	}
 }
 
+func guardedReusableConcurrencyWarning(position workflow.Position, calleePath string) Warning {
+	return Warning{
+		Code:    "W_REUSABLE_WORKFLOW_CONCURRENCY_ENTERED_BEFORE_CALL_CONDITION",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: fmt.Sprintf("The call condition depends on runtime values, so Buildkite enters the concurrency group of reusable workflow %q before it knows whether the call runs. When the condition is false, the skipped jobs still wait for the group and hold it until they finish. GitHub never enters the group for a skipped call. Write the condition with github, inputs, or event values only, which resolve during compilation, if the wait matters.", calleePath),
+	}
+}
+
 func legacyCheckoutWarning(position workflow.Position, release string, defaultsToFullHistory bool) Warning {
 	generation := "v2"
 	if defaultsToFullHistory {
@@ -535,6 +565,17 @@ func unknownUploadArtifactCommitWarning(position workflow.Position, commit strin
 		Column: position.Column,
 		Message: fmt.Sprintf("actions/upload-artifact resolved to immutable commit %s, which is absent from the frozen per-commit snapshot. The native adapter is using the supported %s contract instead; it still restricts names, paths, archive mode, overwrite, hidden files, sizes, and outputs, and does not run the upstream action JavaScript.",
 			commit, actionintegration.UploadArtifactFallbackContractRelease),
+	}
+}
+
+func substitutedCacheCommitWarning(position workflow.Position, substitution CacheSubstitution) Warning {
+	action, _, _ := strings.Cut(substitution.Reference, "@")
+	return Warning{
+		Code:   "W_CACHE_UNKNOWN_COMMIT_SUBSTITUTED",
+		Line:   position.Line,
+		Column: position.Column,
+		Message: fmt.Sprintf("%s resolved to commit %s, which is not in the frozen actions/cache snapshot admitted to the Buildkite cache-v2 service. The audited %s release (%s) runs instead. Pin %s@%s to remove this warning.",
+			substitution.Reference, substitution.ResolvedCommit, substitution.Release, substitution.Commit, action, substitution.Commit),
 	}
 }
 

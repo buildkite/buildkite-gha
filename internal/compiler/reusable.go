@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
@@ -59,9 +60,26 @@ type secretBinding struct {
 }
 
 type sourcedCallGuard struct {
-	condition    string
+	condition string
+	// known reports that condition reduced to the constant value during
+	// compilation, so the runtime outcome of this guard is already decided.
+	known, value bool
 	inputs       reusableInputs
 	needBindings map[string]needBinding
+}
+
+// staticCallGuardValue reports whether a guard chain is decided during
+// compilation. The chain is false when any guard is known false and true when
+// every guard is known true; otherwise the runtime decides.
+func staticCallGuardValue(guards []sourcedCallGuard) (known, value bool) {
+	known = true
+	for _, guard := range guards {
+		if guard.known && !guard.value {
+			return true, false
+		}
+		known = known && guard.known
+	}
+	return known, known
 }
 
 type reusableInputs struct {
@@ -111,14 +129,18 @@ type reusableResolver struct {
 	scan               workflowScan
 	warnings           []Warning
 	warnedCancellation map[workflow.Position]bool
+	// warnedGuardedConcurrency records the root call positions whose
+	// runtime-decided guard already produced a concurrency wait warning.
+	warnedGuardedConcurrency map[workflow.Position]bool
 }
 
 // workflowScan is what static discovery learns about a workflow and every
-// reusable workflow it reaches, independent of the event: whether a runtime
-// matrix boundary exists and whether any expression reads the vars context.
+// reusable workflow it reaches: fetched source revisions, runtime matrix
+// boundaries, and whether any expression reads the vars context.
 type workflowScan struct {
 	runtimeMatrixBoundary bool
 	referencesVars        bool
+	sources               map[string]WorkflowSourceReference
 }
 
 func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource) ([]sourcedJob, []Warning, workflowScan, error) {
@@ -138,6 +160,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 				return nil, nil, scan, err
 			}
 		}
+		scan.sources = map[string]WorkflowSourceReference{sourcePath: localSourceReference(path, source)}
 		jobs := make([]sourcedJob, len(parsed.Jobs))
 		workflowJobs := make(map[string]workflow.Job, len(parsed.Jobs))
 		replacements := make(map[string]needBinding, len(parsed.Jobs))
@@ -170,8 +193,10 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 	resolver := reusableResolver{
 		workspaceRoot: rootSource.repositoryRoot, repositorySource: newMemoizedActionSource(repositorySource), stack: []reusableSourceIdentity{rootSource.identity}, context: context,
 		rootPermissions: effectivePermissions(nil, parsed.Permissions, nil, false), scan: scan,
-		warnedCancellation: make(map[workflow.Position]bool),
+		warnedCancellation:       make(map[workflow.Position]bool),
+		warnedGuardedConcurrency: make(map[workflow.Position]bool),
 	}
+	resolver.scan.sources = map[string]WorkflowSourceReference{rootSource.displayPath: localSourceReference(path, source)}
 	defer func() {
 		for _, materialized := range resolver.materialized {
 			materialized.Release()
@@ -334,19 +359,21 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				}
 				return reusableResolution{}, locatedJobWrappedError(path, job, job.Span.Start.Line, job.Span.Start.Column, "reduce reusable-workflow call condition", err)
 			}
-			condition := reduced.Source
-			if reduced.Known {
-				condition = fmt.Sprint(reduced.Value)
+			guard := sourcedCallGuard{
+				condition: reduced.Source, inputs: cloneReusableInputs(inputs), needBindings: cloneNeedBindings(callNeedBindings),
 			}
-			if err := validateCompileSite(condition, expression.ProfileCallCondition, expression.ResultBoolean); err != nil {
+			if reduced.Known {
+				guard.known = true
+				guard.value, _ = reduced.Value.(bool)
+				guard.condition = strconv.FormatBool(guard.value)
+			}
+			if err := validateCompileSite(guard.condition, expression.ProfileCallCondition, expression.ResultBoolean); err != nil {
 				if blockerDetailUnsafe {
 					err = suppressBlockerDetail(err)
 				}
 				return reusableResolution{}, locatedJobWrappedError(path, job, job.Span.Start.Line, job.Span.Start.Column, "reusable-workflow call condition", err)
 			}
-			calleeGuards = append(cloneSourcedCallGuards(callGuards), sourcedCallGuard{
-				condition: condition, inputs: cloneReusableInputs(inputs), needBindings: cloneNeedBindings(callNeedBindings),
-			})
+			calleeGuards = append(cloneSourcedCallGuards(callGuards), guard)
 		}
 		if depth >= MaxReusableWorkflowDepth {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow nesting exceeds maximum depth %d", MaxReusableWorkflowDepth))
@@ -444,9 +471,6 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			}
 			calleeConcurrencyGates := concurrencyGates
 			if callee.Concurrency != nil {
-				if len(calleeGuards) != 0 {
-					return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "called-workflow concurrency is unsupported for guarded reusable-workflow calls")
-				}
 				concurrencyContext := resolver.context
 				concurrencyContext.Inputs = callInputs.values
 				concurrencyContext.Matrix = nil
@@ -462,12 +486,28 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				if len(needs) != 0 {
 					return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "called-workflow concurrency is unsupported for reusable-workflow calls with prerequisites")
 				}
-				calleeConcurrencyGates = append(append([]WorkflowConcurrencyGate(nil), concurrencyGates...), WorkflowConcurrencyGate{ID: callNamespace, Group: group})
-				if cancelInProgress && !resolver.warnedCancellation[calleeCallPosition] {
-					resolver.warnedCancellation[calleeCallPosition] = true
-					warning := workflowCancellationWarning(calleeCallPosition)
-					warning.Job = job.ID
-					resolver.warnings = append(resolver.warnings, warning)
+				// A call guard that is already false never runs the called
+				// workflow, so GitHub never enters its group; the skipped jobs
+				// must not wait for or hold the gate. Every other guard keeps
+				// the gate: Buildkite enters the group before the runtime
+				// evaluates the guard, which is never weaker than GitHub's
+				// mutual exclusion, and a runtime-decided guard warns about
+				// the wait a skipped call may still incur.
+				guardKnown, guardValue := staticCallGuardValue(calleeGuards)
+				if !guardKnown || guardValue {
+					calleeConcurrencyGates = append(append([]WorkflowConcurrencyGate(nil), concurrencyGates...), WorkflowConcurrencyGate{ID: callNamespace, Group: group})
+					if !guardKnown && !resolver.warnedGuardedConcurrency[calleeCallPosition] {
+						resolver.warnedGuardedConcurrency[calleeCallPosition] = true
+						warning := guardedReusableConcurrencyWarning(calleeCallPosition, calleeSource.displayPath)
+						warning.Job = job.ID
+						resolver.warnings = append(resolver.warnings, warning)
+					}
+					if cancelInProgress && !resolver.warnedCancellation[calleeCallPosition] {
+						resolver.warnedCancellation[calleeCallPosition] = true
+						warning := workflowCancellationWarning(calleeCallPosition)
+						warning.Job = job.ID
+						resolver.warnings = append(resolver.warnings, warning)
+					}
 				}
 			}
 			resolver.stack = append(resolver.stack, calleeSource.identity)
@@ -478,6 +518,10 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				detail := ""
 				var finding *ProcessingFinding
 				if errors.As(err, &finding) {
+					// A syntax failure belongs to the parsed file, not this call site.
+					if finding.Stage == StageWorkflowParsing {
+						return reusableResolution{}, err
+					}
 					message = finding.Message
 					detail = finding.Detail
 				}
@@ -802,7 +846,8 @@ func cloneSourcedCallGuards(guards []sourcedCallGuard) []sourcedCallGuard {
 	cloned := make([]sourcedCallGuard, len(guards))
 	for i, guard := range guards {
 		cloned[i] = sourcedCallGuard{
-			condition: guard.condition, inputs: cloneReusableInputs(guard.inputs), needBindings: cloneNeedBindings(guard.needBindings),
+			condition: guard.condition, known: guard.known, value: guard.value,
+			inputs: cloneReusableInputs(guard.inputs), needBindings: cloneNeedBindings(guard.needBindings),
 		}
 	}
 	return cloned

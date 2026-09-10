@@ -33,13 +33,16 @@ const (
 )
 
 var supportedEvents = map[string]bool{
-	"push":              true,
-	"pull_request":      true,
-	"merge_group":       true,
-	"release":           true,
-	"issues":            true,
-	"workflow_dispatch": true,
-	"schedule":          true,
+	"push":                        true,
+	"pull_request":                true,
+	"pull_request_review":         true,
+	"pull_request_review_comment": true,
+	"merge_group":                 true,
+	"release":                     true,
+	"issues":                      true,
+	"issue_comment":               true,
+	"workflow_dispatch":           true,
+	"schedule":                    true,
 }
 
 var supportedWorkflowResults = map[string]bool{

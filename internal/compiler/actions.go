@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -69,6 +70,9 @@ type actionLockBuilder struct {
 	caps         map[string]bool
 	materialized []source.Materialized
 	requiresMise bool
+	// cacheSubstitutions records actions/cache references whose resolved
+	// commit was replaced by an audited release.
+	cacheSubstitutions []CacheSubstitution
 }
 
 type actionNode struct {
@@ -90,6 +94,7 @@ type actionCompilation struct {
 	requiresEventPayload bool
 	programs             map[string]program.Action
 	rootAuthorities      []program.ActionAuthority
+	cacheSubstitutions   []CacheSubstitution
 }
 
 // validateActionResolutions resolves each independent root invocation before
@@ -108,8 +113,8 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 				evidence.ActionResolutionComplete = false
 				continue
 			}
-			_, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, plan.EventServerURL(ir.Event.Provider), []string{step.Uses}, []map[string]string{step.With})
-			evaluation := ActionEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Reference: step.Uses, Step: i + 1, Passed: err == nil}
+			compiled, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, plan.EventServerURL(ir.Event.Provider), []string{step.Uses}, []map[string]string{step.With})
+			evaluation := ActionEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Reference: step.Uses, Step: i + 1, Passed: err == nil, CacheSubstitutions: compiled.cacheSubstitutions}
 			evidence.Actions = append(evidence.Actions, evaluation)
 			if err == nil {
 				continue
@@ -146,6 +151,20 @@ func actionResolutionMessage(reference string, err error) (message, detail, acti
 	if message, detail, ok := actionintegration.UnsupportedVersionDiagnostic(action, err); ok {
 		return message, detail, action
 	}
+	reason := strings.TrimPrefix(err.Error(), fmt.Sprintf("compile action %q: ", action))
+	localPath, localAction := strings.CutPrefix(action, "./")
+	missingLocalAction := localAction && errors.Is(err, os.ErrNotExist) && strings.HasPrefix(reason, fmt.Sprintf("resolve local action %q: ", localPath))
+	if missingLocalAction {
+		reportedAction := action
+		if path, internal := strings.CutPrefix(action, "./__BUILDER_CHECKOUT_DIR__/"); internal {
+			reportedAction = "./" + path
+		}
+		detail := ""
+		if reference != action {
+			detail = fmt.Sprintf("The local action is referenced by composite action %q.", reference)
+		}
+		return fmt.Sprintf("Local action %q is unavailable during compilation. Local actions must already exist in the event repository; Buildkite cannot resolve one created by an earlier step, such as actions/checkout with path. Check in the action and reference its repository path, or use a public owner/repository/path@ref action. Buildkite reports this error on the affected expanded job, skips jobs that depend on it, and may run independently compiled jobs.", reportedAction), detail, reportedAction
+	}
 	var runtimeErr *metadata.UnsupportedRuntimeError
 	if errors.As(err, &runtimeErr) {
 		runtime := fmt.Sprintf("runtime %q", runtimeErr.Runtime)
@@ -157,7 +176,6 @@ func actionResolutionMessage(reference string, err error) (message, detail, acti
 		}
 		return fmt.Sprintf("Action %q uses %s, which is unsupported. Use an action release that supports Node.js 16, 20, or 24.", action, runtime), "", action
 	}
-	reason := strings.TrimPrefix(err.Error(), fmt.Sprintf("compile action %q: ", action))
 	if strings.HasPrefix(reason, "resolve action reference: ") || strings.HasPrefix(reason, "download action source: ") {
 		return fmt.Sprintf("Action %q could not be resolved: %s", action, reason[strings.Index(reason, ": ")+2:]), "", action
 	}
@@ -302,6 +320,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 		requiresEventPayload: requiresEventPayload,
 		programs:             programs,
 		rootAuthorities:      rootAuthorities,
+		cacheSubstitutions:   b.cacheSubstitutions,
 	}, nil
 }
 
@@ -481,19 +500,56 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 	}
 	commit := strings.ToLower(resolved.Commit)
 	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: ref.Ref, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest}
-	descriptor, _, admitErr := actionintegration.Admit(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
+	identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
+	descriptor, _, admitErr := actionintegration.Admit(identity, lock.Commit)
+	if admitErr != nil && descriptor.Service == actionintegration.ServiceCache {
+		lock, repositoryRoot, admitErr = b.substituteCacheRelease(ctx, ref, lock, identity)
+	}
 	if admitErr != nil {
-		if descriptor.Service == actionintegration.ServiceCache {
-			requested := lock.Repository
-			if lock.Path != "" {
-				requested += "/" + lock.Path
-			}
-			return "", plan.ActionLock{}, "", "", fmt.Errorf("%s@%s resolved to commit %s, which is not admitted: %w", requested, lock.RequestedRef, lock.Commit, admitErr)
-		}
 		return "", plan.ActionLock{}, "", "", admitErr
 	}
 	b.caps["network"] = true
 	return key, lock, repositoryRoot, ref.Path, nil
+}
+
+// substituteCacheRelease replaces an actions/cache commit outside the frozen
+// cache-v2 snapshot with the newest audited release for the requested major.
+// The unknown bundle is never executed; the lock records the substitute
+// commit and source digest while keeping the requested ref for expressions.
+func (b *actionLockBuilder) substituteCacheRelease(ctx context.Context, ref source.Reference, lock plan.ActionLock, identity actionintegration.Identity) (plan.ActionLock, string, error) {
+	requested := lock.Repository
+	if lock.Path != "" {
+		requested += "/" + lock.Path
+	}
+	substitute, release := actionintegration.SubstituteCacheCommit(ref.Ref)
+	substituteRef, err := source.PinReference(ref, substitute)
+	if err != nil {
+		return plan.ActionLock{}, "", fmt.Errorf("%s@%s resolved to commit %s, which is not admitted; substitute %s: %w", requested, lock.RequestedRef, lock.Commit, release, err)
+	}
+	resolved, materialized, err := b.source.Fetch(ctx, substituteRef)
+	if err != nil {
+		return plan.ActionLock{}, "", fmt.Errorf("%s@%s resolved to commit %s, which is not admitted; fetch substitute %s (%s): %w", requested, lock.RequestedRef, lock.Commit, release, substitute, err)
+	}
+	b.materialized = append(b.materialized, materialized)
+	repositoryRoot, err := canonicalMaterializedRepositoryRoot(materialized.RepositoryRoot)
+	if err != nil {
+		return plan.ActionLock{}, "", err
+	}
+	if strings.ToLower(resolved.Commit) != substitute {
+		return plan.ActionLock{}, "", fmt.Errorf("%s@%s resolved to commit %s, which is not admitted; substitute %s resolved to %s instead of %s", requested, lock.RequestedRef, lock.Commit, release, resolved.Commit, substitute)
+	}
+	if _, _, err := actionintegration.Admit(identity, substitute); err != nil {
+		return plan.ActionLock{}, "", fmt.Errorf("%s@%s resolved to commit %s, which is not admitted: %w", requested, lock.RequestedRef, lock.Commit, err)
+	}
+	b.cacheSubstitutions = append(b.cacheSubstitutions, CacheSubstitution{
+		Reference:      requested + "@" + lock.RequestedRef,
+		ResolvedCommit: lock.Commit,
+		Commit:         substitute,
+		Release:        release,
+	})
+	lock.Commit = substitute
+	lock.SourceDigest = materialized.SourceDigest
+	return lock, repositoryRoot, nil
 }
 
 type memoizedActionSource struct {

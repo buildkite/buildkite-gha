@@ -111,13 +111,11 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 		{name: "release prereleased", triggers: []workflow.Trigger{{Event: "release", Types: []string{"prereleased"}}}, want: "cannot be mapped exactly"},
 		{name: "release branch filter", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Branches: []string{"main"}}}, want: "unsupported filters"},
 		{name: "release paths", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Paths: []string{"src/**"}}}, want: "path filters are unsupported"},
-		{name: "empty issues types", triggers: []workflow.Trigger{{Event: "issues", Types: []string{}}}, want: "issues types is explicitly empty"},
 		{name: "unknown issues type", triggers: []workflow.Trigger{{Event: "issues", Types: []string{"not-real"}}}, want: `issues activity type "not-real" cannot be mapped exactly`},
 		{name: "issues branches", triggers: []workflow.Trigger{{Event: "issues", Branches: []string{"main"}}}, want: "issues has unsupported filters"},
 		{name: "issues tags", triggers: []workflow.Trigger{{Event: "issues", Tags: []string{"v*"}}}, want: "issues has unsupported filters"},
 		{name: "issues paths", triggers: []workflow.Trigger{{Event: "issues", Paths: []string{"src/**"}}}, want: "issues path filters are unsupported"},
 		{name: "issues workflows", triggers: []workflow.Trigger{{Event: "issues", Workflows: []string{"CI"}}}, want: "issues has unsupported filters"},
-		{name: "empty issue comment types", triggers: []workflow.Trigger{{Event: "issue_comment", Types: []string{}}}, want: "issue_comment types is explicitly empty"},
 		{name: "unknown issue comment type", triggers: []workflow.Trigger{{Event: "issue_comment", Types: []string{"not-real"}}}, want: `issue_comment activity type "not-real" cannot be mapped exactly`},
 		{name: "issue comment branches", triggers: []workflow.Trigger{{Event: "issue_comment", Branches: []string{"main"}}}, want: "issue_comment has unsupported filters"},
 		{name: "issue comment paths", triggers: []workflow.Trigger{{Event: "issue_comment", Paths: []string{"src/**"}}}, want: "issue_comment path filters are unsupported"},
@@ -210,6 +208,36 @@ func TestTranslateEventTriggerConditionUsesReleaseSnapshot(t *testing.T) {
 	)
 	if err != nil || !strings.Contains(reason, `"released"`) {
 		t.Fatalf("release mismatch reason = %q, %v", reason, err)
+	}
+}
+
+func TestEmptyIssueTypesMatchAllActivities(t *testing.T) {
+	for _, event := range []string{"issues", "issue_comment"} {
+		t.Run(event, func(t *testing.T) {
+			for _, types := range [][]string{nil, {}} {
+				triggers := []workflow.Trigger{{Event: event, Types: types}}
+				condition, err := TranslateTriggerCondition(triggers)
+				if err != nil || condition != "("+LiveEventPredicate(event)+")" {
+					t.Fatalf("types %#v: condition = %q, error = %v", types, condition, err)
+				}
+				activities := supportedIssuesAction
+				if event == "issue_comment" {
+					activities = supportedIssueCommentAction
+				}
+				for action := range activities {
+					snapshot := TriggerEventSnapshot{IssuesAction: &action, IssueCommentAction: &action}
+					reason, err := TriggerFilterMismatchReason(triggers, event, snapshot)
+					if err != nil || reason != "" {
+						t.Errorf("types %#v, action %s: mismatch = %q, %v", types, action, reason, err)
+					}
+					condition, applicable, err := TranslateEventTriggerCondition(triggers, event,
+						TriggerConditionExpressions{EventPredicate: "true", IssuesAction: yamlScalar(action), IssueCommentAction: yamlScalar(action)}, snapshot)
+					if err != nil || !applicable || condition != "(true)" {
+						t.Errorf("types %#v, action %s: condition = %q, applicable = %t, error = %v", types, action, condition, applicable, err)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -469,26 +497,26 @@ func TestTranslateEventTriggerConditionMatchesPullRequestPaths(t *testing.T) {
 			}
 		})
 	}
-	_, _, err := TranslateEventTriggerCondition(
+	condition, applicable, err := TranslateEventTriggerCondition(
 		[]workflow.Trigger{{Event: "pull_request", Paths: []string{"web/**"}}},
 		"pull_request",
 		expressions,
 		snapshot,
 	)
-	if err == nil || !strings.Contains(err.Error(), "diff-timeout outcome is unavailable") {
-		t.Fatalf("nonmatching local paths error = %v", err)
+	if err != nil || applicable || condition != "" {
+		t.Fatalf("nonmatching local paths = %q / %t / %v", condition, applicable, err)
 	}
 }
 
 func TestTranslateEventTriggerConditionTreatsEmptyChangedPathsAsAvailable(t *testing.T) {
-	_, _, err := TranslateEventTriggerCondition(
+	condition, applicable, err := TranslateEventTriggerCondition(
 		[]workflow.Trigger{{Event: "pull_request", Paths: []string{"src/**"}}},
 		"pull_request",
 		TriggerConditionExpressions{EventPredicate: "true", PullRequestAction: `"opened"`},
 		TriggerEventSnapshot{ChangedPaths: ChangedPathEvaluation{Paths: []string{}}},
 	)
-	if err == nil || !strings.Contains(err.Error(), "local changed paths do not match") {
-		t.Fatalf("empty available changed paths error = %v", err)
+	if err != nil || applicable || condition != "" {
+		t.Fatalf("empty available changed paths = %q / %t / %v", condition, applicable, err)
 	}
 }
 
@@ -509,8 +537,8 @@ func TestTranslateEventTriggerConditionMatchesPushPaths(t *testing.T) {
 		t.Fatalf("push condition/applicable/error = %q / %t / %v", condition, applicable, err)
 	}
 	snapshot.ChangedPaths = ChangedPathEvaluation{Paths: []string{"docs/readme.md", "src/generated/api.go"}}
-	if _, _, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger}, "push", expressions, snapshot); err == nil || !strings.Contains(err.Error(), "diff-timeout outcome is unavailable") {
-		t.Fatalf("nonmatching push paths error = %v", err)
+	if condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger}, "push", expressions, snapshot); err != nil || applicable || condition != "" {
+		t.Fatalf("nonmatching push paths = %q / %t / %v", condition, applicable, err)
 	}
 	snapshot.ChangedPaths = ChangedPathEvaluation{UnavailableReason: "verified push diff unavailable"}
 	if _, _, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger}, "push", expressions, snapshot); err == nil || !strings.Contains(err.Error(), "verified push diff unavailable") {
@@ -528,6 +556,23 @@ func TestTranslateEventTriggerConditionMatchesPushPaths(t *testing.T) {
 	trigger.Branches = []string{"release"}
 	if condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger}, "push", expressions, snapshot); err != nil || !applicable || !strings.Contains(condition, `"main" =~ /^release$/`) {
 		t.Fatalf("branch-mismatched push path filter = %q, %t, %v", condition, applicable, err)
+	}
+}
+
+func TestPullRequestNonPathExclusionsDoNotRequireDiff(t *testing.T) {
+	for _, test := range []struct{ branch, action string }{
+		{"release", "opened"},
+		{"main", "closed"},
+	} {
+		t.Run(test.branch+"-"+test.action, func(t *testing.T) {
+			trigger := workflow.Trigger{Event: "pull_request", Branches: []string{"main"}, Paths: []string{"src/**"}}
+			expressions := TriggerConditionExpressions{EventPredicate: "true", PullRequestBaseBranch: yamlScalar(test.branch), PullRequestAction: yamlScalar(test.action)}
+			snapshot := TriggerEventSnapshot{PullRequestBaseBranch: &test.branch, PullRequestAction: &test.action}
+			condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger}, "pull_request", expressions, snapshot)
+			if err != nil || !applicable || !strings.Contains(condition, yamlScalar(test.branch)+" =~ /^main$/") || !strings.Contains(condition, yamlScalar(test.action)+` == "opened"`) {
+				t.Fatalf("non-path exclusion = %q / %t / %v", condition, applicable, err)
+			}
+		})
 	}
 }
 

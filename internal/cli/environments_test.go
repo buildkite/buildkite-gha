@@ -413,31 +413,62 @@ func uploadedPlanVars(t *testing.T, content []byte) map[string]string {
 	return job.EnvironmentVars
 }
 
-// TestRunUploadAgentResolutionFailureFailsClosed proves a disabled or failing
-// Agent API environments endpoint fails the upload with an actionable error
-// instead of degrading to an unprotected deployment.
-func TestRunUploadAgentResolutionFailureFailsClosed(t *testing.T) {
+// TestRunUploadAgentResolutionFailurePreservesExpandedJobs proves a disabled
+// or failing Agent API environments endpoint becomes a scoped failed job while
+// an independent job retains its runnable plan. The deployment never degrades
+// to an unprotected runnable job.
+func TestRunUploadAgentResolutionFailurePreservesExpandedJobs(t *testing.T) {
 	requireImporterHost(t)
 	agent, _ := agentEnvironmentsStub(t, "job-secret", http.StatusNotFound)
 	setAgentResolutionEnvironment(t, agent.URL)
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "environment-agent-fail-importer")
 	workflow := filepath.Join(t.TempDir(), "deploy.yml")
-	if err := os.WriteFile(workflow, []byte(environmentUploadWorkflow), 0o600); err != nil {
+	source := `on: push
+jobs:
+  safe:
+    runs-on: ubuntu-latest
+    steps: [{run: echo safe}]
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps: [{run: echo deploy}]
+`
+	if err := os.WriteFile(workflow, []byte(source), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 
 	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev", runner); code == 0 {
-		t.Fatal("run() with failing environment resolution succeeded")
+	if code := run([]string{"upload", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if want := "the Agent API does not offer GitHub environment resolution"; !strings.Contains(stderr.String(), want) {
-		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	var plans int
+	var failureMessage string
+	for path, contents := range runner.uploaded {
+		switch {
+		case strings.Contains(path, "/plans/"):
+			plans++
+			job, err := plan.Decode(contents)
+			if err != nil || job.Workflow.LogicalJobID != "safe" {
+				t.Fatalf("independent plan = %#v, %v", job, err)
+			}
+		case strings.Contains(path, "/failures/messages/"):
+			failureMessage += string(contents)
+		}
 	}
-	if strings.Contains(stderr.String(), "token") {
-		t.Fatalf("stderr = %q, must not suggest a GitHub token", stderr.String())
+	if plans != 1 || !strings.Contains(failureMessage, "the Agent API does not offer GitHub environment resolution") {
+		t.Fatalf("plans = %d, failure message = %q", plans, failureMessage)
+	}
+	pipeline := string(runner.commands[len(runner.commands)-1].stdin)
+	for _, want := range []string{":github: job · safe", ":github: job · deploy", "run-job", ".buildkite-gha/failures/messages/"} {
+		if !strings.Contains(pipeline, want) {
+			t.Fatalf("pipeline missing %q:\n%s", want, pipeline)
+		}
+	}
+	if strings.Contains(stderr.String(), "token") || strings.Contains(failureMessage, "token") {
+		t.Fatalf("diagnostics must not suggest a GitHub token: stderr = %q, failure = %q", stderr.String(), failureMessage)
 	}
 }
 

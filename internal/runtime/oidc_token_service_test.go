@@ -269,7 +269,7 @@ if (process.env.no_proxy !== "lower.example,127.0.0.1") throw new Error("no_prox
 `)
 	marker := filepath.Join(workspace, "token")
 	lockID := "a-0123456789abcdef"
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID: "oidc", Kind: "uses", Uses: "./" + actionPath,
 		Env: map[string]string{"MARKER": marker, "NO_PROXY": "upper.example", "no_proxy": "lower.example"}, Action: &plan.ActionSelector{Lock: lockID},
 	}})
@@ -306,7 +306,7 @@ const core = require("@actions/core");
 `)
 	marker := filepath.Join(workspace, "post-token")
 	lockID := "a-0123456789abcdef"
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID: "oidc-cancel", Kind: "uses", Uses: "./" + actionPath,
 		Env: map[string]string{"MARKER": marker}, Action: &plan.ActionSelector{Lock: lockID},
 	}})
@@ -351,7 +351,7 @@ const core = require("@actions/core");
 `)
 	marker := filepath.Join(workspace, "missing-environment")
 	lockID := "a-0123456789abcdef"
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
 		ID: "no-oidc", Kind: "uses", Uses: "./" + actionPath,
 		Env:    map[string]string{"ACTIONS_ID_TOKEN_REQUEST_URL": "https://attacker.invalid/?x=1", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "attacker", "MARKER": marker},
 		Action: &plan.ActionSelector{Lock: lockID},

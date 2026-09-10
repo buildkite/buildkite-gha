@@ -1,3 +1,3 @@
-// Package program defines Program, the executable instructions for one workflow
-// job: its steps, containers, services, expressions, and resolved actions.
+// Package program defines the immutable normalized executable form of GitHub
+// Actions workflow jobs and the resolved actions they may invoke.
 package program

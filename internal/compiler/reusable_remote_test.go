@@ -74,6 +74,53 @@ func (s *fakeReusableRepositorySource) references() []actionsource.Reference {
 	return append([]actionsource.Reference(nil), s.calls...)
 }
 
+func TestLocalDiagnosticSourcesSurviveNestedWorkflowFailure(t *testing.T) {
+	root := t.TempDir()
+	caller := writeWorkflow(t, root, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/broken.yml\n")
+	broken := writeWorkflow(t, root, "broken.yml", "on: workflow_call\njobs: [\n")
+	canonical, err := filepath.EvalSymlinks(broken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := WorkflowSourceReference{LocalPath: canonical, Digest: transport.Digest(readFile(t, broken))}
+	const display = "./.github/workflows/broken.yml"
+	report, err := ValidateWithOptionsContext(t.Context(), caller, readFile(t, caller), defaultOptions())
+	if err == nil || report.Sources[display] != want || report.Sources[caller].Digest != transport.Digest(readFile(t, caller)) {
+		t.Fatalf("validation lost source identity: sources=%v err=%v", report.Sources, err)
+	}
+	ir, err := CompileIRWithOptionsContext(t.Context(), caller, readFile(t, caller), pushEvent(t), defaultOptions())
+	if err == nil || ir.Sources[display] != want || ir.Sources[caller].Digest != transport.Digest(readFile(t, caller)) {
+		t.Fatalf("compilation lost source identity: sources=%v err=%v", ir.Sources, err)
+	}
+}
+
+func TestRemoteDiagnosticSourcesSurviveNestedWorkflowFailure(t *testing.T) {
+	callerRoot, remoteRoot := t.TempDir(), t.TempDir()
+	caller := writeWorkflow(t, callerRoot, "caller.yml", "on: push\njobs:\n  call:\n    uses: owner/shared/.github/workflows/callee.yml@v2\n")
+	writeWorkflow(t, remoteRoot, "callee.yml", "on: workflow_call\njobs:\n  nested:\n    uses: ./.github/workflows/broken.yml\n")
+	writeWorkflow(t, remoteRoot, "broken.yml", "on: workflow_call\njobs: [\n")
+	fake := newFakeReusableRepositorySource(t, map[string]string{"owner/shared": remoteRoot})
+	options := defaultOptions()
+	options.RepositorySource = fake
+	want := WorkflowSourceReference{Repository: "owner/shared", Path: ".github/workflows/broken.yml", Commit: fake.commits["owner/shared"]}
+	const display = "owner/shared/.github/workflows/broken.yml@v2"
+	report, err := ValidateWithOptionsContext(t.Context(), caller, readFile(t, caller), options)
+	if err == nil || !strings.Contains(err.Error(), display) || report.Sources[display] != want {
+		t.Fatalf("validation lost failing source: sources=%v err=%v", report.Sources, err)
+	}
+	ir, err := CompileIRWithOptionsContext(t.Context(), caller, readFile(t, caller), pushEvent(t), options)
+	if err == nil || ir.JobGraphComplete || ir.Sources[display] != want {
+		t.Fatalf("compilation lost failing source: sources=%v err=%v", ir.Sources, err)
+	}
+	encoded, err := json.Marshal(ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), want.Commit) || strings.Contains(string(encoded), `"Sources"`) {
+		t.Fatalf("diagnostic provenance leaked into serialized IR: %s", encoded)
+	}
+}
+
 func TestCompilePublicReusableWorkflowWithNestedPinnedLocalCall(t *testing.T) {
 	callerRoot := t.TempDir()
 	callerPath := writeWorkflow(t, callerRoot, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: GaloisInc/.github/.github/workflows/haskell-ci.yml@v2\n")
@@ -286,8 +333,9 @@ jobs:
 	if len(callee.Dependencies) != 1 || callee.Dependencies[0] != producer.Target.StepKey || len(callee.NeedSources["hash"]) != 1 || len(callee.NeedOutputs["hash"]) != 0 {
 		t.Fatalf("callee dependencies = %#v, needs = %#v / %#v", callee.Dependencies, callee.NeedSources, callee.NeedOutputs)
 	}
-	if _, exists := callee.Inputs["base64-subjects"]; exists || callee.Steps[0].Env["UNTRUSTED_SUBJECTS"] != "${{ inputs.base64-subjects }}" {
-		t.Fatalf("callee deferred input boundary = inputs %#v, step %#v", callee.Inputs, callee.Steps[0])
+	step := callee.Program.Job.Steps[0]
+	if _, exists := callee.Inputs["base64-subjects"]; exists || testBindingSources(step.Env)["UNTRUSTED_SUBJECTS"] != "${{ inputs.base64-subjects }}" {
+		t.Fatalf("callee deferred input boundary = inputs %#v, step %#v", callee.Inputs, step)
 	}
 	if callee.Workflow.Remote == nil || callee.Workflow.Remote.Repository != "slsa-framework/slsa-github-generator" || callee.Workflow.Remote.RequestedRef != "v2.1.0" {
 		t.Fatalf("remote provenance = %#v", callee.Workflow.Remote)

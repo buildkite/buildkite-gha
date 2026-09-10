@@ -17,16 +17,17 @@ const maxSkipReasonLength = 70
 // TriggerConditionExpressions supplies the trusted Buildkite expressions used
 // to select one effective event and apply its supported trigger filters.
 type TriggerConditionExpressions struct {
-	EventPredicate        string
-	Branch                string
-	Tag                   string
-	PullRequestBaseBranch string
-	PullRequestAction     string
-	MergeGroupBaseBranch  string
-	MergeGroupAction      string
-	ReleaseAction         string
-	IssuesAction          string
-	IssueCommentAction    string
+	EventPredicate          string
+	Branch                  string
+	Tag                     string
+	PullRequestBaseBranch   string
+	PullRequestAction       string
+	MergeGroupBaseBranch    string
+	MergeGroupAction        string
+	ReleaseAction           string
+	IssuesAction            string
+	IssueCommentAction      string
+	PullRequestReviewAction string
 }
 
 // ChangedPathEvaluation records either the available changed paths or why
@@ -43,30 +44,33 @@ func (e ChangedPathEvaluation) available() bool {
 // TriggerEventSnapshot supplies observed effective-event values used to match
 // trigger filters and explain mismatches.
 type TriggerEventSnapshot struct {
-	Branch                *string
-	Tag                   *string
-	PullRequestBaseBranch *string
-	PullRequestAction     *string
-	MergeGroupBaseBranch  *string
-	MergeGroupAction      *string
-	ReleaseAction         *string
-	IssuesAction          *string
-	IssueCommentAction    *string
-	ChangedPaths          ChangedPathEvaluation
+	Branch                  *string
+	Tag                     *string
+	PullRequestBaseBranch   *string
+	PullRequestAction       *string
+	MergeGroupBaseBranch    *string
+	MergeGroupAction        *string
+	ReleaseAction           *string
+	IssuesAction            *string
+	IssueCommentAction      *string
+	PullRequestReviewAction *string
+	ChangedPaths            ChangedPathEvaluation
 }
 
 // supportedTriggerEvents is the single source of truth for GitHub trigger
 // events that map to a Buildkite build source.
 var supportedTriggerEvents = map[string]bool{
-	"workflow_call":     true,
-	"workflow_dispatch": true,
-	"schedule":          true,
-	"push":              true,
-	"pull_request":      true,
-	"merge_group":       true,
-	"release":           true,
-	"issues":            true,
-	"issue_comment":     true,
+	"workflow_call":               true,
+	"workflow_dispatch":           true,
+	"schedule":                    true,
+	"push":                        true,
+	"pull_request":                true,
+	"merge_group":                 true,
+	"release":                     true,
+	"issues":                      true,
+	"issue_comment":               true,
+	"pull_request_review":         true,
+	"pull_request_review_comment": true,
 }
 
 var supportedIssuesAction = map[string]bool{
@@ -130,16 +134,17 @@ func (e *UnsupportedPathFiltersError) CompatibilityBlocker() (string, string) {
 // supplied the effective event snapshot.
 func LiveTriggerConditionExpressions(eventPredicate string) TriggerConditionExpressions {
 	return TriggerConditionExpressions{
-		EventPredicate:        eventPredicate,
-		Branch:                "build.branch",
-		Tag:                   "build.tag",
-		PullRequestBaseBranch: "build.pull_request.base_branch",
-		PullRequestAction:     "build.source_action",
-		MergeGroupBaseBranch:  "build.merge_queue.base_branch",
-		MergeGroupAction:      "build.source_action",
-		ReleaseAction:         "build.source_action",
-		IssuesAction:          "build.source_action",
-		IssueCommentAction:    "build.source_action",
+		EventPredicate:          eventPredicate,
+		Branch:                  "build.branch",
+		Tag:                     "build.tag",
+		PullRequestBaseBranch:   "build.pull_request.base_branch",
+		PullRequestAction:       "build.source_action",
+		MergeGroupBaseBranch:    "build.merge_queue.base_branch",
+		MergeGroupAction:        "build.source_action",
+		ReleaseAction:           "build.source_action",
+		IssuesAction:            "build.source_action",
+		IssueCommentAction:      "build.source_action",
+		PullRequestReviewAction: "build.source_action",
 	}
 }
 
@@ -342,12 +347,25 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 				return fmt.Sprintf("Release activity %q does not match this workflow's release activity filters.", *snapshot.ReleaseAction), nil
 			}
 		case "issues":
-			if snapshot.IssuesAction != nil && trigger.Types != nil && !slices.Contains(trigger.Types, *snapshot.IssuesAction) {
+			if snapshot.IssuesAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.IssuesAction) {
 				return fmt.Sprintf("Issue activity %q does not match this workflow's issues activity filters.", *snapshot.IssuesAction), nil
 			}
 		case "issue_comment":
-			if snapshot.IssueCommentAction != nil && trigger.Types != nil && !slices.Contains(trigger.Types, *snapshot.IssueCommentAction) {
+			if snapshot.IssueCommentAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.IssueCommentAction) {
 				return fmt.Sprintf("Issue comment activity %q does not match this workflow's issue_comment activity filters.", *snapshot.IssueCommentAction), nil
+			}
+		case "pull_request_review", "pull_request_review_comment":
+			if snapshot.PullRequestReviewAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.PullRequestReviewAction) {
+				return fmt.Sprintf("Review activity %q does not match this workflow's %s activity filters.", *snapshot.PullRequestReviewAction, event), nil
+			}
+		}
+		if (trigger.Paths != nil || trigger.PathsIgnore != nil) && (event == "pull_request" || event == "push" && snapshot.Tag == nil) && snapshot.ChangedPaths.available() {
+			matches, err := pathFiltersMatch(snapshot.ChangedPaths.Paths, trigger.Paths, trigger.PathsIgnore)
+			if err != nil {
+				return "", err
+			}
+			if !matches {
+				return "Changed paths do not match this workflow's path filters", nil
 			}
 		}
 		return "", nil
@@ -375,7 +393,7 @@ func LiveEventPredicate(event string) string {
 	predicate := "(" + githubEvent + " == " + yamlScalar(event) + " || (" + githubEventMissing + " && " + buildkiteGitHubEvent + " == " + yamlScalar(event) + "))"
 	fallbackEvent := "(" + githubEventMissing + " && (" + buildkiteGitHubEvent + " == null"
 	unsupportedEvent := ""
-	for _, supported := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
+	for _, supported := range []string{"push", "pull_request", "workflow_dispatch", "schedule", "pull_request_review", "pull_request_review_comment"} {
 		if unsupportedEvent != "" {
 			unsupportedEvent += " && "
 		}
@@ -391,7 +409,7 @@ func LiveEventPredicate(event string) string {
 		return predicate
 	case "schedule":
 		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source == "schedule"))`
-	case "merge_group", "release", "issues", "issue_comment":
+	case "merge_group", "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment":
 		return predicate
 	default:
 		return ""
@@ -483,10 +501,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 				return "", false, fmt.Errorf("push paths: %w", err)
 			}
 			if !matches {
-				return "", false, &UnsupportedPathFiltersError{
-					Event:  t.Event,
-					Reason: "local changed paths do not match, and GitHub's diff-timeout outcome is unavailable",
-				}
+				return "", false, nil
 			}
 		}
 		return strings.Join(parts, " && "), true, nil
@@ -531,6 +546,18 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		parts = append(parts, "("+strings.Join(actions, " || ")+")")
 		if pathFilters && selected {
+			if snapshot.PullRequestAction != nil && !slices.Contains(types, *snapshot.PullRequestAction) {
+				return strings.Join(parts, " && "), true, nil
+			}
+			if snapshot.PullRequestBaseBranch != nil {
+				matches, err := refFilterMatches(*snapshot.PullRequestBaseBranch, t.Branches, t.BranchesIgnore)
+				if err != nil {
+					return "", false, fmt.Errorf("pull_request branches: %w", err)
+				}
+				if !matches {
+					return strings.Join(parts, " && "), true, nil
+				}
+			}
 			if !snapshot.ChangedPaths.available() {
 				return "", false, &UnsupportedPathFiltersError{Event: t.Event, Reason: snapshot.ChangedPaths.UnavailableReason}
 			}
@@ -539,10 +566,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 				return "", false, fmt.Errorf("pull_request paths: %w", err)
 			}
 			if !matches {
-				return "", false, &UnsupportedPathFiltersError{
-					Event:  t.Event,
-					Reason: "local changed paths do not match, and GitHub's diff-timeout outcome is unavailable",
-				}
+				return "", false, nil
 			}
 		}
 		return strings.Join(parts, " && "), true, nil
@@ -616,11 +640,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		if expressions.IssuesAction == "null" {
 			return "", false, fmt.Errorf("issues event snapshot requires payload.action")
 		}
-		if t.Types == nil {
-			return expressions.EventPredicate, true, nil
-		}
 		if len(t.Types) == 0 {
-			return "", false, fmt.Errorf("issues types is explicitly empty")
+			return expressions.EventPredicate, true, nil
 		}
 		actions := make([]string, 0, len(t.Types))
 		for _, action := range t.Types {
@@ -628,6 +649,27 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 				return "", false, fmt.Errorf("issues activity type %q cannot be mapped exactly", action)
 			}
 			actions = append(actions, expressions.IssuesAction+` == `+yamlScalar(action))
+		}
+		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
+	case "pull_request_review", "pull_request_review_comment":
+		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+			return "", false, fmt.Errorf("%s has unsupported filters", t.Event)
+		}
+		if expressions.EventPredicate == "" || expressions.PullRequestReviewAction == "" || expressions.PullRequestReviewAction == "null" {
+			return "", false, fmt.Errorf("%s requires effective event and action expressions", t.Event)
+		}
+		if snapshot.PullRequestReviewAction != nil && !SupportedPullRequestReviewAction(t.Event, *snapshot.PullRequestReviewAction) {
+			return "", false, fmt.Errorf("%s activity type %q cannot be mapped exactly", t.Event, *snapshot.PullRequestReviewAction)
+		}
+		if len(t.Types) == 0 {
+			return expressions.EventPredicate, true, nil
+		}
+		actions := make([]string, 0, len(t.Types))
+		for _, action := range t.Types {
+			if !SupportedPullRequestReviewAction(t.Event, action) {
+				return "", false, fmt.Errorf("%s activity type %q cannot be mapped exactly", t.Event, action)
+			}
+			actions = append(actions, expressions.PullRequestReviewAction+` == `+yamlScalar(action))
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "issue_comment":
@@ -640,11 +682,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		if expressions.IssueCommentAction == "null" {
 			return "", false, fmt.Errorf("issue_comment event snapshot requires payload.action")
 		}
-		if t.Types == nil {
-			return expressions.EventPredicate, true, nil
-		}
 		if len(t.Types) == 0 {
-			return "", false, fmt.Errorf("issue_comment types is explicitly empty")
+			return expressions.EventPredicate, true, nil
 		}
 		actions := make([]string, 0, len(t.Types))
 		for _, action := range t.Types {
@@ -656,6 +695,18 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	default:
 		return "", false, &UnsupportedTriggerEventError{Event: t.Event}
+	}
+}
+
+// SupportedPullRequestReviewAction reports the documented activity set for review events.
+func SupportedPullRequestReviewAction(event, action string) bool {
+	switch event {
+	case "pull_request_review":
+		return action == "submitted" || action == "edited" || action == "dismissed"
+	case "pull_request_review_comment":
+		return action == "created" || action == "edited" || action == "deleted"
+	default:
+		return false
 	}
 }
 
