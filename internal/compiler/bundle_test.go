@@ -126,7 +126,7 @@ jobs:
       - run: echo "${{ matrix.steps }}"
 `)
 	bundle, err := CompileBundle("runtime-matrix.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
-	if err == nil || !strings.Contains(err.Error(), "continuation upload is disabled") {
+	if err == nil || !strings.Contains(err.Error(), "needs a second pipeline upload") {
 		t.Fatalf("CompileBundle() error = %v", err)
 	}
 	if len(bundle.Plans) != 0 || len(bundle.Pipeline) != 0 {

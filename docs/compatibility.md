@@ -861,9 +861,28 @@ concrete `matrix` values and each called workflow receives its declared
 A job may expand to at most 256 instances. All matrix values must be available
 before Buildkite pipeline generation. Expressions derived from `needs` outputs
 or `steps` require jobs to run before the final graph can be generated, so they
-remain unsupported. The compiler validates a narrow `needs.<job>.outputs.<name>`
-runtime-matrix shape, but does not upload a continuation pipeline because the
-transport has no authoritative current-attempt and durable idempotency fence.
+remain unsupported:
+
+```yaml
+build:
+  needs: plan
+  runs-on: ${{ matrix.runner }}
+  strategy:
+    matrix:
+      include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+```
+
+```
+E_MATRIX_INVALID matrix values come from a job output that exists only after that job runs; buildkite-gha cannot expand this matrix yet (https://github.com/buildkite/buildkite-gha/issues/130)
+  detail: the matrix reference is valid, but expanding it needs a second pipeline upload after the producing job finishes, which buildkite-gha does not perform yet
+```
+
+The compiler recognizes exactly `fromJSON(needs.<job>.outputs.<name>)` as the
+whole `matrix` or the whole `include` list, and the `detail` line says whether
+the reference itself is valid or why it is not. Support is tracked in
+[issue #130](https://github.com/buildkite/buildkite-gha/issues/130). Until
+then, move the expansion into the workflow: list the combinations statically,
+or read them from `inputs` or the event payload with `fromJSON`.
 
 ### Containers and services
 
