@@ -182,6 +182,25 @@ func TestTranslateEventTriggerConditionUsesMergeGroupSnapshot(t *testing.T) {
 	}
 }
 
+func TestEmptyMergeGroupTypesMatchChecksRequested(t *testing.T) {
+	triggers := []workflow.Trigger{{Event: "merge_group", Types: []string{}}}
+	condition, err := TranslateTriggerCondition(triggers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{LiveEventPredicate("merge_group"), `build.source_action == "checks_requested"`} {
+		if !strings.Contains(condition, want) {
+			t.Fatalf("condition missing %q: %s", want, condition)
+		}
+	}
+
+	action := "checks_requested"
+	reason, err := TriggerFilterMismatchReason(triggers, "merge_group", TriggerEventSnapshot{MergeGroupAction: &action})
+	if err != nil || reason != "" {
+		t.Fatalf("mismatch reason = %q, %v", reason, err)
+	}
+}
+
 func TestTranslateEventTriggerConditionUsesReleaseSnapshot(t *testing.T) {
 	action := "released"
 	expressions := TriggerConditionExpressions{
