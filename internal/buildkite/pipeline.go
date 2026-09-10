@@ -386,6 +386,9 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		}
 		prepared[i].ReusableConcurrencyGates = gates
 	}
+	if err := validateConcurrencyDependencies(prepared, pipeline.CompilerStep); err != nil {
+		return nil, err
+	}
 	var out bytes.Buffer
 	out.WriteString("steps:\n")
 	for _, workflow := range prepared {
@@ -409,6 +412,7 @@ type preparedConcurrencyGate struct {
 	ConcurrencyGate
 	ParentID, OpenKey, CloseKey string
 	Members                     []string
+	Prerequisites               []string
 }
 
 func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflow) error {
@@ -477,18 +481,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			dependencies = nil
 		}
 		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start workflow concurrency", workflow.GateOpenKey, workflow.ConcurrencyGate, dependencies)
-		dependencies = make([]dependency, 0, len(workflow.Jobs)+len(workflow.ReusableConcurrencyGates)+1)
-		if !workflow.Aggregate {
-			dependencies = append(dependencies, dependency{Step: pipeline.CompilerStep})
-		}
-		for _, job := range workflow.Jobs {
-			dependencies = append(dependencies, dependency{Step: job.Key, AllowFailure: true})
-		}
-		for _, gate := range workflow.ReusableConcurrencyGates {
-			if gate.ParentID == "" {
-				dependencies = append(dependencies, dependency{Step: gate.CloseKey, AllowFailure: true})
-			}
-		}
+		dependencies = workflowGateCloseDependencies(workflow, pipeline.CompilerStep)
 		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", workflow.GateCloseKey, workflow.ConcurrencyGate, dependencies)
 	}
 	gateOpenKeys := make(map[string]string, len(workflow.ReusableConcurrencyGates))
@@ -496,15 +489,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		dependencies := reusableGateOpenDependencies(workflow, gate, gateOpenKeys, pipeline.CompilerStep)
 		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start reusable-workflow concurrency", gate.OpenKey, &gate.ConcurrencyGate, dependencies)
 		gateOpenKeys[gate.ID] = gate.OpenKey
-		dependencies = make([]dependency, 0, len(gate.Members)+len(workflow.ReusableConcurrencyGates))
-		for _, member := range gate.Members {
-			dependencies = append(dependencies, dependency{Step: member, AllowFailure: true})
-		}
-		for _, child := range workflow.ReusableConcurrencyGates {
-			if child.ParentID == gate.ID {
-				dependencies = append(dependencies, dependency{Step: child.CloseKey, AllowFailure: true})
-			}
-		}
+		dependencies = reusableGateCloseDependencies(workflow, gate)
 		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish reusable-workflow concurrency", gate.CloseKey, &gate.ConcurrencyGate, dependencies)
 	}
 	for _, job := range workflow.Jobs {
@@ -692,25 +677,34 @@ func emitFailureBody(out *bytes.Buffer, indent, artifactProducer string, failure
 }
 
 func emitJobDependencies(out *bytes.Buffer, indent string, workflow preparedWorkflow, job Job, gateOpenKeys map[string]string, compilerStep string) {
-	runnable := job.Failure == nil && job.SkipReason == ""
+	dependencies := jobDependencies(workflow, job, gateOpenKeys, compilerStep)
+	if len(dependencies) != 0 {
+		_, _ = fmt.Fprintf(out, "%sdepends_on:\n", indent)
+	}
+	for _, dependency := range dependencies {
+		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: %t\n", indent, yamlScalar(dependency.Step), indent, dependency.AllowFailure)
+	}
+}
+
+func jobDependencies(workflow preparedWorkflow, job Job, gateOpenKeys map[string]string, compilerStep string) []dependency {
+	var dependencies []dependency
 	if !workflow.Aggregate {
-		_, _ = fmt.Fprintf(out, "%sdepends_on:\n", indent)
-		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", indent, yamlScalar(compilerStep), indent)
-	} else if (workflow.GateOpenKey != "" && runnable) || len(job.Dependencies) != 0 || len(job.ConcurrencyGates) != 0 || job.ApprovalGate != "" {
-		_, _ = fmt.Fprintf(out, "%sdepends_on:\n", indent)
+		dependencies = append(dependencies, dependency{Step: compilerStep})
 	}
+	runnable := job.Failure == nil && job.SkipReason == ""
 	if workflow.GateOpenKey != "" && runnable {
-		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", indent, yamlScalar(workflow.GateOpenKey), indent)
+		dependencies = append(dependencies, dependency{Step: workflow.GateOpenKey})
 	}
-	for _, dependency := range job.Dependencies {
-		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: true\n", indent, yamlScalar(dependency), indent)
+	for _, key := range job.Dependencies {
+		dependencies = append(dependencies, dependency{Step: key, AllowFailure: true})
 	}
 	for _, gate := range job.ConcurrencyGates {
-		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", indent, yamlScalar(gateOpenKeys[gate.ID]), indent)
+		dependencies = append(dependencies, dependency{Step: gateOpenKeys[gate.ID]})
 	}
 	if job.ApprovalGate != "" {
-		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", indent, yamlScalar(job.ApprovalGate), indent)
+		dependencies = append(dependencies, dependency{Step: job.ApprovalGate})
 	}
+	return dependencies
 }
 
 func prepareReusableConcurrencyGates(jobs []Job) ([]preparedConcurrencyGate, error) {
@@ -753,7 +747,8 @@ func prepareReusableConcurrencyGates(jobs []Job) ([]preparedConcurrencyGate, err
 			parentID = parent.ParentID
 		}
 	}
-	for _, gate := range gates {
+	for index := range gates {
+		gate := &gates[index]
 		members := make(map[string]bool, len(gate.Members))
 		for _, key := range gate.Members {
 			job := jobsByKey[key]
@@ -762,12 +757,36 @@ func prepareReusableConcurrencyGates(jobs []Job) ([]preparedConcurrencyGate, err
 			}
 			members[key] = true
 		}
+		prerequisites := make(map[string]bool)
 		for _, key := range gate.Members {
 			for _, dependency := range jobsByKey[key].Dependencies {
-				if !members[dependency] {
-					return nil, fmt.Errorf("reusable-workflow concurrency gate %q has an external prerequisite", gate.ID)
+				if !members[dependency] && !prerequisites[dependency] {
+					prerequisites[dependency] = true
+					gate.Prerequisites = append(gate.Prerequisites, dependency)
 				}
 			}
+		}
+		// A prerequisite call can include nested gates even when its leaf
+		// jobs have no job-level concurrency. Check the full needs closure.
+		pending := append([]string(nil), gate.Prerequisites...)
+		seen := make(map[string]bool)
+		for len(pending) != 0 {
+			key := pending[0]
+			pending = pending[1:]
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			job := jobsByKey[key]
+			if job.Concurrency > 0 && job.ConcurrencyGroup == gate.Group {
+				return nil, fmt.Errorf("reusable-workflow concurrency gate %q shares group with prerequisite job %q", gate.ID, key)
+			}
+			for _, prerequisiteGate := range job.ConcurrencyGates {
+				if prerequisiteGate.Group == gate.Group {
+					return nil, fmt.Errorf("reusable-workflow concurrency gate %q shares group with prerequisite gate %q", gate.ID, prerequisiteGate.ID)
+				}
+			}
+			pending = append(pending, job.Dependencies...)
 		}
 	}
 	return gates, nil
@@ -790,7 +809,101 @@ func reusableGateOpenDependencies(workflow preparedWorkflow, gate preparedConcur
 	case !workflow.Aggregate:
 		add(compilerStep, false)
 	}
+	for _, key := range gate.Prerequisites {
+		add(key, true)
+	}
 	return dependencies
+}
+
+func reusableGateCloseDependencies(workflow preparedWorkflow, gate preparedConcurrencyGate) []dependency {
+	dependencies := make([]dependency, 0, len(gate.Members)+len(workflow.ReusableConcurrencyGates))
+	for _, member := range gate.Members {
+		dependencies = append(dependencies, dependency{Step: member, AllowFailure: true})
+	}
+	for _, child := range workflow.ReusableConcurrencyGates {
+		if child.ParentID == gate.ID {
+			dependencies = append(dependencies, dependency{Step: child.CloseKey, AllowFailure: true})
+		}
+	}
+	return dependencies
+}
+
+func workflowGateCloseDependencies(workflow preparedWorkflow, compilerStep string) []dependency {
+	dependencies := make([]dependency, 0, len(workflow.Jobs)+len(workflow.ReusableConcurrencyGates)+1)
+	if !workflow.Aggregate {
+		dependencies = append(dependencies, dependency{Step: compilerStep})
+	}
+	for _, job := range workflow.Jobs {
+		dependencies = append(dependencies, dependency{Step: job.Key, AllowFailure: true})
+	}
+	for _, gate := range workflow.ReusableConcurrencyGates {
+		if gate.ParentID == "" {
+			dependencies = append(dependencies, dependency{Step: gate.CloseKey, AllowFailure: true})
+		}
+	}
+	return dependencies
+}
+
+// Lifting prerequisites to gate-open can introduce cycles that the authored
+// job DAG does not contain. Include both emitted dependencies and queue order:
+// every entry in an ordered concurrency group waits for the preceding entry,
+// even when that entry is itself blocked on dependencies.
+func validateConcurrencyDependencies(workflows []preparedWorkflow, compilerStep string) error {
+	dependencies := make(map[string][]string)
+	previous := make(map[string]string)
+	var order []string
+	add := func(key, group string, needs []dependency) {
+		order = append(order, key)
+		for _, need := range needs {
+			dependencies[key] = append(dependencies[key], need.Step)
+		}
+		if group != "" {
+			if prior := previous[group]; prior != "" {
+				dependencies[key] = append(dependencies[key], prior)
+			}
+			previous[group] = key
+		}
+	}
+	for _, workflow := range workflows {
+		if workflow.ConcurrencyGate != nil {
+			add(workflow.GateOpenKey, workflow.ConcurrencyGate.Group, nil)
+			add(workflow.GateCloseKey, workflow.ConcurrencyGate.Group, workflowGateCloseDependencies(workflow, compilerStep))
+		}
+		openKeys := make(map[string]string)
+		for _, gate := range workflow.ReusableConcurrencyGates {
+			add(gate.OpenKey, gate.Group, reusableGateOpenDependencies(workflow, gate, openKeys, compilerStep))
+			openKeys[gate.ID] = gate.OpenKey
+			add(gate.CloseKey, gate.Group, reusableGateCloseDependencies(workflow, gate))
+		}
+		for _, job := range workflow.Jobs {
+			add(job.Key, job.ConcurrencyGroup, jobDependencies(workflow, job, openKeys, compilerStep))
+		}
+	}
+	visiting, visited := make(map[string]bool), make(map[string]bool)
+	var visit func(string) error
+	visit = func(key string) error {
+		if visiting[key] {
+			return fmt.Errorf("concurrency queue and prerequisite dependencies form a cycle at step %q", key)
+		}
+		if visited[key] {
+			return nil
+		}
+		visiting[key] = true
+		for _, need := range dependencies[key] {
+			if err := visit(need); err != nil {
+				return err
+			}
+		}
+		delete(visiting, key)
+		visited[key] = true
+		return nil
+	}
+	for _, key := range order {
+		if err := visit(key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func emitWorkflowCheck(out *bytes.Buffer, indent, provider string, workflow preparedWorkflow, checkKey, jobLabel, title, summary string) {

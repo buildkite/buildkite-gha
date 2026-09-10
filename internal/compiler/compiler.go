@@ -521,6 +521,15 @@ func guardedReusableConcurrencyWarning(position workflow.Position, calleePath st
 	}
 }
 
+func prerequisiteReusableConcurrencyWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_REUSABLE_WORKFLOW_CONCURRENCY_QUEUED_BEFORE_PREREQUISITES",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "Buildkite reserves the reusable workflow's concurrency queue position at pipeline upload, before its prerequisites finish. The opening gate waits for those prerequisites, but later calls or builds using the group can wait behind it even when they are ready. GitHub admits the called workflow after its prerequisites finish. Mutual exclusion is preserved; admission order can differ.",
+	}
+}
+
 func legacyCheckoutWarning(position workflow.Position, release string, defaultsToFullHistory bool) Warning {
 	generation := "v2"
 	if defaultsToFullHistory {
