@@ -1444,10 +1444,14 @@ func workflowRunIdentity(job plan.Job) (string, string) {
 		workflowPath = job.Workflow.Path
 	}
 	workflowPath = strings.TrimPrefix(workflowPath, "./")
-	if job.Event.Repository == "" || workflowPath == "" || filepath.IsAbs(workflowPath) || job.Event.Ref == "" {
+	ref := job.Event.Ref
+	if ref == "" && (job.Event.Name == "deployment" || job.Event.Name == "deployment_status") {
+		ref = job.Event.SHA
+	}
+	if job.Event.Repository == "" || workflowPath == "" || filepath.IsAbs(workflowPath) || ref == "" {
 		return "", job.Event.SHA
 	}
-	return job.Event.Repository + "/" + workflowPath + "@" + job.Event.Ref, job.Event.SHA
+	return job.Event.Repository + "/" + workflowPath + "@" + ref, job.Event.SHA
 }
 
 func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string, identity RunIdentity) map[string]string {

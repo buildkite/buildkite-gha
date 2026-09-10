@@ -149,7 +149,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 		EventEvaluation{Event: "pull_request", Source: "generated", Report: pullRequest},
 		EventEvaluation{Event: "issues", Source: "generated", Report: push},
 	)
-	for _, event := range []string{"merge_group", "release", "issue_comment", "pull_request_review", "pull_request_review_comment", "workflow_dispatch", "schedule"} {
+	for _, event := range []string{"merge_group", "release", "deployment", "deployment_status", "issue_comment", "pull_request_review", "pull_request_review_comment", "workflow_dispatch", "schedule"} {
 		report.Evaluations = append(report.Evaluations, EventEvaluation{Event: event, Source: "generated", Report: push})
 	}
 
@@ -161,7 +161,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Schema != ProcessingSchemaV3 || decoded.Result != "incompatible" || decoded.Status != Failed || len(decoded.Evaluations) != 10 || decoded.Evaluations[0].Report.Result != "admitted" || decoded.Evaluations[1].Report.Result != "incompatible" {
+	if decoded.Schema != ProcessingSchemaV3 || decoded.Result != "incompatible" || decoded.Status != Failed || len(decoded.Evaluations) != 12 || decoded.Evaluations[0].Report.Result != "admitted" || decoded.Evaluations[1].Report.Result != "incompatible" {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
 	v2Source, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v2.schema.json"))

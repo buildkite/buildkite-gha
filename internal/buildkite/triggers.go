@@ -67,6 +67,8 @@ var supportedTriggerEvents = map[string]bool{
 	"pull_request":                true,
 	"merge_group":                 true,
 	"release":                     true,
+	"deployment":                  true,
+	"deployment_status":           true,
 	"issues":                      true,
 	"issue_comment":               true,
 	"pull_request_review":         true,
@@ -409,7 +411,7 @@ func LiveEventPredicate(event string) string {
 		return predicate
 	case "schedule":
 		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source == "schedule"))`
-	case "merge_group", "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment":
+	case "merge_group", "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "deployment", "deployment_status":
 		return predicate
 	default:
 		return ""
@@ -432,6 +434,14 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 	switch t.Event {
 	case "workflow_call":
 		return "", false, nil
+	case "deployment", "deployment_status":
+		if hasWebhookFilters(t) {
+			return "", false, fmt.Errorf("%s has unsupported filters; use job or step conditions on github.event", t.Event)
+		}
+		if expressions.EventPredicate == "" {
+			return "", false, fmt.Errorf("%s requires an effective event predicate", t.Event)
+		}
+		return expressions.EventPredicate, true, nil
 	case "workflow_dispatch":
 		if hasWebhookFilters(t) {
 			return "", false, fmt.Errorf("workflow_dispatch has unsupported webhook filters")

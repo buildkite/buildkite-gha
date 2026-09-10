@@ -78,7 +78,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--event` supports `push`, `pull_request`, `merge_group`, `release`, `issues`,
+`--event` supports `push`, `pull_request`, `merge_group`, `release`, `deployment`, `deployment_status`, `issues`,
 `issue_comment`, `pull_request_review`, `pull_request_review_comment`,
 `workflow_dispatch`, and `schedule`. It requires
 `--profile hosted` and cannot be combined with `--event-path`.
@@ -87,7 +87,8 @@ The generated snapshot contains an example repository and the minimum event
 fields. It is useful for a quick check, but it is not a real payload. The
 release snapshot represents one stable, non-prerelease `published` event. The
 issues snapshot represents `opened`, review represents `submitted`, and both
-comment events represent `created`. Use
+comment events represent `created`. Deployment snapshots use the `staging` branch
+and `preview` environment; deployment status represents `success`. Use
 `--event-path` when exact refs, activity, repository identity, or payload fields
 matter.
 
@@ -370,7 +371,8 @@ Without an explicit selector, `BUILDKITE_GITHUB_WORKFLOW_PATH` marks a GitHub
 Actions Pipeline Trigger selection. The server also supplies:
 
 - `GITHUB_EVENT_NAME`: `push`, `pull_request`, `issues`, `issue_comment`,
-  `pull_request_review`, `pull_request_review_comment`, `release`, or `merge_group`
+  `pull_request_review`, `pull_request_review_comment`, `release`, `merge_group`,
+  `deployment`, or `deployment_status`
 - `GITHUB_WORKFLOW`: the workflow `name`, or its repository-relative path when
   `name` is absent
 - `GITHUB_WORKFLOW_REF`:
@@ -378,7 +380,7 @@ Actions Pipeline Trigger selection. The server also supplies:
 - `GITHUB_WORKFLOW_SHA`: the full commit used to match the workflow
 - `BUILDKITE_GITHUB_EVENT`: a compatibility duplicate of `GITHUB_EVENT_NAME`
 - `BUILDKITE_GITHUB_ACTION`: the event activity, including `checks_requested` for merge groups; push
-  events omit it
+  and deployment events omit it
 
 The `GITHUB_*` values take precedence when present. The plugin derives the
 selected path from `GITHUB_WORKFLOW_REF`, checks `GITHUB_WORKFLOW` against the
@@ -401,6 +403,11 @@ For `release`, both workflow identity fields and the original linked payload
 are required. The ref identifies the release tag; the SHA identifies its
 server-resolved peeled commit. Repository, tag, branch, and supported non-draft
 activity must agree. See [release compatibility](compatibility.md#names-and-triggers).
+Deployment events require both workflow identity fields and the original linked
+payload. Workflows use the deployment commit and branch/tag ref, or an empty
+Actions ref for SHA-only deployments. SHA-only workflow identity uses `@<sha>`.
+See [deployment compatibility](compatibility.md#names-and-triggers) for provenance
+checks and inactive-status suppression.
 For `merge_group`, both workflow identity fields and the original linked payload
 are required. The selected ref/SHA identifies the speculative head; the distinct
 base branch/SHA must match Buildkite's merge-queue metadata. Only tokenless
@@ -559,7 +566,7 @@ explicit event is never replaced with live Buildkite fields.
 
 Linked webhook data can provide native `merge_group`, `release`, and `issues`
 events. GitHub Actions Pipeline Trigger identity additionally supports `merge_group`, `release`,
-`issues`, `issue_comment`, and PR review events without native event settings. Merge
+`deployment`, `deployment_status`, `issues`, `issue_comment`, and PR review events without native event settings. Merge
 groups and releases need matching Buildkite refs, commits, and
 activity. Release also needs a valid payload and a tag matching `BUILDKITE_TAG`
 and `BUILDKITE_BRANCH`. Issue and comment payloads need a valid action, object

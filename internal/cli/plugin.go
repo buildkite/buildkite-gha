@@ -256,8 +256,8 @@ func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(strin
 	if event == "" {
 		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT is required", githubEventNameEnvironment)
 	}
-	if event != "push" && event != "pull_request" && event != "issues" && event != "issue_comment" && event != "pull_request_review" && event != "pull_request_review_comment" && event != "release" && event != "merge_group" {
-		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT must be push, pull_request, issues, issue_comment, pull_request_review, pull_request_review_comment, release, or merge_group", githubEventNameEnvironment)
+	if event != "push" && event != "pull_request" && event != "issues" && event != "issue_comment" && event != "pull_request_review" && event != "pull_request_review_comment" && event != "release" && event != "merge_group" && event != "deployment" && event != "deployment_status" {
+		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT must be push, pull_request, issues, issue_comment, pull_request_review, pull_request_review_comment, release, merge_group, deployment, or deployment_status", githubEventNameEnvironment)
 	}
 
 	workflowName := getenv(githubWorkflowEnvironment)
@@ -276,7 +276,7 @@ func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(strin
 	if workflowSHA != "" && !git.ValidObjectID(workflowSHA) {
 		return nil, nil, fmt.Errorf("%s must be a full lowercase 40-hex commit", githubWorkflowSHAEnvironment)
 	}
-	if (event == "issues" || event == "issue_comment" || event == "pull_request_review" || event == "pull_request_review_comment" || event == "release" || event == "merge_group") && (getenv(githubWorkflowRefEnvironment) == "" || workflowSHA == "") {
+	if (event == "issues" || event == "issue_comment" || event == "pull_request_review" || event == "pull_request_review_comment" || event == "release" || event == "merge_group" || event == "deployment" || event == "deployment_status") && (getenv(githubWorkflowRefEnvironment) == "" || workflowSHA == "") {
 		return nil, nil, fmt.Errorf("%s and %s are required for %s", githubWorkflowRefEnvironment, githubWorkflowSHAEnvironment, event)
 	}
 	return []string{selectedPath}, &pipelineTriggerWorkflow{Name: workflowName, SHA: workflowSHA}, nil
@@ -284,6 +284,9 @@ func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(strin
 
 func parsePipelineTriggerWorkflowRef(workflowRef, event, repository string) (string, string, error) {
 	separator := strings.Index(workflowRef, "@refs/")
+	if separator < 0 && (event == "deployment" || event == "deployment_status") {
+		separator = strings.LastIndex(workflowRef, "@")
+	}
 	if separator <= 0 {
 		return "", "", fmt.Errorf("%s must have <owner>/<repo>/<workflow-path>@<event-ref> format", githubWorkflowRefEnvironment)
 	}
@@ -313,6 +316,8 @@ func pipelineTriggerEventRef(event, ref string) bool {
 		return false
 	}
 	switch event {
+	case "deployment", "deployment_status":
+		return git.ValidObjectID(ref) || pipelineTriggerEventRef("push", ref)
 	case "push":
 		for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
 			if value, ok := strings.CutPrefix(ref, prefix); ok {
