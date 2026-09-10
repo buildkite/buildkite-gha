@@ -267,7 +267,11 @@ func processingLog(ctx context.Context, report compatibility.ProcessingReport, s
 		}
 		if diagnostic.Location != nil {
 			location := diagnostic.Location
-			message += "\n  \x1b[36mError source: " + terminalText(location.Path)
+			sourceLabel := "Error source: "
+			if diagnostic.Level == "warning" {
+				sourceLabel = "Source: "
+			}
+			message += "\n  \x1b[36m" + sourceLabel + terminalText(location.Path)
 			if location.Line > 0 {
 				message += fmt.Sprintf(":%d", location.Line)
 				if location.Column > 0 {

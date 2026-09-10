@@ -297,7 +297,10 @@ func readReusableWorkflowFile(workflowPath string) ([]byte, error) {
 	return source, nil
 }
 
-func parseReusableWorkflow(workflowPath string, source []byte) (*workflow.Workflow, error) {
+func parseReusableWorkflow(workflowPath string, source []byte) (parsed *workflow.Workflow, err error) {
+	defer func() {
+		err = attributedProcessingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", workflowPath, 0, 0, "", "", "", 0, err)
+	}()
 	if len(source) > MaxReusableWorkflowBytes {
 		return nil, fmt.Errorf("%s: workflow exceeds %d-byte limit", workflowPath, MaxReusableWorkflowBytes)
 	}

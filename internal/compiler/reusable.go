@@ -518,6 +518,10 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				detail := ""
 				var finding *ProcessingFinding
 				if errors.As(err, &finding) {
+					// A syntax failure belongs to the parsed file, not this call site.
+					if finding.Stage == StageWorkflowParsing {
+						return reusableResolution{}, err
+					}
 					message = finding.Message
 					detail = finding.Detail
 				}

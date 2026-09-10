@@ -9,9 +9,87 @@ import (
 	"strings"
 	"testing"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 )
+
+func TestNestedRemoteParseFailureLinksOffendingWorkflow(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, ".github", "workflows")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, source := range map[string]string{
+		"callee.yml": "on: workflow_call\njobs:\n  nested:\n    uses: ./.github/workflows/broken.yml\n",
+		"broken.yml": "on: workflow_call\njobs:\n  broken:\n    runs-on: ubuntu-latest\n    steps:\n      - name: missing execution\n",
+	} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	digest, err := actionsource.DigestTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller := filepath.Join(t.TempDir(), ".github", "workflows", "caller.yml")
+	if err := os.MkdirAll(filepath.Dir(caller), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	options := compiler.DefaultOptions()
+	options.RepositorySource = compiler.MemoizeRepositorySource(&batchCountingActionSource{root: root, digest: digest})
+	validated, parseErr := compiler.ValidateWithOptionsContext(t.Context(), caller,
+		[]byte("on: push\njobs:\n  call:\n    uses: owner/shared/.github/workflows/callee.yml@v2\n"),
+		options)
+	if parseErr == nil {
+		t.Fatal("invalid nested workflow was accepted")
+	}
+	report := compatibility.InitialProcessingReport(caller, "", false, validated, parseErr)
+	_, artifacts := generatedFailure(t.Context(), report, sourceLinkContext{})
+	const display = "owner/shared/.github/workflows/broken.yml@v2:6:9"
+	target := "https://github.com/owner/shared/blob/" + strings.Repeat("a", 40) + "/.github/workflows/broken.yml#L6"
+	for _, artifact := range artifacts {
+		text := string(artifact.Contents)
+		if !strings.Contains(text, display) || !strings.Contains(text, target) || !strings.Contains(text, "run: echo hello") || strings.Contains(text, "reusable workflow could not be resolved") {
+			t.Errorf("artifact lost nested diagnostic: %s", text)
+		}
+	}
+	// Malformed YAML has no structured column, but must still identify the
+	// nested file rather than falling back to the root caller.
+	if err := os.WriteFile(filepath.Join(directory, "broken.yml"), []byte("on: workflow_call\njobs: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	validated, parseErr = compiler.ValidateWithOptionsContext(t.Context(), caller,
+		[]byte("on: push\njobs:\n  call:\n    uses: owner/shared/.github/workflows/callee.yml@v2\n"), options)
+	report = compatibility.InitialProcessingReport(caller, "", false, validated, parseErr)
+	_, artifacts = generatedFailure(t.Context(), report, sourceLinkContext{})
+	for _, artifact := range artifacts {
+		if !bytes.Contains(artifact.Contents, []byte(strings.TrimSuffix(target, "6")+"1")) || !bytes.Contains(artifact.Contents, []byte("parse workflow YAML")) {
+			t.Errorf("malformed YAML lost nested source: %s", artifact.Contents)
+		}
+	}
+}
+
+func TestTriggerFailureRetainsSourceLink(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", root)
+	const path = "ci.yml"
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hello\n")
+	if err := os.WriteFile(path, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture := compatibility.NewProcessingReport(path, "")
+	sha := commitDiagnosticSources(t, root, &fixture)
+	report := triggerProcessingReport(path, source)
+	report.Diagnostics = []compatibility.Diagnostic{{Level: "error", Message: "Push path filters could not be evaluated.", Location: &compatibility.SourceLocation{Path: path, Line: 1, Column: 1}}}
+	_, artifacts := generatedFailure(t.Context(), report, sourceLinkContext{serverURL: "https://github.com", repository: "owner/project", sha: sha})
+	for _, artifact := range artifacts {
+		if !bytes.Contains(artifact.Contents, []byte("https://github.com/owner/project/blob/"+sha+"/ci.yml#L1")) {
+			t.Errorf("trigger failure lost source link: %s", artifact.Contents)
+		}
+	}
+}
 
 func TestDiagnosticExcerptsUseCapturedInputOnBothSurfaces(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ci.yml")
@@ -97,13 +175,16 @@ func TestPluginProcessingFiltersUnknownRuntimeAndUsesNeutralWarningHeading(t *te
 	report := compatibility.NewProcessingReport("ci.yml", "")
 	report.Diagnostics = []compatibility.Diagnostic{
 		{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Message: "hidden"},
-		{Level: "warning", Code: "W_TEST", Message: "Visible warning."},
+		{Level: "warning", Code: "W_TEST", Message: "Visible warning.", Location: &compatibility.SourceLocation{Path: "ci.yml", Line: 4, Column: 3}},
 	}
 	var output bytes.Buffer
 	if err := writePluginProcessing(t.Context(), &output, report, sourceLinkContext{}); err != nil {
 		t.Fatal(err)
 	}
 	got := output.String()
+	if !strings.Contains(got, "Source: ci.yml:4:3") || strings.Contains(got, "Error source:") {
+		t.Fatalf("warning source has misleading severity: %q", got)
+	}
 	if !strings.Contains(got, "Workflow diagnostics") || strings.Contains(got, "failed") || strings.Contains(got, "hidden") || strings.Contains(got, "^^^ +++") || strings.Contains(got, "Compilation:") {
 		t.Fatalf("warning output = %q", got)
 	}
