@@ -12,6 +12,34 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
+func TestPluginReleasePipelineTriggerDiagnosticLinks(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"release.yml": "name: Release\non: {release: {types: [published]}}\njobs:\n  marker:\n    runs-on: ubuntu-latest\n    concurrency:\n      group: release\n      cancel-in-progress: true\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv(pluginConfigurationEnvironment, `{"experimental-runner-user":false}`)
+	setCLIPluginBuildkiteEnvironment(t, "")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_BRANCH", "v2.3.4")
+	t.Setenv("BUILDKITE_TAG", "v2.3.4")
+	t.Setenv("BUILDKITE_GITHUB_ACTION", "published")
+	setCLIPipelineTriggerEnvironment(t, ".github/workflows/release.yml", "Release", "release", "buildkite/buildkite-gha/.github/workflows/release.yml@refs/tags/v2.3.4")
+	runner := &cliCaptureRunner{webhook: []byte(`{"action":"published","repository":{"full_name":"buildkite/buildkite-gha"},"release":{"tag_name":"v2.3.4","draft":false,"prerelease":false}}`)}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("plugin = %d: %s", code, &stderr)
+	}
+	for _, data := range runner.uploaded {
+		if bytes.Contains(data, []byte(`href="https://github.com/buildkite/buildkite-gha/blob/0123456789abcdef0123456789abcdef01234567/.github/workflows/release.yml#L`)) &&
+			bytes.Contains(data, []byte("cancel-in-progress is unsupported")) {
+			return
+		}
+	}
+	t.Fatalf("release failure diagnostic lacks a link to the immutable workflow commit: %s", &stderr)
+}
+
 func TestPluginReleasePipelineTrigger(t *testing.T) {
 	requireImporterHost(t)
 	for _, action := range []string{"published", "created", "released"} {
