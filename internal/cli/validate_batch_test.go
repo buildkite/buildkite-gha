@@ -39,8 +39,9 @@ func TestValidateBatchWritesAndResumesAtomicReports(t *testing.T) {
 		{ID: "two", Repository: "owner/two", Path: ".github/workflows/test.yml", Hash: strings.Repeat("2", 64), Source: filepath.Join(root, "two.yml")},
 	}
 	events := []string{"pull_request_review", "pull_request_review_comment"}
+	deployments := []string{"deployment", "deployment_status"}
 	for i, record := range records {
-		workflow := []byte("on: [push, " + events[i] + "]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n")
+		workflow := []byte("on: [push, " + events[i] + ", " + deployments[i] + "]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n")
 		if err := os.WriteFile(record.Source, workflow, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -64,12 +65,12 @@ func TestValidateBatchWritesAndResumesAtomicReports(t *testing.T) {
 		if err != nil || json.Unmarshal(contents, &report) != nil || report.Schema != compatibility.ProcessingSchemaV3 || report.Profile != hostedProfile {
 			t.Fatalf("report %q is invalid: %v\n%s", path, err, contents)
 		}
-		wantEvent := events[0]
+		wantEvent, wantDeployment := events[0], deployments[0]
 		if report.Workflow == records[1].Source {
-			wantEvent = events[1]
+			wantEvent, wantDeployment = events[1], deployments[1]
 		}
-		if len(report.Evaluations) != 2 || report.Evaluations[0].Event != "push" || report.Evaluations[1].Event != wantEvent || report.Evaluations[1].Report.Result != "admitted" {
-			t.Fatalf("report %q lost review evaluation: %#v", path, report.Evaluations)
+		if len(report.Evaluations) != 3 || report.Evaluations[0].Event != "push" || report.Evaluations[1].Event != wantDeployment || report.Evaluations[1].Report.Result != "admitted" || report.Evaluations[2].Event != wantEvent || report.Evaluations[2].Report.Result != "admitted" {
+			t.Fatalf("report %q lost deployment or review evaluation: %#v", path, report.Evaluations)
 		}
 	}
 

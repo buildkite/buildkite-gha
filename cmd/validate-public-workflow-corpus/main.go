@@ -39,6 +39,8 @@ var supportedEvents = map[string]bool{
 	"pull_request_review_comment": true,
 	"merge_group":                 true,
 	"release":                     true,
+	"deployment":                  true,
+	"deployment_status":           true,
 	"issues":                      true,
 	"issue_comment":               true,
 	"workflow_dispatch":           true,
