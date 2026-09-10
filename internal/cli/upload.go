@@ -214,6 +214,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		return 1
 	}
+	out.sourceLinks = sourceLinksForEvent(effectiveEvent.Event)
 	authentication := importerJobActionSourceAuthentication(stderr, uploadArguments.clientVersion)
 	var sourceOptions []actionsource.Option
 	if effectiveEvent.Event.Provider == "github" {
