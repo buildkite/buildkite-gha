@@ -50,6 +50,27 @@ func TestParseIssueTypes(t *testing.T) {
 	}
 }
 
+func TestParseMergeGroupTypes(t *testing.T) {
+	for _, test := range []struct {
+		types string
+		want  []string
+	}{
+		{types: ""},
+		{types: "    types: []\n"},
+		{types: "    types: [ # empty\n    ]\n"},
+		{types: "    types: [checks_requested]\n", want: []string{"checks_requested"}},
+	} {
+		source := "on:\n  merge_group:\n" + test.types + "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+		parsed, err := Parse("types.yml", []byte(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(parsed.Triggers) != 1 || !reflect.DeepEqual(parsed.Triggers[0].Types, test.want) {
+			t.Fatalf("types %q: triggers = %#v, want types %#v", test.types, parsed.Triggers, test.want)
+		}
+	}
+}
+
 func TestParseEmptyIssueTypesTogether(t *testing.T) {
 	for _, on := range []string{
 		`on: {issues: {types: []}, issue_comment: {types: []}}`,
@@ -70,7 +91,6 @@ func TestParseEmptyIssueTypesPreservesDiagnostics(t *testing.T) {
 	for _, test := range []struct{ on, want string }{
 		{"issues: {types: []}\n  pull_request: {types: []}", `"types" section should not be empty`},
 		{"issue_comment: {types: []}\n  release: {types: []}", `"types" section should not be empty`},
-		{"issues: {types: []}\n  merge_group: {types: []}", `"types" section should not be empty`},
 		{"issues: {types: &empty []}\n  pull_request: {types: *empty}", `"types" section should not be empty`},
 		{"issues: {types: {}}", "sequence"},
 		{"issue_comment: {types: null}", "should not be empty"},

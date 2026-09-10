@@ -606,9 +606,6 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 			parts = append(parts, branch)
 		}
 		if t.Types != nil {
-			if len(t.Types) == 0 {
-				return "", false, fmt.Errorf("merge_group types is explicitly empty")
-			}
 			for _, activity := range t.Types {
 				if activity != "checks_requested" {
 					return "", false, fmt.Errorf("merge_group type %q is unsupported. checks_requested is the only merge queue activity currently mapped. Set types: [checks_requested]. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it", activity)
