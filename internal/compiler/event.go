@@ -134,7 +134,7 @@ func validateDeploymentEvent(provider, event string, repository Repository, ref,
 			return fmt.Errorf("deployment_status requires deployment_status.id")
 		}
 		switch status["state"] {
-		case "error", "failure", "in_progress", "queued", "pending", "success":
+		case "error", "failure", "in_progress", "queued", "pending", "success", "waiting":
 		case "inactive":
 			return fmt.Errorf("inactive deployment_status does not trigger GitHub Actions")
 		default:

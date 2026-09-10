@@ -169,7 +169,7 @@ jobs:
 func TestDeploymentEventValidation(t *testing.T) {
 	sha := strings.Repeat("a", 40)
 	source := fmt.Sprintf(`{"provider":"github","event":"deployment_status","repository":{"owner":"acme","name":"widgets"},"ref":"","sha":%q,"actor":"octocat","payload":{"repository":{"id":1234,"full_name":"acme/widgets"},"deployment":{"id":42,"sha":%q,"ref":%q},"deployment_status":{"id":91,"state":"success"}}}`, sha, sha, sha)
-	for _, state := range []string{"error", "failure", "pending", "queued", "in_progress", "success"} {
+	for _, state := range []string{"error", "failure", "pending", "queued", "in_progress", "success", "waiting"} {
 		if _, err := compiler.ParseEvent([]byte(strings.Replace(source, `"success"`, fmt.Sprintf("%q", state), 1))); err != nil {
 			t.Fatalf("state %s: %v", state, err)
 		}
