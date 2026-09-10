@@ -70,6 +70,36 @@ func TestNestedRemoteParseFailureLinksOffendingWorkflow(t *testing.T) {
 	}
 }
 
+func TestNestedReusableFailureRetainsOffendingWorkflowDiagnostic(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), ".github", "workflows")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workflows := map[string]string{
+		"caller.yml": "on: push\njobs:\n  call:\n    uses: ./.github/workflows/middle.yml\n",
+		"middle.yml": "on: workflow_call\njobs:\n  nested:\n    uses: ./.github/workflows/leaf.yml\n",
+		"leaf.yml":   "on: workflow_call\njobs:\n  broken:\n    runs-on: ${{ inputs.runner }}\n    steps:\n      - run: true\n",
+	}
+	for name, source := range workflows {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	caller := filepath.Join(directory, "caller.yml")
+	validated, validationErr := compiler.Validate(caller, []byte(workflows["caller.yml"]))
+	if validationErr == nil {
+		t.Fatal("invalid nested workflow was accepted")
+	}
+	report := compatibility.InitialProcessingReport(caller, "", false, validated, validationErr)
+	if len(report.Diagnostics) != 1 {
+		t.Fatalf("diagnostics = %#v, want one nested failure", report.Diagnostics)
+	}
+	diagnostic := report.Diagnostics[0]
+	if diagnostic.Location == nil || diagnostic.Location.Path != "./.github/workflows/caller.yml" || diagnostic.Location.Line != 4 || diagnostic.Location.Column != 11 || diagnostic.Message != "reusable-workflow input expression is not statically resolvable" {
+		t.Fatalf("nested diagnostic = %#v", diagnostic)
+	}
+}
+
 func TestTriggerFailureRetainsSourceLink(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
