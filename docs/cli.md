@@ -127,8 +127,10 @@ verified action source by immutable commit.
 Mutable ref resolutions are cached for one hour under
 `$XDG_CACHE_HOME/buildkite-gha/action-ref-resolutions/v1`, or the platform's
 user cache directory. Concurrent validators can share this cache, so a moved
-tag or branch may use its previous commit for up to one hour. Do not share
-either writable cache between untrusted validation jobs.
+tag or branch may use its previous commit for up to one hour. Uploads with
+`private-reusable-workflows` enabled skip this cache for called repositories
+and resolve their refs once per operation. Do not share either writable cache
+between untrusted validation jobs.
 
 For a large workflow corpus, reuse one validator process and action resolver:
 
@@ -244,11 +246,12 @@ control characters are removed without changing the underlying report data.
 If the CLI cannot publish an annotation, it warns without changing the command
 result.
 
-For fetched public reusable workflows, source locations in annotations link
-to the resolved commit and line in the source repository, including nested
-local calls inside that repository. Generated failure logs include the same
-URL and a Buildkite `Open source` hyperlink. If the source could not be fetched,
-the CLI keeps the location without guessing a revision.
+For fetched public and private reusable workflows, source locations in
+annotations link to the resolved commit and line in the source repository,
+including nested local calls inside that repository. The link opens only for
+viewers with GitHub access to that repository. Generated failure logs include
+the same URL and a Buildkite `Open source` hyperlink. If the source could not
+be fetched, the CLI keeps the location without guessing a revision.
 
 Local workflow links use the event's commit only when its file in the checkout's
 Git object database matches the bytes parsed. This includes local reusable
@@ -355,7 +358,7 @@ configuration from `BUILDKITE_PLUGIN_CONFIGURATION`. It accepts:
 - either one `workflow` path or a non-empty `workflows` array
 - `runners` and `oidc`
 - plugin-owned `version`, `source-ref`, and `minimum-release-age` fields
-- the Boolean `experimental-runner-user` field
+- the Boolean `experimental-runner-user` and `private-reusable-workflows` fields
 
 ### Private-preview Pipeline Trigger selection
 
@@ -518,6 +521,13 @@ names, provider-check names, and the Buildkite build message remain unchanged.
 
 See [Aggregate workflow upload](compatibility.md#aggregate-workflow-upload) for
 group labels, provider checks, and failure behavior.
+
+Private reusable workflows are off by default. Set the plugin's
+`private-reusable-workflows: true` field, or pass
+`upload --private-reusable-workflows` from a custom importer. See
+[Reusable workflows](compatibility.md#reusable-workflows) for the access
+boundary and [Security](security.md#repository-data-does-not-grant-authority)
+for the credential boundary.
 
 A safe compilation or trigger-translation error replaces only that workflow
 with a failing top-level step. Compilation continues for later workflows.

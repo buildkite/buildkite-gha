@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -45,8 +46,14 @@ var (
 	repoRE  = regexp.MustCompile(`^(?:[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?|\.[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,97}[A-Za-z0-9])?)$`)
 )
 
-// Reference is a parsed remote action reference.
-type Reference struct{ Owner, Repository, Path, Ref, Raw string }
+// Reference is a parsed remote repository reference. RepositoryRoot asks a
+// RepositorySource to materialize the complete tree while retaining Path as
+// the exact requested resource for authorization and cache isolation.
+type Reference struct {
+	Owner, Repository, Path, Ref, Raw string
+	RepositoryRoot                    bool
+	authorizationRef                  string
+}
 
 // Resolved pins a requested reference to an immutable commit.
 type Resolved struct {
@@ -55,7 +62,7 @@ type Resolved struct {
 	SourceDigest string
 }
 
-// Materialized identifies the immutable repository tree and selected action.
+// Materialized identifies the immutable repository tree and selected source.
 type Materialized struct {
 	RepositoryRoot string
 	ActionRoot     string
@@ -110,6 +117,28 @@ func Parse(raw string) (Reference, error) {
 	return Reference{Owner: parts[0], Repository: parts[1], Path: strings.Join(parts[2:], "/"), Ref: ref, Raw: raw}, nil
 }
 
+// PinReference replaces a mutable ref with an immutable commit while retaining
+// the originally requested ref for repository-source authorization.
+func PinReference(ref Reference, commit string) (Reference, error) {
+	if !git.ValidObjectID(commit) {
+		return Reference{}, fmt.Errorf("commit must be lower-case full SHA")
+	}
+	raw := ref.Owner + "/" + ref.Repository
+	if ref.Path != "" {
+		raw += "/" + ref.Path
+	}
+	pinned, err := Parse(raw + "@" + commit)
+	if err != nil {
+		return Reference{}, err
+	}
+	pinned.RepositoryRoot = ref.RepositoryRoot
+	pinned.authorizationRef = ref.Ref
+	if ref.authorizationRef != "" {
+		pinned.authorizationRef = ref.authorizationRef
+	}
+	return pinned, nil
+}
+
 func hasControl(s string) bool {
 	for _, r := range s {
 		if r < 0x20 || r == 0x7f {
@@ -139,6 +168,9 @@ type config struct {
 	codeload                            *url.URL
 	finalHosts                          map[string]bool
 	credential                          *actionSourceCredential
+	git                                 string
+	gitTestArgs                         []string
+	gitTestRemoteBase                   string
 	mutableRefs                         *mutableRefCache
 	resolutionSnapshot                  *actionResolutionSnapshot
 	cacheMaxBytes                       int64
@@ -188,6 +220,24 @@ func WithGitHubAPITokenProvider(provider func(context.Context) (string, error)) 
 			return fmt.Errorf("invalid GitHub API credential provider")
 		}
 		c.credential = &actionSourceCredential{provider: provider}
+		return nil
+	}
+}
+
+// WithGitRepositorySource enables Git fallback for references explicitly
+// marked RepositoryRoot. Git inherits the process's trusted credential
+// helpers and environment. Other references remain on the public source path,
+// so this option cannot grant private action access.
+func WithGitRepositorySource(executable string) Option {
+	return func(c *config) error {
+		if executable == "" || !filepath.IsAbs(executable) {
+			return fmt.Errorf("git repository source requires an absolute Git executable")
+		}
+		info, err := os.Stat(executable)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+			return fmt.Errorf("git repository source executable is not an executable regular file")
+		}
+		c.git = executable
 		return nil
 	}
 }
@@ -261,8 +311,8 @@ func WithCacheMaxBytes(maxBytes int64) Option {
 	}
 }
 
-// Resolver resolves public GitHub references, optionally using a credential
-// only for GitHub API requests. Requests discard the client's cookie jar.
+// Resolver resolves GitHub references, optionally using credentials only for
+// GitHub API requests. Requests discard the client's cookie jar.
 type Resolver struct {
 	client *http.Client
 	cfg    config
@@ -299,6 +349,8 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 	if err != nil {
 		return Resolved{}, err
 	}
+	parsed.RepositoryRoot = ref.RepositoryRoot
+	parsed.authorizationRef = ref.authorizationRef
 	ref = parsed
 	if git.ValidObjectID(ref.Ref) {
 		return Resolved{Reference: ref, Commit: ref.Ref}, nil
@@ -306,10 +358,32 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 	if r.cfg.resolutionSnapshot != nil {
 		return r.cfg.resolutionSnapshot.resolve(ctx, ref, r.resolveMutable)
 	}
-	if r.cfg.mutableRefs != nil {
+	if r.cfg.mutableRefs != nil && !r.gitRepositorySource(ref) {
 		return r.cfg.mutableRefs.resolve(ctx, ref, r.resolveMutable)
 	}
 	return r.resolveMutable(ctx, ref)
+}
+
+// gitRepositorySource reports whether ref may be served by the Git fallback.
+// Those refs skip the cross-operation mutable-ref cache: Materialize fetches
+// the ref again and rejects a commit the cache pinned before the branch moved,
+// so a stale entry would fail every later operation until it expired. The
+// per-operation repository-source memoizer still pins one commit per upload.
+func (r *Resolver) gitRepositorySource(ref Reference) bool {
+	return ref.RepositoryRoot && r.cfg.git != ""
+}
+
+// gitFallbackError reports whether an anonymous GitHub API failure leaves a
+// repository-root reference to the Git repository source. Not-found, denied,
+// and rate-limited responses all leave repository access undecided: the event
+// repository never receives the action-source token, so its shared anonymous
+// quota can run out while the importer's own Git credentials still authorize
+// the fetch. Other errors, and every error when the Git source is disabled,
+// are returned unchanged.
+func gitFallbackError(err error) bool {
+	var notPublic *NotPublicError
+	var rateLimited *RateLimitError
+	return errors.As(err, &notPublic) || errors.As(err, &rateLimited)
 }
 
 // ResolutionSnapshotID identifies the immutable mutable-ref generation.
@@ -326,9 +400,22 @@ func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved,
 	}
 	if r.cfg.credential != nil && r.cfg.credential.token != "" {
 		if err := ensurePublic(ctx, r.client, r.cfg, ref); err != nil {
-			return Resolved{}, err
+			if !gitFallbackError(err) || !r.gitRepositorySource(ref) {
+				return Resolved{}, err
+			}
+			return resolveWithGit(ctx, r.cfg, ref)
 		}
 	}
+	resolved, err := r.resolveMutableViaAPI(ctx, ref)
+	if gitFallbackError(err) && r.gitRepositorySource(ref) {
+		return resolveWithGit(ctx, r.cfg, ref)
+	}
+	return resolved, err
+}
+
+// resolveMutableViaAPI resolves a tag, branch, or commit-ish through the
+// GitHub API, trying tag and branch refs before the commits endpoint.
+func (r *Resolver) resolveMutableViaAPI(ctx context.Context, ref Reference) (Resolved, error) {
 	for _, kind := range []string{"tags", "heads"} {
 		var v struct {
 			Object struct {
@@ -434,6 +521,9 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	if rate := rateLimitError(resp, body); rate != nil {
 		return rate
 	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return &NotPublicError{}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
 	}
@@ -466,6 +556,357 @@ func actionSourceToken(cfg config, parts []string) string {
 		return ""
 	}
 	return cfg.credential.token
+}
+
+func resolveWithGit(ctx context.Context, cfg config, ref Reference) (Resolved, error) {
+	repository, cleanup, err := fetchWithGit(ctx, cfg, ref, ref.Ref)
+	if err != nil {
+		return Resolved{}, err
+	}
+	defer cleanup()
+	commit, err := gitCommit(ctx, cfg.git, repository)
+	if err != nil {
+		return Resolved{}, err
+	}
+	return Resolved{Reference: ref, Commit: commit}, nil
+}
+
+func fetchWithGit(ctx context.Context, cfg config, ref Reference, requestedRef string) (string, func(), error) {
+	cleanup := func() {}
+	if !ref.RepositoryRoot || cfg.git == "" {
+		return "", cleanup, &NotPublicError{}
+	}
+	// The requested value is passed to git fetch as a refspec. check-ref-format
+	// below rejects the other refspec metacharacters (":", "^", "*", and a
+	// leading "-") but accepts a leading "+", which git fetch would strip as the
+	// force marker and then fetch the remaining ref instead of the literal name.
+	if strings.HasPrefix(requestedRef, "+") {
+		return "", cleanup, &NotPublicError{}
+	}
+	if err := runGit(ctx, cfg.git, "", io.Discard, "check-ref-format", "--allow-onelevel", requestedRef); err != nil {
+		if ctx.Err() != nil {
+			return "", cleanup, ctx.Err()
+		}
+		return "", cleanup, &NotPublicError{}
+	}
+	root, err := os.MkdirTemp("", "buildkite-gha-repository-source-")
+	if err != nil {
+		return "", cleanup, fmt.Errorf("create Git repository source: %w", err)
+	}
+	cleanup = func() { _ = os.RemoveAll(root) }
+	repository := filepath.Join(root, "repository.git")
+	// An empty --template stops Git from copying the importer's init template
+	// (GIT_TEMPLATE_DIR or init.templateDir) into the private repository. A
+	// template can carry refs/replace entries, objects, grafts, and alternates
+	// that would substitute content for the pinned commit.
+	if err := runGit(ctx, cfg.git, "", io.Discard, "init", "--bare", "--quiet", "--template=", repository); err != nil {
+		cleanup()
+		if ctx.Err() != nil {
+			return "", func() {}, ctx.Err()
+		}
+		return "", func() {}, fmt.Errorf("initialize Git repository source")
+	}
+	boundedEnvironment, err := boundedGitEnvironment(ctx, cfg.git, root, cfg.maxCompressed)
+	if err != nil {
+		cleanup()
+		if ctx.Err() != nil {
+			return "", func() {}, ctx.Err()
+		}
+		return "", func() {}, fmt.Errorf("configure bounded Git repository source")
+	}
+	remoteBase := "https://github.com/"
+	if cfg.gitTestRemoteBase != "" {
+		remoteBase = cfg.gitTestRemoteBase
+	}
+	remote := remoteBase + ref.Owner + "/" + ref.Repository + ".git"
+	// Inherited url.<base>.insteadOf rewrites could send the request, and the
+	// credential helper lookup, to another host. Expand the URL without
+	// contacting the remote and refuse any rewrite. The rewritten URL is not
+	// reported because it may embed credentials.
+	var expanded bytes.Buffer
+	if err := runGit(ctx, cfg.git, repository, &expanded, "ls-remote", "--get-url", "--", remote); err != nil || strings.TrimSpace(expanded.String()) != remote {
+		cleanup()
+		if ctx.Err() != nil {
+			return "", func() {}, ctx.Err()
+		}
+		return "", func() {}, fmt.Errorf("git repository source URL is rewritten by inherited Git configuration")
+	}
+	refs := []string{"refs/tags/" + requestedRef, "refs/heads/" + requestedRef, requestedRef}
+	fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	fetched := false
+	for _, candidate := range refs {
+		limitError := &containsWriter{needle: []byte("pack exceeds maximum allowed size")}
+		// cfg.gitTestArgs follows gitBaseArgs so tests can reopen the file
+		// transport for local fixtures; production configurations leave it and
+		// cfg.gitTestRemoteBase empty.
+		fetchArgs := append(append(append([]string{}, cfg.gitTestArgs...), gitRemoteArgs(remote)...),
+			"-c", "fetch.unpackLimit=1", "fetch", "--quiet", "--force", "--no-tags", "--depth=1", "--no-recurse-submodules", "--no-auto-maintenance", "--", remote, candidate)
+		err = runGitEnvironment(fetchCtx, cfg.git, repository, io.Discard, limitError, boundedEnvironment, fetchArgs...)
+		if err == nil {
+			fetched = true
+			break
+		}
+		if limitError.found {
+			cleanup()
+			return "", func() {}, fmt.Errorf("git repository source exceeds compressed size limit")
+		}
+		if fetchCtx.Err() != nil {
+			cleanup()
+			if ctx.Err() != nil {
+				return "", func() {}, ctx.Err()
+			}
+			return "", func() {}, fmt.Errorf("fetch Git repository source: %w", fetchCtx.Err())
+		}
+	}
+	if !fetched {
+		cleanup()
+		return "", func() {}, &NotPublicError{}
+	}
+	if err := gitObjectLimit(repository, cfg.maxCompressed); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return repository, cleanup, nil
+}
+
+func gitCommit(ctx context.Context, executable, repository string) (string, error) {
+	var output bytes.Buffer
+	if err := runGit(ctx, executable, repository, &output, "rev-parse", "--verify", "FETCH_HEAD^{commit}"); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", &NotPublicError{}
+	}
+	commit := strings.TrimSpace(output.String())
+	if !git.ValidObjectID(commit) {
+		return "", fmt.Errorf("git returned malformed commit SHA")
+	}
+	return commit, nil
+}
+
+func gitObjectLimit(repository string, limit int64) error {
+	var total int64
+	err := filepath.WalkDir(filepath.Join(repository, "objects"), func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		if total > limit {
+			return fmt.Errorf("git repository source exceeds compressed size limit")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// Git fetch does not expose the pack plumbing's max-input-size option. Its
+// internal Git commands use GIT_EXEC_PATH, so replace only that dispatcher in
+// a private mirror of Git's trusted executable directory.
+const boundedGitWrapper = `#!/bin/sh
+if [ "$1" = index-pack ] || [ "$1" = unpack-objects ]; then
+	subcommand=$1
+	shift
+	exec "$BUILDKITE_GHA_GIT_EXECUTABLE" "$subcommand" "--max-input-size=$BUILDKITE_GHA_GIT_MAX_INPUT_SIZE" "$@"
+fi
+if [ "$1" = --shallow-file ] && { [ "$3" = index-pack ] || [ "$3" = unpack-objects ]; }; then
+	global_option=$1
+	global_value=$2
+	subcommand=$3
+	shift 3
+	exec "$BUILDKITE_GHA_GIT_EXECUTABLE" "$global_option" "$global_value" "$subcommand" "--max-input-size=$BUILDKITE_GHA_GIT_MAX_INPUT_SIZE" "$@"
+fi
+exec "$BUILDKITE_GHA_GIT_EXECUTABLE" "$@"
+`
+
+func boundedGitEnvironment(ctx context.Context, executable, root string, limit int64) ([]string, error) {
+	var output bytes.Buffer
+	if err := runGit(ctx, executable, "", &output, "--exec-path"); err != nil {
+		return nil, err
+	}
+	execPath := strings.TrimSpace(output.String())
+	if !filepath.IsAbs(execPath) || hasControl(execPath) {
+		return nil, fmt.Errorf("git returned invalid executable path")
+	}
+	entries, err := os.ReadDir(execPath)
+	if err != nil {
+		return nil, err
+	}
+	boundedExecPath := filepath.Join(root, "git-exec")
+	if err := os.Mkdir(boundedExecPath, 0o700); err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.Name() == "git" {
+			continue
+		}
+		if err := os.Symlink(filepath.Join(execPath, entry.Name()), filepath.Join(boundedExecPath, entry.Name())); err != nil {
+			return nil, err
+		}
+	}
+	if err := os.WriteFile(filepath.Join(boundedExecPath, "git"), []byte(boundedGitWrapper), 0o700); err != nil {
+		return nil, err
+	}
+	environment := gitEnvironment()
+	filtered := environment[:0]
+	for _, value := range environment {
+		if strings.HasPrefix(value, "BUILDKITE_GHA_GIT_EXECUTABLE=") ||
+			strings.HasPrefix(value, "BUILDKITE_GHA_GIT_MAX_INPUT_SIZE=") ||
+			strings.HasPrefix(value, "LC_ALL=") ||
+			strings.HasPrefix(value, "LANGUAGE=") {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	return append(filtered,
+		"GIT_EXEC_PATH="+boundedExecPath,
+		"BUILDKITE_GHA_GIT_EXECUTABLE="+executable,
+		"BUILDKITE_GHA_GIT_MAX_INPUT_SIZE="+strconv.FormatInt(limit, 10),
+		"LC_ALL=C",
+	), nil
+}
+
+type containsWriter struct {
+	needle []byte
+	tail   []byte
+	found  bool
+}
+
+func (w *containsWriter) Write(p []byte) (int, error) {
+	combined := make([]byte, 0, len(w.tail)+len(p))
+	combined = append(combined, w.tail...)
+	combined = append(combined, p...)
+	if bytes.Contains(combined, w.needle) {
+		w.found = true
+	}
+	keep := len(w.needle) - 1
+	if keep > len(combined) {
+		keep = len(combined)
+	}
+	w.tail = append(w.tail[:0], combined[len(combined)-keep:]...)
+	return len(p), nil
+}
+
+func runGit(ctx context.Context, executable, repository string, stdout io.Writer, args ...string) error {
+	return runGitEnvironment(ctx, executable, repository, stdout, io.Discard, gitEnvironment(), args...)
+}
+
+// gitBaseArgs pins every Git invocation to the same boundary as the verified
+// checkout adapter: hooks and askpass programs are disabled, only HTTPS may reach the network so an
+// inherited URL rewrite cannot select another transport, redirects are not
+// followed so credentials stay with the requested host, received objects are
+// checked, replace refs never substitute objects for the pinned commit, and the
+// credential helper receives the repository path so Buildkite authorizes the
+// exact repository. Inherited http.extraHeader values are dropped and no
+// http.cookieFile is read, so a token stored as a header or cookie cannot
+// reach a repository the helper did not authorize. Credential helpers
+// themselves are inherited from the importer's Git configuration; nothing here
+// supplies or captures one.
+func gitBaseArgs() []string {
+	return []string{
+		"--no-replace-objects",
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.askPass=",
+		"-c", "credential.interactive=false",
+		"-c", "credential.useHttpPath=true",
+		"-c", "http.extraHeader=",
+		"-c", "http.cookieFile=", "-c", "http.saveCookies=false",
+		"-c", "http.followRedirects=false",
+		"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
+		"-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true",
+	}
+}
+
+// gitRemoteArgs pins the settings Git resolves per URL for the exact remote
+// being fetched. Inherited http.<url>.* and credential.<url>.* keys take
+// precedence over the generic keys in gitBaseArgs; an exact-URL command-line
+// value is the longest possible match and, on a tie, the last one applied. An
+// empty extraHeader value resets the list Git collected from inherited
+// configuration and an empty cookieFile reads no cookies, so only the
+// credential helper can attach credentials.
+func gitRemoteArgs(remote string) []string {
+	return []string{
+		"-c", "http." + remote + ".followRedirects=false",
+		"-c", "http." + remote + ".sslVerify=true",
+		"-c", "http." + remote + ".extraHeader=",
+		"-c", "http." + remote + ".cookieFile=", "-c", "http." + remote + ".saveCookies=false",
+		"-c", "credential." + remote + ".useHttpPath=true",
+	}
+}
+
+func runGitEnvironment(ctx context.Context, executable, repository string, stdout, stderr io.Writer, environment []string, args ...string) error {
+	base := gitBaseArgs()
+	if repository != "" {
+		base = append(base, "-C", repository)
+	}
+	cmd := exec.CommandContext(ctx, executable, append(base, args...)...)
+	cmd.Env = environment
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	return cmd.Run()
+}
+
+// gitEnvironment inherits the importer's environment, including the settings
+// that locate its credential helpers, but removes variables that would prompt
+// (including askpass programs), trace credentials, override the transport policy set through -c, replace
+// Git's own programs, or redirect the private repository. GIT_SSL_NO_VERIFY
+// and GIT_ALLOW_PROTOCOL take precedence over any http.* or protocol.*
+// configuration, the GIT_CONFIG_* variables inject configuration that is not
+// visible on the command line, GIT_EXEC_PATH selects the directory Git runs
+// remote helpers such as git-remote-https from, GIT_TEMPLATE_DIR seeds new
+// repositories with the importer's refs and objects, and the GIT_DIR family
+// points every command at another repository than the one created for the
+// fetch. boundedGitEnvironment discovers Git's compiled-in executable directory
+// with this environment and sets GIT_EXEC_PATH to its private mirror for the
+// fetch.
+func gitEnvironment() []string {
+	environment := os.Environ()
+	filtered := environment[:0]
+	for _, value := range environment {
+		if strings.HasPrefix(value, "GIT_EXEC_PATH=") ||
+			strings.HasPrefix(value, "GIT_TEMPLATE_DIR=") ||
+			strings.HasPrefix(value, "GIT_DIR=") ||
+			strings.HasPrefix(value, "GIT_COMMON_DIR=") ||
+			strings.HasPrefix(value, "GIT_WORK_TREE=") ||
+			strings.HasPrefix(value, "GIT_OBJECT_DIRECTORY=") ||
+			strings.HasPrefix(value, "GIT_ALTERNATE_OBJECT_DIRECTORIES=") ||
+			strings.HasPrefix(value, "GIT_INDEX_FILE=") ||
+			strings.HasPrefix(value, "GIT_NAMESPACE=") ||
+			strings.HasPrefix(value, "GIT_TERMINAL_PROMPT=") ||
+			strings.HasPrefix(value, "GIT_ASKPASS=") ||
+			strings.HasPrefix(value, "SSH_ASKPASS=") ||
+			strings.HasPrefix(value, "GCM_INTERACTIVE=") ||
+			strings.HasPrefix(value, "GIT_TRACE=") ||
+			strings.HasPrefix(value, "GIT_TRACE_") ||
+			strings.HasPrefix(value, "GIT_CURL_VERBOSE=") ||
+			strings.HasPrefix(value, "GCM_TRACE=") ||
+			strings.HasPrefix(value, "GCM_TRACE_") ||
+			strings.HasPrefix(value, "GIT_SSL_NO_VERIFY=") ||
+			strings.HasPrefix(value, "GIT_ALLOW_PROTOCOL=") ||
+			strings.HasPrefix(value, "GIT_PROTOCOL_FROM_USER=") ||
+			strings.HasPrefix(value, "GIT_CONFIG_PARAMETERS=") ||
+			strings.HasPrefix(value, "GIT_CONFIG_COUNT=") ||
+			strings.HasPrefix(value, "GIT_CONFIG_KEY_") ||
+			strings.HasPrefix(value, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	// Git consults GIT_ASKPASS, then core.askPass, then SSH_ASKPASS, and runs
+	// the first one set. An empty GIT_ASKPASS ends that search without a
+	// program, so the checkout adapter's setting is mirrored here and a denied
+	// repository fails instead of running or blocking on a prompt program.
+	return append(filtered, "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "GCM_INTERACTIVE=never")
 }
 func rateLimitError(resp *http.Response, body []byte) error {
 	if resp.StatusCode != http.StatusTooManyRequests && (resp.StatusCode != http.StatusForbidden || (resp.Header.Get("X-RateLimit-Remaining") != "0" && !strings.Contains(strings.ToLower(string(body)), "rate limit"))) {
@@ -542,7 +983,7 @@ func NewStoreContext(ctx context.Context, root string, client *http.Client, opts
 	return store, nil
 }
 
-// Materialize returns the verified repository and selected action identity.
+// Materialize returns the verified repository and selected source identity.
 func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialized, error) {
 	if !git.ValidObjectID(resolved.Commit) {
 		return Materialized{}, fmt.Errorf("commit must be lower-case full SHA")
@@ -551,7 +992,13 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	if err != nil {
 		return Materialized{}, err
 	}
+	parsed.RepositoryRoot = resolved.Reference.RepositoryRoot
+	parsed.authorizationRef = resolved.Reference.authorizationRef
 	resolved.Reference = parsed
+	selectedPath := parsed.Path
+	if parsed.RepositoryRoot {
+		selectedPath = ""
+	}
 	base := filepath.Join(s.root, strings.ToLower(parsed.Owner), strings.ToLower(parsed.Repository), resolved.Commit)
 	tree := filepath.Join(base, "tree")
 	parent := filepath.Dir(base)
@@ -564,16 +1011,24 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	}
 	m, verifyErr := s.verify(base, resolved)
 	if verifyErr == nil {
+		if err := s.authorizeCachedRepository(ctx, resolved.Reference, m); err != nil {
+			entryLock.unlock()
+			return Materialized{}, err
+		}
 		s.touch(base)
-		return s.materializedLease(ctx, entryLock, resolved, tree, parsed.Path, m.Digest)
+		return s.materializedLease(ctx, entryLock, resolved, tree, selectedPath, m.Digest)
 	}
 	if _, statErr := os.Stat(base); statErr == nil {
 		// The initial verification may have raced a publisher between its
 		// manifest and tree operations. Once base exists, verify the complete
 		// publication again before treating it as corrupt.
 		if m, retryErr := s.verify(base, resolved); retryErr == nil {
+			if err := s.authorizeCachedRepository(ctx, resolved.Reference, m); err != nil {
+				entryLock.unlock()
+				return Materialized{}, err
+			}
 			s.touch(base)
-			return s.materializedLease(ctx, entryLock, resolved, tree, parsed.Path, m.Digest)
+			return s.materializedLease(ctx, entryLock, resolved, tree, selectedPath, m.Digest)
 		}
 		entryLock.unlock()
 		return Materialized{}, fmt.Errorf("verify action source cache: %w", verifyErr)
@@ -585,7 +1040,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	if err := ctx.Err(); err != nil {
 		return Materialized{}, err
 	}
-	entryLock, cached, err := s.lockMissingEntry(ctx, base, tree, parsed.Path, resolved)
+	entryLock, cached, err := s.lockMissingEntry(ctx, base, tree, selectedPath, resolved)
 	if err != nil {
 		return Materialized{}, err
 	}
@@ -598,9 +1053,12 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 		}
 	}()
 	if m, verifyErr = s.verify(base, resolved); verifyErr == nil {
+		if err := s.authorizeCachedRepository(ctx, resolved.Reference, m); err != nil {
+			return Materialized{}, err
+		}
 		exclusive := entryLock
 		entryLock = nil
-		return s.reacquireMaterializedLease(ctx, exclusive, resolved, base, tree, parsed.Path)
+		return s.reacquireMaterializedLease(ctx, exclusive, resolved, base, tree, selectedPath)
 	}
 	tmp, partialLock, err := s.createPartial(ctx, parent)
 	if err != nil {
@@ -608,16 +1066,18 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	}
 	defer partialLock.unlock()
 	defer func() { _ = os.RemoveAll(tmp) }()
-	if err = s.downloadExtract(ctx, resolved, filepath.Join(tmp, "tree")); err != nil {
+	authenticated, err := s.downloadExtract(ctx, resolved, filepath.Join(tmp, "tree"))
+	if err != nil {
 		return Materialized{}, err
 	}
-	if _, err = selected(filepath.Join(tmp, "tree"), parsed.Path); err != nil {
+	if _, err = selected(filepath.Join(tmp, "tree"), selectedPath); err != nil {
 		return Materialized{}, err
 	}
 	m, err = buildManifest(filepath.Join(tmp, "tree"), s.cfg, parsed, resolved.Commit)
 	if err != nil {
 		return Materialized{}, err
 	}
+	m.Authenticated = authenticated
 	if resolved.SourceDigest != "" && resolved.SourceDigest != m.Digest {
 		return Materialized{}, fmt.Errorf("source digest mismatch: expected %s, got %s", resolved.SourceDigest, m.Digest)
 	}
@@ -633,7 +1093,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	}
 	exclusive := entryLock
 	entryLock = nil
-	return s.reacquireMaterializedLease(ctx, exclusive, resolved, base, tree, parsed.Path)
+	return s.reacquireMaterializedLease(ctx, exclusive, resolved, base, tree, selectedPath)
 }
 
 func (s *Store) lockMissingEntry(ctx context.Context, base, tree, actionPath string, resolved Resolved) (*actionCacheLock, *Materialized, error) {
@@ -649,6 +1109,10 @@ func (s *Store) lockMissingEntry(ctx context.Context, base, tree, actionPath str
 		if sharedErr == nil {
 			m, verifyErr := s.verify(base, resolved)
 			if verifyErr == nil {
+				if authErr := s.authorizeCachedRepository(ctx, resolved.Reference, m); authErr != nil {
+					shared.unlock()
+					return nil, nil, authErr
+				}
 				s.touch(base)
 				materialized, leaseErr := s.materializedLease(ctx, shared, resolved, tree, actionPath, m.Digest)
 				return nil, &materialized, leaseErr
@@ -701,11 +1165,91 @@ func selected(tree, p string) (string, error) {
 	return dst, nil
 }
 
-func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) error {
+func (s *Store) authorizeCachedRepository(ctx context.Context, ref Reference, m manifest) error {
+	if !m.Authenticated {
+		return nil
+	}
+	if !ref.RepositoryRoot || s.cfg.git == "" {
+		return &NotPublicError{}
+	}
+	requestedRef := ref.Ref
+	if ref.authorizationRef != "" {
+		requestedRef = ref.authorizationRef
+	}
+	repository, cleanup, err := fetchWithGit(ctx, s.cfg, ref, requestedRef)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	commit, err := gitCommit(ctx, s.cfg.git, repository)
+	if err != nil {
+		return err
+	}
+	if commit != m.Commit {
+		return fmt.Errorf("repository source changed while resolving immutable commit")
+	}
+	return nil
+}
+
+func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) (bool, error) {
 	u := apiURL(s.cfg.codeload, r.Reference.Owner, r.Reference.Repository, "tar.gz", r.Commit)
 	if !validArchiveURL(u, s.cfg.finalHosts) {
-		return fmt.Errorf("archive URL denied")
+		return false, fmt.Errorf("archive URL denied")
 	}
+	err := s.downloadArchive(ctx, u, dst)
+	if !gitFallbackError(err) || !r.Reference.RepositoryRoot || s.cfg.git == "" {
+		return false, err
+	}
+	if err := s.extractGitRepository(ctx, r, dst); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) extractGitRepository(ctx context.Context, resolved Resolved, dst string) error {
+	requestedRef := resolved.Reference.Ref
+	if resolved.Reference.authorizationRef != "" {
+		requestedRef = resolved.Reference.authorizationRef
+	}
+	repository, cleanup, err := fetchWithGit(ctx, s.cfg, resolved.Reference, requestedRef)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	commit, err := gitCommit(ctx, s.cfg.git, repository)
+	if err != nil {
+		return err
+	}
+	if commit != resolved.Commit {
+		return fmt.Errorf("repository source changed while resolving immutable commit")
+	}
+	args := append(gitBaseArgs(), "-C", repository, "archive", "--format=tar", "--prefix=repository/", commit)
+	cmd := exec.CommandContext(ctx, s.cfg.git, args...)
+	cmd.Env = gitEnvironment()
+	cmd.Stderr = io.Discard
+	archive, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("open Git repository archive")
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start Git repository archive")
+	}
+	extractErr := extractTar(archive, dst, s.cfg)
+	_ = archive.Close()
+	waitErr := cmd.Wait()
+	if extractErr != nil {
+		return extractErr
+	}
+	if waitErr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("archive Git repository source")
+	}
+	return nil
+}
+
+func (s *Store) downloadArchive(ctx context.Context, u *url.URL, dst string) error {
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if e != nil {
 		return e
@@ -747,6 +1291,9 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) err
 			return rate
 		}
 	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return &NotPublicError{}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("archive returned HTTP %d", resp.StatusCode)
 	}
@@ -780,12 +1327,13 @@ func validArchiveURL(u *url.URL, allowed map[string]bool) bool {
 }
 
 type manifest struct {
-	Schema     string         `json:"schema"`
-	Owner      string         `json:"owner"`
-	Repository string         `json:"repository"`
-	Commit     string         `json:"commit"`
-	Files      []manifestFile `json:"files"`
-	Digest     string         `json:"digest"`
+	Schema        string         `json:"schema"`
+	Owner         string         `json:"owner"`
+	Repository    string         `json:"repository"`
+	Commit        string         `json:"commit"`
+	Files         []manifestFile `json:"files"`
+	Digest        string         `json:"digest"`
+	Authenticated bool           `json:"authenticated,omitempty"`
 }
 type manifestFile struct {
 	Path   string `json:"path"`
@@ -883,6 +1431,7 @@ func (s *Store) verify(base string, resolved Resolved) (manifest, error) {
 		return manifest{}, fmt.Errorf("invalid manifest")
 	}
 	got, e := buildManifest(filepath.Join(base, "tree"), s.cfg, resolved.Reference, resolved.Commit)
+	got.Authenticated = want.Authenticated
 	if e != nil || !reflect.DeepEqual(got, want) {
 		return manifest{}, fmt.Errorf("cache verification failed")
 	}

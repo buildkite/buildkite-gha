@@ -61,6 +61,44 @@ untrusted input. They can describe work and request permissions. Buildkite
 configuration and server-side policy choose the queue and decide which
 credentials the job can receive.
 
+Private reusable workflows use the separate, default-off
+`private-reusable-workflows` importer setting. After anonymous access fails,
+including when GitHub's shared anonymous API quota is exhausted, the importer
+passes Git a canonical credential-free `https://github.com/` URL for the
+called repository and the requested ref as one literal ref name; refspec
+syntax, including a leading `+`, is rejected before Git runs. Git inherits
+the importer's credential helpers,
+configuration, and environment. Credentials come only from credential helpers:
+terminal prompts and askpass programs (`GIT_ASKPASS`, `core.askPass`,
+`SSH_ASKPASS`) are disabled, so a denied repository fails instead of running
+or waiting on a prompt program, and inherited `http.extraHeader` and
+`http.cookieFile` values, including host-scoped `http.<url>.*` values, are
+reset so a token stored as a header or cookie is not sent to a repository the
+helper did not authorize. Each invocation allows only the HTTPS transport,
+refuses redirects, verifies TLS, and checks received objects. These values are
+pinned for the exact repository URL, and Git environment variables that would
+relax them, such as `GIT_SSL_NO_VERIFY` and `GIT_ALLOW_PROTOCOL`, are removed,
+so inherited configuration cannot weaken them. `GIT_EXEC_PATH` and the
+`GIT_DIR` family are also removed, so Git runs its remote helpers from its own
+installation and writes only to the private repository created for the fetch.
+That repository is created with an empty init template and every command
+ignores replace refs, so an inherited template cannot seed refs or objects
+that substitute another tree for the pinned commit. The importer expands the
+URL with `git ls-remote --get-url` before fetching and stops if an inherited
+`url.<base>.insteadOf` rewrite changed it, so the request and the credential
+helper lookup stay on `github.com`. The Buildkite Agent repository-provider
+helper requests access for the exact repository; operators can also configure
+broader credentials. Denied repositories, refs, paths, and tenants remain
+indistinguishable from missing sources. Private action source access is
+separate and remains unsupported.
+
+This design reuses ambient importer Git authority instead of minting a
+workflow-path-scoped credential. Access is repository-wide: enabling it allows
+workflow source to select any workflow in any GitHub repository those
+credentials can read. Restrict the importer's Git credentials or use
+Buildkite's repository-provider access policy to approve only required
+repositories.
+
 Digests and immutable source locks detect changed code. They do not make code
 trusted or grant credentials.
 
@@ -127,6 +165,7 @@ manifests. A missing or changed manifest stops the job.
 | Credential | Boundary |
 | --- | --- |
 | Repository checkout | The native adapter checks the event repository and exact commit. Buildkite authorizes private access. Credentials apply only to Git commands and are not persisted. |
+| Private reusable workflow source | Git uses the importer's existing HTTPS credential helpers only while resolving an approved source. The importer passes no authenticated URL, captures no credential, and suppresses Git output. Credentials never reach plans, pipeline YAML, or runtime jobs. |
 | `GITHUB_TOKEN` | A short-lived token for the event repository. Buildkite enforces the top-level workflow permission map and build provenance. The token is not ambient. |
 | Cache token | A fresh job-bound token for each compatible JavaScript or Docker action lifecycle. Shell steps do not receive it. |
 | Workflow secrets | Static names resolve with `buildkite-agent secret get` in the destination job. Buildkite Secret access policy is the authority. |
@@ -280,5 +319,6 @@ boundary.
     ```
 
 1. Keep private actions and protected queues out of imported workflows.
+1. Approve only required private reusable workflow sources.
 1. Configure OIDC trust for Buildkite's issuer, then restrict subjects and
    audiences to the intended jobs.

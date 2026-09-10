@@ -112,7 +112,7 @@ func (c sourceLinkContext) sourceLink(ctx context.Context, path string, line int
 	if !git.ValidObjectID(source.Commit) {
 		return ""
 	}
-	// Public reusable workflows are fetched from GitHub, not the caller's
+	// Remote reusable workflows are fetched from GitHub, not the caller's
 	// provider. Never substitute the caller's repository, SHA, or server URL.
 	return (sourceLinkContext{serverURL: "https://github.com", repository: source.Repository, sha: source.Commit}).link(source.Path, line)
 }

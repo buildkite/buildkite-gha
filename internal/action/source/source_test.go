@@ -5,14 +5,18 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -827,6 +831,998 @@ func TestStoreExactCommitDownloadsDirectlyFromCodeloadWithoutCredentials(t *test
 	if apiRequests != 0 || archiveRequests != 1 || tokenProvisions != 0 {
 		t.Fatalf("API/archive/token-provision requests = %d / %d / %d, want 0 / 1 / 0", apiRequests, archiveRequests, tokenProvisions)
 	}
+}
+
+func TestGitRepositorySourceUsesExistingConfigurationOnlyForRepositoryRoots(t *testing.T) {
+	git, _, remote, commit := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml":    "on: workflow_call\njobs: {}\n",
+		".github/workflows/child.yml": "on: workflow_call\njobs: {}\n",
+		"action/action.yml":           "runs:\n  using: composite\n  steps: []\n",
+	})
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	option := withGitFixtureSource(git, remote)
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	resolver, err := NewResolver(server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := t.TempDir()
+	store, err := NewStore(cache, server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != commit {
+		t.Fatalf("Resolve() = %#v, %v, want %s", resolved, err, commit)
+	}
+	resolved.Reference, err = PinReference(ref, resolved.Commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized.Release()
+	if materialized.ActionRoot != materialized.RepositoryRoot || materialized.SourceDigest == "" {
+		t.Fatalf("materialized Git repository = %#v", materialized)
+	}
+	if source, readErr := os.ReadFile(filepath.Join(materialized.RepositoryRoot, ".github", "workflows", "child.yml")); readErr != nil || !strings.Contains(string(source), "workflow_call") {
+		t.Fatalf("nested workflow source = %q, %v", source, readErr)
+	}
+
+	action, _ := Parse("o/r/action@" + commit)
+	if _, err := store.Materialize(t.Context(), Resolved{Reference: action, Commit: commit}); err == nil {
+		t.Fatal("private action read a Git-authenticated repository cache")
+	} else {
+		var notPublic *NotPublicError
+		if !errors.As(err, &notPublic) {
+			t.Fatalf("private action error = %v, want non-enumerating denial", err)
+		}
+	}
+	disabledStore, err := NewStore(cache, server.Client(), endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := disabledStore.Materialize(t.Context(), resolved); err == nil {
+		t.Fatal("disabled Git source read a Git-authenticated repository cache")
+	}
+	if _, err := os.Stat(remote); err != nil {
+		t.Fatalf("Git fixture remote: %v", err)
+	}
+}
+
+func TestGitRepositorySourceReauthorizesAuthenticatedCacheEntries(t *testing.T) {
+	git, _, remote, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	option := withGitFixtureSource(git, remote)
+	resolver, err := NewResolver(server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := t.TempDir()
+	store, err := NewStore(cache, server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized.Release()
+
+	const secret = "other-tenant-git-output"
+	wrapper := filepath.Join(t.TempDir(), "git")
+	script := "#!/bin/sh\ncase \" $* \" in *\" fetch \"*) echo '" + secret + "' >&2; exit 1;; esac\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	denied, err := NewStore(cache, server.Client(), endpoint, WithGitRepositorySource(wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = denied.Materialize(t.Context(), resolved)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) || strings.Contains(err.Error(), secret) {
+		t.Fatalf("cached repository error = %v, want reauthorization denial without Git output", err)
+	}
+}
+
+func TestGitRepositorySourceRejectsMutableRefDrift(t *testing.T) {
+	git, work, remote, first := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	option := withGitFixtureSource(git, remote)
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	resolver, err := NewResolver(server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != first {
+		t.Fatalf("Resolve() = %#v, %v", resolved, err)
+	}
+	advanceGitRepositorySource(t, git, work)
+	store, err := NewStore(t.TempDir(), server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Materialize(t.Context(), resolved); err == nil || !strings.Contains(err.Error(), "changed while resolving immutable commit") {
+		t.Fatalf("Materialize() drift error = %v", err)
+	}
+}
+
+// TestGitRepositorySourceSkipsMutableRefCache covers a persistent importer
+// whose one-hour mutable-ref cache pinned a private branch before it moved.
+// Materialize rejects the stale commit as drift, so Git-backed repository roots
+// must resolve the branch again on every operation instead of reusing the
+// cache; other references keep using it.
+func TestGitRepositorySourceSkipsMutableRefCache(t *testing.T) {
+	git, work, remote, first := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/p/q/git/ref/") {
+			_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, testSHA)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	cache := t.TempDir()
+	option := withGitFixtureSource(git, remote)
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	newResolver := func() *Resolver {
+		t.Helper()
+		resolver, err := NewResolver(server.Client(), endpoint, option)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolver.cfg.mutableRefs, err = newMutableRefCache(cache, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resolver
+	}
+	root, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	root.RepositoryRoot = true
+	resolved, err := newResolver().Resolve(t.Context(), root)
+	if err != nil || resolved.Commit != first {
+		t.Fatalf("Resolve() = %#v, %v, want commit %s", resolved, err, first)
+	}
+	advanceGitRepositorySource(t, git, work)
+	second := strings.TrimSpace(runSourceGit(t, git, work, "rev-parse", "HEAD"))
+	resolver := newResolver()
+	resolved, err = resolver.Resolve(t.Context(), root)
+	if err != nil || resolved.Commit != second {
+		t.Fatalf("Resolve() after branch moved = %#v, %v, want commit %s", resolved, err, second)
+	}
+	store, err := NewStore(t.TempDir(), server.Client(), endpoint, option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatalf("Materialize() after branch moved = %v", err)
+	}
+	materialized.Release()
+
+	action, _ := Parse("p/q@main")
+	if resolved, err := resolver.Resolve(t.Context(), action); err != nil || resolved.Commit != testSHA {
+		t.Fatalf("Resolve() action = %#v, %v", resolved, err)
+	}
+	entries := 0
+	if err := filepath.WalkDir(cache, func(path string, entry os.DirEntry, err error) error {
+		if err == nil && !entry.IsDir() && filepath.Ext(path) != ".lock" {
+			entries++
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if entries != 1 {
+		t.Fatalf("mutable ref cache entries = %d, want only the action reference", entries)
+	}
+}
+
+// TestGitRepositorySourceIgnoresInheritedInitTemplates covers an importer init
+// template (init.templateDir or GIT_TEMPLATE_DIR) that seeds new repositories
+// with a refs/replace entry and a replacement commit for the fetched commit.
+// The archive must contain the pinned commit's tree, not the replacement.
+func TestGitRepositorySourceIgnoresInheritedInitTemplates(t *testing.T) {
+	const original = "on: workflow_call\njobs: {}\n"
+	git, work, remote, commit := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": original,
+	})
+	filename := filepath.Join(work, ".github", "workflows", "ci.yml")
+	if err := os.WriteFile(filename, []byte("on: workflow_call\n# replaced\njobs: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runSourceGit(t, git, work, "add", ".github/workflows/ci.yml")
+	runSourceGit(t, git, work, "commit", "--quiet", "-m", "replacement")
+	replacement := strings.TrimSpace(runSourceGit(t, git, work, "rev-parse", "HEAD"))
+	template := filepath.Join(t.TempDir(), "template")
+	if err := os.MkdirAll(filepath.Join(template, "refs", "replace"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(template, "refs", "replace", commit), []byte(replacement+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.CopyFS(filepath.Join(template, "objects"), os.DirFS(filepath.Join(work, ".git", "objects"))); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"init.templateDir", "GIT_TEMPLATE_DIR"} {
+		t.Run(name, func(t *testing.T) {
+			if name == "GIT_TEMPLATE_DIR" {
+				t.Setenv("GIT_TEMPLATE_DIR", template)
+			} else {
+				runSourceGit(t, git, "", "config", "--global", "init.templateDir", template)
+				t.Cleanup(func() { runSourceGit(t, git, "", "config", "--global", "--unset", "init.templateDir") })
+			}
+			server := httptest.NewTLSServer(http.NotFoundHandler())
+			defer server.Close()
+			option := withGitFixtureSource(git, remote)
+			endpoint := WithTestEndpoints(server.URL, server.URL)
+			resolver, err := NewResolver(server.Client(), endpoint, option)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+			ref.RepositoryRoot = true
+			resolved, err := resolver.Resolve(t.Context(), ref)
+			if err != nil || resolved.Commit != commit {
+				t.Fatalf("Resolve() = %#v, %v", resolved, err)
+			}
+			store, err := NewStore(t.TempDir(), server.Client(), endpoint, option)
+			if err != nil {
+				t.Fatal(err)
+			}
+			materialized, err := store.Materialize(t.Context(), resolved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contents, err := os.ReadFile(filepath.Join(materialized.RepositoryRoot, ".github", "workflows", "ci.yml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(contents) != original {
+				t.Fatalf("archived workflow = %q, want the pinned commit's content %q", contents, original)
+			}
+		})
+	}
+}
+
+func TestGitRepositorySourceFailuresAreNonEnumeratingAndDoNotLeakOutput(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	const secret = "credential-that-must-not-leak"
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\ncase \" $* \" in *\" fetch \"*) echo '" + secret + "' >&2; exit 1;; esac\nexec '" + realGit + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), WithGitRepositorySource(wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("other/missing/.github/workflows/secret.yml@secret-ref")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "secret-ref") {
+		t.Fatalf("Resolve() error = %v, want non-enumerating denial without Git output", err)
+	}
+}
+
+func TestGitRepositorySourceEnvironmentDisablesInteractionAndTracing(t *testing.T) {
+	t.Setenv("BUILDKITE_GHA_PRESERVED", "yes")
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	t.Setenv("GIT_ASKPASS", "/importer/askpass")
+	t.Setenv("SSH_ASKPASS", "/importer/askpass")
+	t.Setenv("GCM_INTERACTIVE", "always")
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_TRACE_CURL", "/tmp/git-trace")
+	t.Setenv("GIT_CURL_VERBOSE", "1")
+	t.Setenv("GCM_TRACE", "1")
+	t.Setenv("GCM_TRACE_SECRETS", "1")
+	t.Setenv("GIT_SSL_NO_VERIFY", "1")
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file:https")
+	t.Setenv("GIT_PROTOCOL_FROM_USER", "1")
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'http.followRedirects=true'")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "http.https://github.com/o/r.git.sslVerify")
+	t.Setenv("GIT_CONFIG_VALUE_0", "false")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/importer/.gitconfig")
+	t.Setenv("GIT_EXEC_PATH", "/importer/git-core")
+	t.Setenv("GIT_TEMPLATE_DIR", "/importer/git-template")
+	t.Setenv("GIT_DIR", "/importer/.git")
+	t.Setenv("GIT_COMMON_DIR", "/importer/.git")
+	t.Setenv("GIT_WORK_TREE", "/importer")
+	t.Setenv("GIT_OBJECT_DIRECTORY", "/importer/.git/objects")
+	t.Setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/importer/.git/objects")
+	t.Setenv("GIT_INDEX_FILE", "/importer/.git/index")
+	t.Setenv("GIT_NAMESPACE", "importer")
+
+	environment := make(map[string]string)
+	for _, entry := range gitEnvironment() {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			environment[key] = value
+		}
+	}
+	for key, want := range map[string]string{
+		"BUILDKITE_GHA_PRESERVED": "yes",
+		"GIT_CONFIG_GLOBAL":       "/importer/.gitconfig",
+		"GIT_TERMINAL_PROMPT":     "0",
+		"GIT_ASKPASS":             "",
+		"SSH_ASKPASS":             "",
+		"GCM_INTERACTIVE":         "never",
+	} {
+		if got, exists := environment[key]; !exists || got != want {
+			t.Errorf("Git environment %s = %q (present %t), want %q", key, got, exists, want)
+		}
+	}
+	for _, key := range []string{"GIT_TRACE", "GIT_TRACE_CURL", "GIT_CURL_VERBOSE", "GCM_TRACE", "GCM_TRACE_SECRETS"} {
+		if _, exists := environment[key]; exists {
+			t.Errorf("Git environment retained tracing variable %s", key)
+		}
+	}
+	for _, key := range []string{"GIT_SSL_NO_VERIFY", "GIT_ALLOW_PROTOCOL", "GIT_PROTOCOL_FROM_USER", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"} {
+		if _, exists := environment[key]; exists {
+			t.Errorf("Git environment retained policy override variable %s", key)
+		}
+	}
+	for _, key := range []string{"GIT_EXEC_PATH", "GIT_TEMPLATE_DIR", "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_NAMESPACE"} {
+		if _, exists := environment[key]; exists {
+			t.Errorf("Git environment retained program or repository location variable %s", key)
+		}
+	}
+}
+
+// TestGitRepositorySourceEnvironmentCannotReplaceRemoteHelper covers an
+// importer environment whose GIT_EXEC_PATH names a directory with a replacement
+// git-remote-https. The bounded fetch must run the helper from Git's compiled-in
+// executable directory instead, so the replacement is never executed.
+func TestGitRepositorySourceEnvironmentCannotReplaceRemoteHelper(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	marker := filepath.Join(root, "replacement-ran")
+	execPath := filepath.Join(root, "git-core")
+	if err := os.Mkdir(execPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := "#!/bin/sh\n: > '" + marker + "'\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(execPath, "git-remote-https"), []byte(helper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_EXEC_PATH", execPath)
+
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	remote := server.URL + "/o/r.git"
+	scratch := t.TempDir()
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", scratch)
+	args := append(gitRemoteArgs(remote), "fetch", "--quiet", "--", remote, "main")
+	if err := runGitEnvironment(t.Context(), git, scratch, io.Discard, io.Discard, os.Environ(), args...); err == nil {
+		t.Fatal("fetch through the replacement helper succeeded")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("GIT_EXEC_PATH should select the replacement helper without the filter: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git), func(c *config) error {
+		c.gitTestRemoteBase = server.URL + "/"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) {
+		t.Fatalf("Resolve() error = %v, want non-enumerating denial", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bounded fetch ran the replacement git-remote-https from the inherited GIT_EXEC_PATH (stat error %v)", err)
+	}
+}
+
+// TestGitRepositorySourceDeniedAuthenticationDoesNotRunAskpass covers a
+// private repository that rejects the importer's credentials. Git must fail
+// without running the inherited GIT_ASKPASS, core.askPass, or SSH_ASKPASS
+// programs, which could block on a prompt or run arbitrary code.
+func TestGitRepositorySourceDeniedAuthenticationDoesNotRunAskpass(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	marker := filepath.Join(root, "askpass-ran")
+	askpass := filepath.Join(root, "askpass")
+	if err := os.WriteFile(askpass, []byte("#!/bin/sh\n: > '"+marker+"'\necho token\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	if err := os.Mkdir(filepath.Join(root, "home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runSourceGit(t, git, "", "config", "--global", "core.askPass", askpass)
+	t.Setenv("GIT_ASKPASS", askpass)
+	t.Setenv("SSH_ASKPASS", askpass)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/info/refs") {
+			w.Header().Set("WWW-Authenticate", `Basic realm="private"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	certificate := filepath.Join(root, "server.pem")
+	if err := os.WriteFile(certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trust := []string{"-c", "http.sslCAInfo=" + certificate}
+	remote := server.URL + "/o/r.git"
+
+	// Without the fetch boundary, Git asks the inherited program for
+	// credentials even when terminal prompts are disabled.
+	scratch := t.TempDir()
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", scratch)
+	control := exec.CommandContext(t.Context(), git, append(append([]string{"-C", scratch}, trust...), "fetch", "--quiet", "--", remote, "main")...)
+	control.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if err := control.Run(); err == nil {
+		t.Fatal("fetch from a denying server succeeded")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("inherited askpass should run without the fetch boundary: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	// Git 2.46 and earlier ignore credential.interactive, so the askpass
+	// sources must be neutralized even when that setting is turned back on.
+	permissive := append(append(trust, gitRemoteArgs(remote)...), "-c", "credential.interactive=true", "fetch", "--quiet", "--", remote, "main")
+	if err := runGitEnvironment(t.Context(), git, scratch, io.Discard, io.Discard, gitEnvironment(), permissive...); err == nil {
+		t.Fatal("fetch from a denying server succeeded")
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fetch boundary relied on credential.interactive to stop askpass (stat error %v)", err)
+	}
+
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git), func(c *config) error {
+		c.gitTestRemoteBase = server.URL + "/"
+		c.gitTestArgs = trust
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) {
+		t.Fatalf("Resolve() error = %v, want non-enumerating denial", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("denied fetch ran an inherited askpass program (stat error %v)", err)
+	}
+}
+
+// TestGitRepositorySourceDropsInheritedExtraHeadersAndCookies covers an
+// importer whose global configuration attaches an Authorization header and a
+// cookie file to every request for a host. Git would send both to any
+// repository named by workflow YAML without consulting the credential helper,
+// so the fetch boundary must reset the generic and URL-scoped header lists and
+// cookie files.
+func TestGitRepositorySourceDropsInheritedExtraHeadersAndCookies(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	if err := os.Mkdir(filepath.Join(root, "home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var authorizations, cookies atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			authorizations.Add(1)
+		}
+		if r.Header.Get("Cookie") != "" {
+			cookies.Add(1)
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	certificate := filepath.Join(root, "server.pem")
+	if err := os.WriteFile(certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trust := []string{"-c", "http.sslCAInfo=" + certificate}
+	remote := server.URL + "/o/r.git"
+	runSourceGit(t, git, "", "config", "--global", "http."+server.URL+"/.extraHeader", "Authorization: Bearer inherited-token")
+	runSourceGit(t, git, "", "config", "--global", "--add", "http.extraHeader", "Authorization: Bearer generic-token")
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookieFile := filepath.Join(root, "cookies.txt")
+	if err := os.WriteFile(cookieFile, []byte(serverURL.Hostname()+"\tFALSE\t/\tTRUE\t0\tprivate-auth\tinherited-cookie\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runSourceGit(t, git, "", "config", "--global", "http."+server.URL+"/.cookieFile", cookieFile)
+
+	// Without the fetch boundary, Git sends the inherited header and cookie.
+	scratch := t.TempDir()
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", scratch)
+	control := exec.CommandContext(t.Context(), git, append(append([]string{"-C", scratch}, trust...), "fetch", "--quiet", "--", remote, "main")...)
+	control.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if err := control.Run(); err == nil {
+		t.Fatal("fetch from a denying server succeeded")
+	}
+	if authorizations.Load() == 0 || cookies.Load() == 0 {
+		t.Fatalf("inherited credentials without the fetch boundary: Authorization %d, Cookie %d, want both", authorizations.Load(), cookies.Load())
+	}
+	authorizations.Store(0)
+	cookies.Store(0)
+
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git), func(c *config) error {
+		c.gitTestRemoteBase = server.URL + "/"
+		c.gitTestArgs = trust
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) {
+		t.Fatalf("Resolve() error = %v, want non-enumerating denial", err)
+	}
+	if authorizations.Load() != 0 || cookies.Load() != 0 {
+		t.Fatalf("requests carrying inherited credentials: Authorization %d, Cookie %d, want 0", authorizations.Load(), cookies.Load())
+	}
+}
+
+func TestGitRepositorySourceEnvironmentCannotDisableTLSVerification(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_SSL_NO_VERIFY", "1")
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	repository := t.TempDir()
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", repository)
+	remote := server.URL + "/o/r.git"
+	fetch := func(environment []string) string {
+		var stderr bytes.Buffer
+		args := append(gitRemoteArgs(remote), "fetch", "--quiet", "--", remote, "main")
+		if err := runGitEnvironment(t.Context(), git, repository, io.Discard, &stderr, environment, args...); err == nil {
+			t.Fatalf("fetch from a self-signed server succeeded")
+		}
+		return strings.ToLower(stderr.String())
+	}
+	if filtered := fetch(gitEnvironment()); !strings.Contains(filtered, "certificate") {
+		t.Fatalf("filtered environment did not fail on TLS verification: %s", filtered)
+	}
+	if inherited := fetch(os.Environ()); strings.Contains(inherited, "certificate") {
+		t.Fatalf("GIT_SSL_NO_VERIFY should bypass verification without the filter, got: %s", inherited)
+	}
+}
+
+func TestGitRepositorySourcePreservesArchiveLimits(t *testing.T) {
+	git, _, remote, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": strings.Repeat("x", 256),
+	})
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	option := withGitFixtureSource(git, remote)
+	limits := WithLimits(1<<20, 128, 128, 100)
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	resolver, err := NewResolver(server.Client(), endpoint, option, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(t.TempDir(), server.Client(), endpoint, option, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Materialize(t.Context(), resolved); err == nil || !strings.Contains(err.Error(), "archive size exceeds limit") {
+		t.Fatalf("Materialize() size error = %v", err)
+	}
+}
+
+func TestGitRepositorySourceRejectsRefspecBeforeFetch(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	invocations := filepath.Join(root, "invocations")
+	t.Setenv("GIT_INVOCATIONS", invocations)
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GIT_INVOCATIONS\"\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), WithGitRepositorySource(wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// check-ref-format accepts a leading "+", which git fetch would treat as
+	// the force marker rather than part of the requested ref.
+	for _, maliciousRef := range []string{"refs/heads/*:refs/heads/*", "+refs/heads/main", "+main"} {
+		ref, err := Parse("o/r/.github/workflows/ci.yml@" + maliciousRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref.RepositoryRoot = true
+		_, err = resolver.Resolve(t.Context(), ref)
+		var notPublic *NotPublicError
+		if !errors.As(err, &notPublic) || strings.Contains(err.Error(), maliciousRef) {
+			t.Fatalf("Resolve(%q) error = %v, want non-enumerating invalid-ref denial", maliciousRef, err)
+		}
+	}
+	log, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), " fetch ") {
+		t.Fatalf("invalid ref reached Git fetch: %s", log)
+	}
+}
+
+// TestGitRepositorySourceFetchesLiteralRefOnly proves a "+main" request does
+// not resolve the fixture's main branch: without the prefix check, git fetch
+// strips "+" as the force marker and fetches main.
+func TestGitRepositorySourceFetchesLiteralRefOnly(t *testing.T) {
+	git, _, remote, commit := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), withGitFixtureSource(git, remote))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	if resolved, err := resolver.Resolve(t.Context(), ref); err != nil || resolved.Commit != commit {
+		t.Fatalf("Resolve(main) = %#v, %v, want %s", resolved, err, commit)
+	}
+	forced, _ := Parse("o/r/.github/workflows/ci.yml@+main")
+	forced.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), forced)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) || resolved.Commit != "" {
+		t.Fatalf("Resolve(+main) = %#v, %v, want non-enumerating denial", resolved, err)
+	}
+}
+
+// TestGitRepositorySourceFallsBackWhenAnonymousAPIIsRateLimited covers the
+// event repository: it never receives the action-source token, so its shared
+// anonymous API quota can be exhausted while the importer's Git credentials
+// still authorize the fetch. Rate limits stay visible when the Git source is
+// disabled or the reference is not a repository root.
+func TestGitRepositorySourceFallsBackWhenAnonymousAPIIsRateLimited(t *testing.T) {
+	git, _, remote, commit := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	var authorized atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			authorized.Add(1)
+		}
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	endpoint := WithTestEndpoints(server.URL, server.URL)
+	option := withGitFixtureSource(git, remote)
+	eventRepository := WithGitHubActionSourceTokenProvider("o/r", func(context.Context) (string, error) { return "action-source-token", nil })
+
+	resolver, err := NewResolver(server.Client(), endpoint, option, eventRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	resolved, err := resolver.Resolve(t.Context(), ref)
+	if err != nil || resolved.Commit != commit {
+		t.Fatalf("Resolve() = %#v, %v, want Git fallback to %s", resolved, err, commit)
+	}
+	if authorized.Load() != 0 {
+		t.Fatalf("event repository requests carried the action-source token %d times", authorized.Load())
+	}
+	resolved.Reference, err = PinReference(ref, resolved.Commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(t.TempDir(), server.Client(), endpoint, option, eventRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatalf("Materialize() error = %v, want Git fallback after rate-limited archive download", err)
+	}
+	materialized.Release()
+
+	var rate *RateLimitError
+	disabled, err := NewResolver(server.Client(), endpoint, eventRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := disabled.Resolve(t.Context(), ref); !errors.As(err, &rate) || rate.Reset.IsZero() {
+		t.Fatalf("disabled Git source error = %v, want rate limit", err)
+	}
+	action, _ := Parse("o/r/action@v1")
+	if _, err := resolver.Resolve(t.Context(), action); !errors.As(err, &rate) {
+		t.Fatalf("action reference error = %v, want rate limit without Git fallback", err)
+	}
+}
+
+func TestGitRepositorySourceBoundsFetchPackInput(t *testing.T) {
+	git, _, remote, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": strings.Repeat("x", 256),
+	})
+	root := t.TempDir()
+	invocations := filepath.Join(root, "invocations")
+	t.Setenv("GIT_INVOCATIONS", invocations)
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GIT_INVOCATIONS\"\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL), withGitFixtureSource(wrapper, remote), WithLimits(100, 1<<20, 1<<20, 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	if _, err := resolver.Resolve(t.Context(), ref); err == nil || !strings.Contains(err.Error(), "compressed size limit") {
+		t.Fatalf("Resolve() error = %v, want acquisition-time compressed limit", err)
+	}
+	log, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "index-pack --max-input-size=100") {
+		t.Fatalf("Git pack input was not bounded: %s", log)
+	}
+}
+
+// withGitFixtureSource enables Git fallback against the local bare fixture
+// remote and reopens the file transport that the production policy denies.
+func withGitFixtureSource(executable, remote string) Option {
+	return func(c *config) error {
+		if err := WithGitRepositorySource(executable)(c); err != nil {
+			return err
+		}
+		if err := withGitFixtureRemote(remote)(c); err != nil {
+			return err
+		}
+		c.gitTestArgs = []string{"-c", "protocol.file.allow=always"}
+		return nil
+	}
+}
+
+// withGitFixtureRemote points fetches at the fixture's file:// remote root
+// instead of github.com without changing the transport policy.
+func withGitFixtureRemote(remote string) Option {
+	return func(c *config) error {
+		c.gitTestRemoteBase = "file://" + filepath.ToSlash(filepath.Dir(filepath.Dir(remote))) + "/"
+		return nil
+	}
+}
+
+func TestGitRepositorySourceDeniesNonHTTPSTransports(t *testing.T) {
+	git, _, remote, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	runSourceGit(t, git, "", "config", "--global", "protocol.file.allow", "always")
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(git), withGitFixtureRemote(remote))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) {
+		t.Fatalf("Resolve() error = %v, want denial of a non-HTTPS transport even when inherited configuration allows it", err)
+	}
+}
+
+func TestGitRepositorySourcePinsURLScopedHTTPSettings(t *testing.T) {
+	git, _, _, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	const remote = "https://github.com/o/r.git"
+	runSourceGit(t, git, "", "config", "--global", "http.https://github.com/.followRedirects", "true")
+	runSourceGit(t, git, "", "config", "--global", "http.https://github.com/o/.sslVerify", "false")
+	runSourceGit(t, git, "", "config", "--global", "credential.https://github.com/.useHttpPath", "false")
+	args := append(gitBaseArgs(), gitRemoteArgs(remote)...)
+	for key, want := range map[string]string{"http.followRedirects": "false", "http.sslVerify": "true", "credential.useHttpPath": "true"} {
+		got := strings.TrimSpace(runSourceGit(t, git, "", append(args, "config", "--get-urlmatch", key, remote)...))
+		if got != want {
+			t.Fatalf("effective %s for %s = %q, want %q despite inherited URL-scoped override", key, remote, got, want)
+		}
+	}
+
+	root := t.TempDir()
+	invocations := filepath.Join(root, "invocations")
+	t.Setenv("GIT_INVOCATIONS", invocations)
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GIT_INVOCATIONS\"\ncase \" $* \" in *\" fetch \"*) exit 1;; esac\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	if _, err := resolver.Resolve(t.Context(), ref); err == nil {
+		t.Fatal("Resolve() succeeded against a failing fetch wrapper")
+	}
+	log, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "http."+remote+".followRedirects=false") || !strings.Contains(string(log), " fetch ") {
+		t.Fatalf("fetch did not pin URL-scoped settings for %s: %s", remote, log)
+	}
+}
+
+func TestGitRepositorySourceRefusesInheritedURLRewrites(t *testing.T) {
+	git, _, _, _ := configureGitRepositorySource(t, map[string]string{
+		".github/workflows/ci.yml": "on: workflow_call\njobs: {}\n",
+	})
+	runSourceGit(t, git, "", "config", "--global", "url.https://mirror.example/.insteadOf", "https://github.com/")
+	root := t.TempDir()
+	invocations := filepath.Join(root, "invocations")
+	t.Setenv("GIT_INVOCATIONS", invocations)
+	wrapper := filepath.Join(root, "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GIT_INVOCATIONS\"\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	defer server.Close()
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitRepositorySource(wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r/.github/workflows/ci.yml@main")
+	ref.RepositoryRoot = true
+	_, err = resolver.Resolve(t.Context(), ref)
+	if err == nil || !strings.Contains(err.Error(), "rewritten by inherited Git configuration") || strings.Contains(err.Error(), "mirror.example") {
+		t.Fatalf("Resolve() error = %v, want rewrite refusal without the rewritten URL", err)
+	}
+	log, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), " fetch ") {
+		t.Fatalf("rewritten URL reached Git fetch: %s", log)
+	}
+}
+
+func configureGitRepositorySource(t *testing.T, files map[string]string) (git, work, remote, commit string) {
+	t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	work = filepath.Join(root, "work")
+	remoteRoot := filepath.Join(root, "remotes")
+	remote = filepath.Join(remoteRoot, "o", "r.git")
+	for _, directory := range []string{home, work, filepath.Dir(remote)} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	runSourceGit(t, git, "", "init", "--quiet", work)
+	runSourceGit(t, git, work, "config", "user.name", "Repository Source Test")
+	runSourceGit(t, git, work, "config", "user.email", "repository-source@example.invalid")
+	for name, contents := range files {
+		filename := filepath.Join(work, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filename, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runSourceGit(t, git, work, "add", ".")
+	runSourceGit(t, git, work, "commit", "--quiet", "-m", "initial")
+	runSourceGit(t, git, work, "branch", "-M", "main")
+	runSourceGit(t, git, "", "init", "--bare", "--quiet", remote)
+	runSourceGit(t, git, work, "remote", "add", "origin", remote)
+	runSourceGit(t, git, work, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+	commit = strings.TrimSpace(runSourceGit(t, git, work, "rev-parse", "HEAD"))
+	return git, work, remote, commit
+}
+
+func advanceGitRepositorySource(t *testing.T, git, work string) {
+	t.Helper()
+	filename := filepath.Join(work, ".github", "workflows", "ci.yml")
+	if err := os.WriteFile(filename, []byte("on: workflow_call\n# moved\njobs: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runSourceGit(t, git, work, "add", ".github/workflows/ci.yml")
+	runSourceGit(t, git, work, "commit", "--quiet", "-m", "move branch")
+	runSourceGit(t, git, work, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+}
+
+func runSourceGit(t *testing.T, git, directory string, args ...string) string {
+	t.Helper()
+	if directory != "" {
+		args = append([]string{"-C", directory}, args...)
+	}
+	output, err := exec.Command(git, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+	return string(output)
 }
 
 func TestStoreCodeloadRedirectPolicy(t *testing.T) {

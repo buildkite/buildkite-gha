@@ -41,7 +41,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `python`, and custom shell templates. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
-| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local and literal public GitHub workflows with static inputs, string inputs that embed needs outputs, and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. |
+| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local, public, and approved private GitHub workflows with static inputs, string inputs that embed needs outputs, and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. Private access requires a separate importer opt-in and existing Git access. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile and public prebuilt-image actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Reusable-workflow jobs use the top-level workflow permissions. |
@@ -375,12 +375,14 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 ### Reusable workflows
 
-**🟡 Supported subset.** Calls may use a local path or a literal public GitHub reference such as `owner/repository/.github/workflows/ci.yml@v1`. A public reference resolves once per operation to an immutable commit. Nested `./.github/workflows/...` calls resolve in that pinned repository.
+**🟡 Supported subset.** Calls may use a local path or a literal GitHub reference such as `owner/repository/.github/workflows/ci.yml@v1`. A remote reference resolves once per operation to an immutable commit and repository digest. Nested `./.github/workflows/...` calls resolve in that pinned repository.
+
+Private references work for the pipeline repository and cross-repository sources available to the importer's existing Git credentials. Enable them with the plugin's default-off `private-reusable-workflows` field or the matching `upload` flag. When the Buildkite Agent repository-provider credential helper supplies access, Buildkite approves each requested repository. Git access is also used when GitHub's anonymous API quota is exhausted, so a rate limit does not fail an otherwise authorized call. Missing and denied repositories, refs, and paths produce the same error.
 
 **✅ Supported:**
 
 - Local `./.github/workflows/...` paths.
-- Literal public references to a `.yml` or `.yaml` file directly under `owner/repository/.github/workflows/`.
+- Literal public or approved private references to a `.yml` or `.yaml` file directly under `owner/repository/.github/workflows/`.
 - `boolean`, `number`, and `string` inputs.
 - Static input values. Caller values may use graph-time `github`, matrix, and parent reusable-workflow inputs with the supported operators and pure functions.
 - String inputs that read `needs.<job>.outputs.<name>`, alone or inside a larger value such as `type=raw,value=${{ needs.meta.outputs.tag }}` or `${{ format('{0}-{1}', github.ref_name, needs.meta.outputs.tag) }}`. The call must list each job in `needs`. Every other part of the value must resolve before jobs run: literals, graph-time `github`, `vars`, matrix values, static parent inputs, and the supported operators and pure functions. Buildkite resolves the verified outputs and renders the value before each flattened callee job runs.
@@ -397,7 +399,7 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 **❌ Unsupported:**
 
-- Dynamic workflow paths and private repositories.
+- Dynamic workflow paths.
 - Secret forwarding for public remote calls.
 - Literal, compound, dynamic, or non-secret explicit mapping values.
 - `needs.<job>.result`, whole `needs.<job>.outputs` objects, or needs values mixed with runtime-only values such as `github.run_id` in inputs.
@@ -421,6 +423,8 @@ For a local call with `secrets: inherit`, each flattened callee job requests onl
 Explicit mappings must target aliases declared by the called workflow. Every required alias must receive authority; an unmapped optional alias is empty. Nested mappings compose to the original Buildkite secret name and cannot recover an omitted same-named secret. Plans contain aliases and original names, never values. The runtime retrieves each original once, registers its value with both redactors, then projects it to the callee aliases.
 
 `${{ secrets.GITHUB_TOKEN }}` may be forwarded to a declared alias. The alias remains part of the scoped workflow-token contract and never becomes an ordinary Buildkite secret.
+
+Upload configures Git fallback before validating remote calls. After anonymous access fails, Git fetches a canonical credential-free HTTPS URL with the importer's existing credential configuration. Each Git invocation allows only the HTTPS transport, refuses redirects, verifies TLS, and checks received objects; these values are pinned for the exact repository URL and Git environment variables that would relax them are removed. The fetch stops if inherited `url.<base>.insteadOf` configuration rewrites the URL. Git pack input and extracted trees keep the anonymous source size and entry limits. Git output is suppressed, terminal prompts and askpass programs are disabled and inherited `http.extraHeader` and `http.cookieFile` values are reset so credentials come only from credential helpers, and credential material is never added to plans, generated pipeline YAML, workflow environments, or runtime jobs. Called repositories that may use Git fallback skip the one-hour mutable ref cache and resolve once per operation. Private actions remain unsupported.
 
 A call condition runs in caller scope before static call-matrix expansion. It keeps the implicit `success()` guard. A false condition skips every flattened descendant, including jobs with `if: always()`, and exposes `skipped` with empty outputs to downstream `needs`. Nested calls evaluate ordered outer-to-inner guards. Callee job results do not change an outer guard. Call conditions cannot use `matrix`, `strategy`, callee inputs or needs, `steps`, `env`, `runner`, or `secrets`.
 
@@ -1574,7 +1578,8 @@ JavaScript and Docker actions with compatible bundled cache clients also receive
 | Internal or private Origin event repository | 🟡 Supported subset | `BUILDKITE_REPO` must be the pipeline's exact `https://origin.cursor.com/git/<namespace>/<repository>.git` URL. Buildkite must authorize repository-provider Git credentials. |
 | Alternate repository in `actions/checkout` | ❌ Unsupported | Not available. |
 | Public GitHub action | 🟡 Supported subset | Subject to the action boundaries above. |
-| Private action or reusable workflow | ❌ Unsupported | Not available. |
+| Private reusable workflow | 🟡 Supported subset | Same-repository or explicitly approved cross-repository source. Resolved by the importer only. |
+| Private action | ❌ Unsupported | No private action source access. |
 | GitHub Enterprise Server or an unlisted provider | ❌ Unsupported | Not available. |
 
 ### GitHub token
@@ -1612,8 +1617,7 @@ Reusable-workflow jobs receive the requesting workflow's top-level repository
 permissions. Buildkite does not inspect called-workflow maps for `GITHUB_TOKEN`,
 so those maps cannot narrow it. The separate `id-token` permission still
 supports called-workflow narrowing. Compilation warns when a called policy
-would have narrowed the repository token. Private reusable workflows remain
-unsupported.
+would have narrowed the repository token.
 
 Pull requests and their triggered or rebuilt descendants have a `contents: read`
 ceiling. Merge-queue builds and their descendants cannot request a token. GitHub
@@ -1715,7 +1719,7 @@ The endpoint variables are scoped to each host action lifecycle invocation. Shel
 
 ### Default environment
 
-The runtime sets `GITHUB_WORKFLOW` to the workflow's top-level `name`. If the workflow has no name, it uses the repository-relative workflow path. `GITHUB_WORKFLOW_REF` identifies that top-level workflow as `<owner>/<repo>/<path>@<event-ref>`, and `GITHUB_WORKFLOW_SHA` is the event commit. Jobs expanded from local or public reusable workflows retain this caller identity. Workflow and step environment entries cannot override these values.
+The runtime sets `GITHUB_WORKFLOW` to the workflow's top-level `name`. If the workflow has no name, it uses the repository-relative workflow path. `GITHUB_WORKFLOW_REF` identifies that top-level workflow as `<owner>/<repo>/<path>@<event-ref>`, and `GITHUB_WORKFLOW_SHA` is the event commit. Jobs expanded from local, public, or private reusable workflows retain this caller identity. Workflow and step environment entries cannot override these values.
 
 ### Runner tools
 

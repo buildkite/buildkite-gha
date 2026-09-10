@@ -189,8 +189,8 @@ jobs:
 		t.Fatalf("remote plan provenance = %#v", plans)
 	}
 	validateCompiledPlansAgainstSchema(t, plans)
-	if calls := fake.references(); len(calls) != 1 || calls[0].Raw != "GaloisInc/.github@v2" || calls[0].Path != "" {
-		t.Fatalf("repository source calls = %#v, want one repository-root resolution", calls)
+	if calls := fake.references(); len(calls) != 1 || calls[0].Raw != "GaloisInc/.github/.github/workflows/haskell-ci.yml@v2" || calls[0].Path != ".github/workflows/haskell-ci.yml" || !calls[0].RepositoryRoot {
+		t.Fatalf("repository source calls = %#v, want one exact workflow authorization", calls)
 	}
 }
 
@@ -378,7 +378,7 @@ jobs:
 		t.Fatalf("workflow/action pins = %#v", plans)
 	}
 	calls := fake.references()
-	if len(calls) != 2 || calls[0].Raw != "owner/repository@v1" || calls[1].Raw != "owner/repository/action@"+commit {
+	if len(calls) != 2 || calls[0].Raw != "owner/repository/.github/workflows/ci.yml@v1" || !calls[0].RepositoryRoot || calls[1].Raw != "owner/repository/action@"+commit || calls[1].RepositoryRoot {
 		t.Fatalf("repository source calls = %#v, want mutable ref once then exact commit", calls)
 	}
 }
@@ -431,7 +431,7 @@ func TestCompileRemoteReusableWorkflowLocalActionUsesCallerWorkspace(t *testing.
 	if len(plans) != 1 || len(plans[0].Actions) != 1 || plans[0].Actions[0].Source != "workspace" || plans[0].Actions[0].Path != ".github/actions/local" {
 		t.Fatalf("remote workflow caller-local action plan = %#v", plans)
 	}
-	if calls := fake.references(); len(calls) != 1 || calls[0].Path != "" {
+	if calls := fake.references(); len(calls) != 1 || calls[0].Path != ".github/workflows/ci.yml" || !calls[0].RepositoryRoot {
 		t.Fatalf("repository source calls = %#v, want only the remote workflow repository", calls)
 	}
 }
@@ -541,11 +541,11 @@ func TestCompileRemoteReusableWorkflowLimitsAndDiagnostics(t *testing.T) {
 		options := defaultOptions()
 		options.RepositorySource = MemoizeRepositorySource(fake)
 		_, err := CompileWithOptions(callerPath, readFile(t, callerPath), event, options)
-		if err == nil || !strings.Contains(err.Error(), `public reusable workflow "owner/private/.github/workflows/ci.yml@v1" could not be read`) {
+		if err == nil || !strings.Contains(err.Error(), `remote reusable workflow "owner/private/.github/workflows/ci.yml@v1" could not be read`) {
 			t.Fatalf("CompileWithOptions() error = %v, want non-enumerating source error", err)
 		}
 		var finding *ProcessingFinding
-		wantMessage := `Reusable workflow could not be read. "owner/private/.github/workflows/ci.yml@v1" is either private or does not exist. Only public workflows can be called across repositories. Check the path, or copy the workflow into this repository's .github/workflows and call it with a ./ path. If you need private cross-repository calls, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`
+		wantMessage := `Reusable workflow could not be read. "owner/private/.github/workflows/ci.yml@v1" is private, is not accessible to this pipeline, or does not exist. Check the path. Public workflows can be called across repositories. Private workflows also need the plugin's private-reusable-workflows setting and Buildkite code access to that repository. Otherwise copy the workflow into this repository's .github/workflows and call it with a ./ path.`
 		if !errors.As(err, &finding) || finding.Message != wantMessage || finding.Detail != "" || finding.Path != "./.github/workflows/private.yml" || finding.Line != 4 || finding.Column != 11 || finding.Job != "call" {
 			t.Fatalf("CompileWithOptions() finding = %#v", finding)
 		}
@@ -557,11 +557,11 @@ func TestCompileRemoteReusableWorkflowLimitsAndDiagnostics(t *testing.T) {
 		options := defaultOptions()
 		options.RepositorySource = MemoizeRepositorySource(newFakeReusableRepositorySource(t, map[string]string{"owner/public": publicRoot}))
 		_, err := CompileWithOptions(callerPath, readFile(t, callerPath), event, options)
-		if err == nil || !strings.Contains(err.Error(), `public reusable workflow "owner/public/.github/workflows/absent.yml@v1" could not be read`) {
+		if err == nil || !strings.Contains(err.Error(), `remote reusable workflow "owner/public/.github/workflows/absent.yml@v1" could not be read`) {
 			t.Fatalf("CompileWithOptions() error = %v, want non-enumerating missing workflow error", err)
 		}
 		var finding *ProcessingFinding
-		wantMessage := `Reusable workflow could not be read. "owner/public/.github/workflows/absent.yml@v1" is either private or does not exist. Only public workflows can be called across repositories. Check the path, or copy the workflow into this repository's .github/workflows and call it with a ./ path. If you need private cross-repository calls, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.`
+		wantMessage := `Reusable workflow could not be read. "owner/public/.github/workflows/absent.yml@v1" is private, is not accessible to this pipeline, or does not exist. Check the path. Public workflows can be called across repositories. Private workflows also need the plugin's private-reusable-workflows setting and Buildkite code access to that repository. Otherwise copy the workflow into this repository's .github/workflows and call it with a ./ path.`
 		if !errors.As(err, &finding) || finding.Message != wantMessage || finding.Detail != "" || finding.Path != "./.github/workflows/missing.yml" || finding.Line != 4 || finding.Column != 11 || finding.Job != "call" {
 			t.Fatalf("CompileWithOptions() finding = %#v", finding)
 		}
