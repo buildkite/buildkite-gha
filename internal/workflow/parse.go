@@ -226,7 +226,7 @@ func emptyDefaultTypesDiagnostics(document *yaml.Node) []expectedActionlintDiagn
 	}
 	on := mappingValue(document.Content[0], "on")
 	var diagnostics []expectedActionlintDiagnostic
-	for _, event := range []string{"issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "merge_group"} {
+	for _, event := range []string{"issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "merge_group", "label"} {
 		types := mappingValue(mappingValue(on, event), "types")
 		if types != nil && types.Kind == yaml.SequenceNode && len(types.Content) == 0 {
 			diagnostics = append(diagnostics, expectedActionlintDiagnostic{

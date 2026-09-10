@@ -81,6 +81,21 @@ No shadow GitHub Actions run is created. Buildkite owns scheduling, logs, retrie
 
 Steps remain inside one job because they share a workspace, environment files, action state, and post-action cleanup.
 
+### Repository label lifecycle events
+
+`label` supports `created`, `edited`, and `deleted` activities, all by default.
+Scalar, array, null, empty-map, and `types: []` declarations select all three;
+explicit `types` selects a subset. Issue/PR `labeled` actions and branch/tag/path
+filters are not label lifecycle events and are rejected.
+
+Pipeline Triggers require a compatible backend and the original linked payload.
+Workflow discovery and checkout use the server-resolved default-branch commit,
+not stale pipeline or webhook branch metadata. `github.event.label` and the
+original event file retain the label data. Missing/malformed/foreign payloads
+fail closed. Existing immutable workflow token policy and pipeline/repository/PR
+restrictions remain unchanged. Release and select this runtime before deploying
+the backend's label subscription defaults.
+
 ### Branch and tag lifecycle events
 
 `create` and `delete` support scalar, array, null, and empty-map declarations.
@@ -298,6 +313,7 @@ the group condition, and the provider-check suffix.
 | `release` | Pipeline Triggers and native Buildkite release builds. Native builds require **Additional Webhooks** > **Releases** and **Code** trigger mode. Pipeline Triggers require a compatible server and the GitHub Code Access App to select the workflow at the immutable peeled tag commit. `types` is required and may contain only `published`, `created`, and `released`; bare `release`, all other activity types, and branch, tag, path, and workflow filters are rejected. All draft deliveries are rejected; publishing a prerelease with `published` is supported, unlike the `prereleased` activity. The ref is `refs/tags/<tag_name>`. The SHA is the server-resolved peeled commit, or the checked-out commit for the native compatibility fallback. Existing hosted release `GITHUB_TOKEN` policy is unchanged. |
 | `deployment`, `deployment_status` | Pipeline Triggers with a compatible server, or explicit event snapshots. Bare, array, null, and empty-map declarations are supported; activity types and event filters are not. Workflows and checkout use the deployment commit. The ref identifies its branch or tag and is empty for SHA-only deployments. Status states `error`, `failure`, `in_progress`, `queued`, `pending`, `success`, and `waiting` are supported ([GitHub status enum](https://docs.github.com/en/graphql/reference/enums#deploymentstatusstate)); `inactive` cannot run a workflow. The genuine payload exposes `github.event.deployment` and `github.event.deployment_status`, including environment, state, `environment_url`, `log_url`, and `target_url` when present. Use job/step conditions on these values, not `types` or environment filters. No deployment creation or environment orchestration is added. |
 | `create`, `delete` | [Branch and tag lifecycle](#branch-and-tag-lifecycle-events). No activity types or filters. Creation uses the exact ref's resolved commit; deletion uses the default branch. |
+| `label` | [Repository label lifecycle](#repository-label-lifecycle-events). `created`, `edited`, and `deleted`, all by default. Workflows and checkout use the resolved default branch. |
 | `issues` | Omitted `types` or `types: []` accepts every GitHub Actions issue activity. Nonempty `types` may contain `opened`, `edited`, `deleted`, `transferred`, `pinned`, `unpinned`, `closed`, `reopened`, `assigned`, `unassigned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `milestoned`, `demilestoned`, `typed`, `untyped`, `field_added`, and `field_removed`. Unknown types and branch, tag, path, or workflow filters are rejected. In a GitHub Actions Pipeline Trigger build, Buildkite selects workflows and the checkout from the latest verified default-branch SHA; native issue-build settings, branch/path filters, and comment gating do not participate. Existing native Buildkite issue builds remain supported through linked webhook data and retain their own build-creation settings. |
 | `issue_comment` | Omitted `types` or `types: []` accepts `created`, `edited`, and `deleted`; nonempty `types` may contain those activities. Both issue and pull request conversation comments are supported. Unknown types and branch, tag, path, or workflow filters are rejected. GitHub Actions Pipeline Trigger builds select workflows and the checkout from the latest verified default-branch SHA and do not inherit native command-word, trusted-commenter, PR-only, branch, or path gating. |
 | `pull_request_review` | Pipeline Triggers support `submitted`, `edited`, and `dismissed`, all by default. Nonempty `types` selects activities, not review states. Use `if: github.event.review.state == 'approved'` on a job or step for approval-only execution. |

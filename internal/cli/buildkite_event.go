@@ -123,7 +123,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 				}
 				payload = map[string]any{"ref": ref}
 			}
-		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "release", "merge_group", "deployment", "deployment_status", "create", "delete":
+		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "release", "merge_group", "deployment", "deployment_status", "create", "delete", "label":
 			if (githubEvent == "issues" || githubEvent == "release" || githubEvent == "merge_group") && getenv(pipelineTriggerWorkflowPathEnvironment) == "" &&
 				getenv(githubWorkflowRefEnvironment) == "" && getenv(githubWorkflowSHAEnvironment) == "" {
 				break
@@ -163,12 +163,12 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	if defaultBranch := strings.TrimSpace(getenv("BUILDKITE_PIPELINE_DEFAULT_BRANCH")); defaultBranch != "" {
 		repository["default_branch"] = defaultBranch
 	}
-	if event == "create" || event == "delete" {
+	if event == "create" || event == "delete" || event == "label" {
 		if pullRequest != "" && pullRequest != "false" || branch != plan.EventRefName(ref) ||
 			(plan.EventRefType(ref) == "tag" && tag != branch) || (plan.EventRefType(ref) == "branch" && tag != "") {
 			return nil, fmt.Errorf("%s workflow ref does not match the Buildkite branch and tag", event)
 		}
-		if event == "delete" {
+		if event == "delete" || event == "label" {
 			// The server resolved this branch at ingestion; neither pipeline settings
 			// nor the older webhook's repository metadata can replace that identity.
 			repository["default_branch"] = branch
@@ -214,6 +214,9 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 	}
 	if event != "" {
 		snapshot["event"] = event
+	}
+	if event == "label" && payload["action"] != getenv("BUILDKITE_GITHUB_ACTION") {
+		return nil, fmt.Errorf("label action does not match BUILDKITE_GITHUB_ACTION")
 	}
 	if sender, ok := payload["sender"].(map[string]any); ok {
 		if login, ok := sender["login"].(string); ok && safeGitHubLogin(login) {

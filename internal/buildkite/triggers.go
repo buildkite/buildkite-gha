@@ -28,6 +28,7 @@ type TriggerConditionExpressions struct {
 	IssuesAction            string
 	IssueCommentAction      string
 	PullRequestReviewAction string
+	LabelAction             string
 }
 
 // ChangedPathEvaluation records either the available changed paths or why
@@ -54,6 +55,7 @@ type TriggerEventSnapshot struct {
 	IssuesAction            *string
 	IssueCommentAction      *string
 	PullRequestReviewAction *string
+	LabelAction             *string
 	ChangedPaths            ChangedPathEvaluation
 }
 
@@ -71,6 +73,7 @@ var supportedTriggerEvents = map[string]bool{
 	"deployment_status":           true,
 	"create":                      true,
 	"delete":                      true,
+	"label":                       true,
 	"issues":                      true,
 	"issue_comment":               true,
 	"pull_request_review":         true,
@@ -149,6 +152,7 @@ func LiveTriggerConditionExpressions(eventPredicate string) TriggerConditionExpr
 		IssuesAction:            "build.source_action",
 		IssueCommentAction:      "build.source_action",
 		PullRequestReviewAction: "build.source_action",
+		LabelAction:             "build.source_action",
 	}
 }
 
@@ -354,6 +358,10 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 			if snapshot.IssuesAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.IssuesAction) {
 				return fmt.Sprintf("Issue activity %q does not match this workflow's issues activity filters.", *snapshot.IssuesAction), nil
 			}
+		case "label":
+			if snapshot.LabelAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.LabelAction) {
+				return fmt.Sprintf("Label activity %q does not match this workflow's label activity filters.", *snapshot.LabelAction), nil
+			}
 		case "issue_comment":
 			if snapshot.IssueCommentAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.IssueCommentAction) {
 				return fmt.Sprintf("Issue comment activity %q does not match this workflow's issue_comment activity filters.", *snapshot.IssueCommentAction), nil
@@ -413,7 +421,7 @@ func LiveEventPredicate(event string) string {
 		return predicate
 	case "schedule":
 		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source == "schedule"))`
-	case "merge_group", "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete":
+	case "merge_group", "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete", "label":
 		return predicate
 	default:
 		return ""
@@ -637,6 +645,24 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 				return "", false, fmt.Errorf("release activity type %q cannot be mapped exactly", action)
 			}
 			actions = append(actions, expressions.ReleaseAction+` == `+yamlScalar(action))
+		}
+		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
+	case "label":
+		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+			return "", false, fmt.Errorf("label has unsupported filters")
+		}
+		if expressions.EventPredicate == "" || expressions.LabelAction == "" || expressions.LabelAction == "null" {
+			return "", false, fmt.Errorf("label requires effective event and action expressions")
+		}
+		if len(t.Types) == 0 {
+			return expressions.EventPredicate, true, nil
+		}
+		actions := make([]string, 0, len(t.Types))
+		for _, action := range t.Types {
+			if action != "created" && action != "edited" && action != "deleted" {
+				return "", false, fmt.Errorf("label activity type %q cannot be mapped exactly", action)
+			}
+			actions = append(actions, expressions.LabelAction+` == `+yamlScalar(action))
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "issues":
