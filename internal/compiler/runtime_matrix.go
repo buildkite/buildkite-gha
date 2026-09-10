@@ -32,6 +32,15 @@ const (
 	runtimeMatrixMaxSourceCoordinate = 1_000_000
 )
 
+// runtimeMatrixDeferredMessage is the report text for a matrix whose values
+// come from a job output. It names the gap and where its progress is tracked.
+const runtimeMatrixDeferredMessage = "matrix values come from a job output that exists only after that job runs; buildkite-gha cannot expand this matrix yet (https://github.com/buildkite/buildkite-gha/issues/130)"
+
+// runtimeMatrixDeferredReason explains why a valid needs-derived matrix is
+// still rejected: expanding it needs a second pipeline upload after the
+// producing job finishes, which buildkite-gha does not perform yet.
+const runtimeMatrixDeferredReason = "the matrix reference is valid, but expanding it needs a second pipeline upload after the producing job finishes, which buildkite-gha does not perform yet"
+
 var runtimeMatrixLogicalJobPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*$`)
 var runtimeMatrixStepKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var runtimeMatrixDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -90,7 +99,7 @@ func describeRuntimeMatrix(job workflow.Job, sourcePath, sourceDigest string, ne
 	if err != nil {
 		return RuntimeMatrixDescriptor{}, false, nil
 	}
-	if shape == RuntimeMatrixShapeInclude && (len(job.Matrix.Rows) != 0 || job.Matrix.Include != nil || job.Matrix.Exclude != nil) {
+	if shape == RuntimeMatrixShapeInclude && (len(job.Matrix.Rows) != 0 || len(job.Matrix.Include) != 0 || len(job.Matrix.Exclude) != 0 || job.Matrix.ExcludeExpression != nil) {
 		return RuntimeMatrixDescriptor{}, true, errors.New("runtime matrix include output must be the complete matrix definition")
 	}
 
