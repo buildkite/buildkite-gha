@@ -67,7 +67,8 @@ func parseEvent(source []byte) (Event, error) {
 		}
 		return Event{}, fmt.Errorf("parse event snapshot: %w", err)
 	}
-	if strings.TrimSpace(input.Provider) == "" || strings.TrimSpace(input.Event) == "" || strings.TrimSpace(input.Repository.Owner) == "" || strings.TrimSpace(input.Repository.Name) == "" || strings.TrimSpace(input.Ref) == "" || strings.TrimSpace(input.SHA) == "" || strings.TrimSpace(input.Actor) == "" {
+	deployment := input.Event == "deployment" || input.Event == "deployment_status"
+	if strings.TrimSpace(input.Provider) == "" || strings.TrimSpace(input.Event) == "" || strings.TrimSpace(input.Repository.Owner) == "" || strings.TrimSpace(input.Repository.Name) == "" || (!deployment && strings.TrimSpace(input.Ref) == "") || strings.TrimSpace(input.SHA) == "" || strings.TrimSpace(input.Actor) == "" {
 		return Event{}, fmt.Errorf("event snapshot requires provider, event, repository owner/name, ref, sha, and actor")
 	}
 	if input.Payload == nil {
@@ -83,10 +84,66 @@ func parseEvent(source []byte) (Event, error) {
 			return Event{}, err
 		}
 	}
+	if deployment {
+		if err := validateDeploymentEvent(input.Provider, input.Event, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
 	return Event{
 		Provider: input.Provider, Event: input.Event, Repository: input.Repository,
 		Ref: input.Ref, SHA: input.SHA, Actor: input.Actor, Payload: input.Payload,
 	}, nil
+}
+
+func validateDeploymentEvent(provider, event string, repository Repository, ref, sha string, payload map[string]any) error {
+	positiveID := func(value any) bool {
+		number, ok := value.(json.Number)
+		if !ok {
+			return false
+		}
+		id, err := number.Int64()
+		return err == nil && id > 0
+	}
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	if provider != "github" || !positiveID(repo["id"]) || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) {
+		return fmt.Errorf("%s repository does not match the event snapshot", event)
+	}
+	if action, exists := payload["action"]; exists && action != "created" {
+		return fmt.Errorf("%s payload.action must be created when present", event)
+	}
+	deployment, _ := payload["deployment"].(map[string]any)
+	if !positiveID(deployment["id"]) || !git.ValidObjectID(sha) || deployment["sha"] != sha {
+		return fmt.Errorf("%s requires deployment.id and deployment.sha matching the full snapshot SHA", event)
+	}
+	rawRef, ok := deployment["ref"].(string)
+	if !ok || rawRef == "" || rawRef != strings.TrimSpace(rawRef) {
+		return fmt.Errorf("%s requires deployment.ref", event)
+	}
+	if ref == "" {
+		if rawRef != sha {
+			return fmt.Errorf("%s empty ref requires a SHA-only deployment", event)
+		}
+	} else if plan.EventRefType(ref) == "" || plan.EventRefName(ref) == "" || strings.HasPrefix(ref, "refs/pull/") ||
+		(ref != rawRef && plan.EventRefName(ref) != rawRef) {
+		return fmt.Errorf("%s ref must match the deployment branch or tag", event)
+	}
+	if event == "deployment_status" {
+		status, _ := payload["deployment_status"].(map[string]any)
+		if !positiveID(status["id"]) {
+			return fmt.Errorf("deployment_status requires deployment_status.id")
+		}
+		switch status["state"] {
+		case "error", "failure", "in_progress", "queued", "pending", "success":
+		case "inactive":
+			return fmt.Errorf("inactive deployment_status does not trigger GitHub Actions")
+		default:
+			return fmt.Errorf("deployment_status state is unsupported")
+		}
+	} else if _, exists := payload["deployment_status"]; exists {
+		return fmt.Errorf("deployment_status payload does not match deployment event")
+	}
+	return nil
 }
 
 func validateMergeGroupEvent(ref, sha string, payload map[string]any) error {

@@ -14,6 +14,7 @@ import (
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/git"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 const githubEventNameEnvironment = "GITHUB_EVENT_NAME"
@@ -122,7 +123,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 				}
 				payload = map[string]any{"ref": ref}
 			}
-		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "release", "merge_group":
+		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "release", "merge_group", "deployment", "deployment_status":
 			if (githubEvent == "issues" || githubEvent == "release" || githubEvent == "merge_group") && getenv(pipelineTriggerWorkflowPathEnvironment) == "" &&
 				getenv(githubWorkflowRefEnvironment) == "" && getenv(githubWorkflowSHAEnvironment) == "" {
 				break
@@ -142,6 +143,19 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		_, ref, err = parsePipelineTriggerWorkflowRef(workflowRef, event, getenv("BUILDKITE_REPO"))
 		if err != nil {
 			return nil, err
+		}
+	}
+	if event == "deployment" || event == "deployment_status" {
+		if githubEvent != getenv("BUILDKITE_GITHUB_EVENT") || pullRequest != "" && pullRequest != "false" {
+			return nil, fmt.Errorf("deployment event identity is contradictory")
+		}
+		if git.ValidObjectID(ref) {
+			if ref != sha || branch != sha || tag != "" {
+				return nil, fmt.Errorf("SHA-only deployment workflow ref must match BUILDKITE_COMMIT and BUILDKITE_BRANCH, without a tag")
+			}
+			ref = ""
+		} else if branch != plan.EventRefName(ref) || (plan.EventRefType(ref) == "tag" && tag != branch) || (plan.EventRefType(ref) == "branch" && tag != "") {
+			return nil, fmt.Errorf("deployment workflow ref does not match the Buildkite branch and tag")
 		}
 	}
 
@@ -202,6 +216,9 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 	}
 	if _, hasRelease := payload["release"]; hasRelease && snapshot["event"] != "release" {
 		return nil, fmt.Errorf("release webhook payload does not match BUILDKITE_GITHUB_EVENT")
+	}
+	if _, hasDeployment := payload["deployment"]; hasDeployment && snapshot["event"] != "deployment" && snapshot["event"] != "deployment_status" {
+		return nil, fmt.Errorf("deployment webhook payload does not match BUILDKITE_GITHUB_EVENT")
 	}
 	if snapshot["event"] == "release" {
 		if err := validateBuildkiteRelease(snapshot, getenv); err != nil {

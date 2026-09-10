@@ -7,6 +7,36 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
+func TestDeploymentTriggerConditions(t *testing.T) {
+	for _, event := range []string{"deployment", "deployment_status"} {
+		t.Run(event, func(t *testing.T) {
+			for _, declaration := range []string{event, "[push, " + event + "]", "{" + event + ": null}", "{" + event + ": {}}"} {
+				parsed, err := workflow.Parse("deployment.yml", []byte("on: "+declaration+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				condition, applicable, err := TranslateEventTriggerCondition(parsed.Triggers, event, TriggerConditionExpressions{EventPredicate: "true"}, TriggerEventSnapshot{})
+				if err != nil || !applicable || condition != "(true)" {
+					t.Fatalf("%s: %q, %v, %v", declaration, condition, applicable, err)
+				}
+			}
+			for _, trigger := range []workflow.Trigger{
+				{Types: []string{"created"}}, {Types: []string{"success"}}, {Types: []string{}},
+				{Branches: []string{"main"}}, {Tags: []string{"v1"}}, {Paths: []string{"src/**"}}, {Workflows: []string{"Deploy"}},
+			} {
+				trigger.Event = event
+				if err := ValidateTriggerConditions([]workflow.Trigger{trigger}); err == nil {
+					t.Fatalf("accepted unsupported deployment filters: %#v", trigger)
+				}
+			}
+			_, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{{Event: "push"}}, event, TriggerConditionExpressions{EventPredicate: "true"}, TriggerEventSnapshot{})
+			if err != nil || applicable {
+				t.Fatalf("deployment matched push: %v, %v", applicable, err)
+			}
+		})
+	}
+}
+
 func TestTranslateTriggerCondition(t *testing.T) {
 	got, err := TranslateTriggerCondition([]workflow.Trigger{
 		{Event: "push", Branches: []string{"main", "releases/**", "!releases/**-alpha", "releases/v[0-9]+"}},
