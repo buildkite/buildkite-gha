@@ -41,6 +41,8 @@ var supportedEvents = map[string]bool{
 	"release":                     true,
 	"deployment":                  true,
 	"deployment_status":           true,
+	"create":                      true,
+	"delete":                      true,
 	"issues":                      true,
 	"issue_comment":               true,
 	"workflow_dispatch":           true,
