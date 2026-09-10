@@ -216,7 +216,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	return owned, nil
 }
 
-// GitHub treats empty issues/issue_comment types as omitted. The pinned
+// GitHub treats empty issue and review event types as omitted. The pinned
 // actionlint parser already returns nil Types for these sequences, but also
 // reports an error. Accept only that diagnostic at each verified empty sequence,
 // leaving the source and all other diagnostics (including alias errors) intact.
@@ -226,7 +226,7 @@ func emptyIssueTypesDiagnostics(document *yaml.Node) []expectedActionlintDiagnos
 	}
 	on := mappingValue(document.Content[0], "on")
 	var diagnostics []expectedActionlintDiagnostic
-	for _, event := range []string{"issues", "issue_comment"} {
+	for _, event := range []string{"issues", "issue_comment", "pull_request_review", "pull_request_review_comment"} {
 		types := mappingValue(mappingValue(on, event), "types")
 		if types != nil && types.Kind == yaml.SequenceNode && len(types.Content) == 0 {
 			diagnostics = append(diagnostics, expectedActionlintDiagnostic{

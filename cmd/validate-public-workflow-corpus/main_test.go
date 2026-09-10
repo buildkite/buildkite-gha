@@ -259,6 +259,9 @@ func TestTallyReports(t *testing.T) {
 			{Event: "issue_comment", Source: "generated", Report: validation},
 		},
 	}
+	for _, event := range []string{"pull_request_review", "pull_request_review_comment"} {
+		report.Evaluations = append(report.Evaluations, compatibility.EventEvaluation{Event: event, Source: "generated", Report: validation})
+	}
 	contents, err := json.Marshal(report)
 	if err != nil {
 		t.Fatal(err)
@@ -297,6 +300,11 @@ func TestTallyReports(t *testing.T) {
 	}
 	if tally.ByFinding["E_EXAMPLE"] != 1 || tally.ByRepo["E_EXAMPLE"] != 1 || tally.Evaluations["push"] != 1 || tally.Evaluations["issue_comment"] != 1 {
 		t.Fatalf("diagnostic tally = %#v", tally)
+	}
+	for _, event := range []string{"pull_request_review", "pull_request_review_comment"} {
+		if tally.Evaluations[event] != 1 {
+			t.Fatalf("missing %s evaluation: %#v", event, tally.Evaluations)
+		}
 	}
 	if tally.WorkflowResults["admitted"] != 1 || tally.WorkflowResults["context-required"] != 1 {
 		t.Fatalf("workflow result tally = %#v", tally.WorkflowResults)

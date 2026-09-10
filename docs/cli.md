@@ -79,14 +79,15 @@ buildkite-gha validate \
 ```
 
 `--event` supports `push`, `pull_request`, `merge_group`, `release`, `issues`,
-`issue_comment`, `workflow_dispatch`, and `schedule`. It requires
+`issue_comment`, `pull_request_review`, `pull_request_review_comment`,
+`workflow_dispatch`, and `schedule`. It requires
 `--profile hosted` and cannot be combined with `--event-path`.
 
 The generated snapshot contains an example repository and the minimum event
 fields. It is useful for a quick check, but it is not a real payload. The
 release snapshot represents one stable, non-prerelease `published` event. The
-issues snapshot represents `opened`, and the issue-comment snapshot represents
-`created`. Use
+issues snapshot represents `opened`, review represents `submitted`, and both
+comment events represent `created`. Use
 `--event-path` when exact refs, activity, repository identity, or payload fields
 matter.
 
@@ -333,7 +334,8 @@ Actions Pipeline Trigger builds. Most users should configure an explicit
 Without an explicit selector, `BUILDKITE_GITHUB_WORKFLOW_PATH` marks a GitHub
 Actions Pipeline Trigger selection. The server also supplies:
 
-- `GITHUB_EVENT_NAME`: `push`, `pull_request`, `issues`, or `issue_comment`
+- `GITHUB_EVENT_NAME`: `push`, `pull_request`, `issues`, `issue_comment`,
+  `pull_request_review`, or `pull_request_review_comment`
 - `GITHUB_WORKFLOW`: the workflow `name`, or its repository-relative path when
   `name` is absent
 - `GITHUB_WORKFLOW_REF`:
@@ -350,6 +352,11 @@ commit. A malformed preferred value fails instead of falling back.
 For pull requests, `GITHUB_WORKFLOW_REF` and imported jobs' `GITHUB_REF` retain
 `refs/pull/<number>/merge`, while `GITHUB_WORKFLOW_SHA`, `GITHUB_SHA`, and the
 Buildkite checkout use the pull request head commit.
+Review and inline review-comment events use the same PR-head contract. They
+require both workflow identity fields and the original `buildkite:webhook`
+payload. The PR number, head SHA, head/base branches, activity, and all three
+repository identities must agree with the build. Missing payloads (including
+rebuilds without retained webhook data) fail closed, not as synthetic PR events.
 For `issues` and `issue_comment`, the ref is the current repository default
 branch and the SHA is its server-verified tip. Both identity fields are
 required. The linked payload action and repository must match the Buildkite
