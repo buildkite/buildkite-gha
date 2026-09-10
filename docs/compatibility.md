@@ -81,6 +81,29 @@ No shadow GitHub Actions run is created. Buildkite owns scheduling, logs, retrie
 
 Steps remain inside one job because they share a workspace, environment files, action state, and post-action cleanup.
 
+### Branch and tag lifecycle events
+
+`create` and `delete` support scalar, array, null, and empty-map declarations.
+They have no activity types or branch/tag/path filters. These events refer to
+Git refs, not repository creation/deletion. GitHub does not deliver them when
+more than three tags are created/deleted at once.
+
+Pipeline Triggers require a compatible backend and the original linked webhook.
+`create` uses the server-resolved created branch/tag commit (peeled for annotated
+tags). `delete` uses the server-resolved default-branch commit, never the deleted
+ref. Workflow selection and checkout share that immutable SHA. The deleted ref
+remains available in `github.event.ref`; `github.ref` names the default branch.
+Explicit snapshots must supply a full SHA, matching repository identity and,
+for deletion, the resolved `repository.default_branch`. The runtime does not
+resolve mutable refs or attest event-time SHAs from these SHA-less webhooks.
+
+The original payload is digest-bound and hydrated into `GITHUB_EVENT_PATH`.
+Missing payloads fail rather than synthesizing provenance. Neither event adds
+token authority: existing immutable workflow policy, pipeline opt-in, repository,
+PR and merge-queue restrictions remain. Release and select this runtime before
+deploying backend subscription defaults; this change performs no release,
+deployment, or existing-hook migration.
+
 ### Aggregate workflow upload
 
 The plugin accepts either one `workflow` path or a non-empty `workflows` array.

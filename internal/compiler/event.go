@@ -74,6 +74,11 @@ func parseEvent(source []byte) (Event, error) {
 	if input.Payload == nil {
 		input.Payload = map[string]any{}
 	}
+	if input.Event == "create" || input.Event == "delete" {
+		if err := validateRefLifecycleEvent(input.Provider, input.Event, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
 	if input.Event == "merge_group" {
 		if err := validateMergeGroupEvent(input.Ref, input.SHA, input.Payload); err != nil {
 			return Event{}, err
@@ -93,6 +98,32 @@ func parseEvent(source []byte) (Event, error) {
 		Provider: input.Provider, Event: input.Event, Repository: input.Repository,
 		Ref: input.Ref, SHA: input.SHA, Actor: input.Actor, Payload: input.Payload,
 	}, nil
+}
+
+func validateRefLifecycleEvent(provider, event string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	id, _ := repo["id"].(json.Number)
+	number, err := id.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("%s requires the original repository identity and a full commit SHA", event)
+	}
+	rawRef, _ := payload["ref"].(string)
+	kind, _ := payload["ref_type"].(string)
+	if rawRef == "" || strings.ContainsAny(rawRef, " \t\r\n") || (kind != "branch" && kind != "tag") {
+		return fmt.Errorf("%s requires a branch or tag payload.ref and ref_type", event)
+	}
+	if _, exists := payload["action"]; exists {
+		return fmt.Errorf("%s has no activity types", event)
+	}
+	if event == "delete" {
+		if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+			return fmt.Errorf("delete must execute the resolved default branch, not the deleted ref")
+		}
+	} else if plan.EventRefName(ref) != rawRef || plan.EventRefType(ref) != kind || strings.HasPrefix(ref, "refs/pull/") {
+		return fmt.Errorf("create ref must match the created branch or tag")
+	}
+	return nil
 }
 
 func validateDeploymentEvent(provider, event string, repository Repository, ref, sha string, payload map[string]any) error {
