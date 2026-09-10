@@ -334,14 +334,14 @@ Without an explicit selector, `BUILDKITE_GITHUB_WORKFLOW_PATH` marks a GitHub
 Actions Pipeline Trigger selection. The server also supplies:
 
 - `GITHUB_EVENT_NAME`: `push`, `pull_request`, `issues`, `issue_comment`,
-  `pull_request_review`, or `pull_request_review_comment`
+  `pull_request_review`, `pull_request_review_comment`, or `release`
 - `GITHUB_WORKFLOW`: the workflow `name`, or its repository-relative path when
   `name` is absent
 - `GITHUB_WORKFLOW_REF`:
   `<owner>/<repo>/<repository-relative-path>@<event-ref>`
 - `GITHUB_WORKFLOW_SHA`: the full commit used to match the workflow
 - `BUILDKITE_GITHUB_EVENT`: a compatibility duplicate of `GITHUB_EVENT_NAME`
-- `BUILDKITE_GITHUB_ACTION`: the pull request, issue, or comment action; push
+- `BUILDKITE_GITHUB_ACTION`: the pull request, issue, comment, or release action; push
   events omit it
 
 The `GITHUB_*` values take precedence when present. The plugin derives the
@@ -361,6 +361,10 @@ branch and the SHA is its server-verified tip. Both identity fields are
 required. The linked payload action and repository must match the Buildkite
 environment, and `issue_comment` accepts both issue and pull request
 conversation comments.
+For `release`, both workflow identity fields and the original linked payload
+are required. The ref identifies the release tag; the SHA identifies its
+server-resolved peeled commit. Repository, tag, branch, and supported non-draft
+activity must agree. See [release compatibility](compatibility.md#names-and-triggers).
 `BUILDKITE_GITHUB_WORKFLOW_PATH` remains the path fallback because GitHub has no
 `GITHUB_WORKFLOW_PATH`. `BUILDKITE_GITHUB_ACTION` remains the action source
 because GitHub's `GITHUB_ACTION` has a different meaning. An explicit
@@ -506,8 +510,8 @@ group conditions, provider-check names, and explicit run-name evaluation. An
 explicit event is never replaced with live Buildkite fields.
 
 Linked webhook data can provide native `merge_group`, `release`, and `issues`
-events. GitHub Actions Pipeline Trigger identity additionally supports `issues`
-and `issue_comment` without native Buildkite issue/comment settings. Merge
+events. GitHub Actions Pipeline Trigger identity additionally supports `release`,
+`issues`, `issue_comment`, and PR review events without native event settings. Merge
 groups and releases need matching Buildkite refs, commits, and
 activity. Release also needs a valid payload and a tag matching `BUILDKITE_TAG`
 and `BUILDKITE_BRANCH`. Issue and comment payloads need a valid action, object
