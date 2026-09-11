@@ -15,7 +15,6 @@ steps:
       mise exec -- go run -ldflags "-X main.revision=$$revision" ./cmd/buildkite-gha upload \
         --event-path testdata/smoke/events/push.json \
         --runner-queue ubuntu-latest=hosted \
-        --importer-step continue-on-error-importer \
         .buildkite/fixtures/continue-on-error.yml
 
   - label: ":pipeline: Continue-on-error proof continuation loader"
