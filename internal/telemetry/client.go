@@ -322,11 +322,11 @@ func BoundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
 			out[index].MessageTruncated = out[index].MessageTruncated || diagnostic.MessageTruncated
 			continue
 		}
+		if len(out) == maxDiagnostics {
+			continue
+		}
 		seen[identity] = len(out)
 		out = append(out, diagnostic)
-		if len(out) == maxDiagnostics {
-			break
-		}
 	}
 	return out, nil
 }

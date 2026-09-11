@@ -363,6 +363,21 @@ func TestDiagnosticsDeduplicateByWireIdentity(t *testing.T) {
 	if err != nil || len(got) != 1 || !got[0].MessageTruncated {
 		t.Fatalf("post-truncation diagnostics = %#v, %v", got, err)
 	}
+
+	// After the budget fills, ignore new identities but still merge duplicate flags.
+	input := []Diagnostic{first}
+	for i := range 20 {
+		other := first
+		other.WorkflowPath = strconv.Itoa(i) + ".yml"
+		input = append(input, other)
+	}
+	input = append(input, duplicate, first)
+	want = append([]Diagnostic(nil), input[:20]...)
+	want[0].MessageTruncated = true
+	got, err = BoundedDiagnostics(input)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("full-budget diagnostics = %#v, %v; want %#v", got, err, want)
+	}
 }
 
 func TestClientEmitsDiagnosticTextWithinServerRequestLimit(t *testing.T) {
