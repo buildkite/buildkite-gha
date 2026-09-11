@@ -112,6 +112,50 @@ func TestRunJobCallGuardSkipsActionJobBeforePreparingRuntimeMise(t *testing.T) {
 	}
 }
 
+func TestRunJobMakesSkippedJobVisibleWithoutFailingIt(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		failStepUpdate bool
+		wantWarning    bool
+	}{
+		{name: "label updated"},
+		{name: "label update is advisory", failStepUpdate: true, wantWarning: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := cliRunJobPlan()
+			job.Condition = "false"
+			job.Program.Job.Steps[0].Run.Command.Source = "exit 99"
+			planPath, planDigest := writeCLIJobPlan(t, job)
+			setCLIJobIdentity(t, job, planDigest)
+			runner := &cliCaptureRunner{failStepUpdate: test.failStepUpdate}
+			var stdout, stderr bytes.Buffer
+
+			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 0 {
+				t.Fatalf("run() code = %d, stderr = %q, want successful skipped check", code, stderr.String())
+			}
+			if manifest := publishedCLIManifest(t, runner, job, planDigest); manifest.Result != "skipped" {
+				t.Fatalf("published result = %q, want skipped", manifest.Result)
+			}
+			var updates []cliCommand
+			for _, command := range runner.commands {
+				if len(command.args) > 1 && command.args[0] == "step" && command.args[1] == "update" {
+					updates = append(updates, command)
+				}
+			}
+			wantArgs := []string{"step", "update", "label", " (skipped)", "--append"}
+			if len(updates) != 1 || !slices.Equal(updates[0].args, wantArgs) {
+				t.Fatalf("step updates = %#v, want skipped label", updates)
+			}
+			if got := strings.Contains(stderr.String(), "warning: skipped job label"); got != test.wantWarning {
+				t.Fatalf("stderr = %q, warning present = %v, want %v", stderr.String(), got, test.wantWarning)
+			}
+			if test.wantWarning && !strings.Contains(stdout.String(), "^^^ +++") {
+				t.Fatalf("stdout = %q, want advisory publication warning expanded", stdout.String())
+			}
+		})
+	}
+}
+
 func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	workspace := t.TempDir()
 	workflowSource := []byte("name: cli fixture\n")

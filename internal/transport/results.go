@@ -45,6 +45,7 @@ type Publication struct {
 	Path                   string
 	ManifestDigest         string
 	MetadataMirrorError    error
+	SkippedLabelError      error
 	SummaryAnnotationError error
 	WarningAnnotationError error
 	ErrorAnnotationError   error

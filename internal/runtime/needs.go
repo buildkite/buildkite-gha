@@ -14,6 +14,7 @@ const (
 	jobSummaryAnnotationContext = "buildkite-gha-job-summary"
 	jobWarningAnnotationContext = "buildkite-gha-workflow-warnings"
 	jobErrorAnnotationContext   = "buildkite-gha-workflow-errors"
+	skippedJobLabelSuffix       = " (skipped)"
 )
 
 // ResolveNeeds converts compiler-owned producer identities into the verified
@@ -141,6 +142,11 @@ func PublishJobResult(ctx context.Context, agent transport.Agent, root, workflow
 }
 
 func publishJobAnnotations(ctx context.Context, agent transport.Agent, jobID string, result JobResult, publication *transport.Publication) {
+	if result.Conclusion == "skipped" {
+		if err := agent.EnsureStepLabelSuffix(ctx, skippedJobLabelSuffix); err != nil {
+			publication.SkippedLabelError = fmt.Errorf("mark skipped job: %w", err)
+		}
+	}
 	publishJobSummary(ctx, agent, jobID, result.Summary, publication)
 	if result.WarningAnnotations != "" {
 		if err := agent.AnnotateJob(ctx, jobID, jobWarningAnnotationContext, "warning", result.WarningAnnotations); err != nil {
