@@ -78,7 +78,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--event` supports `push`, `pull_request`, `merge_group`, `release`, `deployment`, `deployment_status`, `create`, `delete`, `label`, `issues`,
+`--event` supports `push`, `pull_request`, `pull_request_target`, `merge_group`, `release`, `deployment`, `deployment_status`, `create`, `delete`, `label`, `issues`,
 `issue_comment`, `pull_request_review`, `pull_request_review_comment`,
 `workflow_dispatch`, and `schedule`. It requires
 `--profile hosted` and cannot be combined with `--event-path`.
@@ -379,7 +379,7 @@ Actions Pipeline Trigger builds. Most users should configure an explicit
 Without an explicit selector, `BUILDKITE_GITHUB_WORKFLOW_PATH` marks a GitHub
 Actions Pipeline Trigger selection. The server also supplies:
 
-- `GITHUB_EVENT_NAME`: `push`, `pull_request`, `issues`, `issue_comment`,
+- `GITHUB_EVENT_NAME`: `push`, `pull_request`, `pull_request_target`, `issues`, `issue_comment`,
   `pull_request_review`, `pull_request_review_comment`, `release`, `merge_group`,
   `deployment`, `deployment_status`, `create`, `delete`, or `label`
 - `GITHUB_WORKFLOW`: the workflow `name`, or its repository-relative path when
@@ -395,9 +395,13 @@ The `GITHUB_*` values take precedence when present. The plugin derives the
 selected path from `GITHUB_WORKFLOW_REF`, checks `GITHUB_WORKFLOW` against the
 checked-out file, and requires `GITHUB_WORKFLOW_SHA` to match the checkout
 commit. A malformed preferred value fails instead of falling back.
-For pull requests, `GITHUB_WORKFLOW_REF` and imported jobs' `GITHUB_REF` retain
+For `pull_request`, `GITHUB_WORKFLOW_REF` and imported jobs' `GITHUB_REF` retain
 `refs/pull/<number>/merge`, while `GITHUB_WORKFLOW_SHA`, `GITHUB_SHA`, and the
 Buildkite checkout use the pull request head commit.
+For `pull_request_target`, the workflow ref and SHA identify the server-selected
+default branch and commit. Both fields, the original linked payload, and a clean
+matching checkout are required; explicit plugin workflow selectors are rejected.
+See [target semantics and limitations](compatibility.md#trusted-default-branch-pr-workflows).
 Review and inline review-comment events use the same PR-head contract. They
 require both workflow identity fields and the original `buildkite:webhook`
 payload. The PR number, head SHA, head/base branches, activity, and all three

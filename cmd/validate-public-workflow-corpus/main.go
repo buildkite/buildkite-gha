@@ -35,6 +35,7 @@ const (
 var supportedEvents = map[string]bool{
 	"push":                        true,
 	"pull_request":                true,
+	"pull_request_target":         true,
 	"pull_request_review":         true,
 	"pull_request_review_comment": true,
 	"merge_group":                 true,

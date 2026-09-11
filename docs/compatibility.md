@@ -309,6 +309,7 @@ the group condition, and the provider-check suffix.
 | --- | --- |
 | `push` | `branches`, `branches-ignore`, `tags`, and `tags-ignore`, including ordered negative patterns in an include list. Branch and tag filters select their corresponding ref kind. Matching `paths` and `paths-ignore` can be admitted for linked GitHub branch pushes when the bounded local-diff requirements below are met. |
 | `pull_request` | `branches` and `branches-ignore` match the base branch. Omitted `types` defaults to `opened`, `synchronize`, and `reopened`; explicitly listed activity types must map exactly to a supported Buildkite source action. Matching `paths` and `paths-ignore` can be admitted when the bounded local-diff requirements below are met. |
+| `pull_request_target` | [Trusted default-branch PR workflows](#trusted-default-branch-pr-workflows). The same activities and branch/path filters as `pull_request`, but workflow source and default checkout use the base repository's resolved default branch, not the PR base or head. |
 | `merge_group` | Pipeline Triggers with a compatible server, and native Buildkite merge queue builds. Native builds require merge queue builds and Merge groups webhook delivery in the pipeline's GitHub settings. `branches` and `branches-ignore` match the base branch. Omitted `types` or `types: []` selects the only supported activity, `checks_requested`; other types and tag and workflow filters are rejected. `destroyed` is not a workflow event. `paths` and `paths-ignore` are ignored with a warning, matching GitHub, which does not evaluate path filters for `merge_group` events. The ref and SHA identify the speculative queue head, not the base commit. A push to a queue ref is still a push. |
 | `release` | Pipeline Triggers and native Buildkite release builds. Native builds require **Additional Webhooks** > **Releases** and **Code** trigger mode. Pipeline Triggers require a compatible server and the GitHub Code Access App to select the workflow at the immutable peeled tag commit. `types` is required and may contain only `published`, `created`, and `released`; bare `release`, all other activity types, and branch, tag, path, and workflow filters are rejected. All draft deliveries are rejected; publishing a prerelease with `published` is supported, unlike the `prereleased` activity. The ref is `refs/tags/<tag_name>`. The SHA is the server-resolved peeled commit, or the checked-out commit for the native compatibility fallback. Existing hosted release `GITHUB_TOKEN` policy is unchanged. |
 | `deployment`, `deployment_status` | Pipeline Triggers with a compatible server, or explicit event snapshots. Bare, array, null, and empty-map declarations are supported; activity types and event filters are not. Workflows and checkout use the deployment commit. The ref identifies its branch or tag and is empty for SHA-only deployments. Status states `error`, `failure`, `in_progress`, `queued`, `pending`, `success`, and `waiting` are supported ([GitHub status enum](https://docs.github.com/en/graphql/reference/enums#deploymentstatusstate)); `inactive` cannot run a workflow. The genuine payload exposes `github.event.deployment` and `github.event.deployment_status`, including environment, state, `environment_url`, `log_url`, and `target_url` when present. Use job/step conditions on these values, not `types` or environment filters. No deployment creation or environment orchestration is added. |
@@ -343,6 +344,42 @@ without retained payloads fail explicitly. See the
 [server-selected event contract](cli.md#private-preview-pipeline-trigger-selection).
 
 GitHub defines seven release activities: `published`, `unpublished`, `created`, `edited`, `deleted`, `prereleased`, and `released`. A bare `on: release` selects all seven, so it cannot map exactly to Buildkite's three delivered activities and is unsupported.
+
+#### Trusted default-branch PR workflows
+
+`pull_request_target` supports same-repository and fork PRs through a compatible
+Pipeline Trigger backend. GitHub delivers a `pull_request` webhook, not a
+separate target hook. The server independently selects ordinary PR workflows
+from the head and target workflows from the base repository's default branch.
+Install the compatible runtime before enabling backend dispatch.
+
+Following [current GitHub.com behavior](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target),
+target workflow source, local reusable workflows, and default checkout use the
+selected default-branch commit. This can differ from the PR base branch.
+`github.ref` names that default branch and `github.sha` is its immutable selected
+SHA. `github.head_ref`, `github.base_ref`, and the original event payload retain
+the PR's actual identity. Moving a ref after selection does not move execution.
+Merge conflicts do not suppress target events; `closed` requires explicit
+`types: [closed]`, and `github.event.pull_request.merged` distinguishes a merge.
+Branch filters still match the PR base; CI-skip directives do not suppress target
+events. Explicitly empty `types` is unsupported.
+
+These are bounded semantics, not full GitHub parity:
+
+- The server pins the default branch at processing time. The PR webhook does not
+  contain GitHub's event-time default SHA. A redelivery can resolve a newer tip.
+- Imports require the original linked webhook and server-selected path/ref/SHA,
+  without plugin workflow overrides. Missing repository identity fails closed.
+- The importer verifies a clean checkout of the selected SHA and matching origin
+  before reading source. Dirty, untracked or ignored files, index overrides,
+  sparse checkouts, and submodules are unsupported for target imports.
+- Path filters require complete existing local PR base/head history and the
+  bounds below. The importer does not fetch missing PR objects. Unlike ordinary
+  PR imports, the checkout and workflow must match the selected default SHA,
+  while the diff remains `base...head`.
+- GitHub's unpublished security-sensitive branch-name suppression rules are not
+  reproduced. Buildkite token, secret, environment and cache policies differ;
+  see [target security boundaries](security.md#target-pr-workflows).
 
 For push and pull-request path filters, once the workflow and checkout are
 verified against the webhook commit, non-path exclusions retain their branch
@@ -396,7 +433,8 @@ on:
 Before upload, the importer compares the pull request merge base with its head
 in the local checkout (`base...head`). The linked webhook must provide full
 base and head commit SHAs with one common merge base verified as an ancestor
-of both commits. The checkout and filtered workflow must match the PR head.
+of both commits. The checkout and filtered workflow must match the PR head for
+`pull_request`, or the selected default commit for `pull_request_target`.
 The comparison uses those pinned commits, not the current base-branch tip.
 
 Buildkite builds the PR head, not GitHub's synthetic merge. Path evaluation

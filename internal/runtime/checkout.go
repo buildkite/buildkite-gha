@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
@@ -82,6 +83,9 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandOutputProcess
 	}
 	if err := actionintegration.ValidateCheckoutInputs(commit, inputs, job.Event.Repository, job.Event.SHA); err != nil {
 		return result, fmt.Errorf("%s: %w", adapter, err)
+	}
+	if err := validateTargetCheckout(job.Event, inputs); err != nil {
+		return result, err
 	}
 	inputs = checkoutInputsWithReleaseDefaults(commit, inputs)
 	lfs := checkoutInputTrue(checkoutInput(inputs, "lfs"))
@@ -209,6 +213,42 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandOutputProcess
 	}
 	setCheckoutOutputs(result.Outputs, commit, checkoutRefOutput(inputs, job.Event.Ref), headSHA)
 	return result, nil
+}
+
+// Mirror checkout's fork-PR guard. Repository overrides and refs/pull refs are
+// already rejected by the adapter's bounded input contract. Explicit opt-out
+// remains unsupported; this is not a sandbox for user-authored git commands.
+func validateTargetCheckout(event plan.Event, inputs map[string]string) error {
+	if event.Name != "pull_request_target" {
+		return nil
+	}
+	if event.Payload == nil {
+		return fmt.Errorf("target checkout requires the verified PR payload")
+	}
+	payload := *event.Payload
+	pr, _ := payload["pull_request"].(map[string]any)
+	repository, _ := payload["repository"].(map[string]any)
+	head, _ := pr["head"].(map[string]any)
+	headRepository, _ := head["repo"].(map[string]any)
+	baseID, _ := repository["id"].(json.Number)
+	headID, _ := headRepository["id"].(json.Number)
+	baseNumber, baseErr := baseID.Int64()
+	headNumber, headErr := headID.Int64()
+	headSHA, _ := head["sha"].(string)
+	if baseErr != nil || headErr != nil || baseNumber <= 0 || headNumber <= 0 || !gitutil.ValidObjectID(headSHA) {
+		return fmt.Errorf("target checkout requires valid PR repository IDs and head SHA")
+	}
+	if baseNumber == headNumber {
+		return nil
+	}
+	selected, branch := checkoutSelectedRevision(inputs, event.SHA)
+	if branch {
+		return nil
+	}
+	if selected == head["sha"] || selected == pr["merge_commit_sha"] {
+		return fmt.Errorf("target checkout of a fork PR head or merge SHA is unsafe; use the default checkout")
+	}
+	return nil
 }
 
 func setCheckoutOutputs(outputs map[string]string, commit, ref, headSHA string) {

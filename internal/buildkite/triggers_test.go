@@ -423,12 +423,12 @@ func TestTranslateTriggerConditionIgnoresUnsupportedEventsBesideSupportedOnes(t 
 	got, err := TranslateTriggerCondition([]workflow.Trigger{
 		{Event: "push"},
 		{Event: "discussion"},
-		{Event: "pull_request_target", Paths: []string{"src/**"}, Branches: []string{"main"}},
+		{Event: "workflow_run", Paths: []string{"src/**"}, Branches: []string{"main"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, `build.env("BUILDKITE_GITHUB_EVENT") == "push"`) || strings.Contains(got, "discussion") || strings.Contains(got, "pull_request_target") {
+	if !strings.Contains(got, `build.env("BUILDKITE_GITHUB_EVENT") == "push"`) || strings.Contains(got, "discussion") || strings.Contains(got, "workflow_run") {
 		t.Fatalf("condition = %q", got)
 	}
 }
@@ -437,13 +437,13 @@ func TestValidateTriggerConditionsIgnoresUnsupportedEventsBesideSupportedOnes(t 
 	if err := ValidateTriggerConditions([]workflow.Trigger{
 		{Event: "push"},
 		{Event: "discussion"},
-		{Event: "pull_request_target", Paths: []string{"src/**"}},
+		{Event: "workflow_run", Paths: []string{"src/**"}},
 		{Event: "workflow_run"},
 	}); err != nil {
 		t.Fatalf("ValidateTriggerConditions() error = %v", err)
 	}
-	err := ValidateTriggerConditions([]workflow.Trigger{{Event: "discussion"}, {Event: "pull_request_target"}})
-	if err == nil || !strings.Contains(err.Error(), `unsupported GitHub trigger event "discussion"`) || !strings.Contains(err.Error(), `unsupported GitHub trigger event "pull_request_target"`) {
+	err := ValidateTriggerConditions([]workflow.Trigger{{Event: "discussion"}, {Event: "workflow_run"}})
+	if err == nil || !strings.Contains(err.Error(), `unsupported GitHub trigger event "discussion"`) || !strings.Contains(err.Error(), `unsupported GitHub trigger event "workflow_run"`) {
 		t.Fatalf("ValidateTriggerConditions() error = %v", err)
 	}
 }
@@ -455,7 +455,7 @@ func TestTranslateEventTriggerConditionIgnoresUnsupportedEvents(t *testing.T) {
 		Tag:            "build.tag",
 	}
 	condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{
-		{Event: "push"}, {Event: "discussion"}, {Event: "pull_request_target", Paths: []string{"src/**"}},
+		{Event: "push"}, {Event: "discussion"}, {Event: "workflow_run", Paths: []string{"src/**"}},
 	}, "push", expressions, TriggerEventSnapshot{})
 	if err != nil || !applicable {
 		t.Fatalf("condition/applicable/error = %q / %t / %v", condition, applicable, err)

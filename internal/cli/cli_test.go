@@ -461,7 +461,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile ignores unsupported trigger events beside a supported one", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "mixed.yml")
-		if err := os.WriteFile(workflow, []byte("on: [push, discussion, pull_request_target]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on: [push, discussion, workflow_run]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -487,7 +487,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 				messages[event] = message
 			}
 		}
-		for _, event := range []string{"discussion", "pull_request_target"} {
+		for _, event := range []string{"discussion", "workflow_run"} {
 			want := "on." + event + " is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: push. Move the jobs this trigger guards to one of those triggers if you need them. If you need " + event + ", log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it."
 			if messages[event] != want {
 				t.Fatalf("unsupported-trigger message for %s = %q, want %q; report = %#v", event, messages[event], want, report)
