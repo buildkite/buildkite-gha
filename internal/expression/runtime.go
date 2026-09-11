@@ -360,6 +360,11 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 		if allowedContexts != nil && !allowedContexts[strings.ToLower(root)] {
 			return fmt.Errorf("runtime context %q is unavailable in this field", root)
 		}
+		// Job controls reduce strategy values during graph expansion, before
+		// the normalized program reaches runtime.
+		if strings.EqualFold(root, "strategy") && len(path) == 1 {
+			return nil
+		}
 		if strings.EqualFold(root, "github") {
 			if len(path) == 0 {
 				return fmt.Errorf("dynamic or whole github access is unsupported")

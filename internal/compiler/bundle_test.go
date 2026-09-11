@@ -423,7 +423,7 @@ jobs:
       matrix:
         experimental: [false, true]
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.experimental }}
+    continue-on-error: ${{ strategy.fail-fast && matrix.experimental }}
     steps:
       - run: exit 1
 `)
