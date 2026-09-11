@@ -177,7 +177,7 @@ func TestDiagnosticExcerptsUseCapturedInputOnBothSurfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, artifacts := generatedFailure(t.Context(), report, sourceLinkContext{})
-	const excerpt = "> 6 |       - uses: ./.github/actions/missing"
+	const excerpt = "> 6 |       - uses: ./.github/actions/missing\n    |               ^^^^^^^^^^^^^^^^^^^^^^^^^"
 	if !strings.Contains(string(artifacts[0].Contents), excerpt) || !strings.Contains(string(artifacts[1].Contents), "<pre><code>"+html.EscapeString(excerpt)+"</code></pre>") {
 		t.Fatalf("missing original excerpt: %s", artifacts)
 	}
