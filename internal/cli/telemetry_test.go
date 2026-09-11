@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -128,14 +129,74 @@ func TestCommandCompletionTelemetryFailureDoesNotChangeExit(t *testing.T) {
 	}
 }
 
+func TestSuccessfulImportTelemetryIncludesWorkflowDiagnostics(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", root)
+	events := make(chan map[string]json.RawMessage, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var event struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			t.Error(err)
+		}
+		events <- event.Properties
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+
+	details := &commandTelemetryDetails{}
+	for _, name := range []string{"docs.yml", "test.yml", "docs.yml"} {
+		details.addReportDiagnostics(compatibility.ProcessingReport{
+			Workflow: filepath.Join(root, ".github", "workflows", name),
+			Diagnostics: []compatibility.Diagnostic{{
+				Level: "error", Code: compiler.CodePipelineGeneration,
+				Message: "Push filters could not be evaluated.", Detail: "Missing\nwebhook history.",
+				Location: &compatibility.SourceLocation{Path: "reusable.yml", Line: 3},
+			}},
+		})
+	}
+	details.addReportDiagnostics(compatibility.NewProcessingReport("valid.yml", ""))
+	emitCommandTelemetry(t.Context(), telemetry.CommandPluginImport, telemetry.OutcomeSuccess, "dev", 0, details.forOutcome(telemetry.OutcomeSuccess))
+	var properties map[string]json.RawMessage
+	select {
+	case properties = <-events:
+	default:
+		t.Fatal("successful import did not send telemetry")
+	}
+	if string(properties["outcome"]) != `"success"` {
+		t.Fatalf("outcome = %s", properties["outcome"])
+	}
+	for _, field := range []string{"failure_phase", "failure_code", "error_message", "error_message_truncated"} {
+		if _, exists := properties[field]; exists {
+			t.Fatalf("successful import sent %s", field)
+		}
+	}
+	var diagnostics []telemetry.Diagnostic
+	if err := json.Unmarshal(properties["diagnostics"], &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	want := []telemetry.Diagnostic{
+		{Code: compiler.CodePipelineGeneration, Severity: telemetry.SeverityError, Message: "Push filters could not be evaluated. Missing webhook history.", WorkflowPath: ".github/workflows/docs.yml"},
+		{Code: compiler.CodePipelineGeneration, Severity: telemetry.SeverityError, Message: "Push filters could not be evaluated. Missing webhook history.", WorkflowPath: ".github/workflows/test.yml"},
+	}
+	if !reflect.DeepEqual(diagnostics, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", diagnostics, want)
+	}
+}
+
 func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
 	details := &commandTelemetryDetails{}
 	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
-		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: compiler.StageWorkflowParsing, Message: "must not be uploaded"},
-		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: compiler.StageWorkflowParsing, Message: "different sensitive text"},
-		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions, Blocker: "runner_label", BlockerDetail: "windows-latest", Message: "must not be uploaded"},
-		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions, Blocker: "runner_label", BlockerDetail: "macos-10", Message: "must not be uploaded"},
-		{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Stage: compiler.StageAdmission, Message: "must not be uploaded"},
+		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: compiler.StageWorkflowParsing, Message: "invalid workflow"},
+		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: compiler.StageWorkflowParsing, Message: "invalid job"},
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions, Blocker: "runner_label", BlockerDetail: "windows-latest", Message: "unsupported runner"},
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: compiler.StageExpressions, Blocker: "runner_label", BlockerDetail: "macos-10", Message: "unsupported runner"},
+		{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Stage: compiler.StageAdmission, Message: "unproven action"},
 		{Level: "error", Code: "E_FUTURE_UNALLOWLISTED", Stage: compiler.StageGraph, Message: "must not be uploaded"},
 	}})
 	got := details.telemetryDetails()
@@ -146,10 +207,11 @@ func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
 		t.Fatalf("blocker = %q / %q", got.Blocker, got.BlockerDetail)
 	}
 	want := []telemetry.Diagnostic{
-		{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError},
-		{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError, Blocker: "runner_label", BlockerDetail: "windows-latest"},
-		{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError, Blocker: "runner_label", BlockerDetail: "macos-10"},
-		{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: telemetry.SeverityWarning},
+		{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError, Message: "invalid workflow"},
+		{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError, Message: "invalid job"},
+		{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError, Blocker: "runner_label", BlockerDetail: "windows-latest", Message: "unsupported runner"},
+		{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError, Blocker: "runner_label", BlockerDetail: "macos-10", Message: "unsupported runner"},
+		{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: telemetry.SeverityWarning, Message: "unproven action"},
 	}
 	if !reflect.DeepEqual(got.Diagnostics, want) {
 		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
@@ -172,13 +234,19 @@ func TestTriggerFailureTelemetryIncludesTrigger(t *testing.T) {
 
 func TestUnsupportedTriggerWarningTelemetryIncludesTrigger(t *testing.T) {
 	details := &commandTelemetryDetails{}
-	details.addWarnings([]compiler.Warning{{
+	warnings := []compiler.Warning{{
 		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Blocker: "trigger", BlockerDetail: "workflow_run",
-	}})
+		Message: "Unsupported trigger", Path: "reusable.yml", Line: 2, Column: 3,
+	}}
+	details.addWarnings("workflow.yml", warnings)
+	report := compatibility.NewProcessingReport("workflow.yml", "")
+	report.ApplyWarnings("workflow.yml", warnings)
+	details.addReportDiagnostics(report)
 	got := details.telemetryDetails()
 	want := []telemetry.Diagnostic{{
 		Code: "W_TRIGGER_EVENT_UNSUPPORTED", Severity: telemetry.SeverityWarning,
 		Blocker: "trigger", BlockerDetail: "workflow_run",
+		Message: "reusable.yml:2:3: Unsupported trigger", WorkflowPath: "workflow.yml",
 	}}
 	if !reflect.DeepEqual(got.Diagnostics, want) {
 		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
@@ -226,7 +294,7 @@ func TestHandledReportErrorsDoNotAttributeCommandFailure(t *testing.T) {
 	if got.FailurePhase != telemetry.FailurePhaseUnknown || got.FailureCode != telemetry.FailureCodeUnknown {
 		t.Fatalf("handled error attributed a later failure: %#v", got)
 	}
-	want := []telemetry.Diagnostic{{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError}}
+	want := []telemetry.Diagnostic{{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError, Message: "emitted as a failing step"}}
 	if !reflect.DeepEqual(got.Diagnostics, want) {
 		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
 	}
