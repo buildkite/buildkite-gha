@@ -225,7 +225,10 @@ func processingLog(ctx context.Context, report compatibility.ProcessingReport, s
 	if sourceLinks.localLinks == nil {
 		sourceLinks.localLinks = make(map[string]string)
 	}
-	workflowPath, _ := processingAnnotationWorkflowPath(report.Workflow, "")
+	workflowPath, workflowLinkable := processingAnnotationWorkflowPath(report.Workflow, "")
+	if workflowLinkable {
+		sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
+	}
 	messages := []string{
 		"\x1b[1;31m" + heading + "\x1b[0m",
 		"\x1b[1;36mWorkflow: " + terminalText(workflowPath) + "\x1b[0m",

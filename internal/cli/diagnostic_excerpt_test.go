@@ -46,11 +46,21 @@ func TestTriggerFailureLinksFilterAfterLicenseHeader(t *testing.T) {
 			_, artifacts := generatedFailure(t.Context(), report, sourceLinkContext{serverURL: "https://github.com", repository: "owner/project", sha: sha})
 			for _, artifact := range artifacts {
 				text := string(artifact.Contents)
-				if !strings.Contains(text, displayPath+":21:5") || !strings.Contains(text, "/blob/"+sha+"/"+displayPath+"#L21") || !strings.Contains(text, "pull_request_review does not support the branches filter") || strings.Contains(text, root) {
-					t.Errorf("diagnostic lost filter position: %s", text)
+				for _, want := range []string{
+					displayPath + ":21:5",
+					"/blob/" + sha + "/" + displayPath + "#L21",
+					"pull_request_review does not support the branches filter",
+					"21 |     branches:\n     |     ^^^^^^^^",
+					"move the check into a job or step condition",
+				} {
+					if !strings.Contains(text, want) {
+						t.Errorf("diagnostic missing %q: %s", want, text)
+					}
 				}
-				if !strings.Contains(text, "21 |     branches:\n     |     ^^^^^^^^") || !strings.Contains(text, "move the check into a job or step condition") || strings.Contains(text, "private-branch") {
-					t.Errorf("diagnostic lost safe filter explanation: %s", text)
+				for _, unwanted := range []string{root, "private-branch"} {
+					if strings.Contains(text, unwanted) {
+						t.Errorf("diagnostic exposed %q: %s", unwanted, text)
+					}
 				}
 			}
 		})

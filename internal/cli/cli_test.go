@@ -1624,7 +1624,7 @@ func TestProcessingAnnotationResolvesPathsFromBelowCheckoutRoot(t *testing.T) {
 	}
 }
 
-func TestProcessingAnnotationResolvesCompilerLocationsFromCheckoutRoot(t *testing.T) {
+func TestProcessingDiagnosticsResolveCompilerLocationsFromCheckoutRoot(t *testing.T) {
 	repository := t.TempDir()
 	workingDirectory := filepath.Join(repository, ".github")
 	workflowDirectory := filepath.Join(workingDirectory, "workflows")
@@ -1650,6 +1650,12 @@ func TestProcessingAnnotationResolvesCompilerLocationsFromCheckoutRoot(t *testin
 	want := `<a href="https://github.com/owner/repo/blob/` + sha + `/.github/workflows/build-security.yml#L35"><code>.github/workflows/build-security.yml:35:13</code></a>`
 	if !strings.Contains(body, want) {
 		t.Fatalf("annotation = %q, want %q", body, want)
+	}
+	messages, _ := processingLog(t.Context(), report, sourceLinks, "Workflow diagnostics")
+	log := strings.Join(messages, "\n")
+	wantLog := "\x1b\\.github/workflows/build-security.yml:35:13\x1b]8;;\x1b\\"
+	if !strings.Contains(log, wantLog) || strings.Contains(log, ".github/.github/") {
+		t.Fatalf("log lost checkout-relative source location: %q", log)
 	}
 }
 
@@ -1679,6 +1685,11 @@ func TestProcessingDiagnosticsRetainNestedWorkflowSourceRoot(t *testing.T) {
 	_, summary := processingAnnotationWithin(t.Context(), report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
 	if !strings.Contains(annotation, `href="`+wantLink+`"`) || !strings.Contains(summary, `href="`+wantLink+`"`) {
 		t.Fatalf("nested workflow location was not retained: annotation=%q summary=%q", annotation, summary)
+	}
+	messages, _ := processingLog(t.Context(), report, sourceLinks, "Workflow diagnostics")
+	wantLog := "\x1b]8;;" + wantLink + "\x1b\\nested/.github/workflows/build-security.yml:35:13\x1b]8;;\x1b\\"
+	if log := strings.Join(messages, "\n"); !strings.Contains(log, wantLog) {
+		t.Fatalf("log lost nested workflow source: %q", log)
 	}
 }
 
