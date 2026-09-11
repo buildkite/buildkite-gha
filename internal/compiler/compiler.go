@@ -92,51 +92,53 @@ type WorkflowSource struct {
 
 // JobInstance is one statically expanded job in the owned IR.
 type JobInstance struct {
-	Key                     string                    `json:"key"`
-	LogicalJobID            string                    `json:"logical_job_id"`
-	Label                   string                    `json:"label"`
-	Needs                   []string                  `json:"needs,omitempty"`
-	NeedGroups              map[string][]string       `json:"need_groups,omitempty"`
-	NeedOutputs             map[string][]NeedOutput   `json:"need_outputs,omitempty"`
-	CallGuards              []CallGuard               `json:"call_guards,omitempty"`
-	RunsOn                  []string                  `json:"runs_on"`
-	Queue                   string                    `json:"queue"`
-	Platform                Platform                  `json:"-"`
-	RuntimeImage            string                    `json:"runtime_image,omitempty"`
-	Cache                   *CacheVolume              `json:"-"`
-	Matrix                  map[string]any            `json:"matrix,omitempty"`
-	Inputs                  map[string]any            `json:"inputs,omitempty"`
-	DeferredInputs          map[string]DeferredInput  `json:"deferred_inputs,omitempty"`
-	FailFast                *bool                     `json:"fail_fast,omitempty"`
-	MaxParallel             *int                      `json:"max_parallel,omitempty"`
-	ConcurrencyGroup        string                    `json:"concurrency_group,omitempty"`
-	ConcurrencyGates        []WorkflowConcurrencyGate `json:"workflow_concurrency_gates,omitempty"`
-	Environment             string                    `json:"environment,omitempty"`
-	EnvironmentApproval     bool                      `json:"environment_approval,omitempty"`
-	Steps                   []workflow.Step           `json:"steps"`
-	Env                     map[string]string         `json:"env,omitempty"`
-	Permissions             map[string]string         `json:"permissions,omitempty"`
-	If                      string                    `json:"if,omitempty"`
-	ContinueOnError         bool                      `json:"continue_on_error,omitempty"`
-	TimeoutMinutes          float64                   `json:"timeout_minutes,omitempty"`
-	DefaultShell            string                    `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string                    `json:"default_working_directory,omitempty"`
-	Outputs                 map[string]string         `json:"outputs,omitempty"`
-	Container               *workflow.Container       `json:"container,omitempty"`
-	Services                []workflow.Service        `json:"services,omitempty"`
-	ServicesExpression      string                    `json:"services_expression,omitempty"`
-	SourcePath              string                    `json:"source_path"`
-	SourceDigest            string                    `json:"source_digest"`
-	RemoteWorkflow          *RemoteWorkflowSource     `json:"remote_workflow,omitempty"`
-	BlockerDetailUnsafe     bool                      `json:"blocker_detail_unsafe,omitempty"`
-	RepositoryRoot          string                    `json:"-"`
-	Source                  workflow.Span             `json:"source"`
-	environmentSecrets      []string
-	environmentVariables    map[string]string
-	secretAuthority         secretAuthority
-	tokenPolicyNarrowed     bool
-	jobPermissionsIgnored   bool
-	reusableCall            workflow.Position
+	Key                       string                    `json:"key"`
+	LogicalJobID              string                    `json:"logical_job_id"`
+	Label                     string                    `json:"label"`
+	Needs                     []string                  `json:"needs,omitempty"`
+	NeedGroups                map[string][]string       `json:"need_groups,omitempty"`
+	NeedOutputs               map[string][]NeedOutput   `json:"need_outputs,omitempty"`
+	CallGuards                []CallGuard               `json:"call_guards,omitempty"`
+	RunsOn                    []string                  `json:"runs_on"`
+	Queue                     string                    `json:"queue"`
+	Platform                  Platform                  `json:"-"`
+	RuntimeImage              string                    `json:"runtime_image,omitempty"`
+	Cache                     *CacheVolume              `json:"-"`
+	Matrix                    map[string]any            `json:"matrix,omitempty"`
+	Inputs                    map[string]any            `json:"inputs,omitempty"`
+	DeferredInputs            map[string]DeferredInput  `json:"deferred_inputs,omitempty"`
+	FailFast                  *bool                     `json:"fail_fast,omitempty"`
+	MaxParallel               *int                      `json:"max_parallel,omitempty"`
+	ConcurrencyGroup          string                    `json:"concurrency_group,omitempty"`
+	ConcurrencyGates          []WorkflowConcurrencyGate `json:"workflow_concurrency_gates,omitempty"`
+	Environment               string                    `json:"environment,omitempty"`
+	EnvironmentApproval       bool                      `json:"environment_approval,omitempty"`
+	Steps                     []workflow.Step           `json:"steps"`
+	Env                       map[string]string         `json:"env,omitempty"`
+	Permissions               map[string]string         `json:"permissions,omitempty"`
+	If                        string                    `json:"if,omitempty"`
+	ContinueOnError           bool                      `json:"continue_on_error,omitempty"`
+	ContinueOnErrorExpression string                    `json:"continue_on_error_expression,omitempty"`
+	ContinueOnErrorSpan       workflow.Span             `json:"-"`
+	TimeoutMinutes            float64                   `json:"timeout_minutes,omitempty"`
+	DefaultShell              string                    `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory   string                    `json:"default_working_directory,omitempty"`
+	Outputs                   map[string]string         `json:"outputs,omitempty"`
+	Container                 *workflow.Container       `json:"container,omitempty"`
+	Services                  []workflow.Service        `json:"services,omitempty"`
+	ServicesExpression        string                    `json:"services_expression,omitempty"`
+	SourcePath                string                    `json:"source_path"`
+	SourceDigest              string                    `json:"source_digest"`
+	RemoteWorkflow            *RemoteWorkflowSource     `json:"remote_workflow,omitempty"`
+	BlockerDetailUnsafe       bool                      `json:"blocker_detail_unsafe,omitempty"`
+	RepositoryRoot            string                    `json:"-"`
+	Source                    workflow.Span             `json:"source"`
+	environmentSecrets        []string
+	environmentVariables      map[string]string
+	secretAuthority           secretAuthority
+	tokenPolicyNarrowed       bool
+	jobPermissionsIgnored     bool
+	reusableCall              workflow.Position
 }
 
 // CallGuard is one immutable caller-scoped condition inherited by a flattened

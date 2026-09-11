@@ -103,6 +103,11 @@ func (p *Program) walkWorkflowSites(visit func(*Site) error) error {
 	if err := w(&job.Condition, SurfaceJobCondition, ResultBoolean, PurposeExpression); err != nil {
 		return err
 	}
+	if job.ContinueOnError.Expression != nil {
+		if err := w(job.ContinueOnError.Expression, SurfaceJobControl, ResultBoolean, PurposeExpression); err != nil {
+			return err
+		}
+	}
 	if err := bindings(job.Env, SurfaceJobEnvironment, PurposeExpression); err != nil {
 		return err
 	}

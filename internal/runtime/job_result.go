@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
@@ -83,12 +82,12 @@ func IsToleratedJobFailure(err error) bool {
 	return ok
 }
 
-func tolerateJobSetupFailure(runCtx context.Context, job plan.Job, result JobResult, err error) (JobResult, error) {
+func tolerateJobSetupFailure(runCtx context.Context, continueOnError bool, result JobResult, err error) (JobResult, error) {
 	if runCtx.Err() != nil {
 		result.Conclusion = "cancelled"
 		return result, errors.Join(err, runCtx.Err())
 	}
-	if job.ContinueOnError && isWorkflowJobFailure(err) && !isHardJobFailure(err) {
+	if continueOnError && isWorkflowJobFailure(err) && !isHardJobFailure(err) {
 		result.Conclusion = "success"
 		return result, &toleratedJobFailure{err: err}
 	}

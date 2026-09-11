@@ -275,6 +275,10 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		resolvedContainer, containerErr := resolveCompileContainer(instanceJob.Container, instanceContext)
 		instanceJob.Container = resolvedContainer
 		resolvedServices, serviceErr := resolveCompileServices(instanceJob.Services, instanceContext)
+		controlContext := instanceContext
+		controlContext.Vars = nil
+		resolvedContinueOnError, continueOnErrorErr := resolveJobContinueOnError(instanceJob, controlContext)
+		instanceJob = resolvedContinueOnError
 		candidate := newJobCandidate(sourced, instanceJob, matrix, key, resolvedServices)
 
 		valid := true
@@ -283,6 +287,10 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			valid = false
 		} else if serviceErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, job.Span.Start.Line, job.Span.Start.Column, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve service containers: %v", serviceErr))))
+			valid = false
+		} else if continueOnErrorErr != nil {
+			position := job.ContinueOnErrorSpan.Start
+			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, key, "", 0, locatedJobError(jobPath, job, position.Line, position.Column, fmt.Sprintf("resolve job continue-on-error: %v", continueOnErrorErr))))
 			valid = false
 		} else if compileConditionErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, compileConditionErr))
@@ -366,6 +374,23 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 	e.failedJobs[id] = jobFailed || jobBlocked
 }
 
+func resolveJobContinueOnError(job workflow.Job, context expression.CompileContext) (workflow.Job, error) {
+	if job.ContinueOnErrorExpression == "" {
+		return job, nil
+	}
+	reduced, err := reduceCompileSite(job.ContinueOnErrorExpression, expression.ProfileJobControl, expression.ResultBoolean, context)
+	if err != nil {
+		return job, err
+	}
+	if reduced.Known {
+		job.ContinueOnError = reduced.Value.(bool)
+		job.ContinueOnErrorExpression = ""
+	} else {
+		job.ContinueOnErrorExpression = reduced.Source
+	}
+	return job, nil
+}
+
 func matrixStrategy(job workflow.Job, index, total int) map[string]any {
 	strategy := map[string]any{"job-index": index, "job-total": total, "fail-fast": true, "max-parallel": total}
 	if job.FailFast != nil {
@@ -382,7 +407,7 @@ func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any
 		Key: key, LogicalJobID: job.ID, Matrix: matrix, Inputs: cloneAnyMap(sourced.inputs.values),
 		FailFast: job.FailFast, MaxParallel: job.MaxParallel, Steps: append([]workflow.Step(nil), job.Steps...),
 		Env: cloneMap(job.Env), Permissions: permissionScopes(job.Permissions), If: job.If, Environment: job.Environment,
-		ContinueOnError: job.ContinueOnError, TimeoutMinutes: job.TimeoutMinutes,
+		ContinueOnError: job.ContinueOnError, ContinueOnErrorExpression: job.ContinueOnErrorExpression, ContinueOnErrorSpan: job.ContinueOnErrorSpan, TimeoutMinutes: job.TimeoutMinutes,
 		DefaultShell: job.DefaultShell, DefaultWorkingDirectory: job.DefaultWorkingDirectory,
 		Outputs: cloneMap(job.Outputs), Container: job.Container, Services: services,
 		ConcurrencyGates:   append([]WorkflowConcurrencyGate(nil), sourced.concurrencyGates...),

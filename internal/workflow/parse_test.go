@@ -604,6 +604,25 @@ func TestParseRetainsAllYAMLBooleanSpellingsForJobContinueOnError(t *testing.T) 
 	}
 }
 
+func TestParseRetainsExpressionValuedJobContinueOnError(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    continue-on-error: ${{ matrix.experimental }}\n    steps: [{run: true}]\n")
+	parsed, err := Parse("workflow.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Jobs[0].ContinueOnErrorExpression; got != "${{ matrix.experimental }}" {
+		t.Fatalf("continue-on-error expression = %q", got)
+	}
+	if parsed.Jobs[0].ContinueOnErrorSpan.Start.Line != 5 {
+		t.Fatalf("continue-on-error span = %#v", parsed.Jobs[0].ContinueOnErrorSpan)
+	}
+
+	invalid := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    continue-on-error: ${{ env.ALLOW_FAILURE }}\n    steps: [{run: true}]\n")
+	if _, err := Parse("workflow.yml", invalid); err == nil || !strings.Contains(err.Error(), `context "env" is unavailable`) {
+		t.Fatalf("Parse() error = %v, want unavailable job-control context", err)
+	}
+}
+
 func TestParseMatrixPreservesDeclarationOrderAndCombinationSpans(t *testing.T) {
 	source := []byte(`on: push
 jobs:
@@ -739,7 +758,6 @@ func TestParseRejectsExpressionValuedExecutionScalars(t *testing.T) {
 	}{
 		{name: "fail fast", snippet: "    strategy:\n      fail-fast: ${{ inputs.flag }}\n      matrix:\n        os: [ubuntu-latest]\n    steps:\n      - run: true\n", want: "expression-valued matrix fail-fast is unsupported"},
 		{name: "max parallel", snippet: "    strategy:\n      max-parallel: ${{ inputs.count }}\n      matrix:\n        os: [ubuntu-latest]\n    steps:\n      - run: true\n", want: "expression-valued matrix max-parallel is unsupported"},
-		{name: "job continue on error", snippet: "    continue-on-error: ${{ matrix.experimental }}\n    steps:\n      - run: true\n", want: "expression-valued job continue-on-error is unsupported"},
 		{name: "job timeout", snippet: "    timeout-minutes: ${{ inputs.timeout }}\n    steps:\n      - run: true\n", want: "expression-valued job timeout-minutes is unsupported"},
 	}
 	for _, test := range tests {

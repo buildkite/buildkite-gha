@@ -657,7 +657,7 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 | `outputs` | 🟡 Supported subset | Maps step outputs for consumption through `needs`. A job may publish 64 outputs of up to 1 KiB each. Ambiguous matrix output values stop the job with an error. |
 | `env`, `defaults.run` | 🟡 Supported subset | Uses the [workflow-level behavior](#environment-and-defaults). |
 | `timeout-minutes` | 🟡 Supported subset | Accepts literal timeouts up to 360 minutes. Expressions are rejected. |
-| `continue-on-error` | 🟡 Supported subset | Accepts literal booleans. Expressions are rejected. A tolerated failure remains visible as a Buildkite soft failure and reports `success` through downstream `needs`. |
+| `continue-on-error` | ✅ Supported | Accepts literal booleans or expressions that produce a Boolean. A tolerated failure remains visible as a Buildkite soft failure and reports `success` through downstream `needs`. |
 | `environment` | 🟡 Supported subset | Requires GitHub environment access at compile time. See [Deployment environments](#deployment-environments). |
 | `snapshot` | ➖ Accepted, no effect | Custom image creation is not implemented. |
 
@@ -712,7 +712,7 @@ jobs:
 
 Results and outputs come from verified producer manifests. Retrying one producer can make selection ambiguous; retry the whole build.
 
-A job with `continue-on-error: true` stops ordinary steps after a failure, runs eligible failure and always steps plus post-actions, publishes its outputs, and reports `success` through `needs.<job>.result`. The generated Buildkite job returns reserved status `78` for the tolerated workflow failure and soft-fails only that status, so the failure remains visible without blocking dependent jobs. Job timeout expiry remains `cancelled` and is never tolerated.
+A job with `continue-on-error: true`, or an expression that resolves to `true`, stops ordinary steps after a failure, runs eligible failure and always steps plus post-actions, publishes its outputs, and reports `success` through `needs.<job>.result`. The generated Buildkite job returns reserved status `78` for the tolerated workflow failure and soft-fails only that status, so the failure remains visible without blocking dependent jobs. Job timeout expiry remains `cancelled` and is never tolerated.
 
 Runner labels are case-insensitive. Runner aliases such as `macOS-latest` use
 the same target as `macos-latest`. Linux labels default to the corresponding
@@ -1187,6 +1187,7 @@ Job-level expressions support the same operators and pure functions with these f
 
 | Field | Contexts |
 | --- | --- |
+| `continue-on-error` | `github`, `needs`, `strategy`, `matrix`, `vars`, `inputs` |
 | `env` | `github`, `needs`, `matrix`, `vars`, `secrets`, `inputs` |
 | `defaults.run` | `github`, `needs`, `matrix`, `env`, `vars`, `inputs` |
 | `outputs` | `github`, `needs`, `matrix`, `runner`, `env`, `vars`, `secrets`, `steps`, `inputs` |
@@ -1195,9 +1196,10 @@ Workflow step fields support `hashFiles()`; composite step and job-level fields
 do not. Composite action `run`, `env`, `with`, and `working-directory` fields do
 support the listed operators and pure functions.
 
-The runtime has no equivalent values for `strategy`, or `job` in job outputs,
-so those contexts remain unsupported. Job-level fields also reject computed,
-whole, and projected `steps` and `needs` access.
+Outside `continue-on-error`, the runtime has no equivalent value for
+`strategy`; job outputs also have no `job` value. Those contexts remain
+unsupported. Other job-level fields reject computed, whole, and projected
+`steps` and `needs` access.
 
 Expression-valued `continue-on-error` must produce a Boolean. Expression-valued `timeout-minutes` must produce a number greater than 0 and at most 360.
 

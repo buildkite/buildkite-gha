@@ -415,6 +415,36 @@ jobs:
 	}
 }
 
+func TestCompileBundleCarriesExpressionJobContinueOnError(t *testing.T) {
+	workflow := []byte(`on: push
+jobs:
+  build:
+    strategy:
+      matrix:
+        experimental: [false, true]
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ strategy.fail-fast && matrix.experimental }}
+    steps:
+      - run: exit 1
+`)
+	bundle, err := CompileBundle("workflow.yml", workflow, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("compiled plans = %d, want two matrix jobs", len(bundle.Plans))
+	}
+	for i, want := range []bool{false, true} {
+		control := bundle.Plans[i].Job.Program.Job.ContinueOnError
+		if control.Expression != nil || control.Literal != want {
+			t.Fatalf("plan %d continue-on-error = %#v, want literal %t", i, control, want)
+		}
+		if bundle.Plans[i].Job.ContinueOnError != want {
+			t.Fatalf("plan %d soft-fail reservation = %t, want %t", i, bundle.Plans[i].Job.ContinueOnError, want)
+		}
+	}
+}
+
 func TestCompileBundlePreservesRuntimeImagePolicy(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)

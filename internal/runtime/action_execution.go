@@ -207,6 +207,10 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		jobResult.Conclusion = "skipped"
 		return jobResult, nil
 	}
+	r.continueOnError, err = evaluateJobContinueOnError(executionJob.ContinueOnError, eval)
+	if err != nil {
+		return jobResult, fmt.Errorf("evaluate job continue-on-error: %w", err)
+	}
 	// Reachability never resolves vars: jobs.<id>.if and step conditions see
 	// different vars scopes, so unknown vars keep every step reachable.
 	reachability, err := executionprogram.WorkflowReachability(*job.Program, expression.AbstractValues{References: map[string]any{
@@ -239,13 +243,13 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	if r.Mise == "" && r.ResolveMise != nil {
 		r.Mise, err = r.ResolveMise(runCtx)
 		if err != nil {
-			return tolerateJobSetupFailure(runCtx, job, jobResult, err)
+			return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, err)
 		}
 	}
 
 	secrets, err := r.resolveSecrets(runCtx, processor, job.RequiredSecrets)
 	if err != nil {
-		return tolerateJobSetupFailure(runCtx, job, jobResult, err)
+		return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, err)
 	}
 	if len(job.SecretMappings) != 0 {
 		projected := make(map[string]string, len(job.SecretMappings))
@@ -260,7 +264,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		}
 		token, err := r.resolveWorkflowToken(runCtx, processor, job.Event.Repository, job.GitHubToken.Workflow, job.GitHubToken.Permissions)
 		if err != nil {
-			return tolerateJobSetupFailure(runCtx, job, jobResult, err)
+			return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, err)
 		}
 		secrets["GITHUB_TOKEN"] = token
 		for _, alias := range job.GitHubToken.Aliases {
@@ -332,19 +336,19 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	}
 	jobEnv, err := executionprogram.EvaluateBindings(executionJob.Env, executionprogram.EvaluationContext{Expression: eval})
 	if err != nil {
-		return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate job environment: %w", err))
+		return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("evaluate job environment: %w", err))
 	}
 	serviceEval := eval
 	serviceEval.Env = jobEnv
 	services, evaluatedServiceOrder, err := evaluateProgramServices(executionJob.Services, serviceEval)
 	if err != nil {
-		return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate services: %w", err))
+		return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("evaluate services: %w", err))
 	}
 	var containerSpec *plan.Container
 	if executionJob.Container != nil {
 		containerSpec, err = evaluateProgramContainer(*executionJob.Container, serviceEval)
 		if err != nil {
-			return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate job container: %w", err))
+			return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("evaluate job container: %w", err))
 		}
 	}
 	_, explicitJobPATH := jobEnv["PATH"]
@@ -395,7 +399,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	actions := newActionLockResolver(job, workspace, r.Actions)
 	prebuiltDocker, err := r.preparePrebuiltDockerActions(runCtx, processor, actions)
 	if err != nil {
-		return tolerateJobSetupFailure(runCtx, job, jobResult, err)
+		return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, err)
 	}
 	if prebuiltDocker != nil {
 		r.prebuiltDocker = prebuiltDocker
@@ -417,14 +421,14 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			}
 			action, _, resolveErr := actions.resolve(runCtx, plan.ActionSelector{Lock: lock.ID})
 			if resolveErr != nil {
-				return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, resolveErr))
+				return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, resolveErr))
 			}
 			actionRuntime, runtimeErr := action.Runtime()
 			if runtimeErr != nil {
-				return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, runtimeErr))
+				return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, runtimeErr))
 			}
 			if entrypointErr := action.ValidateEntrypoints(actionRuntime); entrypointErr != nil {
-				return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, entrypointErr))
+				return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, entrypointErr))
 			}
 		}
 		for _, step := range executionJob.Steps {
@@ -433,10 +437,10 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 				continue
 			}
 			if source, sourceErr := actions.source(selector); sourceErr != nil {
-				return tolerateJobSetupFailure(runCtx, job, jobResult, sourceErr)
+				return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, sourceErr)
 			} else if source == "github" {
 				if verifyErr := r.verifyRemoteActionTree(runCtx, actions, selector, nil); verifyErr != nil {
-					return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action %q: %w", stepUses(step), verifyErr))
+					return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("prepare action %q: %w", stepUses(step), verifyErr))
 				}
 			}
 		}
@@ -444,7 +448,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			var mountErr error
 			containerMounts, mountErr = r.actionContainerMounts(runCtx, actions)
 			if mountErr != nil {
-				return tolerateJobSetupFailure(runCtx, job, jobResult, mountErr)
+				return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, mountErr)
 			}
 		}
 		if eventPath != "" {
@@ -452,7 +456,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		}
 		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, containerSpec, services, evaluatedServiceOrder, containerMounts...)
 		if setupErr != nil {
-			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
+			return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, setupErr)
 		}
 		r.jobContainer = backend
 		r.jobDocker = backend
@@ -465,7 +469,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	} else if len(services) != 0 {
 		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, nil, services, evaluatedServiceOrder)
 		if setupErr != nil {
-			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
+			return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, setupErr)
 		}
 		r.jobDocker = backend
 		eval.Services = backend.servicePorts
@@ -847,11 +851,18 @@ func (r *jobRun) finalize(runCtx context.Context) (JobResult, error) {
 		jobResult.Conclusion = "cancelled"
 	case runErr == nil:
 		jobResult.Conclusion = "success"
-	case job.ContinueOnError && !hardFailure && !isHardJobFailure(runErr):
+	case r.continueOnError && !hardFailure && !isHardJobFailure(runErr):
 		jobResult.Conclusion = "success"
 		runErr = &toleratedJobFailure{err: runErr}
 	}
 	return scrubJobResult(jobResult, sensitiveValues), runErr
+}
+
+func evaluateJobContinueOnError(control executionprogram.BoolControl, context expression.Context) (bool, error) {
+	if control.Expression != nil {
+		return evaluateProgramTyped[bool](*control.Expression, executionprogram.EvaluationContext{Expression: context})
+	}
+	return control.Literal, nil
 }
 
 func evaluateCallGuards(job plan.Job) (bool, error) {

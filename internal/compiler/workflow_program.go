@@ -12,7 +12,7 @@ func lowerWorkflowProgram(instance JobInstance) program.Program {
 	jobLocation := programLocation(instance.SourcePath, "job", instance.Source)
 	result := program.Program{Version: program.Version, Job: program.Job{
 		Condition:       workflowSite(instance.If, jobLocation, "job.if"),
-		ContinueOnError: instance.ContinueOnError,
+		ContinueOnError: program.BoolControl{Literal: instance.ContinueOnError},
 		TimeoutMinutes:  instance.TimeoutMinutes,
 		Env:             workflowBindings(instance.Env, jobLocation, "job.env"),
 		Defaults: program.Defaults{
@@ -21,6 +21,11 @@ func lowerWorkflowProgram(instance JobInstance) program.Program {
 		},
 		Outputs: workflowBindings(instance.Outputs, jobLocation, "job.outputs"),
 	}}
+	if instance.ContinueOnErrorExpression != "" {
+		location := programLocation(instance.SourcePath, "job.continue-on-error", instance.ContinueOnErrorSpan)
+		site := workflowSite(instance.ContinueOnErrorExpression, location, "job.continue-on-error")
+		result.Job.ContinueOnError.Expression = &site
+	}
 	if len(instance.CallGuards) != 0 {
 		result.Job.Guards = make([]program.Guard, len(instance.CallGuards))
 		for i, guard := range instance.CallGuards {

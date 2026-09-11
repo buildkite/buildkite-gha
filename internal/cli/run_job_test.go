@@ -1018,7 +1018,7 @@ func attachCLIExecutionProgram(job *plan.Job) {
 		actions[lock.ID] = action
 	}
 	normalized := executionprogram.Program{Version: executionprogram.Version, Actions: actions, Job: executionprogram.Job{
-		Condition: cliProgramSite(job.Condition), ContinueOnError: job.ContinueOnError, TimeoutMinutes: job.TimeoutMinutes,
+		Condition: cliProgramSite(job.Condition), ContinueOnError: executionprogram.BoolControl{Literal: job.ContinueOnError}, TimeoutMinutes: job.TimeoutMinutes,
 		Env:      cliProgramBindings(job.Env),
 		Defaults: executionprogram.Defaults{Shell: cliProgramSite(job.DefaultShell), WorkingDirectory: cliProgramSite(job.DefaultWorkingDirectory)},
 		Outputs:  cliProgramBindings(job.Outputs),
