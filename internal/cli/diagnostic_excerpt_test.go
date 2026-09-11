@@ -16,13 +16,13 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
-func TestTriggerFailureLinksDeclarationAfterLicenseHeader(t *testing.T) {
+func TestTriggerFailureLinksFilterAfterLicenseHeader(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", root)
 	const path = "pr-reviewed.yml"
-	// The rejected trigger is at 19:3, not the file start or the selected PR trigger.
-	source := []byte(strings.Repeat("# License header\n", 15) + "\nname: Reviewed\non:\n  pull_request_review:\n    types: [submitted, edited, dismissed]\n    branches: [trunk]\n  pull_request:\n    types: [opened]\n    branches: [trunk]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hello\n")
+	// The rejected filter is at 21:5, not the review event or the selected PR trigger.
+	source := []byte(strings.Repeat("# License header\n", 15) + "\nname: Reviewed\non:\n  pull_request_review:\n    types: [submitted, edited, dismissed]\n    branches:\n      - private-branch\n  pull_request:\n    types: [opened]\n    branches: [trunk]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hello\n")
 	if err := os.WriteFile(path, source, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -45,8 +45,11 @@ func TestTriggerFailureLinksDeclarationAfterLicenseHeader(t *testing.T) {
 			_, artifacts := generatedFailure(t.Context(), report, sourceLinkContext{serverURL: "https://github.com", repository: "owner/project", sha: sha})
 			for _, artifact := range artifacts {
 				text := string(artifact.Contents)
-				if !strings.Contains(text, path+":19:3") || !strings.Contains(text, "/blob/"+sha+"/"+path+"#L19") || !strings.Contains(text, "pull_request_review has unsupported filters") {
-					t.Errorf("diagnostic lost trigger position: %s", text)
+				if !strings.Contains(text, path+":21:5") || !strings.Contains(text, "/blob/"+sha+"/"+path+"#L21") || !strings.Contains(text, "pull_request_review does not support the branches filter") {
+					t.Errorf("diagnostic lost filter position: %s", text)
+				}
+				if !strings.Contains(text, "21 |     branches:\n     |     ^^^^^^^^") || !strings.Contains(text, "move the check into a job or step condition") || strings.Contains(text, "private-branch") {
+					t.Errorf("diagnostic lost safe filter explanation: %s", text)
 				}
 			}
 		})

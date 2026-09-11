@@ -264,7 +264,13 @@ on disk after parsing do not change which source revision the diagnostic links t
 Annotations and generated failure logs include a real configuration excerpt
 where safe: literal action/workflow references in `uses`, standard Ubuntu,
 Windows, or macOS `runs-on` labels, and built-in step `shell` names. Excerpts
-retain the parsed line numbers and mark the offending line with `>`.
+retain the parsed line numbers, mark the offending line with `>`, and underline
+the reference, runner label, or shell with `^`.
+Standalone trigger filter keys, such as `branches:` and `types:`, also appear
+with an underline. Filter values and inline filter declarations are omitted.
+Rejected filters, invalid filter patterns, and unsupported activity types link
+to their filter key. Errors without a corresponding field retain the event
+declaration location.
 Only eligible adjacent lines are included. Scripts, `env`, `with`, comments,
 expressions, aliases, malformed YAML, and other unclassified content are omitted.
 Capture is limited to 240 bytes per line and 16 KiB per workflow; excerpts are

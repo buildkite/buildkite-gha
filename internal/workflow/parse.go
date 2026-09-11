@@ -64,6 +64,22 @@ func Parse(path string, source []byte) (*Workflow, error) {
 
 	owned := &Workflow{}
 	owned.Triggers = adaptTriggers(parsed.On)
+	// The raw mapping also retains keys such as types and workflows, whose
+	// positions are not preserved by actionlint's event model.
+	events := mappingEntries(mappingEntries(document.Content[0])["on"])
+	for i := range owned.Triggers {
+		trigger := &owned.Triggers[i]
+		node := events[trigger.Event]
+		if node == nil || node.Kind != yaml.MappingNode {
+			continue
+		}
+		trigger.FilterSpans = make(map[string]Span)
+		for j := 0; j+1 < len(node.Content); j += 2 {
+			key := node.Content[j]
+			position := Position{Line: key.Line, Column: key.Column}
+			trigger.FilterSpans[key.Value] = Span{Start: position, End: position}
+		}
+	}
 	if parsed.Name != nil {
 		owned.Name = parsed.Name.Value
 	}
