@@ -12,7 +12,7 @@ func TestCaptureDiagnosticSourceExcerpt(t *testing.T) {
 	if captured == nil {
 		t.Fatal("CaptureDiagnosticSource returned nil")
 	}
-	want := "  6 |       - uses: actions/checkout@v4\n> 7 |       - shell: bash"
+	want := "  6 |       - uses: actions/checkout@v4\n> 7 |       - shell: bash\n    |                ^^^^"
 	if got := captured.Excerpt(7); got != want {
 		t.Fatalf("Excerpt(7) = %q, want %q", got, want)
 	}
@@ -22,7 +22,7 @@ func TestCaptureDiagnosticSourceExcerpt(t *testing.T) {
 	for i := range source {
 		source[i] = 'x'
 	}
-	if got := captured.Excerpt(4); got != "> 4 |     runs-on: 'ubuntu-24.04-arm64'" {
+	if got := captured.Excerpt(4); got != "> 4 |     runs-on: 'ubuntu-24.04-arm64'\n    |              ^^^^^^^^^^^^^^^^^^^^" {
 		t.Fatalf("captured source changed with input: %q", got)
 	}
 	var nilSource *DiagnosticSource
@@ -31,8 +31,26 @@ func TestCaptureDiagnosticSourceExcerpt(t *testing.T) {
 	}
 }
 
+func TestCaptureDiagnosticSourceFilterUnderline(t *testing.T) {
+	source := []byte("on:\r\n  pull_request_review:\r\n    branches-ignore:\r\n      - private-branch\r\n")
+	captured := CaptureDiagnosticSource(source)
+	want := "> 3 |     branches-ignore:\n    |     ^^^^^^^^^^^^^^^"
+	if got := captured.Excerpt(3); got != want {
+		t.Fatalf("filter excerpt = %q, want %q", got, want)
+	}
+	if got := captured.Excerpt(4); got != "" {
+		t.Fatalf("filter value was retained: %q", got)
+	}
+}
+
 func TestCaptureDiagnosticSourceRejectsUnsafeLines(t *testing.T) {
 	tests := map[string]string{
+		"inline filter":         "on:\n  pull_request_review:\n    branches: [private-branch]\n",
+		"filter comment":        "on:\n  pull_request_review:\n    branches: # private\n      - trunk\n",
+		"quoted filter key":     "on:\n  pull_request_review:\n    'branches':\n      - trunk\n",
+		"filter alias":          "on:\n  pull_request_review: &review\n    branches:\n      - trunk\n  pull_request: *review\n",
+		"filter in script":      "jobs:\n  x:\n    steps:\n      - run: |\n          branches:\n",
+		"unknown filter":        "on:\n  pull_request_review:\n    private-key:\n      - trunk\n",
 		"comment":               "jobs:\n  x:\n    runs-on: ubuntu-latest # token\n",
 		"credentials":           "jobs:\n  x:\n    uses: owner/repo@v1 password=secret\n",
 		"HTML in uses":          "jobs:\n  x:\n    uses: owner/repo@v1<!-- secret -->\n",

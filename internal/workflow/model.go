@@ -52,6 +52,7 @@ func (w Workflow) ReusableOnly() bool {
 type Trigger struct {
 	Event          string           `json:"event"`
 	Position       Position         `json:"position"`
+	FilterSpans    map[string]Span  `json:"-"`
 	Types          []string         `json:"types,omitempty"`
 	Branches       []string         `json:"branches,omitempty"`
 	BranchesIgnore []string         `json:"branches_ignore,omitempty"`

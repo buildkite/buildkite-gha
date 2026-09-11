@@ -115,15 +115,15 @@ func TestRunValidateAndCompile(t *testing.T) {
 			{name: "unsupported event", trigger: "discussion", want: `unsupported GitHub trigger event "discussion"`},
 			{name: "malformed path filter", trigger: "push:\n    paths: ['!src/**']", want: "must follow a positive pattern"},
 			{name: "mixed branch filters", trigger: "push:\n    branches: [main]\n    branches-ignore: [release]", want: "include and ignore filters cannot be combined"},
-			{name: "pull request tag filter", trigger: "pull_request:\n    tags: [v1]", want: "pull_request tag filters are unsupported"},
+			{name: "pull request tag filter", trigger: "pull_request:\n    tags: [v1]", want: "pull_request does not support the tags filter"},
 			{name: "pull request activity", trigger: "pull_request:\n    types: [auto_merge_enabled, submitted]", want: `activity type "submitted" cannot be mapped exactly`},
 			{name: "bare release", trigger: "release", want: "on: release needs a types list"},
 			{name: "unsupported release activity", trigger: "release:\n    types: [edited]", want: `release activity type "edited" cannot be mapped exactly`},
-			{name: "release branch filter", trigger: "release:\n    types: [published]\n    branches: [main]", want: "release has unsupported filters"},
+			{name: "release branch filter", trigger: "release:\n    types: [published]\n    branches: [main]", want: "release does not support the branches filter"},
 			{name: "unknown issues activity", trigger: "issues:\n    types: [not-real]", want: `issues activity type "not-real" cannot be mapped exactly`},
-			{name: "issues branch filter", trigger: "issues:\n    branches: [main]", want: "issues has unsupported filters"},
+			{name: "issues branch filter", trigger: "issues:\n    branches: [main]", want: "issues does not support the branches filter"},
 			{name: "unknown issue comment activity", trigger: "issue_comment:\n    types: [not-real]", want: `issue_comment activity type "not-real" cannot be mapped exactly`},
-			{name: "issue comment branch filter", trigger: "issue_comment:\n    branches: [main]", want: "issue_comment has unsupported filters"},
+			{name: "issue comment branch filter", trigger: "issue_comment:\n    branches: [main]", want: "issue_comment does not support the branches filter"},
 		}
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {

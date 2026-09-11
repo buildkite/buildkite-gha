@@ -23,7 +23,8 @@ var (
 
 // DiagnosticSource retains only configuration lines eligible for display.
 type DiagnosticSource struct {
-	lines map[int]string
+	lines      map[int]string
+	underlines map[int]string
 }
 
 // CaptureDiagnosticSource retains a deliberately narrow set of safe workflow
@@ -42,9 +43,10 @@ func CaptureDiagnosticSource(source []byte) *DiagnosticSource {
 	}
 	physical := bytes.Split(source, []byte{'\n'})
 	type candidate struct {
-		key  string
-		node *yaml.Node
-		step bool
+		key     string
+		node    *yaml.Node
+		step    bool
+		keyOnly bool
 	}
 	var candidates []candidate
 	add := func(key string, node *yaml.Node, valid func(string) bool, step bool) {
@@ -52,6 +54,21 @@ func CaptureDiagnosticSource(source []byte) *DiagnosticSource {
 			return
 		}
 		candidates = append(candidates, candidate{key: key, node: node, step: step})
+	}
+
+	for _, event := range orderedMappingValues(mappingEntries(root)["on"]) {
+		if event.Kind != yaml.MappingNode || event.Style != 0 || event.Alias != nil || event.Anchor != "" {
+			continue
+		}
+		for i := 0; i+1 < len(event.Content); i += 2 {
+			key := event.Content[i]
+			switch key.Value {
+			case "branches", "branches-ignore", "tags", "tags-ignore", "paths", "paths-ignore", "types", "workflows":
+				if key.Kind == yaml.ScalarNode && key.Style == 0 && key.Alias == nil && key.Anchor == "" {
+					candidates = append(candidates, candidate{key: key.Value, node: key, keyOnly: true})
+				}
+			}
+		}
 	}
 
 	for _, job := range orderedMappingValues(mappingEntries(root)["jobs"]) {
@@ -76,6 +93,7 @@ func CaptureDiagnosticSource(source []byte) *DiagnosticSource {
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].node.Line < candidates[j].node.Line })
 	eligible := make(map[int]string)
+	underlines := make(map[int]string)
 	copied := 0
 	for _, candidate := range candidates {
 		line := candidate.node.Line
@@ -83,16 +101,29 @@ func CaptureDiagnosticSource(source []byte) *DiagnosticSource {
 			continue
 		}
 		raw := bytes.TrimSuffix(physical[line-1], []byte{'\r'})
-		if len(raw) > maxDiagnosticLineSize || !physicalField(raw, candidate.key, candidate.node.Value, candidate.step) || copied+len(raw) > maxDiagnosticCopySize {
+		value := candidate.node.Value
+		if candidate.keyOnly {
+			if strings.TrimSpace(string(raw)) != candidate.key+":" {
+				continue
+			}
+			value = ""
+		}
+		if len(raw) > maxDiagnosticLineSize || !physicalField(raw, candidate.key, value, candidate.step) || copied+len(raw) > maxDiagnosticCopySize {
 			continue
 		}
 		eligible[line] = strings.Clone(string(raw))
+		if candidate.keyOnly {
+			underlines[line] = strings.Repeat(" ", candidate.node.Column-1) + strings.Repeat("^", len(candidate.key))
+		} else {
+			start := candidate.node.Column - 1
+			underlines[line] = strings.Repeat(" ", start) + strings.Repeat("^", len(bytes.TrimRight(raw[start:], " ")))
+		}
 		copied += len(raw)
 	}
 	if len(eligible) == 0 {
 		return nil
 	}
-	return &DiagnosticSource{lines: eligible}
+	return &DiagnosticSource{lines: eligible, underlines: underlines}
 }
 
 func orderedMappingValues(node *yaml.Node) []*yaml.Node {
@@ -170,6 +201,9 @@ func (source *DiagnosticSource) Excerpt(line int) string {
 			marker = ">"
 		}
 		fmt.Fprintf(&excerpt, "%s %*d | %s", marker, width, number, text)
+		if number == line && source.underlines[number] != "" {
+			fmt.Fprintf(&excerpt, "\n  %*s | %s", width, "", source.underlines[number])
+		}
 		if number != last {
 			excerpt.WriteByte('\n')
 		}
