@@ -20,7 +20,8 @@ func TestTriggerFailureLinksFilterAfterLicenseHeader(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", root)
-	const path = "pr-reviewed.yml"
+	const displayPath = "pr-reviewed.yml"
+	path := filepath.Join(root, displayPath)
 	// The rejected filter is at 21:5, not the review event or the selected PR trigger.
 	source := []byte(strings.Repeat("# License header\n", 15) + "\nname: Reviewed\non:\n  pull_request_review:\n    types: [submitted, edited, dismissed]\n    branches:\n      - private-branch\n  pull_request:\n    types: [opened]\n    branches: [trunk]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hello\n")
 	if err := os.WriteFile(path, source, 0o600); err != nil {
@@ -45,11 +46,21 @@ func TestTriggerFailureLinksFilterAfterLicenseHeader(t *testing.T) {
 			_, artifacts := generatedFailure(t.Context(), report, sourceLinkContext{serverURL: "https://github.com", repository: "owner/project", sha: sha})
 			for _, artifact := range artifacts {
 				text := string(artifact.Contents)
-				if !strings.Contains(text, path+":21:5") || !strings.Contains(text, "/blob/"+sha+"/"+path+"#L21") || !strings.Contains(text, "pull_request_review does not support the branches filter") {
-					t.Errorf("diagnostic lost filter position: %s", text)
+				for _, want := range []string{
+					displayPath + ":21:5",
+					"/blob/" + sha + "/" + displayPath + "#L21",
+					"pull_request_review does not support the branches filter",
+					"21 |     branches:\n     |     ^^^^^^^^",
+					"move the check into a job or step condition",
+				} {
+					if !strings.Contains(text, want) {
+						t.Errorf("diagnostic missing %q: %s", want, text)
+					}
 				}
-				if !strings.Contains(text, "21 |     branches:\n     |     ^^^^^^^^") || !strings.Contains(text, "move the check into a job or step condition") || strings.Contains(text, "private-branch") {
-					t.Errorf("diagnostic lost safe filter explanation: %s", text)
+				for _, unwanted := range []string{root, "private-branch"} {
+					if strings.Contains(text, unwanted) {
+						t.Errorf("diagnostic exposed %q: %s", unwanted, text)
+					}
 				}
 			}
 		})
@@ -254,7 +265,7 @@ func TestPluginProcessingFiltersUnknownRuntimeAndUsesNeutralWarningHeading(t *te
 		t.Fatal(err)
 	}
 	got := output.String()
-	if !strings.Contains(got, "Source: ci.yml:4:3") || strings.Contains(got, "Error source:") {
+	if !strings.Contains(got, "ci.yml:4:3") || strings.Contains(got, "Source:") || strings.Contains(got, "Error source:") {
 		t.Fatalf("warning source has misleading severity: %q", got)
 	}
 	if !strings.Contains(got, "Workflow diagnostics") || strings.Contains(got, "failed") || strings.Contains(got, "hidden") || strings.Contains(got, "^^^ +++") || strings.Contains(got, "Compilation:") {
@@ -280,7 +291,7 @@ func TestProcessingLogSanitizesTerminalControls(t *testing.T) {
 			t.Errorf("processing log retained unsafe sequence %q: %q", sequence, got)
 		}
 	}
-	for _, want := range []string{"Error: bad[31m message.", "More context.", "detail]8;;https://evil.example", "job=job[2J", "action=action", "Error source: path]8;;https://evil.example:1"} {
+	for _, want := range []string{"Error: bad[31m message.", "More context.", "detail]8;;https://evil.example", "job=job[2J", "action=action", "path]8;;https:/evil.example:1"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("processing log lost ordinary text %q: %q", want, got)
 		}
