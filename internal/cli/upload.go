@@ -446,7 +446,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			parsed, _ := compiler.ParseWorkflow(input.Path, input.Source)
 			writeCompilerWarnings(stderr, "upload", input.CanonicalPath, parsed.Warnings)
 			if uploadArguments.telemetry != nil {
-				uploadArguments.telemetry.addWarnings(parsed.Warnings)
+				uploadArguments.telemetry.addWarnings(input.Path, parsed.Warnings)
 			}
 			continue
 		}
@@ -546,7 +546,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		processingReports[i].Result = "admitted"
 		writeCompilerWarnings(stderr, "upload", input.CanonicalPath, bundle.IR.Warnings)
 		if uploadArguments.telemetry != nil {
-			uploadArguments.telemetry.addWarnings(bundle.IR.Warnings)
+			uploadArguments.telemetry.addWarnings(input.Path, bundle.IR.Warnings)
 			if bundleRunsUnprovenActions(bundle) {
 				uploadArguments.telemetry.addActionRuntimeUnknown()
 			}

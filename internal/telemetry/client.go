@@ -21,12 +21,13 @@ import (
 const (
 	EventCommandCompleted = "pipelines:buildkite_gha:command_completed"
 
-	defaultTimeout        = 1500 * time.Millisecond
-	responseDrainLimit    = 32 << 10
-	maxClientVersionBytes = 64
-	maxBlockerDetailBytes = 1024
-	maxDurationMS         = int64(1<<31 - 1)
-	maxDiagnostics        = 20
+	defaultTimeout         = 1500 * time.Millisecond
+	responseDrainLimit     = 32 << 10
+	maxClientVersionBytes  = 64
+	maxBlockerDetailBytes  = 1024
+	maxDiagnosticTextBytes = 1024
+	maxDurationMS          = int64(1<<31 - 1)
+	maxDiagnostics         = 20
 
 	// MaxErrorMessageBytes bounds the error message sent on unsuccessful
 	// commands. Over-long messages keep their final bytes, where a failing
@@ -97,10 +98,13 @@ const (
 )
 
 type Diagnostic struct {
-	Code          string   `json:"code"`
-	Severity      Severity `json:"severity"`
-	Blocker       string   `json:"blocker,omitempty"`
-	BlockerDetail string   `json:"blocker_detail,omitempty"`
+	Code             string   `json:"code"`
+	Severity         Severity `json:"severity"`
+	Blocker          string   `json:"blocker,omitempty"`
+	BlockerDetail    string   `json:"blocker_detail,omitempty"`
+	Message          string   `json:"message,omitempty"`
+	MessageTruncated bool     `json:"message_truncated,omitempty"`
+	WorkflowPath     string   `json:"workflow_path,omitempty"`
 }
 
 type Details struct {
@@ -205,7 +209,7 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 	if details.FailureCode != "" && !validFailureCode(details.FailureCode) {
 		return fmt.Errorf("invalid telemetry failure code")
 	}
-	diagnostics, err := boundedDiagnostics(details.Diagnostics)
+	diagnostics, err := BoundedDiagnostics(details.Diagnostics)
 	if err != nil {
 		return err
 	}
@@ -281,8 +285,10 @@ func validFailureCode(code FailureCode) bool {
 	}
 }
 
-func boundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
-	seen := make(map[Diagnostic]bool, min(len(in), maxDiagnostics))
+// BoundedDiagnostics normalizes diagnostic text and deduplicates by wire identity
+// before applying the diagnostic count limit. It does not modify in.
+func BoundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
+	seen := make(map[Diagnostic]int, min(len(in), maxDiagnostics))
 	out := make([]Diagnostic, 0, min(len(in), maxDiagnostics))
 	for _, diagnostic := range in {
 		severity, ok := diagnosticSeverity(diagnostic.Code)
@@ -294,14 +300,33 @@ func boundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
 			return nil, err
 		}
 		diagnostic.Blocker, diagnostic.BlockerDetail = blocker, blockerDetail
-		if seen[diagnostic] {
+		diagnostic.Message = normalizedTelemetryText(diagnostic.Message)
+		if len(diagnostic.Message) > maxDiagnosticTextBytes {
+			end := maxDiagnosticTextBytes
+			for !utf8.RuneStart(diagnostic.Message[end]) {
+				end--
+			}
+			diagnostic.Message = strings.TrimSpace(diagnostic.Message[:end])
+			diagnostic.MessageTruncated = true
+		}
+		if diagnostic.Message == "" {
+			diagnostic.MessageTruncated = false
+		}
+		// A shortened or normalized path could name a different workflow.
+		if len(diagnostic.WorkflowPath) > maxDiagnosticTextBytes || !utf8.ValidString(diagnostic.WorkflowPath) || strings.ContainsFunc(diagnostic.WorkflowPath, unicode.IsControl) {
+			diagnostic.WorkflowPath = ""
+		}
+		identity := diagnostic
+		identity.MessageTruncated = false
+		if index, exists := seen[identity]; exists {
+			out[index].MessageTruncated = out[index].MessageTruncated || diagnostic.MessageTruncated
 			continue
 		}
-		seen[diagnostic] = true
-		out = append(out, diagnostic)
 		if len(out) == maxDiagnostics {
-			break
+			continue
 		}
+		seen[identity] = len(out)
+		out = append(out, diagnostic)
 	}
 	return out, nil
 }
@@ -317,13 +342,7 @@ func boundedBlocker(blocker, detail string) (string, string, error) {
 	default:
 		return "", "", fmt.Errorf("invalid telemetry blocker")
 	}
-	detail = strings.Map(func(character rune) rune {
-		if unicode.IsControl(character) {
-			return ' '
-		}
-		return character
-	}, strings.ToValidUTF8(detail, "�"))
-	detail = strings.Join(strings.Fields(detail), " ")
+	detail = normalizedTelemetryText(detail)
 	if len(detail) > maxBlockerDetailBytes {
 		digest := sha256.Sum256([]byte(detail))
 		suffix := fmt.Sprintf("…#%x", digest[:6])
@@ -378,14 +397,18 @@ func boundedClientVersion(version string) string {
 	return version
 }
 
-func boundedErrorMessage(message string) (string, bool) {
+func normalizedTelemetryText(message string) string {
 	message = strings.Map(func(character rune) rune {
 		if unicode.IsControl(character) {
 			return ' '
 		}
 		return character
 	}, strings.ToValidUTF8(message, "�"))
-	message = strings.Join(strings.Fields(message), " ")
+	return strings.Join(strings.Fields(message), " ")
+}
+
+func boundedErrorMessage(message string) (string, bool) {
+	message = normalizedTelemetryText(message)
 	if len(message) <= MaxErrorMessageBytes {
 		return message, false
 	}

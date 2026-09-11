@@ -18,10 +18,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
-const (
-	maxCommandTelemetryDiagnostics = 20
-	maxCommandErrorCaptureBytes    = 64 << 10
-)
+const maxCommandErrorCaptureBytes = 64 << 10
 
 func emitCommandTelemetry(ctx context.Context, command telemetry.Command, outcome telemetry.Outcome, version string, duration time.Duration, details telemetry.Details) {
 	client, err := telemetry.New(telemetry.Config{
@@ -66,12 +63,7 @@ type commandTelemetryDetails struct {
 	blocker        string
 	blockerDetail  string
 	diagnostics    []telemetry.Diagnostic
-	seen           map[telemetryDiagnosticKey]int
 	errorOutput    boundedTailBuffer
-}
-
-type telemetryDiagnosticKey struct {
-	code, blocker, blockerDetail string
 }
 
 func (d *commandTelemetryDetails) captureErrors(writer io.Writer) io.Writer {
@@ -103,12 +95,24 @@ func (d *commandTelemetryDetails) setFailureCode(code telemetry.FailureCode) {
 // handles, such as workflows emitted as failing pipeline steps, belong here so
 // they never attribute an unrelated later failure.
 func (d *commandTelemetryDetails) addReportDiagnostics(report compatibility.ProcessingReport) {
+	var workflowPath string
+	if report.Workflow != "" {
+		workflowPath, _ = processingAnnotationWorkflowPath(report.Workflow, "")
+	}
 	for _, diagnostic := range report.Diagnostics {
 		severity, ok := telemetrySeverity(diagnostic.Level)
 		if !ok || !allowlistedTelemetryDiagnosticCode(diagnostic.Code) {
 			continue
 		}
-		d.addDiagnostic(diagnostic.Code, severity, diagnostic.Blocker, diagnostic.BlockerDetail)
+		message := diagnostic.Message
+		if diagnostic.Detail != "" {
+			message += " " + diagnostic.Detail
+		}
+		d.addDiagnostic(telemetry.Diagnostic{
+			Code: diagnostic.Code, Severity: severity,
+			Blocker: diagnostic.Blocker, BlockerDetail: diagnostic.BlockerDetail,
+			Message: message, WorkflowPath: workflowPath,
+		})
 		if diagnostic.Level == "error" {
 			d.setBlocker(diagnostic.Blocker, diagnostic.BlockerDetail)
 		}
@@ -133,37 +137,23 @@ func (d *commandTelemetryDetails) observe(report compatibility.ProcessingReport)
 	}
 }
 
-func (d *commandTelemetryDetails) addWarnings(warnings []compiler.Warning) {
-	for _, warning := range warnings {
-		if allowlistedTelemetryDiagnosticCode(warning.Code) {
-			d.addDiagnostic(warning.Code, telemetry.SeverityWarning, warning.Blocker, warning.BlockerDetail)
-		}
-	}
+func (d *commandTelemetryDetails) addWarnings(workflowPath string, warnings []compiler.Warning) {
+	report := compatibility.NewProcessingReport(workflowPath, "")
+	report.ApplyWarnings(workflowPath, warnings)
+	d.addReportDiagnostics(report)
 }
 
 // addActionRuntimeUnknown records admitted actions whose runtime behavior was
 // never proven. Upload keeps this in telemetry rather than the processing
 // report, where it would annotate every import that uses actions.
 func (d *commandTelemetryDetails) addActionRuntimeUnknown() {
-	d.addDiagnostic("W_ACTION_RUNTIME_UNKNOWN", telemetry.SeverityWarning, "", "")
+	d.addDiagnostic(telemetry.Diagnostic{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: telemetry.SeverityWarning})
 }
 
-func (d *commandTelemetryDetails) addDiagnostic(code string, severity telemetry.Severity, blocker, blockerDetail string) {
-	if d.seen == nil {
-		d.seen = make(map[telemetryDiagnosticKey]int)
+func (d *commandTelemetryDetails) addDiagnostic(diagnostic telemetry.Diagnostic) {
+	if diagnostics, err := telemetry.BoundedDiagnostics(append(d.diagnostics, diagnostic)); err == nil {
+		d.diagnostics = diagnostics
 	}
-	key := telemetryDiagnosticKey{code: code, blocker: blocker, blockerDetail: blockerDetail}
-	if index, exists := d.seen[key]; exists {
-		if severity == telemetry.SeverityError {
-			d.diagnostics[index].Severity = severity
-		}
-		return
-	}
-	if len(d.diagnostics) == maxCommandTelemetryDiagnostics {
-		return
-	}
-	d.seen[key] = len(d.diagnostics)
-	d.diagnostics = append(d.diagnostics, telemetry.Diagnostic{Code: code, Severity: severity, Blocker: blocker, BlockerDetail: blockerDetail})
 }
 
 func (d *commandTelemetryDetails) setBlocker(blocker, detail string) {

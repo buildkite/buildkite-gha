@@ -676,7 +676,17 @@ outcome, client version, duration, and bounded diagnostics. Diagnostics can
 identify a rejected feature with a `blocker` slug and bounded `blocker_detail`,
 such as `runner_label` and `windows-latest`. Distinct rejected values remain
 separate diagnostics even when they share a diagnostic code.
-For an unsuccessful command, they also contain a normalized user-visible error
+
+Workflow diagnostics include their message and detail in `message`, even when
+the importer exits zero after uploading failing steps for rejected workflows.
+Messages are normalized to one line and retain at most their first 1,024 UTF-8 bytes;
+`message_truncated` is true when text was shortened. `workflow_path` identifies
+the root workflow being imported, relative to the checkout when possible.
+Paths over 1,024 bytes or containing invalid UTF-8 or control characters are
+omitted rather than shortened. Deduplication includes the bounded message and
+workflow path, subject to the limit of 20 diagnostics per command.
+
+For an unsuccessful command, events also contain a normalized user-visible error
 message of at most 1,024 bytes. When a workflow diagnostic attributes the
 failure, the message is that diagnostic's text, kept whole so later job output
 cannot displace it. Otherwise it is the final bytes of the command's error
@@ -698,9 +708,9 @@ variables, command text, or secrets as separate properties. Blocker details
 come from workflow-authored configuration. Event-derived runner labels and
 environment expressions are omitted.
 
-Error output can include details already printed in the job log, such as
-workflow paths, action references, expressions, or invalid configuration
-values. Avoid putting secrets in error messages. Disable telemetry when this
-diagnostic context must stay inside the job.
+Diagnostic messages and error output can include details already printed in
+the job log, such as workflow paths, action references, expressions, or invalid
+configuration values. Avoid putting secrets in error messages. Disable
+telemetry when this diagnostic context must stay inside the job.
 
 Set `BUILDKITE_GHA_TELEMETRY_DISABLED=true` to disable telemetry. Missing Agent endpoint, job ID, or job token also disables it. Telemetry failures do not change command results.
