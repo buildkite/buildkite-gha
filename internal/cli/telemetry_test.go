@@ -218,6 +218,29 @@ func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
 	}
 }
 
+func TestCommandTelemetryDiagnosticLimitUsesWireIdentity(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	common := strings.Repeat("x", 1024)
+	for i := range 20 {
+		details.addReportDiagnostics(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{{
+			Level: "error", Code: compiler.CodeWorkflowSyntax, Message: common + strings.Repeat("y", i+1),
+		}}})
+	}
+	want := []telemetry.Diagnostic{{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError, Message: common, MessageTruncated: true}}
+	for i := range 20 {
+		message := strings.Repeat("distinct ", i+1) + "error"
+		details.addReportDiagnostics(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{{
+			Level: "error", Code: compiler.CodeWorkflowSyntax, Message: message,
+		}}})
+		if i < 19 {
+			want = append(want, telemetry.Diagnostic{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError, Message: message})
+		}
+	}
+	if got := details.forOutcome(telemetry.OutcomeSuccess).Diagnostics; !reflect.DeepEqual(got, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", got, want)
+	}
+}
+
 func TestTriggerFailureTelemetryIncludesTrigger(t *testing.T) {
 	for _, triggerErr := range []error{
 		&buildkitepipeline.UnsupportedTriggerEventError{Event: "workflow_run"},

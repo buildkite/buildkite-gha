@@ -273,15 +273,15 @@ func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
 		input = append(input, Diagnostic{Code: code, Severity: SeverityWarning})
 	}
 	input = append(input, input[0], input[len(errorCodes)])
-	bounded, err := boundedDiagnostics(input)
+	bounded, err := BoundedDiagnostics(input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(bounded) != len(errorCodes)+len(warningCodes) {
 		t.Fatalf("diagnostics = %d, want %d unique codes", len(bounded), len(errorCodes)+len(warningCodes))
 	}
-	if _, err := boundedDiagnostics([]Diagnostic{{Code: "CUSTOMER_VALUE", Severity: SeverityError}}); err == nil {
-		t.Fatal("boundedDiagnostics() accepted non-allowlisted code")
+	if _, err := BoundedDiagnostics([]Diagnostic{{Code: "CUSTOMER_VALUE", Severity: SeverityError}}); err == nil {
+		t.Fatal("BoundedDiagnostics() accepted non-allowlisted code")
 	}
 }
 
@@ -291,7 +291,7 @@ func TestDiagnosticsPreserveDistinctBlockersForOneCode(t *testing.T) {
 		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "expression", BlockerDetail: common + "first"},
 		{Code: string(FailureCodeExpressionInvalid), Severity: SeverityError, Blocker: "expression", BlockerDetail: common + "second"},
 	}
-	bounded, err := boundedDiagnostics(input)
+	bounded, err := BoundedDiagnostics(input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,9 +330,9 @@ func TestDiagnosticTextBounds(t *testing.T) {
 		{name: "preserve flag", message: "already shortened", truncated: true, wantMessage: "already shortened", wantTruncated: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := boundedDiagnostics([]Diagnostic{{Code: string(FailureCodePipelineGeneration), Severity: SeverityError, Message: test.message, MessageTruncated: test.truncated, WorkflowPath: test.path}})
+			got, err := BoundedDiagnostics([]Diagnostic{{Code: string(FailureCodePipelineGeneration), Severity: SeverityError, Message: test.message, MessageTruncated: test.truncated, WorkflowPath: test.path}})
 			if err != nil || len(got) != 1 {
-				t.Fatalf("boundedDiagnostics() = %#v, %v", got, err)
+				t.Fatalf("BoundedDiagnostics() = %#v, %v", got, err)
 			}
 			if got[0].Message != test.wantMessage || got[0].WorkflowPath != test.wantPath || got[0].MessageTruncated != test.wantTruncated {
 				t.Fatalf("diagnostic = %#v", got[0])
@@ -348,18 +348,18 @@ func TestDiagnosticsDeduplicateByWireIdentity(t *testing.T) {
 	otherMessage.Message = "another filter failed"
 	duplicate.Message = " filter\nfailed "
 	duplicate.MessageTruncated = true
-	got, err := boundedDiagnostics([]Diagnostic{first, otherPath, otherMessage, duplicate})
+	got, err := BoundedDiagnostics([]Diagnostic{first, otherPath, otherMessage, duplicate})
 	first.MessageTruncated = true
 	want := []Diagnostic{first, otherPath, otherMessage}
 	if err != nil || !reflect.DeepEqual(got, want) {
-		t.Fatalf("boundedDiagnostics() = %#v, %v; want %#v", got, err, want)
+		t.Fatalf("BoundedDiagnostics() = %#v, %v; want %#v", got, err, want)
 	}
 
 	// Truncation can make previously distinct messages identical to the API.
 	first.Message, first.MessageTruncated = strings.Repeat("x", 1024), false
 	duplicate = first
 	duplicate.Message += " extra"
-	got, err = boundedDiagnostics([]Diagnostic{first, duplicate})
+	got, err = BoundedDiagnostics([]Diagnostic{first, duplicate})
 	if err != nil || len(got) != 1 || !got[0].MessageTruncated {
 		t.Fatalf("post-truncation diagnostics = %#v, %v", got, err)
 	}
@@ -410,8 +410,8 @@ func TestDiagnosticsRejectMismatchedSeverity(t *testing.T) {
 		{Code: string(FailureCodeWorkflowSyntax), Severity: SeverityWarning},
 		{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: SeverityError},
 	} {
-		if _, err := boundedDiagnostics([]Diagnostic{diagnostic}); err == nil {
-			t.Fatalf("boundedDiagnostics(%#v) accepted mismatched severity", diagnostic)
+		if _, err := BoundedDiagnostics([]Diagnostic{diagnostic}); err == nil {
+			t.Fatalf("BoundedDiagnostics(%#v) accepted mismatched severity", diagnostic)
 		}
 	}
 }

@@ -209,7 +209,7 @@ func (c *Client) EmitContext(ctx context.Context, command Command, outcome Outco
 	if details.FailureCode != "" && !validFailureCode(details.FailureCode) {
 		return fmt.Errorf("invalid telemetry failure code")
 	}
-	diagnostics, err := boundedDiagnostics(details.Diagnostics)
+	diagnostics, err := BoundedDiagnostics(details.Diagnostics)
 	if err != nil {
 		return err
 	}
@@ -285,7 +285,9 @@ func validFailureCode(code FailureCode) bool {
 	}
 }
 
-func boundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
+// BoundedDiagnostics normalizes diagnostic text and deduplicates by wire identity
+// before applying the diagnostic count limit. It does not modify in.
+func BoundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
 	seen := make(map[Diagnostic]int, min(len(in), maxDiagnostics))
 	out := make([]Diagnostic, 0, min(len(in), maxDiagnostics))
 	for _, diagnostic := range in {

@@ -18,10 +18,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
-const (
-	maxCommandTelemetryDiagnostics = 20
-	maxCommandErrorCaptureBytes    = 64 << 10
-)
+const maxCommandErrorCaptureBytes = 64 << 10
 
 func emitCommandTelemetry(ctx context.Context, command telemetry.Command, outcome telemetry.Outcome, version string, duration time.Duration, details telemetry.Details) {
 	client, err := telemetry.New(telemetry.Config{
@@ -66,7 +63,6 @@ type commandTelemetryDetails struct {
 	blocker        string
 	blockerDetail  string
 	diagnostics    []telemetry.Diagnostic
-	seen           map[telemetry.Diagnostic]bool
 	errorOutput    boundedTailBuffer
 }
 
@@ -155,17 +151,9 @@ func (d *commandTelemetryDetails) addActionRuntimeUnknown() {
 }
 
 func (d *commandTelemetryDetails) addDiagnostic(diagnostic telemetry.Diagnostic) {
-	if d.seen == nil {
-		d.seen = make(map[telemetry.Diagnostic]bool)
+	if diagnostics, err := telemetry.BoundedDiagnostics(append(d.diagnostics, diagnostic)); err == nil {
+		d.diagnostics = diagnostics
 	}
-	if d.seen[diagnostic] {
-		return
-	}
-	if len(d.diagnostics) == maxCommandTelemetryDiagnostics {
-		return
-	}
-	d.seen[diagnostic] = true
-	d.diagnostics = append(d.diagnostics, diagnostic)
 }
 
 func (d *commandTelemetryDetails) setBlocker(blocker, detail string) {
