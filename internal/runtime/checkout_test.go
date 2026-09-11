@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,53 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
+
+func TestTargetCheckoutGuard(t *testing.T) {
+	for _, test := range []struct {
+		name, event, ref, headID string
+		missingPayload, denied   bool
+	}{
+		{"default fork checkout", "pull_request_target", "", "2", false, false},
+		{"explicit fork head", "pull_request_target", strings.Repeat("b", 40), "2", false, true},
+		{"explicit fork merge", "pull_request_target", strings.Repeat("c", 40), "2", false, true},
+		{"same repository head", "pull_request_target", strings.Repeat("b", 40), "1", false, false},
+		{"same repository merge", "pull_request_target", strings.Repeat("c", 40), "1", false, false},
+		{"base repository branch", "pull_request_target", "feature", "2", false, false},
+		{"unrelated commit", "pull_request_target", strings.Repeat("d", 40), "2", false, false},
+		{"ordinary PR unchanged", "pull_request", strings.Repeat("b", 40), "2", false, false},
+		{"missing payload", "pull_request_target", "", "2", true, true},
+		{"missing head ID", "pull_request_target", strings.Repeat("b", 40), "", false, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := map[string]any{
+				"repository": map[string]any{"id": json.Number("1")},
+				"pull_request": map[string]any{
+					"merge_commit_sha": strings.Repeat("c", 40),
+					"head":             map[string]any{"sha": strings.Repeat("b", 40), "repo": map[string]any{"id": json.Number(test.headID)}},
+				},
+			}
+			event := plan.Event{Provider: "github", Name: test.event, Repository: "acme/repo", SHA: strings.Repeat("a", 40), Payload: &payload}
+			if test.missingPayload {
+				event.Payload = nil
+			}
+			inputs := map[string]string{"ref": test.ref}
+			if err := validateTargetCheckout(event, inputs); (err != nil) != test.denied {
+				t.Fatalf("checkout guard: %v, denied=%v", err, test.denied)
+			}
+			if test.denied {
+				workspace := t.TempDir()
+				_, err := (Runner{}).runCheckout(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), workspace, plan.Job{Event: event}, actionintegration.CheckoutV7Commit, inputs)
+				if err == nil {
+					t.Fatal("adapter bypassed guard")
+				}
+				entries, _ := os.ReadDir(workspace)
+				if len(entries) != 0 {
+					t.Fatal("checkout performed work before rejection")
+				}
+			}
+		})
+	}
+}
 
 func TestAnonymousCheckoutAdapterPopulatesVerifiedWorkspace(t *testing.T) {
 	workspace := t.TempDir()
@@ -148,6 +196,40 @@ esac
 	if got, err := os.ReadFile(filepath.Join(workspace, ".git", "HEAD")); err != nil || strings.TrimSpace(string(got)) != sha {
 		t.Fatalf("checkout HEAD = %q, %v", got, err)
 	}
+
+	// A target PR retains head/base context without changing no-ref checkout or
+	// the subsequently verified local action source. This executes the adapter
+	// and local action using a fake Git process, not a live GitHub checkout.
+	job.Event.Name = "pull_request_target"
+	job.Event.Ref, job.Event.HeadRef, job.Event.BaseRef = "refs/heads/main", "feature", "release"
+	prPayload := map[string]any{
+		"repository":   map[string]any{"id": json.Number("1")},
+		"pull_request": map[string]any{"head": map[string]any{"sha": strings.Repeat("b", 40), "repo": map[string]any{"id": json.Number("2")}}},
+	}
+	job.Event.Payload = &prPayload
+	prBytes, err := json.Marshal(prPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPayloadDigest := job.Event.PayloadDigest
+	job.Event.PayloadDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(prBytes))
+	if err := os.Remove(gitLog); err != nil {
+		t.Fatal(err)
+	}
+	result, err = (Runner{Git: git, Actions: materializer}).runTestJob(t.Context(), job, t.TempDir())
+	if err != nil || result.Conclusion != "success" || result.Env["CHECKOUT_CHAIN"] != "ok" {
+		t.Fatalf("target checkout/local action = %#v, %v", result, err)
+	}
+	logBytes, err = os.ReadFile(gitLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logBytes), "checkout --detach "+sha) || strings.Contains(string(logBytes), "refs/pull/") || strings.Contains(string(logBytes), "origin feature") {
+		t.Fatalf("target checkout used PR identity: %s", logBytes)
+	}
+	job.Event.Name, job.Event.HeadRef, job.Event.BaseRef = "push", "", ""
+	job.Event.Payload = nil
+	job.Event.PayloadDigest = originalPayloadDigest
 
 	job.Program.Job.Steps[0].Invocation.With = testProgramBindingsPurpose(map[string]string{"ref": "${{ needs.configure.outputs.sha }}"}, executionprogram.SurfaceStepTemplate, executionprogram.PurposeActionInput)
 	job.Needs = map[string]plan.Need{"configure": {Result: "success", Outputs: map[string]string{"sha": strings.Repeat("b", 40)}}}

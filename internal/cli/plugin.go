@@ -69,6 +69,12 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %s does not match BUILDKITE_COMMIT after checkout: %q != %q\n", githubWorkflowSHAEnvironment, serverSelectedWorkflow.SHA, os.Getenv("BUILDKITE_COMMIT"))
 		return 1
 	}
+	if event, _ := buildkiteGitHubEventName(os.Getenv); event == "pull_request_target" {
+		if err := verifyTargetCheckout(checkoutPath, serverSelectedWorkflow.SHA, os.Getenv("BUILDKITE_REPO")); err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", err)
+			return 1
+		}
+	}
 	return uploadParsedContext(ctx, parsedUploadArgs{
 		workflowOperands:         workflowOperands,
 		explicitWorkflowPaths:    true,
@@ -234,6 +240,9 @@ type pipelineTriggerWorkflow struct {
 
 func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(string) string) ([]string, *pipelineTriggerWorkflow, error) {
 	if len(configuration.Workflows) != 0 {
+		if event, _ := buildkiteGitHubEventName(getenv); event == "pull_request_target" {
+			return nil, nil, fmt.Errorf("pull_request_target requires the server-selected workflow, without workflow or workflows overrides")
+		}
 		return configuration.Workflows, nil, nil
 	}
 	compatibilityPath := getenv(pipelineTriggerWorkflowPathEnvironment)
@@ -256,8 +265,8 @@ func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(strin
 	if event == "" {
 		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT is required", githubEventNameEnvironment)
 	}
-	if event != "label" && event != "create" && event != "delete" && event != "push" && event != "pull_request" && event != "issues" && event != "issue_comment" && event != "pull_request_review" && event != "pull_request_review_comment" && event != "release" && event != "merge_group" && event != "deployment" && event != "deployment_status" {
-		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT must be push, pull_request, issues, issue_comment, pull_request_review, pull_request_review_comment, release, merge_group, deployment, deployment_status, create, delete, or label", githubEventNameEnvironment)
+	if event != "label" && event != "create" && event != "delete" && event != "push" && event != "pull_request" && event != "pull_request_target" && event != "issues" && event != "issue_comment" && event != "pull_request_review" && event != "pull_request_review_comment" && event != "release" && event != "merge_group" && event != "deployment" && event != "deployment_status" {
+		return nil, nil, fmt.Errorf("%s or BUILDKITE_GITHUB_EVENT must be push, pull_request, pull_request_target, issues, issue_comment, pull_request_review, pull_request_review_comment, release, merge_group, deployment, deployment_status, create, delete, or label", githubEventNameEnvironment)
 	}
 
 	workflowName := getenv(githubWorkflowEnvironment)
@@ -276,8 +285,11 @@ func pluginWorkflowOperands(configuration pluginConfiguration, getenv func(strin
 	if workflowSHA != "" && !git.ValidObjectID(workflowSHA) {
 		return nil, nil, fmt.Errorf("%s must be a full lowercase 40-hex commit", githubWorkflowSHAEnvironment)
 	}
-	if (event == "label" || event == "create" || event == "delete" || event == "issues" || event == "issue_comment" || event == "pull_request_review" || event == "pull_request_review_comment" || event == "release" || event == "merge_group" || event == "deployment" || event == "deployment_status") && (getenv(githubWorkflowRefEnvironment) == "" || workflowSHA == "") {
+	if (event == "pull_request_target" || event == "label" || event == "create" || event == "delete" || event == "issues" || event == "issue_comment" || event == "pull_request_review" || event == "pull_request_review_comment" || event == "release" || event == "merge_group" || event == "deployment" || event == "deployment_status") && (getenv(githubWorkflowRefEnvironment) == "" || workflowSHA == "") {
 		return nil, nil, fmt.Errorf("%s and %s are required for %s", githubWorkflowRefEnvironment, githubWorkflowSHAEnvironment, event)
+	}
+	if event == "pull_request_target" && selectedPath != compatibilityPath {
+		return nil, nil, fmt.Errorf("%s path does not match %s", githubWorkflowRefEnvironment, pipelineTriggerWorkflowPathEnvironment)
 	}
 	return []string{selectedPath}, &pipelineTriggerWorkflow{Name: workflowName, SHA: workflowSHA}, nil
 }
@@ -332,7 +344,7 @@ func pipelineTriggerEventRef(event, ref string) bool {
 		number, ok = strings.CutSuffix(number, "/merge")
 		parsed, err := strconv.Atoi(number)
 		return ok && err == nil && parsed > 0 && strconv.Itoa(parsed) == number
-	case "issues", "issue_comment", "merge_group", "delete", "label":
+	case "issues", "issue_comment", "merge_group", "delete", "label", "pull_request_target":
 		branch, ok := strings.CutPrefix(ref, "refs/heads/")
 		return ok && branch != ""
 	case "release":
@@ -447,6 +459,49 @@ func normalizePluginCommit(ctx context.Context, checkoutPath string, getenv func
 	}
 	if err := setenv("BUILDKITE_COMMIT", commit); err != nil {
 		return fmt.Errorf("set resolved BUILDKITE_COMMIT: %w", err)
+	}
+	return nil
+}
+
+// Target imports read workflows, local reusable workflows and action source
+// from this tree. Checking only BUILDKITE_COMMIT would allow a head checkout or
+// dirty local action to masquerade as the server's trusted default revision.
+// Hooks and concurrent writers remain part of the trusted agent boundary.
+func verifyTargetCheckout(checkoutPath, sha, repository string) error {
+	rootBytes, err := gitRootCommand(checkoutPath).Output()
+	if err != nil || !git.ValidObjectID(sha) {
+		return fmt.Errorf("pull_request_target requires the selected Git checkout")
+	}
+	root := strings.TrimSpace(string(rootBytes))
+	head, err := gitCommand(root, "rev-parse", "--verify", "HEAD^{commit}").Output()
+	if err != nil || strings.TrimSpace(string(head)) != sha {
+		return fmt.Errorf("pull_request_target checkout HEAD does not match GITHUB_WORKFLOW_SHA")
+	}
+	remote, err := gitCommand(root, "remote", "get-url", "origin").Output()
+	provider, owner, name, _, parseErr := parseBuildkiteRepository(strings.TrimSpace(string(remote)))
+	wantProvider, wantOwner, wantName, _, wantErr := parseBuildkiteRepository(repository)
+	if err != nil || parseErr != nil || wantErr != nil || provider != "github" || provider != wantProvider || !strings.EqualFold(owner+"/"+name, wantOwner+"/"+wantName) {
+		return fmt.Errorf("pull_request_target checkout origin does not match BUILDKITE_REPO")
+	}
+	// Reject index flags that could hide changes from diff (sparse checkout,
+	// assume-unchanged), and submodules whose worktrees have separate identity.
+	entries, err := gitCommand(root, "ls-files", "-v", "--stage", "-z").Output()
+	if err != nil {
+		return fmt.Errorf("pull_request_target cannot inspect checkout index")
+	}
+	for entry := range strings.SplitSeq(strings.TrimSuffix(string(entries), "\x00"), "\x00") {
+		if !strings.HasPrefix(entry, "H ") || strings.HasPrefix(entry, "H 160000 ") {
+			return fmt.Errorf("pull_request_target requires a complete checkout without index overrides or submodules")
+		}
+	}
+	if err := gitCommand(root, "-c", "core.fsmonitor=false", "diff", "--exit-code", "--no-ext-diff", "--no-textconv", sha, "--").Run(); err != nil {
+		return fmt.Errorf("pull_request_target requires an unchanged checkout of GITHUB_WORKFLOW_SHA")
+	}
+	// Without --exclude-standard this includes ignored files. They too can be
+	// consumed as local actions, scripts, or reusable workflows.
+	untracked, err := gitCommand(root, "ls-files", "--others", "-z").Output()
+	if err != nil || len(untracked) != 0 {
+		return fmt.Errorf("pull_request_target requires a clean checkout without untracked or ignored files")
 	}
 	return nil
 }

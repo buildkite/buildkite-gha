@@ -211,6 +211,33 @@ For non-pull-request builds, a user who can create a build at any commit may
 choose code that requests the workflow's allowed permissions. Enable write
 tokens only when those build-creation paths are trusted.
 
+### Target PR workflows
+
+`pull_request_target` selects trusted default-branch source, but the PR payload
+remains untrusted. Do not interpolate titles, bodies or refs into shell commands,
+or execute downloaded PR artifacts, dependencies or scripts with secrets. Use
+isolated, ephemeral agents; agent hooks and concurrent checkout writers remain
+trusted. A matching environment variable or local origin URL is not an attestation
+against a compromised agent.
+
+The native checkout adapter blocks a fork's payload head and merge SHAs. Target
+jobs retain the digest-verified event artifact so this guard uses repository IDs,
+not a caller's claim that a PR is same-repository. Existing restrictions also
+reject another repository, `refs/pull/*`, and `allow-unsafe-pr-checkout: true`.
+Same-repository PR SHAs and ordinary base-repository branch overrides remain
+allowed, as in GitHub's default fork-specific guard. This does not prevent a
+workflow author from fetching and executing arbitrary code outside checkout.
+
+Target builds keep Buildkite's PR `contents:read` token ceiling; they do not gain
+GitHub's default read/write token. With the companion backend, cache credentials
+are read-only even for same-repository target PRs. Scope remains the configured
+Buildkite pipeline default branch; GitHub's write-capable `cache-mode` opt-out is
+not supported. No GitHub secrets or fork approval policy are imported. Existing
+Buildkite Secret policies and environment protection checks still apply.
+
+See [supported target semantics](compatibility.md#trusted-default-branch-pr-workflows)
+and GitHub Security Lab's [pwn request guidance](https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/).
+
 ### Workflow secrets
 
 Workflow secrets are Buildkite secrets available to the destination job. They
