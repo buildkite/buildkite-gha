@@ -195,6 +195,7 @@ type captureRunner struct {
 	commands []capturedCommand
 	uploaded map[string][]byte
 	failAt   int
+	output   []byte
 }
 
 func (r *captureRunner) Run(ctx context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
@@ -221,7 +222,7 @@ func (r *captureRunner) Run(ctx context.Context, dir, name string, args []string
 			return nil, err
 		}
 	}
-	return nil, nil
+	return bytes.Clone(r.output), nil
 }
 
 func TestAgentUsesExactProducerAndUploadFlags(t *testing.T) {
@@ -277,6 +278,35 @@ func TestAgentPublishesBoundedJobAnnotationThroughStdin(t *testing.T) {
 				t.Fatalf("AnnotateJob() error = %v, commands = %#v", err, validationRunner.commands)
 			}
 		})
+	}
+}
+
+func TestAgentEnsuresStepLabelSuffix(t *testing.T) {
+	runner := &captureRunner{}
+	agent := Agent{Runner: runner}
+	if err := agent.EnsureStepLabelSuffix(t.Context(), " (skipped)"); err != nil {
+		t.Fatal(err)
+	}
+	want := []capturedCommand{
+		{name: "buildkite-agent", args: []string{"step", "get", "label"}},
+		{name: "buildkite-agent", args: []string{"step", "update", "label", " (skipped)", "--append"}},
+	}
+	if !reflect.DeepEqual(runner.commands, want) {
+		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+	alreadyMarked := &captureRunner{output: []byte(":github: job · e2e (skipped)\n")}
+	if err := (Agent{Runner: alreadyMarked}).EnsureStepLabelSuffix(t.Context(), " (skipped)"); err != nil {
+		t.Fatal(err)
+	}
+	if len(alreadyMarked.commands) != 1 || !reflect.DeepEqual(alreadyMarked.commands[0].args, []string{"step", "get", "label"}) {
+		t.Fatalf("already marked commands = %#v, want no duplicate update", alreadyMarked.commands)
+	}
+
+	for _, suffix := range []string{"", string([]byte{0xff})} {
+		validationRunner := &captureRunner{}
+		if err := (Agent{Runner: validationRunner}).EnsureStepLabelSuffix(t.Context(), suffix); err == nil || len(validationRunner.commands) != 0 {
+			t.Fatalf("EnsureStepLabelSuffix(%q) error = %v, commands = %#v", suffix, err, validationRunner.commands)
+		}
 	}
 }
 

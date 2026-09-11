@@ -333,6 +333,9 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		if publication.MetadataMirrorError != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: result metadata mirror: %v\n", publication.MetadataMirrorError)
 		}
+		if publication.SkippedLabelError != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: skipped job label: %v\n", publication.SkippedLabelError)
+		}
 		if publication.SummaryAnnotationError != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: job summary annotation: %v\n", publication.SummaryAnnotationError)
 		}
@@ -345,7 +348,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		if secretAnnotationError != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: secret resolution annotation: %v\n", secretAnnotationError)
 		}
-		if err != nil || publication.MetadataMirrorError != nil || publication.SummaryAnnotationError != nil || publication.WarningAnnotationError != nil || publication.ErrorAnnotationError != nil || secretAnnotationError != nil {
+		if err != nil || publication.MetadataMirrorError != nil || publication.SkippedLabelError != nil || publication.SummaryAnnotationError != nil || publication.WarningAnnotationError != nil || publication.ErrorAnnotationError != nil || secretAnnotationError != nil {
 			_, _ = fmt.Fprintln(stdout, "^^^ +++")
 			failureVisible = true
 		}

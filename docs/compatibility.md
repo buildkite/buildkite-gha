@@ -1788,10 +1788,10 @@ hosted-toolchains images provide. macOS images are unsupported.
 
 ### Results, retries, and cancellation
 
-- A runtime-skipped Actions job appears successful in Buildkite while publishing a logical `skipped` result for downstream imported jobs.
+- A runtime-skipped Actions job remains successful in Buildkite, appends `(skipped)` to its job label, and publishes a logical `skipped` result for downstream imported jobs.
 - Retry the whole build if a producer result or artifact becomes ambiguous.
 - Cancellation targets the complete process tree: `SIGINT`, `SIGTERM` after 7.5 seconds, then `SIGKILL` after another 2.5 seconds.
-- Summary or annotation publication failure produces a warning and does not change a completed job result.
+- Summary, annotation, or skipped-label publication failure produces a warning and does not change a completed job result.
 
 ### Key limits
 

@@ -119,6 +119,7 @@ type cliCaptureRunner struct {
 	failAt         int
 	failMetadata   bool
 	failAnnotation bool
+	failStepUpdate bool
 	gitOutput      []byte
 	gitErr         error
 	webhook        []byte
@@ -226,6 +227,9 @@ func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []str
 	}
 	if r.failAnnotation && len(args) > 0 && args[0] == "annotate" {
 		return nil, errors.New("annotation unavailable")
+	}
+	if r.failStepUpdate && len(args) > 1 && args[0] == "step" && args[1] == "update" {
+		return nil, errors.New("step update unavailable")
 	}
 	return nil, nil
 }

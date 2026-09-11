@@ -172,6 +172,23 @@ func (a Agent) UploadPipeline(ctx context.Context, pipeline []byte) error {
 	return err
 }
 
+// EnsureStepLabelSuffix makes a terminal runtime distinction visible on the
+// current Buildkite step without duplicating it when the step is retried.
+func (a Agent) EnsureStepLabelSuffix(ctx context.Context, suffix string) error {
+	if suffix == "" || !utf8.ValidString(suffix) {
+		return fmt.Errorf("step label suffix must be nonempty valid UTF-8")
+	}
+	label, err := a.run(ctx, []string{"step", "get", "label"}, nil)
+	if err != nil {
+		return err
+	}
+	if strings.HasSuffix(strings.TrimSpace(string(label)), strings.TrimSpace(suffix)) {
+		return nil
+	}
+	_, err = a.run(ctx, []string{"step", "update", "label", suffix, "--append"}, nil)
+	return err
+}
+
 // AnnotateJob publishes Markdown through stdin under a job-scoped context.
 // Reusing the context updates the annotation instead of duplicating it.
 func (a Agent) AnnotateJob(ctx context.Context, jobID, annotationContext, style, body string) error {
