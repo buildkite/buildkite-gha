@@ -28,7 +28,7 @@
     },
     "required_capabilities": [],
     "program": {
-      "version": 1,
+      "version": 2,
       "job": {
         "condition": {
           "source": "",
@@ -45,6 +45,7 @@
             }
           }
         },
+        "continue_on_error": {},
         "defaults": {
           "shell": {
             "source": "",
@@ -352,12 +353,12 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:ef20d47d6b84803323d803f6b5a8b695e90babce5f104021b721a820e2602577"
+          "plan_digest": "sha256:07e67555df452a299e387007926e71979b99283830ad52b4d262ca30fe0a0bfa"
         }
       ]
     },
     "program": {
-      "version": 1,
+      "version": 2,
       "job": {
         "condition": {
           "source": "",
@@ -374,6 +375,7 @@
             }
           }
         },
+        "continue_on_error": {},
         "defaults": {
           "shell": {
             "source": "",
@@ -584,12 +586,12 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:ef20d47d6b84803323d803f6b5a8b695e90babce5f104021b721a820e2602577"
+          "plan_digest": "sha256:07e67555df452a299e387007926e71979b99283830ad52b4d262ca30fe0a0bfa"
         }
       ]
     },
     "program": {
-      "version": 1,
+      "version": 2,
       "job": {
         "condition": {
           "source": "",
@@ -606,6 +608,7 @@
             }
           }
         },
+        "continue_on_error": {},
         "defaults": {
           "shell": {
             "source": "",

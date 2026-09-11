@@ -17,6 +17,7 @@ type Surface string
 
 const (
 	SurfaceJobCondition      Surface = "job-condition"
+	SurfaceJobControl        Surface = "job-control"
 	SurfaceCallCondition     Surface = "call-condition"
 	SurfaceStepCondition     Surface = "step-condition"
 	SurfaceJobEnvironment    Surface = "job-environment"
@@ -199,19 +200,19 @@ type Guard struct {
 // owns the steps and their expressions and controls, along with job-level
 // environment, defaults, containers, services, and outputs.
 type Job struct {
-	Guards          []Guard    `json:"guards,omitempty"`
-	Condition       Site       `json:"condition"`
-	ContinueOnError bool       `json:"continue_on_error,omitempty"`
-	TimeoutMinutes  float64    `json:"timeout_minutes,omitempty"`
-	Env             []Binding  `json:"env,omitempty"`
-	Defaults        Defaults   `json:"defaults"`
-	Container       *Container `json:"container,omitempty"`
-	Services        Services   `json:"services"`
-	Steps           []Step     `json:"steps"`
-	Outputs         []Binding  `json:"outputs,omitempty"`
+	Guards          []Guard     `json:"guards,omitempty"`
+	Condition       Site        `json:"condition"`
+	ContinueOnError BoolControl `json:"continue_on_error"`
+	TimeoutMinutes  float64     `json:"timeout_minutes,omitempty"`
+	Env             []Binding   `json:"env,omitempty"`
+	Defaults        Defaults    `json:"defaults"`
+	Container       *Container  `json:"container,omitempty"`
+	Services        Services    `json:"services"`
+	Steps           []Step      `json:"steps"`
+	Outputs         []Binding   `json:"outputs,omitempty"`
 }
 
-const Version = 1
+const Version = 2
 
 // Program is the versioned execution contract for one normalized GitHub Actions
 // workflow job and the resolved actions it may invoke.
@@ -232,6 +233,12 @@ func (p *Program) Validate() error {
 		return fmt.Errorf("execution program contains no steps")
 	}
 	engine := expression.NewEngine()
+	if p.Job.ContinueOnError.Expression != nil && p.Job.ContinueOnError.Literal {
+		return fmt.Errorf("job plan has both literal and expression continue_on_error")
+	}
+	if err := validateStepSiteLength("job", "continue_on_error", p.Job.ContinueOnError.Expression); err != nil {
+		return err
+	}
 	if err := validateSteps(p.Job.Steps); err != nil {
 		return err
 	}
@@ -410,6 +417,10 @@ func cloneProgram(source Program) Program {
 		result.Actions[id] = cloneAction(action)
 	}
 	result.Job.Guards = append([]Guard(nil), job.Guards...)
+	if job.ContinueOnError.Expression != nil {
+		value := *job.ContinueOnError.Expression
+		result.Job.ContinueOnError.Expression = &value
+	}
 	result.Job.Env = cloneBindings(job.Env)
 	result.Job.Outputs = cloneBindings(job.Outputs)
 	result.Job.Steps = append([]Step(nil), job.Steps...)

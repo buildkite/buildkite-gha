@@ -35,7 +35,7 @@ func (job *Job) ProjectProgram() error {
 	}
 	job.Env = bindingMap(source.Env)
 	job.Condition = source.Condition.Source
-	job.ContinueOnError = source.ContinueOnError
+	job.ContinueOnError = source.ContinueOnError.Literal || source.ContinueOnError.Expression != nil
 	job.TimeoutMinutes = source.TimeoutMinutes
 	job.DefaultShell = source.Defaults.Shell.Source
 	job.DefaultWorkingDirectory = source.Defaults.WorkingDirectory.Source

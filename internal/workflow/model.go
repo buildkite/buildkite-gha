@@ -124,31 +124,33 @@ type CallSecret struct {
 
 // Job is one logical GitHub Actions job.
 type Job struct {
-	ID                      string                 `json:"id"`
-	Name                    string                 `json:"name,omitempty"`
-	Needs                   []string               `json:"needs,omitempty"`
-	RunsOn                  []string               `json:"runs_on,omitempty"`
-	RunsOnExpr              *expression.Expression `json:"runs_on_expression,omitempty"`
-	Matrix                  *Matrix                `json:"matrix,omitempty"`
-	FailFast                *bool                  `json:"fail_fast,omitempty"`
-	MaxParallel             *int                   `json:"max_parallel,omitempty"`
-	Concurrency             *Concurrency           `json:"concurrency,omitempty"`
-	Environment             string                 `json:"environment,omitempty"`
-	Reusable                *ReusableWorkflowCall  `json:"reusable_workflow,omitempty"`
-	Env                     map[string]string      `json:"env,omitempty"`
-	Permissions             *Permissions           `json:"permissions,omitempty"`
-	If                      string                 `json:"if,omitempty"`
-	IfSpan                  Span                   `json:"-"`
-	ContinueOnError         bool                   `json:"continue_on_error,omitempty"`
-	TimeoutMinutes          float64                `json:"timeout_minutes,omitempty"`
-	Outputs                 map[string]string      `json:"outputs,omitempty"`
-	Container               *Container             `json:"container,omitempty"`
-	Services                []Service              `json:"services,omitempty"`
-	ServicesExpression      string                 `json:"services_expression,omitempty"`
-	DefaultShell            string                 `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string                 `json:"default_working_directory,omitempty"`
-	Steps                   []Step                 `json:"steps"`
-	Span                    Span                   `json:"span"`
+	ID                        string                 `json:"id"`
+	Name                      string                 `json:"name,omitempty"`
+	Needs                     []string               `json:"needs,omitempty"`
+	RunsOn                    []string               `json:"runs_on,omitempty"`
+	RunsOnExpr                *expression.Expression `json:"runs_on_expression,omitempty"`
+	Matrix                    *Matrix                `json:"matrix,omitempty"`
+	FailFast                  *bool                  `json:"fail_fast,omitempty"`
+	MaxParallel               *int                   `json:"max_parallel,omitempty"`
+	Concurrency               *Concurrency           `json:"concurrency,omitempty"`
+	Environment               string                 `json:"environment,omitempty"`
+	Reusable                  *ReusableWorkflowCall  `json:"reusable_workflow,omitempty"`
+	Env                       map[string]string      `json:"env,omitempty"`
+	Permissions               *Permissions           `json:"permissions,omitempty"`
+	If                        string                 `json:"if,omitempty"`
+	IfSpan                    Span                   `json:"-"`
+	ContinueOnError           bool                   `json:"continue_on_error,omitempty"`
+	ContinueOnErrorExpression string                 `json:"continue_on_error_expression,omitempty"`
+	ContinueOnErrorSpan       Span                   `json:"-"`
+	TimeoutMinutes            float64                `json:"timeout_minutes,omitempty"`
+	Outputs                   map[string]string      `json:"outputs,omitempty"`
+	Container                 *Container             `json:"container,omitempty"`
+	Services                  []Service              `json:"services,omitempty"`
+	ServicesExpression        string                 `json:"services_expression,omitempty"`
+	DefaultShell              string                 `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory   string                 `json:"default_working_directory,omitempty"`
+	Steps                     []Step                 `json:"steps"`
+	Span                      Span                   `json:"span"`
 }
 
 // Container is the statically owned subset of a GitHub Actions container.

@@ -26,6 +26,7 @@ type jobRun struct {
 	prepared        remotePreparations
 	preFailures     map[int]stepExecution
 	reachableSteps  []bool
+	continueOnError bool
 	runErr          error
 	hardFailure     bool
 

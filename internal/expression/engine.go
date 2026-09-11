@@ -24,6 +24,7 @@ const (
 	ProfileReusableInput         ProfileID = "reusable-input"
 	ProfileRunName               ProfileID = "run-name"
 	ProfileJobCondition          ProfileID = "job-condition"
+	ProfileJobControl            ProfileID = "job-control"
 	ProfileStepCondition         ProfileID = "step-condition"
 	ProfileCallCondition         ProfileID = "call-condition"
 	ProfileActionLifecycle       ProfileID = "action-lifecycle"
@@ -93,6 +94,7 @@ const (
 	semanticsReusableInput
 	semanticsRunName
 	semanticsCondition
+	semanticsJobControl
 	semanticsActionLifecycle
 	semanticsJobEnvironment
 	semanticsJobDefault
@@ -126,6 +128,7 @@ var profiles = map[ProfileID]Profile{
 	ProfileReusableInput:         {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"github", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsReusableInput},
 	ProfileRunName:               {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"github", "inputs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsRunName},
 	ProfileJobCondition:          {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "runner", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: JobCondition},
+	ProfileJobControl:            {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"github", "inputs", "matrix", "needs", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsJobControl},
 	ProfileStepCondition:         {Form: FormExpression, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "hashFiles", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: StepCondition},
 	ProfileCallCondition:         {Form: FormExpression, Scope: ScopeCall, Contexts: ContextSet{"github", "inputs", "needs", "vars"}, Functions: profileFunctions("always", "cancelled", "failure", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCondition, condition: CallCondition},
 	ProfileActionLifecycle:       {Form: FormExpression, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "runner", "steps"}, Functions: profileFunctions("always", "cancelled", "failure", "hashFiles", "success"), Missing: MissingNull, Token: TokenDenied, semantics: semanticsActionLifecycle, condition: actionLifecycleCondition},
@@ -395,7 +398,7 @@ func (Engine) Validate(site Site) (Validation, error) {
 		}
 	case semanticsStepTemplate:
 		err = validateStepProfile(site.Source, profile)
-	case semanticsStepControl, semanticsReusableStepControl:
+	case semanticsJobControl, semanticsStepControl, semanticsReusableStepControl:
 		var node actionlint.ExprNode
 		node, err = parseCompleteExpression(site.Source)
 		if err == nil {
@@ -562,7 +565,7 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 		value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
 	case semanticsStepTemplate, semanticsDeferredInput:
 		value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
-	case semanticsStepControl, semanticsReusableStepControl:
+	case semanticsJobControl, semanticsStepControl, semanticsReusableStepControl:
 		var node actionlint.ExprNode
 		node, err = parseCompleteExpression(site.Source)
 		if err == nil {
@@ -710,7 +713,7 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 		if err != nil {
 			return Reduced{}, siteError(site, err)
 		}
-		if profile.semantics == semanticsStepControl {
+		if profile.semantics == semanticsJobControl || profile.semantics == semanticsStepControl {
 			node, empty, parseErr := parseCondition(reduced)
 			if parseErr != nil {
 				return Reduced{}, siteError(site, parseErr)
@@ -728,7 +731,7 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 		}
 		residual := site
 		residual.Source = reduced
-		if profile.semantics == semanticsStepControl || profile.semantics == semanticsServiceMap {
+		if profile.semantics == semanticsJobControl || profile.semantics == semanticsStepControl || profile.semantics == semanticsServiceMap {
 			residual.Source = "${{ " + reduced + " }}"
 		}
 		if _, err := engine.Validate(residual); err != nil {

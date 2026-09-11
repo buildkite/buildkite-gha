@@ -43,14 +43,16 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 	compile := CompileContext{
 		GitHub: map[string]any{"event_name": "push", "server_url": "https://github.com"},
 		Inputs: map[string]any{"enabled": true, "name": "value"},
-		Matrix: map[string]any{"os": "linux"},
+		Matrix: map[string]any{"os": "linux", "enabled": true},
 		Vars:   map[string]string{"NAME": "value"},
 	}
 	runtime := Context{
-		Env:    map[string]string{"NAME": "value"},
-		GitHub: map[string]any{"event_name": "push", "server_url": "https://github.com"},
-		Inputs: map[string]string{"enabled": "true", "name": "value"},
-		Needs:  map[string]NeedStatus{"build": {Outputs: map[string]string{"value": `{"name":"value"}`}, Result: "success"}},
+		Env:            map[string]string{"NAME": "value"},
+		GitHub:         map[string]any{"event_name": "push", "server_url": "https://github.com"},
+		Inputs:         map[string]string{"enabled": "true", "name": "value"},
+		WorkflowInputs: map[string]any{"enabled": true, "name": "value"},
+		Matrix:         map[string]any{"enabled": true},
+		Needs:          map[string]NeedStatus{"build": {Outputs: map[string]string{"value": `{"name":"value"}`}, Result: "success"}},
 	}
 	condition := ConditionContext{
 		Env:    runtime.Env,
@@ -84,6 +86,7 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 		ProfileReusableInput:         {"${{ 'value' }}", ResultString, "value"},
 		ProfileRunName:               {"run-${{ github.event_name }}", ResultString, "run-push"},
 		ProfileJobCondition:          {"always() && inputs.enabled", ResultBoolean, true},
+		ProfileJobControl:            {"${{ matrix.enabled }}", ResultBoolean, true},
 		ProfileStepCondition:         {"always() && inputs.enabled", ResultBoolean, true},
 		ProfileCallCondition:         {"always() && inputs.enabled", ResultBoolean, true},
 		ProfileActionLifecycle:       {"${{ always() && inputs.enabled }}", ResultBoolean, true},
@@ -694,7 +697,7 @@ func TestEngineCaseFunctionPolicyIsClosedByProfile(t *testing.T) {
 func profileIDs() []ProfileID {
 	return []ProfileID{
 		ProfileCompile, ProfileCompileTemplate, ProfileCompileContainerImage, ProfilePartialTemplate, ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
-		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileStepCondition, ProfileCallCondition,
+		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileJobControl, ProfileStepCondition, ProfileCallCondition,
 		ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput, ProfileStepTemplate,
 		ProfileStepControl, ProfileReusableStepControl, ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileDeferredInput, ProfileServiceCredential, ProfileServiceMap,
 		ProfileActionInputDefault, ProfileDockerActionArg,

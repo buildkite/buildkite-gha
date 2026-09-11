@@ -1236,7 +1236,7 @@ func synchronizeExecutionProgram(job *Job) {
 func programFromTestJob(job Job) program.Program {
 	result := program.Program{Version: program.Version, Job: program.Job{
 		Condition:       testPlanSite(job.Condition),
-		ContinueOnError: job.ContinueOnError, TimeoutMinutes: job.TimeoutMinutes,
+		ContinueOnError: program.BoolControl{Literal: job.ContinueOnError}, TimeoutMinutes: job.TimeoutMinutes,
 		Env: testPlanBindings(job.Env),
 		Defaults: program.Defaults{
 			Shell:            testPlanSite(job.DefaultShell),

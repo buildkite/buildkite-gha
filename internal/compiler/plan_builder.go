@@ -327,7 +327,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 			site.Source, reduceErr = reduceCondition(site.Source, profile)
 		case program.SurfaceStepCondition:
 			site.Source, reduceErr = reduceCondition(site.Source, profile)
-		case program.SurfaceStepControl:
+		case program.SurfaceJobControl, program.SurfaceStepControl:
 			site.Source, reduceErr = reduceTypedExpression(site, profile)
 		case program.SurfaceJobEnvironment:
 			site.Source, reduceErr = reduceTemplate(site.Source, profile)
@@ -367,6 +367,7 @@ func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (J
 // Program.Validate applies the destination runtime profile to every residual.
 var compileReductionProfiles = map[program.Surface]expression.ProfileID{
 	program.SurfaceJobCondition:      expression.ProfileCompileJobCondition,
+	program.SurfaceJobControl:        expression.ProfileJobControl,
 	program.SurfaceCallCondition:     expression.ProfileCompileCallCondition,
 	program.SurfaceStepCondition:     expression.ProfileCompileStepCondition,
 	program.SurfaceStepControl:       expression.ProfileStepControl,
@@ -392,6 +393,11 @@ func compileReductionProfile(surface program.Surface) (expression.ProfileID, err
 // whole-program pass. Expression traversal remains owned by Program.TransformSites.
 func projectReducedProgram(instance *JobInstance, reduced program.Program) {
 	instance.If = reduced.Job.Condition.Source
+	instance.ContinueOnError = reduced.Job.ContinueOnError.Literal
+	instance.ContinueOnErrorExpression = ""
+	if reduced.Job.ContinueOnError.Expression != nil {
+		instance.ContinueOnErrorExpression = reduced.Job.ContinueOnError.Expression.Source
+	}
 	instance.Env = programBindingMap(reduced.Job.Env)
 	instance.DefaultShell = reduced.Job.Defaults.Shell.Source
 	instance.DefaultWorkingDirectory = reduced.Job.Defaults.WorkingDirectory.Source

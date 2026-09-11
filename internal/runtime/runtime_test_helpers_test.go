@@ -117,7 +117,7 @@ func attachTestProgram(job *plan.Job) {
 	}
 	program := executionprogram.Program{Version: executionprogram.Version, Actions: actions, Job: executionprogram.Job{
 		Condition:       testProgramSite(job.Condition, executionprogram.SurfaceJobCondition, executionprogram.ResultBoolean),
-		ContinueOnError: job.ContinueOnError,
+		ContinueOnError: executionprogram.BoolControl{Literal: job.ContinueOnError},
 		TimeoutMinutes:  job.TimeoutMinutes,
 		Env:             testProgramBindings(job.Env, executionprogram.SurfaceJobEnvironment),
 		Defaults: executionprogram.Defaults{

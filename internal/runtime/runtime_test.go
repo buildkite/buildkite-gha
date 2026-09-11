@@ -865,6 +865,33 @@ func TestRunJobScrubsTokenSerializedIntoRuntimeError(t *testing.T) {
 	}
 }
 
+func TestJobContinueOnErrorExpressionControlsFailureTolerance(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		allowFailure  string
+		wantResult    string
+		wantTolerated bool
+	}{
+		{name: "enabled", allowFailure: "yes", wantResult: "success", wantTolerated: true},
+		{name: "disabled", allowFailure: "no", wantResult: "failure"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: expression continue on error\n")
+			job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "fail", Kind: "run", Command: "exit 7"}})
+			job.RepositoryVars = map[string]string{"ALLOW_FAILURE": test.allowFailure}
+			site := testProgramSite("${{ vars.ALLOW_FAILURE == 'yes' }}", executionprogram.SurfaceJobControl, executionprogram.ResultBoolean)
+			job.Program.Job.ContinueOnError = executionprogram.BoolControl{Expression: &site}
+			job.Program.DeriveSiteSemantics()
+			result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+			if result.Conclusion != test.wantResult || IsToleratedJobFailure(err) != test.wantTolerated {
+				t.Fatalf("RunJob() result/error = %#v / %v, want result %q tolerated %t", result, err, test.wantResult, test.wantTolerated)
+			}
+		})
+	}
+}
+
 func TestRunJobRejectsInvalidWorkflowTokenPolicyBeforeMinting(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/nested/test.yml"
