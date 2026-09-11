@@ -82,7 +82,7 @@ func siteReferencesVars(site program.Site) bool {
 }
 
 func jobReferencesVars(job workflow.Job) bool {
-	for _, value := range []string{job.Name, job.Environment, job.ServicesExpression, job.DefaultShell, job.DefaultWorkingDirectory} {
+	for _, value := range []string{job.Name, job.Environment, job.ServicesExpression, job.ContinueOnErrorExpression, job.DefaultShell, job.DefaultWorkingDirectory} {
 		if templateReferencesVars(value) {
 			return true
 		}

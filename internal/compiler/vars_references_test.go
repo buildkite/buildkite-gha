@@ -68,6 +68,13 @@ jobs:
     if: vars.DEPLOY_ENABLED == 'true'
     steps: [{run: true}]
 `, true},
+		"job continue on error": {`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ vars.ALLOW_FAILURE == 'true' }}
+    steps: [{run: true}]
+`, true},
 		"index access": {`on: push
 jobs:
   test:
