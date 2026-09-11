@@ -609,13 +609,16 @@ runs:
     MODE: action
     ACTION_ONLY: default
     INPUT_VALUE: action
+    GITHUB_REF_NAME: spoofed-action
+    GITHUB_REF_TYPE: spoofed-action
 `)
 	writeFixtureFile(t, workspace, ".github/actions/docker/Dockerfile", "FROM scratch\n")
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []runtimeTestStep{{
 		ID: "docker", Kind: "uses", Uses: "./.github/actions/docker",
 		With: map[string]string{"value": "caller-input"},
-		Env:  map[string]string{"MODE": "caller"},
+		Env:  map[string]string{"MODE": "caller", "GITHUB_REF_NAME": "spoofed-step", "GITHUB_REF_TYPE": "spoofed-step"},
 	}})
+	job.Event.Ref = "refs/tags/v4.5.6"
 	job.RequiredCapabilities = []string{"docker", "network"}
 	if _, err := (Runner{Docker: fake.path}).runTestJob(t.Context(), job, workspace); err != nil {
 		t.Fatal(err)
@@ -625,7 +628,7 @@ runs:
 	if runIndex < 0 {
 		t.Fatalf("Docker run absent: %#v", calls)
 	}
-	for _, want := range []string{"MODE=caller", "ACTION_ONLY=default", "INPUT_VALUE=caller-input"} {
+	for _, want := range []string{"MODE=caller", "ACTION_ONLY=default", "INPUT_VALUE=caller-input", "GITHUB_REF=refs/tags/v4.5.6", "GITHUB_REF_NAME=v4.5.6", "GITHUB_REF_TYPE=tag"} {
 		if !slices.Contains(calls[runIndex].args, want) {
 			t.Fatalf("Docker environment omits %q: %#v", want, calls[runIndex].args)
 		}

@@ -1054,6 +1054,55 @@ func TestGitHubContextExposesRuntimeEventIdentity(t *testing.T) {
 	}
 }
 
+func TestRefEnvironmentShellJavaScriptAndComposite(t *testing.T) {
+	node := requireNode24(t)
+	for _, test := range []struct{ ref, name, kind string }{
+		{"refs/heads/feature/runtime", "feature/runtime", "branch"},
+		{"refs/tags/v3.2.1", "v3.2.1", "tag"},
+		{"refs/pull/73/merge", "73/merge", "branch"},
+	} {
+		t.Run(test.ref, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeFixtureFile(t, workspace, "workflow.yml", "name: ref environment\n")
+			writeFixtureFile(t, workspace, ".github/actions/js/action.yml", "runs:\n  using: node24\n  pre: check.js\n  main: check.js\n  post: check.js\n")
+			writeFixtureFile(t, workspace, ".github/actions/js/check.js", fmt.Sprintf(`
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+assert.equal(process.env.GITHUB_REF, %q);
+assert.equal(process.env.GITHUB_REF_NAME, %q);
+assert.equal(process.env.GITHUB_REF_TYPE, %q);
+fs.appendFileSync('observations', 'js\n');
+`, test.ref, test.name, test.kind))
+			shell := fmt.Sprintf(`test "$GITHUB_REF" = %q
+test "$GITHUB_REF_NAME" = %q
+test "$GITHUB_REF_TYPE" = %q
+echo shell >> observations
+echo GITHUB_REF_NAME=spoofed-file >> "$GITHUB_ENV"
+echo GITHUB_REF_TYPE=spoofed-file >> "$GITHUB_ENV"`, test.ref, test.name, test.kind)
+			writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "runs:\n  using: composite\n  steps:\n    - shell: sh\n      env:\n        GITHUB_REF_NAME: spoofed-composite\n        GITHUB_REF_TYPE: spoofed-composite\n      run: |\n        "+strings.ReplaceAll(shell, "\n", "\n        ")+"\n")
+			spoofed := map[string]string{"GITHUB_REF_NAME": "spoofed-step", "GITHUB_REF_TYPE": "spoofed-step"}
+			job := runtimePlan(t, workspace, "workflow.yml", []runtimeTestStep{
+				{ID: "shell", Kind: "run", Shell: "sh", Command: shell, Env: spoofed},
+				{ID: "js", Kind: "uses", Uses: "./.github/actions/js", Env: spoofed},
+				{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", Env: spoofed},
+			})
+			job.Event.Ref = test.ref
+			job.Env = map[string]string{"GITHUB_REF_NAME": "spoofed-job", "GITHUB_REF_TYPE": "spoofed-job"}
+			t.Setenv("GITHUB_REF_NAME", "spoofed-host")
+			t.Setenv("GITHUB_REF_TYPE", "spoofed-host")
+			var logs bytes.Buffer
+			result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("ref readers failed: %v; logs: %s", err, &logs)
+			}
+			observations, err := os.ReadFile(filepath.Join(workspace, "observations"))
+			if err != nil || strings.Count(string(observations), "js\n") != 3 || strings.Count(string(observations), "shell\n") != 2 {
+				t.Fatalf("observations = %q, %v; want shell, composite, JS pre/main/post", observations, err)
+			}
+		})
+	}
+}
+
 func TestStandardEnvironmentSuppliesProtectedGitHubWorkflow(t *testing.T) {
 	tests := []struct {
 		name     string
