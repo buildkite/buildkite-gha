@@ -18,6 +18,13 @@ import (
 // default branch trunk; both PR revisions contain different executable source.
 func targetFixture(t *testing.T, headRepo, filters string) (root, trusted, base, head string, webhook []byte) {
 	t.Helper()
+	// These tests capture uploads without executing the Linux job runtime.
+	// Supply its existing binary fixture when the importer host is macOS.
+	linuxRuntime := filepath.Join(t.TempDir(), "linux-runtime")
+	if err := os.WriteFile(linuxRuntime, pluginTestLinuxExecutable(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginDevLinuxRuntimeEnvironment, linuxRuntime)
 	root = writeUploadWorkflowRepository(t, map[string]string{
 		"ci.yml":       "name: Target\non:\n  pull_request_target:\n" + filters + "jobs:\n  direct:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo TRUSTED_DEFAULT\n        env:\n          HEAD_REF: ${{ github.head_ref }}\n          BASE_REF: ${{ github.base_ref }}\n          PR: ${{ github.event.number }}\n      - uses: ./.github/actions/sentinel\n  call:\n    uses: ./.github/workflows/reusable.yml\n",
 		"reusable.yml": "on: workflow_call\njobs:\n  child:\n    runs-on: ubuntu-latest\n    steps: [{run: echo TRUSTED_REUSABLE}]\n",
@@ -93,7 +100,6 @@ func targetGit(t *testing.T, root string, args ...string) string {
 }
 
 func TestPluginPullRequestTargetTrustedSource(t *testing.T) {
-	requireImporterHost(t)
 	for _, headRepo := range []string{"contributor/fork", "buildkite/buildkite-gha"} {
 		t.Run(headRepo, func(t *testing.T) {
 			_, trusted, _, head, webhook := targetFixture(t, headRepo, "    branches: [release]\n    paths: ['src/**']\n")
