@@ -119,6 +119,16 @@ func unsupportedTriggerEvent(err error) bool {
 	return errors.As(err, &unsupported)
 }
 
+// TriggerError retains the declaration responsible for a translation failure.
+// The original error remains available for unsupported-event/filter handling.
+type TriggerError struct {
+	Position workflow.Position
+	Err      error
+}
+
+func (e *TriggerError) Error() string { return e.Err.Error() }
+func (e *TriggerError) Unwrap() error { return e.Err }
+
 // UnsupportedPathFiltersError reports a trigger that cannot be translated
 // without changing its path-filter semantics.
 type UnsupportedPathFiltersError struct {
@@ -428,7 +438,12 @@ func LiveEventPredicate(event string) string {
 	}
 }
 
-func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpressions, snapshot TriggerEventSnapshot, selected bool) (string, bool, error) {
+func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpressions, snapshot TriggerEventSnapshot, selected bool) (condition string, contributes bool, err error) {
+	defer func() {
+		if err != nil && t.Position.Line > 0 {
+			err = &TriggerError{Position: t.Position, Err: err}
+		}
+	}()
 	if !SupportedTriggerEvent(t.Event) {
 		return "", false, &UnsupportedTriggerEventError{Event: t.Event}
 	}

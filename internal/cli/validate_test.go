@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,9 +188,11 @@ func TestValidatePublishesActionableTriggerDiagnostics(t *testing.T) {
 		workflow       string
 		wantMessage    string
 		wantAnnotation []string
+		line, column   int
 	}{
 		{
 			name: "unsupported merge group type",
+			line: 2, column: 3,
 			workflow: "on:\n  merge_group:\n    types: [destroyed]\n" +
 				"jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
 			wantMessage: `merge_group type "destroyed" is unsupported. checks_requested is the only merge queue activity currently mapped. Set types: [checks_requested]. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
@@ -200,7 +203,8 @@ func TestValidatePublishesActionableTriggerDiagnostics(t *testing.T) {
 			},
 		},
 		{
-			name:        "bare release",
+			name: "bare release",
+			line: 1, column: 5,
 			workflow:    "on: release\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
 			wantMessage: `on: release needs a types list. A bare release covers every release event, while the currently supported types are exactly published, created, and released. Use on: {release: {types: [published]}}. If you need another release type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
 			wantAnnotation: []string{
@@ -229,15 +233,15 @@ func TestValidatePublishesActionableTriggerDiagnostics(t *testing.T) {
 				t.Fatalf("diagnostics = %#v, want message %q", report.Diagnostics, test.wantMessage)
 			}
 			location := report.Diagnostics[0].Location
-			if location == nil || location.Path != workflowPath || location.Line != 1 || location.Column != 1 {
-				t.Fatalf("diagnostic location = %#v, want %s:1:1", location, workflowPath)
+			if location == nil || location.Path != workflowPath || location.Line != test.line || location.Column != test.column {
+				t.Fatalf("diagnostic location = %#v, want %s:%d:%d", location, workflowPath, test.line, test.column)
 			}
 			if len(runner.commands) != 1 || runner.commands[0].args[8] != "error" {
 				t.Fatalf("commands = %#v, want one error annotation", runner.commands)
 			}
 			annotation := string(runner.commands[0].stdin)
 			for _, want := range append(test.wantAnnotation,
-				`<code>`+workflowPath+`:1:1</code>`,
+				fmt.Sprintf("<code>%s:%d:%d</code>", workflowPath, test.line, test.column),
 				`open an issue in <a href="https://github.com/buildkite/buildkite-gha" target="_blank">buildkite/buildkite-gha</a> so we can prioritize it`,
 			) {
 				if !strings.Contains(annotation, want) {

@@ -10,9 +10,48 @@ import (
 	"testing"
 
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
+
+func TestTriggerFailureLinksDeclarationAfterLicenseHeader(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", root)
+	const path = "pr-reviewed.yml"
+	// The rejected trigger is at 19:3, not the file start or the selected PR trigger.
+	source := []byte(strings.Repeat("# License header\n", 15) + "\nname: Reviewed\non:\n  pull_request_review:\n    types: [submitted, edited, dismissed]\n    branches: [trunk]\n  pull_request:\n    types: [opened]\n    branches: [trunk]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hello\n")
+	if err := os.WriteFile(path, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture := compatibility.NewProcessingReport(path, "")
+	sha := commitDiagnosticSources(t, root, &fixture)
+	parsed, err := workflow.Parse(path, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validated, validationErr := compiler.Validate(path, source)
+	_, _, translationErr := buildkitepipeline.TranslateEventTriggerCondition(parsed.Triggers, "pull_request", buildkitepipeline.LiveTriggerConditionExpressions("true"), buildkitepipeline.TriggerEventSnapshot{})
+	if validationErr == nil || translationErr == nil {
+		t.Fatal("unsupported review filters were accepted")
+	}
+	for name, report := range map[string]compatibility.ProcessingReport{
+		"validation":  compatibility.InitialProcessingReport(path, "", false, validated, validationErr),
+		"translation": triggerFailureProcessingReport(workflowInput{Path: path, Source: source}, translationErr),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, artifacts := generatedFailure(t.Context(), report, sourceLinkContext{serverURL: "https://github.com", repository: "owner/project", sha: sha})
+			for _, artifact := range artifacts {
+				text := string(artifact.Contents)
+				if !strings.Contains(text, path+":19:3") || !strings.Contains(text, "/blob/"+sha+"/"+path+"#L19") || !strings.Contains(text, "pull_request_review has unsupported filters") {
+					t.Errorf("diagnostic lost trigger position: %s", text)
+				}
+			}
+		})
+	}
+}
 
 func TestNestedRemoteParseFailureLinksOffendingWorkflow(t *testing.T) {
 	root := t.TempDir()

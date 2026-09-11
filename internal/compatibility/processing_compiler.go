@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
@@ -305,6 +306,10 @@ func diagnosticFromError(defaultPath string, stage workflowprocessing.Stage, cod
 				message = match[4]
 			}
 		}
+	}
+	var trigger *buildkite.TriggerError
+	if errors.As(err, &trigger) && defaultPath != "" {
+		location = sourceLocation(defaultPath, trigger.Position.Line, trigger.Position.Column)
 	}
 	diagnostic := Diagnostic{
 		Level: "error", Code: code, Category: category, Stage: stage,
