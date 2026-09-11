@@ -154,7 +154,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 				return nil, fmt.Errorf("SHA-only deployment workflow ref must match BUILDKITE_COMMIT and BUILDKITE_BRANCH, without a tag")
 			}
 			ref = ""
-		} else if branch != plan.EventRefName(ref) || (plan.EventRefType(ref) == "tag" && tag != branch) || (plan.EventRefType(ref) == "branch" && tag != "") {
+		} else if branch != plan.EventRefName(ref) || (plan.EventRefType(event, ref) == "tag" && tag != branch) || (plan.EventRefType(event, ref) == "branch" && tag != "") {
 			return nil, fmt.Errorf("deployment workflow ref does not match the Buildkite branch and tag")
 		}
 	}
@@ -165,7 +165,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	}
 	if event == "create" || event == "delete" || event == "label" {
 		if pullRequest != "" && pullRequest != "false" || branch != plan.EventRefName(ref) ||
-			(plan.EventRefType(ref) == "tag" && tag != branch) || (plan.EventRefType(ref) == "branch" && tag != "") {
+			(plan.EventRefType(event, ref) == "tag" && tag != branch) || (plan.EventRefType(event, ref) == "branch" && tag != "") {
 			return nil, fmt.Errorf("%s workflow ref does not match the Buildkite branch and tag", event)
 		}
 		if event == "delete" || event == "label" {

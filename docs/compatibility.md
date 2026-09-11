@@ -1247,7 +1247,7 @@ The runtime retains this bounded `github` context:
 | `workflow` | Workflow name, or its path when unnamed. |
 | `head_ref`, `base_ref` | Pull request source and target branches; empty for other events. |
 | `ref_name` | Ref without `refs/heads/`, `refs/tags/`, or `refs/pull/`. Pull request refs use `<number>/merge` or `<number>/head`. |
-| `ref_type` | `branch` for branch and pull request refs; `tag` for tag refs. |
+| `ref_type` | `branch` for branch and pull request refs; `tag` for tag refs. SHA-only `deployment` and `deployment_status` events also use `branch`, while `ref` and `ref_name` remain empty. |
 | `action_path` | Composite action directory inside composite steps; empty elsewhere. |
 | `action_repository`, `action_ref` | Remote composite repository and requested ref; empty for local composites and outside composite steps. |
 | `workspace` | The workspace directory: the fixed job-container mount for container jobs, the host checkout directory otherwise. Exposed as `GITHUB_WORKSPACE`. |
@@ -1771,6 +1771,8 @@ The endpoint variables are scoped to each host action lifecycle invocation. Shel
 ## Runtime behavior and limits
 
 ### Default environment
+
+The runtime sets `GITHUB_REF`, `GITHUB_REF_NAME`, and `GITHUB_REF_TYPE` from the corresponding [`github` context fields](#expressions-and-contexts). Shell steps and actions receive the same values. Workflow, job, step, action, and `GITHUB_ENV` entries cannot override these process variables.
 
 The runtime sets `GITHUB_WORKFLOW` to the workflow's top-level `name`. If the workflow has no name, it uses the repository-relative workflow path. `GITHUB_WORKFLOW_REF` identifies that top-level workflow as `<owner>/<repo>/<path>@<event-ref>`, and `GITHUB_WORKFLOW_SHA` is the event commit. Jobs expanded from local, public, or private reusable workflows retain this caller identity. Workflow and step environment entries cannot override these values.
 

@@ -138,12 +138,16 @@ func EventRefName(ref string) string {
 	return ""
 }
 
-// EventRefType returns the GitHub ref type for a branch, tag, or pull request ref.
-func EventRefType(ref string) string {
+// EventRefType returns the GitHub ref type. SHA-only deployments have no ref
+// but expose branch as their type, just like GitHub Actions.
+func EventRefType(event, ref string) string {
 	if strings.HasPrefix(ref, "refs/tags/") {
 		return "tag"
 	}
 	if strings.HasPrefix(ref, "refs/heads/") || strings.HasPrefix(ref, "refs/pull/") {
+		return "branch"
+	}
+	if ref == "" && (event == "deployment" || event == "deployment_status") {
 		return "branch"
 	}
 	return ""

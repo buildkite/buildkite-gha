@@ -54,6 +54,7 @@ on: [deployment, deployment_status]
 permissions: {}
 jobs:
   marker:
+    if: github.ref_type == 'branch' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
     outputs:
       marker: ${{ steps.emit.outputs.marker }}
@@ -68,9 +69,11 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
         run: |
           test "$GITHUB_REF" = '${{ github.ref }}'
+          test "$GITHUB_REF_NAME" = "$REF_NAME"
+          test "$GITHUB_REF_TYPE" = "$REF_TYPE"
           test "$GITHUB_SHA" = '${{ github.event.deployment.sha }}'
           test "$GITHUB_WORKFLOW_REF" = "buildkite/buildkite-gha/.github/workflows/deployment.yml@${GITHUB_REF:-$GITHUB_SHA}"
-          echo "marker=$DEPLOY_ENV|$STATUS_ENV|$STATUS|$URL|$GITHUB_REF|$REF_NAME|$REF_TYPE" >> "$GITHUB_OUTPUT"
+          echo "marker=$DEPLOY_ENV|$STATUS_ENV|$STATUS|$URL|$GITHUB_REF|$GITHUB_REF_NAME|$GITHUB_REF_TYPE" >> "$GITHUB_OUTPUT"
 `,
 					"other.yml": "on: push\n",
 				})
@@ -80,12 +83,15 @@ jobs:
 				t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
 				t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 				sha := os.Getenv("BUILDKITE_COMMIT")
-				ref, rawRef, branch, tag := "refs/heads/staging", "staging", "staging", ""
+				ref, rawRef, branch, tag := "refs/heads/deploy/preview", "deploy/preview", "deploy/preview", ""
+				refFields := "refs/heads/deploy/preview|deploy/preview|branch"
 				switch kind {
 				case "tag":
-					ref, tag = "refs/tags/staging", "staging"
+					ref, rawRef, branch, tag = "refs/tags/v2.7.1", "v2.7.1", "v2.7.1", "v2.7.1"
+					refFields = "refs/tags/v2.7.1|v2.7.1|tag"
 				case "sha":
 					ref, rawRef, branch = "", sha, sha
+					refFields = "||branch"
 				}
 				t.Setenv("BUILDKITE_BRANCH", branch)
 				t.Setenv("BUILDKITE_TAG", tag)
@@ -96,10 +102,6 @@ jobs:
 				}
 				setCLIPipelineTriggerEnvironment(t, ".github/workflows/deployment.yml", "Deployment", event, "buildkite/buildkite-gha/.github/workflows/deployment.yml@"+workflowRef)
 				status := ""
-				refFields := ref + "|staging|" + kind
-				if kind == "sha" {
-					refFields = "||"
-				}
 				marker := "preview||||" + refFields
 				if event == "deployment_status" {
 					status = `,"deployment_status":{"id":91,"state":"success","environment":"production","environment_url":"https://preview.example/42"}`

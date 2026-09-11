@@ -149,7 +149,7 @@ func validateRefLifecycleEvent(provider, event string, repository Repository, re
 		if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
 			return fmt.Errorf("delete must execute the resolved default branch, not the deleted ref")
 		}
-	} else if plan.EventRefName(ref) != rawRef || plan.EventRefType(ref) != kind || strings.HasPrefix(ref, "refs/pull/") {
+	} else if plan.EventRefName(ref) != rawRef || plan.EventRefType(event, ref) != kind || strings.HasPrefix(ref, "refs/pull/") {
 		return fmt.Errorf("create ref must match the created branch or tag")
 	}
 	return nil
@@ -184,7 +184,7 @@ func validateDeploymentEvent(provider, event string, repository Repository, ref,
 		if rawRef != sha {
 			return fmt.Errorf("%s empty ref requires a SHA-only deployment", event)
 		}
-	} else if plan.EventRefType(ref) == "" || plan.EventRefName(ref) == "" || strings.HasPrefix(ref, "refs/pull/") ||
+	} else if plan.EventRefType(event, ref) == "" || plan.EventRefName(ref) == "" || strings.HasPrefix(ref, "refs/pull/") ||
 		(ref != rawRef && plan.EventRefName(ref) != rawRef) {
 		return fmt.Errorf("%s ref must match the deployment branch or tag", event)
 	}
@@ -278,7 +278,7 @@ func compileContext(event Event, vars map[string]string, workflowPath, workflowN
 			"repository_owner": event.Repository.Owner,
 			"ref":              event.Ref,
 			"ref_name":         plan.EventRefName(event.Ref),
-			"ref_type":         plan.EventRefType(event.Ref),
+			"ref_type":         plan.EventRefType(event.Event, event.Ref),
 			"sha":              event.SHA,
 			"actor":            event.Actor,
 			"workflow":         workflowName,
