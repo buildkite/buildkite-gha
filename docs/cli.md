@@ -256,7 +256,8 @@ be fetched, the CLI keeps the location without guessing a revision.
 
 Local workflow links use the event's commit only when its file in the checkout's
 Git object database matches the bytes parsed. This includes local reusable
-workflows and early syntax errors. Annotations and generated failure logs keep
+workflows and early syntax errors. Logs and annotations display local source
+paths relative to the checkout when possible. They keep
 the location without a link for edited inputs, unavailable revisions, files
 outside the checkout, or files larger than the 1 MiB verification limit. Changes
 on disk after parsing do not change which source revision the diagnostic links to.

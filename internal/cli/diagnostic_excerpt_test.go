@@ -20,7 +20,8 @@ func TestTriggerFailureLinksFilterAfterLicenseHeader(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", root)
-	const path = "pr-reviewed.yml"
+	const displayPath = "pr-reviewed.yml"
+	path := filepath.Join(root, displayPath)
 	// The rejected filter is at 21:5, not the review event or the selected PR trigger.
 	source := []byte(strings.Repeat("# License header\n", 15) + "\nname: Reviewed\non:\n  pull_request_review:\n    types: [submitted, edited, dismissed]\n    branches:\n      - private-branch\n  pull_request:\n    types: [opened]\n    branches: [trunk]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hello\n")
 	if err := os.WriteFile(path, source, 0o600); err != nil {
@@ -45,7 +46,7 @@ func TestTriggerFailureLinksFilterAfterLicenseHeader(t *testing.T) {
 			_, artifacts := generatedFailure(t.Context(), report, sourceLinkContext{serverURL: "https://github.com", repository: "owner/project", sha: sha})
 			for _, artifact := range artifacts {
 				text := string(artifact.Contents)
-				if !strings.Contains(text, path+":21:5") || !strings.Contains(text, "/blob/"+sha+"/"+path+"#L21") || !strings.Contains(text, "pull_request_review does not support the branches filter") {
+				if !strings.Contains(text, displayPath+":21:5") || !strings.Contains(text, "/blob/"+sha+"/"+displayPath+"#L21") || !strings.Contains(text, "pull_request_review does not support the branches filter") || strings.Contains(text, root) {
 					t.Errorf("diagnostic lost filter position: %s", text)
 				}
 				if !strings.Contains(text, "21 |     branches:\n     |     ^^^^^^^^") || !strings.Contains(text, "move the check into a job or step condition") || strings.Contains(text, "private-branch") {
@@ -280,7 +281,7 @@ func TestProcessingLogSanitizesTerminalControls(t *testing.T) {
 			t.Errorf("processing log retained unsafe sequence %q: %q", sequence, got)
 		}
 	}
-	for _, want := range []string{"Error: bad[31m message.", "More context.", "detail]8;;https://evil.example", "job=job[2J", "action=action", "Error source: path]8;;https://evil.example:1"} {
+	for _, want := range []string{"Error: bad[31m message.", "More context.", "detail]8;;https://evil.example", "job=job[2J", "action=action", "Error source: path]8;;https:/evil.example:1"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("processing log lost ordinary text %q: %q", want, got)
 		}

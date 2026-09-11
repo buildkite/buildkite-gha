@@ -271,7 +271,11 @@ func processingLog(ctx context.Context, report compatibility.ProcessingReport, s
 			if diagnostic.Level == "warning" {
 				sourceLabel = "Source: "
 			}
-			message += "\n  \x1b[36m" + sourceLabel + terminalText(location.Path)
+			path := location.Path
+			if source := sourceLinks.sources[path]; source.Repository == "" {
+				path, _ = processingAnnotationWorkflowPath(path, sourceLinks.workflowSourceRoot)
+			}
+			message += "\n  \x1b[36m" + sourceLabel + terminalText(path)
 			if location.Line > 0 {
 				message += fmt.Sprintf(":%d", location.Line)
 				if location.Column > 0 {
