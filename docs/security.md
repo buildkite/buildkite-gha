@@ -160,6 +160,20 @@ materializes actions, creates containers, or runs steps.
 Direct `needs` values come from producer-attributed, digest-bound result
 manifests. A missing or changed manifest stops the job.
 
+### Matrices from job outputs
+
+A [matrix from a job output](compatibility.md#matrices-from-job-outputs) is
+untrusted graph input. The deferred step reads it from the same result
+manifest, accepts only scalar rows within the static-matrix limits, and feeds
+the rows into a full recompilation of the workflow with the importer's
+recorded event, variables, runner mappings, and OIDC settings. Rows can only
+supply `matrix` values. Runner labels, queues, images, permissions, secrets,
+and admission come from that recompilation and its Buildkite policy checks,
+exactly as for static jobs, and the recompilation must reproduce the jobs the
+importer already uploaded before anything is uploaded. The continuation
+artifact and the workflow in the checkout are digest-checked against what the
+importer compiled.
+
 ## Credential boundaries
 
 | Credential | Boundary |

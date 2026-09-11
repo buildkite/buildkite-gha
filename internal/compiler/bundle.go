@@ -93,7 +93,7 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		return Bundle{IR: ir}, compileErr
 	}
 	ir, reductionErr := reducePlanEventExpressions(ir)
-	options.ActionSource = newMemoizedActionSource(options.ActionSource)
+	options.ActionSource = newPinnedActionSource(options.ActionSource, options.RuntimeMatrixActionLocks)
 	directFailures := failedInstancesFromError(compileErr)
 	for key := range failedInstancesFromError(reductionErr) {
 		directFailures[key] = true
@@ -106,6 +106,9 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	failed := failedDependencyClosure(ir, maps.Clone(directFailures))
 	planningIR := irWithoutJobs(ir, failed)
 	evidence, actionErr := validateActionResolutions(ctx, planningIR, options)
+	continuations, deferredActionsReferenceVars, continuationErr := resolveContinuationActions(ctx, ir, options)
+	ir.Continuations = continuations
+	ir.deferredActionsReferenceVars = deferredActionsReferenceVars
 	bundle := Bundle{IR: ir, Processing: evidence}
 	if actionErr != nil {
 		actionFailureFound := false
@@ -122,6 +125,16 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		}
 		failed = failedDependencyClosure(ir, maps.Clone(directFailures))
 		planningIR = irWithoutJobs(ir, failed)
+	}
+	if continuationErr != nil {
+		// A deferred job cannot run its actions; no job of the workflow is
+		// uploaded, so the failure shows before the producer runs.
+		for _, instance := range ir.Jobs {
+			directFailures[instance.Key] = true
+		}
+		failed = failedDependencyClosure(ir, maps.Clone(directFailures))
+		planningIR = irWithoutJobs(ir, failed)
+		actionErr = errors.Join(actionErr, continuationErr)
 	}
 	plans, authorizations, planEvaluations, planErr := compilePlansWithAuthorization(ctx, planningIR, compilerVersion, compilerDistributionDigest, options)
 	bundle.Processing.Plans = planEvaluations
@@ -470,7 +483,10 @@ func jobPermissionsIgnored(workflowPermissions, effectivePermissions map[string]
 }
 
 // GenerateBundlePipeline emits pipeline bytes only after plan construction and
-// any caller-owned admission stage have succeeded.
+// any caller-owned admission stage have succeeded. A workflow with
+// continuations gets its generated workflow but no single-workflow pipeline
+// bytes: the deferred upload steps exist only in the aggregate pipeline that
+// upload emits, so a pipeline without them would silently drop jobs.
 func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerStep string, options Options) (Bundle, error) {
 	ir, artifacts := bundle.IR, bundle.Plans
 	if len(artifacts) != len(ir.Jobs) {
@@ -479,6 +495,11 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 	generatedWorkflow, err := GeneratePlannedWorkflow(bundle, options)
 	if err != nil {
 		return bundle, processingFinding(StagePipeline, CodePipelineGeneration, "compatibility", err)
+	}
+	if len(ir.Continuations) != 0 {
+		bundle.GeneratedWorkflow = generatedWorkflow
+		bundle.Processing.PipelineGenerated = true
+		return bundle, nil
 	}
 	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep:    compilerStep,

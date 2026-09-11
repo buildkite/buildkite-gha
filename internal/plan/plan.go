@@ -1372,30 +1372,41 @@ func hasStepActions(steps []program.Step) bool {
 	return false
 }
 
-func validateActionLocks(job Job) error {
-	if len(job.Actions) > 1024 {
-		return fmt.Errorf("job plan has more than 1024 action locks")
+// ValidateActionLockList checks that locks are well-formed, sorted by unique
+// ID, and each identifies one admitted source, then returns them by ID. It
+// does not check the child graph, which needs the job that reaches into it.
+func ValidateActionLockList(actions []ActionLock) (map[string]ActionLock, error) {
+	if len(actions) > 1024 {
+		return nil, fmt.Errorf("job plan has more than 1024 action locks")
 	}
-	locks := make(map[string]ActionLock, len(job.Actions))
-	for i, lock := range job.Actions {
-		if !actionLockIDPattern.MatchString(lock.ID) || i > 0 && job.Actions[i-1].ID >= lock.ID {
-			return fmt.Errorf("action locks must have valid, unique, sorted IDs")
+	locks := make(map[string]ActionLock, len(actions))
+	for i, lock := range actions {
+		if !actionLockIDPattern.MatchString(lock.ID) || i > 0 && actions[i-1].ID >= lock.ID {
+			return nil, fmt.Errorf("action locks must have valid, unique, sorted IDs")
 		}
 		if !digestPattern.MatchString(lock.SourceDigest) || len(lock.Children) > 1024 {
-			return fmt.Errorf("action lock %q has invalid digest or too many children", lock.ID)
+			return nil, fmt.Errorf("action lock %q has invalid digest or too many children", lock.ID)
 		}
 		if lock.DockerImage != "" && !ValidContainerImageReference(lock.DockerImage) {
-			return fmt.Errorf("action lock %q has invalid Docker image", lock.ID)
+			return nil, fmt.Errorf("action lock %q has invalid Docker image", lock.ID)
 		}
 		if err := validateLockIdentity(lock); err != nil {
-			return fmt.Errorf("action lock %q: %w", lock.ID, err)
+			return nil, fmt.Errorf("action lock %q: %w", lock.ID, err)
 		}
 		for uses, child := range lock.Children {
 			if len(uses) == 0 || len(uses) > 2048 || !utf8.ValidString(uses) || hasControl(uses) || !actionLockIDPattern.MatchString(child.Lock) {
-				return fmt.Errorf("action lock %q has invalid child selector", lock.ID)
+				return nil, fmt.Errorf("action lock %q has invalid child selector", lock.ID)
 			}
 		}
 		locks[lock.ID] = lock
+	}
+	return locks, nil
+}
+
+func validateActionLocks(job Job) error {
+	locks, err := ValidateActionLockList(job.Actions)
+	if err != nil {
+		return err
 	}
 	reachable := map[string]bool{}
 	state := map[string]uint8{}

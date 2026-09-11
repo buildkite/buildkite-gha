@@ -52,7 +52,8 @@ func agentVariablesHandler(t *testing.T, status int, retryAfter string) (http.Ha
 	requests := new(int)
 	return func(w http.ResponseWriter, r *http.Request) {
 		*requests++
-		if r.Method != http.MethodPost || r.URL.Path != "/jobs/11111111-1111-4111-8111-111111111111/github-actions/variables" {
+		// The job-scoped endpoint names the job whose token is in use.
+		if r.Method != http.MethodPost || r.URL.Path != "/jobs/"+os.Getenv("BUILDKITE_JOB_ID")+"/github-actions/variables" {
 			t.Errorf("variables request = %s %s", r.Method, r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Token job-secret" {
@@ -103,8 +104,21 @@ func pushEventPath(t *testing.T) string {
 // and returns their repository-relative paths in a stable order.
 func writeUploadWorkflows(t *testing.T, sources map[string]string) []string {
 	t.Helper()
-	repository := writeUploadWorkflowRepository(t, sources)
+	return enterUploadWorkflows(t, writeUploadWorkflowRepository(t, sources), sources)
+}
+
+// enterUploadWorkflows makes a repository written by
+// writeUploadWorkflowRepository the current checkout and returns the relative
+// paths of the workflows it holds.
+func enterUploadWorkflows(t *testing.T, repository string, sources map[string]string) []string {
+	t.Helper()
 	t.Chdir(repository)
+	// The Buildkite agent sets this to its own checkout, which would point
+	// commands away from the repository the test just created.
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	// The agent also sets the build commit, which the repository the test
+	// just created does not contain; upload then falls back to HEAD.
+	t.Setenv("BUILDKITE_COMMIT", "")
 	paths := make([]string, 0, len(sources))
 	for _, name := range []string{"build.yml", "deploy.yml", "plain.yml"} {
 		if _, ok := sources[name]; ok {
@@ -309,7 +323,7 @@ func TestRunUploadResolvesVariablesWhenAnotherWorkflowHasRuntimeMatrix(t *testin
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "variables-runtime-matrix-importer")
 	eventPath := pushEventPath(t)
-	workflows := writeUploadWorkflows(t, map[string]string{
+	workflows := writeCommittedUploadWorkflows(t, map[string]string{
 		"build.yml": `on: push
 jobs:
   lint:
@@ -342,6 +356,7 @@ jobs:
 		t.Fatal(err)
 	}
 
+	t.Setenv("BUILDKITE_JOB_ID", "0192f7d0-0000-7000-8000-000000000001")
 	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
 	var stdout, stderr bytes.Buffer
 	if code := run(append([]string{"upload", "--event-path", eventPath}, workflows...), &stdout, &stderr, "dev", runner); code != 0 {
@@ -351,23 +366,25 @@ jobs:
 		t.Fatalf("variables requests = %d, want 1", *variableRequests)
 	}
 	output := stdout.String() + stderr.String()
-	if strings.Contains(output, "vars.") {
-		t.Fatalf("upload reported a variables error although variables resolved:\n%s", output)
+	if strings.Contains(output, "vars.") || strings.Contains(output, "[E_MATRIX_INVALID]") {
+		t.Fatalf("upload reported an error although variables resolved and the matrix is deferred:\n%s", output)
 	}
-	for _, want := range []string{"[E_MATRIX_INVALID]", "runtime-matrix.yml", "Uploaded 1 jobs from 2 workflows"} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("upload output missing %q:\n%s", want, output)
-		}
+	// lint, plan, the deferred upload step, and the plain workflow's test job.
+	if !strings.Contains(output, "Uploaded 4 jobs from 2 workflows") {
+		t.Fatalf("upload output missing job count:\n%s", output)
 	}
 	plans := uploadedPlans(t, runner)
-	if len(plans) != 1 || len(plans["test"]) != 1 {
-		t.Fatalf("uploaded plans by job = %v, want only the plain workflow", plans)
+	if len(plans) != 3 || len(plans["test"]) != 1 || len(plans["lint"]) != 1 || len(plans["build.plan"]) != 1 {
+		t.Fatalf("uploaded plans by job = %v, want the static jobs only", plans)
 	}
 	pipeline := string(runner.commands[len(runner.commands)-1].stdin)
-	for _, want := range []string{defaultNobleRunnerImage, `label: ":github: workflow · .github/workflows/build.yml"`, `title: "Workflow could not be run"`} {
+	for _, want := range []string{defaultNobleRunnerImage, `group: ":github: workflow · .github/workflows/build.yml"`, `label: ":github: matrix · build / build"`, `key: "gha-5c3fa597431eda03-build-build-matrix"`, "continue --continuation-digest 'sha256:"} {
 		if !strings.Contains(pipeline, want) {
 			t.Fatalf("pipeline missing %q:\n%s", want, pipeline)
 		}
+	}
+	if strings.Contains(pipeline, `title: "Workflow could not be run"`) {
+		t.Fatalf("pipeline reports the deferred workflow as failed:\n%s", pipeline)
 	}
 }
 

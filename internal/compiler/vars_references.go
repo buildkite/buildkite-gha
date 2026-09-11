@@ -45,29 +45,38 @@ func workflowReferencesVars(parsed *workflow.Workflow) bool {
 }
 
 // ActionsReferenceVars reports whether any resolved action program in the
-// bundle's plans reads the vars context, such as an action.yml input default
+// bundle's plans, or of a job deferred to a continuation, reads the vars context, such as an action.yml input default
 // of ${{ vars.REGION }} or a composite step condition of vars.ENABLED ==
 // 'true'. Action metadata is only known once compilation has resolved the
 // actions, so a workflow whose sole vars reference lives in an action is
 // discovered here rather than by Report.ReferencesVars; callers resolve the
 // scopes and compile again so the plans carry them.
 func ActionsReferenceVars(bundle Bundle) bool {
+	if bundle.IR.deferredActionsReferenceVars {
+		return true
+	}
 	for _, artifact := range bundle.Plans {
 		if artifact.Job.Program == nil {
 			continue
 		}
 		for _, action := range artifact.Job.Program.Actions {
-			found := false
-			_ = action.VisitSites(func(site program.Site) error {
-				found = found || siteReferencesVars(site)
-				return nil
-			})
-			if found {
+			if actionProgramReferencesVars(action) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// actionProgramReferencesVars reports whether any site of one resolved action
+// program reads the vars context.
+func actionProgramReferencesVars(action program.Action) bool {
+	found := false
+	_ = action.VisitSites(func(site program.Site) error {
+		found = found || siteReferencesVars(site)
+		return nil
+	})
+	return found
 }
 
 // siteReferencesVars inspects one program site by its surface: condition

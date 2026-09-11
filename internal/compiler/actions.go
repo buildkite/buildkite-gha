@@ -588,6 +588,38 @@ func newMemoizedActionSource(actionSource ActionSource) ActionSource {
 	}
 }
 
+// newPinnedActionSource memoizes actionSource with the repository pins the
+// locks record: each GitHub repository and requested ref fetches the recorded
+// commit and must reproduce the recorded source digest. Locks that disagree
+// about one repository and ref are refused, since one compilation resolves a
+// ref once.
+func newPinnedActionSource(actionSource ActionSource, locks []plan.ActionLock) ActionSource {
+	memoized, ok := newMemoizedActionSource(actionSource).(*memoizedActionSource)
+	if !ok {
+		return nil
+	}
+	for _, lock := range locks {
+		if lock.Source != "github" || lock.Repository == "" || lock.RequestedRef == "" || lock.Commit == "" {
+			continue
+		}
+		key := strings.ToLower(lock.Repository) + "\x00" + lock.RequestedRef
+		pin := memoizedRepositoryPin{commit: strings.ToLower(lock.Commit), digest: lock.SourceDigest}
+		if previous, exists := memoized.pins[key]; exists && previous != pin {
+			return conflictingPinSource{fmt.Errorf("action locks pin %s@%s to both %s and %s", lock.Repository, lock.RequestedRef, previous.commit, pin.commit)}
+		}
+		memoized.pins[key] = pin
+	}
+	return memoized
+}
+
+// conflictingPinSource fails every fetch with the pin conflict it was built
+// from, so the compilation reports it where the action is used.
+type conflictingPinSource struct{ err error }
+
+func (s conflictingPinSource) Fetch(context.Context, source.Reference) (source.Resolved, source.Materialized, error) {
+	return source.Resolved{}, source.Materialized{}, s.err
+}
+
 // MemoizeActionSource reuses successful action resolutions and materializations
 // across compiler invocations that share the returned source.
 func MemoizeActionSource(actionSource ActionSource) ActionSource {
@@ -653,7 +685,7 @@ func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) 
 		if pinned && (call.resolved.Commit != pin.commit || call.materialized.SourceDigest != pin.digest) {
 			call.materialized.Release()
 			call.materialized = source.Materialized{}
-			call.err = fmt.Errorf("repository source changed after immutable pin")
+			call.err = fmt.Errorf("%s/%s@%s: repository source changed after immutable pin to commit %s", ref.Owner, ref.Repository, ref.Ref, pin.commit)
 		}
 	}
 	s.mu.Lock()
