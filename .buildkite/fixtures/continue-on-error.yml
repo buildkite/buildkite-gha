@@ -1,0 +1,37 @@
+name: continue-on-error hosted proof
+
+on: push
+
+permissions: {}
+
+jobs:
+  literal:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - run: exit 7
+
+  expression:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        experimental: [false, true]
+    continue-on-error: ${{ matrix.experimental }}
+    steps:
+      - env:
+          EXPERIMENTAL: ${{ matrix.experimental }}
+        run: |
+          if [ "$EXPERIMENTAL" = "true" ]; then
+            exit 7
+          fi
+
+  verify:
+    needs: [literal, expression]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          LITERAL_RESULT: ${{ needs.literal.result }}
+          EXPRESSION_RESULT: ${{ needs.expression.result }}
+        run: |
+          test "$LITERAL_RESULT" = "success"
+          test "$EXPRESSION_RESULT" = "success"

@@ -1,0 +1,25 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":pipeline: Continue-on-error proof importer"
+    key: "continue-on-error-importer"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      commit="$${COMPATIBILITY_PROOF_COMMIT:?COMPATIBILITY_PROOF_COMMIT is required}"
+      scripts/verify-source-checkout "$$commit"
+      revision="$$(git rev-parse HEAD)"
+      mise exec -- go run -ldflags "-X main.revision=$$revision" ./cmd/buildkite-gha upload \
+        --event-path testdata/smoke/events/push.json \
+        --runner-queue ubuntu-latest=hosted \
+        --importer-step continue-on-error-importer \
+        .buildkite/fixtures/continue-on-error.yml
+
+  - label: ":pipeline: Continue-on-error proof continuation loader"
+    key: "continue-on-error-continuation-loader"
+    depends_on: "continue-on-error-importer"
+    allow_dependency_failure: true
+    command: "buildkite-agent pipeline upload .buildkite/continue-on-error-proof-continuation.yml"
