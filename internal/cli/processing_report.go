@@ -267,25 +267,21 @@ func processingLog(ctx context.Context, report compatibility.ProcessingReport, s
 		}
 		if diagnostic.Location != nil {
 			location := diagnostic.Location
-			sourceLabel := "Error source: "
-			if diagnostic.Level == "warning" {
-				sourceLabel = "Source: "
-			}
 			path := location.Path
 			if source := sourceLinks.sources[path]; source.Repository == "" {
 				path, _ = processingAnnotationWorkflowPath(path, sourceLinks.workflowSourceRoot)
 			}
-			message += "\n  \x1b[36m" + sourceLabel + terminalText(path)
+			label := terminalText(path)
 			if location.Line > 0 {
-				message += fmt.Sprintf(":%d", location.Line)
+				label += fmt.Sprintf(":%d", location.Line)
 				if location.Column > 0 {
-					message += fmt.Sprintf(":%d", location.Column)
+					label += fmt.Sprintf(":%d", location.Column)
 				}
 			}
-			message += "\x1b[0m"
 			if link := sourceLinks.sourceLink(ctx, location.Path, location.Line); link != "" {
-				message += "\n  " + link + " \x1b]1339;url='" + link + "';content='Open source'\a"
+				label = "\x1b]8;;" + link + "\x1b\\" + label + "\x1b]8;;\x1b\\"
 			}
+			message += "\n  \x1b[36m" + label + "\x1b[0m"
 		}
 		if excerpt := sourceLinks.excerpt(diagnostic); excerpt != "" {
 			message += "\n\x1b[36m" + terminalText(excerpt) + "\x1b[0m"

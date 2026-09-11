@@ -250,9 +250,11 @@ result.
 For fetched public and private reusable workflows, source locations in
 annotations link to the resolved commit and line in the source repository,
 including nested local calls inside that repository. The link opens only for
-viewers with GitHub access to that repository. Generated failure logs include
-the same URL and a Buildkite `Open source` hyperlink. If the source could not
-be fetched, the CLI keeps the location without guessing a revision.
+viewers with GitHub access to that repository. Generated failure logs make the
+source path and coordinates an OSC 8 terminal hyperlink to the same URL, without
+a separate URL line. Terminals without hyperlink support display the label.
+If the source could not be fetched, the CLI keeps the location without guessing
+a revision.
 
 Local workflow links use the event's commit only when its file in the checkout's
 Git object database matches the bytes parsed. This includes local reusable

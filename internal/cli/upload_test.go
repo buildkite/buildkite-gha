@@ -74,15 +74,15 @@ func TestGeneratedFailureLinksOnlyTheParsedLocalRevision(t *testing.T) {
 			}
 			_, artifacts := generatedFailure(t.Context(), report, sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: test.revision})
 			log, annotation := string(artifacts[0].Contents), string(artifacts[1].Contents)
-			if !strings.Contains(log, "Error source: ci.yml:") || !strings.Contains(annotation, "ci.yml:") {
+			if !strings.Contains(log, "ci.yml:") || !strings.Contains(annotation, "ci.yml:") {
 				t.Fatalf("lost location: log=%q annotation=%q", log, annotation)
 			}
 			target := "https://github.com/owner/repo/blob/" + sha + "/ci.yml#L"
 			if test.linked {
-				if !strings.Contains(log, "\x1b]1339;url='"+target) || !strings.Contains(annotation, `href="`+target) {
+				if !strings.Contains(log, "\x1b]8;;"+target) || !strings.Contains(annotation, `href="`+target) {
 					t.Fatalf("lost verified link: log=%q annotation=%q", log, annotation)
 				}
-			} else if strings.Contains(log, "\x1b]1339;") || strings.Contains(annotation, "href=") {
+			} else if strings.Contains(log, "\x1b]8;") || strings.Contains(annotation, "href=") {
 				t.Fatalf("linked unverified content: log=%q annotation=%q", log, annotation)
 			}
 		})
@@ -142,8 +142,8 @@ func TestGeneratedFailureLinksFetchedRevisionInsteadOfCallerOrTag(t *testing.T) 
 	caller := sourceLinkContext{serverURL: "https://github.example.com", repository: "caller/project", sha: strings.Repeat("b", 40)}
 	_, artifacts := generatedFailure(t.Context(), report, caller)
 	message, annotation := string(artifacts[0].Contents), string(artifacts[1].Contents)
-	if !strings.Contains(message, "\n  "+target+" \x1b]1339;url='"+target+"';content='Open source'\a") {
-		t.Fatalf("log lacks safe hyperlink and plain URL: %q", message)
+	if !strings.Contains(message, "\x1b]8;;"+target+"\x1b\\"+display+":35:5\x1b]8;;\x1b\\") || strings.Count(message, target) != 1 || strings.Contains(message, "Open source") || strings.Contains(message, "Error source:") {
+		t.Fatalf("log lacks a single linked source label: %q", message)
 	}
 	if !strings.Contains(annotation, `<a href="`+target+`"><code>`+html.EscapeString(display)+`:35:5</code></a>`) {
 		t.Fatalf("annotation lost remote source link: %s", annotation)
@@ -151,7 +151,7 @@ func TestGeneratedFailureLinksFetchedRevisionInsteadOfCallerOrTag(t *testing.T) 
 	for _, invalid := range []string{"", "v2"} {
 		report.Sources[display] = compiler.WorkflowSourceReference{Repository: "owner/shared", Path: ".github/workflows/build's.yml", Commit: invalid}
 		_, artifacts = generatedFailure(t.Context(), report, caller)
-		if strings.Contains(string(artifacts[0].Contents), "\x1b]1339;") || strings.Contains(string(artifacts[1].Contents), "href=") {
+		if strings.Contains(string(artifacts[0].Contents), "\x1b]8;") || strings.Contains(string(artifacts[1].Contents), "href=") {
 			t.Fatalf("invented source link for revision %q: %s", invalid, artifacts)
 		}
 	}
@@ -180,15 +180,15 @@ func TestGeneratedFailureRetainsWorkflowAndDiagnosticSources(t *testing.T) {
 	message = strings.NewReplacer("\x1b[1;31m", "", "\x1b[1;36m", "", "\x1b[36m", "", "\x1b[0m", "").Replace(message)
 	for _, want := range []string{
 		"Workflow: .github/workflows/ci.yml",
-		"Error: Local action could not be found.\n  Check that the action directory exists. {job=build.test, instance=test-linux, action=./.github/actions/check, step=2}\n  Error source: .github/workflows/build.yml:35:5\n  detail: action.yml is missing",
-		"Error: Another job was rejected {job=publish}\n  Error source: .github/workflows/publish.yml:19",
+		"Error: Local action could not be found.\n  Check that the action directory exists. {job=build.test, instance=test-linux, action=./.github/actions/check, step=2}\n  .github/workflows/build.yml:35:5\n  detail: action.yml is missing",
+		"Error: Another job was rejected {job=publish}\n  .github/workflows/publish.yml:19",
 		"Error: Source unavailable",
 	} {
 		if !strings.Contains(message, want) {
 			t.Errorf("failure log missing %q: %s", want, message)
 		}
 	}
-	if strings.Count(message, "Error source:") != 2 || strings.Contains(message, ":19:0") {
+	if strings.Contains(message, "Error source:") || strings.Contains(message, ":19:0") {
 		t.Errorf("failure log invents source coordinates: %s", message)
 	}
 	for _, diagnostic := range report.Diagnostics {

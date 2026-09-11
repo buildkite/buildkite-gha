@@ -255,7 +255,7 @@ func TestPluginProcessingFiltersUnknownRuntimeAndUsesNeutralWarningHeading(t *te
 		t.Fatal(err)
 	}
 	got := output.String()
-	if !strings.Contains(got, "Source: ci.yml:4:3") || strings.Contains(got, "Error source:") {
+	if !strings.Contains(got, "ci.yml:4:3") || strings.Contains(got, "Source:") || strings.Contains(got, "Error source:") {
 		t.Fatalf("warning source has misleading severity: %q", got)
 	}
 	if !strings.Contains(got, "Workflow diagnostics") || strings.Contains(got, "failed") || strings.Contains(got, "hidden") || strings.Contains(got, "^^^ +++") || strings.Contains(got, "Compilation:") {
@@ -281,7 +281,7 @@ func TestProcessingLogSanitizesTerminalControls(t *testing.T) {
 			t.Errorf("processing log retained unsafe sequence %q: %q", sequence, got)
 		}
 	}
-	for _, want := range []string{"Error: bad[31m message.", "More context.", "detail]8;;https://evil.example", "job=job[2J", "action=action", "Error source: path]8;;https:/evil.example:1"} {
+	for _, want := range []string{"Error: bad[31m message.", "More context.", "detail]8;;https://evil.example", "job=job[2J", "action=action", "path]8;;https:/evil.example:1"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("processing log lost ordinary text %q: %q", want, got)
 		}
