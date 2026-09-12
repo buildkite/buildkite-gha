@@ -7,8 +7,9 @@ and the Buildkite plugin. If a feature is not listed, treat it as unsupported.
 
 buildkite-gha requires Buildkite agent v3.129 or newer.
 
-The released plugin supports Linux x86-64 and native macOS arm64 importers and
-jobs. It sets the matching `runner.os` and `runner.arch` values. Runner labels
+The plugin supports Linux x86-64 and native macOS arm64 importers and
+jobs, with [experimental Windows jobs](#experimental-windows-jobs) available by
+explicit opt-in. It sets the matching `runner.os` and `runner.arch` values. Runner labels
 select a platform; they do not promise GitHub image, toolchain, or Xcode parity.
 It sets `runner.environment` to `self-hosted` on every platform.
 
@@ -50,19 +51,31 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Environments and snapshots](#deployment-environments) | 🟡 Supported subset | Literal environments on top-level jobs, with required-reviewer approval gates and environment-scoped secret names. Wait timers, branch policies, and custom rules are rejected. Snapshots are accepted with no effect. |
 | [Variables](#repository-and-organization-variables) | 🟡 Supported subset | Repository, organization, and environment `vars` resolve inside a Buildkite job with GitHub's per-position scoping. `run-name` rejects `vars`. |
 | [OIDC](#other-secrets-and-oidc) | 🟡 Supported subset | Host JavaScript and composite actions can request Buildkite OIDC tokens in jobs with `id-token: write`. |
-| [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers are outside the initial release. |
+| [Windows jobs](#experimental-windows-jobs) | 🟡 Experimental subset | Windows Server 2022 x86-64 requires explicit opt-in and a compatible Windows queue. No default Windows mapping. |
+| [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows arm64, Windows Server 2025, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers. |
 | [Other GitHub services](#github-services) | ❌ Unsupported | No general emulation for Releases, Packages, Checks, deployments, or GitHub artifact APIs. |
 
-## Outside the initial scope
+## Experimental Windows jobs
 
-`buildkite-gha` targets Linux x86-64 and native macOS arm64. Windows execution
-is outside the initial product scope, so Windows runner labels are rejected
-instead of mapped to another platform.
+Windows support is in development, not generally available. Import workflows
+from Linux x86-64 or macOS arm64; Windows agents run generated jobs only.
+`windows-latest` and `windows-2022` select Windows x86-64 when explicitly mapped
+to a queue or enabled through Agent API resolution. They have no local preset
+and are otherwise rejected, never silently redirected to Linux.
 
-Compatibility analysis should distinguish this scope boundary from features
-that could be added to the supported platforms. This distinction does not
-change validation: Windows workflows remain unsupported and appear in raw
-corpus results.
+Use a Windows Server 2022 queue with Buildkite agent v3.129 or newer, PowerShell
+7 (`pwsh`), and Git on `PATH`. Runner labels do not install GitHub's runner image
+or its tools. `runner.os` is `Windows` and `runner.arch` is `X64`. See
+[explicit mappings and runtime distributions](cli.md#choose-runners-and-runtimes).
+
+The default shell is `pwsh`. Explicit `pwsh` and Windows PowerShell
+(`powershell`) steps, JavaScript actions, and composite actions are supported
+within the same action restrictions documented below. Use UTF-8 for file
+commands; Windows PowerShell needs `Out-File -Encoding utf8 -Append` rather
+than its default UTF-16 redirection. `cmd` and MSYS2 shells, containers,
+services, Docker actions, `actions/cache`, custom images, and cache volumes
+are not supported on Windows. Windows Server 2025 and arm64 labels are not
+enabled by these mappings.
 
 ## How workflows run on Buildkite
 
@@ -722,7 +735,8 @@ with that image when unmapped.
 
 An explicit mapping is authoritative and bypasses Agent API resolution. It
 declares that the selector runs on Linux x86-64, except for the known macOS
-labels, which select Darwin arm64 and reject images. For every other selector,
+labels, which select Darwin arm64, and the experimental Windows labels, which
+select Windows x86-64. Both reject images. For every other selector,
 the job-scoped Agent API owns compatibility and returns the complete queue,
 platform, and immutable Linux image. The importer applies that target verbatim
 and publishes returned fallback warnings as annotations.
@@ -981,7 +995,7 @@ A service with a Docker health check must become healthy before steps run. A ser
 
 Cleanup removes the job container, emits masked and bounded service logs, then removes services in declaration order, the network, newly created volumes, and private Docker configuration. Remaining owned resources fail the job. Docker resources are not a security or resource-isolation boundary: the hosted queue must isolate the whole job and enforce host CPU, memory, disk, and network limits. See the [security model](security.md#isolate-the-whole-job).
 
-macOS jobs reject containers, services, Docker actions, and Docker capability.
+macOS and Windows jobs reject containers, services, Docker actions, and Docker capability.
 
 ## Step syntax
 
@@ -1012,7 +1026,12 @@ A step can continue after failure and expose its outcome to a later condition:
 
 Install the custom command on the runner or in the job container, and add it to `PATH`. R and Julia are not installed automatically.
 
-PowerShell and Windows shells are not supported. If the shell name is known before the job starts, the workflow fails before an agent starts the job. A shell expression that needs a runtime value is checked before its step starts. If it resolves to an unsupported shell, the step fails. Use `bash`, `sh`, `python`, or a valid custom template instead.
+`pwsh` and `powershell` are also accepted when installed on the runner. Windows
+defaults to `pwsh`; Linux and macOS retain their existing bash default. PowerShell
+scripts stop on errors and propagate the last native command's exit code.
+`cmd` and MSYS2 are unsupported. Known unsupported shells fail before an agent
+starts the job; shell expressions requiring runtime values are checked before
+the step starts.
 
 Working directories must stay inside the workspace.
 

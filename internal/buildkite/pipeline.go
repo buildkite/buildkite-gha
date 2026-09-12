@@ -3,6 +3,8 @@ package buildkite
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -528,14 +531,17 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if err != nil {
 			return fmt.Errorf("job %q: %w", job.Key, err)
 		}
-		if platform != "linux/amd64" && platform != "darwin/arm64" {
+		if platform != "linux/amd64" && platform != "darwin/arm64" && platform != "windows/amd64" {
 			return fmt.Errorf("job %q has unsupported runtime platform %q", job.Key, platform)
 		}
 		if runtimeImage != "" && !runtimeImagePattern.MatchString(runtimeImage) {
 			return fmt.Errorf("job %q runtime image %q must be an immutable registry sha256 reference", job.Key, runtimeImage)
 		}
-		if platform == "darwin/arm64" && runtimeImage != "" {
-			return fmt.Errorf("job %q cannot select a container runtime image on darwin/arm64", job.Key)
+		if platform != "linux/amd64" && runtimeImage != "" {
+			return fmt.Errorf("job %q cannot select a container runtime image on %s", job.Key, platform)
+		}
+		if platform == "windows/amd64" && job.Cache != nil {
+			return fmt.Errorf("job %q cannot select cache on windows/amd64", job.Key)
 		}
 		_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(":github: job · "+job.Label))
 		_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))
@@ -553,6 +559,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			`if command -v sha256sum >/dev/null 2>&1; then actual_distribution_digest="$(sha256sum "$distribution" | awk '{print "sha256:" $1}')"; elif command -v shasum >/dev/null 2>&1; then actual_distribution_digest="$(shasum -a 256 "$distribution" | awk '{print "sha256:" $1}')"; else echo 'buildkite-gha: no SHA-256 tool available' >&2; exit 1; fi`,
 			"test \"$actual_distribution_digest\" = " + shellQuote(distributionDigest),
 			`chmod 0500 "$distribution"`,
+		}
+		if platform == "windows/amd64" {
+			commands = windowsBootstrapCommands(distributionPath, distributionDigest, artifactProducer, job)
 		}
 		experimentalRunnerUser := !pipeline.DisableRunnerUser && platform == "linux/amd64"
 		runJob := `"$distribution" run-job --plan-digest ` + shellQuote(job.PlanDigest) + " --plan-producer " + shellQuote(artifactProducer)
@@ -582,8 +591,13 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if experimentalRunnerUser {
 			runJob = experimentalRunnerUserCommand(runJob)
 		}
-		commands = append(commands, `trap 'rm -rf -- "$bootstrap_dir"' EXIT`, "unset -f bootstrap_exit", runJob)
+		if platform != "windows/amd64" {
+			commands = append(commands, `trap 'rm -rf -- "$bootstrap_dir"' EXIT`, "unset -f bootstrap_exit", runJob)
+		}
 		command := strings.Join(commands, "\n")
+		if platform == "windows/amd64" {
+			command = windowsBootstrapCommand(command)
+		}
 		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
 		if workflow.Aggregate {
 			checkLabel := job.CheckLabel
@@ -602,7 +616,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			// approval, so gated jobs cannot be retried.
 			_, _ = fmt.Fprintf(out, "%sretry:\n%s  manual:\n%s    allowed: false\n", attributeIndent, attributeIndent, attributeIndent)
 		}
-		cache := mergedCacheVolume(job.Cache, job.RequiresMise, platform, experimentalRunnerUser)
+		cache := mergedCacheVolume(job.Cache, job.RequiresMise && platform != "windows/amd64", platform, experimentalRunnerUser)
 		if cache != nil {
 			_, _ = fmt.Fprintf(out, "%scache:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s  paths:\n", attributeIndent)
@@ -619,7 +633,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if job.SoftFail {
 			_, _ = fmt.Fprintf(out, "%ssoft_fail:\n%s  - exit_status: %d\n", attributeIndent, attributeIndent, ContinueOnErrorExitStatus)
 		}
-		if job.RequiresMise {
+		if job.RequiresMise && platform != "windows/amd64" {
 			_, _ = fmt.Fprintf(out, "%senv:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(MiseDataDir(platform)))
 		}
@@ -649,6 +663,48 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(pipeline.CompilerStep), attributeIndent)
 	}
 	return nil
+}
+
+func windowsBootstrapCommands(distributionPath, distributionDigest, artifactProducer string, job Job) []string {
+	runArguments := "run-job --plan-digest " + powershellQuote(job.PlanDigest) + " --plan-producer " + powershellQuote(artifactProducer)
+	if job.EventPayload {
+		runArguments += " --artifact-producer " + powershellQuote(artifactProducer)
+	}
+	return []string{
+		`$ErrorActionPreference = 'Stop'`,
+		`Write-Host '~~~ :package: Prepare GitHub Actions runtime'`,
+		`$bootstrapDir = Join-Path ([IO.Path]::GetTempPath()) ('buildkite-gha-' + [Guid]::NewGuid().ToString('N'))`,
+		`$runtimeStatus = 1`,
+		`try {`,
+		`  New-Item -ItemType Directory -Path $bootstrapDir | Out-Null`,
+		"  & buildkite-agent artifact download " + powershellQuote(distributionPath) + " $bootstrapDir --step " + powershellQuote(artifactProducer),
+		`  if ($LASTEXITCODE -ne 0) { throw "buildkite-agent artifact download failed with exit code $LASTEXITCODE" }`,
+		"  $distribution = Join-Path $bootstrapDir " + powershellQuote(distributionPath),
+		`  $actualDigest = 'sha256:' + (Get-FileHash -LiteralPath $distribution -Algorithm SHA256).Hash.ToLowerInvariant()`,
+		"  if ($actualDigest -ne " + powershellQuote(distributionDigest) + `) { throw "runtime distribution digest mismatch" }`,
+		`  $executable = Join-Path $bootstrapDir 'buildkite-gha.exe'`,
+		`  Copy-Item -LiteralPath $distribution -Destination $executable`,
+		"  & $executable " + runArguments,
+		`  $runtimeStatus = $LASTEXITCODE`,
+		`} catch {`,
+		`  Write-Error $_ -ErrorAction Continue`,
+		`  $runtimeStatus = 1`,
+		`} finally {`,
+		`  Remove-Item -LiteralPath $bootstrapDir -Recurse -Force -ErrorAction SilentlyContinue`,
+		`}`,
+		`exit $runtimeStatus`,
+	}
+}
+
+func powershellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
+
+func windowsBootstrapCommand(script string) string {
+	encoded := utf16.Encode([]rune(script))
+	data := make([]byte, len(encoded)*2)
+	for i, value := range encoded {
+		binary.LittleEndian.PutUint16(data[i*2:], value)
+	}
+	return "pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + base64.StdEncoding.EncodeToString(data)
 }
 
 func emitFailureBody(out *bytes.Buffer, indent, artifactProducer string, failure Failure, exitStatus int) {

@@ -79,7 +79,7 @@ func TestRunJobClassifiesUnsupportedShell(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/shell.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: shell\n")
-	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "shell", Kind: "run", Shell: "pwsh", Command: "Get-Location"}})
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "shell", Kind: "run", Shell: "cmd", Command: "echo test"}})
 	var logs bytes.Buffer
 	result, err := (Runner{Stdout: &logs, Stderr: &logs}).runTestJob(t.Context(), job, workspace)
 	if err == nil || result.Conclusion != "failure" {

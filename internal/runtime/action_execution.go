@@ -338,6 +338,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	if err != nil {
 		return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("evaluate job environment: %w", err))
 	}
+	jobEnv = cloneStrings(jobEnv)
 	serviceEval := eval
 	serviceEval.Env = jobEnv
 	services, evaluatedServiceOrder, err := evaluateProgramServices(executionJob.Services, serviceEval)
@@ -1506,6 +1507,8 @@ func canonicalRunnerContext(goos, goarch string) (map[string]string, error) {
 		return map[string]string{"os": "Linux", "arch": "X64", "environment": expression.RunnerEnvironment}, nil
 	case goos == "darwin" && goarch == "arm64":
 		return map[string]string{"os": "macOS", "arch": "ARM64", "environment": expression.RunnerEnvironment}, nil
+	case goos == "windows" && goarch == "amd64":
+		return map[string]string{"os": "Windows", "arch": "X64", "environment": expression.RunnerEnvironment}, nil
 	default:
 		return nil, errUnsupportedf("unsupported runner platform %s/%s", goos, goarch)
 	}
@@ -1516,14 +1519,18 @@ func ValidateHost(job plan.Job, goos, goarch string) error {
 	if _, err := canonicalRunnerContext(goos, goarch); err != nil {
 		return err
 	}
-	if goos == "darwin" {
+	if goos != "linux" {
+		platform := goos
+		if goos == "darwin" {
+			platform = "macOS"
+		}
 		switch {
 		case job.HasCapability("docker"):
-			return errUnsupportedf("docker capability is unsupported on macOS runners")
+			return errUnsupportedf("docker capability is unsupported on %s runners", platform)
 		case job.Container != nil:
-			return errUnsupportedf("job containers are unsupported on macOS runners")
+			return errUnsupportedf("job containers are unsupported on %s runners", platform)
 		case len(job.Services) != 0:
-			return errUnsupportedf("services are unsupported on macOS runners")
+			return errUnsupportedf("services are unsupported on %s runners", platform)
 		}
 	}
 	return nil
@@ -1603,6 +1610,9 @@ func mergeStepEnvironment(base map[string]string, overlays ...map[string]string)
 	out := mergeStringMaps(append([]map[string]string{base}, overlays...)...)
 	for name, value := range base {
 		if isRuntimeContextEnvironment(name) {
+			if goruntime.GOOS == "windows" {
+				name = strings.ToUpper(name)
+			}
 			out[name] = value
 		}
 	}
@@ -1610,6 +1620,9 @@ func mergeStepEnvironment(base map[string]string, overlays ...map[string]string)
 }
 
 func isRuntimeContextEnvironment(name string) bool {
+	if goruntime.GOOS == "windows" {
+		name = strings.ToUpper(name)
+	}
 	// GITHUB_ACTION_PATH is invocation-scoped and overlaid by action runtimes,
 	// not protected for ordinary top-level steps.
 	switch name {
@@ -2570,7 +2583,18 @@ func cloneStrings(in map[string]string) map[string]string {
 }
 
 func mergeInto(target map[string]string, source map[string]string) {
-	maps.Copy(target, source)
+	if goruntime.GOOS != "windows" {
+		maps.Copy(target, source)
+		return
+	}
+	for name, value := range source {
+		for existing := range target {
+			if strings.EqualFold(existing, name) {
+				delete(target, existing)
+			}
+		}
+		target[strings.ToUpper(name)] = value
+	}
 }
 
 func mergeStringMaps(values ...map[string]string) map[string]string {

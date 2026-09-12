@@ -4,11 +4,60 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func TestPowerShellExecution(t *testing.T) {
+	if _, err := exec.LookPath("pwsh"); err != nil {
+		t.Skip("PowerShell is not installed")
+	}
+	for _, shell := range []string{"pwsh", "powershell", ""} {
+		if shell == "" && runtime.GOOS != "windows" || shell == "powershell" && runtime.GOOS != "windows" {
+			continue
+		}
+		t.Run("shell="+shell, func(t *testing.T) {
+			workspace := t.TempDir()
+			temp := filepath.Join(workspace, "runner's temp")
+			if err := os.Mkdir(temp, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("TMPDIR", temp)
+			t.Setenv("TMP", temp)
+			t.Setenv("TEMP", temp)
+			workflow := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflow, "name: PowerShell test\n")
+			job := runtimePlan(t, workspace, workflow, []runtimeTestStep{
+				{ID: "first", Kind: "run", Shell: shell, Command: `"script=$PSCommandPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+"GREETING=héllo" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`},
+				{ID: "second", Kind: "run", Shell: shell, Command: `if ($env:GREETING -ne 'héllo') { throw 'environment lost' }
+"value=$env:GREETING" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append`},
+			})
+			job.Outputs = map[string]string{"value": "${{ steps.second.outputs.value }}", "script": "${{ steps.first.outputs.script }}"}
+			result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+			if err != nil || result.Outputs["value"] != "héllo" {
+				t.Fatalf("result = %#v, error = %v", result, err)
+			}
+			script := result.Outputs["script"]
+			if filepath.Ext(script) != ".ps1" {
+				t.Fatalf("script = %q", script)
+			}
+			if _, err := os.Stat(script); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("script not removed: %v", err)
+			}
+			for _, command := range []string{`Write-Error 'stop here'; "should-not-run=yes" >> $env:GITHUB_OUTPUT`, `& pwsh -NoProfile -Command 'exit 7'`} {
+				failed := runtimePlan(t, workspace, workflow, []runtimeTestStep{{ID: "failed", Kind: "run", Shell: shell, Command: command}})
+				if _, err := (Runner{}).runTestJob(t.Context(), failed, workspace); err == nil {
+					t.Fatalf("command succeeded: %s", command)
+				}
+			}
+		})
+	}
+}
 
 func TestRunJobPythonShellUsesTemporaryScript(t *testing.T) {
 	installPythonShellTestCommand(t)

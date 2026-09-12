@@ -86,15 +86,16 @@ type ActionSelector struct {
 }
 
 type ActionLock struct {
-	ID           string                    `json:"id"`
-	Source       string                    `json:"source"`
-	Repository   string                    `json:"repository,omitempty"`
-	RequestedRef string                    `json:"requested_ref,omitempty"`
-	Commit       string                    `json:"commit,omitempty"`
-	Path         string                    `json:"path,omitempty"`
-	SourceDigest string                    `json:"source_digest"`
-	DockerImage  string                    `json:"docker_image,omitempty"`
-	Children     map[string]ActionSelector `json:"children,omitempty"`
+	ID              string                    `json:"id"`
+	Source          string                    `json:"source"`
+	Repository      string                    `json:"repository,omitempty"`
+	RequestedRef    string                    `json:"requested_ref,omitempty"`
+	Commit          string                    `json:"commit,omitempty"`
+	Path            string                    `json:"path,omitempty"`
+	SourceDigest    string                    `json:"source_digest"`
+	ExecutablePaths []string                  `json:"executable_paths,omitempty"`
+	DockerImage     string                    `json:"docker_image,omitempty"`
+	Children        map[string]ActionSelector `json:"children,omitempty"`
 }
 
 type Compiler struct {
@@ -1387,6 +1388,14 @@ func validateActionLocks(job Job) error {
 		}
 		if !digestPattern.MatchString(lock.SourceDigest) || len(lock.Children) > 1024 {
 			return fmt.Errorf("action lock %q has invalid digest or too many children", lock.ID)
+		}
+		if len(lock.ExecutablePaths) > 50000 {
+			return fmt.Errorf("action lock %q has too many executable paths", lock.ID)
+		}
+		for i, executable := range lock.ExecutablePaths {
+			if !cleanActionPath(executable) || i > 0 && lock.ExecutablePaths[i-1] >= executable {
+				return fmt.Errorf("action lock %q has invalid executable paths", lock.ID)
+			}
 		}
 		if lock.DockerImage != "" && !ValidContainerImageReference(lock.DockerImage) {
 			return fmt.Errorf("action lock %q has invalid Docker image", lock.ID)

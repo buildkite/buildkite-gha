@@ -6,10 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -58,7 +58,7 @@ func (r *jobRun) runProcess(ctx context.Context, processor *commandOutputProcess
 	effects, fileErr := files.apply(result, state)
 	effects.reportSummaryUploadFailure(processor)
 	if fileErr == nil && (effects.pathSet || len(effects.paths) > 0) {
-		pathEnv := map[string]string{"PATH": env["PATH"]}
+		pathEnv := map[string]string{"PATH": environmentValue(env, "PATH")}
 		if effects.pathSet {
 			pathEnv["PATH"] = effects.pathBase
 		}
@@ -89,14 +89,23 @@ func resolveExecutableInPath(name, path string) (string, error) {
 	if strings.ContainsRune(name, filepath.Separator) {
 		return name, nil
 	}
+	extensions := []string{""}
+	if runtime.GOOS == "windows" && filepath.Ext(name) == "" {
+		extensions = filepath.SplitList(os.Getenv("PATHEXT"))
+		if len(extensions) == 0 {
+			extensions = []string{".COM", ".EXE", ".BAT", ".CMD"}
+		}
+	}
 	for _, dir := range filepath.SplitList(path) {
 		if dir == "" {
 			dir = "."
 		}
-		candidate := filepath.Join(dir, name)
-		info, err := os.Stat(candidate)
-		if err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
-			return candidate, nil
+		for _, extension := range extensions {
+			candidate := filepath.Join(dir, name+extension)
+			info, err := os.Stat(candidate)
+			if err == nil && !info.IsDir() && (runtime.GOOS == "windows" || info.Mode().Perm()&0o111 != 0) {
+				return candidate, nil
+			}
 		}
 	}
 	return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
@@ -123,6 +132,16 @@ func (r Runner) runStreamingCommand(ctx context.Context, processor *commandOutpu
 		_ = stderrWriter.Close()
 		return err
 	}
+	if err := processStarted(cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		processFinished(cmd.Process.Pid)
+		_ = stdout.Close()
+		_ = stdoutWriter.Close()
+		_ = stderr.Close()
+		_ = stderrWriter.Close()
+		return fmt.Errorf("contain process tree: %w", err)
+	}
 	_ = stdoutWriter.Close()
 	_ = stderrWriter.Close()
 	defer func() {
@@ -134,6 +153,7 @@ func (r Runner) runStreamingCommand(ctx context.Context, processor *commandOutpu
 	var waitErr error
 	go func() {
 		waitErr = cmd.Wait()
+		processFinished(cmd.Process.Pid)
 		close(processDone)
 	}()
 	finished := make(chan struct{})
@@ -260,7 +280,11 @@ func processEnv(overrides map[string]string) []string {
 	// This allowlist is also the mise trust boundary: ambient MISE_* values must
 	// never redirect compatibility runtime downloads or verification.
 	values := make(map[string]string, 6+len(overrides))
-	for _, name := range []string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"} {
+	inherited := []string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"}
+	if runtime.GOOS == "windows" {
+		inherited = append(inherited, "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramData", "ProgramFiles", "ProgramFiles(x86)")
+	}
+	for _, name := range inherited {
 		if value, ok := os.LookupEnv(name); ok {
 			values[name] = value
 		}
@@ -276,8 +300,20 @@ func processEnv(overrides map[string]string) []string {
 	if _, ok := values["TMPDIR"]; !ok {
 		values["TMPDIR"] = os.TempDir()
 	}
-	maps.Copy(values, overrides)
+	mergeInto(values, overrides)
 	return mapEnv(values)
+}
+
+func environmentValue(env map[string]string, name string) string {
+	if value, ok := env[name]; ok || runtime.GOOS != "windows" {
+		return value
+	}
+	for candidate, value := range env {
+		if strings.EqualFold(candidate, name) {
+			return value
+		}
+	}
+	return ""
 }
 
 func validateEnvironmentNames(env map[string]string) error {
