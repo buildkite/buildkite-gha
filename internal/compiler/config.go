@@ -16,6 +16,7 @@ var queuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var distributionDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var runtimeImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
 var stepKeyNamespacePattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
+var windowsRunnerLabelPattern = regexp.MustCompile(`(?i)(?:^|[-_./\s])(?:windows|win32|win64)(?:$|[-_./\s\d])`)
 
 // OperatingSystem identifies one supported workflow host operating system.
 type OperatingSystem string
@@ -527,7 +528,7 @@ func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []s
 		if label != "" {
 			linuxGuidance = fmt.Sprintf(`If this job can run on Linux, change%s to "ubuntu-latest".`, label)
 		}
-		return "Windows runners aren't currently supported. Imported jobs run on Linux or macOS Buildkite hosted agents. " + linuxGuidance + " If it requires Windows, open an issue in https://github.com/buildkite/buildkite-gha to help us prioritize Windows support.", ""
+		return "Windows runners are not enabled for this workflow. " + linuxGuidance + " If it requires Windows, contact support@buildkite.com with the runner label and a link to the build to ask about Windows support. Creating a hosted Windows queue alone does not enable GitHub Actions support.", ""
 	case reasonUnmappedLabel:
 		return fmt.Sprintf("Runner label%s has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.", label), detail
 	case reasonServerRejected:
@@ -563,11 +564,9 @@ func serverRunnerRejectionDiagnostic(rejection RunnerRejection, label, supported
 	}
 	message = fmt.Sprintf("Buildkite could not resolve %s. ", subject)
 	switch rejection.Code {
-	case RunnerRejectionMissingQueue, RunnerRejectionNoCluster:
+	case RunnerRejectionMissingQueue, RunnerRejectionNoCluster, RunnerRejectionIncompatibleLabels:
 		// The server message may end with a documentation URL; leave it intact.
 		return message + strings.Join(strings.Fields(rejection.Message), " "), ""
-	case RunnerRejectionIncompatibleLabels:
-		return message + sentence(rejection.Message) + " Change runs-on to a Linux or macOS runner label that Buildkite hosted agents support.", supportedDetail
 	default:
 		return message + sentence(rejection.Message) + " Configure a mapping for this selector or use a mapped runner label.", supportedDetail
 	}
@@ -605,7 +604,7 @@ func (policy RunnerPolicy) supportedLabels() []string {
 }
 
 func unsupportedOS(label string) bool {
-	return strings.HasPrefix(label, "windows-") || label == "windows"
+	return windowsRunnerLabelPattern.MatchString(label)
 }
 
 func targetDescription(target RunnerTarget) string {

@@ -64,6 +64,12 @@ that could be added to the supported platforms. This distinction does not
 change validation: Windows workflows remain unsupported and appear in raw
 corpus results.
 
+If a job requires a platform that its runner mapping does not support,
+[contact Buildkite support](mailto:support@buildkite.com) with the `runs-on`
+label, required operating system and architecture, and a link to the Buildkite
+build. Creating a hosted queue alone does not enable GitHub Actions support
+for that platform. Change to a supported label only if the job can run there.
+
 ## How workflows run on Buildkite
 
 GitHub Actions combines run creation and workload definition in one file. Buildkite keeps them separate.

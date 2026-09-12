@@ -1655,6 +1655,7 @@ func runnerResolutionServer(t *testing.T, status int, verdicts map[string]map[st
 func TestRunUploadReportsServerRunnerRejectionsInsteadOfLocalPresets(t *testing.T) {
 	requireImporterHost(t)
 	const missingQueueMessage = "The 'Default' cluster has no hosted macOS queue for this runner selector. Create a hosted macOS queue named macos-medium, or map this runner label to an existing queue: https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md"
+	const incompatibleMessage = "This operating system or architecture is not supported by the current GitHub Actions runner mapping. If it requires this platform, contact support@buildkite.com with the runner label and a link to the build to ask about support."
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"runners.yml": "name: Runners\non: push\njobs:\n  mac:\n    runs-on: macos-latest\n    steps: [{run: true}]\n  arm:\n    runs-on: ubuntu-24.04-arm\n    steps: [{run: true}]\n  windows:\n    runs-on: windows-latest\n    steps: [{run: true}]\n  linux:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 	})
@@ -1664,7 +1665,7 @@ func TestRunUploadReportsServerRunnerRejectionsInsteadOfLocalPresets(t *testing.
 	}
 	server, requests := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
 		"macos-latest":     {"error": map[string]any{"code": "missing_queue", "message": missingQueueMessage, "platform": "darwin/arm64", "required_queues": []string{"macos-medium"}}},
-		"ubuntu-24.04-arm": {"error": map[string]any{"code": "incompatible_labels", "message": "No compatible runner is configured."}},
+		"ubuntu-24.04-arm": {"error": map[string]any{"code": "incompatible_labels", "message": incompatibleMessage}},
 		"windows-latest":   {"error": map[string]any{"code": "incompatible_labels", "message": "No compatible runner is configured."}},
 		"ubuntu-latest":    {"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}},
 	})
@@ -1700,10 +1701,10 @@ func TestRunUploadReportsServerRunnerRejectionsInsteadOfLocalPresets(t *testing.
 	if !strings.Contains(message, `Buildkite could not resolve runner label "macos-latest". `+missingQueueMessage) {
 		t.Fatalf("missing_queue rejection was not rendered: %q", message)
 	}
-	if !strings.Contains(message, `Buildkite could not resolve runner label "ubuntu-24.04-arm". No compatible runner is configured. Change runs-on to a Linux or macOS runner label that Buildkite hosted agents support.`) {
+	if !strings.Contains(message, `Buildkite could not resolve runner label "ubuntu-24.04-arm". `+incompatibleMessage) {
 		t.Fatalf("incompatible_labels rejection was not rendered: %q", message)
 	}
-	if !strings.Contains(message, `Windows runners aren't currently supported.`) {
+	if !strings.Contains(message, `Windows runners are not enabled for this workflow.`) {
 		t.Fatalf("local Windows guidance was replaced by the server rejection: %q", message)
 	}
 	if strings.Contains(message, "has no runner-target mapping") || strings.Contains(message, `job "linux"`) {
@@ -1823,7 +1824,7 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 		t.Fatalf("expanded failed workflow = %#v", missing)
 	}
 	firstFailureMessage := failureLogText(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
-	if !strings.Contains(firstFailureMessage, `Windows runners aren't currently supported. Imported jobs run on Linux or macOS Buildkite hosted agents. If this job can run on Linux, change "windows-latest" to "ubuntu-latest". If it requires Windows, open an issue in https://github.com/buildkite/buildkite-gha to help us prioritize Windows support.`) ||
+	if !strings.Contains(firstFailureMessage, `Windows runners are not enabled for this workflow. If this job can run on Linux, change "windows-latest" to "ubuntu-latest". If it requires Windows, contact support@buildkite.com with the runner label and a link to the build to ask about Windows support. Creating a hosted Windows queue alone does not enable GitHub Actions support.`) ||
 		!strings.Contains(firstFailureMessage, `Runner label "macos-15" has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.`) ||
 		strings.Count(firstFailureMessage, "detail: Supported runner labels: macos-latest, ubuntu-22.04, ubuntu-24.04, ubuntu-latest.") != 1 {
 		t.Fatalf("multi-diagnostic failure message = %q", firstFailureMessage)

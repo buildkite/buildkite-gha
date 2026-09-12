@@ -608,6 +608,7 @@ func renderProcessingDiagnostic(ctx context.Context, diagnostic compatibility.Di
 			detail = strings.ReplaceAll(detail, "&#34;ubuntu-latest&#34;", annotationCode("ubuntu-latest"))
 			const issueURL = "https://github.com/buildkite/buildkite-gha"
 			detail = strings.ReplaceAll(detail, issueURL+" ", `<a href="`+issueURL+`" target="_blank">buildkite/buildkite-gha</a> `)
+			detail = strings.ReplaceAll(detail, "contact support@buildkite.com with", `contact <a href="mailto:support@buildkite.com">support@buildkite.com</a> with`)
 			out.WriteString(detail)
 			out.WriteString("</p>\n")
 		}

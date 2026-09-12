@@ -662,8 +662,12 @@ func TestRunnerRejectionDiagnosticRendersServerRejections(t *testing.T) {
 			name:        "incompatible labels",
 			rejection:   RunnerRejection{Labels: []string{"self-hosted", "arm64"}, Code: RunnerRejectionIncompatibleLabels, Message: "No compatible runner is configured."},
 			labels:      []string{"self-hosted", "arm64"},
-			wantMessage: "Buildkite could not resolve the runs-on labels. No compatible runner is configured. Change runs-on to a Linux or macOS runner label that Buildkite hosted agents support.",
-			wantDetail:  "Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest.",
+			wantMessage: "Buildkite could not resolve the runs-on labels. No compatible runner is configured.",
+		},
+		{
+			name:        "incompatible labels preserves support guidance and trailing URL",
+			rejection:   RunnerRejection{Labels: []string{"ubuntu-24.04-arm"}, Code: RunnerRejectionIncompatibleLabels, Message: "This platform is not supported by the current runner mapping. If it requires this platform, contact support@buildkite.com with the runner label and a link to the build. See https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md"},
+			wantMessage: "Buildkite could not resolve the runs-on labels. This platform is not supported by the current runner mapping. If it requires this platform, contact support@buildkite.com with the runner label and a link to the build. See https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md",
 		},
 		{
 			name:        "legacy unmapped labels keeps mapping guidance",
@@ -731,7 +735,7 @@ func TestRunnerRejectionDiagnosticSeparatesStaticLabelFromAllowlist(t *testing.T
 	}{
 		{
 			label:       "windows-latest",
-			wantMessage: `Windows runners aren't currently supported. Imported jobs run on Linux or macOS Buildkite hosted agents. If this job can run on Linux, change "windows-latest" to "ubuntu-latest". If it requires Windows, open an issue in https://github.com/buildkite/buildkite-gha to help us prioritize Windows support.`,
+			wantMessage: `Windows runners are not enabled for this workflow. If this job can run on Linux, change "windows-latest" to "ubuntu-latest". If it requires Windows, contact support@buildkite.com with the runner label and a link to the build to ask about Windows support. Creating a hosted Windows queue alone does not enable GitHub Actions support.`,
 		},
 		{
 			label:       "macos-latest",
@@ -755,6 +759,31 @@ func TestRunnerRejectionDiagnosticSeparatesStaticLabelFromAllowlist(t *testing.T
 		}
 		if strings.Contains(message, "ubuntu-22.04") {
 			t.Fatalf("runner allowlist leaked into message: %q", message)
+		}
+	}
+}
+
+func TestProviderWindowsRunnerDiagnostics(t *testing.T) {
+	for _, label := range []string{"depot-windows-2025-16", "BLACKSMITH-4VCPU-WINDOWS-2025", "windows/amd64", "self_hosted_win64"} {
+		t.Run(label, func(t *testing.T) {
+			policy := RunnerPolicy{Rejections: []RunnerRejection{{Labels: []string{label}, Code: RunnerRejectionIncompatibleLabels, Message: "Generic server rejection."}}}
+			_, err := policy.Resolve([]string{label}, EventTrusted)
+			message, detail := runnerRejectionDiagnostic(err, nil, []string{"ubuntu-latest"}, nil)
+			for _, want := range []string{"Windows runners are not enabled for this workflow.", `If this job can run on Linux, change runs-on to "ubuntu-latest".`, "contact support@buildkite.com with the runner label and a link to the build"} {
+				if !strings.Contains(message, want) {
+					t.Fatalf("diagnostic = %q, want %q", message, want)
+				}
+			}
+			if detail != "" || strings.Contains(message, label) || strings.Contains(message, "Generic server rejection") {
+				t.Fatalf("diagnostic leaked a resolved label or lost Windows guidance: %q, %q", message, detail)
+			}
+		})
+	}
+	for _, label := range []string{"windowsill", "mywindows-runner", "depot-ubuntu-24.04", "custom-win64bit"} {
+		_, err := (RunnerPolicy{}).Resolve([]string{label}, EventTrusted)
+		message, _ := runnerRejectionDiagnostic(err, []string{label}, nil, nil)
+		if !strings.Contains(message, "has no runner-target mapping") {
+			t.Fatalf("non-Windows label %q misclassified: %q", label, message)
 		}
 	}
 }
