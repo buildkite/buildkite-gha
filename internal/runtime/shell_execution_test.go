@@ -38,9 +38,10 @@ func TestPowerShellExecution(t *testing.T) {
 "value=$env:GREETING" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append`},
 			})
 			job.Outputs = map[string]string{"value": "${{ steps.second.outputs.value }}", "script": "${{ steps.first.outputs.script }}"}
-			result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+			var stdout, stderr bytes.Buffer
+			result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).runTestJob(t.Context(), job, workspace)
 			if err != nil || result.Outputs["value"] != "héllo" {
-				t.Fatalf("result = %#v, error = %v", result, err)
+				t.Fatalf("outputs = %#v, error = %v\nstdout: %s\nstderr: %s", result.Outputs, err, stdout.String(), stderr.String())
 			}
 			script := result.Outputs["script"]
 			if filepath.Ext(script) != ".ps1" {

@@ -53,7 +53,9 @@ func newCommandFilesUnder(parent string) (commandFiles, error) {
 		open:    make(map[string]*os.File, 5),
 	}
 	for _, path := range []string{files.output, files.env, files.state, files.summary, files.path} {
-		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		// Retain the inode for verification without denying Windows writers
+		// that share read access only, including PowerShell's Out-File.
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDONLY, 0o600)
 		if err != nil {
 			return commandFiles{}, errors.Join(fmt.Errorf("create file-command file: %w", err), files.cleanup())
 		}
