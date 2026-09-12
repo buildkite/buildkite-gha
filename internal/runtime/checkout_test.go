@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -23,6 +24,34 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
 )
+
+func TestCheckoutPreflightResolvesHostGit(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: checkout preflight\n")
+	const checkoutID = "a-0000000000000001"
+	// A skipped checkout still requires Git preflight, without fetching a
+	// repository over the network. The next step proves execution can proceed.
+	shell := "sh"
+	if runtime.GOOS == "windows" {
+		shell = "pwsh"
+	}
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
+		{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Condition: "false", Action: &plan.ActionSelector{Lock: checkoutID}},
+		{ID: "git", Kind: "run", Shell: shell, Command: "git --version"},
+	})
+	job.RequiredCapabilities = []string{"network", "provider-token-read"}
+	job.Actions = []plan.ActionLock{{
+		ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7",
+		Commit: actionintegration.CheckoutV7Commit, SourceDigest: "sha256:" + strings.Repeat("a", 64),
+	}}
+	*job.RequiresMise = false
+	var stdout, stderr bytes.Buffer
+	result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" || !strings.Contains(stdout.String(), "git version ") {
+		t.Fatalf("checkout preflight result = %#v, error = %v\nstdout: %s\nstderr: %s", result, err, &stdout, &stderr)
+	}
+}
 
 func TestAnonymousCheckoutAdapterPopulatesVerifiedWorkspace(t *testing.T) {
 	workspace := t.TempDir()

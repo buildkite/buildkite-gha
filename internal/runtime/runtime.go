@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -107,7 +108,7 @@ func resolveHostExecutableBeforeWorkflow(configured, fallback, label string) (st
 		return "", fmt.Errorf("canonicalize %s before workflow execution: %w", label, err)
 	}
 	info, err := os.Stat(resolved)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+	if err != nil || !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0) {
 		return "", fmt.Errorf("%s must be a real executable resolved before workflow execution", label)
 	}
 	return resolved, nil
