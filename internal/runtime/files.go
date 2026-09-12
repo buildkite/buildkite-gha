@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -53,13 +54,29 @@ func newCommandFilesUnder(parent string) (commandFiles, error) {
 		open:    make(map[string]*os.File, 5),
 	}
 	for _, path := range []string{files.output, files.env, files.state, files.summary, files.path} {
-		// Retain the inode for verification without denying Windows writers
-		// that share read access only, including PowerShell's Out-File.
-		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDONLY, 0o600)
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 		if err != nil {
 			return commandFiles{}, errors.Join(fmt.Errorf("create file-command file: %w", err), files.cleanup())
 		}
 		files.open[path] = file
+		if runtime.GOOS == "windows" {
+			// O_CREATE adds write access even with O_RDONLY on Windows. Reopen
+			// read-only so Out-File can share this handle, retaining the original
+			// until identity is checked to prevent path replacement races.
+			reader, err := os.Open(path)
+			if err != nil {
+				return commandFiles{}, errors.Join(err, files.cleanup())
+			}
+			created, createErr := file.Stat()
+			retained, retainErr := reader.Stat()
+			if createErr != nil || retainErr != nil || !os.SameFile(created, retained) {
+				return commandFiles{}, errors.Join(fmt.Errorf("file-command file changed while opening"), createErr, retainErr, reader.Close(), files.cleanup())
+			}
+			if err := file.Close(); err != nil {
+				return commandFiles{}, errors.Join(err, reader.Close(), files.cleanup())
+			}
+			files.open[path] = reader
+		}
 	}
 	return files, nil
 }
