@@ -23,7 +23,7 @@ jobs:
       - name: Build Windows runtime
         run: go build ./...
       - name: Exercise checkout Git preflight
-        run: go test ./internal/runtime -run '^TestCheckoutPreflightResolvesHostGit$' -v -count=1
+        run: go test ./internal/runtime -run '^(TestCheckoutPreflightResolvesHostGit|TestCheckoutLFSInitializesBeforeFetch)$' -v -count=1
       - name: Exercise PowerShell and process cleanup
         run: go test ./internal/runtime -run '^(TestPowerShellExecution|TestWindowsEnvironment|TestWindowsProcessTree)$' -v -count=1 -timeout=3m
       - name: Exercise JavaScript action lifecycle

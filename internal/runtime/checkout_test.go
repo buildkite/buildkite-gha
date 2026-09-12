@@ -1032,6 +1032,37 @@ func TestCheckoutRejectsUnavailableLFSBeforeCreatingPath(t *testing.T) {
 	}
 }
 
+func TestCheckoutLFSInitializesBeforeFetch(t *testing.T) {
+	if _, err := exec.LookPath("git-lfs"); err != nil && runtime.GOOS != "windows" {
+		t.Skip("Git LFS is not installed")
+	}
+	git, err := resolveHostExecutableBeforeWorkflow("", "git", "Git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitLFS, err := resolveHostExecutableBeforeWorkflow("", "git-lfs", "Git LFS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	job := plan.Job{
+		Event:                plan.Event{Provider: "github", Repository: "buildkite/buildkite-gha", SHA: strings.Repeat("a", 40)},
+		RequiredCapabilities: []string{"network", "provider-token-read"},
+	}
+	// Missing credential-helper authority stops the fetch before any network
+	// access, after real Git and Git LFS have initialized the repository.
+	runner := Runner{Git: git, GitLFS: gitLFS, RepositoryCredentials: &AgentRepositoryCredentials{}}
+	var logs bytes.Buffer
+	_, err = runner.runCheckout(t.Context(), newCommandOutputProcessor(&logs, &logs), workspace, job, actionintegration.CheckoutV7Commit, map[string]string{"lfs": "true"})
+	if err == nil || !strings.Contains(err.Error(), "repository-provider credentials were not resolved") {
+		t.Fatalf("expected fetch credential boundary, got %v\n%s", err, &logs)
+	}
+	command := exec.Command(git, "-C", workspace, "config", "--local", "--get", "filter.lfs.process")
+	if output, err := command.CombinedOutput(); err != nil || strings.TrimSpace(string(output)) != "git-lfs filter-process" {
+		t.Fatalf("Git LFS was not configured: %v: %s", err, output)
+	}
+}
+
 func TestCheckoutUsesCommandScopedAgentCredentialHelper(t *testing.T) {
 	workspace := canonicalTempDir(t)
 	checkoutDirectory := filepath.Join(workspace, "test-catalog")
