@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"debug/elf"
 	"debug/macho"
+	"debug/pe"
 	"errors"
 	"fmt"
 	"io"
@@ -59,7 +60,7 @@ func loadRuntimeDistributions(paths map[compiler.Platform]string) (map[compiler.
 			_ = file.Close()
 			return nil, fmt.Errorf("runtime distribution for %s changed while being opened", platform)
 		}
-		if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		if !info.Mode().IsRegular() || (platform != compiler.PlatformWindowsAMD64 && info.Mode().Perm()&0o111 == 0) {
 			_ = file.Close()
 			return nil, fmt.Errorf("runtime distribution for %s is not a non-symlink executable regular file", platform)
 		}
@@ -107,6 +108,18 @@ func validateRuntimeDistributionBinary(platform compiler.Platform, contents []by
 		if binary.Cpu != macho.CpuArm64 || binary.Type != macho.TypeExec {
 			return fmt.Errorf("want a thin darwin/arm64 executable")
 		}
+	case compiler.PlatformWindowsAMD64:
+		binary, err := pe.NewFile(bytes.NewReader(contents))
+		if err != nil {
+			return fmt.Errorf("open PE executable: %w", err)
+		}
+		defer func() { _ = binary.Close() }()
+		if binary.Machine != pe.IMAGE_FILE_MACHINE_AMD64 || binary.Characteristics&pe.IMAGE_FILE_DLL != 0 || binary.Characteristics&pe.IMAGE_FILE_EXECUTABLE_IMAGE == 0 {
+			return fmt.Errorf("want a 64-bit windows/amd64 executable that is not a DLL")
+		}
+		if _, ok := binary.OptionalHeader.(*pe.OptionalHeader64); !ok {
+			return fmt.Errorf("want a 64-bit windows/amd64 executable that is not a DLL")
+		}
 	default:
 		return fmt.Errorf("unsupported platform")
 	}
@@ -138,7 +151,7 @@ func executable() (path string, contents []byte, digest string, err error) {
 		_ = file.Close()
 		return "", nil, "", fmt.Errorf("inspect running compiler executable: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || info.Size() <= 0 || info.Size() > runtimeDistributionLimit {
+	if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0) || info.Size() <= 0 || info.Size() > runtimeDistributionLimit {
 		_ = file.Close()
 		return "", nil, "", fmt.Errorf("running compiler executable must be an executable regular file between 1 and %d bytes", runtimeDistributionLimit)
 	}

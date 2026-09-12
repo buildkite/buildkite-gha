@@ -1,0 +1,36 @@
+name: Windows runtime
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+      - name: Build Windows runtime
+        run: go build ./...
+      - name: Exercise checkout Git preflight
+        run: go test ./internal/runtime -run '^(TestCheckoutPreflightResolvesHostGit|TestCheckoutLFSInitializesBeforeFetch)$' -v -count=1
+      - name: Exercise PowerShell and process cleanup
+        run: go test ./internal/runtime -run '^(TestPowerShellExecution|TestWindowsEnvironment|TestWindowsProcessTree)$' -v -count=1 -timeout=3m
+      - name: Exercise JavaScript action lifecycle
+        run: |
+          $env:BUILDKITE_GHA_TEST_NODE24 = (Get-Command node).Source
+          go test ./internal/runtime -run '^(TestJavaScriptActionLifecycleRunsInWorkspace|TestJavaScriptPostInputUsesFinalJobStatus|TestCloneExpressionContextDeepCopiesStepOutputs)$' -v -count=1
+      - name: Verify bootstrap integrity and exit codes
+        run: go test ./internal/buildkite -run '^(TestEmitWindowsBootstrap|TestWindowsBootstrapExecution)$' -v -count=1
+      - name: Verify Windows distribution and managed tools
+        run: go test ./internal/cli -run '^(TestWindowsRuntimeDistributionValidatesPEAndNeedsNoUnixExecuteBit|TestExtractRuntimeMiseWindowsZip)$' -v -count=1

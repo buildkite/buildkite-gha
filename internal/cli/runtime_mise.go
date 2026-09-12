@@ -2,6 +2,7 @@ package cli
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -23,12 +24,14 @@ import (
 )
 
 const (
-	runtimeMiseArchiveDigest            = "bd0930c0b619f51ddb60e32e5cce18a5533567b2f1ba9fc4875b9f39a2bb3ed8"
-	runtimeMiseBinaryDigest             = "a238972a3162d710b85b28c324372e96ca4e4b486c81fe78695000d9fbc77c48"
-	runtimeMiseDarwinARM64ArchiveDigest = "5b883c868a0748dd0c595d30fd000ec5138dfabdeef2c30222866ebf34af1ae3"
-	runtimeMiseDarwinARM64BinaryDigest  = "e777070540ffe22cf8b2b9f88aed88b461d0887d940c4f1c1a97359463cde6e1"
-	runtimeMiseArchiveLimit             = 64 << 20
-	runtimeMiseBinaryLimit              = 128 << 20
+	runtimeMiseArchiveDigest             = "bd0930c0b619f51ddb60e32e5cce18a5533567b2f1ba9fc4875b9f39a2bb3ed8"
+	runtimeMiseBinaryDigest              = "a238972a3162d710b85b28c324372e96ca4e4b486c81fe78695000d9fbc77c48"
+	runtimeMiseDarwinARM64ArchiveDigest  = "5b883c868a0748dd0c595d30fd000ec5138dfabdeef2c30222866ebf34af1ae3"
+	runtimeMiseDarwinARM64BinaryDigest   = "e777070540ffe22cf8b2b9f88aed88b461d0887d940c4f1c1a97359463cde6e1"
+	runtimeMiseWindowsAMD64ArchiveDigest = "f366c72d65ca27eec6e61801b949a63b20d6a3a4cd9277521fc01623ac050164"
+	runtimeMiseWindowsAMD64BinaryDigest  = "adf1b4c9f51e7d15cff723056fcd8fd51f40ebacadcca97fd5758c44d469d5ea"
+	runtimeMiseArchiveLimit              = 64 << 20
+	runtimeMiseBinaryLimit               = 128 << 20
 )
 
 func resolveRuntimeMise(ctx context.Context, configured, dataDir, privateRuntime string, stderr io.Writer) (string, error) {
@@ -103,7 +106,7 @@ func validateRuntimeMiseFile(ctx context.Context, candidate, expectedDigest stri
 	if err != nil {
 		return "", fmt.Errorf("inspect runtime mise executable: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+	if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0) {
 		return "", fmt.Errorf("runtime mise executable %q is not an executable regular file", resolved)
 	}
 	if expectedDigest != "" {
@@ -156,6 +159,8 @@ func miseVersionAtLeast(actual, minimum string) bool {
 type runtimeMiseRelease struct {
 	asset         string
 	cacheKey      string
+	archiveFormat string
+	executable    string
 	archiveDigest string
 	binaryDigest  string
 }
@@ -166,6 +171,8 @@ func selectRuntimeMiseRelease(goos, goarch string) (runtimeMiseRelease, error) {
 		return runtimeMiseRelease{
 			asset:         "linux-x64",
 			cacheKey:      "linux-amd64",
+			archiveFormat: "tar.gz",
+			executable:    "mise",
 			archiveDigest: runtimeMiseArchiveDigest,
 			binaryDigest:  runtimeMiseBinaryDigest,
 		}, nil
@@ -173,8 +180,19 @@ func selectRuntimeMiseRelease(goos, goarch string) (runtimeMiseRelease, error) {
 		return runtimeMiseRelease{
 			asset:         "macos-arm64",
 			cacheKey:      "darwin-arm64",
+			archiveFormat: "tar.gz",
+			executable:    "mise",
 			archiveDigest: runtimeMiseDarwinARM64ArchiveDigest,
 			binaryDigest:  runtimeMiseDarwinARM64BinaryDigest,
+		}, nil
+	case "windows/amd64":
+		return runtimeMiseRelease{
+			asset:         "windows-x64",
+			cacheKey:      "windows-amd64",
+			archiveFormat: "zip",
+			executable:    "mise.exe",
+			archiveDigest: runtimeMiseWindowsAMD64ArchiveDigest,
+			binaryDigest:  runtimeMiseWindowsAMD64BinaryDigest,
 		}, nil
 	default:
 		return runtimeMiseRelease{}, fmt.Errorf("managed mise is unavailable on %s/%s; set BUILDKITE_GHA_MISE to a compatible absolute path", goos, goarch)
@@ -200,12 +218,12 @@ func installRuntimeMiseVersion(ctx context.Context, dataDir, privateRuntime stri
 	} else {
 		root = filepath.Join(filepath.Dir(root), "runtime", buildkitepipeline.MinimumMiseVersion)
 	}
-	destination := filepath.Join(root, selected.cacheKey, "mise")
+	destination := filepath.Join(root, selected.cacheKey, selected.executable)
 	if resolved, err := validateRuntimeMiseFile(ctx, destination, selected.binaryDigest); err == nil {
 		return pinRuntimeMise(ctx, resolved, privateRuntime, selected.binaryDigest)
 	}
 	_, _ = fmt.Fprintf(stderr, "~~~ :mise: Install mise %s\n", buildkitepipeline.MinimumMiseVersion)
-	url := fmt.Sprintf("https://github.com/jdx/mise/releases/download/v%s/mise-v%s-%s.tar.gz", buildkitepipeline.MinimumMiseVersion, buildkitepipeline.MinimumMiseVersion, selected.asset)
+	url := fmt.Sprintf("https://github.com/jdx/mise/releases/download/v%s/mise-v%s-%s.%s", buildkitepipeline.MinimumMiseVersion, buildkitepipeline.MinimumMiseVersion, selected.asset, selected.archiveFormat)
 	requestUserAgent := useragent.FromVersion(clientVersion)
 	client := &http.Client{
 		Timeout: 2 * time.Minute,
@@ -220,7 +238,7 @@ func installRuntimeMiseVersion(ctx context.Context, dataDir, privateRuntime stri
 			return nil
 		},
 	}
-	cached, err := installRuntimeMiseFromPlatform(ctx, root, selected.cacheKey, client, url, selected.archiveDigest, selected.binaryDigest, clientVersion)
+	cached, err := installRuntimeMiseFromRelease(ctx, root, selected, client, url, clientVersion)
 	if err != nil {
 		return "", err
 	}
@@ -240,7 +258,7 @@ func pinRuntimeMise(ctx context.Context, cached, privateRuntime, expectedDigest 
 		return "", fmt.Errorf("open cached mise executable: %w", err)
 	}
 	defer func() { _ = source.Close() }()
-	destination := filepath.Join(resolvedRoot, "mise")
+	destination := filepath.Join(resolvedRoot, filepath.Base(cached))
 	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o500)
 	if err != nil {
 		return "", fmt.Errorf("create private mise executable: %w", err)
@@ -272,6 +290,11 @@ func installRuntimeMiseFrom(ctx context.Context, root string, client *http.Clien
 }
 
 func installRuntimeMiseFromPlatform(ctx context.Context, root, cacheKey string, client *http.Client, sourceURL, archiveDigest, binaryDigest, clientVersion string) (string, error) {
+	return installRuntimeMiseFromRelease(ctx, root, runtimeMiseRelease{cacheKey: cacheKey, archiveFormat: "tar.gz", executable: "mise", archiveDigest: archiveDigest, binaryDigest: binaryDigest}, client, sourceURL, clientVersion)
+}
+
+func installRuntimeMiseFromRelease(ctx context.Context, root string, release runtimeMiseRelease, client *http.Client, sourceURL, clientVersion string) (string, error) {
+	cacheKey, archiveDigest, binaryDigest := release.cacheKey, release.archiveDigest, release.binaryDigest
 	destinationDir := filepath.Join(root, cacheKey)
 	parent := filepath.Dir(destinationDir)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -282,7 +305,7 @@ func installRuntimeMiseFromPlatform(ctx context.Context, root, cacheKey string, 
 		return "", fmt.Errorf("mise runtime cache contains a symlink")
 	}
 	destinationDir = filepath.Join(resolvedParent, cacheKey)
-	destination := filepath.Join(destinationDir, "mise")
+	destination := filepath.Join(destinationDir, release.executable)
 	if resolved, err := validateRuntimeMiseFile(ctx, destination, binaryDigest); err == nil {
 		return resolved, nil
 	}
@@ -291,12 +314,12 @@ func installRuntimeMiseFromPlatform(ctx context.Context, root, cacheKey string, 
 		return "", fmt.Errorf("stage mise runtime: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(staging) }()
-	archive := filepath.Join(staging, "mise.tar.gz")
+	archive := filepath.Join(staging, "mise."+release.archiveFormat)
 	if err := downloadRuntimeMise(ctx, client, sourceURL, archive, archiveDigest, clientVersion); err != nil {
 		return "", err
 	}
-	stagedExecutable := filepath.Join(staging, "mise")
-	if err := extractRuntimeMise(archive, stagedExecutable, binaryDigest); err != nil {
+	stagedExecutable := filepath.Join(staging, release.executable)
+	if err := extractRuntimeMiseRelease(archive, stagedExecutable, binaryDigest, release); err != nil {
 		return "", err
 	}
 	if _, err := validateRuntimeMiseFile(ctx, stagedExecutable, binaryDigest); err != nil {
@@ -366,7 +389,10 @@ func downloadRuntimeMise(ctx context.Context, client *http.Client, sourceURL, de
 	return nil
 }
 
-func extractRuntimeMise(archive, destination, expectedDigest string) error {
+func extractRuntimeMiseRelease(archive, destination, expectedDigest string, release runtimeMiseRelease) error {
+	if release.archiveFormat == "zip" {
+		return extractRuntimeMiseZip(archive, destination, expectedDigest, release.executable)
+	}
 	file, err := os.Open(archive)
 	if err != nil {
 		return fmt.Errorf("open mise archive: %w", err)
@@ -416,6 +442,51 @@ func extractRuntimeMise(archive, destination, expectedDigest string) error {
 	}
 	if !found {
 		return fmt.Errorf("mise archive does not contain mise/bin/mise")
+	}
+	return nil
+}
+
+func extractRuntimeMiseZip(archive, destination, expectedDigest, executable string) error {
+	reader, err := zip.OpenReader(archive)
+	if err != nil {
+		return fmt.Errorf("open mise zip archive: %w", err)
+	}
+	defer func() { _ = reader.Close() }()
+	want := "mise/bin/" + executable
+	var member *zip.File
+	for _, candidate := range reader.File {
+		name := strings.TrimPrefix(filepath.ToSlash(candidate.Name), "./")
+		if name != want {
+			continue
+		}
+		if member != nil {
+			return fmt.Errorf("mise archive contains duplicate executable")
+		}
+		member = candidate
+	}
+	if member == nil {
+		return fmt.Errorf("mise archive does not contain %s", want)
+	}
+	if !member.Mode().IsRegular() || member.UncompressedSize64 == 0 || member.UncompressedSize64 > runtimeMiseBinaryLimit {
+		return fmt.Errorf("mise archive executable is not a bounded regular file")
+	}
+	input, err := member.Open()
+	if err != nil {
+		return fmt.Errorf("open mise archive executable: %w", err)
+	}
+	defer func() { _ = input.Close() }()
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o500)
+	if err != nil {
+		return fmt.Errorf("create mise executable: %w", err)
+	}
+	hash := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(output, hash), io.LimitReader(input, runtimeMiseBinaryLimit+1))
+	closeErr := output.Close()
+	if copyErr != nil || closeErr != nil {
+		return fmt.Errorf("extract mise executable: %w", errors.Join(copyErr, closeErr))
+	}
+	if written != int64(member.UncompressedSize64) || hex.EncodeToString(hash.Sum(nil)) != expectedDigest {
+		return fmt.Errorf("mise executable checksum verification failed")
 	}
 	return nil
 }

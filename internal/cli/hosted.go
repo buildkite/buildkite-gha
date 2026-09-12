@@ -539,8 +539,8 @@ func configuredRunnerTarget(label, queue, image string) (string, compiler.Runner
 	if image != "" && !runnerImagePattern.MatchString(image) {
 		return "", compiler.RunnerTarget{}, fmt.Errorf("runner image for %q must be an immutable registry sha256 reference", canonical)
 	}
-	if image != "" && platform == compiler.PlatformDarwinARM64 {
-		return "", compiler.RunnerTarget{}, fmt.Errorf("runner image for %q is unsupported on darwin/arm64", canonical)
+	if image != "" && platform != compiler.PlatformLinuxAMD64 {
+		return "", compiler.RunnerTarget{}, fmt.Errorf("runner image for %q is unsupported on %s", canonical, platform)
 	}
 	if image == "" {
 		if preset, ok := hostedRunnerTargets()[canonical]; ok {
@@ -562,7 +562,12 @@ func supportedRunnerTarget(label string) (string, compiler.Platform, error) {
 	case "macos-15", "macos-14":
 		// These remain available as local fallbacks when the Agent API is absent.
 		return canonical, compiler.PlatformDarwinARM64, nil
+	case "windows-latest", "windows-2022":
+		return canonical, compiler.PlatformWindowsAMD64, nil
 	default:
+		if canonical == "windows" || strings.HasPrefix(canonical, "windows-") {
+			return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q; Windows mappings support windows-latest and windows-2022", label)
+		}
 		// Configuring an otherwise unknown selector explicitly maps it to the
 		// supported Linux/amd64 platform. The Agent API owns compatibility
 		// policy for every selector that is not configured locally.

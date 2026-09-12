@@ -2,12 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"encoding/binary"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -28,6 +31,87 @@ func TestImporterPlatform(t *testing.T) {
 	}
 	if _, err := importerPlatform("linux", "arm64"); err == nil || !strings.Contains(err.Error(), "linux/amd64 or darwin/arm64") {
 		t.Fatalf("unsupported importer error = %v", err)
+	}
+}
+
+func TestWindowsRuntimeDistributionValidatesPEAndNeedsNoUnixExecuteBit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "buildkite-gha.exe")
+	command := exec.Command("go", "build", "-o", path, "../../cmd/buildkite-gha")
+	command.Env = append(os.Environ(), "GOOS=windows", "GOARCH=amd64", "CGO_ENABLED=0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("cross-build Windows runtime: %v\n%s", err, output)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	distributions, err := loadRuntimeDistributions(map[compiler.Platform]string{compiler.PlatformWindowsAMD64: path})
+	if err != nil || len(distributions) != 1 {
+		t.Fatalf("load Windows distribution = %#v, %v", distributions, err)
+	}
+	t.Run("mixed upload", func(t *testing.T) {
+		requireImporterHost(t)
+		workflow := filepath.Join(t.TempDir(), "mixed.yml")
+		if err := os.WriteFile(workflow, []byte(`on: push
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps: [{run: echo linux}]
+  windows:
+    needs: linux
+    runs-on: windows-2022
+    steps: [{run: Write-Output windows}]
+`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BUILDKITE", "true")
+		t.Setenv("BUILDKITE_STEP_KEY", "mixed-importer")
+		runner := &cliCaptureRunner{}
+		var stdout, stderr bytes.Buffer
+		args := []string{"upload", "--event-path", "../../testdata/smoke/events/push.json",
+			"--runner-queue", "ubuntu-latest=linux", "--runner-queue", "windows-2022=windows",
+			"--runtime-distribution", "windows/amd64=" + path, workflow}
+		if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
+			t.Fatalf("upload = %d: %s", code, stderr.String())
+		}
+		plans := map[string]string{}
+		for artifactPath, content := range runner.uploaded {
+			if strings.HasPrefix(artifactPath, ".buildkite-gha/plans/") {
+				job, err := plan.Decode(content)
+				if err != nil {
+					t.Fatal(err)
+				}
+				plans[job.Workflow.LogicalJobID] = job.RuntimeDistributionDigest()
+			}
+		}
+		windowsDigest := distributions[compiler.PlatformWindowsAMD64].digest
+		if len(plans) != 2 || plans["linux"] != cliTestRuntimeDigest() || plans["windows"] != windowsDigest {
+			t.Fatalf("plan runtime bindings = %#v", plans)
+		}
+		artifactPath, err := buildkitepipeline.DistributionPath(windowsDigest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if transport.Digest(runner.uploaded[artifactPath]) != windowsDigest {
+			t.Fatal("Windows executable was not uploaded intact")
+		}
+	})
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents[0] = 0
+	if err := validateRuntimeDistributionBinary(compiler.PlatformWindowsAMD64, contents); err == nil || !strings.Contains(err.Error(), "PE") {
+		t.Fatalf("malformed PE error = %v", err)
+	}
+	contents, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peOffset := binary.LittleEndian.Uint32(contents[0x3c:0x40])
+	characteristics := contents[peOffset+4+18 : peOffset+4+20]
+	binary.LittleEndian.PutUint16(characteristics, binary.LittleEndian.Uint16(characteristics)|0x2000)
+	if err := validateRuntimeDistributionBinary(compiler.PlatformWindowsAMD64, contents); err == nil || !strings.Contains(err.Error(), "not a DLL") {
+		t.Fatalf("DLL error = %v", err)
 	}
 }
 

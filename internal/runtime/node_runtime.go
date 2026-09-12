@@ -23,12 +23,15 @@ const (
 	Node20Version = "20.20.2"
 	Node24Version = "24.18.0"
 	// Digests are for bin/node in the official platform release archives.
-	node16LinuxAMD64Digest  = "8440cffda5a21bf7cfda43d2c396f79777585a4c5e03ed2801fe226953a7aa11"
-	node20LinuxAMD64Digest  = "6295488653f0d93b0a157841746fef7e72cc4328cfb60c4bbe0ca2668a836ffd"
-	node24LinuxAMD64Digest  = "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"
-	node16DarwinARM64Digest = "83325958463d59cb0b16433eefab0a03fd1ce7d565a27e0274f507b1f3839a6e"
-	node20DarwinARM64Digest = "38de4fc456c0c439bac48c727d378f749abb4e31f4116703bb1ee9a746fccbb6"
-	node24DarwinARM64Digest = "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a"
+	node16LinuxAMD64Digest   = "8440cffda5a21bf7cfda43d2c396f79777585a4c5e03ed2801fe226953a7aa11"
+	node20LinuxAMD64Digest   = "6295488653f0d93b0a157841746fef7e72cc4328cfb60c4bbe0ca2668a836ffd"
+	node24LinuxAMD64Digest   = "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"
+	node16DarwinARM64Digest  = "83325958463d59cb0b16433eefab0a03fd1ce7d565a27e0274f507b1f3839a6e"
+	node20DarwinARM64Digest  = "38de4fc456c0c439bac48c727d378f749abb4e31f4116703bb1ee9a746fccbb6"
+	node24DarwinARM64Digest  = "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a"
+	node16WindowsAMD64Digest = "9f498591fd05b3aca332ce4ad966e77cd6e5c150751079ce8bad8ee499945b79"
+	node20WindowsAMD64Digest = "56c1520ee33b801e8bdb92fb321cf2e98529735b6d12bd4a2a6dec0ac0bab937"
+	node24WindowsAMD64Digest = "9a4eb5f1c29c6a2e93852ead46b999e284a6a5ca8bab4d4e241d587d025a52de"
 )
 
 type managedNodeVerification struct {
@@ -187,6 +190,15 @@ func nodeDigest(goos, goarch string, major int) string {
 		case 24:
 			return node24DarwinARM64Digest
 		}
+	case "windows/amd64":
+		switch major {
+		case 16:
+			return node16WindowsAMD64Digest
+		case 20:
+			return node20WindowsAMD64Digest
+		case 24:
+			return node24WindowsAMD64Digest
+		}
 	default:
 		return ""
 	}
@@ -214,6 +226,9 @@ func (r Runner) miseNodeInstallation(ctx context.Context, major int, mise string
 		}
 	}
 	node := filepath.Join(installation, "bin", "node")
+	if runtime.GOOS == "windows" {
+		node = filepath.Join(installation, "node.exe")
+	}
 	if r.MiseDataDir != "" {
 		_, node, err = canonicalPathWithinRealRoot(r.MiseDataDir, node)
 		if err != nil {

@@ -385,7 +385,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		return 1
 	}
 	runtimeDistributions := make(map[compiler.Platform]runtimeDistribution, len(requiredPlatforms))
-	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		if !requiredPlatforms[platform] {
 			continue
 		}
@@ -594,7 +594,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		artifactPaths[artifact.Path] = struct{}{}
 		artifacts = append(artifacts, artifact)
 	}
-	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		runtimeDistribution, ok := runtimeDistributions[platform]
 		if !ok {
 			continue
@@ -824,8 +824,9 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 
 func requiredRuntimePlatforms(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerResolution agentRunnerResolution, repositorySource compiler.RepositorySource, environmentSource compiler.EnvironmentSource, vars compiler.VariableSources) (map[compiler.Platform]bool, error, error) {
 	runtimeDigests := map[compiler.Platform]string{
-		compiler.PlatformLinuxAMD64:  distributionDigest,
-		compiler.PlatformDarwinARM64: distributionDigest,
+		compiler.PlatformLinuxAMD64:   distributionDigest,
+		compiler.PlatformDarwinARM64:  distributionDigest,
+		compiler.PlatformWindowsAMD64: distributionDigest,
 	}
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDigests)
 	options.Vars = vars

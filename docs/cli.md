@@ -627,15 +627,33 @@ The hosted preset accepts runner labels case-insensitively, so aliases such as
 `ubuntu-latest` and `ubuntu-24.04` default to the Noble hosted-toolchains image;
 `ubuntu-22.04` defaults to Jammy. Use `--runner-image` with an immutable digest
 to override the default for a configured profile. An explicit mapping declares
-that its selector runs on Linux x86-64, except for the known macOS labels, and
+that its selector runs on Linux x86-64, except for the known macOS and Windows labels, and
 bypasses Agent API resolution. The Agent API owns compatibility and returns the
 complete target for every other selector. The importer publishes returned
 warnings as annotations. See [Compatibility](compatibility.md#job-configuration)
 for runner behavior. Runtime distribution paths must be absolute executables.
-The importer's platform defaults to its running executable; the other platform
-has no direct-upload default.
+The importer's platform defaults to its running executable; other platforms
+have no direct-upload default.
 `BUILDKITE_GHA_TARGET_QUEUE` and `BUILDKITE_GHA_RUNTIME_IMAGE` are no longer
 supported.
+
+For [experimental Windows jobs](compatibility.md#experimental-windows-jobs),
+explicitly map `windows-latest` or `windows-2022` and supply the matching
+Windows x86-64 runtime from the same release:
+
+```sh
+buildkite-gha upload \
+  --event-path event.json \
+  --runner-queue windows-2022=my-windows-queue \
+  --runtime-distribution windows/amd64=/opt/buildkite-gha.exe \
+  .github/workflows/ci.yml
+```
+
+The plugin acquires the Windows runtime from the same release only when a
+selected workflow requires it. Development plugin runs use
+`BUILDKITE_GHA_PLUGIN_DEV_WINDOWS_RUNTIME` as an absolute path to a locally
+built Windows executable. Windows targets reject `--runner-image` and cache
+volumes. These mappings do not create queues or grant hosted Windows access.
 
 The deprecated `--runtime-queue hosted` argument is accepted as a no-op for compatibility with plugin releases that pass it. Other values are rejected.
 

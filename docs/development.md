@@ -139,9 +139,10 @@ indeterminate repositories separately and excludes them from the compatibility
 percentage. The tally records workflow result counts; each workflow report
 keeps its diagnostics.
 
-Windows execution is [outside the initial product scope](compatibility.md#outside-the-initial-scope),
-not a compatibility gap on Linux or macOS. Keep Windows workflows in raw corpus
-results so the benchmark still describes the full sample.
+Windows jobs require [explicit opt-in](compatibility.md#experimental-windows-jobs).
+Corpus validation has no Windows preset, so it still rejects unmapped Windows
+labels. Keep those workflows in raw results so the benchmark describes the full
+sample; a rejected mapping is not proof of runtime incompatibility.
 
 An in-scope view must classify each record and account for overlapping
 findings. Do not calculate its denominator by subtracting aggregate diagnostic

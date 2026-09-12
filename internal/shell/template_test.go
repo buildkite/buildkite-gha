@@ -20,9 +20,9 @@ func TestParseTemplate(t *testing.T) {
 		{name: "empty command", shell: `"" {0}`, wantErr: "must contain a command"},
 		{name: "missing placeholder", shell: `Rscript --vanilla`, wantErr: "must contain {0}"},
 		{name: "malformed quote", shell: `julia "unterminated {0}`, wantErr: "parse shell template"},
-		{name: "PowerShell remains unsupported", shell: `/usr/bin/pwsh -File {0}`, wantErr: "PowerShell and Windows shells cannot run"},
-		{name: "Windows shell remains unsupported", shell: `cmd.exe /C {0}`, wantErr: "PowerShell and Windows shells cannot run"},
-		{name: "MSYS2 remains unsupported", shell: `msys2 {0}`, wantErr: "PowerShell and Windows shells cannot run"},
+		{name: "PowerShell template", shell: `/usr/bin/pwsh -File {0}`, want: []string{"/usr/bin/pwsh", "-File", "{0}"}},
+		{name: "Windows shell remains unsupported", shell: `cmd.exe /C {0}`, wantErr: "is unsupported"},
+		{name: "MSYS2 remains unsupported", shell: `msys2 {0}`, wantErr: "is unsupported"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -45,12 +45,8 @@ func TestValidateCompatibilityClassifiesUnsupportedCommands(t *testing.T) {
 		value   string
 		command string
 	}{
-		{value: "pwsh", command: "pwsh"},
-		{value: "PowerShell.exe", command: "powershell.exe"},
 		{value: "cmd /C {0}", command: "cmd"},
 		{value: "msys2.cmd {0}", command: "msys2.cmd"},
-		{value: "/opt/microsoft/powershell/7/pwsh -File {0}", command: "pwsh"},
-		{value: `'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -File {0}`, command: "powershell.exe"},
 	} {
 		t.Run(test.value, func(t *testing.T) {
 			if err := ValidateCompatibility(test.value); err == nil || !strings.Contains(err.Error(), "shell "+strconv.Quote(test.command)+" is unsupported") {
@@ -59,7 +55,7 @@ func TestValidateCompatibilityClassifiesUnsupportedCommands(t *testing.T) {
 		})
 	}
 
-	for _, value := range []string{"bash", "sh", "python", "bash -l {0}", "Rscript {0}", "julia --color=yes {0}", `julia "unterminated {0}`} {
+	for _, value := range []string{"bash", "sh", "pwsh", "PowerShell.exe", "python", "bash -l {0}", "Rscript {0}", "julia --color=yes {0}", `julia "unterminated {0}`} {
 		t.Run(value, func(t *testing.T) {
 			if err := ValidateCompatibility(value); err != nil {
 				t.Fatalf("ValidateCompatibility(%q) error = %v", value, err)

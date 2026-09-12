@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -81,6 +82,9 @@ func TestCloneExpressionContextDeepCopiesStepOutputs(t *testing.T) {
 
 	cloned := cloneExpressionContext(source)
 	status := cloned.Steps["build"]
+	if !maps.Equal(status.Outputs, source.Steps["build"].Outputs) {
+		t.Fatalf("cloned outputs changed keys or values: %#v", status.Outputs)
+	}
 	status.Outcome = "failure"
 	status.Outputs["result"] = "clone"
 	cloned.Steps["build"] = status

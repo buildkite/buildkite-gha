@@ -181,8 +181,15 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	}
 	sort.Strings(actions.capabilities)
 	actions.capabilities = slices.Compact(actions.capabilities)
-	if instance.Platform == PlatformDarwinARM64 && slices.Contains(actions.capabilities, "docker") {
-		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on darwin/arm64", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
+	if instance.Platform != PlatformLinuxAMD64 && slices.Contains(actions.capabilities, "docker") {
+		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on %s", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, instance.Platform)
+	}
+	if instance.Platform == PlatformWindowsAMD64 {
+		for _, action := range actions.locks {
+			if action.Repository == "actions/cache" {
+				return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q uses actions/cache, which is unavailable on windows/amd64", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
+			}
+		}
 	}
 	job := b.lowerPlanJob(instance, workflowProgram, runtimeDistributionDigest, actions, needSources, buildPlanNeedOutputs(instance), deferredInputs, callGuards, secrets, secretMappings, githubToken)
 	if err := job.ProjectProgram(); err != nil {

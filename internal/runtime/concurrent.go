@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 
@@ -235,7 +236,7 @@ func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *ex
 	eval.Steps[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: execution.result.Outputs}
 	commitResultEnvironment(jobResult.Env, execution.result)
 	eval.Env = jobResult.Env
-	mergeInto(jobResult.State, execution.result.State)
+	maps.Copy(jobResult.State, execution.result.State)
 	appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, execution.result.Summary, execution.result.summaryTruncated)
 	jobResult.Artifacts = append(jobResult.Artifacts, execution.result.Artifacts...)
 	if execution.conclusion != "success" {
@@ -247,14 +248,14 @@ func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *ex
 func commitResultEnvironment(env map[string]string, result Result) {
 	effects := result.Env
 	if len(result.Paths) > 0 {
-		effects = cloneStrings(effects)
+		effects = mergeStringMaps(effects)
 		if result.pathBaseSet {
 			effects["PATH"] = result.pathBase
 		} else {
 			delete(effects, "PATH")
 		}
 	}
-	mergeInto(env, effects)
+	mergeEnvironmentInto(env, effects)
 	applyPaths(env, result.Paths)
 }
 
