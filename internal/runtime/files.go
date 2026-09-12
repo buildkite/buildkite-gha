@@ -135,7 +135,7 @@ func (files commandFiles) apply(result *Result, state map[string]string) (fileCo
 	if outputErr != nil || envErr != nil || stateErr != nil || summaryErr != nil || pathErr != nil {
 		return effects, errors.Join(outputErr, envErr, stateErr, summaryErr, pathErr)
 	}
-	env = cloneStrings(env)
+	env = mergeStringMaps(env)
 	for name := range env {
 		// Match GitHub Runner's file-command behavior: NODE_OPTIONS is blocked,
 		// while actions may deliberately propagate GITHUB_* and RUNNER_* values.
@@ -152,7 +152,7 @@ func (files commandFiles) apply(result *Result, state map[string]string) (fileCo
 		result.Paths = result.Paths[:0]
 	}
 	maps.Copy(result.Outputs, outputs)
-	mergeInto(result.Env, env)
+	mergeEnvironmentInto(result.Env, env)
 	for name, value := range states {
 		result.State[name] = value
 		if state != nil {

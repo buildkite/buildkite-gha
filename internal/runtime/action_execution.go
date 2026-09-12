@@ -338,7 +338,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 	if err != nil {
 		return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("evaluate job environment: %w", err))
 	}
-	jobEnv = cloneStrings(jobEnv)
+	jobEnv = mergeStringMaps(jobEnv)
 	serviceEval := eval
 	serviceEval.Env = jobEnv
 	services, evaluatedServiceOrder, err := evaluateProgramServices(executionJob.Services, serviceEval)
@@ -574,7 +574,7 @@ func (r *jobRun) runPreActions(ctx, runCtx context.Context) (JobResult, error) {
 			wasUnsuccessful := preStatus.unsuccessful
 			preResult, preErr := r.prepareRemoteAction(preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, posts, actions, prepared, &preStatus, true, nil, nil, nil)
 			commitResultEnvironment(jobResult.Env, preResult)
-			mergeInto(jobResult.State, preResult.State)
+			maps.Copy(jobResult.State, preResult.State)
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
 			eval.Env = jobResult.Env
 			if preErr != nil {
@@ -781,7 +781,7 @@ func (r *jobRun) runPostActions(runCtx context.Context) (JobResult, error) {
 		}
 		// The post process uses the same live final environment and declared
 		// invocation overlays as its condition, not the main-time snapshot.
-		action.Env = cloneStrings(invocation.envOverlay)
+		action.Env = mergeStringMaps(invocation.envOverlay)
 		for name, value := range invocation.action.Env {
 			if isRuntimeContextEnvironment(name) {
 				action.Env[name] = value
@@ -795,10 +795,10 @@ func (r *jobRun) runPostActions(runCtx context.Context) (JobResult, error) {
 			}
 		}
 		postResult := newResult()
-		postResult.Env = cloneStrings(jobResult.Env)
+		postResult.Env = mergeStringMaps(jobResult.Env)
 		postErr := r.runJavaScriptPhase(postCtx, processor, workspace, invocation.node, action, action.Post, invocation.state, invocation.state, &postResult)
-		mergeInto(jobResult.Env, postResult.Env)
-		mergeInto(jobResult.State, postResult.State)
+		mergeEnvironmentInto(jobResult.Env, postResult.Env)
+		maps.Copy(jobResult.State, postResult.State)
 		appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, postResult.Summary, postResult.summaryTruncated)
 		if postErr != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("post action %q: %w", action.Name, postErr))
@@ -1958,14 +1958,14 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutp
 			eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
 			wasUnsuccessful := status.unsuccessful
 			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, false, compositeEvalErr, preparationTimeout, lifecycleEnvOverlay)
-			mergeInto(result.Env, childResult.Env)
+			mergeEnvironmentInto(result.Env, childResult.Env)
 			if childResult.pathBaseSet {
 				result.pathBase = childResult.pathBase
 				result.pathBaseSet = true
 				result.Paths = result.Paths[:0]
 			}
 			result.Paths = append(result.Paths, childResult.Paths...)
-			mergeInto(result.State, childResult.State)
+			maps.Copy(result.State, childResult.State)
 			appendJobSummary(&result.Summary, &result.summaryTruncated, childResult.Summary, childResult.summaryTruncated)
 			if childErr != nil {
 				classificationCtx, cancelClassification := context.WithCancel(ctx)
@@ -2308,7 +2308,7 @@ func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandOut
 		default:
 			childErr = r.runCompositeShellStep(ctx, processor, workspace, executionStep, childJobEnv, eval, &stepResult)
 		}
-		mergeInto(result.Env, stepResult.Env)
+		mergeEnvironmentInto(result.Env, stepResult.Env)
 		if stepResult.pathBaseSet {
 			result.pathBase = stepResult.pathBase
 			result.pathBaseSet = true
@@ -2316,7 +2316,7 @@ func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandOut
 		}
 		result.Paths = append(result.Paths, stepResult.Paths...)
 		result.Artifacts = append(result.Artifacts, stepResult.Artifacts...)
-		mergeInto(result.State, stepResult.State)
+		maps.Copy(result.State, stepResult.State)
 		appendJobSummary(&result.Summary, &result.summaryTruncated, stepResult.Summary, stepResult.summaryTruncated)
 		execution := classifyStepExecution(ctx, ctx, step.ID, step.ContinueOnError, stepResult, childErr)
 		if id != "" {
@@ -2578,11 +2578,11 @@ func postPhaseContext(parent context.Context, timeout, cancelGrace time.Duration
 
 func cloneStrings(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
-	mergeInto(out, in)
+	maps.Copy(out, in)
 	return out
 }
 
-func mergeInto(target map[string]string, source map[string]string) {
+func mergeEnvironmentInto(target map[string]string, source map[string]string) {
 	if goruntime.GOOS != "windows" {
 		maps.Copy(target, source)
 		return
@@ -2597,10 +2597,12 @@ func mergeInto(target map[string]string, source map[string]string) {
 	}
 }
 
+// mergeStringMaps combines environment maps, folding Windows variable names.
+// Inputs, outputs, state, and other maps must preserve their original keys.
 func mergeStringMaps(values ...map[string]string) map[string]string {
 	out := map[string]string{}
 	for _, value := range values {
-		mergeInto(out, value)
+		mergeEnvironmentInto(out, value)
 	}
 	return out
 }

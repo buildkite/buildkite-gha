@@ -93,6 +93,31 @@ require('node:fs').appendFileSync(process.env.CWD_LOG, %q + process.cwd() + '\t'
 	}
 }
 
+func TestJavaScriptPostInputUsesFinalJobStatus(t *testing.T) {
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	workflow := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflow, "name: final status\n")
+	writeFixtureFile(t, workspace, ".github/actions/status/action.yml", "name: Status\ninputs:\n  job_status:\n    default: ${{ job.status }}\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	for _, phase := range []string{"main", "post"} {
+		writeFixtureFile(t, workspace, ".github/actions/status/"+phase+".js", fmt.Sprintf(`
+require('node:fs').appendFileSync(process.env.STATUS_LOG, %q + process.env.INPUT_JOB_STATUS + '\n')
+`, phase+":"))
+	}
+	statusLog := filepath.Join(t.TempDir(), "status.log")
+	job := runtimePlan(t, workspace, workflow, []runtimeTestStep{
+		{ID: "status", Kind: "uses", Uses: "./.github/actions/status", Env: map[string]string{"STATUS_LOG": statusLog}},
+		{ID: "fail", Kind: "run", Command: "exit 7"},
+	})
+	result, err := (Runner{Node24: node}).runTestJob(t.Context(), job, workspace)
+	if err == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() = %#v, %v, want failure", result, err)
+	}
+	if data, err := os.ReadFile(statusLog); err != nil || string(data) != "main:success\npost:failure\n" {
+		t.Fatalf("action status = %q, %v, want main:success then post:failure", data, err)
+	}
+}
+
 func TestJavaScriptActionCanonicalizesWorkspaceAndRunnerTemp(t *testing.T) {
 	node := requireNode24(t)
 	base := canonicalTempDir(t)

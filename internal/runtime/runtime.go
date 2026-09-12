@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -747,7 +748,7 @@ func restoreStringMap(target, source map[string]string) {
 	for name := range target {
 		delete(target, name)
 	}
-	mergeInto(target, source)
+	maps.Copy(target, source)
 }
 
 func resultContains(result Result, value string) bool {

@@ -172,7 +172,7 @@ func isCacheServiceEnvironment(name string) bool {
 }
 
 func removeCacheServiceEnvironment(env map[string]string) map[string]string {
-	clean := cloneStrings(env)
+	clean := mergeStringMaps(env)
 	for name := range clean {
 		if isCacheServiceEnvironment(name) {
 			delete(clean, name)

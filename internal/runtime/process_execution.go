@@ -300,7 +300,7 @@ func processEnv(overrides map[string]string) []string {
 	if _, ok := values["TMPDIR"]; !ok {
 		values["TMPDIR"] = os.TempDir()
 	}
-	mergeInto(values, overrides)
+	mergeEnvironmentInto(values, overrides)
 	return mapEnv(values)
 }
 
