@@ -24,6 +24,10 @@ func TestPowerShellExecution(t *testing.T) {
 		if err := os.Mkdir(temp, 0o700); err != nil {
 			t.Fatal(err)
 		}
+		wantTemp, err := os.Stat(temp)
+		if err != nil {
+			t.Fatal(err)
+		}
 		t.Setenv("TMPDIR", temp)
 		t.Setenv("TMP", temp)
 		t.Setenv("TEMP", temp)
@@ -40,8 +44,13 @@ func TestPowerShellExecution(t *testing.T) {
 		}})
 		job.Outputs = map[string]string{"script": "${{ steps.script.outputs.script }}"}
 		result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
-		if err != nil || filepath.Ext(result.Outputs["script"]) != ".ps1" || filepath.Dir(result.Outputs["script"]) != temp {
-			t.Fatalf("absolute template outputs=%v error=%v", result.Outputs, err)
+		if err != nil || filepath.Ext(result.Outputs["script"]) != ".ps1" {
+			t.Fatalf("absolute template outputs=%v error=%v, want script in %q", result.Outputs, err, temp)
+		}
+		// PowerShell may expand Windows 8.3 aliases in the script path.
+		gotTemp, err := os.Stat(filepath.Dir(result.Outputs["script"]))
+		if err != nil || !os.SameFile(gotTemp, wantTemp) {
+			t.Fatalf("script path = %q, want parent directory %q: %v", result.Outputs["script"], temp, err)
 		}
 	})
 	for _, shell := range []string{"pwsh", "powershell", ""} {
