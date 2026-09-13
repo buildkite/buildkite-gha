@@ -49,7 +49,7 @@ func TestWindowsBatchArguments(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GHA_BATCH_AMBIENT_SECRET", "must-not-reach-child")
-	want := []string{"", "two words", "&whoami", "(group)|<>^", "%GHA_BATCH_POISON%", "%", "!GHA_BATCH_POISON!", "single'quote", "héllo", `C:\path with spaces\file`, "semi;colon"}
+	want := []string{"", "two words", "&whoami", "(group)|<>^", "%GHA_BATCH_POISON%", "%", "!GHA_BATCH_POISON!", "single'quote", "héllo", `C:\path with spaces\file`, "semi;colon", ""}
 	var output bytes.Buffer
 	env := map[string]string{
 		"GHA_BATCH_HELPER": "1", "GHA_BATCH_POISON": "expanded",
@@ -100,10 +100,12 @@ func TestWindowsMSYS2Shell(t *testing.T) {
 	}
 	workflow := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflow, "name: MSYS2 test\n")
-	const script = `test "$MSYSTEM" = MINGW64
-test "$MSYS2_PATH_TYPE" = minimal
-test "$CHERE_INVOKING" = 1
-test "$(cygpath -w "$PWD")" = "$GITHUB_WORKSPACE"
+	// MSYS2's 05-home-dir.post preserves CHERE_INVOKING in the user-visible
+	// marker and unsets the original after deciding not to cd to HOME.
+	const script = `test "$MSYSTEM" = MINGW64 || { echo 'expected MSYSTEM=MINGW64' >&2; exit 1; }
+test "$MSYS2_PATH_TYPE" = minimal || { echo 'expected MSYS2_PATH_TYPE=minimal' >&2; exit 1; }
+test "$CHERE_INVOKING_VISIBLE_FOR_USER" = 1 || { echo 'expected the invoking-directory marker after login' >&2; exit 1; }
+test "$(cygpath -w "$PWD")" = "$GITHUB_WORKSPACE" || { echo 'MSYS2 login changed the working directory' >&2; exit 1; }
 printf 'value=%s\n' 'héllo & ^ %GHA_BATCH_POISON% !GHA_BATCH_POISON! "quoted"' >> "$GITHUB_OUTPUT"
 printf 'script=%s\n' "$0" >> "$GITHUB_OUTPUT"
 cat "$0" > "$SCRIPT_COPY"
