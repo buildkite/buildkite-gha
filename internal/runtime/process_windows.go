@@ -46,6 +46,12 @@ func prepareProcessCommand(command *exec.Cmd) error {
 	}
 	arguments := make([]string, len(values))
 	for i, value := range values {
+		// cmd treats an empty environment value as undefined and leaves its
+		// percent reference literal. Empty argv needs no data interpolation.
+		if value == "" {
+			arguments[i] = `""`
+			continue
+		}
 		name := fmt.Sprintf("%s%d", prefix, i)
 		env = append(env, name+"="+value)
 		arguments[i] = `"%` + name + `%"`
