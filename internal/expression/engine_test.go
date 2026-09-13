@@ -149,6 +149,22 @@ func TestEngineCompileTemplateScalarAndContainerImageBoundaries(t *testing.T) {
 	if _, err := engine.Evaluate(Site{Source: "${{ true }}", Profile: ProfileCompileContainerImage, Result: ResultString}, Values{}); err == nil || !strings.Contains(err.Error(), "want string") {
 		t.Fatalf("strict complete expression error = %v", err)
 	}
+	for _, source := range []string{"${{ null }}", "${{ matrix.container }}", "${{ '' }}"} {
+		site := Site{Source: source, Profile: ProfileCompileContainerImage, Result: ResultString}
+		values := Values{Compile: CompileContext{Matrix: map[string]any{}}}
+		value, err := engine.Evaluate(site, values)
+		if err != nil || value != "" {
+			t.Fatalf("optional container image %q = %#v, %v", source, value, err)
+		}
+		reduced, err := engine.Reduce(site, values)
+		if err != nil || !reduced.Known || reduced.Value != "" {
+			t.Fatalf("reduced optional container image %q = %#v, %v", source, reduced, err)
+		}
+		analysis, err := engine.Analyze(site, AbstractValues{References: map[string]any{"matrix.container": nil}})
+		if err != nil || !analysis.Value.Known || analysis.Value.Value != "" || analysis.Effects != (Effects{}) {
+			t.Fatalf("analyzed optional container image %q = %#v, %v", source, analysis, err)
+		}
+	}
 	value, err := engine.Evaluate(Site{Source: "node:${{ 24 }}", Profile: ProfileCompileContainerImage, Result: ResultString}, Values{})
 	if err != nil || value != "node:24" {
 		t.Fatalf("interpolated container image = %#v, %v", value, err)

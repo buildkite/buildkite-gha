@@ -4802,6 +4802,66 @@ jobs:
 	}
 }
 
+func TestCompilePlansOptionalMatrixContainer(t *testing.T) {
+	// The OS objects and Linux image come from dotnet/runtime's jit-format.yml
+	// at 3c4631e63b1de4308e2965b149992b992c9f5318. Windows runs on the host.
+	const image = "mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net11.0-cross-amd64"
+	for _, object := range []bool{false, true} {
+		for _, test := range []struct {
+			name, windowsContainer string
+			wantError              bool
+		}{
+			{name: "missing"},
+			{name: "null", windowsContainer: ", container: null"},
+			{name: "empty", windowsContainer: ", container: ''"},
+			{name: "windows container", windowsContainer: ", container: mcr.microsoft.com/windows/servercore:ltsc2022", wantError: true},
+		} {
+			t.Run(fmt.Sprintf("object=%t/%s", object, test.name), func(t *testing.T) {
+				container := "${{ matrix.os.container }}"
+				if object {
+					container = "{image: '${{ matrix.os.container }}', env: {CONTAINER_ONLY: yes}, ports: ['8080']}"
+				}
+				source := []byte(fmt.Sprintf(`on: push
+jobs:
+  format:
+    strategy:
+      matrix:
+        os:
+          - {name: linux, image: ubuntu-latest, container: %s}
+          - {name: windows, image: windows-latest%s}
+    runs-on: ${{ matrix.os.image }}
+    container: %s
+    steps: [{run: 'Write-Output container-probe'}]
+`, image, test.windowsContainer, container))
+				options := defaultOptions()
+				options.Runners.Targets = map[string]RunnerTarget{"windows-latest": {Queue: "windows-medium", Platform: PlatformWindowsAMD64}}
+				options.Runners.UntrustedQueues = []string{"windows-medium"}
+				options.RuntimeDistributions = map[Platform]string{PlatformWindowsAMD64: testDistributionDigest}
+				plans, err := compilePlansForTest(t.Context(), "containers.yml", source, pushEvent(t), "dev", testDistributionDigest, options)
+				if test.wantError {
+					if err == nil || !strings.Contains(err.Error(), "requires Docker, which is unavailable on windows/amd64") {
+						t.Fatalf("Windows container error = %v", err)
+					}
+					return
+				}
+				if err != nil || len(plans) != 2 {
+					t.Fatalf("compile = %d plans, %v", len(plans), err)
+				}
+				linux, windows := plans[0], plans[1]
+				if linux.Container == nil || linux.Container.Image != image || !slices.Contains(linux.RequiredCapabilities, "docker") {
+					t.Fatalf("Linux container = %#v, capabilities = %v", linux.Container, linux.RequiredCapabilities)
+				}
+				if object && (linux.Container.Env["CONTAINER_ONLY"] != "yes" || !slices.Equal(linux.Container.Ports, []string{"8080"})) {
+					t.Fatalf("Linux container settings lost: %#v", linux.Container)
+				}
+				if windows.Container != nil || windows.Program.Job.Container != nil || slices.Contains(windows.RequiredCapabilities, "docker") || windows.Env["CONTAINER_ONLY"] != "" {
+					t.Fatalf("Windows host retained container settings: %#v", windows)
+				}
+			})
+		}
+	}
+}
+
 func TestCompilePlansRejectInvalidJobContainerImageExpressions(t *testing.T) {
 	for name, image := range map[string]string{
 		"secret":        "${{ secrets.IMAGE }}",
@@ -4809,8 +4869,11 @@ func TestCompilePlansRejectInvalidJobContainerImageExpressions(t *testing.T) {
 		"step output":   "${{ steps.build.outputs.image }}",
 		"whole context": "${{ github }}",
 		"boolean":       "${{ true }}",
-		"empty":         "${{ '' }}",
+		"number":        "${{ 42 }}",
+		"whitespace":    "${{ ' ' }}",
 		"invalid":       "${{ 'bad image' }}",
+		"lazy secret":   "${{ case(true, null, secrets.IMAGE) }}",
+		"token":         "${{ github.token }}",
 	} {
 		t.Run(name, func(t *testing.T) {
 			workflowSource := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: \"" + image + "\"\n    steps: [{run: true}]\n")

@@ -649,6 +649,11 @@ func resolveCompileContainer(container *workflow.Container, context expression.C
 			return nil, err
 		}
 		resolved.Image = value.(string)
+		// GitHub treats an empty evaluated image as host execution, including
+		// object-form containers. Literal images are validated during parsing.
+		if resolved.Image == "" {
+			return nil, nil
+		}
 	}
 	if strings.TrimSpace(resolved.Image) == "" {
 		return nil, fmt.Errorf("container image resolved to an empty string")

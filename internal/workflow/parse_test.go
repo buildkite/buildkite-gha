@@ -543,6 +543,11 @@ func TestContainerValidationIsScopedAndSourceLocated(t *testing.T) {
 		name, field, want string
 	}{
 		{"image", "image: INVALID IMAGE", "bad.yml:6:14:"},
+		{"empty image", "image: ''", "bad.yml:6:14:"},
+		{"missing image", "env: {OK: yes}", "bad.yml:6:7:"},
+		{"null image with options", "image: ${{ null }}\n      options: --privileged", "container options are unsupported"},
+		{"null image with secret env", "image: ${{ null }}\n      env: {TOKEN: '${{ secrets.TOKEN }}'}", "expression-valued container env is unsupported"},
+		{"null image with invalid port", "image: ${{ null }}\n      ports: ['65536/tcp']", "bad.yml:7:15:"},
 		{"env-key", "image: node:24\n      env: {'bad-key': ok}", "bad.yml:7:13:"},
 		{"env-value", "image: node:24\n      env: {OK: '" + strings.Repeat("x", 65537) + "'}", "bad.yml:7:17:"},
 		{"port", "image: node:24\n      ports: ['65536/tcp']", "bad.yml:7:15:"},
