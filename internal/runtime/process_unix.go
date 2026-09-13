@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+func prepareProcessCommand(_ *exec.Cmd) error { return nil }
+
 func configureProcessGroup(command *exec.Cmd) {
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }

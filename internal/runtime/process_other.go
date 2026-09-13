@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+func prepareProcessCommand(_ *exec.Cmd) error { return nil }
+
 func configureProcessGroup(_ *exec.Cmd) {}
 func processStarted(_ *exec.Cmd) error  { return nil }
 func processFinished(_ int)             {}

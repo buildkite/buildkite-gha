@@ -40,7 +40,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64. The Agent API can map compatible selectors to hosted Linux, native macOS arm64, or explicitly enabled experimental Windows x86-64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Needs-derived matrices can also read their producer's parallel limit. Maximum 256 instances per job. `fail-fast` has no effect. |
-| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `pwsh`, `powershell`, `python`, and custom shell templates; PowerShell on experimental Windows jobs. |
+| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `pwsh`, `powershell`, `python`, and custom shell templates; PowerShell and MSYS2 on experimental Windows jobs. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local, public, and approved private GitHub workflows with static or needs-derived typed inputs and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. Private access requires a separate importer opt-in and existing Git access. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux, macOS, and experimental Windows jobs; verified Dockerfile and public prebuilt-image actions on Linux only. |
@@ -72,7 +72,8 @@ The default shell is `pwsh`. Explicit `pwsh` and Windows PowerShell
 (`powershell`) steps, JavaScript actions, and composite actions are supported
 within the same action restrictions documented below. Use UTF-8 for file
 commands; Windows PowerShell needs `Out-File -Encoding utf8 -Append` rather
-than its default UTF-16 redirection. `cmd` and MSYS2 shells, containers,
+than its default UTF-16 redirection. [MSYS2 custom shells](#commands-and-actions)
+are supported. `cmd` shells, containers,
 services, Docker actions, custom images, and cache volumes
 are not supported on Windows. Windows Server 2025 and arm64 labels are not
 enabled by these mappings.
@@ -574,7 +575,7 @@ To grant repository access, list each required permission at the top level, such
 | Key | Status | Behavior |
 | --- | --- | --- |
 | `env` | 🟡 Supported subset | Workflow, job, and step maps use normal precedence; the most specific value wins. Individual values may use supported interpolation. An entire map cannot be expression-valued. |
-| `defaults.run.shell` | 🟡 Supported subset | Supported at workflow and job level for [supported shells](#commands-and-actions). Host jobs default to `bash`; job containers default to `sh`. |
+| `defaults.run.shell` | 🟡 Supported subset | Supported at workflow and job level, subject to [shell and platform limits](#commands-and-actions). Windows defaults to `pwsh`, other host jobs to `bash`, and job containers to `sh`. |
 | `defaults.run.working-directory` | 🟡 Supported subset | Supported at workflow and job level for workspace-relative paths. |
 
 A job-level value overrides the same workflow-level environment variable:
@@ -1325,7 +1326,20 @@ Install the interpreter on the runner or in the job container, and add it to `PA
 Named PowerShell shells run UTF-8 `.ps1` temporary scripts with `$ErrorActionPreference = 'stop'` and propagate the last native command's exit status. PowerShell custom templates receive a `.ps1` script but control their own error behavior. `GITHUB_ENV`, `GITHUB_OUTPUT`, `GITHUB_STATE`, and `GITHUB_PATH` files ignore a leading UTF-8 byte order mark (BOM); BOMs within values remain unchanged.
 
 Windows defaults to `pwsh`; Linux and macOS retain their existing bash default.
-`cmd` and MSYS2 shells remain unsupported. If the shell name is known before the job starts, the workflow fails before an agent starts the job. A shell expression that needs a runtime value is checked before its step starts. If it resolves to an unsupported shell, the step fails.
+`cmd` remains unsupported. If the shell name is known before the job starts, the workflow fails before an agent starts the job. A shell expression that needs a runtime value is checked before its step starts. If it resolves to an unsupported shell, the step fails.
+
+On Windows, `msys2/setup-msys2@v2` can install the `msys2 {0}` custom shell,
+including through `defaults.run.shell`. The runtime resolves its `.cmd` wrapper
+from the step's `PATH`, including earlier `GITHUB_PATH` updates. It passes an
+extensionless, unmodified script and the Windows working directory to the
+wrapper. MSYS2 supplies its login environment, error handling, and path conversion.
+
+Windows `.cmd` custom shells must forward arguments directly, without `CALL`
+or delayed expansion. Arguments can contain spaces, single quotes, and
+metacharacters such as `%`, `!`, `&`, and `^`. Arguments containing double
+quotes, line breaks, NUL, or a trailing backslash are rejected; these limits
+do not apply to the script contents. Native executable templates retain their
+existing argument handling.
 
 Working directories must stay inside the workspace.
 

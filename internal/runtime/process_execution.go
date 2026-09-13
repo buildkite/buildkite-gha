@@ -82,6 +82,9 @@ func (r Runner) runStreaming(ctx context.Context, processor *commandOutputProces
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = processEnv(env)
+	if err := prepareProcessCommand(cmd); err != nil {
+		return err
+	}
 	return r.runStreamingCommand(ctx, processor, cmd)
 }
 

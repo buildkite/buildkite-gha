@@ -80,19 +80,28 @@ func TestWindowsProcessTree(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows job objects")
 	}
-	for _, mode := range []string{"parent-exit", "parent-wait"} {
+	for _, mode := range []string{"parent-exit", "parent-wait", "batch-parent-exit", "batch-parent-wait"} {
 		t.Run(mode, func(t *testing.T) {
 			pidFile := filepath.Join(t.TempDir(), "pid")
 			executable, err := os.Executable()
 			if err != nil {
 				t.Fatal(err)
 			}
+			args := []string{"-test.run=^TestWindowsProcessHelper$"}
+			if strings.HasPrefix(mode, "batch-") {
+				wrapper := filepath.Join(t.TempDir(), "process.cmd")
+				if err := os.WriteFile(wrapper, []byte("@echo off\r\n\""+executable+"\" -test.run=^TestWindowsProcessHelper$\r\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				executable, args = wrapper, nil
+				mode = strings.TrimPrefix(mode, "batch-")
+			}
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			done := make(chan error, 1)
 			processor := newCommandOutputProcessor(io.Discard, io.Discard)
 			go func() {
-				done <- (Runner{}).runStreaming(ctx, processor, "", map[string]string{"GHA_WINDOWS_PROCESS_HELPER": mode, "GHA_WINDOWS_CHILD_PID": pidFile}, executable, "-test.run=^TestWindowsProcessHelper$")
+				done <- (Runner{}).runStreaming(ctx, processor, "", map[string]string{"GHA_WINDOWS_PROCESS_HELPER": mode, "GHA_WINDOWS_CHILD_PID": pidFile}, executable, args...)
 			}()
 			var pid []byte
 			deadline := time.After(5 * time.Second)
