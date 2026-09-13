@@ -1034,6 +1034,13 @@ scripts stop on errors and propagate the last native command's exit code.
 starts the job; shell expressions requiring runtime values are checked before
 the step starts.
 
+Native Windows executable paths can use drive-absolute backslashes, such as
+`D:\cygwin\bin\bash.exe '{0}'`. Quote executable paths containing spaces:
+`"C:\Program Files\PowerShell\7\pwsh.exe" -File {0}`. The runner must provide
+the executable at that path. A single backslash after the drive prefix selects
+literal separators for the executable only; templates with an escaped first
+backslash keep their escape rules. Argument escaping is unchanged.
+
 On Windows, `msys2/setup-msys2@v2` can install the `msys2 {0}` custom shell,
 including through `defaults.run.shell`. The runtime resolves its `.cmd` wrapper
 from the step's `PATH`, including earlier `GITHUB_PATH` updates. It passes an

@@ -20,15 +20,27 @@ func TestPowerShellExecution(t *testing.T) {
 	}
 	t.Run("absolute template", func(t *testing.T) {
 		workspace := t.TempDir()
+		temp := filepath.Join(workspace, "script temp")
+		if err := os.Mkdir(temp, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("TMPDIR", temp)
+		t.Setenv("TMP", temp)
+		t.Setenv("TEMP", temp)
+		command := strconv.Quote(pwsh)
+		if runtime.GOOS == "windows" {
+			// Use native separators, including in Program Files, not Go escapes.
+			command = `"` + pwsh + `"`
+		}
 		workflow := ".github/workflows/test.yml"
 		writeFixtureFile(t, workspace, workflow, "name: absolute PowerShell template\n")
 		job := runtimePlan(t, workspace, workflow, []runtimeTestStep{{
-			ID: "script", Kind: "run", Shell: strconv.Quote(pwsh) + " -NoProfile -File {0}",
+			ID: "script", Kind: "run", Shell: command + " -NoProfile -File {0}",
 			Command: `"script=$PSCommandPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append`,
 		}})
 		job.Outputs = map[string]string{"script": "${{ steps.script.outputs.script }}"}
 		result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
-		if err != nil || filepath.Ext(result.Outputs["script"]) != ".ps1" {
+		if err != nil || filepath.Ext(result.Outputs["script"]) != ".ps1" || filepath.Dir(result.Outputs["script"]) != temp {
 			t.Fatalf("absolute template outputs=%v error=%v", result.Outputs, err)
 		}
 	})

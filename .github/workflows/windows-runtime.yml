@@ -33,6 +33,16 @@ jobs:
         run: go test ./internal/action/source -run '^(TestStoreExactCommitAtomicHitAndSubpath|TestStoreConcurrentMaterialize|TestStoreMaintenanceUsesLRUAndCleansOnlyUnlockedPartials|TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease)$' -v -count=1
       - name: Exercise PowerShell and process cleanup
         run: go test ./internal/runtime -run '^(TestPowerShellExecution|TestWindowsEnvironment|TestWindowsProcessTree)$' -v -count=1 -timeout=3m
+      - uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6.0.2
+        with:
+          platform: x86_64
+          work-vol: 'D:'
+          site: https://mirrors.kernel.org/sourceware/cygwin/
+          add-to-path: false
+      - name: Exercise curl's native Cygwin shell template
+        run: |
+          $env:BUILDKITE_GHA_TEST_CYGWIN = '1'
+          go test ./internal/runtime -run '^TestWindowsCygwinShell$' -v -count=1 -timeout=3m
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:
           msystem: MINGW64
