@@ -26,6 +26,10 @@ func TestWindowsCygwinShell(t *testing.T) {
 	if err := os.Mkdir(temp, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	wantTemp, err := os.Stat(temp)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("TMP", temp)
 	t.Setenv("TEMP", temp)
 	workflow := ".github/workflows/test.yml"
@@ -54,8 +58,10 @@ cat "$0" > "$SCRIPT_COPY"
 		t.Fatalf("script changed: %q, error = %v", contents, err)
 	}
 	scriptPath := result.Outputs["script"]
-	if filepath.Dir(scriptPath) != temp {
-		t.Fatalf("script path = %q, want parent %q", scriptPath, temp)
+	// Compare directory identity, not Windows path alias spelling.
+	gotTemp, err := os.Stat(filepath.Dir(scriptPath))
+	if err != nil || !os.SameFile(gotTemp, wantTemp) {
+		t.Fatalf("script path = %q, want parent directory %q: %v", scriptPath, temp, err)
 	}
 	if _, err := os.Stat(scriptPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("temporary script was not removed: %v", err)
