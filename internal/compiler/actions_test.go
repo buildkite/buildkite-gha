@@ -1378,6 +1378,57 @@ func TestCompileActionLocksDoesNotValidateUnusedNativeLifecycle(t *testing.T) {
 	}
 }
 
+func TestWindowsCacheRejectionSurvivesRuntimeDiscovery(t *testing.T) {
+	remote := t.TempDir()
+	writeAction(t, remote, "", "name: cache\nruns:\n  using: node24\n  main: index.js\n")
+	for _, runtimeAvailable := range []bool{true, false} {
+		for _, usesCache := range []bool{true, false} {
+			t.Run(fmt.Sprintf("runtime=%t/cache=%t", runtimeAvailable, usesCache), func(t *testing.T) {
+				step := "run: Write-Output ok"
+				if usesCache {
+					step = "uses: actions/cache@v4\n        with: {path: deps, key: deps}"
+				}
+				workflow := []byte("on: push\njobs:\n  test:\n    strategy:\n      matrix:\n        os: [windows-latest]\n    runs-on: ${{ matrix.os }}\n    steps:\n      - " + step + "\n")
+				options := Options{
+					EventTrust: EventUntrusted,
+					Runners: RunnerPolicy{
+						Selectors:       []RunnerSelector{{Labels: []string{"windows-latest"}, Target: RunnerTarget{Queue: "windows-medium", Platform: PlatformWindowsAMD64}}},
+						UntrustedQueues: []string{"windows-medium"},
+					},
+					ResolveActions: true,
+					ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}, commit: actionintegration.CacheV4Commit},
+				}
+				if runtimeAvailable {
+					options.RuntimeDistributions = map[Platform]string{PlatformWindowsAMD64: testDistributionDigest}
+				}
+				workflowPath := filepath.Join(t.TempDir(), ".github", "workflows", "ci.yml")
+				if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				bundle, err := CompileBundlePlansContext(t.Context(), workflowPath, workflow, pushEvent(t), "dev", testDistributionDigest, options)
+				switch {
+				case usesCache:
+					if err == nil || !strings.Contains(err.Error(), "actions/cache, which is unavailable on windows/amd64") || strings.Contains(err.Error(), "no runtime distribution") {
+						t.Fatalf("cache rejection = %v", err)
+					}
+				case !runtimeAvailable:
+					if err == nil || !strings.Contains(err.Error(), "no runtime distribution configured for windows/amd64") {
+						t.Fatalf("missing runtime rejection = %v", err)
+					}
+				case err != nil || len(bundle.Plans) != 1:
+					t.Fatalf("supported Windows plan = %d plans, %v", len(bundle.Plans), err)
+				}
+				if err != nil && len(bundle.Plans) != 0 {
+					t.Fatal("rejected job produced a plan")
+				}
+			})
+		}
+	}
+}
+
 func TestCompileActionLocksAllowsOnlyAuditedCacheCommits(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	for _, path := range []string{"", "restore", "save"} {
