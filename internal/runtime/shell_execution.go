@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"runtime"
 	"strings"
 
@@ -164,7 +164,7 @@ func (r *jobRun) runShellProcess(ctx context.Context, processor *commandOutputPr
 }
 
 func shellScriptExtension(command string) string {
-	switch strings.ToLower(filepath.Base(command)) {
+	switch strings.ToLower(path.Base(strings.ReplaceAll(command, `\`, "/"))) {
 	case "bash", "sh":
 		return ".sh"
 	case "python":
