@@ -82,6 +82,9 @@ type reusableWorkflowSource struct {
 	displayPath    string
 	digest         string
 	remote         *RemoteWorkflowSource
+	// rootSecretScope is forwarding eligibility, not storage or cycle identity.
+	// Local and verified self source retain it; explicit remote calls clear it.
+	rootSecretScope bool
 }
 
 func cloneRemoteWorkflowSource(source *RemoteWorkflowSource) *RemoteWorkflowSource {
@@ -110,9 +113,10 @@ func localReusableWorkflowSource(workflowPath string) (reusableWorkflowSource, e
 	}
 	relativePath = filepath.ToSlash(relativePath)
 	return reusableWorkflowSource{
-		identity:       reusableSourceIdentity{kind: "workspace", repository: root, path: relativePath},
-		repositoryRoot: root,
-		displayPath:    "./" + relativePath,
+		identity:        reusableSourceIdentity{kind: "workspace", repository: root, path: relativePath},
+		repositoryRoot:  root,
+		displayPath:     "./" + relativePath,
+		rootSecretScope: true,
 	}, nil
 }
 
@@ -161,6 +165,7 @@ func (resolver *reusableResolver) verifyWorkflowSource(ctx context.Context, work
 	if loaded.remote.Commit != candidate.Commit {
 		return reusableWorkflowSource{}, fmt.Errorf("workflow source returned a different commit")
 	}
+	loaded.rootSecretScope = true
 	return loaded, nil
 }
 
@@ -252,9 +257,10 @@ func (resolver *reusableResolver) loadLocalReusableWorkflow(parent reusableWorkf
 	}
 	canonicalRelative = filepath.ToSlash(canonicalRelative)
 	child := reusableWorkflowSource{
-		identity:       parent.identity,
-		repositoryRoot: parent.repositoryRoot,
-		displayPath:    "./" + canonicalRelative,
+		identity:        parent.identity,
+		repositoryRoot:  parent.repositoryRoot,
+		displayPath:     "./" + canonicalRelative,
+		rootSecretScope: parent.rootSecretScope,
 	}
 	child.identity.path = canonicalRelative
 	if parent.remote != nil {

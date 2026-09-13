@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -375,5 +376,110 @@ func TestSelfRepositoryPathsAndMissingIdentity(t *testing.T) {
 	}
 	if _, err := selfRepositoryReference("$/child", nil); err == nil || !strings.Contains(err.Error(), "containing workflow repository") {
 		t.Fatalf("missing identity error = %v", err)
+	}
+}
+
+func TestSelfRepositorySecretForwardingRetainsRootScope(t *testing.T) {
+	for _, paths := range []struct{ first, second string }{{"$/", "$/"}, {"$/", "./"}, {"./", "$/"}} {
+		for _, mode := range []string{"inherit", "map"} {
+			for _, omitted := range []string{"none", "first", "second"} {
+				t.Run(paths.first+paths.second+"/"+mode+"/omit-"+omitted, func(t *testing.T) {
+					workspace, remote := t.TempDir(), t.TempDir()
+					first, second := "    secrets: inherit\n", "    secrets: inherit\n"
+					ordinary, token := "ORIGINAL", "optional_token"
+					if mode == "map" {
+						first = "    secrets:\n      middle_alias: ${{ secrets.ORIGINAL }}\n      middle_token: ${{ secrets.GITHUB_TOKEN }}\n"
+						second = "    secrets:\n      leaf_alias: ${{ secrets.middle_alias }}\n      leaf_token: ${{ secrets.middle_token }}\n"
+						ordinary, token = "leaf_alias", "leaf_token"
+					}
+					switch omitted {
+					case "first":
+						first = ""
+					case "second":
+						second = ""
+					}
+					callerText := "on: push\npermissions: {contents: read}\njobs:\n  call:\n    uses: " + paths.first + ".github/workflows/middle.yml\n" + first
+					caller := writeWorkflow(t, workspace, "caller.yml", callerText)
+					writeWorkflow(t, remote, "caller.yml", callerText)
+					middle := "on:\n  workflow_call:\n    secrets:\n      middle_alias:\n      middle_token:\njobs:\n  nested:\n    uses: " + paths.second + ".github/workflows/leaf.yml\n" + second
+					writeWorkflow(t, workspace, "middle.yml", middle)
+					writeWorkflow(t, remote, "middle.yml", middle)
+					// Only fetched source contains the leaf; this must not become
+					// a workspace call merely to permit forwarding.
+					leaf := fmt.Sprintf("on:\n  workflow_call:\n    secrets:\n      leaf_alias:\n      leaf_token:\n      optional_token:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      VALUE: ${{ secrets.%s }}\n      TOKEN: ${{ secrets.%s }}\n    steps:\n      - run: true\n", ordinary, token)
+					writeWorkflow(t, remote, "leaf.yml", leaf)
+					fake := newFakeReusableRepositorySource(t, map[string]string{"source/repo": remote})
+					options := defaultOptions()
+					options.WorkflowSource = &WorkflowSourceReference{Repository: "source/repo", Commit: strings.Repeat("e", 40)}
+					options.RepositorySource = MemoizeRepositorySource(fake)
+					plans, err := compilePlansForTest(t.Context(), caller, []byte(callerText), pushEvent(t), "test", testDistributionDigest, options)
+					if err != nil || len(plans) != 1 {
+						t.Fatalf("self forwarding: plans=%#v err=%v", plans, err)
+					}
+					job := plans[0]
+					var wantSecrets []string
+					var wantMappings map[string]string
+					if omitted == "none" {
+						wantSecrets = []string{"ORIGINAL"}
+						if mode == "map" {
+							wantMappings = map[string]string{"LEAF_ALIAS": "ORIGINAL"}
+						} else {
+							wantSecrets = []string{"OPTIONAL_TOKEN", "ORIGINAL"}
+						}
+					}
+					if !slices.Equal(job.RequiredSecrets, wantSecrets) || !maps.Equal(job.SecretMappings, wantMappings) || job.HasCapability("secrets") != (len(wantSecrets) > 0) {
+						t.Fatalf("forwarded secret scope = %#v / %#v / %#v", job.RequiredSecrets, job.SecretMappings, job.RequiredCapabilities)
+					}
+					wantToken := mode == "map" && omitted == "none"
+					if (job.GitHubToken != nil) != wantToken || job.HasCapability("provider-token-write") != wantToken {
+						t.Fatalf("token scope = %#v / %#v", job.GitHubToken, job.RequiredCapabilities)
+					}
+					if wantToken && (!slices.Equal(job.GitHubToken.Aliases, []string{"LEAF_TOKEN"}) || !maps.Equal(job.GitHubToken.Permissions, map[string]string{"contents": "read"})) {
+						t.Fatalf("token alias or permissions changed: %#v", job.GitHubToken)
+					}
+					if job.Workflow.Remote == nil || job.Workflow.Remote.Repository != "source/repo" || job.Workflow.Remote.Commit != strings.Repeat("e", 40) || job.Workflow.Remote.SourceDigest != fake.digests["source/repo"] || job.Workflow.Digest != "sha256:"+sha256Sum([]byte(leaf)) {
+						t.Fatalf("forwarding changed immutable provenance: %#v", job.Workflow)
+					}
+					validateCompiledPlansAgainstSchema(t, plans)
+				})
+			}
+		}
+	}
+}
+
+func TestSelfRepositorySecretForwardingCannotReenterRootScope(t *testing.T) {
+	for _, test := range []struct{ name, first, middle, last string }{
+		{"self then remote", "$/.github/workflows/middle.yml", "other/repo/.github/workflows/leaf.yml@v1", ""},
+		{"remote then self", "other/repo/.github/workflows/middle.yml@v1", "$/.github/workflows/leaf.yml", ""},
+		{"remote then local then self", "other/repo/.github/workflows/middle.yml@v1", "./.github/workflows/leaf.yml", "$/.github/workflows/end.yml"},
+		{"same repository remote then self then local", "source/repo/.github/workflows/middle.yml@" + strings.Repeat("e", 40), "$/.github/workflows/leaf.yml", "./.github/workflows/end.yml"},
+	} {
+		for _, forwarding := range []string{"    secrets: inherit\n", "    secrets:\n      token: ${{ secrets.GITHUB_TOKEN }}\n"} {
+			t.Run(test.name+"/"+strings.TrimSpace(forwarding), func(t *testing.T) {
+				workspace, remote, other := t.TempDir(), t.TempDir(), t.TempDir()
+				callerText := "on: push\npermissions: {contents: read}\njobs:\n  call:\n    uses: " + test.first + "\n"
+				caller := writeWorkflow(t, workspace, "caller.yml", callerText)
+				writeWorkflow(t, remote, "caller.yml", callerText)
+				middle := "on: workflow_call\njobs:\n  nested:\n    uses: " + test.middle + "\n"
+				leaf := "on:\n  workflow_call:\n    secrets:\n      token:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets.token }}\n    steps:\n      - run: true\n"
+				if test.last == "" {
+					middle += forwarding
+				} else {
+					leaf = "on: workflow_call\njobs:\n  last:\n    uses: " + test.last + "\n" + forwarding
+				}
+				for _, root := range []string{remote, other} {
+					writeWorkflow(t, root, "middle.yml", middle)
+					writeWorkflow(t, root, "leaf.yml", leaf)
+					writeWorkflow(t, root, "end.yml", "on:\n  workflow_call:\n    secrets:\n      token:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+				}
+				options := defaultOptions()
+				options.WorkflowSource = &WorkflowSourceReference{Repository: "source/repo", Commit: strings.Repeat("e", 40)}
+				options.RepositorySource = MemoizeRepositorySource(newFakeReusableRepositorySource(t, map[string]string{"source/repo": remote, "other/repo": other}))
+				_, err := compilePlansForTest(t.Context(), caller, []byte(callerText), pushEvent(t), "test", testDistributionDigest, options)
+				if err == nil || !strings.Contains(err.Error(), "cannot forward secrets to a workflow in another repository") {
+					t.Fatalf("remote chain regained forwarding eligibility: %v", err)
+				}
+			})
+		}
 	}
 }

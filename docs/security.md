@@ -220,11 +220,13 @@ with a GitHub environment resolve environment-defined secret names to
 remain the authorization boundary. See [deployment
 environments](compatibility.md#deployment-environments).
 
-`secrets: inherit` lets a local reusable-workflow call place that callee job's
-statically referenced secret names in its plan. It is one hop, and every nested
-edge must repeat it. A local call can instead map a declared callee alias from
-one direct caller secret reference. Required declarations must be mapped;
-optional unmapped aliases stay empty.
+`secrets: inherit` lets a repository-local reusable-workflow call, including a
+verified root-repository self call, place that callee job's statically referenced
+secret names in its plan. It is one hop, and every nested edge must repeat it.
+A repository-local call can instead map a declared callee alias from one direct
+caller secret reference. Required declarations must be mapped; optional unmapped
+aliases stay empty. See [Reusable workflows](compatibility.md#reusable-workflows)
+for the self-call forwarding scope.
 
 Nested explicit mappings compose aliases to the original Buildkite secret.
 They can forward only authority received from the parent and never fall back to
