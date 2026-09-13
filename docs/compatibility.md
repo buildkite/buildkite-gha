@@ -1328,6 +1328,13 @@ Named PowerShell shells run UTF-8 `.ps1` temporary scripts with `$ErrorActionPre
 Windows defaults to `pwsh`; Linux and macOS retain their existing bash default.
 `cmd` remains unsupported. If the shell name is known before the job starts, the workflow fails before an agent starts the job. A shell expression that needs a runtime value is checked before its step starts. If it resolves to an unsupported shell, the step fails.
 
+Native Windows executable paths can use drive-absolute backslashes, such as
+`D:\cygwin\bin\bash.exe '{0}'`. Quote executable paths containing spaces:
+`"C:\Program Files\PowerShell\7\pwsh.exe" -File {0}`. The runner must provide
+the executable at that path. A single backslash after the drive prefix selects
+literal separators for the executable only; templates with an escaped first
+backslash keep their escape rules. Argument escaping is unchanged.
+
 On Windows, `msys2/setup-msys2@v2` can install the `msys2 {0}` custom shell,
 including through `defaults.run.shell`. The runtime resolves its `.cmd` wrapper
 from the step's `PATH`, including earlier `GITHUB_PATH` updates. It passes an
