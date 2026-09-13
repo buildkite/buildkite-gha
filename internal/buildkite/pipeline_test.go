@@ -2,12 +2,17 @@ package buildkite
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/binary"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"go.yaml.in/yaml/v4"
@@ -100,6 +105,112 @@ func TestEmitGolden(t *testing.T) {
 	}
 	if !strings.Contains(string(first), `Consumer ($VALUE, variant=\"two\")`) {
 		t.Fatal("runtime dollar sign or quoted label did not survive scalar encoding")
+	}
+}
+
+func TestEmitWindowsBootstrap(t *testing.T) {
+	digest := testDigest("windows distribution")
+	output, err := Emit(Pipeline{CompilerStep: "compile", DistributionDigest: digest, Jobs: []Job{{Key: "windows", Label: "Windows", Queue: "windows", Platform: "windows/amd64", PlanDigest: testDigest("windows plan"), RequiresMise: true}}})
+	if err != nil {
+		t.Fatalf("Emit() error = %v", err)
+	}
+	var document struct {
+		Steps []struct {
+			Command string `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	invocation := document.Steps[0].Command
+	if !strings.HasPrefix(invocation, "pwsh -NoLogo -NoProfile -NonInteractive") || len(invocation) >= 8191 {
+		t.Fatalf("bootstrap must fit cmd.exe command limit: %s", invocation)
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.Fields(invocation)[len(strings.Fields(invocation))-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	units := make([]uint16, len(data)/2)
+	for i := range units {
+		units[i] = binary.LittleEndian.Uint16(data[i*2:])
+	}
+	command := string(utf16.Decode(units))
+	for _, want := range []string{"$ErrorActionPreference", "[Guid]::NewGuid()", "artifact download", "--step", "Get-FileHash", "buildkite-gha.exe", "$runtimeStatus = $LASTEXITCODE", "finally", "Remove-Item"} {
+		if !strings.Contains(command, want) {
+			t.Errorf("Windows bootstrap lacks %q:\n%s", want, command)
+		}
+	}
+	for _, forbidden := range []string{"set -euo pipefail", "chmod 0500", "BUILDKITE_GHA_MISE_DATA_DIR", "cache:"} {
+		if strings.Contains(command, forbidden) || strings.Contains(string(output), forbidden) {
+			t.Errorf("Windows bootstrap contains %q:\n%s", forbidden, command)
+		}
+	}
+}
+
+func TestWindowsBootstrapExecution(t *testing.T) {
+	if _, err := exec.LookPath("pwsh"); err != nil {
+		t.Skip("PowerShell is not installed")
+	}
+	root := t.TempDir()
+	source := filepath.Join(root, "main.go")
+	if err := os.WriteFile(source, []byte(`package main
+import ("os"; "strings")
+func main() { _ = os.WriteFile(os.Getenv("BOOTSTRAP_ARGS"), []byte(strings.Join(os.Args[1:], "\n")), 0600); os.Exit(7) }
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(root, "runtime.exe")
+	if output, err := exec.Command("go", "build", "-o", executable, source).CombinedOutput(); err != nil {
+		t.Fatalf("build fixture: %v: %s", err, output)
+	}
+	contents, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, corrupt := range []bool{false, true} {
+		t.Run(fmt.Sprint("corrupt=", corrupt), func(t *testing.T) {
+			dir := t.TempDir()
+			arguments := filepath.Join(dir, "arguments")
+			actualDigest := transport.Digest(contents)
+			expectedDigest := actualDigest
+			if corrupt {
+				expectedDigest = testDigest("wrong executable")
+			}
+			distribution, _ := DistributionPath(actualDigest)
+			job := Job{PlanDigest: testDigest("plan"), EventPayload: true}
+			script := `function buildkite-agent {
+  if ($args[0] -ne 'artifact' -or $args[1] -ne 'download' -or $args[4] -ne '--step' -or $args[5] -ne 'producer') { throw 'wrong artifact binding' }
+  $target = Join-Path $args[3] $args[2]
+  New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
+  Copy-Item -LiteralPath $env:BOOTSTRAP_BINARY -Destination $target
+  $global:LASTEXITCODE = 0
+}
+` + strings.Join(windowsBootstrapCommands(distribution, expectedDigest, "producer", job), "\n")
+			invocation := strings.Fields(windowsBootstrapCommand(script))
+			cmd := exec.Command(invocation[0], invocation[1:]...)
+			cmd.Env = append(os.Environ(), "BOOTSTRAP_BINARY="+executable, "BOOTSTRAP_ARGS="+arguments, "TMPDIR="+dir, "TMP="+dir, "TEMP="+dir)
+			output, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			want := 7
+			if corrupt {
+				want = 1
+			}
+			if !errors.As(err, &exit) || exit.ExitCode() != want {
+				t.Fatalf("exit = %v, want %d: %s", err, want, output)
+			}
+			args, readErr := os.ReadFile(arguments)
+			if corrupt {
+				if !os.IsNotExist(readErr) {
+					t.Fatal("executed unverified binary")
+				}
+			} else if readErr != nil || string(args) != "run-job\n--plan-digest\n"+job.PlanDigest+"\n--plan-producer\nproducer\n--artifact-producer\nproducer" {
+				t.Fatalf("runtime args = %s, %v", args, readErr)
+			}
+			leftovers, _ := filepath.Glob(filepath.Join(dir, "buildkite-gha-*"))
+			if len(leftovers) != 0 {
+				t.Fatalf("bootstrap directories remain: %v", leftovers)
+			}
+		})
 	}
 }
 

@@ -23,7 +23,7 @@ func ValidateCompatibility(shell string) error {
 func compatibilityError(shell, command string) error {
 	command = normalizeCommand(command)
 	switch command {
-	case "pwsh", "pwsh.exe", "cmd", "cmd.exe", "powershell", "powershell.exe", "msys2", "msys2.cmd", "msys2.exe":
+	case "cmd", "cmd.exe", "msys2", "msys2.cmd", "msys2.exe":
 		return &UnsupportedError{Shell: shell, Command: command}
 	default:
 		return nil
@@ -38,7 +38,7 @@ type UnsupportedError struct {
 }
 
 func (e *UnsupportedError) Error() string {
-	return fmt.Sprintf("shell %q is unsupported. PowerShell and Windows shells cannot run in buildkite-gha. Use bash, sh, python, or a valid custom shell template whose command is available on PATH, or file a compatibility issue at https://github.com/buildkite/buildkite-gha", e.Shell)
+	return fmt.Sprintf("shell %q is unsupported. Use bash, sh, pwsh, powershell, python, or a valid custom shell template whose command is available on PATH, or file a compatibility issue at https://github.com/buildkite/buildkite-gha", e.Shell)
 }
 
 // UnsupportedCommand returns the normalized executable rejected by shell

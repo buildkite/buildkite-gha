@@ -21,8 +21,9 @@ var stepKeyNamespacePattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
 type OperatingSystem string
 
 const (
-	OperatingSystemLinux  OperatingSystem = "linux"
-	OperatingSystemDarwin OperatingSystem = "darwin"
+	OperatingSystemLinux   OperatingSystem = "linux"
+	OperatingSystemDarwin  OperatingSystem = "darwin"
+	OperatingSystemWindows OperatingSystem = "windows"
 )
 
 // Architecture identifies one supported workflow host architecture.
@@ -40,8 +41,9 @@ type Platform struct {
 }
 
 var (
-	PlatformLinuxAMD64  = Platform{OS: OperatingSystemLinux, Arch: ArchitectureAMD64}
-	PlatformDarwinARM64 = Platform{OS: OperatingSystemDarwin, Arch: ArchitectureARM64}
+	PlatformLinuxAMD64   = Platform{OS: OperatingSystemLinux, Arch: ArchitectureAMD64}
+	PlatformDarwinARM64  = Platform{OS: OperatingSystemDarwin, Arch: ArchitectureARM64}
+	PlatformWindowsAMD64 = Platform{OS: OperatingSystemWindows, Arch: ArchitectureAMD64}
 )
 
 func (platform Platform) String() string {
@@ -55,6 +57,8 @@ func ParsePlatform(value string) (Platform, error) {
 		return PlatformLinuxAMD64, nil
 	case PlatformDarwinARM64.String():
 		return PlatformDarwinARM64, nil
+	case PlatformWindowsAMD64.String():
+		return PlatformWindowsAMD64, nil
 	default:
 		return Platform{}, fmt.Errorf("unsupported runtime platform %q", value)
 	}
@@ -316,16 +320,19 @@ func validateRunnerTarget(labels map[string]RunnerTarget, label string, target R
 	if err := target.Platform.validate(); err != nil {
 		return fmt.Errorf("runner label %q: %w", label, err)
 	}
-	if target.Platform == PlatformDarwinARM64 && target.Queue == "" {
-		return fmt.Errorf("runner label %q targets darwin/arm64 without an explicit queue", label)
+	if target.Platform != PlatformLinuxAMD64 && target.Queue == "" {
+		return fmt.Errorf("runner label %q targets %s without an explicit queue", label, target.Platform)
 	}
 	if target.Image != "" && !runtimeImagePattern.MatchString(target.Image) {
 		return fmt.Errorf("runner label %q has invalid immutable runtime image %q", label, target.Image)
 	}
-	if target.Platform == PlatformDarwinARM64 && target.Image != "" {
-		return fmt.Errorf("runner label %q cannot select a runtime image on darwin/arm64", label)
+	if target.Platform != PlatformLinuxAMD64 && target.Image != "" {
+		return fmt.Errorf("runner label %q cannot select a runtime image on %s", label, target.Platform)
 	}
 	if target.Cache != nil {
+		if target.Platform == PlatformWindowsAMD64 {
+			return fmt.Errorf("runner label %q cannot select cache volumes on windows/amd64", label)
+		}
 		if err := buildkitepipeline.ValidateCacheVolume(*target.Cache); err != nil {
 			return fmt.Errorf("runner label %q has invalid cache configuration: %w", label, err)
 		}
@@ -422,9 +429,12 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 		if err != nil || key != selectorKey {
 			continue
 		}
-		// The local Windows guidance is more specific than a server
-		// incompatibility message, so let the per-label loop report it.
-		if !slices.ContainsFunc(normalizedLabels, unsupportedOS) {
+		// Preserve local Windows guidance unless this policy explicitly opts in.
+		unmappedWindows := slices.ContainsFunc(normalizedLabels, func(label string) bool {
+			_, mapped := policy.mappedTarget(label)
+			return unsupportedOS(label) && !mapped
+		})
+		if !unmappedWindows {
 			return RunnerTarget{}, rejectRunnerByServer(rejection)
 		}
 	}
@@ -432,17 +442,9 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 	resolved := false
 	for i, label := range labels {
 		normalized := normalizedLabels[i]
-		if unsupportedOS(normalized) {
+		mapped, ok := policy.mappedTarget(normalized)
+		if unsupportedOS(normalized) && !ok {
 			return RunnerTarget{}, rejectRunnerLabel(reasonUnsupportedOS, label, "unsupported operating system runner label %q", label)
-		}
-		mapped, ok := policy.Targets[normalized]
-		if !ok {
-			for configured, candidate := range policy.Targets {
-				if strings.ToLower(strings.TrimSpace(configured)) == normalized {
-					mapped, ok = candidate, true
-					break
-				}
-			}
 		}
 		if !ok {
 			if queue, exists := policy.Labels[normalized]; exists {
@@ -469,6 +471,18 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 		resolved = true
 	}
 	return policy.enforceRunnerTrust(target, trust)
+}
+
+func (policy RunnerPolicy) mappedTarget(label string) (RunnerTarget, bool) {
+	if target, ok := policy.Targets[label]; ok {
+		return target, true
+	}
+	for configured, target := range policy.Targets {
+		if strings.ToLower(strings.TrimSpace(configured)) == label {
+			return target, true
+		}
+	}
+	return RunnerTarget{}, false
 }
 
 func (policy RunnerPolicy) enforceRunnerTrust(target RunnerTarget, trust EventTrust) (RunnerTarget, error) {

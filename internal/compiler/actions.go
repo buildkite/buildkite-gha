@@ -474,8 +474,8 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 		if err != nil {
 			return "", plan.ActionLock{}, "", "", err
 		}
-		digest, err := source.DigestTree(m.Path)
-		return "workspace:" + p, plan.ActionLock{Source: "workspace", Path: p, SourceDigest: digest}, b.workspace, p, err
+		digest, executablePaths, err := source.DigestTreeAndExecutablePaths(m.Path)
+		return "workspace:" + p, plan.ActionLock{Source: "workspace", Path: p, SourceDigest: digest, ExecutablePaths: executablePaths}, b.workspace, p, err
 	}
 	ref, err := source.Parse(raw)
 	if err != nil {
@@ -499,7 +499,11 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 		return "", plan.ActionLock{}, "", "", err
 	}
 	commit := strings.ToLower(resolved.Commit)
-	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: ref.Ref, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest}
+	_, executablePaths, err := source.DigestTreeAndExecutablePaths(repositoryRoot)
+	if err != nil {
+		return "", plan.ActionLock{}, "", "", err
+	}
+	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: ref.Ref, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest, ExecutablePaths: executablePaths}
 	identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
 	descriptor, _, admitErr := actionintegration.Admit(identity, lock.Commit)
 	if admitErr != nil && descriptor.Service == actionintegration.ServiceCache {
@@ -549,6 +553,10 @@ func (b *actionLockBuilder) substituteCacheRelease(ctx context.Context, ref sour
 	})
 	lock.Commit = substitute
 	lock.SourceDigest = materialized.SourceDigest
+	_, lock.ExecutablePaths, err = source.DigestTreeAndExecutablePaths(repositoryRoot)
+	if err != nil {
+		return plan.ActionLock{}, "", err
+	}
 	return lock, repositoryRoot, nil
 }
 

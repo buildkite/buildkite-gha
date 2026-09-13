@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -261,7 +262,7 @@ func (r *actionLockResolver) verifyWorkspace(lock plan.ActionLock) (metadata.Met
 	if err != nil {
 		return metadata.Metadata{}, fmt.Errorf("resolve workspace action: %w", err)
 	}
-	digest, err := source.DigestTree(actionPath)
+	digest, err := digestActionTree(actionPath, lock.ExecutablePaths)
 	if err != nil {
 		return metadata.Metadata{}, fmt.Errorf("digest workspace action tree before metadata load: %w", err)
 	}
@@ -294,6 +295,9 @@ func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLock
 		return metadata.Metadata{}, fmt.Errorf("GitHub action commit is not an exact lower-case SHA")
 	}
 	resolved := source.Resolved{Reference: ref, Commit: lock.Commit, SourceDigest: lock.SourceDigest}
+	if runtime.GOOS == "windows" {
+		resolved.ExecutablePaths = append([]string{}, lock.ExecutablePaths...)
+	}
 	materialized, err := entry.materialize(ctx, r.materializer, resolved)
 	if err != nil {
 		return metadata.Metadata{}, fmt.Errorf("materialize GitHub action: %w", err)
@@ -317,7 +321,7 @@ func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLock
 	if err != nil || !os.SameFile(logicalInfo, canonicalInfo) {
 		return metadata.Metadata{}, fmt.Errorf("materialized repository root changed while canonicalizing")
 	}
-	digest, err := source.DigestTree(repositoryRoot)
+	digest, err := digestActionTree(repositoryRoot, lock.ExecutablePaths)
 	if err != nil {
 		return metadata.Metadata{}, fmt.Errorf("digest materialized repository tree: %w", err)
 	}
@@ -332,6 +336,13 @@ func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLock
 		return metadata.Metadata{}, fmt.Errorf("resolve materialized action path: %w", err)
 	}
 	return metadata.Metadata{Path: actionPath, SourceRoot: repositoryRoot}, nil
+}
+
+func digestActionTree(root string, executablePaths []string) (string, error) {
+	if runtime.GOOS == "windows" {
+		return source.DigestTreeWithExecutablePaths(root, append([]string{}, executablePaths...))
+	}
+	return source.DigestTree(root)
 }
 
 func verifiedActionPath(root, relative string) (string, error) {

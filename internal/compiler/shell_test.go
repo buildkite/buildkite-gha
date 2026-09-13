@@ -24,10 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Unsupported shell
-        shell: /opt/microsoft/powershell/7/pwsh -File {0}
+        shell: /opt/msys2/msys2 -File {0}
         run: Write-Output test
 `,
-			wantReportedCommand: "pwsh",
+			wantReportedCommand: "msys2",
 			wantLine:            6,
 			wantStep:            1,
 		},
@@ -53,7 +53,7 @@ jobs:
   test:
     strategy:
       matrix:
-        shell: [powershell]
+        shell: [cmd]
     runs-on: ubuntu-latest
     steps:
       - shell: ${{ matrix.shell }}
@@ -84,7 +84,7 @@ jobs:
 				t.Fatalf("finding blocker = %q / %q", finding.Blocker, finding.BlockerDetail)
 			}
 			for _, want := range []string{
-				"Use bash, sh, python, or a valid custom shell template whose command is available on PATH",
+				"Use bash, sh, pwsh, powershell, python, or a valid custom shell template whose command is available on PATH",
 				"https://github.com/buildkite/buildkite-gha",
 			} {
 				if !strings.Contains(finding.Message, want) {
@@ -105,7 +105,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - shell: pwsh -File {0} ${{ github.event.shell_suffix }}
+      - shell: cmd /C {0} ${{ github.event.shell_suffix }}
         run: Write-Output test
 `)
 	eventSource := pushEvent(t)
@@ -124,7 +124,7 @@ jobs:
 	if strings.Contains(finding.Message, sentinel) || strings.Contains(err.Error(), sentinel) {
 		t.Fatalf("event-derived shell argument reached diagnostic: message %q, error %v", finding.Message, err)
 	}
-	if !strings.Contains(finding.Message, `shell "pwsh" is unsupported`) {
+	if !strings.Contains(finding.Message, `shell "cmd" is unsupported`) {
 		t.Fatalf("finding message = %q", finding.Message)
 	}
 	if finding.Blocker != "shell" || finding.BlockerDetail != "" {
@@ -155,7 +155,7 @@ jobs:
         run: Write-Output test
 `)
 	eventSource := pushEvent(t)
-	event := bytes.Replace(eventSource, []byte(`"payload": {`), []byte(`"payload": {"shell": "pwsh",`), 1)
+	event := bytes.Replace(eventSource, []byte(`"payload": {`), []byte(`"payload": {"shell": "cmd",`), 1)
 	if bytes.Equal(event, eventSource) {
 		t.Fatal("event payload was not updated")
 	}
