@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -233,6 +234,11 @@ func TestCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T) {
 func testCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T, using, commit string) {
 	t.Helper()
 	node := requireNode24(t)
+	toolEnv, err := isolateCacheActionEnvironment(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheActionToolPath := toolEnv["PATH"]
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/cache.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: cache lifecycle\n")
@@ -251,10 +257,11 @@ for (const name of [
   "ACTIONS_RUNTIME_URL",
   "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_AUDIT", "LD_PRELOAD", "LD_LIBRARY_PATH",
   "OPENSSL_CONF", "OPENSSL_CONF_INCLUDE", "OPENSSL_ENGINES", "OPENSSL_MODULES",
-  "TAR_OPTIONS",
+  "TAR_OPTIONS", "BASH_ENV", "ENV",
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
   "BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_JOB_ID",
 ]) if (process.env[name]) throw new Error(name + " leaked");
+if (Object.keys(process.env).some(name => name.startsWith('BASH_FUNC_'))) throw new Error('shell function leaked');
 const tar = spawnSync("tar", ["--version"], {encoding: "utf8"});
 if (tar.status !== 0) throw new Error("trusted tar failed: " + tar.stderr);
 if (process.env.PATH !== %q) throw new Error("unsafe PATH: " + process.env.PATH);
@@ -298,19 +305,35 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 		"SSLKEYLOGFILE": "/attacker/keys", "LD_AUDIT": "/attacker-audit.so", "LD_PRELOAD": "/attacker.so", "LD_LIBRARY_PATH": "/attacker/lib",
 		"OPENSSL_CONF": "/attacker/openssl.cnf", "OPENSSL_CONF_INCLUDE": "/attacker/includes", "OPENSSL_ENGINES": "/attacker/engines", "OPENSSL_MODULES": "/attacker/modules",
 		"TAR_OPTIONS": "--checkpoint=1 --checkpoint-action=exec=/attacker-command",
-		"HTTP_PROXY":  "http://attacker", "HTTPS_PROXY": "http://attacker", "ALL_PROXY": "http://attacker", "NO_PROXY": "cache.example",
+		"BASH_ENV":    "/attacker/rc", "ENV": "/attacker/rc",
+		"BASH_FUNC_zstd%%": "() { exit 97; }",
+		"HTTP_PROXY":       "http://attacker", "HTTPS_PROXY": "http://attacker", "ALL_PROXY": "http://attacker", "NO_PROXY": "cache.example",
 		"http_proxy": "http://attacker", "https_proxy": "http://attacker", "all_proxy": "http://attacker", "no_proxy": "cache.example",
 		"BUILDKITE_AGENT_ACCESS_TOKEN": "workflow-agent-token", "BUILDKITE_JOB_ID": testCacheJobID, "FAKE_TAR_MARKER": fakeTarMarker,
 	}
+	shellCheck := `test -z "${ACTIONS_RUNTIME_TOKEN:-}" && test -z "${ACTIONS_RESULTS_URL:-}" && test -z "${ACTIONS_CACHE_SERVICE_V2:-}"`
+	poisonPath := `printf '%s\n' "$ATTACKER_BIN" >> "$GITHUB_PATH"`
+	if runtime.GOOS == "windows" {
+		shellCheck = `if ($env:ACTIONS_RUNTIME_TOKEN -or $env:ACTIONS_RESULTS_URL -or $env:ACTIONS_CACHE_SERVICE_V2) { exit 1 }`
+		poisonPath = `$env:ATTACKER_BIN | Out-File -Encoding utf8 -Append $env:GITHUB_PATH`
+		// Windows treats all spellings alike, including workflow overrides.
+		for name, value := range cacheEnv {
+			delete(cacheEnv, name)
+			cacheEnv[strings.ToLower(name)] = value
+		}
+		for _, name := range []string{"ProgramFiles", "SystemDrive", "SystemRoot", "WinDir", "ComSpec", "PathExt"} {
+			cacheEnv[name] = attackerBin
+		}
+	}
 	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{
-		{ID: "shell-before", Kind: "run", Command: `test -z "${ACTIONS_RUNTIME_TOKEN:-}" && test -z "${ACTIONS_RESULTS_URL:-}" && test -z "${ACTIONS_CACHE_SERVICE_V2:-}"`},
-		{ID: "poison-path", Kind: "run", Command: `printf '%s\n' "$ATTACKER_BIN" >> "$GITHUB_PATH"`},
+		{ID: "shell-before", Kind: "run", Command: shellCheck},
+		{ID: "poison-path", Kind: "run", Command: poisonPath},
 		{ID: "ordinary", Kind: "uses", Uses: "owner/repo/ordinary@v1", Env: map[string]string{
 			"ACTIONS_RESULTS_URL": "https://attacker.invalid", "ACTIONS_RUNTIME_TOKEN": "workflow-token", "ACTIONS_CACHE_SERVICE_V2": "false",
 			"ACTIONS_CACHE_URL": "https://legacy.invalid", "ACTIONS_RUNTIME_URL": "https://legacy.invalid",
 		}, Action: &plan.ActionSelector{Lock: ordinaryID}},
 		{ID: "cache", Kind: "uses", Uses: "actions/cache@" + commit, Env: cacheEnv, Action: &plan.ActionSelector{Lock: cacheID}},
-		{ID: "shell-after", Kind: "run", Command: `test -z "${ACTIONS_RUNTIME_TOKEN:-}" && test -z "${ACTIONS_RESULTS_URL:-}" && test -z "${ACTIONS_CACHE_SERVICE_V2:-}"`},
+		{ID: "shell-after", Kind: "run", Command: shellCheck},
 	})
 	job.Schema = plan.Schema
 	job.Event.Provider = "cursor-origin"
@@ -426,12 +449,15 @@ func TestIsolateCacheActionEnvironmentLeavesGitHubServerURLForSharedOverride(t *
 		"BUILDKITE_AGENT_ACCESS_TOKEN": "secret",
 		"BUILDKITE_JOB_ID":             "job-id",
 	}
-	isolated := isolateCacheActionEnvironment(env)
+	isolated, err := isolateCacheActionEnvironment(env)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := isolated["GITHUB_SERVER_URL"]; got != "https://origin.cursor.com" {
 		t.Fatalf("GITHUB_SERVER_URL = %q, want unchanged https://origin.cursor.com", got)
 	}
-	if isolated["PATH"] != cacheActionToolPath {
-		t.Fatalf("PATH = %q, want %q", isolated["PATH"], cacheActionToolPath)
+	if runtime.GOOS != "windows" && isolated["PATH"] != "/usr/local/bin:/usr/bin:/bin" {
+		t.Fatalf("unsafe PATH = %q", isolated["PATH"])
 	}
 	for _, name := range []string{"BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_JOB_ID"} {
 		if _, ok := isolated[name]; ok {
@@ -444,7 +470,10 @@ func TestIsolateCacheActionEnvironmentLeavesRealGitHubServerURLUnchanged(t *test
 	env := map[string]string{
 		"GITHUB_SERVER_URL": "https://github.com",
 	}
-	isolated := isolateCacheActionEnvironment(env)
+	isolated, err := isolateCacheActionEnvironment(env)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := isolated["GITHUB_SERVER_URL"]; got != "https://github.com" {
 		t.Fatalf("GITHUB_SERVER_URL = %q, want unchanged https://github.com", got)
 	}

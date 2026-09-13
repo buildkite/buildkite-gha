@@ -190,6 +190,20 @@ rationale, security invariants, and remaining design work.
 
 Every normal Buildkite build runs repository checks, Test Engine-split Go tests, native macOS tests, the starter workflow compatibility report, and the shell and public-action smoke workflows against the build's exact CLI source. The public-action proof executes pinned checkout, Node, Go, Python, and Java setup actions. Test Engine records the Linux test results; the repository checks retain the race-enabled suite. GitHub Actions differential oracles run only when manually dispatched.
 
+The **Windows runtime** GitHub Actions workflow checks cache credential lifecycle
+isolation and local GNU tar round trips with zstd and gzip. It poisons tool
+environment variables and places decoy executables in the working directory.
+These checks do not prove Buildkite cache-service persistence.
+
+Before a Windows hosted cache proof, verify the [cache tool installation
+paths](compatibility.md#cache-action), record GNU tar and zstd versions, and run
+`TestWindowsCacheArchiveTools` with `BUILDKITE_GHA_TEST_NODE24` set to an absolute
+Node 24 executable. Then use a unique key in a root `actions/cache` producer:
+assert a miss, write known file contents, and confirm post-save completes. In a
+separate clean Windows job, assert an exact restore hit and compare the restored
+contents. Repeat with `actions/cache/save` and `actions/cache/restore`. A passing
+compile or job without these assertions is not a cache round-trip proof.
+
 The **Expression differential oracle** records hosted GitHub expression results
 for the conformance fixtures in `internal/expression/conformance_test.go`. Run it
 manually when expression semantics change; it is not part of the local check

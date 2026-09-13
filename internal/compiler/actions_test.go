@@ -1378,15 +1378,18 @@ func TestCompileActionLocksDoesNotValidateUnusedNativeLifecycle(t *testing.T) {
 	}
 }
 
-func TestWindowsCacheRejectionSurvivesRuntimeDiscovery(t *testing.T) {
+func TestWindowsActionCompatibilityAndRuntimeDiscovery(t *testing.T) {
 	remote := t.TempDir()
-	writeAction(t, remote, "", "name: cache\nruns:\n  using: node24\n  main: index.js\n")
+	for _, path := range []string{"", "restore", "save"} {
+		writeAction(t, remote, path, "name: cache\nruns:\n  using: node24\n  main: index.js\n")
+	}
+	writeAction(t, remote, "docker", "name: docker\nruns:\n  using: docker\n  image: docker://alpine:3\n")
 	for _, runtimeAvailable := range []bool{true, false} {
-		for _, usesCache := range []bool{true, false} {
-			t.Run(fmt.Sprintf("runtime=%t/cache=%t", runtimeAvailable, usesCache), func(t *testing.T) {
+		for _, action := range []string{"", "actions/cache", "actions/cache/restore", "actions/cache/save", "owner/repo/docker"} {
+			t.Run(fmt.Sprintf("runtime=%t/action=%s", runtimeAvailable, action), func(t *testing.T) {
 				step := "run: Write-Output ok"
-				if usesCache {
-					step = "uses: actions/cache@v4\n        with: {path: deps, key: deps}"
+				if action != "" {
+					step = "uses: " + action + "@v4\n        with: {path: deps, key: deps}"
 				}
 				workflow := []byte("on: push\njobs:\n  test:\n    strategy:\n      matrix:\n        os: [windows-latest]\n    runs-on: ${{ matrix.os }}\n    steps:\n      - " + step + "\n")
 				options := Options{
@@ -1410,9 +1413,9 @@ func TestWindowsCacheRejectionSurvivesRuntimeDiscovery(t *testing.T) {
 				}
 				bundle, err := CompileBundlePlansContext(t.Context(), workflowPath, workflow, pushEvent(t), "dev", testDistributionDigest, options)
 				switch {
-				case usesCache:
-					if err == nil || !strings.Contains(err.Error(), "actions/cache, which is unavailable on windows/amd64") || strings.Contains(err.Error(), "no runtime distribution") {
-						t.Fatalf("cache rejection = %v", err)
+				case action == "owner/repo/docker":
+					if err == nil || !strings.Contains(err.Error(), "requires Docker, which is unavailable on windows/amd64") || strings.Contains(err.Error(), "no runtime distribution") {
+						t.Fatalf("Docker rejection = %v", err)
 					}
 				case !runtimeAvailable:
 					if err == nil || !strings.Contains(err.Error(), "no runtime distribution configured for windows/amd64") {

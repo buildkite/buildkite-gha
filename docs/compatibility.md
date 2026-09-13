@@ -73,7 +73,7 @@ The default shell is `pwsh`. Explicit `pwsh` and Windows PowerShell
 within the same action restrictions documented below. Use UTF-8 for file
 commands; Windows PowerShell needs `Out-File -Encoding utf8 -Append` rather
 than its default UTF-16 redirection. `cmd` and MSYS2 shells, containers,
-services, Docker actions, `actions/cache`, custom images, and cache volumes
+services, Docker actions, custom images, and cache volumes
 are not supported on Windows. Windows Server 2025 and arm64 labels are not
 enabled by these mappings.
 
@@ -1623,6 +1623,16 @@ Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP v
 | v6.1.0 | [`55cc8345863c7cc4c66a329aec7e433d2d1c52a9`](https://github.com/actions/cache/tree/55cc8345863c7cc4c66a329aec7e433d2d1c52a9) | 24 | 6.1.0 |
 
 The v3 releases use managed Node 16 and emit its standard deprecation warning. Node 20 declarations run with managed Node 24. Every admitted bundle selects cache v2 from `ACTIONS_CACHE_SERVICE_V2`, uses `ACTIONS_RESULTS_URL` and a job-scoped runtime token, and preserves the root restore/post-save lifecycle and separate entry points. A non-routable `ACTIONS_CACHE_URL` satisfies the legacy availability gate; cache traffic still uses `ACTIONS_RESULTS_URL`. Their tar with zstd-or-gzip archive versioning is compatible across releases.
+
+On experimental Windows jobs, cache actions use a restricted tool path:
+`Git\usr\bin` and `zstd` under the Windows Program Files directory, then
+Windows System32. Install Git for Windows and zstd there for GNU tar with zstd
+compression. Without zstd, the upstream client uses gzip; without Git's tar,
+it can use Windows System32 tar. Cross-OS archives require GNU tar and zstd.
+The runtime obtains installation paths from Windows, replaces tool-selection
+environment variables case-insensitively, and excludes workflow `PATH` and
+`GITHUB_PATH` additions. Keep these installation directories outside workflow
+write access. This does not enable Buildkite cache volumes.
 
 The snapshot admits a commit only when every bundle it runs selects cache v2 and embeds one `@actions/cache` client version of 4.0.0 or later. Commits before v3.4.0 and v4.2.0 bundle cache-v1 clients and are absent. v3.4.1 is snapshotted but excluded because [its upstream release warns that it was published with an incorrect SHA](https://github.com/actions/cache/releases/tag/v3.4.1).
 

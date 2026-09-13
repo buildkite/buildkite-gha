@@ -662,7 +662,11 @@ func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandOutpu
 	}
 	env = removeCacheServiceEnvironment(env)
 	if action.Cache {
-		env = isolateCacheActionEnvironment(env)
+		var err error
+		env, err = isolateCacheActionEnvironment(env)
+		if err != nil {
+			return fmt.Errorf("configure actions/cache tools: %w", err)
+		}
 	}
 	if action.Cache || action.CacheClientCompatibility {
 		applyGitHubServerURLOverride(env)
