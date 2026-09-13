@@ -617,6 +617,19 @@ func TestRunnerPolicyServerRejectionWinsOverLocalPreset(t *testing.T) {
 	}
 }
 
+func TestRunnerPolicyExplicitWindowsTarget(t *testing.T) {
+	target := RunnerTarget{Queue: "windows", Platform: PlatformWindowsAMD64}
+	policy := RunnerPolicy{Targets: map[string]RunnerTarget{"windows-latest": target}}
+	if got, err := policy.Resolve([]string{"windows-latest"}, EventTrusted); err != nil || got != target {
+		t.Fatalf("Resolve() = %#v, %v, want explicit Windows target", got, err)
+	}
+	options := DefaultOptions()
+	options.Runners = RunnerPolicy{Targets: map[string]RunnerTarget{"windows-latest": {Platform: PlatformWindowsAMD64}}}
+	if err := options.validate(); err == nil {
+		t.Fatal("options accepted Windows target without explicit queue")
+	}
+}
+
 func TestOptionsValidateRejectsMalformedRunnerRejections(t *testing.T) {
 	target := RunnerTarget{Queue: "macos-medium", Platform: PlatformDarwinARM64}
 	tests := []struct {

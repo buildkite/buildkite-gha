@@ -65,7 +65,7 @@ func suggestedRunnerTargets(ctx context.Context, reports []compiler.Report, conf
 		if platform == compiler.PlatformLinuxAMD64 && !runnerImagePattern.MatchString(suggestion.Image) {
 			return agentRunnerResolution{}, fmt.Errorf("runner resolution response contains an invalid target image")
 		}
-		if platform == compiler.PlatformDarwinARM64 && suggestion.Image != "" {
+		if platform != compiler.PlatformLinuxAMD64 && suggestion.Image != "" {
 			return agentRunnerResolution{}, fmt.Errorf("runner resolution response contains an invalid target image")
 		}
 		target := compiler.RunnerTarget{Queue: suggestion.Queue, Platform: platform, Image: suggestion.Image}

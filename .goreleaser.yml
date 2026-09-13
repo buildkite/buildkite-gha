@@ -25,6 +25,18 @@ builds:
       - -trimpath
     ldflags:
       - -s -w -X main.version={{.Version}}
+  - id: buildkite-gha-windows
+    main: ./cmd/buildkite-gha
+    binary: buildkite-gha
+    env:
+      - CGO_ENABLED=0
+    goos: [windows]
+    goarch: [amd64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
 
 archives:
   - id: buildkite-gha
@@ -46,6 +58,21 @@ archives:
     ids: [buildkite-gha-darwin]
     formats: [tar.gz]
     name_template: buildkite-gha_Darwin_arm64
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+      owner: root
+      group: root
+    files:
+      - src: LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+          mode: 0644
+          owner: root
+          group: root
+  - id: buildkite-gha-windows-archive
+    ids: [buildkite-gha-windows]
+    formats: [tar.gz]
+    name_template: buildkite-gha_Windows_x86_64
     builds_info:
       mtime: "{{ .CommitDate }}"
       owner: root
