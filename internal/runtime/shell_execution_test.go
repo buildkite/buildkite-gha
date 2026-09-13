@@ -8,14 +8,30 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 func TestPowerShellExecution(t *testing.T) {
-	if _, err := exec.LookPath("pwsh"); err != nil {
+	pwsh, err := exec.LookPath("pwsh")
+	if err != nil {
 		t.Skip("PowerShell is not installed")
 	}
+	t.Run("absolute template", func(t *testing.T) {
+		workspace := t.TempDir()
+		workflow := ".github/workflows/test.yml"
+		writeFixtureFile(t, workspace, workflow, "name: absolute PowerShell template\n")
+		job := runtimePlan(t, workspace, workflow, []runtimeTestStep{{
+			ID: "script", Kind: "run", Shell: strconv.Quote(pwsh) + " -NoProfile -File {0}",
+			Command: `"script=$PSCommandPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append`,
+		}})
+		job.Outputs = map[string]string{"script": "${{ steps.script.outputs.script }}"}
+		result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+		if err != nil || filepath.Ext(result.Outputs["script"]) != ".ps1" {
+			t.Fatalf("absolute template outputs=%v error=%v", result.Outputs, err)
+		}
+	})
 	for _, shell := range []string{"pwsh", "powershell", ""} {
 		if shell == "" && runtime.GOOS != "windows" || shell == "powershell" && runtime.GOOS != "windows" {
 			continue
@@ -57,6 +73,14 @@ func TestPowerShellExecution(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAbsolutePowerShellScriptExtension(t *testing.T) {
+	for _, command := range []string{`C:\Program Files\PowerShell\7\pwsh.exe`, `/opt/powershell/PWSH`} {
+		if got := shellScriptExtension(command); got != ".ps1" {
+			t.Fatalf("extension for %q = %q", command, got)
+		}
 	}
 }
 
