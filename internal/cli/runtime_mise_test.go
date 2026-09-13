@@ -2,6 +2,7 @@ package cli
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -406,6 +407,7 @@ func TestSelectRuntimeMiseRelease(t *testing.T) {
 	}{
 		{"linux", "amd64", "linux-x64", "linux-amd64", runtimeMiseArchiveDigest, runtimeMiseBinaryDigest},
 		{"darwin", "arm64", "macos-arm64", "darwin-arm64", runtimeMiseDarwinARM64ArchiveDigest, runtimeMiseDarwinARM64BinaryDigest},
+		{"windows", "amd64", "windows-x64", "windows-amd64", runtimeMiseWindowsAMD64ArchiveDigest, runtimeMiseWindowsAMD64BinaryDigest},
 	} {
 		selected, err := selectRuntimeMiseRelease(test.goos, test.goarch)
 		if err != nil {
@@ -417,6 +419,43 @@ func TestSelectRuntimeMiseRelease(t *testing.T) {
 	}
 	if _, err := selectRuntimeMiseRelease("linux", "arm64"); err == nil || !strings.Contains(err.Error(), "unavailable") {
 		t.Fatalf("selectRuntimeMiseRelease() unsupported platform error = %v", err)
+	}
+}
+
+func TestExtractRuntimeMiseWindowsZip(t *testing.T) {
+	binary := []byte("windows mise")
+	digest := sha256.Sum256(binary)
+	archive := filepath.Join(t.TempDir(), "mise.zip")
+	file, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	member, err := writer.Create("mise/bin/mise.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = member.Write(binary)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "mise.exe")
+	release := runtimeMiseRelease{archiveFormat: "zip", executable: "mise.exe"}
+	if err := extractRuntimeMiseRelease(archive, destination, hex.EncodeToString(digest[:]), release); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(destination, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = validateRuntimeMiseFile(t.Context(), destination, hex.EncodeToString(digest[:]))
+	if runtime.GOOS == "windows" && err != nil || runtime.GOOS != "windows" && err == nil {
+		t.Fatalf("non-executable mise on %s = %v", runtime.GOOS, err)
+	}
+	if err := extractRuntimeMiseRelease(archive, filepath.Join(t.TempDir(), "bad.exe"), strings.Repeat("0", 64), release); err == nil || !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("checksum error = %v", err)
 	}
 }
 

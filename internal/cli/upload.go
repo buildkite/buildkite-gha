@@ -380,7 +380,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		return 1
 	}
 	runtimeDistributions := make(map[compiler.Platform]runtimeDistribution, len(requiredPlatforms))
-	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		if !requiredPlatforms[platform] {
 			continue
 		}
@@ -640,7 +640,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		artifactPaths[artifact.Path] = struct{}{}
 		artifacts = append(artifacts, artifact)
 	}
-	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		runtimeDistribution, ok := runtimeDistributions[platform]
 		if !ok {
 			continue
@@ -907,8 +907,9 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 // reject the workflow. The plans it produces are discarded.
 func requiredRuntimePlatforms(ctx context.Context, request hostedCompileRequest) (map[compiler.Platform]bool, bool, error, error) {
 	request.RuntimeDistributions = map[compiler.Platform]string{
-		compiler.PlatformLinuxAMD64:  request.DistributionDigest,
-		compiler.PlatformDarwinARM64: request.DistributionDigest,
+		compiler.PlatformLinuxAMD64:   request.DistributionDigest,
+		compiler.PlatformDarwinARM64:  request.DistributionDigest,
+		compiler.PlatformWindowsAMD64: request.DistributionDigest,
 	}
 	options := request.options()
 	options.RepositorySource = request.RepositorySource

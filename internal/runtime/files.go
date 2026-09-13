@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -58,6 +59,24 @@ func newCommandFilesUnder(parent string) (commandFiles, error) {
 			return commandFiles{}, errors.Join(fmt.Errorf("create file-command file: %w", err), files.cleanup())
 		}
 		files.open[path] = file
+		if runtime.GOOS == "windows" {
+			// O_CREATE adds write access even with O_RDONLY on Windows. Reopen
+			// read-only so Out-File can share this handle, retaining the original
+			// until identity is checked to prevent path replacement races.
+			reader, err := os.Open(path)
+			if err != nil {
+				return commandFiles{}, errors.Join(err, files.cleanup())
+			}
+			created, createErr := file.Stat()
+			retained, retainErr := reader.Stat()
+			if createErr != nil || retainErr != nil || !os.SameFile(created, retained) {
+				return commandFiles{}, errors.Join(fmt.Errorf("file-command file changed while opening"), createErr, retainErr, reader.Close(), files.cleanup())
+			}
+			if err := file.Close(); err != nil {
+				return commandFiles{}, errors.Join(err, reader.Close(), files.cleanup())
+			}
+			files.open[path] = reader
+		}
 	}
 	return files, nil
 }
@@ -116,6 +135,7 @@ func (files commandFiles) apply(result *Result, state map[string]string) (fileCo
 	if outputErr != nil || envErr != nil || stateErr != nil || summaryErr != nil || pathErr != nil {
 		return effects, errors.Join(outputErr, envErr, stateErr, summaryErr, pathErr)
 	}
+	env = mergeStringMaps(env)
 	for name := range env {
 		// Match GitHub Runner's file-command behavior: NODE_OPTIONS is blocked,
 		// while actions may deliberately propagate GITHUB_* and RUNNER_* values.
@@ -132,7 +152,7 @@ func (files commandFiles) apply(result *Result, state map[string]string) (fileCo
 		result.Paths = result.Paths[:0]
 	}
 	maps.Copy(result.Outputs, outputs)
-	maps.Copy(result.Env, env)
+	mergeEnvironmentInto(result.Env, env)
 	for name, value := range states {
 		result.State[name] = value
 		if state != nil {

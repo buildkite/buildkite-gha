@@ -22,10 +22,11 @@ import (
 )
 
 const (
-	pluginDevDarwinRuntimeEnvironment = "BUILDKITE_GHA_PLUGIN_DEV_DARWIN_RUNTIME"
-	pluginDevLinuxRuntimeEnvironment  = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_RUNTIME"
-	pluginChecksumLimit               = 4 << 20
-	pluginArchiveLimit                = 256 << 20
+	pluginDevDarwinRuntimeEnvironment  = "BUILDKITE_GHA_PLUGIN_DEV_DARWIN_RUNTIME"
+	pluginDevLinuxRuntimeEnvironment   = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_RUNTIME"
+	pluginDevWindowsRuntimeEnvironment = "BUILDKITE_GHA_PLUGIN_DEV_WINDOWS_RUNTIME"
+	pluginChecksumLimit                = 4 << 20
+	pluginArchiveLimit                 = 256 << 20
 )
 
 var stableVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
@@ -39,8 +40,9 @@ type pluginRuntimeAcquisition struct {
 }
 
 const (
-	pluginLinuxAsset  = "buildkite-gha_Linux_x86_64.tar.gz"
-	pluginDarwinAsset = "buildkite-gha_Darwin_arm64.tar.gz"
+	pluginLinuxAsset   = "buildkite-gha_Linux_x86_64.tar.gz"
+	pluginDarwinAsset  = "buildkite-gha_Darwin_arm64.tar.gz"
+	pluginWindowsAsset = "buildkite-gha_Windows_x86_64.tar.gz"
 )
 
 func securePluginHTTPClient() *http.Client {
@@ -61,8 +63,9 @@ func securePluginHTTPClient() *http.Client {
 func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[compiler.Platform]bool, hostPlatform compiler.Platform, host runtimeDistribution) (map[compiler.Platform]runtimeDistribution, error) {
 	distributions := make(map[compiler.Platform]runtimeDistribution, len(required))
 	devPaths := map[compiler.Platform]string{
-		compiler.PlatformLinuxAMD64:  os.Getenv(pluginDevLinuxRuntimeEnvironment),
-		compiler.PlatformDarwinARM64: os.Getenv(pluginDevDarwinRuntimeEnvironment),
+		compiler.PlatformLinuxAMD64:   os.Getenv(pluginDevLinuxRuntimeEnvironment),
+		compiler.PlatformDarwinARM64:  os.Getenv(pluginDevDarwinRuntimeEnvironment),
+		compiler.PlatformWindowsAMD64: os.Getenv(pluginDevWindowsRuntimeEnvironment),
 	}
 	if a.version != "dev" {
 		for platform, path := range devPaths {
@@ -71,7 +74,7 @@ func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[com
 			}
 		}
 	}
-	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		if !required[platform] {
 			continue
 		}
@@ -104,6 +107,9 @@ func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[com
 }
 
 func pluginDevRuntimeEnvironment(platform compiler.Platform) string {
+	if platform == compiler.PlatformWindowsAMD64 {
+		return pluginDevWindowsRuntimeEnvironment
+	}
 	if platform == compiler.PlatformDarwinARM64 {
 		return pluginDevDarwinRuntimeEnvironment
 	}
@@ -111,6 +117,9 @@ func pluginDevRuntimeEnvironment(platform compiler.Platform) string {
 }
 
 func pluginRuntimeAsset(platform compiler.Platform) string {
+	if platform == compiler.PlatformWindowsAMD64 {
+		return pluginWindowsAsset
+	}
 	if platform == compiler.PlatformDarwinARM64 {
 		return pluginDarwinAsset
 	}
@@ -214,9 +223,13 @@ func extractPluginRuntime(archive []byte, platform compiler.Platform) ([]byte, e
 		if header.Typeflag != tar.TypeReg || header.Size < 0 || header.Size > runtimeDistributionLimit {
 			return nil, fmt.Errorf("%s archive contains an unsafe member %q", platform, header.Name)
 		}
+		binaryName := "buildkite-gha"
+		if platform == compiler.PlatformWindowsAMD64 {
+			binaryName = "buildkite-gha.exe"
+		}
 		switch header.Name {
-		case "buildkite-gha":
-			if seenBinary || header.Mode&0o111 == 0 {
+		case binaryName:
+			if seenBinary || (platform != compiler.PlatformWindowsAMD64 && header.Mode&0o111 == 0) {
 				return nil, fmt.Errorf("%s archive has an invalid executable member", platform)
 			}
 			seenBinary = true
@@ -234,7 +247,7 @@ func extractPluginRuntime(archive []byte, platform compiler.Platform) ([]byte, e
 		}
 	}
 	if !seenBinary || !seenLicense {
-		return nil, fmt.Errorf("%s archive must contain exactly buildkite-gha and LICENSE", platform)
+		return nil, fmt.Errorf("%s archive must contain exactly its executable and LICENSE", platform)
 	}
 	return executable, nil
 }

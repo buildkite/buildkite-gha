@@ -17,7 +17,6 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	executionprogram "github.com/buildkite/buildkite-gha/internal/program"
-	"golang.org/x/sys/unix"
 )
 
 func TestHashWorkspaceFilesConformance(t *testing.T) {
@@ -133,7 +132,7 @@ func TestHashWorkspaceFilesRejectsEscapesAndUnsafeFiles(t *testing.T) {
 
 	if runtime.GOOS != "windows" {
 		fifo := filepath.Join(workspace, "pipe")
-		if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		if err := testMkfifo(fifo, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := hashWorkspaceFiles(t.Context(), workspace, []string{"pipe"}); err == nil || !strings.Contains(err.Error(), "non-regular") {
@@ -536,7 +535,7 @@ func TestHashWorkspaceFilesRejectsFIFORacedIntoMatch(t *testing.T) {
 		if err := os.Remove(file); err != nil {
 			t.Fatal(err)
 		}
-		if err := unix.Mkfifo(file, 0o600); err != nil {
+		if err := testMkfifo(file, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
