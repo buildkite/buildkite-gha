@@ -23,7 +23,7 @@ func ValidateCompatibility(shell string) error {
 func compatibilityError(shell, command string) error {
 	command = normalizeCommand(command)
 	switch command {
-	case "cmd", "cmd.exe", "msys2", "msys2.cmd", "msys2.exe":
+	case "cmd", "cmd.exe":
 		return &UnsupportedError{Shell: shell, Command: command}
 	default:
 		return nil
