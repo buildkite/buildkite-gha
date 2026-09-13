@@ -104,7 +104,7 @@ func resolveHostExecutableBeforeWorkflow(configured, fallback, label string) (st
 	if err != nil {
 		return "", fmt.Errorf("resolve %s absolute path before workflow execution: %w", label, err)
 	}
-	resolved, err = filepath.EvalSymlinks(resolved)
+	resolved, err = canonicalHostExecutable(resolved)
 	if err != nil {
 		return "", fmt.Errorf("canonicalize %s before workflow execution: %w", label, err)
 	}
