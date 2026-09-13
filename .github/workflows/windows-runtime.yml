@@ -20,6 +20,11 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.18.0
+      - name: Install zstd in the isolated cache tool directory
+        run: |
+          $directory = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'zstd'
+          New-Item -ItemType Directory -Force -Path $directory | Out-Null
+          Copy-Item -LiteralPath 'C:\tools\zstd\zstd.exe' -Destination (Join-Path $directory 'zstd.exe')
       - name: Build Windows runtime
         run: go build ./...
       - name: Exercise checkout Git preflight
