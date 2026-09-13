@@ -14,6 +14,60 @@ import (
 	"testing"
 )
 
+func TestWindowsCygwinShell(t *testing.T) {
+	// Match curl/curl's windows.yml at
+	// 0b04700029149d740f50b7925dd162aa270e3908. CI installs real Cygwin at D:.
+	if os.Getenv("BUILDKITE_GHA_TEST_CYGWIN") == "" {
+		t.Skip(`set BUILDKITE_GHA_TEST_CYGWIN=1 with Cygwin installed at D:\cygwin`)
+	}
+	const shell = `D:\cygwin\bin\bash.exe '{0}'`
+	workspace := t.TempDir()
+	temp := filepath.Join(workspace, "script temp")
+	if err := os.Mkdir(temp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMP", temp)
+	t.Setenv("TEMP", temp)
+	workflow := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflow, "name: Cygwin test\n")
+	const script = `set -eu
+PATH=/usr/bin
+test "$(uname -o)" = Cygwin
+test "$(cygpath -w "$PWD")" = "$GITHUB_WORKSPACE"
+printf 'value=%s\n' 'Cygwin héllo' >> "$GITHUB_OUTPUT"
+printf 'script=%s\n' "$(cygpath -w "$0")" >> "$GITHUB_OUTPUT"
+cat "$0" > "$SCRIPT_COPY"
+`
+	job := runtimePlan(t, workspace, workflow, []runtimeTestStep{{
+		ID: "cygwin", Kind: "run", Command: script,
+		Env: map[string]string{"SCRIPT_COPY": filepath.Join(workspace, "script-copy")},
+	}})
+	job.DefaultShell = shell
+	job.Outputs = map[string]string{"value": "${{ steps.cygwin.outputs.value }}", "script": "${{ steps.cygwin.outputs.script }}"}
+	var output bytes.Buffer
+	result, err := (Runner{Stdout: &output, Stderr: &output}).runTestJob(t.Context(), job, workspace)
+	if err != nil || result.Outputs["value"] != "Cygwin héllo" {
+		t.Fatalf("outputs = %v, error = %v\n%s", result.Outputs, err, output.String())
+	}
+	contents, err := os.ReadFile(filepath.Join(workspace, "script-copy"))
+	if err != nil || string(contents) != script {
+		t.Fatalf("script changed: %q, error = %v", contents, err)
+	}
+	scriptPath := result.Outputs["script"]
+	if filepath.Dir(scriptPath) != temp {
+		t.Fatalf("script path = %q, want parent %q", scriptPath, temp)
+	}
+	if _, err := os.Stat(scriptPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary script was not removed: %v", err)
+	}
+	failed := newResult()
+	err = (&jobRun{}).runShellProcess(t.Context(), newCommandOutputProcessor(&output, &output), workspace, nil, &failed, shell, "exit 37")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 37 {
+		t.Fatalf("exit = %v, want 37\n%s", err, output.String())
+	}
+}
+
 func TestWindowsBatchArgumentHelper(t *testing.T) {
 	if os.Getenv("GHA_BATCH_HELPER") == "" {
 		return
