@@ -128,8 +128,10 @@ func (s *Store) maintainLocked(ctx context.Context) error {
 		if lockErr != nil {
 			continue
 		}
-		_ = os.RemoveAll(partial)
+		// The maintenance lock prevents new partial writers while we remove it.
+		// Windows cannot remove a directory containing an open lock file.
 		lock.unlock()
+		_ = os.RemoveAll(partial)
 	}
 	var total int64
 	for _, entry := range entries {
@@ -166,12 +168,15 @@ func (s *Store) maintainLocked(ctx context.Context) error {
 	return s.writeCacheSize(total)
 }
 
-func (s *Store) publishCacheEntry(ctx context.Context, temporary, base string) error {
+func (s *Store) publishCacheEntry(ctx context.Context, temporary, base string, partialLock *actionCacheLock) error {
 	maintenance, err := lockActionCache(ctx, filepath.Join(s.root, ".maintenance.lock"), actionCacheLockExclusive, false)
 	if err != nil {
 		return err
 	}
 	defer maintenance.unlock()
+	// Keep cleanup excluded while closing the partial's handle: Windows cannot
+	// rename a directory containing an open file without delete sharing.
+	partialLock.unlock()
 	if err := os.Rename(temporary, base); err != nil {
 		return err
 	}
