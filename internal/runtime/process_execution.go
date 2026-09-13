@@ -282,7 +282,9 @@ func processEnv(overrides map[string]string) []string {
 	values := make(map[string]string, 6+len(overrides))
 	inherited := []string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"}
 	if runtime.GOOS == "windows" {
-		inherited = append(inherited, "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramData", "ProgramFiles", "ProgramFiles(x86)")
+		// Known-folder lookups (including WiX installers) expand system-drive
+		// and profile paths rather than reading ProgramData alone.
+		inherited = append(inherited, "SystemRoot", "SystemDrive", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "ALLUSERSPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramData", "ProgramFiles", "ProgramFiles(x86)")
 	}
 	for _, name := range inherited {
 		if value, ok := os.LookupEnv(name); ok {

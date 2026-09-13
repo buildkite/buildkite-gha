@@ -26,6 +26,18 @@ func TestWindowsEnvironment(t *testing.T) {
 	if !strings.Contains(strings.ToUpper(strings.Join(process, "\n")), "SYSTEMROOT=") {
 		t.Fatal("missing Windows system environment")
 	}
+	// Exercise legacy common-appdata resolution in a child with the actual
+	// restricted environment, rather than merely asserting an allowlist entry.
+	commonAppData := os.Getenv("ALLUSERSPROFILE")
+	if commonAppData == "" {
+		t.Fatal("Windows host has no ALLUSERSPROFILE")
+	}
+	command := exec.CommandContext(t.Context(), "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", `[Environment]::GetFolderPath('CommonApplicationData')`)
+	command.Env = processEnv(nil)
+	output, err := command.CombinedOutput()
+	if err != nil || !strings.EqualFold(strings.TrimSpace(string(output)), commonAppData) {
+		t.Fatalf("common appdata = %q, want %q; error=%v", output, commonAppData, err)
+	}
 	bin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(bin, "tool.EXE"), []byte("executable"), 0o600); err != nil {
 		t.Fatal(err)
