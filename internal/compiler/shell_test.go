@@ -24,10 +24,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Unsupported shell
-        shell: /opt/microsoft/powershell/7/pwsh -File {0}
+        shell: C:/Windows/System32/cmd.exe /C {0}
         run: Write-Output test
 `,
-			wantReportedCommand: "pwsh",
+			wantReportedCommand: "cmd.exe",
+			wantLine:            6,
+			wantStep:            1,
+		},
+		{
+			name: "native Windows executable path",
+			workflow: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Unsupported shell
+        shell: C:\Windows\System32\cmd.exe /C {0}
+        run: echo test
+`,
+			wantReportedCommand: "cmd.exe",
 			wantLine:            6,
 			wantStep:            1,
 		},
@@ -53,7 +68,7 @@ jobs:
   test:
     strategy:
       matrix:
-        shell: [powershell]
+        shell: [cmd]
     runs-on: ubuntu-latest
     steps:
       - shell: ${{ matrix.shell }}
@@ -84,7 +99,7 @@ jobs:
 				t.Fatalf("finding blocker = %q / %q", finding.Blocker, finding.BlockerDetail)
 			}
 			for _, want := range []string{
-				"Use bash, sh, python, or a valid custom shell template whose command is available on PATH",
+				"Use bash, sh, pwsh, powershell, python, or a valid custom shell template whose command is available on PATH",
 				"https://github.com/buildkite/buildkite-gha",
 			} {
 				if !strings.Contains(finding.Message, want) {
@@ -105,7 +120,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - shell: pwsh -File {0} ${{ github.event.shell_suffix }}
+      - shell: cmd /C {0} ${{ github.event.shell_suffix }}
         run: Write-Output test
 `)
 	eventSource := pushEvent(t)
@@ -124,7 +139,7 @@ jobs:
 	if strings.Contains(finding.Message, sentinel) || strings.Contains(err.Error(), sentinel) {
 		t.Fatalf("event-derived shell argument reached diagnostic: message %q, error %v", finding.Message, err)
 	}
-	if !strings.Contains(finding.Message, `shell "pwsh" is unsupported`) {
+	if !strings.Contains(finding.Message, `shell "cmd" is unsupported`) {
 		t.Fatalf("finding message = %q", finding.Message)
 	}
 	if finding.Blocker != "shell" || finding.BlockerDetail != "" {
@@ -155,7 +170,7 @@ jobs:
         run: Write-Output test
 `)
 	eventSource := pushEvent(t)
-	event := bytes.Replace(eventSource, []byte(`"payload": {`), []byte(`"payload": {"shell": "pwsh",`), 1)
+	event := bytes.Replace(eventSource, []byte(`"payload": {`), []byte(`"payload": {"shell": "cmd",`), 1)
 	if bytes.Equal(event, eventSource) {
 		t.Fatal("event payload was not updated")
 	}
@@ -178,6 +193,9 @@ func TestCompilePlansAcceptCustomShellTemplates(t *testing.T) {
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: msys2 {0}
     steps:
       - shell: bash -l {0}
         run: conda info
@@ -185,15 +203,22 @@ jobs:
         run: print("R script")
       - shell: julia --color=yes {0}
         run: println("Julia script")
+      - shell: D:\cygwin\bin\bash.exe '{0}'
+        run: echo Cygwin
+      - shell: '"C:\Program Files\Cygwin\bin\bash.exe" {0}'
+        run: echo Cygwin
 `)
 	plans, err := compileUntrustedPlans(".github/workflows/shells.yml", workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || len(plans[0].Program.Job.Steps) != 3 {
+	if len(plans) != 1 || len(plans[0].Program.Job.Steps) != 5 {
 		t.Fatalf("compiled plans = %#v", plans)
 	}
-	for i, want := range []string{"bash -l {0}", "Rscript {0}", "julia --color=yes {0}"} {
+	if got := plans[0].Program.Job.Defaults.Shell.Source; got != "msys2 {0}" {
+		t.Fatalf("default shell = %q", got)
+	}
+	for i, want := range []string{"bash -l {0}", "Rscript {0}", "julia --color=yes {0}", `D:\cygwin\bin\bash.exe '{0}'`, `"C:\Program Files\Cygwin\bin\bash.exe" {0}`} {
 		if plans[0].Program.Job.Steps[i].Run.Shell.Source != want {
 			t.Fatalf("step %d shell = %q, want %q", i+1, plans[0].Program.Job.Steps[i].Run.Shell.Source, want)
 		}

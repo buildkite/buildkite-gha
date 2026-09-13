@@ -4,11 +4,106 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestPowerShellExecution(t *testing.T) {
+	pwsh, err := exec.LookPath("pwsh")
+	if err != nil {
+		t.Skip("PowerShell is not installed")
+	}
+	t.Run("absolute template", func(t *testing.T) {
+		workspace := t.TempDir()
+		temp := filepath.Join(workspace, "script temp")
+		if err := os.Mkdir(temp, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		wantTemp, err := os.Stat(temp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("TMPDIR", temp)
+		t.Setenv("TMP", temp)
+		t.Setenv("TEMP", temp)
+		command := strconv.Quote(pwsh)
+		if runtime.GOOS == "windows" {
+			// Use native separators, including in Program Files, not Go escapes.
+			command = `"` + pwsh + `"`
+		}
+		workflow := ".github/workflows/test.yml"
+		writeFixtureFile(t, workspace, workflow, "name: absolute PowerShell template\n")
+		job := runtimePlan(t, workspace, workflow, []runtimeTestStep{{
+			ID: "script", Kind: "run", Shell: command + " -NoProfile -File {0}",
+			Command: `"script=$PSCommandPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append`,
+		}})
+		job.Outputs = map[string]string{"script": "${{ steps.script.outputs.script }}"}
+		result, err := (Runner{}).runTestJob(t.Context(), job, workspace)
+		if err != nil || filepath.Ext(result.Outputs["script"]) != ".ps1" {
+			t.Fatalf("absolute template outputs=%v error=%v, want script in %q", result.Outputs, err, temp)
+		}
+		// PowerShell may expand Windows 8.3 aliases in the script path.
+		gotTemp, err := os.Stat(filepath.Dir(result.Outputs["script"]))
+		if err != nil || !os.SameFile(gotTemp, wantTemp) {
+			t.Fatalf("script path = %q, want parent directory %q: %v", result.Outputs["script"], temp, err)
+		}
+	})
+	for _, shell := range []string{"pwsh", "powershell", ""} {
+		if shell == "" && runtime.GOOS != "windows" || shell == "powershell" && runtime.GOOS != "windows" {
+			continue
+		}
+		t.Run("shell="+shell, func(t *testing.T) {
+			workspace := t.TempDir()
+			temp := filepath.Join(workspace, "runner's temp")
+			if err := os.Mkdir(temp, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("TMPDIR", temp)
+			t.Setenv("TMP", temp)
+			t.Setenv("TEMP", temp)
+			workflow := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflow, "name: PowerShell test\n")
+			job := runtimePlan(t, workspace, workflow, []runtimeTestStep{
+				{ID: "first", Kind: "run", Shell: shell, Command: `"script=$PSCommandPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+"GREETING=héllo" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`},
+				{ID: "second", Kind: "run", Shell: shell, Command: `if ($env:GREETING -ne 'héllo') { throw 'environment lost' }
+"value=$env:GREETING" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append`},
+			})
+			job.Outputs = map[string]string{"value": "${{ steps.second.outputs.value }}", "script": "${{ steps.first.outputs.script }}"}
+			var stdout, stderr bytes.Buffer
+			result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).runTestJob(t.Context(), job, workspace)
+			if err != nil || result.Outputs["value"] != "héllo" {
+				t.Fatalf("outputs = %#v, error = %v\nstdout: %s\nstderr: %s", result.Outputs, err, stdout.String(), stderr.String())
+			}
+			script := result.Outputs["script"]
+			if filepath.Ext(script) != ".ps1" {
+				t.Fatalf("script = %q", script)
+			}
+			if _, err := os.Stat(script); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("script not removed: %v", err)
+			}
+			for _, command := range []string{`Write-Error 'stop here'; "should-not-run=yes" >> $env:GITHUB_OUTPUT`, `& pwsh -NoProfile -Command 'exit 7'`} {
+				failed := runtimePlan(t, workspace, workflow, []runtimeTestStep{{ID: "failed", Kind: "run", Shell: shell, Command: command}})
+				if _, err := (Runner{}).runTestJob(t.Context(), failed, workspace); err == nil {
+					t.Fatalf("command succeeded: %s", command)
+				}
+			}
+		})
+	}
+}
+
+func TestAbsolutePowerShellScriptExtension(t *testing.T) {
+	for _, command := range []string{`C:\Program Files\PowerShell\7\pwsh.exe`, `/opt/powershell/PWSH`} {
+		if got := shellScriptExtension(command); got != ".ps1" {
+			t.Fatalf("extension for %q = %q", command, got)
+		}
+	}
+}
 
 func TestRunJobPythonShellUsesTemporaryScript(t *testing.T) {
 	installPythonShellTestCommand(t)

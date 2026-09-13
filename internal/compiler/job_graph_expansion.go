@@ -81,7 +81,7 @@ func jobGraphExpansionReport(expanded jobGraphExpansionResult, warnings []Warnin
 // expandJobGraph resolves reusable workflow calls, then turns the parsed
 // logical job graph into deterministic JobInstance values and report data.
 func expandJobGraph(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (jobGraphExpansionResult, error) {
-	resolved, warnings, scan, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource)
+	resolved, warnings, scan, err := resolveReusableWorkflows(ctx, path, source, parsed, context, options.RepositorySource, options.WorkflowSource)
 	if err != nil {
 		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
 		for _, job := range parsed.Jobs {

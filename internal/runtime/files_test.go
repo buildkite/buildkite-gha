@@ -18,6 +18,7 @@ func TestFileCommandParsing(t *testing.T) {
 	}{
 		{name: "LF", contents: "single=value\nmulti<<END\nfirst\nsecond\nEND\n", want: map[string]string{"single": "value", "multi": "first\nsecond"}},
 		{name: "CRLF", contents: "single=value\r\nmulti<<END\r\nfirst\r\nsecond\r\nEND\r\n", want: map[string]string{"single": "value", "multi": "first\nsecond"}},
+		{name: "PowerShell UTF8 BOM", contents: "\ufeffsingle=héllo\r\nmulti<<END\r\n\ufeffpayload\r\nEND\r\n", want: map[string]string{"single": "héllo", "multi": "\ufeffpayload"}},
 		{name: "equals before heredoc", contents: "single=value<<literal\n", want: map[string]string{"single": "value<<literal"}},
 		{name: "heredoc before equals", contents: "multi<<END=value\npayload\nEND=value\n", want: map[string]string{"multi": "payload"}},
 		{name: "missing name", contents: "=value\n", wantErr: "invalid file command"},

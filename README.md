@@ -99,7 +99,7 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 
 | Good fit | Not currently supported |
 | --- | --- |
-| Linux x86-64 and native macOS arm64 jobs using `bash`, `sh`, `python`, or an installed custom shell | Windows, Linux arm64, or macOS x86-64 |
+| Linux x86-64 and native macOS arm64 jobs; [experimental Windows x86-64 jobs](docs/compatibility.md#experimental-windows-jobs) with explicit opt-in | Windows arm64/Server 2025, Linux arm64, or macOS x86-64 |
 | Local and public JavaScript and composite actions; verified Dockerfile and public prebuilt-image actions on Linux | Private actions, private container images, and Docker actions on macOS |
 | Static matrices, `needs`, outputs, and local, public, or approved private reusable workflows | Dynamic reusable calls, matrices, and expressions outside the documented subset |
 | Exact-commit checkout, including managed private repository access | GitHub-issued OIDC claims or protected queues |

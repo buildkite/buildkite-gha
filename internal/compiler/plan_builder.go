@@ -35,6 +35,7 @@ type planBuilder struct {
 }
 
 type builtPlanActions struct {
+	workflowSource       *RemoteWorkflowSource
 	locks                []plan.ActionLock
 	capabilities         []string
 	authorization        PlanAuthorization
@@ -148,9 +149,6 @@ func reducePlanEventExpressions(ir IR) (IR, error) {
 }
 
 func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest string) (plan.Job, PlanAuthorization, []byte, error) {
-	if runtimeDistributionDigest == "" {
-		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
-	}
 	workflowProgram := lowerWorkflowProgram(instance)
 	actions, err := b.buildActions(instance, &workflowProgram)
 	if err != nil {
@@ -181,8 +179,13 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	}
 	sort.Strings(actions.capabilities)
 	actions.capabilities = slices.Compact(actions.capabilities)
-	if instance.Platform == PlatformDarwinARM64 && slices.Contains(actions.capabilities, "docker") {
-		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on darwin/arm64", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
+	if instance.Platform != PlatformLinuxAMD64 && slices.Contains(actions.capabilities, "docker") {
+		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on %s", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, instance.Platform)
+	}
+	// Runtime discovery omits failed jobs. Preserve their compatibility error
+	// when upload recompiles without acquiring a runtime for those jobs.
+	if runtimeDistributionDigest == "" {
+		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
 	}
 	job := b.lowerPlanJob(instance, workflowProgram, runtimeDistributionDigest, actions, needSources, buildPlanNeedOutputs(instance), deferredInputs, callGuards, secrets, secretMappings, githubToken)
 	if err := job.ProjectProgram(); err != nil {
@@ -488,9 +491,12 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 		built.capabilities = capabilities
 		return built, nil
 	}
-	compiled, err := compileActionInvocations(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs)
+	compiled, err := compileWorkflowActionInvocations(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs, workflowSourceResolver(instance, b.options))
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+	}
+	if instance.RemoteWorkflow == nil {
+		built.workflowSource = compiled.workflowSource
 	}
 	built.requiresMise = compiled.requiresMise
 	built.requiredSecrets = compiled.requiredSecrets
@@ -678,12 +684,13 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		},
 		Runtime: &plan.Runtime{DistributionDigest: runtimeDistributionDigest},
 		Workflow: plan.Workflow{
-			Path:         instance.SourcePath,
-			RunPath:      workflowRunPath,
-			Name:         b.workflowName,
-			Digest:       instance.SourceDigest,
-			LogicalJobID: instance.LogicalJobID,
-			Remote:       planRemoteWorkflowSource(instance.RemoteWorkflow),
+			Path:           instance.SourcePath,
+			RunPath:        workflowRunPath,
+			Name:           b.workflowName,
+			Digest:         instance.SourceDigest,
+			LogicalJobID:   instance.LogicalJobID,
+			Remote:         planRemoteWorkflowSource(instance.RemoteWorkflow),
+			SelfRepository: planRemoteWorkflowSource(actions.workflowSource),
 		},
 		Event: plan.Event{
 			Provider: b.ir.Event.Provider, Name: b.ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(b.eventDigest[:]),

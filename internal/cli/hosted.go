@@ -179,6 +179,17 @@ func hostedOptions(groupLabel string, configuredTargets map[string]compiler.Runn
 	return options
 }
 
+// candidateWorkflowSource is not provenance. The compiler must fetch the exact
+// workflow path and match its bytes before resolving $/. Synthetic validation
+// events use an all-zero placeholder SHA and cannot identify source.
+func candidateWorkflowSource(eventSource []byte) *compiler.WorkflowSourceReference {
+	event, err := compiler.ParseEvent(eventSource)
+	if err != nil || event.Provider != "github" || strings.Trim(event.SHA, "0") == "" {
+		return nil
+	}
+	return &compiler.WorkflowSourceReference{Repository: event.Repository.Owner + "/" + event.Repository.Name, Commit: event.SHA}
+}
+
 func applyRunnerResolution(options *compiler.Options, resolution agentRunnerResolution) {
 	options.Runners.Selectors = resolution.selectors
 	options.Runners.Rejections = resolution.rejections
@@ -215,6 +226,7 @@ func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowS
 
 func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerResolution agentRunnerResolution, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication, environmentSource compiler.EnvironmentSource, vars compiler.VariableSources, eventFile bool) (hostedCompilation, error) {
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
+	options.WorkflowSource = candidateWorkflowSource(eventSource)
 	options.EventFile = eventFile
 	applyRunnerResolution(&options, runnerResolution)
 	options.StepKeyNamespace = stepKeyNamespace
@@ -539,8 +551,8 @@ func configuredRunnerTarget(label, queue, image string) (string, compiler.Runner
 	if image != "" && !runnerImagePattern.MatchString(image) {
 		return "", compiler.RunnerTarget{}, fmt.Errorf("runner image for %q must be an immutable registry sha256 reference", canonical)
 	}
-	if image != "" && platform == compiler.PlatformDarwinARM64 {
-		return "", compiler.RunnerTarget{}, fmt.Errorf("runner image for %q is unsupported on darwin/arm64", canonical)
+	if image != "" && platform != compiler.PlatformLinuxAMD64 {
+		return "", compiler.RunnerTarget{}, fmt.Errorf("runner image for %q is unsupported on %s", canonical, platform)
 	}
 	if image == "" {
 		if preset, ok := hostedRunnerTargets()[canonical]; ok {
@@ -562,7 +574,12 @@ func supportedRunnerTarget(label string) (string, compiler.Platform, error) {
 	case "macos-15", "macos-14":
 		// These remain available as local fallbacks when the Agent API is absent.
 		return canonical, compiler.PlatformDarwinARM64, nil
+	case "windows-latest", "windows-2022":
+		return canonical, compiler.PlatformWindowsAMD64, nil
 	default:
+		if canonical == "windows" || strings.HasPrefix(canonical, "windows-") {
+			return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q; Windows mappings support windows-latest and windows-2022", label)
+		}
 		// Configuring an otherwise unknown selector explicitly maps it to the
 		// supported Linux/amd64 platform. The Agent API owns compatibility
 		// policy for every selector that is not configured locally.

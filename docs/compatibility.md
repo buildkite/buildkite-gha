@@ -7,8 +7,9 @@ and the Buildkite plugin. If a feature is not listed, treat it as unsupported.
 
 buildkite-gha requires Buildkite agent v3.129 or newer.
 
-The released plugin supports Linux x86-64 and native macOS arm64 importers and
-jobs. It sets the matching `runner.os` and `runner.arch` values. Runner labels
+The plugin supports Linux x86-64 and native macOS arm64 importers and
+jobs, with [experimental Windows jobs](#experimental-windows-jobs) available by
+explicit opt-in. It sets the matching `runner.os` and `runner.arch` values. Runner labels
 select a platform; they do not promise GitHub image, toolchain, or Xcode parity.
 It sets `runner.environment` to `self-hosted` on every platform.
 
@@ -36,13 +37,13 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | --- | --- | --- |
 | [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name`, explicit `run-name`, and job names are retained. `run-name` supports expressions over `github` and `inputs`. |
 | [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. `workflow_call` is supported for composition. |
-| [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64. The Agent API can map compatible selectors to hosted Linux or native macOS arm64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
+| [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64. The Agent API can map compatible selectors to hosted Linux, native macOS arm64, or explicitly enabled experimental Windows x86-64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
-| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `python`, and custom shell templates. |
+| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `python`, and custom shell templates; PowerShell and experimental Windows MSYS2 jobs. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local, public, and approved private GitHub workflows with static inputs, string inputs that embed needs outputs, and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. Private access requires a separate importer opt-in and existing Git access. |
-| [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile and public prebuilt-image actions on Linux only. |
+| [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux, macOS, and experimental Windows jobs; verified Dockerfile and public prebuilt-image actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Reusable-workflow jobs use the top-level workflow permissions. |
 | [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs and locally inherited or explicitly mapped reusable jobs resolve through the destination job's Buildkite secret authority. |
@@ -50,19 +51,32 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Environments and snapshots](#deployment-environments) | 🟡 Supported subset | Literal environments on top-level jobs, with required-reviewer approval gates and environment-scoped secret names. Wait timers, branch policies, and custom rules are rejected. Snapshots are accepted with no effect. |
 | [Variables](#repository-and-organization-variables) | 🟡 Supported subset | Repository, organization, and environment `vars` resolve inside a Buildkite job with GitHub's per-position scoping. `run-name` rejects `vars`. |
 | [OIDC](#other-secrets-and-oidc) | 🟡 Supported subset | Host JavaScript and composite actions can request Buildkite OIDC tokens in jobs with `id-token: write`. |
-| [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers are outside the initial release. |
+| [Windows jobs](#experimental-windows-jobs) | 🟡 Experimental subset | Windows Server 2022 x86-64 requires explicit opt-in and a compatible Windows queue. No default Windows mapping. |
+| [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows arm64, Windows Server 2025, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers. |
 | [Other GitHub services](#github-services) | ❌ Unsupported | No general emulation for Releases, Packages, Checks, deployments, or GitHub artifact APIs. |
 
-## Outside the initial scope
+## Experimental Windows jobs
 
-`buildkite-gha` targets Linux x86-64 and native macOS arm64. Windows execution
-is outside the initial product scope, so Windows runner labels are rejected
-instead of mapped to another platform.
+Windows support is in development, not generally available. Import workflows
+from Linux x86-64 or macOS arm64; Windows agents run generated jobs only.
+`windows-latest` and `windows-2022` select Windows x86-64 when explicitly mapped
+to a queue or enabled through Agent API resolution. They have no local preset
+and are otherwise rejected, never silently redirected to Linux.
 
-Compatibility analysis should distinguish this scope boundary from features
-that could be added to the supported platforms. This distinction does not
-change validation: Windows workflows remain unsupported and appear in raw
-corpus results.
+Use a Windows Server 2022 queue with Buildkite agent v3.129 or newer, PowerShell
+7 (`pwsh`), and Git on `PATH`. Runner labels do not install GitHub's runner image
+or its tools. `runner.os` is `Windows` and `runner.arch` is `X64`. See
+[explicit mappings and runtime distributions](cli.md#choose-runners-and-runtimes).
+
+The default shell is `pwsh`. Explicit `pwsh` and Windows PowerShell
+(`powershell`) steps, JavaScript actions, and composite actions are supported
+within the same action restrictions documented below. Use UTF-8 for file
+commands; Windows PowerShell needs `Out-File -Encoding utf8 -Append` rather
+than its default UTF-16 redirection. [MSYS2 custom shells](#commands-and-actions)
+are supported. `cmd` shells, containers,
+services, Docker actions, custom images, and cache volumes
+are not supported on Windows. Windows Server 2025 and arm64 labels are not
+enabled by these mappings.
 
 ## How workflows run on Buildkite
 
@@ -426,6 +440,10 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 **🟡 Supported subset.** Calls may use a local path or a literal GitHub reference such as `owner/repository/.github/workflows/ci.yml@v1`. A remote reference resolves once per operation to an immutable commit and repository digest. Nested `./.github/workflows/...` calls resolve in that pinned repository.
 
+Self-repository calls such as `$/.github/workflows/ci.yml` select the repository and exact commit containing the calling workflow. They use the same source verification described under [self-repository actions](#self-repository-actions), and retain the existing reusable-workflow access, secret-forwarding, cycle, and depth limits.
+
+Verified self calls in the root workflow's repository support `secrets: inherit` and explicit secret mappings. Nested `$/` and `./` calls retain this forwarding scope. An explicit `owner/repository/...@ref` call leaves the scope, even if it names the same repository and commit; its nested self or local calls cannot restore it. Every forwarding edge still needs its own `secrets` declaration.
+
 Private references work for the pipeline repository and cross-repository sources available to the importer's existing Git credentials. Enable them with the plugin's default-off `private-reusable-workflows` field or the matching `upload` flag. When the Buildkite Agent repository-provider credential helper supplies access, Buildkite approves each requested repository. Git access is also used when GitHub's anonymous API quota is exhausted, so a rate limit does not fail an otherwise authorized call. Missing and denied repositories, refs, and paths produce the same error.
 
 **✅ Supported:**
@@ -548,7 +566,7 @@ To grant repository access, list each required permission at the top level, such
 | Key | Status | Behavior |
 | --- | --- | --- |
 | `env` | 🟡 Supported subset | Workflow, job, and step maps use normal precedence; the most specific value wins. Individual values may use supported interpolation. An entire map cannot be expression-valued. |
-| `defaults.run.shell` | 🟡 Supported subset | Supported at workflow and job level for `bash`, `sh`, `python`, and custom shell templates. Host jobs default to `bash`; job containers default to `sh`. |
+| `defaults.run.shell` | 🟡 Supported subset | Supported at workflow and job level, subject to [shell and platform limits](#commands-and-actions). Windows defaults to `pwsh`, other host jobs to `bash`, and job containers to `sh`. |
 | `defaults.run.working-directory` | 🟡 Supported subset | Supported at workflow and job level for workspace-relative paths. |
 
 A job-level value overrides the same workflow-level environment variable:
@@ -722,7 +740,8 @@ with that image when unmapped.
 
 An explicit mapping is authoritative and bypasses Agent API resolution. It
 declares that the selector runs on Linux x86-64, except for the known macOS
-labels, which select Darwin arm64 and reject images. For every other selector,
+labels, which select Darwin arm64, and the experimental Windows labels, which
+select Windows x86-64. Both reject images. For every other selector,
 the job-scoped Agent API owns compatibility and returns the complete queue,
 platform, and immutable Linux image. The importer applies that target verbatim
 and publishes returned fallback warnings as annotations.
@@ -965,7 +984,7 @@ services:
 
 Services support `image`, `credentials`, `env`, `ports`, `volumes`, `options`, `command`, and `entrypoint`.
 
-- Job container images can use compile-time `github`, `inputs`, `strategy`, and `matrix` values. The complete image must resolve to a non-empty string and a valid image reference during compilation. Secrets, `needs`, step outputs, and whole or dynamic contexts are unsupported.
+- Job container images can use compile-time `github`, `inputs`, `strategy`, and `matrix` values. A null or empty evaluated image runs the job on the host, including object-form containers. For example, `container: ${{ matrix.os.container }}` selects host execution when the matrix entry omits `container`. Other results must be strings containing valid image references. Literal images must be non-empty. Secrets, `needs`, step outputs, and whole or dynamic contexts are unsupported.
 - Service fields can use compile-time `github`, `inputs`, `strategy`, and `matrix` values or runtime `needs` outputs. An empty evaluated image skips the service.
 - A complete non-credential service map can use `${{ fromJSON(needs.<job>.outputs.<name>) }}`. Declare credentials statically so the compiler can prove their secret authority.
 - Credentials accept direct values and `github`, `vars`, `secrets`, or `env` expressions. Passwords pass to `docker login` through standard input. Authentication uses a private per-job Docker configuration and never reads ambient Docker credentials.
@@ -981,7 +1000,7 @@ A service with a Docker health check must become healthy before steps run. A ser
 
 Cleanup removes the job container, emits masked and bounded service logs, then removes services in declaration order, the network, newly created volumes, and private Docker configuration. Remaining owned resources fail the job. Docker resources are not a security or resource-isolation boundary: the hosted queue must isolate the whole job and enforce host CPU, memory, disk, and network limits. See the [security model](security.md#isolate-the-whole-job).
 
-macOS jobs reject containers, services, Docker actions, and Docker capability.
+macOS and Windows jobs reject containers, services, Docker actions, and Docker capability.
 
 ## Step syntax
 
@@ -1012,7 +1031,32 @@ A step can continue after failure and expose its outcome to a later condition:
 
 Install the custom command on the runner or in the job container, and add it to `PATH`. R and Julia are not installed automatically.
 
-PowerShell and Windows shells are not supported. If the shell name is known before the job starts, the workflow fails before an agent starts the job. A shell expression that needs a runtime value is checked before its step starts. If it resolves to an unsupported shell, the step fails. Use `bash`, `sh`, `python`, or a valid custom template instead.
+`pwsh` and `powershell` are also accepted when installed on the runner. Windows
+defaults to `pwsh`; Linux and macOS retain their existing bash default. PowerShell
+scripts stop on errors and propagate the last native command's exit code.
+`cmd` is unsupported. Known unsupported shells fail before an agent
+starts the job; shell expressions requiring runtime values are checked before
+the step starts.
+
+Native Windows executable paths can use drive-absolute backslashes, such as
+`D:\cygwin\bin\bash.exe '{0}'`. Quote executable paths containing spaces:
+`"C:\Program Files\PowerShell\7\pwsh.exe" -File {0}`. The runner must provide
+the executable at that path. A single backslash after the drive prefix selects
+literal separators for the executable only; templates with an escaped first
+backslash keep their escape rules. Argument escaping is unchanged.
+
+On Windows, `msys2/setup-msys2@v2` can install the `msys2 {0}` custom shell,
+including through `defaults.run.shell`. The runtime resolves its `.cmd` wrapper
+from the step's `PATH`, including earlier `GITHUB_PATH` updates. It passes an
+extensionless, unmodified script and the Windows working directory to the
+wrapper. MSYS2 supplies its login environment, error handling, and path conversion.
+
+Windows `.cmd` custom shells must forward arguments directly, without `CALL`
+or delayed expansion. Arguments can contain spaces, single quotes, and
+metacharacters such as `%`, `!`, `&`, and `^`. Arguments containing double
+quotes, line breaks, NUL, or a trailing backslash are rejected; these limits
+do not apply to the script contents. Native executable templates retain their
+existing argument handling.
 
 Working directories must stay inside the workspace.
 
@@ -1051,6 +1095,14 @@ Action steps can call public and local actions:
   with:
     target: production
 ```
+
+### Self-repository actions
+
+**🟡 Supported subset.** `uses: $/.github/actions/build` downloads the action from the repository and exact commit containing the workflow, without `actions/checkout`. Inside a remote composite action, `$/` selects that action's repository and commit, not the caller's. `uses: $/` selects an action at the repository root. Existing `./` action paths remain checkout-relative.
+
+For local workflow input, `compile`, `upload`, and event-specific validation treat the event repository and commit as candidates, not proof of workflow identity. Before resolving `$/`, the compiler fetches the same workflow path at that commit and requires its bytes to match the supplied file. This also applies to self references inside local reusable workflows. A fetched remote reusable workflow supplies its own immutable identity instead. Modified local workflow bytes fail verification; no Git `HEAD` or workspace fallback is used. Synthetic `validate --event` input has no source identity and reports self-repository resolution as indeterminate; use an exact `--event-path` snapshot.
+
+Self-repository actions retain the public-action access boundary, immutable tree verification, capability planning, and nested-action limits. A privately fetched reusable workflow does not grant access to private actions in that tree. Self paths must be repository-relative, without traversal, backslashes, or an explicit `@ref`.
 
 ### Background and parallel steps
 
@@ -1192,6 +1244,10 @@ Job-level expressions support the same operators and pure functions with these f
 | `defaults.run` | `github`, `needs`, `matrix`, `env`, `vars`, `inputs` |
 | `outputs` | `github`, `needs`, `matrix`, `runner`, `env`, `vars`, `secrets`, `steps`, `inputs` |
 
+Workflow-level `env` values use the job `env` expression rules, including
+fallbacks such as `${{ github.head_ref || github.ref_name }}`. Workflow-level
+`defaults.run` remains limited to direct context references.
+
 Workflow step fields support `hashFiles()`; composite step and job-level fields
 do not. Composite action `run`, `env`, `with`, and `working-directory` fields do
 support the listed operators and pure functions.
@@ -1218,7 +1274,8 @@ projected, or dynamically indexed `github`, and passing the whole context to
 another function, remain unsupported. These limits do not apply to access
 rooted at `github.event`.
 
-`runner.os` and `runner.arch` resolve to `Linux`/`X64` or `macOS`/`ARM64`.
+`runner.os` and `runner.arch` resolve to `Linux`/`X64`, `macOS`/`ARM64`, or
+`Windows`/`X64`.
 `runner.environment` resolves to `self-hosted`. GitHub assigns this value to
 runners registered outside GitHub, including managed providers. Buildkite
 agents are in the same class whether they use hosted agents or your own
@@ -1343,8 +1400,8 @@ parts with values supported by their runtime surface. Action references in
 | Public `owner/repo[/path]@ref` action | 🟡 Supported subset | Resolved to an exact commit and digest. |
 | Private action | ❌ Unsupported | No private action source access. |
 | JavaScript action | ✅ Supported | Declares `node16`, `node20`, or `node24`. |
-| Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; `bash`, `sh`, `python`, or an expression-backed custom shell template for `run`; literal `continue-on-error`. |
-| Docker action | 🟡 Supported subset | Verified local or public Dockerfile or prebuilt-image action on Linux with optional bounded `runs.args`. Rejected on macOS, including through a composite action. |
+| Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; `bash`, `sh`, `python`, `pwsh`, `powershell`, or an expression-backed custom shell template for `run`, subject to [platform limits](#commands-and-actions); literal `continue-on-error`. |
+| Docker action | 🟡 Supported subset | Verified local or public Dockerfile or prebuilt-image action on Linux with optional bounded `runs.args`. Rejected on macOS and Windows, including through a composite action. |
 | Direct workflow `uses: docker://...` action | ❌ Unsupported | Rejected during validation. |
 | Top-level action metadata `env` | ➖ Accepted, no effect | Any valid YAML value is discarded. It is not evaluated, injected, retained in plans, or used to request secrets or tokens. |
 
@@ -1604,6 +1661,16 @@ Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP v
 
 The v3 releases use managed Node 16 and emit its standard deprecation warning. Node 20 declarations run with managed Node 24. Every admitted bundle selects cache v2 from `ACTIONS_CACHE_SERVICE_V2`, uses `ACTIONS_RESULTS_URL` and a job-scoped runtime token, and preserves the root restore/post-save lifecycle and separate entry points. A non-routable `ACTIONS_CACHE_URL` satisfies the legacy availability gate; cache traffic still uses `ACTIONS_RESULTS_URL`. Their tar with zstd-or-gzip archive versioning is compatible across releases.
 
+On experimental Windows jobs, cache actions use a restricted tool path:
+`Git\usr\bin` and `zstd` under the Windows Program Files directory, then
+Windows System32. Install Git for Windows and zstd there for GNU tar with zstd
+compression. Without zstd, the upstream client uses gzip; without Git's tar,
+it can use Windows System32 tar. Cross-OS archives require GNU tar and zstd.
+The runtime obtains installation paths from Windows, replaces tool-selection
+environment variables case-insensitively, and excludes workflow `PATH` and
+`GITHUB_PATH` additions. Keep these installation directories outside workflow
+write access. This does not enable Buildkite cache volumes.
+
 The snapshot admits a commit only when every bundle it runs selects cache v2 and embeds one `@actions/cache` client version of 4.0.0 or later. Commits before v3.4.0 and v4.2.0 bundle cache-v1 clients and are absent. v3.4.1 is snapshotted but excluded because [its upstream release warns that it was published with an incorrect SHA](https://github.com/actions/cache/releases/tag/v3.4.1).
 
 A resolved commit outside the snapshot does not run. `actions/cache` runs upstream JavaScript with a job-scoped cache token, so an unaudited bundle could act on the cache service. Instead, the compiler runs the newest principal release for the requested major version (`v5` or `v5.2.0` runs v5.1.0), or v6.1.0 when the ref names no admitted major, a branch, or a bare commit. The plan records the requested ref and the substitute commit, and compilation emits one `W_CACHE_UNKNOWN_COMMIT_SUBSTITUTED` warning per distinct resolved commit:
@@ -1781,20 +1848,20 @@ The runtime sets `GITHUB_WORKFLOW` to the workflow's top-level `name`. If the wo
 ### Runner tools
 
 Linux labels use the corresponding Noble or Jammy hosted-toolchains image.
-macOS agents must provide tools used by shell steps. These images do not provide GitHub image parity. The runtime
-sets `RUNNER_OS` and `RUNNER_ARCH` to `Linux`/`X64` or `macOS`/`ARM64`, and
+macOS and Windows agents must provide tools used by shell steps. These images do not provide GitHub image parity. The runtime
+sets `RUNNER_OS` and `RUNNER_ARCH` to `Linux`/`X64`, `macOS`/`ARM64`, or `Windows`/`X64`, and
 `RUNNER_ENVIRONMENT` to `self-hosted`. Workflow and step environment entries
 cannot override these values.
 
 `RUNNER_TOOL_CACHE` is job-private unless the Linux job selects an immutable
 image with `/opt/hostedtoolcache`, which the default and configured
-hosted-toolchains images provide. macOS images are unsupported.
+hosted-toolchains images provide. macOS and Windows images are unsupported.
 
 ### Results, retries, and cancellation
 
 - A runtime-skipped Actions job remains successful in Buildkite, appends `(skipped)` to its job label, and publishes a logical `skipped` result for downstream imported jobs.
 - Retry the whole build if a producer result or artifact becomes ambiguous.
-- Cancellation targets the complete process tree: `SIGINT`, `SIGTERM` after 7.5 seconds, then `SIGKILL` after another 2.5 seconds.
+- Cancellation targets the complete process tree. Linux and macOS send `SIGINT`, `SIGTERM` after 7.5 seconds, then `SIGKILL` after another 2.5 seconds. Windows terminates the process tree through a Job Object without a signal grace period.
 - Summary, annotation, or skipped-label publication failure produces a warning and does not change a completed job result.
 
 ### Key limits

@@ -202,6 +202,9 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 				return pluginConfiguration{}, fmt.Errorf("runner %d: %w", index, err)
 			}
 			if cacheValue, configured := runner["cache"]; configured {
+				if target.Platform == compiler.PlatformWindowsAMD64 {
+					return pluginConfiguration{}, fmt.Errorf("runner %d: cache volumes are unsupported on windows/amd64", index)
+				}
 				cache, err := parsePluginCacheVolume(cacheValue)
 				if err != nil {
 					return pluginConfiguration{}, fmt.Errorf("runner %d: %w", index, err)

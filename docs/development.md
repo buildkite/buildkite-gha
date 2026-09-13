@@ -139,9 +139,10 @@ indeterminate repositories separately and excludes them from the compatibility
 percentage. The tally records workflow result counts; each workflow report
 keeps its diagnostics.
 
-Windows execution is [outside the initial product scope](compatibility.md#outside-the-initial-scope),
-not a compatibility gap on Linux or macOS. Keep Windows workflows in raw corpus
-results so the benchmark still describes the full sample.
+Windows jobs require [explicit opt-in](compatibility.md#experimental-windows-jobs).
+Corpus validation has no Windows preset, so it still rejects unmapped Windows
+labels. Keep those workflows in raw results so the benchmark describes the full
+sample; a rejected mapping is not proof of runtime incompatibility.
 
 An in-scope view must classify each record and account for overlapping
 findings. Do not calculate its denominator by subtracting aggregate diagnostic
@@ -188,6 +189,20 @@ See [Expression authority architecture](expression-authority.md) for the design
 rationale, security invariants, and remaining design work.
 
 Every normal Buildkite build runs repository checks, Test Engine-split Go tests, native macOS tests, the starter workflow compatibility report, and the shell and public-action smoke workflows against the build's exact CLI source. The public-action proof executes pinned checkout, Node, Go, Python, and Java setup actions. Test Engine records the Linux test results; the repository checks retain the race-enabled suite. GitHub Actions differential oracles run only when manually dispatched.
+
+The **Windows runtime** GitHub Actions workflow checks cache credential lifecycle
+isolation and local GNU tar round trips with zstd and gzip. It poisons tool
+environment variables and places decoy executables in the working directory.
+These checks do not prove Buildkite cache-service persistence.
+
+Before a Windows hosted cache proof, verify the [cache tool installation
+paths](compatibility.md#cache-action), record GNU tar and zstd versions, and run
+`TestWindowsCacheArchiveTools` with `BUILDKITE_GHA_TEST_NODE24` set to an absolute
+Node 24 executable. Then use a unique key in a root `actions/cache` producer:
+assert a miss, write known file contents, and confirm post-save completes. In a
+separate clean Windows job, assert an exact restore hit and compare the restored
+contents. Repeat with `actions/cache/save` and `actions/cache/restore`. A passing
+compile or job without these assertions is not a cache round-trip proof.
 
 The **Expression differential oracle** records hosted GitHub expression results
 for the conformance fixtures in `internal/expression/conformance_test.go`. Run it
@@ -250,7 +265,7 @@ Before running the task, inspect every commit and the complete diff since the la
 
 The task runs `check`, fetches `origin/main` and tags, and accepts only the next pre-1.0 patch or minor tag. It then requires you to type the exact proposed tag before creating and pushing it. Stop without running the task when the changes do not warrant a release or the correct bump is ambiguous.
 
-The tag build reruns checks and publishes the GitHub release, paired Linux/amd64 and Darwin/arm64 archives, and checksum file. Published assets are immutable; a failed publication must not replace an existing archive for the same stable tag.
+The tag build reruns checks and publishes the GitHub release, Linux/amd64, Darwin/arm64, and Windows/amd64 archives, and checksum file. Published assets are immutable; a failed publication must not replace an existing archive for the same stable tag.
 
 `GHA_GITHUB_RELEASE_TOKEN` must be a fine-grained, repository-scoped token with Contents read and write access. Store it as a Buildkite secret restricted to this release pipeline and webhook-created `v*` tag builds, with no access from ordinary branch or pull request builds. The publisher verifies the remote tag, checkout, and Buildkite commit before requesting the secret.
 

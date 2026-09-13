@@ -90,14 +90,17 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		out.observe = uploadArguments.telemetry.observe
 	}
 	var eventSource []byte
+	var sourceCandidate *compiler.WorkflowSourceReference
 	var eventOrigin effectiveEventOrigin
 	var eventLoadErr error
 	if eventPath != "" {
 		eventSource, eventOrigin, eventLoadErr = loadEffectiveEventSource(ctx, eventPath, agent)
+		sourceCandidate = candidateWorkflowSource(eventSource)
 		if parsedEvent, parseErr := compiler.ParseEvent(eventSource); eventLoadErr == nil && parseErr == nil {
 			out.sourceLinks = sourceLinksForEvent(parsedEvent)
 		}
 	} else if buildEvent, buildEventErr := buildkiteEventSource(os.Getenv); buildEventErr == nil {
+		sourceCandidate = candidateWorkflowSource(buildEvent)
 		if parsedEvent, parseErr := compiler.ParseEvent(buildEvent); parseErr == nil {
 			out.sourceLinks = sourceLinksForEvent(parsedEvent)
 		}
@@ -206,6 +209,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		// event and resolved variables.
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.RepositorySource = repositorySource
+		validationOptions.WorkflowSource = sourceCandidate
 		validation, _ := compiler.ValidateWithOptionsContext(ctx, input.Path, input.Source, validationOptions)
 		workflows[i].ReferencesVars = validation.ReferencesVars
 	}
@@ -297,6 +301,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.StepKeyNamespace = input.StepKeyNamespace
 		validationOptions.RepositorySource = repositorySource
+		validationOptions.WorkflowSource = candidateWorkflowSource(effectiveEvent.Source)
 		validationOptions.Vars = vars
 		validations[i], validationErrs[i] = compiler.ValidateEventWithOptionsContext(ctx, input.Path, input.Source, effectiveEvent.Source, validationOptions)
 	}
@@ -321,6 +326,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			applyRunnerResolution(&validationOptions, runnerResolution)
 			validationOptions.StepKeyNamespace = input.StepKeyNamespace
 			validationOptions.RepositorySource = repositorySource
+			validationOptions.WorkflowSource = candidateWorkflowSource(effectiveEvent.Source)
 			validationOptions.Vars = vars
 			validations[i], validationErrs[i] = compiler.ValidateEventWithOptionsContext(ctx, input.Path, input.Source, effectiveEvent.Source, validationOptions)
 		}
@@ -385,7 +391,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		return 1
 	}
 	runtimeDistributions := make(map[compiler.Platform]runtimeDistribution, len(requiredPlatforms))
-	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		if !requiredPlatforms[platform] {
 			continue
 		}
@@ -594,7 +600,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		artifactPaths[artifact.Path] = struct{}{}
 		artifacts = append(artifacts, artifact)
 	}
-	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		runtimeDistribution, ok := runtimeDistributions[platform]
 		if !ok {
 			continue
@@ -824,13 +830,15 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 
 func requiredRuntimePlatforms(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerResolution agentRunnerResolution, repositorySource compiler.RepositorySource, environmentSource compiler.EnvironmentSource, vars compiler.VariableSources) (map[compiler.Platform]bool, error, error) {
 	runtimeDigests := map[compiler.Platform]string{
-		compiler.PlatformLinuxAMD64:  distributionDigest,
-		compiler.PlatformDarwinARM64: distributionDigest,
+		compiler.PlatformLinuxAMD64:   distributionDigest,
+		compiler.PlatformDarwinARM64:  distributionDigest,
+		compiler.PlatformWindowsAMD64: distributionDigest,
 	}
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDigests)
 	options.Vars = vars
 	applyRunnerResolution(&options, runnerResolution)
 	options.RepositorySource = repositorySource
+	options.WorkflowSource = candidateWorkflowSource(eventSource)
 	options.ResolveActions = true
 	options.ActionSource = repositorySource
 	options.EnvironmentSource = environmentSource

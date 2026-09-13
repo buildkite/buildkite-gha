@@ -294,7 +294,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     env:
-      DEFAULT_SHELL: pwsh
+      DEFAULT_SHELL: cmd
     steps:
       - shell: ${{ env.DEFAULT_SHELL }}
         run: Write-Output test
@@ -326,8 +326,8 @@ jobs:
 		t.Fatalf("ClassifyFailure() = %q, want %q", got, FailureClassUnsupportedFeature)
 	}
 	for _, want := range []string{
-		`shell "pwsh" is unsupported`,
-		"Use bash, sh, python, or a valid custom shell template whose command is available on PATH",
+		`shell "cmd" is unsupported`,
+		"Use bash, sh, pwsh, powershell, python, or a valid custom shell template whose command is available on PATH",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("RunJob() error = %v, want %q", err, want)
@@ -561,6 +561,63 @@ func TestReusableWorkflowCallGuardUsesOnlyCallerNeeds(t *testing.T) {
 	result, err = (Runner{}).runTestJob(t.Context(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("failure() guard result = %#v, error = %v", result, err)
+	}
+}
+
+func TestCompiledWorkflowEnvironmentFallbackAndPrecedence(t *testing.T) {
+	const workflowPath = ".github/workflows/test.yml"
+	const source = `on: [push, pull_request]
+env:
+  CI_TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
+  JOB_OVERRIDE: workflow
+  STEP_OVERRIDE: workflow
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      JOB_OVERRIDE: job
+      STEP_OVERRIDE: job
+    outputs:
+      target: ${{ steps.observe.outputs.target }}
+      job: ${{ steps.observe.outputs.job }}
+      step: ${{ steps.observe.outputs.step }}
+      restored: ${{ steps.restore.outputs.step }}
+    steps:
+      - id: observe
+        env:
+          STEP_OVERRIDE: step
+        run: |
+          printf 'target=%s\njob=%s\nstep=%s\n' "$CI_TARGET_BRANCH" "$JOB_OVERRIDE" "$STEP_OVERRIDE" >> "$GITHUB_OUTPUT"
+      - id: restore
+        run: printf 'step=%s\n' "$STEP_OVERRIDE" >> "$GITHUB_OUTPUT"
+`
+	for _, test := range []struct {
+		name, event, ref, head, want string
+	}{
+		{name: "pull request head", event: "pull_request", ref: "refs/pull/42/merge", head: "feature/env", want: "feature/env"},
+		{name: "push fallback", event: "push", ref: "refs/heads/dev", want: "dev"},
+		{name: "expression text stays literal", event: "pull_request", ref: "refs/pull/42/merge", head: "${{ secrets.NOT_AUTHORIZED }}", want: "${{ secrets.NOT_AUTHORIZED }}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeFixtureFile(t, workspace, workflowPath, source)
+			event := []byte(fmt.Sprintf(`{"provider":"github","event":%q,"repository":{"owner":"acme","name":"widgets"},"ref":%q,"sha":"1111111111111111111111111111111111111111","actor":"test","payload":{"action":"opened","pull_request":{"head":{"ref":%q},"base":{"ref":"main"}}}}`, test.event, test.ref, test.head))
+			plans, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(source), event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 1 {
+				t.Fatalf("plans = %d, want 1", len(plans))
+			}
+			if len(plans[0].RequiredSecrets) != 0 || plans[0].GitHubToken != nil {
+				t.Fatal("workflow environment introduced credential authority")
+			}
+			result, err := (Runner{}).RunJob(t.Context(), plans[0], workspace)
+			want := map[string]string{"target": test.want, "job": "job", "step": "step", "restored": "job"}
+			if err != nil || result.Conclusion != "success" || !reflect.DeepEqual(result.Outputs, want) {
+				t.Fatalf("RunJob() result = %#v, error = %v, want outputs %#v", result, err, want)
+			}
+		})
 	}
 }
 

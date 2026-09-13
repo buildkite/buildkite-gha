@@ -86,15 +86,16 @@ type ActionSelector struct {
 }
 
 type ActionLock struct {
-	ID           string                    `json:"id"`
-	Source       string                    `json:"source"`
-	Repository   string                    `json:"repository,omitempty"`
-	RequestedRef string                    `json:"requested_ref,omitempty"`
-	Commit       string                    `json:"commit,omitempty"`
-	Path         string                    `json:"path,omitempty"`
-	SourceDigest string                    `json:"source_digest"`
-	DockerImage  string                    `json:"docker_image,omitempty"`
-	Children     map[string]ActionSelector `json:"children,omitempty"`
+	ID              string                    `json:"id"`
+	Source          string                    `json:"source"`
+	Repository      string                    `json:"repository,omitempty"`
+	RequestedRef    string                    `json:"requested_ref,omitempty"`
+	Commit          string                    `json:"commit,omitempty"`
+	Path            string                    `json:"path,omitempty"`
+	SourceDigest    string                    `json:"source_digest"`
+	ExecutablePaths []string                  `json:"executable_paths,omitempty"`
+	DockerImage     string                    `json:"docker_image,omitempty"`
+	Children        map[string]ActionSelector `json:"children,omitempty"`
 }
 
 type Compiler struct {
@@ -175,6 +176,9 @@ type Workflow struct {
 	Digest       string                `json:"digest"`
 	LogicalJobID string                `json:"logical_job_id"`
 	Remote       *RemoteWorkflowSource `json:"remote,omitempty"`
+	// SelfRepository binds local workflow bytes to fetched source for $/.
+	// Remote workflows use Remote instead; neither changes checkout identity.
+	SelfRepository *RemoteWorkflowSource `json:"self_repository,omitempty"`
 }
 
 // RemoteWorkflowSource binds a workflow file to one immutable remote
@@ -943,6 +947,15 @@ func (job Job) Validate() error {
 }
 
 func validateRemoteWorkflowSource(workflow Workflow) error {
+	if self := workflow.SelfRepository; self != nil {
+		if workflow.Remote != nil || self.RequestedRef != self.Commit {
+			return fmt.Errorf("job plan has ambiguous self-repository workflow provenance")
+		}
+		return validateRemoteWorkflowSource(Workflow{
+			Path:   self.Repository + "/" + strings.TrimPrefix(workflow.Path, "./") + "@" + self.Commit,
+			Remote: self,
+		})
+	}
 	if workflow.Remote == nil {
 		return nil
 	}
@@ -1388,6 +1401,14 @@ func validateActionLocks(job Job) error {
 		if !digestPattern.MatchString(lock.SourceDigest) || len(lock.Children) > 1024 {
 			return fmt.Errorf("action lock %q has invalid digest or too many children", lock.ID)
 		}
+		if len(lock.ExecutablePaths) > 50000 {
+			return fmt.Errorf("action lock %q has too many executable paths", lock.ID)
+		}
+		for i, executable := range lock.ExecutablePaths {
+			if !cleanActionPath(executable) || i > 0 && lock.ExecutablePaths[i-1] >= executable {
+				return fmt.Errorf("action lock %q has invalid executable paths", lock.ID)
+			}
+		}
 		if lock.DockerImage != "" && !ValidContainerImageReference(lock.DockerImage) {
 			return fmt.Errorf("action lock %q has invalid Docker image", lock.ID)
 		}
@@ -1431,7 +1452,17 @@ func validateActionLocks(job Job) error {
 			if !ok {
 				return 0, fmt.Errorf("action selector references missing lock %q", selector.Lock)
 			}
-			if err := validateChildIdentity(lock, uses, child); err != nil {
+			var identityErr error
+			if strings.HasPrefix(uses, "$/") {
+				containing := job.Workflow.selfRepositorySource()
+				if lock.Source == "github" {
+					containing = &RemoteWorkflowSource{Repository: lock.Repository, Commit: lock.Commit, SourceDigest: lock.SourceDigest}
+				}
+				identityErr = validateSelfRepositoryIdentity(uses, child, containing)
+			} else {
+				identityErr = validateChildIdentity(lock, uses, child)
+			}
+			if err := identityErr; err != nil {
 				return 0, fmt.Errorf("action lock %q child %q: %w", id, uses, err)
 			}
 			childHeight, err := visit(selector.Lock, depth+1)
@@ -1463,7 +1494,13 @@ func validateActionLocks(job Job) error {
 		if !ok {
 			return fmt.Errorf("action selector references missing lock %q", step.Invocation.Lock)
 		}
-		if err := validateTopLevelIdentity(step.Invocation.Uses.Source, lock); err != nil {
+		var identityErr error
+		if strings.HasPrefix(step.Invocation.Uses.Source, "$/") {
+			identityErr = validateSelfRepositoryIdentity(step.Invocation.Uses.Source, lock, job.Workflow.selfRepositorySource())
+		} else {
+			identityErr = validateTopLevelIdentity(step.Invocation.Uses.Source, lock)
+		}
+		if err := identityErr; err != nil {
 			return fmt.Errorf("action step %q: %w", step.ID, err)
 		}
 		if _, err := visit(lock.ID, 1); err != nil {
@@ -1525,6 +1562,21 @@ func validateLockIdentity(lock ActionLock) error {
 		}
 	default:
 		return fmt.Errorf("unsupported source %q", lock.Source)
+	}
+	return nil
+}
+
+func (workflow Workflow) selfRepositorySource() *RemoteWorkflowSource {
+	if workflow.Remote != nil {
+		return workflow.Remote
+	}
+	return workflow.SelfRepository
+}
+
+func validateSelfRepositoryIdentity(uses string, lock ActionLock, containing *RemoteWorkflowSource) error {
+	p := strings.TrimPrefix(uses, "$/")
+	if containing == nil || p != "" && !cleanActionPath(p) || strings.ContainsAny(p, "@?#") || lock.Source != "github" || lock.Repository != containing.Repository || lock.Commit != containing.Commit || lock.SourceDigest != containing.SourceDigest || lock.Path != p || lock.RequestedRef != containing.Commit {
+		return fmt.Errorf("self-repository action reference does not match containing source")
 	}
 	return nil
 }

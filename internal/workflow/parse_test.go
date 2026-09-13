@@ -214,27 +214,50 @@ func TestParsePreservesEnvironmentVariableCase(t *testing.T) {
 	}
 }
 
-func TestParseKeepsWorkflowAndJobExpressionSurfacesSeparate(t *testing.T) {
+func TestParseWorkflowEnvironmentUsesJobExpressions(t *testing.T) {
+	workflowSource := []byte("on: push\nenv:\n  VALUE: ${{ format('{0}', vars.VALUE) }}\njobs:\n  build: {runs-on: ubuntu-latest, steps: [{run: true}]}\n")
+	parsed, err := Parse("workflow.yml", workflowSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Env["VALUE"] != "${{ format('{0}', vars.VALUE) }}" || parsed.Jobs[0].Env["VALUE"] != parsed.Env["VALUE"] {
+		t.Fatalf("Parse() dropped workflow environment expressions: %#v", parsed)
+	}
+
 	jobSource := []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    env:\n      VALUE: ${{ format('{0}', vars.VALUE) }}\n    defaults:\n      run:\n        shell: ${{ format('{0}', 'sh') }}\n    steps: [{run: true}]\n")
-	parsed, err := Parse("job.yml", jobSource)
+	parsed, err = Parse("job.yml", jobSource)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if parsed.Jobs[0].Env["VALUE"] == "" || parsed.Jobs[0].DefaultShell == "" {
 		t.Fatalf("Parse() dropped job expressions: %#v", parsed.Jobs[0])
 	}
+}
 
+func TestParseWorkflowExpressionBoundaries(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		source string
 		want   string
 	}{
-		{name: "workflow env", source: "on: push\nenv:\n  VALUE: ${{ format('{0}', vars.VALUE) }}\njobs:\n  build: {runs-on: ubuntu-latest, steps: [{run: true}]}\n", want: `workflow env "VALUE"`},
+		{name: "env map", source: "on: push\nenv: ${{ fromJSON('{}') }}\njobs:\n  build: {runs-on: ubuntu-latest, steps: [{run: true}]}\n", want: "expression-valued workflow env is unsupported"},
 		{name: "workflow default", source: "on: push\ndefaults:\n  run:\n    shell: ${{ format('{0}', 'sh') }}\njobs:\n  build: {runs-on: ubuntu-latest, steps: [{run: true}]}\n", want: "workflow default shell"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := Parse("workflow.yml", []byte(test.source)); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	for _, reference := range []string{
+		"github.token", "toJSON(github)", "secrets[inputs.name]",
+		"env.VALUE", "steps.build.outputs.value", "runner.os", "job.status",
+	} {
+		t.Run(reference, func(t *testing.T) {
+			// A job override and an unreachable branch must not hide invalid workflow authority.
+			source := "on: push\nenv:\n  VALUE: ${{ false && " + reference + " || 'ok' }}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    env: {VALUE: override}\n    steps: [{run: true}]\n"
+			if _, err := Parse("workflow.yml", []byte(source)); err == nil || !strings.Contains(err.Error(), `workflow env "VALUE"`) {
+				t.Fatalf("Parse() error = %v, want workflow env rejection", err)
 			}
 		})
 	}
@@ -543,6 +566,11 @@ func TestContainerValidationIsScopedAndSourceLocated(t *testing.T) {
 		name, field, want string
 	}{
 		{"image", "image: INVALID IMAGE", "bad.yml:6:14:"},
+		{"empty image", "image: ''", "bad.yml:6:14:"},
+		{"missing image", "env: {OK: yes}", "bad.yml:6:7:"},
+		{"null image with options", "image: ${{ null }}\n      options: --privileged", "container options are unsupported"},
+		{"null image with secret env", "image: ${{ null }}\n      env: {TOKEN: '${{ secrets.TOKEN }}'}", "expression-valued container env is unsupported"},
+		{"null image with invalid port", "image: ${{ null }}\n      ports: ['65536/tcp']", "bad.yml:7:15:"},
 		{"env-key", "image: node:24\n      env: {'bad-key': ok}", "bad.yml:7:13:"},
 		{"env-value", "image: node:24\n      env: {OK: '" + strings.Repeat("x", 65537) + "'}", "bad.yml:7:17:"},
 		{"port", "image: node:24\n      ports: ['65536/tcp']", "bad.yml:7:15:"},

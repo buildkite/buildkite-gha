@@ -1,0 +1,67 @@
+name: Windows runtime
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+      - name: Install zstd in the isolated cache tool directory
+        run: |
+          $directory = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'zstd'
+          New-Item -ItemType Directory -Force -Path $directory | Out-Null
+          Copy-Item -LiteralPath 'C:\tools\zstd\zstd.exe' -Destination (Join-Path $directory 'zstd.exe')
+      - name: Build Windows runtime
+        run: go build ./...
+      - name: Exercise checkout Git preflight
+        run: go test ./internal/runtime -run '^(TestCheckoutPreflightResolvesHostGit|TestCheckoutLFSInitializesBeforeFetch|TestWindowsExecutablePreflightPinsJunctionTarget)$' -v -count=1
+      - name: Verify action source publication and cleanup
+        run: go test ./internal/action/source -run '^(TestStoreExactCommitAtomicHitAndSubpath|TestStoreConcurrentMaterialize|TestStoreMaintenanceUsesLRUAndCleansOnlyUnlockedPartials|TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease)$' -v -count=1
+      - name: Exercise PowerShell and process cleanup
+        run: go test ./internal/runtime -run '^(TestPowerShellExecution|TestWindowsEnvironment|TestWindowsProcessTree)$' -v -count=1 -timeout=3m
+      - uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6.0.2
+        with:
+          platform: x86_64
+          work-vol: 'D:'
+          site: https://mirrors.kernel.org/sourceware/cygwin/
+          add-to-path: false
+      - name: Exercise curl's native Cygwin shell template
+        run: |
+          $env:BUILDKITE_GHA_TEST_CYGWIN = '1'
+          go test ./internal/runtime -run '^TestWindowsCygwinShell$' -v -count=1 -timeout=3m
+      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: MINGW64
+          update: false
+      - name: Exercise MSYS2 and batch shell arguments
+        run: |
+          $env:BUILDKITE_GHA_TEST_MSYS2 = (Get-Command msys2.cmd -ErrorAction Stop).Source
+          go test ./internal/runtime -run '^(TestWindowsBatchArguments|TestWindowsMSYS2Shell)$' -v -count=1 -timeout=3m
+      - name: Exercise JavaScript action lifecycle
+        run: |
+          $env:BUILDKITE_GHA_TEST_NODE24 = (Get-Command node).Source
+          go test ./internal/runtime -run '^(TestJavaScriptActionLifecycleRunsInWorkspace|TestJavaScriptPostInputUsesFinalJobStatus|TestCloneExpressionContextDeepCopiesStepOutputs)$' -v -count=1
+      - name: Verify cache credentials and archive tool isolation
+        run: |
+          $env:BUILDKITE_GHA_TEST_NODE24 = (Get-Command node).Source
+          go test ./internal/runtime -run '^(TestCacheServiceLifecycleUsesFreshIsolatedCredentials|TestWindowsCacheArchiveTools|TestIsolateCacheActionEnvironment.*)$' -v -count=1
+      - name: Verify Windows action compatibility
+        run: go test ./internal/compiler -run '^TestWindowsActionCompatibilityAndRuntimeDiscovery$' -v -count=1
+      - name: Verify bootstrap integrity and exit codes
+        run: go test ./internal/buildkite -run '^(TestEmitWindowsBootstrap|TestWindowsBootstrapExecution)$' -v -count=1
+      - name: Verify Windows distribution and managed tools
+        run: go test ./internal/cli -run '^(TestWindowsRuntimeDistributionValidatesPEAndNeedsNoUnixExecuteBit|TestExtractRuntimeMiseWindowsZip)$' -v -count=1
