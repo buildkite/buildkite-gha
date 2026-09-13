@@ -179,6 +179,17 @@ func hostedOptions(groupLabel string, configuredTargets map[string]compiler.Runn
 	return options
 }
 
+// candidateWorkflowSource is not provenance. The compiler must fetch the exact
+// workflow path and match its bytes before resolving $/. Synthetic validation
+// events use an all-zero placeholder SHA and cannot identify source.
+func candidateWorkflowSource(eventSource []byte) *compiler.WorkflowSourceReference {
+	event, err := compiler.ParseEvent(eventSource)
+	if err != nil || event.Provider != "github" || strings.Trim(event.SHA, "0") == "" {
+		return nil
+	}
+	return &compiler.WorkflowSourceReference{Repository: event.Repository.Owner + "/" + event.Repository.Name, Commit: event.SHA}
+}
+
 func applyRunnerResolution(options *compiler.Options, resolution agentRunnerResolution) {
 	options.Runners.Selectors = resolution.selectors
 	options.Runners.Rejections = resolution.rejections
@@ -215,6 +226,7 @@ func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowS
 
 func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runnerResolution agentRunnerResolution, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, oidc *plan.OIDCConfiguration, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication, environmentSource compiler.EnvironmentSource, vars compiler.VariableSources, eventFile bool) (hostedCompilation, error) {
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
+	options.WorkflowSource = candidateWorkflowSource(eventSource)
 	options.EventFile = eventFile
 	applyRunnerResolution(&options, runnerResolution)
 	options.StepKeyNamespace = stepKeyNamespace

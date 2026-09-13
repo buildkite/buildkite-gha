@@ -90,14 +90,17 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		out.observe = uploadArguments.telemetry.observe
 	}
 	var eventSource []byte
+	var sourceCandidate *compiler.WorkflowSourceReference
 	var eventOrigin effectiveEventOrigin
 	var eventLoadErr error
 	if eventPath != "" {
 		eventSource, eventOrigin, eventLoadErr = loadEffectiveEventSource(ctx, eventPath, agent)
+		sourceCandidate = candidateWorkflowSource(eventSource)
 		if parsedEvent, parseErr := compiler.ParseEvent(eventSource); eventLoadErr == nil && parseErr == nil {
 			out.sourceLinks = sourceLinksForEvent(parsedEvent)
 		}
 	} else if buildEvent, buildEventErr := buildkiteEventSource(os.Getenv); buildEventErr == nil {
+		sourceCandidate = candidateWorkflowSource(buildEvent)
 		if parsedEvent, parseErr := compiler.ParseEvent(buildEvent); parseErr == nil {
 			out.sourceLinks = sourceLinksForEvent(parsedEvent)
 		}
@@ -206,6 +209,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		// event and resolved variables.
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.RepositorySource = repositorySource
+		validationOptions.WorkflowSource = sourceCandidate
 		validation, _ := compiler.ValidateWithOptionsContext(ctx, input.Path, input.Source, validationOptions)
 		workflows[i].ReferencesVars = validation.ReferencesVars
 	}
@@ -297,6 +301,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.StepKeyNamespace = input.StepKeyNamespace
 		validationOptions.RepositorySource = repositorySource
+		validationOptions.WorkflowSource = candidateWorkflowSource(effectiveEvent.Source)
 		validationOptions.Vars = vars
 		validations[i], validationErrs[i] = compiler.ValidateEventWithOptionsContext(ctx, input.Path, input.Source, effectiveEvent.Source, validationOptions)
 	}
@@ -321,6 +326,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			applyRunnerResolution(&validationOptions, runnerResolution)
 			validationOptions.StepKeyNamespace = input.StepKeyNamespace
 			validationOptions.RepositorySource = repositorySource
+			validationOptions.WorkflowSource = candidateWorkflowSource(effectiveEvent.Source)
 			validationOptions.Vars = vars
 			validations[i], validationErrs[i] = compiler.ValidateEventWithOptionsContext(ctx, input.Path, input.Source, effectiveEvent.Source, validationOptions)
 		}
@@ -832,6 +838,7 @@ func requiredRuntimePlatforms(ctx context.Context, workflowPath string, workflow
 	options.Vars = vars
 	applyRunnerResolution(&options, runnerResolution)
 	options.RepositorySource = repositorySource
+	options.WorkflowSource = candidateWorkflowSource(eventSource)
 	options.ResolveActions = true
 	options.ActionSource = repositorySource
 	options.EnvironmentSource = environmentSource

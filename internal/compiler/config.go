@@ -181,6 +181,10 @@ type Options struct {
 	// reusable-workflow calls. Callers should share one memoized source for the
 	// complete validate, compile, and upload operation.
 	RepositorySource RepositorySource
+	// WorkflowSource is the candidate GitHub identity of local workflow input,
+	// separate from event identity. Self-repository references use it only after
+	// fetching the exact workflow file and matching its supplied bytes.
+	WorkflowSource *WorkflowSourceReference
 	// EnvironmentSource resolves GitHub deployment environments declared by
 	// workflow jobs. Compilation of a workflow that declares an environment
 	// fails without one.
