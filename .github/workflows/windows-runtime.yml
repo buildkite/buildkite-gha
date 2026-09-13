@@ -33,6 +33,14 @@ jobs:
         run: go test ./internal/action/source -run '^(TestStoreExactCommitAtomicHitAndSubpath|TestStoreConcurrentMaterialize|TestStoreMaintenanceUsesLRUAndCleansOnlyUnlockedPartials|TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease)$' -v -count=1
       - name: Exercise PowerShell and process cleanup
         run: go test ./internal/runtime -run '^(TestPowerShellExecution|TestWindowsEnvironment|TestWindowsProcessTree)$' -v -count=1 -timeout=3m
+      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: MINGW64
+          update: false
+      - name: Exercise MSYS2 and batch shell arguments
+        run: |
+          $env:BUILDKITE_GHA_TEST_MSYS2 = (Get-Command msys2.cmd -ErrorAction Stop).Source
+          go test ./internal/runtime -run '^(TestWindowsBatchArguments|TestWindowsMSYS2Shell)$' -v -count=1 -timeout=3m
       - name: Exercise JavaScript action lifecycle
         run: |
           $env:BUILDKITE_GHA_TEST_NODE24 = (Get-Command node).Source

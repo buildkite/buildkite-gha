@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -16,8 +18,52 @@ var windowsProcessJobs = struct {
 	jobs map[int]windows.Handle
 }{jobs: make(map[int]windows.Handle)}
 
+// Batch wrappers need cmd.exe, not CreateProcess's native-executable quoting.
+// Carry values through one percent-expansion pass, inside quotes: literal %,
+// !, &, and ^ must not become command syntax or undergo recursive expansion.
+// Wrappers that re-evaluate arguments (CALL or delayed expansion) are not safe
+// forwarding interfaces. setup-msys2's wrapper forwards %* directly to bash.
+func prepareProcessCommand(command *exec.Cmd) error {
+	if !strings.EqualFold(filepath.Ext(command.Path), ".cmd") {
+		return nil
+	}
+	values := append([]string{command.Path}, command.Args[1:]...)
+	for _, value := range values {
+		if strings.ContainsAny(value, "\"\r\n\x00") || strings.HasSuffix(value, `\`) {
+			return fmt.Errorf("Windows batch shell arguments cannot contain double quotes, line breaks, NUL, or a trailing backslash")
+		}
+	}
+	systemDirectory, err := windows.GetSystemDirectory()
+	if err != nil {
+		return err
+	}
+	const prefix = "BUILDKITE_GHA_BATCH_ARG_"
+	env := make([]string, 0, len(command.Env)+len(values))
+	for _, entry := range command.Env {
+		if !strings.HasPrefix(strings.ToUpper(entry), prefix) {
+			env = append(env, entry)
+		}
+	}
+	arguments := make([]string, len(values))
+	for i, value := range values {
+		name := fmt.Sprintf("%s%d", prefix, i)
+		env = append(env, name+"="+value)
+		arguments[i] = `"%` + name + `%"`
+	}
+	command.Path = filepath.Join(systemDirectory, "cmd.exe")
+	command.Args = nil
+	command.Env = env
+	command.SysProcAttr = &windows.SysProcAttr{
+		CmdLine: `cmd.exe /d /s /v:off /c "` + strings.Join(arguments, " ") + `"`,
+	}
+	return nil
+}
+
 func configureProcessGroup(command *exec.Cmd) {
-	command.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_SUSPENDED}
+	if command.SysProcAttr == nil {
+		command.SysProcAttr = &windows.SysProcAttr{}
+	}
+	command.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_SUSPENDED
 }
 
 func processStarted(command *exec.Cmd) error {

@@ -24,10 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Unsupported shell
-        shell: /opt/msys2/msys2 -File {0}
+        shell: C:/Windows/System32/cmd.exe /C {0}
         run: Write-Output test
 `,
-			wantReportedCommand: "msys2",
+			wantReportedCommand: "cmd.exe",
 			wantLine:            6,
 			wantStep:            1,
 		},
@@ -178,6 +178,9 @@ func TestCompilePlansAcceptCustomShellTemplates(t *testing.T) {
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: msys2 {0}
     steps:
       - shell: bash -l {0}
         run: conda info
@@ -192,6 +195,9 @@ jobs:
 	}
 	if len(plans) != 1 || len(plans[0].Program.Job.Steps) != 3 {
 		t.Fatalf("compiled plans = %#v", plans)
+	}
+	if got := plans[0].Program.Job.Defaults.Shell.Source; got != "msys2 {0}" {
+		t.Fatalf("default shell = %q", got)
 	}
 	for i, want := range []string{"bash -l {0}", "Rscript {0}", "julia --color=yes {0}"} {
 		if plans[0].Program.Job.Steps[i].Run.Shell.Source != want {
