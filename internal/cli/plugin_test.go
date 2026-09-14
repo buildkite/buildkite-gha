@@ -1316,6 +1316,12 @@ func TestPluginRunsNativelyOnDarwinARM64(t *testing.T) {
 	t.Setenv(pluginConfigurationEnvironment, string(configuration))
 	setCLIPluginBuildkiteEnvironment(t, "plugin-darwin-importer")
 	t.Setenv("BUILDKITE_COMMIT", "HEAD")
+	server, _ := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+		"macos-15": {"validated": true, "target": map[string]string{"queue": "macos", "platform": "darwin/arm64"}},
+	})
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	runner := &cliCaptureRunner{gitOutput: []byte(fullCommit + "\n")}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
