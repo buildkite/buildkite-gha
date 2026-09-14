@@ -309,19 +309,24 @@ func TestBareReleaseMatchesAllGitHubActivities(t *testing.T) {
 	}
 }
 
-func TestEmptyReleaseTypesMatchNoActivities(t *testing.T) {
-	triggers := []workflow.Trigger{{Event: "release", Types: []string{}}}
-	condition, err := TranslateTriggerCondition(triggers)
+func TestEmptyReleaseTypesMatchAllActivities(t *testing.T) {
+	empty := []workflow.Trigger{{Event: "release", Types: []string{}}}
+	condition, err := TranslateTriggerCondition(empty)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "(" + LiveEventPredicate("release") + " && false)"; condition != want {
-		t.Fatalf("condition = %q, want %q", condition, want)
+	want, err := TranslateTriggerCondition([]workflow.Trigger{{Event: "release"}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	action := "published"
-	reason, err := TriggerFilterMismatchReason(triggers, "release", TriggerEventSnapshot{ReleaseAction: &action})
-	if err != nil || !strings.Contains(reason, `"published"`) {
-		t.Fatalf("release mismatch reason = %q, %v", reason, err)
+	if condition != want {
+		t.Fatalf("empty condition = %q, want bare condition %q", condition, want)
+	}
+	for _, action := range supportedReleaseActions {
+		reason, err := TriggerFilterMismatchReason(empty, "release", TriggerEventSnapshot{ReleaseAction: &action})
+		if err != nil || reason != "" {
+			t.Errorf("action %q mismatch = %q, %v", action, reason, err)
+		}
 	}
 }
 

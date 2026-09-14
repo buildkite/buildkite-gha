@@ -73,9 +73,6 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		if node == nil || node.Kind != yaml.MappingNode {
 			continue
 		}
-		if types := mappingValue(node, "types"); trigger.Event == "release" && types != nil && types.Kind == yaml.SequenceNode && len(types.Content) == 0 {
-			trigger.Types = []string{}
-		}
 		trigger.FilterSpans = make(map[string]Span)
 		for j := 0; j+1 < len(node.Content); j += 2 {
 			key := node.Content[j]
@@ -237,9 +234,9 @@ func Parse(path string, source []byte) (*Workflow, error) {
 
 // The pinned actionlint parser rejects empty activity lists more strictly than
 // GitHub. Accept only that diagnostic at each verified sequence, leaving the
-// source and all other diagnostics (including alias errors) intact. Release
-// emptiness is restored after adapting actionlint's syntax tree so it matches no
-// activity; the existing default activity events retain their omitted behavior.
+// source and all other diagnostics (including alias errors) intact. The pinned
+// parser represents these sequences as omitted types, matching GitHub's default
+// activity behavior.
 func acceptedEmptyTypesDiagnostics(document *yaml.Node) []expectedActionlintDiagnostic {
 	if len(document.Content) == 0 {
 		return nil

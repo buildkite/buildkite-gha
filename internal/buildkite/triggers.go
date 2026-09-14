@@ -401,7 +401,7 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 		case "release":
 			if snapshot.ReleaseAction != nil {
 				types := trigger.Types
-				if types == nil {
+				if len(types) == 0 {
 					types = supportedReleaseActions
 				}
 				if slices.Contains(types, *snapshot.ReleaseAction) {
@@ -694,11 +694,8 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		if expressions.ReleaseAction == "null" {
 			return "", false, fmt.Errorf("release event snapshot requires payload.action")
 		}
-		if t.Types == nil {
-			t.Types = supportedReleaseActions
-		}
 		if len(t.Types) == 0 {
-			return expressions.EventPredicate + " && false", true, nil
+			t.Types = supportedReleaseActions
 		}
 		actions := make([]string, 0, len(t.Types))
 		for _, action := range t.Types {

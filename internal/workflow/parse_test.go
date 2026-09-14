@@ -85,7 +85,7 @@ func TestParseReleaseTypes(t *testing.T) {
 
 	for declaration, want := range map[string][]string{
 		"{release: {types: published}}": {"published"},
-		"{release: {types: []}}":        {},
+		"{release: {types: []}}":        nil,
 	} {
 		parsed, err := Parse("release.yml", []byte("on: "+declaration+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
 		if err != nil {
