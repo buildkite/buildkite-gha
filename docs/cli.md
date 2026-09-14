@@ -628,8 +628,11 @@ The hosted preset accepts runner labels case-insensitively, so aliases such as
 `ubuntu-latest` and `ubuntu-24.04` default to the Noble hosted-toolchains image;
 `ubuntu-22.04` defaults to Jammy. Use `--runner-image` with an immutable digest
 to override the default for a configured profile. An explicit mapping declares
-that its selector runs on Linux x86-64, except for the known macOS labels, and
-bypasses Agent API resolution. The Agent API owns compatibility and returns the
+that its selector runs on Linux x86-64, except for the known macOS labels.
+The importer validates its queue and hosted platform through the job-scoped
+Agent API before upload, preserving the configured image and cache. An import
+using explicit mappings stops if that validation is unavailable.
+The Agent API owns compatibility and returns the
 complete target for every other selector. The importer publishes returned
 warnings as annotations. See [Compatibility](compatibility.md#job-configuration)
 for runner behavior. Runtime distribution paths must be absolute executables.

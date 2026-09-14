@@ -5,19 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 )
 
-// agentRunnerResolution is the Agent API's verdict on every runs-on selector
-// that no explicit runners mapping covers. Selectors and rejections both
-// override the built-in presets; warnings accompany heuristic selectors.
+// agentRunnerResolution is the Agent API's verdict on every runs-on selector.
+// Explicit targets require validation rather than falling back on API failure.
 type agentRunnerResolution struct {
-	selectors  []compiler.RunnerSelector
-	rejections []compiler.RunnerRejection
-	warnings   []gharuntime.RunnerWarning
+	selectors          []compiler.RunnerSelector
+	rejections         []compiler.RunnerRejection
+	warnings           []gharuntime.RunnerWarning
+	validationRequired bool
 }
 
 func (r agentRunnerResolution) empty() bool {
@@ -25,11 +26,18 @@ func (r agentRunnerResolution) empty() bool {
 }
 
 func suggestedRunnerTargets(ctx context.Context, reports []compiler.Report, configuredTargets map[string]compiler.RunnerTarget, clientVersion string) (agentRunnerResolution, error) {
+	requirements := uniqueRunnerRequirements(reports, configuredTargets)
+	resolution := agentRunnerResolution{validationRequired: slices.ContainsFunc(requirements, func(requirement gharuntime.RunnerRequirement) bool {
+		return requirement.ConfiguredTarget != nil
+	})}
 	endpoint := os.Getenv("BUILDKITE_AGENT_ENDPOINT")
 	jobID := os.Getenv("BUILDKITE_JOB_ID")
 	jobToken := os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN")
 	if endpoint == "" || jobID == "" || jobToken == "" {
-		return agentRunnerResolution{}, nil
+		if resolution.validationRequired {
+			return resolution, fmt.Errorf("explicit runner mappings require job-scoped Agent API credentials")
+		}
+		return resolution, nil
 	}
 	resolver, err := gharuntime.NewAgentRunnerResolver(gharuntime.AgentRunnerResolverConfig{
 		Endpoint:      endpoint,
@@ -38,35 +46,42 @@ func suggestedRunnerTargets(ctx context.Context, reports []compiler.Report, conf
 		ClientVersion: clientVersion,
 	})
 	if err != nil {
-		return agentRunnerResolution{}, err
+		return resolution, err
 	}
-	requirements := uniqueRunnerRequirements(reports, configuredTargets)
 	suggestions, rejections, err := resolver.Resolve(ctx, requirements)
 	if err != nil {
-		return agentRunnerResolution{}, err
+		return resolution, err
 	}
 	byID := make(map[string]gharuntime.RunnerRequirement, len(requirements))
 	for _, requirement := range requirements {
 		byID[requirement.ID] = requirement
 	}
-	resolution := agentRunnerResolution{selectors: make([]compiler.RunnerSelector, 0, len(suggestions))}
 	for _, suggestion := range suggestions {
-		labels, ok := normalizedRunnerLabels(byID[suggestion.ID].Labels)
+		requirement := byID[suggestion.ID]
+		labels, ok := normalizedRunnerLabels(requirement.Labels)
 		if !ok {
 			continue
 		}
+		if configured := requirement.ConfiguredTarget; configured != nil {
+			if !suggestion.Validated || suggestion.Queue != configured.Queue || suggestion.Platform != configured.Platform {
+				return agentRunnerResolution{validationRequired: true}, fmt.Errorf("agent API did not validate the configured runner target; explicit mappings require server support")
+			}
+			// The server validates routing, not the customer's image or cache.
+			resolution.selectors = append(resolution.selectors, compiler.RunnerSelector{Labels: labels, Target: configuredTargets[labels[0]]})
+			continue
+		}
 		if !runnerQueuePattern.MatchString(suggestion.Queue) {
-			return agentRunnerResolution{}, fmt.Errorf("runner resolution response contains an invalid target")
+			return agentRunnerResolution{validationRequired: resolution.validationRequired}, fmt.Errorf("runner resolution response contains an invalid target")
 		}
 		platform, err := compiler.ParsePlatform(suggestion.Platform)
 		if err != nil {
-			return agentRunnerResolution{}, fmt.Errorf("runner resolution response contains an invalid target: %w", err)
+			return agentRunnerResolution{validationRequired: resolution.validationRequired}, fmt.Errorf("runner resolution response contains an invalid target: %w", err)
 		}
 		if platform == compiler.PlatformLinuxAMD64 && !runnerImagePattern.MatchString(suggestion.Image) {
-			return agentRunnerResolution{}, fmt.Errorf("runner resolution response contains an invalid target image")
+			return agentRunnerResolution{validationRequired: resolution.validationRequired}, fmt.Errorf("runner resolution response contains an invalid target image")
 		}
 		if platform == compiler.PlatformDarwinARM64 && suggestion.Image != "" {
-			return agentRunnerResolution{}, fmt.Errorf("runner resolution response contains an invalid target image")
+			return agentRunnerResolution{validationRequired: resolution.validationRequired}, fmt.Errorf("runner resolution response contains an invalid target image")
 		}
 		target := compiler.RunnerTarget{Queue: suggestion.Queue, Platform: platform, Image: suggestion.Image}
 		resolution.selectors = append(resolution.selectors, compiler.RunnerSelector{Labels: labels, Target: target})
@@ -105,7 +120,7 @@ func uniqueRunnerRequirements(reports []compiler.Report, configuredTargets map[s
 	var requirements []gharuntime.RunnerRequirement
 	for _, report := range reports {
 		for _, job := range report.Jobs {
-			if len(job.RunsOn) == 0 || runnerSelectorIsConfigured(job.RunsOn, configuredTargets) {
+			if len(job.RunsOn) == 0 {
 				continue
 			}
 			encoded, _ := json.Marshal(job.RunsOn)
@@ -114,10 +129,15 @@ func uniqueRunnerRequirements(reports []compiler.Report, configuredTargets map[s
 				continue
 			}
 			seen[key] = true
-			requirements = append(requirements, gharuntime.RunnerRequirement{
+			requirement := gharuntime.RunnerRequirement{
 				ID:     fmt.Sprintf("r%d", len(requirements)+1),
 				Labels: append([]string(nil), job.RunsOn...),
-			})
+			}
+			if runnerSelectorIsConfigured(job.RunsOn, configuredTargets) {
+				target := configuredTargets[strings.ToLower(strings.TrimSpace(job.RunsOn[0]))]
+				requirement.ConfiguredTarget = &gharuntime.ConfiguredRunnerTarget{Queue: target.Queue, Platform: target.Platform.String()}
+			}
+			requirements = append(requirements, requirement)
 		}
 	}
 	return requirements

@@ -730,6 +730,12 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 	t.Setenv("BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW", "ignored.yml")
 	_ = executable // The plugin uses the already-opened running executable, not an environment path.
 	setCLIPluginBuildkiteEnvironment(t, "plugin-linux")
+	server, _ := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+		"ubuntu-latest": {"validated": true, "target": map[string]string{"queue": "hosted", "platform": "linux/amd64"}},
+	})
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
@@ -977,6 +983,111 @@ func TestPluginRejectsNonExplicitWorkflowSelectors(t *testing.T) {
 	}
 }
 
+func TestPluginValidatesExplicitRunnerMappingsBeforeUpload(t *testing.T) {
+	requireImporterHost(t)
+	const mismatch = "The 'macos-medium' queue requires platform darwin/arm64, not linux/amd64."
+	for _, test := range []struct {
+		name       string
+		status     int
+		verdict    map[string]any
+		wantStop   bool
+		wantReject bool
+	}{
+		{name: "valid mapping preserves image and cache", status: http.StatusOK, verdict: map[string]any{"validated": true, "target": map[string]string{"queue": "macos-medium", "platform": "linux/amd64"}}},
+		{name: "platform mismatch", status: http.StatusOK, verdict: map[string]any{"error": map[string]string{"code": "queue_platform_mismatch", "message": mismatch}}, wantReject: true},
+		{name: "API unavailable", status: http.StatusServiceUnavailable, wantStop: true},
+		{name: "old server omits acknowledgment", status: http.StatusOK, verdict: map[string]any{"target": map[string]string{"queue": "macos-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}}, wantStop: true},
+		{name: "server changes configured queue", status: http.StatusOK, verdict: map[string]any{"validated": true, "target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64"}}, wantStop: true},
+		{name: "missing credentials", wantStop: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := writeUploadWorkflowRepository(t, map[string]string{
+				"ci.yml": "name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: echo tested}]\n",
+			})
+			t.Chdir(repository)
+			image := "registry.example.com/custom@sha256:" + strings.Repeat("1", 64)
+			configuration, err := json.Marshal(map[string]any{
+				"workflow": ".github/workflows/ci.yml",
+				"runners": []map[string]any{{"runs-on": "ubuntu-latest", "queue": "macos-medium", "image": image,
+					"cache": map[string]any{"paths": []string{"/home/runner/.cache"}, "name": "custom-dependencies", "size": "40g"}}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			setCLIPluginBuildkiteEnvironment(t, "configured-importer")
+			t.Setenv(pluginConfigurationEnvironment, string(configuration))
+			t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+			t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "true")
+			requests := 0
+			if test.status != 0 {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requests++
+					var body struct {
+						Requirements []struct {
+							ID               string            `json:"id"`
+							ConfiguredTarget map[string]string `json:"configured_target"`
+						} `json:"requirements"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+						return
+					}
+					if len(body.Requirements) != 1 || !reflect.DeepEqual(body.Requirements[0].ConfiguredTarget, map[string]string{"queue": "macos-medium", "platform": "linux/amd64"}) {
+						t.Errorf("explicit target was not sent for validation: %#v", body.Requirements)
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					w.WriteHeader(test.status)
+					verdict := map[string]any{"id": body.Requirements[0].ID}
+					for key, value := range test.verdict {
+						verdict[key] = value
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"resolutions": []map[string]any{verdict}})
+				}))
+				t.Cleanup(server.Close)
+				t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+				t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+				t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+			}
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner)
+			if test.status != 0 && requests != 1 {
+				t.Fatalf("validation requests = %d, want 1; stderr = %s", requests, stderr.String())
+			}
+			if test.wantStop {
+				if code != 1 || !strings.Contains(stderr.String(), "cannot validate explicit runner mappings") || len(runner.uploaded) != 0 {
+					t.Fatalf("unvalidated import = %d, %s; uploads = %d", code, stderr.String(), len(runner.uploaded))
+				}
+				for _, command := range runner.commands {
+					if len(command.args) >= 2 && command.args[0] == "pipeline" && command.args[1] == "upload" {
+						t.Fatal("unvalidated pipeline was uploaded")
+					}
+				}
+				return
+			}
+			if code != 0 || len(runner.commands) == 0 {
+				t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+			}
+			pipeline := string(runner.commands[len(runner.commands)-1].stdin)
+			if test.wantReject {
+				if strings.Contains(pipeline, "run-job") || strings.Contains(pipeline, image) {
+					t.Fatalf("rejected runner was uploaded: %s", pipeline)
+				}
+				foundMessage := false
+				for _, artifact := range runner.uploaded {
+					foundMessage = foundMessage || strings.Contains(string(artifact), mismatch)
+				}
+				if !foundMessage {
+					t.Fatal("queue mismatch diagnostic was not published")
+				}
+			} else if !strings.Contains(pipeline, image) || !strings.Contains(pipeline, `queue: "macos-medium"`) || !strings.Contains(pipeline, "custom-dependencies") || !strings.Contains(pipeline, "40g") || !strings.Contains(pipeline, "run-job") {
+				t.Fatalf("validated target lost its configuration: %s", pipeline)
+			}
+		})
+	}
+}
+
 func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	requireImporterHost(t)
 	const fullCommit = "0123456789abcdef0123456789abcdef01234567"
@@ -1032,6 +1143,11 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 		resolutions := make([]map[string]any, len(body.Requirements))
 		for i, requirement := range body.Requirements {
 			switch {
+			case slices.Equal(requirement.Selector.Labels, []string{"ubuntu-18.04"}):
+				resolutions[i] = map[string]any{
+					"id": requirement.ID, "validated": true,
+					"target": map[string]string{"queue": "legacy-linux", "platform": "linux/amd64"},
+				}
 			case slices.Equal(requirement.Selector.Labels, []string{"ubuntu-latest"}):
 				resolutions[i] = map[string]any{
 					"id":     requirement.ID,
