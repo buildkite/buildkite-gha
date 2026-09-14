@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -478,6 +479,11 @@ func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warnin
 		if trigger.Event == "merge_group" && (trigger.Paths != nil || trigger.PathsIgnore != nil) {
 			warnings = append(warnings, mergeGroupPathFiltersWarning(trigger.Position))
 		}
+		if trigger.Event == "release" && (trigger.Types == nil || slices.ContainsFunc(trigger.Types, func(activity string) bool {
+			return slices.Contains([]string{"unpublished", "edited", "deleted", "prereleased"}, activity)
+		})) {
+			warnings = append(warnings, nativeReleaseActivitiesWarning(trigger.Position))
+		}
 		if buildkitepipeline.SupportedTriggerEvent(trigger.Event) {
 			continue
 		}
@@ -502,6 +508,15 @@ func compilerWarnings(parsed *workflow.Workflow, cancelInProgress bool) []Warnin
 		warnings = append(warnings, workflowCancellationWarning(parsed.Concurrency.CancelInProgressPosition))
 	}
 	return warnings
+}
+
+func nativeReleaseActivitiesWarning(position workflow.Position) Warning {
+	return Warning{
+		Code:    "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "GitHub Actions Pipeline Triggers deliver all seven release activities. Native Buildkite release builds deliver only published, created, and released, so unpublished, edited, deleted, and prereleased will not run this workflow through the native integration.",
+	}
 }
 
 func mergeGroupPathFiltersWarning(position workflow.Position) Warning {

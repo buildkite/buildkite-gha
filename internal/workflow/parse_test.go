@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -68,6 +69,23 @@ func TestParseMergeGroupTypes(t *testing.T) {
 		if len(parsed.Triggers) != 1 || !reflect.DeepEqual(parsed.Triggers[0].Types, test.want) {
 			t.Fatalf("types %q: triggers = %#v, want types %#v", test.types, parsed.Triggers, test.want)
 		}
+	}
+}
+
+func TestParseBareReleaseAndRejectExplicitEmptyTypes(t *testing.T) {
+	for _, declaration := range []string{"release", "[push, release]", "{release: null}", "{release: {}}"} {
+		parsed, err := Parse("release.yml", []byte("on: "+declaration+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+		if err != nil {
+			t.Fatalf("%s: %v", declaration, err)
+		}
+		if !slices.ContainsFunc(parsed.Triggers, func(trigger Trigger) bool { return trigger.Event == "release" && trigger.Types == nil }) {
+			t.Errorf("%s: triggers = %#v, want bare release", declaration, parsed.Triggers)
+		}
+	}
+
+	source := "on: {release: {types: []}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	if _, err := Parse("release.yml", []byte(source)); err == nil || !strings.Contains(err.Error(), `"types" section should not be empty`) {
+		t.Fatalf("explicit empty release types error = %v", err)
 	}
 }
 

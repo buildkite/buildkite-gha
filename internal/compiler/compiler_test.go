@@ -4687,7 +4687,7 @@ func TestParseEventValidatesReleaseIdentity(t *testing.T) {
 	for _, test := range []struct {
 		name, old, replacement, want string
 	}{
-		{name: "unsupported activity", old: `"published"`, replacement: `"edited"`, want: "published, created, or released"},
+		{name: "unsupported activity", old: `"published"`, replacement: `"not-real"`, want: "unsupported"},
 		{name: "tag mismatch", old: `"tag_name":"v1.2.3"`, replacement: `"tag_name":"v2.0.0"`, want: "ref must match"},
 		{name: "missing tag", old: `"tag_name":"v1.2.3",`, replacement: "", want: "tag_name"},
 		{name: "malformed draft", old: `"draft":false`, replacement: `"draft":"false"`, want: "draft"},
@@ -5115,7 +5115,7 @@ func TestCompilerWarningsNameOnlyDeclaredSupportedTriggers(t *testing.T) {
 		{Event: "discussion", Position: workflow.Position{Line: 4, Column: 3}},
 		{Event: "issue_comment"},
 		{Event: "issues"},
-		{Event: "release"},
+		{Event: "release", Types: []string{"published"}},
 		{Event: "push"},
 		{Event: "merge_group"},
 		{Event: "schedule"},
@@ -5140,6 +5140,28 @@ func TestCompilerWarningsNameOnlyDeclaredSupportedTriggers(t *testing.T) {
 	}
 	if !reflect.DeepEqual(warnings, []Warning{want}) {
 		t.Fatalf("warnings without supported triggers = %#v, want %#v", warnings, []Warning{want})
+	}
+}
+
+func TestCompilerWarningsFlagNativeUndeliveredReleaseActivities(t *testing.T) {
+	position := workflow.Position{Line: 3, Column: 3}
+	parsed := &workflow.Workflow{Triggers: []workflow.Trigger{{Event: "release", Position: position}}}
+	want := Warning{
+		Code: "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED", Line: 3, Column: 3,
+		Message: "GitHub Actions Pipeline Triggers deliver all seven release activities. Native Buildkite release builds deliver only published, created, and released, so unpublished, edited, deleted, and prereleased will not run this workflow through the native integration.",
+	}
+	if warnings := compilerWarnings(parsed, false); !reflect.DeepEqual(warnings, []Warning{want}) {
+		t.Fatalf("warnings = %#v, want %#v", warnings, []Warning{want})
+	}
+
+	parsed.Triggers[0].Types = []string{"published"}
+	if warnings := compilerWarnings(parsed, false); warnings != nil {
+		t.Fatalf("explicit release warnings = %#v, want none", warnings)
+	}
+
+	parsed.Triggers[0].Types = []string{"edited"}
+	if warnings := compilerWarnings(parsed, false); !reflect.DeepEqual(warnings, []Warning{want}) {
+		t.Fatalf("explicit native-unsupported release warnings = %#v, want %#v", warnings, []Warning{want})
 	}
 }
 

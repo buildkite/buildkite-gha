@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -46,10 +47,10 @@ func TestPluginReleasePipelineTriggerDiagnosticLinks(t *testing.T) {
 
 func TestPluginReleasePipelineTrigger(t *testing.T) {
 	requireImporterHost(t)
-	for _, action := range []string{"published", "created", "released"} {
+	for _, action := range []string{"published", "unpublished", "created", "edited", "deleted", "prereleased", "released"} {
 		t.Run(action, func(t *testing.T) {
 			repository := writeUploadWorkflowRepository(t, map[string]string{
-				"release.yml": "name: Release\non: {release: {types: [published, created, released]}}\npermissions: {}\njobs:\n  marker:\n    runs-on: ubuntu-latest\n    outputs:\n      marker: ${{ steps.emit.outputs.marker }}\n    steps:\n      - id: emit\n        run: echo 'marker=${{ github.event.release.tag_name }}' >> \"$GITHUB_OUTPUT\"\n",
+				"release.yml": "name: Release\non: release\npermissions: {}\njobs:\n  marker:\n    runs-on: ubuntu-latest\n    outputs:\n      marker: ${{ steps.emit.outputs.marker }}\n    steps:\n      - id: emit\n        run: echo 'marker=${{ github.event.release.tag_name }}' >> \"$GITHUB_OUTPUT\"\n",
 				"other.yml":   "on: push\n",
 			})
 			t.Chdir(repository)
@@ -61,7 +62,8 @@ func TestPluginReleasePipelineTrigger(t *testing.T) {
 			t.Setenv("BUILDKITE_TAG", "v2.3.4")
 			t.Setenv("BUILDKITE_GITHUB_ACTION", action)
 			setCLIPipelineTriggerEnvironment(t, ".github/workflows/release.yml", "Release", "release", "buildkite/buildkite-gha/.github/workflows/release.yml@refs/tags/v2.3.4")
-			payload := []byte(fmt.Sprintf(`{"action":%q,"repository":{"full_name":"buildkite/buildkite-gha"},"release":{"tag_name":"v2.3.4","draft":false,"prerelease":true}}`, action))
+			draft := action == "unpublished"
+			payload := []byte(fmt.Sprintf(`{"action":%q,"repository":{"full_name":"buildkite/buildkite-gha"},"release":{"tag_name":"v2.3.4","draft":%t,"prerelease":true}}`, action, draft))
 			runner := &cliCaptureRunner{webhook: payload}
 			var stdout, stderr bytes.Buffer
 			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
@@ -113,11 +115,14 @@ func TestPluginReleasePipelineTrigger(t *testing.T) {
 					}
 				})
 			}
-			for name, broken := range map[string][]byte{
-				"draft":      bytes.Replace(payload, []byte(`"draft":false`), []byte(`"draft":true`), 1),
+			brokenPayloads := map[string][]byte{
 				"repository": bytes.Replace(payload, []byte(`buildkite/buildkite-gha`), []byte(`other/repo`), 1),
-				"activity":   bytes.Replace(payload, []byte(fmt.Sprintf(`"action":%q`, action)), []byte(`"action":"prereleased"`), 1),
-			} {
+				"activity":   bytes.Replace(payload, []byte(fmt.Sprintf(`"action":%q`, action)), []byte(`"action":"not-real"`), 1),
+			}
+			if slices.Contains([]string{"created", "edited", "deleted"}, action) {
+				brokenPayloads["draft"] = bytes.Replace(payload, []byte(`"draft":false`), []byte(`"draft":true`), 1)
+			}
+			for name, broken := range brokenPayloads {
 				t.Run(name, func(t *testing.T) {
 					stderr.Reset()
 					if run([]string{"plugin"}, &stdout, &stderr, "dev", &cliCaptureRunner{webhook: broken}) == 0 {

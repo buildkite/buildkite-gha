@@ -169,7 +169,7 @@ action execution. In particular:
   issue activity.
 - Generated issue-comment validation uses `created`. It does not prove every
   supported comment activity or payload shape.
-- Bare and broader release triggers remain incompatible.
+- Pipeline Triggers cover all release activities. Native release builds cover three and emit a compatibility warning for the others.
 - The action-resolution snapshot pins action revisions only.
 
 Preserve the snapshot, corpus record, sample seed, and sample size when

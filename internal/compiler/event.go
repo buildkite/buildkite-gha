@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/git"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -235,8 +237,8 @@ func validateMergeGroupEvent(ref, sha string, payload map[string]any) error {
 
 func validateReleaseEvent(ref, sha string, payload map[string]any) error {
 	action, _ := payload["action"].(string)
-	if action != "published" && action != "created" && action != "released" {
-		return fmt.Errorf("release event snapshot requires payload.action to be published, created, or released")
+	if !buildkitepipeline.SupportedReleaseAction(action) {
+		return fmt.Errorf("release event snapshot has unsupported payload.action %q", action)
 	}
 	release, ok := payload["release"].(map[string]any)
 	if !ok {
@@ -248,11 +250,8 @@ func validateReleaseEvent(ref, sha string, payload map[string]any) error {
 	if !tagOK || strings.TrimSpace(tag) == "" || !draftOK || !prereleaseOK {
 		return fmt.Errorf("release event snapshot requires payload.release tag_name, draft, and prerelease")
 	}
-	if draft {
-		if action == "created" {
-			return fmt.Errorf("release event snapshot draft created activity does not trigger GitHub Actions")
-		}
-		return fmt.Errorf("release event snapshot %s activity requires a non-draft release", action)
+	if draft && slices.Contains([]string{"created", "edited", "deleted"}, action) {
+		return fmt.Errorf("release event snapshot draft %s activity does not trigger GitHub Actions", action)
 	}
 	if ref != "refs/tags/"+tag {
 		return fmt.Errorf("release event snapshot ref must match payload.release.tag_name")

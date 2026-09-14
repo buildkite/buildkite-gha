@@ -46,7 +46,7 @@ The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint
 
 GitHub Actions Pipeline Trigger integration is available only in private preview. When enabled, Buildkite can select the workflow without an explicit plugin selector. See [Private-preview Pipeline Trigger selection](docs/cli.md#private-preview-pipeline-trigger-selection).
 
-For `on.release`, open the pipeline's GitHub settings, select **Additional Webhooks** > **Releases**, and use **Code** trigger mode. Only explicit `types` containing `published`, `created`, and/or `released` are supported.
+GitHub Actions Pipeline Triggers deliver all seven `release` activities. For native release builds, open the pipeline's GitHub settings, select **Additional Webhooks** > **Releases**, and use **Code** trigger mode. Native builds deliver only `published`, `created`, and `released`; affected workflows emit a compatibility warning.
 
 The importer can run on Linux x86-64 or native macOS arm64. Its agent targeting
 is independent of `runners`: each runner mapping selects the queue for generated

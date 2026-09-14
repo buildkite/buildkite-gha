@@ -202,17 +202,6 @@ func TestValidatePublishesActionableTriggerDiagnostics(t *testing.T) {
 				`Set types: [checks_requested].`,
 			},
 		},
-		{
-			name: "bare release",
-			line: 1, column: 5,
-			workflow:    "on: release\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
-			wantMessage: `on: release needs a types list. A bare release covers every release event, while the currently supported types are exactly published, created, and released. Use on: {release: {types: [published]}}. If you need another release type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
-			wantAnnotation: []string{
-				`<p><strong>on: release needs a types list.</strong></p>`,
-				`A bare release covers every release event, while the currently supported types are exactly published, created, and released.`,
-				`Use on: {release: {types: [published]}}.`,
-			},
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
