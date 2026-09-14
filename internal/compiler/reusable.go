@@ -830,22 +830,6 @@ func cloneDeferredInput(input deferredInput) deferredInput {
 	return deferredInput{template: input.template, needs: cloneNeedBindings(input.needs)}
 }
 
-// deferredInputMembers lists every caller job that any deferred input reads.
-func deferredInputMembers(inputs map[string]deferredInput) []string {
-	seen := make(map[string]struct{})
-	for _, input := range inputs {
-		for _, member := range bindingMembers(input.needs) {
-			seen[member] = struct{}{}
-		}
-	}
-	members := make([]string, 0, len(seen))
-	for member := range seen {
-		members = append(members, member)
-	}
-	sort.Strings(members)
-	return members
-}
-
 func cloneSourcedCallGuards(guards []sourcedCallGuard) []sourcedCallGuard {
 	if guards == nil {
 		return nil

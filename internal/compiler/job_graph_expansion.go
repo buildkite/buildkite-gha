@@ -28,12 +28,19 @@ type jobGraphExpansionResult struct {
 // jobGraphExpansion carries state while a flattened logical job graph is
 // ordered, expanded into matrix instances, and bound to instance dependencies.
 type jobGraphExpansion struct {
-	path           string
-	context        expression.CompileContext
-	options        Options
-	result         jobGraphExpansionResult
-	accepted       []sourcedJob
-	acceptedIndex  map[string]int
+	path          string
+	context       expression.CompileContext
+	options       Options
+	result        jobGraphExpansionResult
+	accepted      []sourcedJob
+	acceptedIndex map[string]int
+	// prerequisites holds jobPrerequisites for every accepted job by flattened
+	// logical ID. Ordering, blocked-job classification, and any later split of
+	// the graph into compilation stages read this one map.
+	prerequisites map[string][]string
+	// topologyJobs is the accepted graph with Needs replaced by prerequisites.
+	// It is the ordering view of the graph and the producer lookup for
+	// runtime-matrix descriptions; it is not any job's needs scope.
 	topologyJobs   map[string]workflow.Job
 	order          []string
 	matricesByJob  map[string][]map[string]any
@@ -128,17 +135,50 @@ func (e *jobGraphExpansion) acceptJobs(resolved []sourcedJob) {
 	}
 }
 
+// jobPrerequisites returns the flattened logical jobs that must be compiled
+// before this job, sorted and without duplicates:
+//
+//   - the members of every need bound to the job, including the caller needs
+//     a reusable-workflow call forwards to a callee job without needs;
+//   - the caller needs whose outputs feed a deferred reusable-workflow input;
+//   - for each enclosing call guard, the caller needs the guard condition
+//     reads and the caller needs feeding that call's deferred inputs.
+//
+// The list decides ordering and whether a failed earlier job blocks this one.
+// It is not the job's needs scope: bindInstanceDependencies derives that from
+// needBindings alone, so caller needs reached only through a guard or a
+// deferred input never become `needs.<id>` inside the callee.
+func jobPrerequisites(sourced sourcedJob) []string {
+	seen := make(map[string]struct{})
+	addBindings := func(bindings map[string]needBinding) {
+		for _, binding := range bindings {
+			for _, member := range binding.members {
+				seen[member] = struct{}{}
+			}
+		}
+	}
+	addDeferred := func(inputs map[string]deferredInput) {
+		for _, input := range inputs {
+			addBindings(input.needs)
+		}
+	}
+	addBindings(sourced.needBindings)
+	addDeferred(sourced.inputs.deferred)
+	for _, guard := range sourced.callGuards {
+		addBindings(guard.needBindings)
+		addDeferred(guard.inputs.deferred)
+	}
+	return sortedKeys(seen)
+}
+
 func (e *jobGraphExpansion) orderJobs() {
+	e.prerequisites = make(map[string][]string, len(e.accepted))
 	e.topologyJobs = make(map[string]workflow.Job, len(e.accepted))
 	for _, sourced := range e.accepted {
+		prerequisites := jobPrerequisites(sourced)
+		e.prerequisites[sourced.ID] = prerequisites
 		job := sourced.Job
-		for _, guard := range sourced.callGuards {
-			job.Needs = append(job.Needs, bindingMembers(guard.needBindings)...)
-			job.Needs = append(job.Needs, deferredInputMembers(guard.inputs.deferred)...)
-		}
-		job.Needs = append(job.Needs, deferredInputMembers(sourced.inputs.deferred)...)
-		sort.Strings(job.Needs)
-		job.Needs = slices.Compact(job.Needs)
+		job.Needs = prerequisites
 		e.topologyJobs[sourced.ID] = job
 	}
 	order, err := topologicalOrder(e.path, e.topologyJobs)
@@ -236,7 +276,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 	sourced := e.accepted[e.acceptedIndex[id]]
 	job := sourced.Job
 	jobPath := sourced.path
-	jobBlocked := e.jobBlocked(sourced)
+	jobBlocked := e.jobBlocked(id)
 	jobFailed := e.failedJobs[id]
 	matrices := e.matricesByJob[id]
 	concurrencyGroups := make(map[string]struct{}, len(matrices))
@@ -423,32 +463,11 @@ func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any
 	return candidate
 }
 
-func (e *jobGraphExpansion) jobBlocked(sourced sourcedJob) bool {
-	if bindingsFailed(sourced.needBindings, e.failedJobs) || deferredInputsFailed(sourced.inputs.deferred, e.failedJobs) {
-		return true
-	}
-	for _, guard := range sourced.callGuards {
-		if bindingsFailed(guard.needBindings, e.failedJobs) || deferredInputsFailed(guard.inputs.deferred, e.failedJobs) {
-			return true
-		}
-	}
-	return false
-}
-
-func bindingsFailed(bindings map[string]needBinding, failedJobs map[string]bool) bool {
-	for _, binding := range bindings {
-		for _, member := range binding.members {
-			if failedJobs[member] {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func deferredInputsFailed(inputs map[string]deferredInput, failedJobs map[string]bool) bool {
-	for _, input := range inputs {
-		if bindingsFailed(input.needs, failedJobs) {
+// jobBlocked reports whether any prerequisite of the job failed, in which
+// case the job's instances are recorded but not evaluated.
+func (e *jobGraphExpansion) jobBlocked(id string) bool {
+	for _, prerequisite := range e.prerequisites[id] {
+		if e.failedJobs[prerequisite] {
 			return true
 		}
 	}
