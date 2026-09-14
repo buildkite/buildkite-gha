@@ -116,7 +116,7 @@ func TestHostedPreflightCompilesPublicReusableWorkflowWithSharedSource(t *testin
 		t.Fatal(err)
 	}
 	distributionDigest := "sha256:" + strings.Repeat("d", 64)
-	compiled, err := compileHostedWithActionCache(t.Context(), callerPath, caller, event, "0.0.0-test", distributionDigest, "importer", "", nil, map[compiler.Platform]string{compiler.PlatformLinuxAMD64: distributionDigest}, "", shared, nil)
+	compiled, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: callerPath, WorkflowSource: caller, EventSource: event, Version: "0.0.0-test", DistributionDigest: distributionDigest, ImporterStep: "importer", RuntimeDistributions: map[compiler.Platform]string{compiler.PlatformLinuxAMD64: distributionDigest}, RepositorySource: shared})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,9 +152,9 @@ jobs:
 		t.Fatal(err)
 	}
 	digest := "sha256:" + strings.Repeat("d", 64)
-	compiled, err := compileHostedWithActionCache(t.Context(), workflowPath, workflow, event, "0.0.0-test", digest, "importer", "", nil, map[compiler.Platform]string{compiler.PlatformLinuxAMD64: digest}, "", nil, nil)
+	compiled, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: digest, ImporterStep: "importer", RuntimeDistributions: map[compiler.Platform]string{compiler.PlatformLinuxAMD64: digest}})
 	if err == nil {
-		t.Fatal("compileHostedWithActionCache() unexpectedly succeeded")
+		t.Fatal("compileHostedRequest() unexpectedly succeeded")
 	}
 	if compiled.JobGraphComplete || len(compiled.Bundle.IR.Jobs) != 1 || compiled.Bundle.IR.Jobs[0].LogicalJobID != "known" {
 		t.Fatalf("partial hosted compilation = %#v", compiled)
@@ -185,9 +185,9 @@ jobs:
 		t.Fatal(err)
 	}
 	digest := "sha256:" + strings.Repeat("d", 64)
-	compiled, err := compileHostedWithActionCache(t.Context(), workflowPath, workflow, event, "0.0.0-test", digest, "importer", "", nil, map[compiler.Platform]string{compiler.PlatformLinuxAMD64: digest}, "", nil, nil)
+	compiled, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: digest, ImporterStep: "importer", RuntimeDistributions: map[compiler.Platform]string{compiler.PlatformLinuxAMD64: digest}})
 	if err == nil || !strings.Contains(err.Error(), "event payload artifact exceeds") {
-		t.Fatalf("compileHostedWithActionCache() error = %v", err)
+		t.Fatalf("compileHostedRequest() error = %v", err)
 	}
 	if !compiled.JobGraphComplete || len(compiled.Bundle.Plans) != 0 || compiled.Bundle.JobOutcomes[compiled.Bundle.IR.Jobs[0].Key] != compiler.JobFailed {
 		t.Fatalf("event artifact failure retained runnable work: %#v", compiled)
@@ -611,7 +611,7 @@ func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 			redactor := &cliRedactor{}
 			var warnings bytes.Buffer
 			authentication := &actionSourceAuthentication{provider: provider, redactor: redactor, warnings: &warnings}
-			if _, err := compileHosted(t.Context(), workflowPath, workflowSource, test.event, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", nil, nil, authentication); err != nil {
+			if _, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: workflowSource, EventSource: test.event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("0", 64), ImporterStep: "importer", ActionAuthentication: authentication}); err != nil {
 				t.Fatal(err)
 			}
 			if provider.calls != 0 || len(redactor.values) != 0 || warnings.Len() != 0 {
@@ -629,16 +629,16 @@ func TestCompileHostedRequiresExplicitMacOSQueueAndRuntime(t *testing.T) {
 	}
 	compilerDigest := "sha256:" + strings.Repeat("0", 64)
 	darwinDigest := "sha256:" + strings.Repeat("1", 64)
-	_, err = compileHosted(t.Context(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", nil, nil, nil)
+	_, err = compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "macos.yml", WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: compilerDigest, ImporterStep: "importer"})
 	if err == nil || !strings.Contains(err.Error(), `runner label "macos-15" is not mapped by policy`) {
 		t.Fatalf("missing macOS queue error = %v", err)
 	}
 	macOSTarget := map[string]compiler.RunnerTarget{"macos-15": {Queue: "macos", Platform: compiler.PlatformDarwinARM64}}
-	_, err = compileHosted(t.Context(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", macOSTarget, nil, nil)
+	_, err = compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "macos.yml", WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: compilerDigest, ImporterStep: "importer", RunnerTargets: macOSTarget})
 	if err == nil || !strings.Contains(err.Error(), "no runtime distribution configured for darwin/arm64") {
 		t.Fatalf("missing macOS runtime error = %v", err)
 	}
-	compiled, err := compileHosted(t.Context(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", macOSTarget, map[compiler.Platform]string{compiler.PlatformDarwinARM64: darwinDigest}, nil)
+	compiled, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "macos.yml", WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: compilerDigest, ImporterStep: "importer", RunnerTargets: macOSTarget, RuntimeDistributions: map[compiler.Platform]string{compiler.PlatformDarwinARM64: darwinDigest}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -655,12 +655,12 @@ func TestCompileHostedDefaultsMacOSLatestAliasToHostedQueue(t *testing.T) {
 	}
 	compilerDigest := "sha256:" + strings.Repeat("0", 64)
 	darwinDigest := "sha256:" + strings.Repeat("1", 64)
-	_, err = compileHosted(t.Context(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", nil, nil, nil)
+	_, err = compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "macos.yml", WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: compilerDigest, ImporterStep: "importer"})
 	if err == nil || !strings.Contains(err.Error(), "no runtime distribution configured for darwin/arm64") {
 		t.Fatalf("unmapped macos-latest without Darwin runtime error = %v", err)
 	}
 	darwinRuntime := map[compiler.Platform]string{compiler.PlatformDarwinARM64: darwinDigest}
-	compiled, err := compileHosted(t.Context(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", nil, darwinRuntime, nil)
+	compiled, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "macos.yml", WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: compilerDigest, ImporterStep: "importer", RuntimeDistributions: darwinRuntime})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -668,7 +668,7 @@ func TestCompileHostedDefaultsMacOSLatestAliasToHostedQueue(t *testing.T) {
 		t.Fatalf("default macos-latest compilation = %#v\n%s", compiled.Bundle.Plans, compiled.Bundle.Pipeline)
 	}
 	override := map[string]compiler.RunnerTarget{"macos-latest": {Queue: "custom-macos", Platform: compiler.PlatformDarwinARM64}}
-	compiled, err = compileHosted(t.Context(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", override, darwinRuntime, nil)
+	compiled, err = compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "macos.yml", WorkflowSource: workflow, EventSource: event, Version: "0.0.0-test", DistributionDigest: compilerDigest, ImporterStep: "importer", RunnerTargets: override, RuntimeDistributions: darwinRuntime})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -721,7 +721,7 @@ jobs:
 	targets := map[string]compiler.RunnerTarget{
 		"ubuntu-latest": {Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image},
 	}
-	compiled, err := compileHosted(t.Context(), "profiles.yml", workflow, event, "dev", "sha256:"+strings.Repeat("1", 64), "importer", "", targets, nil, nil)
+	compiled, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: "profiles.yml", WorkflowSource: workflow, EventSource: event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("1", 64), ImporterStep: "importer", RunnerTargets: targets})
 	if err != nil {
 		t.Fatal(err)
 	}

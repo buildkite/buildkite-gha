@@ -111,7 +111,7 @@ jobs:
 		"ubuntu-latest": {Queue: "linux", Platform: compiler.PlatformLinuxAMD64},
 		"macos-latest":  {Queue: "macos", Platform: compiler.PlatformDarwinARM64},
 	}
-	platforms, admissionErr, err := requiredRuntimePlatforms(t.Context(), workflowPath, source, event, "dev", "sha256:"+strings.Repeat("1", 64), "", targets, agentRunnerResolution{}, nil, nil, compiler.VariableSources{})
+	platforms, admissionErr, err := requiredRuntimePlatforms(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: source, EventSource: event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("1", 64), RunnerTargets: targets})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ jobs:
 		"ubuntu-latest": {Queue: "linux", Platform: compiler.PlatformLinuxAMD64},
 		"macos-latest":  {Queue: "macos", Platform: compiler.PlatformDarwinARM64},
 	}
-	platforms, admissionErr, err := requiredRuntimePlatforms(t.Context(), workflowPath, source, event, "dev", "sha256:"+strings.Repeat("1", 64), "", targets, agentRunnerResolution{}, nil, nil, compiler.VariableSources{})
+	platforms, admissionErr, err := requiredRuntimePlatforms(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: source, EventSource: event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("1", 64), RunnerTargets: targets})
 	if err != nil {
 		t.Fatal(err)
 	}

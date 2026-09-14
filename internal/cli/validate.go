@@ -125,9 +125,18 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 	}
 	// Profile validation applies the hosted runner policy so validate and
 	// upload agree on supported labels, including the default macOS queue.
+	request := hostedCompileRequest{
+		WorkflowPath:     workflowPath,
+		WorkflowSource:   source,
+		EventSource:      event,
+		Version:          commandVersion(clientVersion),
+		ImporterStep:     "buildkite-gha-profile-importer",
+		ActionCacheDir:   actionCacheDir,
+		RepositorySource: repositorySource,
+	}
 	validationOptions := compiler.DefaultOptions()
 	if profile != "" {
-		validationOptions = hostedOptions("", nil, nil)
+		validationOptions = request.validationOptions()
 	}
 	validationOptions.RepositorySource = repositorySource
 	processingReport, ok := validatedProcessingReportWithOptions(ctx, out, workflowPath, profile, source, event, loadEvent != nil, &validationOptions)
@@ -150,11 +159,12 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		}
 		// Profile validation never executes generated plans, so the importer
 		// digest stands in for every platform's runtime distribution.
-		runtimeDistributions := map[compiler.Platform]string{
+		request.DistributionDigest = distributionDigest
+		request.RuntimeDistributions = map[compiler.Platform]string{
 			compiler.PlatformLinuxAMD64:  distributionDigest,
 			compiler.PlatformDarwinARM64: distributionDigest,
 		}
-		preflight, profileErr := compileHostedWithActionCache(ctx, workflowPath, source, event, commandVersion(clientVersion), distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, actionCacheDir, repositorySource, nil)
+		preflight, profileErr := compileHostedRequest(ctx, request)
 		applyHostedPreflight(&processingReport, preflight)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
