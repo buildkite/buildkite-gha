@@ -441,7 +441,7 @@ func TestBuildkiteWebhookEventSourceBindsReleaseIdentity(t *testing.T) {
 		action     string
 		draft      bool
 		prerelease bool
-	}{{"published", false, true}, {"unpublished", true, false}, {"created", false, false}, {"edited", false, false}, {"deleted", false, false}, {"prereleased", false, true}, {"released", false, false}} {
+	}{{"published", false, true}, {"unpublished", false, false}, {"created", false, false}, {"edited", false, false}, {"deleted", false, false}, {"prereleased", false, true}, {"released", false, false}} {
 		t.Run(activity.action, func(t *testing.T) {
 			changed := maps.Clone(env)
 			changed["BUILDKITE_GITHUB_ACTION"] = activity.action
@@ -469,6 +469,7 @@ func TestBuildkiteWebhookEventSourceBindsReleaseIdentity(t *testing.T) {
 		{name: "malformed draft", webhook: `{"action":"published","release":{"tag_name":"v1.2.3","draft":"false","prerelease":false}}`, want: "draft"},
 		{name: "malformed prerelease", webhook: `{"action":"published","release":{"tag_name":"v1.2.3","draft":false,"prerelease":"false"}}`, want: "prerelease"},
 		{name: "draft created", changeEnv: func(env map[string]string) { env["BUILDKITE_GITHUB_ACTION"] = "created" }, webhook: `{"action":"created","release":{"tag_name":"v1.2.3","draft":true,"prerelease":false}}`, want: "draft created"},
+		{name: "draft unpublished", changeEnv: func(env map[string]string) { env["BUILDKITE_GITHUB_ACTION"] = "unpublished" }, webhook: `{"action":"unpublished","release":{"tag_name":"v1.2.3","draft":true,"prerelease":false}}`, want: "draft unpublished"},
 		{name: "symbolic commit", changeEnv: func(env map[string]string) { env["BUILDKITE_COMMIT"] = "HEAD" }, webhook: webhook, want: "BUILDKITE_COMMIT"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -4693,11 +4693,12 @@ func TestParseEventValidatesReleaseIdentity(t *testing.T) {
 		{name: "malformed draft", old: `"draft":false`, replacement: `"draft":"false"`, want: "draft"},
 		{name: "malformed prerelease", old: `"prerelease":false`, replacement: `"prerelease":"false"`, want: "prerelease"},
 		{name: "draft created", old: `"action":"published"`, replacement: `"action":"created"`, want: "draft created"},
+		{name: "draft unpublished", old: `"action":"published"`, replacement: `"action":"unpublished"`, want: "draft unpublished"},
 		{name: "invalid sha", old: sha, replacement: "HEAD", want: "full lowercase sha"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			changed := strings.Replace(event, test.old, test.replacement, 1)
-			if test.name == "draft created" {
+			if strings.HasPrefix(test.name, "draft ") {
 				changed = strings.Replace(changed, `"draft":false`, `"draft":true`, 1)
 			}
 			if _, err := ParseEvent([]byte(changed)); err == nil || !strings.Contains(err.Error(), test.want) {

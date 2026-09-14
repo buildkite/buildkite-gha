@@ -62,7 +62,7 @@ func TestPluginReleasePipelineTrigger(t *testing.T) {
 			t.Setenv("BUILDKITE_TAG", "v2.3.4")
 			t.Setenv("BUILDKITE_GITHUB_ACTION", action)
 			setCLIPipelineTriggerEnvironment(t, ".github/workflows/release.yml", "Release", "release", "buildkite/buildkite-gha/.github/workflows/release.yml@refs/tags/v2.3.4")
-			draft := action == "unpublished"
+			draft := false
 			payload := []byte(fmt.Sprintf(`{"action":%q,"repository":{"full_name":"buildkite/buildkite-gha"},"release":{"tag_name":"v2.3.4","draft":%t,"prerelease":true}}`, action, draft))
 			runner := &cliCaptureRunner{webhook: payload}
 			var stdout, stderr bytes.Buffer
@@ -119,7 +119,7 @@ func TestPluginReleasePipelineTrigger(t *testing.T) {
 				"repository": bytes.Replace(payload, []byte(`buildkite/buildkite-gha`), []byte(`other/repo`), 1),
 				"activity":   bytes.Replace(payload, []byte(fmt.Sprintf(`"action":%q`, action)), []byte(`"action":"not-real"`), 1),
 			}
-			if slices.Contains([]string{"created", "edited", "deleted"}, action) {
+			if slices.Contains([]string{"created", "edited", "deleted", "unpublished"}, action) {
 				brokenPayloads["draft"] = bytes.Replace(payload, []byte(`"draft":false`), []byte(`"draft":true`), 1)
 			}
 			for name, broken := range brokenPayloads {
