@@ -411,7 +411,7 @@ conversation comments.
 For `release`, both workflow identity fields and the original linked payload
 are required. The ref identifies the release tag; the SHA identifies its
 server-resolved peeled commit. Repository, tag, branch, and activity must agree.
-Draft releases reject `created`, `edited`, and `deleted`. See
+Draft releases reject `created`, `edited`, `deleted`, and `unpublished`. See
 [release compatibility](compatibility.md#names-and-triggers).
 Deployment events require both workflow identity fields and the original linked
 payload. Workflows use the deployment commit and branch/tag ref, or an empty

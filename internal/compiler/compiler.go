@@ -515,7 +515,7 @@ func nativeReleaseActivitiesWarning(position workflow.Position) Warning {
 		Code:    "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED",
 		Line:    position.Line,
 		Column:  position.Column,
-		Message: "GitHub Actions Pipeline Triggers deliver all seven release activities. Native Buildkite release builds deliver only published, created, and released, so unpublished, edited, deleted, and prereleased will not run this workflow through the native integration.",
+		Message: "GitHub Actions Pipeline Triggers accept all seven release activities and apply GitHub's draft-release suppression. Native Buildkite release builds deliver only published, created, and released, so unpublished, edited, deleted, and prereleased will not run this workflow through the native integration.",
 	}
 }
 

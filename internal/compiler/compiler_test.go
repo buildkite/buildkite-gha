@@ -5149,7 +5149,7 @@ func TestCompilerWarningsFlagNativeUndeliveredReleaseActivities(t *testing.T) {
 	parsed := &workflow.Workflow{Triggers: []workflow.Trigger{{Event: "release", Position: position}}}
 	want := Warning{
 		Code: "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED", Line: 3, Column: 3,
-		Message: "GitHub Actions Pipeline Triggers deliver all seven release activities. Native Buildkite release builds deliver only published, created, and released, so unpublished, edited, deleted, and prereleased will not run this workflow through the native integration.",
+		Message: "GitHub Actions Pipeline Triggers accept all seven release activities and apply GitHub's draft-release suppression. Native Buildkite release builds deliver only published, created, and released, so unpublished, edited, deleted, and prereleased will not run this workflow through the native integration.",
 	}
 	if warnings := compilerWarnings(parsed, false); !reflect.DeepEqual(warnings, []Warning{want}) {
 		t.Fatalf("warnings = %#v, want %#v", warnings, []Warning{want})
