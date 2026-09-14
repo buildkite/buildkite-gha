@@ -439,12 +439,13 @@ func TestBuildkiteWebhookEventSourceBindsReleaseIdentity(t *testing.T) {
 	}
 	for _, activity := range []struct {
 		action     string
+		draft      bool
 		prerelease bool
-	}{{"published", true}, {"released", false}, {"created", false}} {
+	}{{"published", false, true}, {"unpublished", true, false}, {"created", false, false}, {"edited", false, false}, {"deleted", false, false}, {"prereleased", false, true}, {"released", false, false}} {
 		t.Run(activity.action, func(t *testing.T) {
 			changed := maps.Clone(env)
 			changed["BUILDKITE_GITHUB_ACTION"] = activity.action
-			payload := fmt.Sprintf(`{"action":%q,"release":{"tag_name":"v1.2.3","draft":false,"prerelease":%t}}`, activity.action, activity.prerelease)
+			payload := fmt.Sprintf(`{"action":%q,"release":{"tag_name":"v1.2.3","draft":%t,"prerelease":%t}}`, activity.action, activity.draft, activity.prerelease)
 			if _, err := buildkiteWebhookEventSource(func(key string) string { return changed[key] }, []byte(payload)); err != nil {
 				t.Fatal(err)
 			}
@@ -460,7 +461,7 @@ func TestBuildkiteWebhookEventSourceBindsReleaseIdentity(t *testing.T) {
 		{name: "event mismatch", changeEnv: func(env map[string]string) { env["BUILDKITE_GITHUB_EVENT"] = "push" }, webhook: webhook, want: "BUILDKITE_GITHUB_EVENT"},
 		{name: "non-GitHub repository", changeEnv: func(env map[string]string) { env["BUILDKITE_REPO"] = "https://origin.cursor.com/git/acme/widgets.git" }, webhook: webhook, want: "GitHub repository"},
 		{name: "action mismatch", changeEnv: func(env map[string]string) { env["BUILDKITE_GITHUB_ACTION"] = "released" }, webhook: webhook, want: "BUILDKITE_GITHUB_ACTION"},
-		{name: "unsupported action", changeEnv: func(env map[string]string) { env["BUILDKITE_GITHUB_ACTION"] = "edited" }, webhook: strings.Replace(webhook, "published", "edited", 1), want: "unsupported"},
+		{name: "unsupported action", changeEnv: func(env map[string]string) { env["BUILDKITE_GITHUB_ACTION"] = "not-real" }, webhook: strings.Replace(webhook, "published", "not-real", 1), want: "unsupported"},
 		{name: "tag mismatch", changeEnv: func(env map[string]string) { env["BUILDKITE_TAG"] = "v2.0.0" }, webhook: webhook, want: "BUILDKITE_TAG"},
 		{name: "branch mismatch", changeEnv: func(env map[string]string) { env["BUILDKITE_BRANCH"] = "main" }, webhook: webhook, want: "BUILDKITE_TAG"},
 		{name: "missing release", webhook: `{"action":"published"}`, want: "payload.release"},

@@ -93,6 +93,13 @@ var supportedIssueCommentAction = map[string]bool{
 	"created": true, "edited": true, "deleted": true,
 }
 
+var supportedReleaseActions = []string{"published", "unpublished", "created", "edited", "deleted", "prereleased", "released"}
+
+// SupportedReleaseAction reports whether action is a GitHub Actions release activity.
+func SupportedReleaseAction(action string) bool {
+	return slices.Contains(supportedReleaseActions, action)
+}
+
 // SupportedTriggerEvent reports whether the GitHub trigger event maps to a
 // Buildkite build source.
 func SupportedTriggerEvent(event string) bool {
@@ -393,7 +400,11 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 			}
 		case "release":
 			if snapshot.ReleaseAction != nil {
-				if slices.Contains(trigger.Types, *snapshot.ReleaseAction) {
+				types := trigger.Types
+				if len(types) == 0 {
+					types = supportedReleaseActions
+				}
+				if slices.Contains(types, *snapshot.ReleaseAction) {
 					return "", nil
 				}
 				return fmt.Sprintf("Release activity %q does not match this workflow's release activity filters.", *snapshot.ReleaseAction), nil
@@ -683,15 +694,12 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		if expressions.ReleaseAction == "null" {
 			return "", false, fmt.Errorf("release event snapshot requires payload.action")
 		}
-		if t.Types == nil {
-			return "", false, fmt.Errorf("on: release needs a types list. A bare release covers every release event, while the currently supported types are exactly published, created, and released. Use on: {release: {types: [published]}}. If you need another release type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it")
-		}
 		if len(t.Types) == 0 {
-			return "", false, triggerFilterError(t, fmt.Errorf("release types is explicitly empty"), "types")
+			t.Types = supportedReleaseActions
 		}
 		actions := make([]string, 0, len(t.Types))
 		for _, action := range t.Types {
-			if action != "published" && action != "created" && action != "released" {
+			if !SupportedReleaseAction(action) {
 				return "", false, triggerFilterError(t, fmt.Errorf("release activity type %q cannot be mapped exactly", action), "types")
 			}
 			actions = append(actions, expressions.ReleaseAction+` == `+yamlScalar(action))

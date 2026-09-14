@@ -410,8 +410,9 @@ environment, and `issue_comment` accepts both issue and pull request
 conversation comments.
 For `release`, both workflow identity fields and the original linked payload
 are required. The ref identifies the release tag; the SHA identifies its
-server-resolved peeled commit. Repository, tag, branch, and supported non-draft
-activity must agree. See [release compatibility](compatibility.md#names-and-triggers).
+server-resolved peeled commit. Repository, tag, branch, and activity must agree.
+Draft releases reject `created`, `edited`, and `deleted`. See
+[release compatibility](compatibility.md#names-and-triggers).
 Deployment events require both workflow identity fields and the original linked
 payload. Workflows use the deployment commit and branch/tag ref, or an empty
 Actions ref for SHA-only deployments. SHA-only workflow identity uses `@<sha>`.

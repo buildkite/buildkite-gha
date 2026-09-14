@@ -53,7 +53,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, err
 	}
 	parsed, errs := actionlint.Parse(source)
-	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, emptyDefaultTypesDiagnostics(&document))
+	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, acceptedEmptyTypesDiagnostics(&document))
 	if err := filterActionlintDiagnostics(path, errs, expectedDiagnostics); err != nil {
 		return nil, err
 	}
@@ -232,17 +232,18 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	return owned, nil
 }
 
-// GitHub treats these empty event types as omitted. The pinned
-// actionlint parser already returns nil Types for these sequences, but also
-// reports an error. Accept only that diagnostic at each verified empty sequence,
-// leaving the source and all other diagnostics (including alias errors) intact.
-func emptyDefaultTypesDiagnostics(document *yaml.Node) []expectedActionlintDiagnostic {
+// The pinned actionlint parser rejects empty activity lists more strictly than
+// GitHub. Accept only that diagnostic at each verified sequence, leaving the
+// source and all other diagnostics (including alias errors) intact. The pinned
+// parser represents these sequences as omitted types, matching GitHub's default
+// activity behavior.
+func acceptedEmptyTypesDiagnostics(document *yaml.Node) []expectedActionlintDiagnostic {
 	if len(document.Content) == 0 {
 		return nil
 	}
 	on := mappingValue(document.Content[0], "on")
 	var diagnostics []expectedActionlintDiagnostic
-	for _, event := range []string{"issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "merge_group", "label"} {
+	for _, event := range []string{"issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "merge_group", "label", "release"} {
 		types := mappingValue(mappingValue(on, event), "types")
 		if types != nil && types.Kind == yaml.SequenceNode && len(types.Content) == 0 {
 			diagnostics = append(diagnostics, expectedActionlintDiagnostic{

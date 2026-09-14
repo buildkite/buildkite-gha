@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -324,7 +325,7 @@ func validateBuildkiteRelease(snapshot map[string]any, getenv func(string) strin
 	if action == "" || action != strings.TrimSpace(getenv("BUILDKITE_GITHUB_ACTION")) {
 		return fmt.Errorf("release webhook payload.action does not match BUILDKITE_GITHUB_ACTION")
 	}
-	if action != "published" && action != "created" && action != "released" {
+	if !buildkitepipeline.SupportedReleaseAction(action) {
 		return fmt.Errorf("release webhook action %q is unsupported", action)
 	}
 	release, ok := payload["release"].(map[string]any)
@@ -337,11 +338,8 @@ func validateBuildkiteRelease(snapshot map[string]any, getenv func(string) strin
 	if !tagOK || strings.TrimSpace(tag) == "" || !draftOK || !prereleaseOK {
 		return fmt.Errorf("release webhook requires payload.release tag_name, draft, and prerelease")
 	}
-	if draft {
-		if action == "created" {
-			return fmt.Errorf("release webhook draft created activity does not trigger GitHub Actions")
-		}
-		return fmt.Errorf("release webhook %s activity requires a non-draft release", action)
+	if draft && slices.Contains([]string{"created", "edited", "deleted"}, action) {
+		return fmt.Errorf("release webhook draft %s activity does not trigger GitHub Actions", action)
 	}
 	if tag != getenv("BUILDKITE_TAG") || tag != getenv("BUILDKITE_BRANCH") {
 		return fmt.Errorf("release webhook tag_name does not match BUILDKITE_TAG and BUILDKITE_BRANCH")

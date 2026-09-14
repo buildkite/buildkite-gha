@@ -23,7 +23,7 @@ func TestTriggerFilterErrorLocations(t *testing.T) {
 		{"push", "tags", "['!v1']", "must follow a positive"},
 		{"pull_request", "paths-ignore", "['!src/**']", "cannot be negated"},
 		{"issues", "paths", "['src/**']", "path filters are unsupported"},
-		{"release", "types", "[edited]", "cannot be mapped exactly"},
+		{"release", "types", "[not-real]", "cannot be mapped exactly"},
 		{"merge_group", "types", "[destroyed]", "checks_requested is the only"},
 	} {
 		t.Run(test.event+"/"+test.filter, func(t *testing.T) {
@@ -175,11 +175,7 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 		{name: "unsupported PR type", triggers: []workflow.Trigger{{Event: "pull_request", Types: []string{"not-real"}}}, want: "cannot be mapped exactly"},
 		{name: "unsupported merge group type", triggers: []workflow.Trigger{{Event: "merge_group", Types: []string{"destroyed"}}}, want: `merge_group type "destroyed" is unsupported`},
 		{name: "merge group tags", triggers: []workflow.Trigger{{Event: "merge_group", Tags: []string{"v*"}}}, want: "does not support the tags filter"},
-		{name: "bare release", triggers: []workflow.Trigger{{Event: "release"}}, want: "on: release needs a types list"},
-		{name: "release unpublished", triggers: []workflow.Trigger{{Event: "release", Types: []string{"unpublished"}}}, want: "cannot be mapped exactly"},
-		{name: "release edited", triggers: []workflow.Trigger{{Event: "release", Types: []string{"edited"}}}, want: "cannot be mapped exactly"},
-		{name: "release deleted", triggers: []workflow.Trigger{{Event: "release", Types: []string{"deleted"}}}, want: "cannot be mapped exactly"},
-		{name: "release prereleased", triggers: []workflow.Trigger{{Event: "release", Types: []string{"prereleased"}}}, want: "cannot be mapped exactly"},
+		{name: "unknown release type", triggers: []workflow.Trigger{{Event: "release", Types: []string{"not-real"}}}, want: "cannot be mapped exactly"},
 		{name: "release branch filter", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Branches: []string{"main"}}}, want: "does not support the branches filter"},
 		{name: "release paths", triggers: []workflow.Trigger{{Event: "release", Types: []string{"published"}, Paths: []string{"src/**"}}}, want: "path filters are unsupported"},
 		{name: "unknown issues type", triggers: []workflow.Trigger{{Event: "issues", Types: []string{"not-real"}}}, want: `issues activity type "not-real" cannot be mapped exactly`},
@@ -211,11 +207,6 @@ func TestTranslateTriggerConditionReportsActionableTriggerErrors(t *testing.T) {
 			name:    "unsupported merge group type",
 			trigger: workflow.Trigger{Event: "merge_group", Types: []string{"destroyed"}},
 			want:    `merge_group type "destroyed" is unsupported. checks_requested is the only merge queue activity currently mapped. Set types: [checks_requested]. If you need another merge_group type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
-		},
-		{
-			name:    "bare release",
-			trigger: workflow.Trigger{Event: "release"},
-			want:    `on: release needs a types list. A bare release covers every release event, while the currently supported types are exactly published, created, and released. Use on: {release: {types: [published]}}. If you need another release type, open an issue in https://github.com/buildkite/buildkite-gha so we can prioritize it`,
 		},
 	}
 	for _, test := range tests {
@@ -298,6 +289,44 @@ func TestTranslateEventTriggerConditionUsesReleaseSnapshot(t *testing.T) {
 	)
 	if err != nil || !strings.Contains(reason, `"released"`) {
 		t.Fatalf("release mismatch reason = %q, %v", reason, err)
+	}
+}
+
+func TestBareReleaseMatchesAllGitHubActivities(t *testing.T) {
+	triggers := []workflow.Trigger{{Event: "release"}}
+	condition, err := TranslateTriggerCondition(triggers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"published", "unpublished", "created", "edited", "deleted", "prereleased", "released"} {
+		if !strings.Contains(condition, `build.source_action == "`+action+`"`) {
+			t.Errorf("condition missing %q: %s", action, condition)
+		}
+		reason, err := TriggerFilterMismatchReason(triggers, "release", TriggerEventSnapshot{ReleaseAction: &action})
+		if err != nil || reason != "" {
+			t.Errorf("action %q mismatch = %q, %v", action, reason, err)
+		}
+	}
+}
+
+func TestEmptyReleaseTypesMatchAllActivities(t *testing.T) {
+	empty := []workflow.Trigger{{Event: "release", Types: []string{}}}
+	condition, err := TranslateTriggerCondition(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := TranslateTriggerCondition([]workflow.Trigger{{Event: "release"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if condition != want {
+		t.Fatalf("empty condition = %q, want bare condition %q", condition, want)
+	}
+	for _, action := range supportedReleaseActions {
+		reason, err := TriggerFilterMismatchReason(empty, "release", TriggerEventSnapshot{ReleaseAction: &action})
+		if err != nil || reason != "" {
+			t.Errorf("action %q mismatch = %q, %v", action, reason, err)
+		}
 	}
 }
 
