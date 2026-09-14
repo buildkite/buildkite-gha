@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 )
 
 func TestSuggestedRunnerTargetsAgentEnvironment(t *testing.T) {
@@ -70,7 +71,7 @@ func TestSuggestedRunnerTargetsAgentEnvironment(t *testing.T) {
 	}
 }
 
-func TestExplicitRunnerImageBypassesNativeResolution(t *testing.T) {
+func TestExplicitRunnerImageIsPreservedAfterValidation(t *testing.T) {
 	image := "registry.example.com/custom@sha256:" + strings.Repeat("a", 64)
 	plugin, err := parsePluginConfiguration(`{"workflow":"workflow.yml","runners":[{"runs-on":"ubuntu-latest","queue":"custom","image":"` + image + `"}]}`)
 	if err != nil {
@@ -80,7 +81,7 @@ func TestExplicitRunnerImageBypassesNativeResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, requests := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{"ubuntu-latest": {"target": map[string]any{"queue": "native", "platform": "linux/amd64", "agents": map[string]string{"nsc-gha-image": "ubuntu-24.04"}, "tool_cache": false}}})
+	server, requests := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{"ubuntu-latest": {"validated": true, "target": map[string]any{"queue": "custom", "platform": "linux/amd64", "agents": map[string]string{"nsc-gha-image": "ubuntu-24.04"}, "tool_cache": false}}})
 	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
@@ -93,9 +94,12 @@ func TestExplicitRunnerImageBypassesNativeResolution(t *testing.T) {
 		options := hostedOptions("", targets, nil)
 		applyRunnerResolution(&options, resolution)
 		selected, err := options.Runners.Resolve([]string{"ubuntu-latest"}, compiler.EventUntrusted)
-		if err != nil || selected.Image != image || selected.Queue != "custom" || len(selected.Agents) != 0 || *requests != 0 {
+		if err != nil || selected.Image != image || selected.Queue != "custom" || len(selected.Agents) != 0 {
 			t.Fatalf("selected=%#v requests=%d error=%v", selected, *requests, err)
 		}
+	}
+	if *requests != 2 {
+		t.Fatalf("validation requests = %d, want 2", *requests)
 	}
 }
 
@@ -119,5 +123,23 @@ func TestRunnerSelectorIsConfigured(t *testing.T) {
 		if got := runnerSelectorIsConfigured(test.labels, targets); got != test.want {
 			t.Errorf("runnerSelectorIsConfigured(%q) = %v, want %v", test.labels, got, test.want)
 		}
+	}
+}
+
+func TestRunnerRequirementsIncludeExplicitMultiLabelTargets(t *testing.T) {
+	target := compiler.RunnerTarget{Queue: "custom-linux", Platform: compiler.PlatformLinuxAMD64}
+	configured := map[string]compiler.RunnerTarget{"self-hosted": target, "ubuntu-latest": target}
+	jobs := []compiler.JobInstance{
+		{RunsOn: []string{"self-hosted", "Ubuntu-Latest"}},
+		{RunsOn: []string{"macos-latest"}},
+		{RunsOn: []string{"self-hosted", "Ubuntu-Latest"}},
+	}
+	requirements := uniqueRunnerRequirements([]compiler.Report{{Jobs: jobs}}, configured)
+	want := []gharuntime.RunnerRequirement{
+		{ID: "r1", Labels: []string{"self-hosted", "Ubuntu-Latest"}, ConfiguredTarget: &gharuntime.ConfiguredRunnerTarget{Queue: "custom-linux", Platform: "linux/amd64"}},
+		{ID: "r2", Labels: []string{"macos-latest"}},
+	}
+	if !reflect.DeepEqual(requirements, want) {
+		t.Fatalf("requirements = %#v, want %#v", requirements, want)
 	}
 }

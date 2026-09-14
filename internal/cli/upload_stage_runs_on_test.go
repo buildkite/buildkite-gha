@@ -3,6 +3,8 @@ package cli
 import (
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -34,6 +36,12 @@ jobs:
 `
 
 func TestContinueRunsOnUsesMappingAndPreservesReplayChecks(t *testing.T) {
+	server, _ := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+		"ubuntu-latest": {"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}},
+		"ubuntu-22.04":  {"validated": true, "target": map[string]string{"queue": "selected-queue", "platform": "linux/amd64"}},
+	})
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
 	initial := runContinueInitialUploads(t, continueRunsOnWorkflow, "--runner-queue", "ubuntu-22.04=selected-queue")[0]
 	continuation := initial.artifact.Continuation
 	if !slices.Equal(continuation.Jobs, []string{"build", "publish"}) || !strings.HasSuffix(continuation.StepKey, "-build-runs-on") || !strings.Contains(initial.pipeline, ":github: runs-on · build") || !strings.Contains(initial.pipeline, "build (runs-on)") {
@@ -93,6 +101,51 @@ func TestContinueRunsOnUsesMappingAndPreservesReplayChecks(t *testing.T) {
 			_, _, skipped := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
 			if len(skipped) != 2 || skipped[0].Key != steps[0].Key || skipped[1].Key != steps[1].Key || skipped[0].Skip == "" || skipped[1].Skip == "" || len(uploadedPlans(t, runner)) != 0 {
 				t.Fatalf("skipped=%+v", skipped)
+			}
+		})
+	}
+}
+
+func TestContinueRunsOnRequiresValidationForExplicitARM64Mapping(t *testing.T) {
+	armRuntime := filepath.Join(t.TempDir(), "buildkite-gha-linux-arm64")
+	if err := os.WriteFile(armRuntime, pluginTestLinuxExecutable(183), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name      string
+		arm       map[string]any
+		wantCode  int
+		wantError string
+	}{
+		{name: "validated", arm: map[string]any{"validated": true, "target": map[string]string{"queue": "self-hosted-arm", "platform": "linux/arm64"}}},
+		{name: "missing validation acknowledgment", arm: map[string]any{"target": map[string]string{"queue": "self-hosted-arm", "platform": "linux/arm64"}}, wantCode: 1, wantError: "cannot validate explicit runner mappings"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, requests := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+				"ubuntu-latest":    {"target": map[string]string{"queue": "linux-medium", "platform": "linux/amd64", "image": defaultNobleRunnerImage}},
+				"ubuntu-24.04-arm": test.arm,
+			})
+			t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+			t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+			initial := runContinueInitialUploads(t, continueRunsOnWorkflow,
+				"--runner-queue", "ubuntu-24.04-arm=self-hosted-arm",
+				"--runtime-distribution", "linux/arm64="+armRuntime,
+			)[0]
+			initialRequests := *requests
+			runner := initial.continueRunner(initial.producerManifest(t, "success", `["ubuntu-24.04-arm"]`))
+			code, _, stderr := runContinue(t, runner, initial.digest)
+			if *requests != initialRequests+1 || code != test.wantCode || !strings.Contains(stderr, test.wantError) {
+				t.Fatalf("continue=%d requests=%d stderr=%s", code, *requests, stderr)
+			}
+			if test.wantCode != 0 {
+				if pipelineUploads(runner) != 0 {
+					t.Fatal("unvalidated deferred job was uploaded")
+				}
+				return
+			}
+			plans := uploadedPlans(t, runner)
+			if len(plans["build"]) != 1 || plans["build"][0].Target.Queue != "self-hosted-arm" || plans["build"][0].Target.Platform != compiler.PlatformLinuxARM64 {
+				t.Fatalf("ARM64 plans = %#v", plans["build"])
 			}
 		})
 	}
