@@ -309,6 +309,22 @@ func TestBareReleaseMatchesAllGitHubActivities(t *testing.T) {
 	}
 }
 
+func TestEmptyReleaseTypesMatchNoActivities(t *testing.T) {
+	triggers := []workflow.Trigger{{Event: "release", Types: []string{}}}
+	condition, err := TranslateTriggerCondition(triggers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "(" + LiveEventPredicate("release") + " && false)"; condition != want {
+		t.Fatalf("condition = %q, want %q", condition, want)
+	}
+	action := "published"
+	reason, err := TriggerFilterMismatchReason(triggers, "release", TriggerEventSnapshot{ReleaseAction: &action})
+	if err != nil || !strings.Contains(reason, `"published"`) {
+		t.Fatalf("release mismatch reason = %q, %v", reason, err)
+	}
+}
+
 func TestEmptyIssueTypesMatchAllActivities(t *testing.T) {
 	for _, event := range []string{"issues", "issue_comment"} {
 		t.Run(event, func(t *testing.T) {

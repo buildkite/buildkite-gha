@@ -698,7 +698,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 			t.Types = supportedReleaseActions
 		}
 		if len(t.Types) == 0 {
-			return "", false, triggerFilterError(t, fmt.Errorf("release types is explicitly empty"), "types")
+			return expressions.EventPredicate + " && false", true, nil
 		}
 		actions := make([]string, 0, len(t.Types))
 		for _, action := range t.Types {

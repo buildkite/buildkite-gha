@@ -53,7 +53,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, err
 	}
 	parsed, errs := actionlint.Parse(source)
-	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, emptyDefaultTypesDiagnostics(&document))
+	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, acceptedEmptyTypesDiagnostics(&document))
 	if err := filterActionlintDiagnostics(path, errs, expectedDiagnostics); err != nil {
 		return nil, err
 	}
@@ -72,6 +72,9 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		node := events[trigger.Event]
 		if node == nil || node.Kind != yaml.MappingNode {
 			continue
+		}
+		if types := mappingValue(node, "types"); trigger.Event == "release" && types != nil && types.Kind == yaml.SequenceNode && len(types.Content) == 0 {
+			trigger.Types = []string{}
 		}
 		trigger.FilterSpans = make(map[string]Span)
 		for j := 0; j+1 < len(node.Content); j += 2 {
@@ -232,17 +235,18 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	return owned, nil
 }
 
-// GitHub treats these empty event types as omitted. The pinned
-// actionlint parser already returns nil Types for these sequences, but also
-// reports an error. Accept only that diagnostic at each verified empty sequence,
-// leaving the source and all other diagnostics (including alias errors) intact.
-func emptyDefaultTypesDiagnostics(document *yaml.Node) []expectedActionlintDiagnostic {
+// The pinned actionlint parser rejects empty activity lists more strictly than
+// GitHub. Accept only that diagnostic at each verified sequence, leaving the
+// source and all other diagnostics (including alias errors) intact. Release
+// emptiness is restored after adapting actionlint's syntax tree so it matches no
+// activity; the existing default activity events retain their omitted behavior.
+func acceptedEmptyTypesDiagnostics(document *yaml.Node) []expectedActionlintDiagnostic {
 	if len(document.Content) == 0 {
 		return nil
 	}
 	on := mappingValue(document.Content[0], "on")
 	var diagnostics []expectedActionlintDiagnostic
-	for _, event := range []string{"issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "merge_group", "label"} {
+	for _, event := range []string{"issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "merge_group", "label", "release"} {
 		types := mappingValue(mappingValue(on, event), "types")
 		if types != nil && types.Kind == yaml.SequenceNode && len(types.Content) == 0 {
 			diagnostics = append(diagnostics, expectedActionlintDiagnostic{

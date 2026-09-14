@@ -72,7 +72,7 @@ func TestParseMergeGroupTypes(t *testing.T) {
 	}
 }
 
-func TestParseBareReleaseAndRejectExplicitEmptyTypes(t *testing.T) {
+func TestParseReleaseTypes(t *testing.T) {
 	for _, declaration := range []string{"release", "[push, release]", "{release: null}", "{release: {}}"} {
 		parsed, err := Parse("release.yml", []byte("on: "+declaration+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
 		if err != nil {
@@ -83,9 +83,19 @@ func TestParseBareReleaseAndRejectExplicitEmptyTypes(t *testing.T) {
 		}
 	}
 
-	source := "on: {release: {types: []}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
-	if _, err := Parse("release.yml", []byte(source)); err == nil || !strings.Contains(err.Error(), `"types" section should not be empty`) {
-		t.Fatalf("explicit empty release types error = %v", err)
+	for declaration, want := range map[string][]string{
+		"{release: {types: published}}": {"published"},
+		"{release: {types: []}}":        {},
+	} {
+		parsed, err := Parse("release.yml", []byte("on: "+declaration+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+		if err != nil {
+			t.Fatalf("%s: %v", declaration, err)
+		}
+		if !slices.ContainsFunc(parsed.Triggers, func(trigger Trigger) bool {
+			return trigger.Event == "release" && reflect.DeepEqual(trigger.Types, want)
+		}) {
+			t.Errorf("%s: triggers = %#v, want release types %#v", declaration, parsed.Triggers, want)
+		}
 	}
 }
 
@@ -108,7 +118,7 @@ func TestParseEmptyIssueTypesTogether(t *testing.T) {
 func TestParseEmptyIssueTypesPreservesDiagnostics(t *testing.T) {
 	for _, test := range []struct{ on, want string }{
 		{"issues: {types: []}\n  pull_request: {types: []}", `"types" section should not be empty`},
-		{"issue_comment: {types: []}\n  release: {types: []}", `"types" section should not be empty`},
+		{"issue_comment: {types: []}\n  release: {types: []}", `types.yml:7:12: "steps" section should not be empty`},
 		{"issues: {types: &empty []}\n  pull_request: {types: *empty}", `"types" section should not be empty`},
 		{"issues: {types: {}}", "sequence"},
 		{"issue_comment: {types: null}", "should not be empty"},
