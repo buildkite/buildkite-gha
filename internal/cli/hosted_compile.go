@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"slices"
 
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -60,6 +61,15 @@ type hostedCompileRequest struct {
 	RepositorySource     compiler.RepositorySource
 	ActionCacheDir       string
 	ActionAuthentication *actionSourceAuthentication
+
+	// RuntimeMatrixRows supplies, per consumer job, the verified rows of a
+	// matrix whose values come from a job output. An initial compilation
+	// leaves it empty and defers those jobs to a continuation; the
+	// continuation compiles the same request with the rows the producer
+	// published. RuntimeMatrixActionLocks pins the actions of the deferred
+	// jobs to the revisions the initial compilation resolved.
+	RuntimeMatrixRows        map[string][]map[string]any
+	RuntimeMatrixActionLocks []plan.ActionLock
 }
 
 // validationOptions returns the options for validating the workflow against
@@ -72,6 +82,7 @@ func (r hostedCompileRequest) validationOptions() compiler.Options {
 	options.StepKeyNamespace = r.StepKeyNamespace
 	options.RepositorySource = r.RepositorySource
 	options.Vars = r.Vars
+	options.RuntimeMatrixRows = r.RuntimeMatrixRows
 	return options
 }
 
@@ -85,6 +96,8 @@ func (r hostedCompileRequest) options() compiler.Options {
 	options.OIDC = r.OIDC
 	options.EnvironmentSource = r.EnvironmentSource
 	options.Vars = r.Vars
+	options.RuntimeMatrixRows = r.RuntimeMatrixRows
+	options.RuntimeMatrixActionLocks = r.RuntimeMatrixActionLocks
 	return options
 }
 
@@ -167,12 +180,20 @@ func compileHostedRequest(ctx context.Context, request hostedCompileRequest) (ho
 // pipeline uses, the logical job it expands, the step keys it depends on,
 // and the digest of its plan. Two compilations of the same request agree on
 // every field; a compilation with different variables agrees on everything
-// but the plan digest.
+// but the plan digest. The continuation artifact records the initial
+// upload's instances in this form so the deferred upload can prove that its
+// recompilation reproduced them.
 type compiledJob struct {
-	Key        string
-	LogicalJob string
-	Needs      []string
-	PlanDigest string
+	Key        string   `json:"key"`
+	LogicalJob string   `json:"job"`
+	Needs      []string `json:"needs,omitempty"`
+	PlanDigest string   `json:"plan_digest"`
+}
+
+// equal reports whether two compilations produced the same instance: the
+// same key, logical job, dependencies, and plan.
+func (j compiledJob) equal(other compiledJob) bool {
+	return j.Key == other.Key && j.LogicalJob == other.LogicalJob && j.PlanDigest == other.PlanDigest && slices.Equal(slices.Sorted(slices.Values(j.Needs)), slices.Sorted(slices.Values(other.Needs)))
 }
 
 // compiledJobs lists the bundle's job instances in expansion order. An
