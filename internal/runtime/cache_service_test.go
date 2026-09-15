@@ -251,10 +251,11 @@ for (const name of [
   "ACTIONS_RUNTIME_URL",
   "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_AUDIT", "LD_PRELOAD", "LD_LIBRARY_PATH",
   "OPENSSL_CONF", "OPENSSL_CONF_INCLUDE", "OPENSSL_ENGINES", "OPENSSL_MODULES",
-  "TAR_OPTIONS",
+  "TAR_OPTIONS", "BASH_ENV", "ENV",
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
   "BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_JOB_ID",
 ]) if (process.env[name]) throw new Error(name + " leaked");
+if (Object.keys(process.env).some(name => name.startsWith('BASH_FUNC_'))) throw new Error('shell function leaked');
 const tar = spawnSync("tar", ["--version"], {encoding: "utf8"});
 if (tar.status !== 0) throw new Error("trusted tar failed: " + tar.stderr);
 if (process.env.PATH !== %q) throw new Error("unsafe PATH: " + process.env.PATH);
@@ -298,7 +299,9 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 		"SSLKEYLOGFILE": "/attacker/keys", "LD_AUDIT": "/attacker-audit.so", "LD_PRELOAD": "/attacker.so", "LD_LIBRARY_PATH": "/attacker/lib",
 		"OPENSSL_CONF": "/attacker/openssl.cnf", "OPENSSL_CONF_INCLUDE": "/attacker/includes", "OPENSSL_ENGINES": "/attacker/engines", "OPENSSL_MODULES": "/attacker/modules",
 		"TAR_OPTIONS": "--checkpoint=1 --checkpoint-action=exec=/attacker-command",
-		"HTTP_PROXY":  "http://attacker", "HTTPS_PROXY": "http://attacker", "ALL_PROXY": "http://attacker", "NO_PROXY": "cache.example",
+		"BASH_ENV":    "/attacker/rc", "ENV": "/attacker/rc",
+		"BASH_FUNC_zstd%%": "() { exit 97; }",
+		"HTTP_PROXY":       "http://attacker", "HTTPS_PROXY": "http://attacker", "ALL_PROXY": "http://attacker", "NO_PROXY": "cache.example",
 		"http_proxy": "http://attacker", "https_proxy": "http://attacker", "all_proxy": "http://attacker", "no_proxy": "cache.example",
 		"BUILDKITE_AGENT_ACCESS_TOKEN": "workflow-agent-token", "BUILDKITE_JOB_ID": testCacheJobID, "FAKE_TAR_MARKER": fakeTarMarker,
 	}

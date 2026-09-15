@@ -1620,6 +1620,8 @@ consumer. [Build 1173](https://buildkite.com/buildkite/buildkite-gha/builds/1173
 verified the payload. Hosted validation checks resolution, compilation, and
 admission for every listed commit; it does not execute the actions.
 
+Audited `actions/cache` subprocesses use a trusted tool `PATH` and strip `BASH_ENV`, `ENV`, and exported Bash functions (`BASH_FUNC_*`). GNU tar may invoke a shell for compression; a trusted `PATH` alone does not exclude shell startup files or exported functions. This filtering does not apply to other actions.
+
 JavaScript and Docker actions with compatible bundled cache clients also receive job-bound cache-v2 credentials when the service is available. Root invocations of `actions/setup-node`, `actions/setup-java`, `actions/setup-python`, `actions/setup-go`, and `actions/setup-dotnet` use a subprocess-scoped synthetic `GITHUB_SERVER_URL` when the real host would make their clients select cache v1. Each allowlist entry requires an audit of the action source and bundled dependencies to confirm that `GITHUB_SERVER_URL` affects only caching behavior and is not load-bearing for any request the action makes. The workflow expression context retains the real server URL. Ordinary `run` steps and native action adapters do not receive cache credentials.
 
 ## Repositories, credentials, and GitHub services
