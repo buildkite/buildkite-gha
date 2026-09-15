@@ -854,6 +854,42 @@ runs:
 	}
 }
 
+func TestSelfRepositoryCompositeRetainsParentActionRef(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: self action identity\n")
+	writeFixtureFile(t, remote, "parent/action.yml", `name: Parent
+runs:
+  using: composite
+  steps:
+    - uses: $/child
+`)
+	writeFixtureFile(t, remote, "child/action.yml", `name: Child
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        ACTION_IDENTITY: ${{ github.action_repository }}@${{ github.action_ref }}
+      run: |
+        test "$ACTION_IDENTITY" = owner/repo@v1
+`)
+	digest := digestTree(t, remote)
+	parentID, childID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
+		ID: "identity", Kind: "uses", Uses: remoteLifecycleUses("parent"), Action: &plan.ActionSelector{Lock: parentID},
+	}})
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(parentID, "parent", digest, map[string]plan.ActionSelector{"$/child": {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	if result, err := (Runner{Actions: materializer}).runTestJob(t.Context(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
 func TestNestedRemoteCompositeInvocationFieldsRetainCallerIdentityForPreAndMain(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

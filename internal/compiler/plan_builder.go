@@ -35,6 +35,7 @@ type planBuilder struct {
 }
 
 type builtPlanActions struct {
+	workflowSource       *RemoteWorkflowSource
 	locks                []plan.ActionLock
 	capabilities         []string
 	authorization        PlanAuthorization
@@ -488,9 +489,12 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 		built.capabilities = capabilities
 		return built, nil
 	}
-	compiled, err := compileActionInvocations(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs)
+	compiled, err := compileWorkflowActionInvocations(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs, workflowSourceResolver(instance, b.options))
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+	}
+	if instance.RemoteWorkflow == nil {
+		built.workflowSource = compiled.workflowSource
 	}
 	built.requiresMise = compiled.requiresMise
 	built.requiredSecrets = compiled.requiredSecrets
@@ -678,12 +682,13 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		},
 		Runtime: &plan.Runtime{DistributionDigest: runtimeDistributionDigest},
 		Workflow: plan.Workflow{
-			Path:         instance.SourcePath,
-			RunPath:      workflowRunPath,
-			Name:         b.workflowName,
-			Digest:       instance.SourceDigest,
-			LogicalJobID: instance.LogicalJobID,
-			Remote:       planRemoteWorkflowSource(instance.RemoteWorkflow),
+			Path:           instance.SourcePath,
+			RunPath:        workflowRunPath,
+			Name:           b.workflowName,
+			Digest:         instance.SourceDigest,
+			LogicalJobID:   instance.LogicalJobID,
+			Remote:         planRemoteWorkflowSource(instance.RemoteWorkflow),
+			SelfRepository: planRemoteWorkflowSource(actions.workflowSource),
 		},
 		Event: plan.Event{
 			Provider: b.ir.Event.Provider, Name: b.ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(b.eventDigest[:]),

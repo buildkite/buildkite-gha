@@ -745,11 +745,28 @@ func validatedProcessingReportWithOptions(ctx context.Context, out processingOut
 	}
 	report := compatibility.InitialProcessingReport(workflowPath, profile, eventEvaluated, validation, err)
 	if err != nil {
-		report.Result = "incompatible"
+		report.Result = validationFailureResult(report)
 		_ = out.write(ctx, report)
 		return report, false
 	}
 	return report, true
+}
+
+func validationFailureResult(report compatibility.ProcessingReport) string {
+	contextRequired := false
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Level != "error" {
+			continue
+		}
+		if diagnostic.Code != workflowprocessing.CodeContextRequired {
+			return "incompatible"
+		}
+		contextRequired = true
+	}
+	if contextRequired {
+		return "indeterminate"
+	}
+	return "incompatible"
 }
 
 // applyHostedPreflight folds hosted preflight evidence and any admission

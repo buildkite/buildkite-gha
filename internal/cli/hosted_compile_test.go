@@ -22,10 +22,14 @@ func TestHostedCompileRequestOptionsCarryEveryInputExactlyOnce(t *testing.T) {
 	}
 	oidc := &plan.OIDCConfiguration{Claims: []string{"repository"}}
 	vars := compiler.VariableSources{Repository: map[string]string{"REGION": "us-east-1"}, Resolved: true}
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := hostedCompileRequest{
 		WorkflowPath:         ".github/workflows/ci.yml",
 		WorkflowSource:       []byte("on: push\n"),
-		EventSource:          []byte("{}"),
+		EventSource:          event,
 		EventFile:            true,
 		Version:              "1.2.3",
 		DistributionDigest:   "sha256:" + strings.Repeat("a", 64),
@@ -50,6 +54,7 @@ func TestHostedCompileRequestOptionsCarryEveryInputExactlyOnce(t *testing.T) {
 	want := compiler.Options{
 		EventTrust:           compiler.EventUntrusted,
 		EventFile:            true,
+		WorkflowSource:       &compiler.WorkflowSourceReference{Repository: "buildkite/buildkite-gha", Commit: strings.Repeat("1", 40)},
 		GroupLabel:           "CI",
 		RuntimeDistributions: request.RuntimeDistributions,
 		StepKeyNamespace:     "ci",

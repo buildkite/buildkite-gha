@@ -49,7 +49,7 @@ func resolveSourcedJobsForTest(t *testing.T, path string) ([]sourcedJob, *workfl
 	}
 	context := compileContext(event, nil, path, parsed.Name)
 	context.Inputs = workflowDispatchInputs(parsed, event)
-	resolved, _, _, err := resolveReusableWorkflows(t.Context(), path, source, parsed, context, defaultOptions().RepositorySource)
+	resolved, _, _, err := resolveReusableWorkflows(t.Context(), path, source, parsed, context, defaultOptions().RepositorySource, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
