@@ -139,6 +139,7 @@ func TestSelfRepositoryRootVerifiesWorkflowBytesWithoutCheckout(t *testing.T) {
 		func(j *plan.Job) { j.Workflow.SelfRepository = nil },
 		func(j *plan.Job) { j.Actions[0].Repository = "event/repo" },
 		func(j *plan.Job) { j.Actions[0].Commit = strings.Repeat("f", 40) },
+		func(j *plan.Job) { j.Actions[0].RequestedRef = "release" },
 		func(j *plan.Job) { j.Actions[0].SourceDigest = "sha256:" + strings.Repeat("f", 64) },
 	} {
 		changed := job
@@ -272,6 +273,15 @@ jobs:
 		if lock.Source == "github" && (lock.Commit != fake.commits[lock.Repository] || lock.SourceDigest != fake.digests[lock.Repository]) {
 			t.Fatalf("lock lost containing source: %#v", lock)
 		}
+		if lock.Source == "github" {
+			wantRef := strings.Repeat("b", 40)
+			if lock.Repository == "actions/repo" {
+				wantRef = "moving"
+			}
+			if lock.RequestedRef != wantRef {
+				t.Fatalf("action context ref = %q, want %q for %s/%s", lock.RequestedRef, wantRef, lock.Repository, lock.Path)
+			}
+		}
 	}
 	for _, lock := range job.Actions {
 		for uses, selector := range lock.Children {
@@ -305,6 +315,56 @@ jobs:
 		t.Fatalf("workflow fetches = %d, want one authorized containing tree", workflowFetches)
 	}
 	validateCompiledPlansAgainstSchema(t, plans)
+	for i, lock := range job.Actions {
+		if lock.Repository != "actions/repo" || lock.Path != "child" {
+			continue
+		}
+		changed := job
+		changed.Actions = slices.Clone(job.Actions)
+		changed.Actions[i].RequestedRef = lock.Commit
+		if err := changed.Validate(); err == nil || !strings.Contains(err.Error(), "self-repository") {
+			t.Fatalf("plan accepted changed nested action context: %v", err)
+		}
+	}
+}
+
+func TestSelfRepositoryActionRefsShareOnlyMatchingSelectors(t *testing.T) {
+	for _, selfFirst := range []bool{true, false} {
+		t.Run(fmt.Sprint(selfFirst), func(t *testing.T) {
+			remote := t.TempDir()
+			writeSelfAction(t, remote, "parent", "runs:\n  using: composite\n  steps:\n    - uses: $/leaf\n")
+			writeSelfAction(t, remote, "leaf", "runs:\n  using: composite\n  steps:\n    - run: echo leaf\n      shell: bash\n")
+			fake := newFakeReusableRepositorySource(t, map[string]string{"source/repo": remote})
+			commit := fake.commits["source/repo"]
+			refs := []string{"source/repo/parent@moving", "source/repo/leaf@moving", "source/repo/leaf@" + commit, "source/repo/parent@other"}
+			if !selfFirst {
+				refs[0], refs[1] = refs[1], refs[0]
+			}
+			selectors, locks, _, _, err := compileActionLocks(t.Context(), t.TempDir(), fake, refs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(locks) != 5 {
+				t.Fatalf("locks = %d, want two parents and three distinct child refs", len(locks))
+			}
+			byID := make(map[string]plan.ActionLock)
+			for _, lock := range locks {
+				byID[lock.ID] = lock
+			}
+			parent, direct := byID[selectors[0].Lock], selectors[1]
+			if !selfFirst {
+				parent, direct = byID[selectors[1].Lock], selectors[0]
+			}
+			if parent.Children["$/leaf"] != direct || direct == selectors[2] {
+				t.Fatalf("symbolic and pinned selectors conflated: parent=%#v selectors=%#v", parent, selectors)
+			}
+			other := byID[selectors[3].Lock]
+			child := byID[other.Children["$/leaf"].Lock]
+			if child.Commit != commit || child.RequestedRef != "other" || child.ID == direct.Lock {
+				t.Fatalf("other ref inherited the wrong child context: %#v", child)
+			}
+		})
+	}
 }
 
 type privateSelfRepositorySource struct{ *fakeReusableRepositorySource }

@@ -267,7 +267,7 @@ func compileWorkflowActionInvocations(ctx context.Context, workspace string, act
 	selectors := make([]plan.ActionSelector, 0, len(refs))
 	roots := make([]*actionNode, 0, len(refs))
 	for _, ref := range refs {
-		n, err := b.add(ctx, ref, 1, b.workflowSource)
+		n, err := b.add(ctx, ref, 1, b.workflowSource, "")
 		if err != nil {
 			return actionCompilation{}, err
 		}
@@ -380,11 +380,11 @@ func lowerActionProgram(node *actionNode) program.Action {
 	return program.ActionFromMetadata(node.metadata, string(node.runtime), children)
 }
 
-func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, containing *RemoteWorkflowSource) (*actionNode, error) {
+func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, containing *RemoteWorkflowSource, containingActionRef string) (*actionNode, error) {
 	if depth > metadata.MaxNestedActionDepth {
 		return nil, fmt.Errorf("action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, raw)
 	}
-	key, lock, root, loadPath, err := b.describe(ctx, raw, containing)
+	key, lock, root, loadPath, err := b.describe(ctx, raw, containing, containingActionRef)
 	if err != nil {
 		return nil, fmt.Errorf("compile action %q: %w", raw, err)
 	}
@@ -458,14 +458,16 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, cont
 	}
 	if runtime == metadata.RuntimeComposite {
 		childSource := b.workflowSource
+		childActionRef := ""
 		if lock.Source == "github" {
 			childSource = &RemoteWorkflowSource{Repository: lock.Repository, Commit: lock.Commit, SourceDigest: lock.SourceDigest}
+			childActionRef = lock.RequestedRef
 		}
 		for _, step := range m.Runs.Steps {
 			if step.Uses == "" {
 				continue
 			}
-			child, err := b.add(ctx, step.Uses, depth+1, childSource)
+			child, err := b.add(ctx, step.Uses, depth+1, childSource, childActionRef)
 			if err != nil {
 				return nil, &actionChildError{child: step.Uses, err: err}
 			}
@@ -480,7 +482,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, cont
 	return n, nil
 }
 
-func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing *RemoteWorkflowSource) (string, plan.ActionLock, string, string, error) {
+func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing *RemoteWorkflowSource, containingActionRef string) (string, plan.ActionLock, string, string, error) {
 	if after, ok := strings.CutPrefix(raw, "./"); ok {
 		p := after
 		if p == "." || p != "" && (path.Clean(p) != p || strings.Contains(p, "\\") || strings.HasPrefix(p, "/")) {
@@ -514,8 +516,14 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing
 	if err != nil {
 		return "", plan.ActionLock{}, "", "", err
 	}
+	requestedRef := ref.Ref
+	if self && containingActionRef != "" {
+		// GitHub exposes the containing action's authored ref to its self
+		// children. Fetch by commit, but retain that ref for action context.
+		requestedRef = containingActionRef
+	}
 	canonical := strings.ToLower(ref.Owner + "/" + ref.Repository)
-	key := "github:" + canonical + "/" + ref.Path + "@" + ref.Ref
+	key := "github:" + canonical + "/" + ref.Path + "@" + requestedRef
 	if n := b.nodes[key]; n != nil {
 		if self && (n.lock.Commit != containing.Commit || containing.SourceDigest != "" && n.lock.SourceDigest != containing.SourceDigest) {
 			return "", plan.ActionLock{}, "", "", fmt.Errorf("self-repository action source differs from containing source")
@@ -538,7 +546,7 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing
 		return "", plan.ActionLock{}, "", "", err
 	}
 	commit := strings.ToLower(resolved.Commit)
-	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: ref.Ref, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest}
+	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: requestedRef, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest}
 	identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
 	descriptor, _, admitErr := actionintegration.Admit(identity, lock.Commit)
 	if admitErr != nil && descriptor.Service == actionintegration.ServiceCache {

@@ -1446,10 +1446,12 @@ func validateActionLocks(job Job) error {
 			var identityErr error
 			if strings.HasPrefix(uses, "$/") {
 				containing := job.Workflow.selfRepositorySource()
+				containingActionRef := ""
 				if lock.Source == "github" {
 					containing = &RemoteWorkflowSource{Repository: lock.Repository, Commit: lock.Commit, SourceDigest: lock.SourceDigest}
+					containingActionRef = lock.RequestedRef
 				}
-				identityErr = validateSelfRepositoryIdentity(uses, child, containing)
+				identityErr = validateSelfRepositoryIdentity(uses, child, containing, containingActionRef)
 			} else {
 				identityErr = validateChildIdentity(lock, uses, child)
 			}
@@ -1487,7 +1489,7 @@ func validateActionLocks(job Job) error {
 		}
 		var identityErr error
 		if strings.HasPrefix(step.Invocation.Uses.Source, "$/") {
-			identityErr = validateSelfRepositoryIdentity(step.Invocation.Uses.Source, lock, job.Workflow.selfRepositorySource())
+			identityErr = validateSelfRepositoryIdentity(step.Invocation.Uses.Source, lock, job.Workflow.selfRepositorySource(), "")
 		} else {
 			identityErr = validateTopLevelIdentity(step.Invocation.Uses.Source, lock)
 		}
@@ -1564,9 +1566,12 @@ func (workflow Workflow) selfRepositorySource() *RemoteWorkflowSource {
 	return workflow.SelfRepository
 }
 
-func validateSelfRepositoryIdentity(uses string, lock ActionLock, containing *RemoteWorkflowSource) error {
+func validateSelfRepositoryIdentity(uses string, lock ActionLock, containing *RemoteWorkflowSource, containingActionRef string) error {
 	p := strings.TrimPrefix(uses, "$/")
-	if containing == nil || p != "" && !cleanActionPath(p) || strings.ContainsAny(p, "@?#") || lock.Source != "github" || lock.Repository != containing.Repository || lock.Commit != containing.Commit || lock.SourceDigest != containing.SourceDigest || lock.Path != p || lock.RequestedRef != containing.Commit {
+	if containingActionRef == "" && containing != nil {
+		containingActionRef = containing.Commit
+	}
+	if containing == nil || p != "" && !cleanActionPath(p) || strings.ContainsAny(p, "@?#") || lock.Source != "github" || lock.Repository != containing.Repository || lock.Commit != containing.Commit || lock.SourceDigest != containing.SourceDigest || lock.Path != p || lock.RequestedRef != containingActionRef {
 		return fmt.Errorf("self-repository action reference does not match containing source")
 	}
 	return nil

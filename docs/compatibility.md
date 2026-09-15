@@ -1046,6 +1046,8 @@ A `uses` step may call a supported local or public action. Action inputs under `
 
 Local actions must exist in the event repository when the workflow is compiled. An earlier step cannot create a local action with `actions/checkout`, an artifact download, or a command. Use a public `owner/repository/path@ref` action instead.
 
+At execution, local actions require both their action tree and the local workflow bytes to match the plan. Checking out an older commit with a different workflow fails this check even if the action itself is unchanged. `$/` actions do not depend on the checkout and retain their containing source commit.
+
 Action steps can call public and local actions:
 
 ```yaml
@@ -1059,6 +1061,8 @@ Action steps can call public and local actions:
 ### Self-repository actions
 
 **🟡 Supported subset.** `uses: $/.github/actions/build` downloads the action from the repository and exact commit containing the workflow, without `actions/checkout`. Inside a remote composite action, `$/` selects that action's repository and commit, not the caller's. `uses: $/` selects an action at the repository root. Existing `./` action paths remain checkout-relative.
+
+Inside a remote composite selected with `@v1`, nested `$/` actions expose `v1` as `github.action_ref`, while their source stays pinned to the resolved commit. A `$/` action called directly by a workflow or from a local composite exposes the containing workflow's commit, not its requested branch or tag. The runtime does not populate `GITHUB_ACTION_REF`; pass `github.action_ref` through a step's `env` when a command needs it.
 
 For local workflow input, `compile`, `upload`, and event-specific validation treat the event repository and commit as candidates, not proof of workflow identity. Before resolving `$/`, the compiler fetches the same workflow path at that commit and requires its bytes to match the supplied file. This also applies to self references inside local reusable workflows. A fetched remote reusable workflow supplies its own immutable identity instead. Modified local workflow bytes fail verification; no Git `HEAD` or workspace fallback is used. Synthetic `validate --event` input has no source identity and reports self-repository resolution as indeterminate; use an exact `--event-path` snapshot.
 
