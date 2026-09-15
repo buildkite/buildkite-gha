@@ -203,11 +203,18 @@ func isolateCacheActionEnvironment(env map[string]string) map[string]string {
 	for _, name := range []string{
 		"NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_AUDIT", "LD_PRELOAD", "LD_LIBRARY_PATH",
 		"OPENSSL_CONF", "OPENSSL_CONF_INCLUDE", "OPENSSL_ENGINES", "OPENSSL_MODULES",
-		"TAR_OPTIONS",
+		"TAR_OPTIONS", "BASH_ENV", "ENV",
 		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
 		"BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_JOB_ID",
 	} {
 		delete(isolated, name)
+	}
+	// GNU tar can invoke a shell for its compressor. Exported Bash functions
+	// must not replace commands even when PATH contains only trusted tools.
+	for name := range isolated {
+		if strings.HasPrefix(name, "BASH_FUNC_") {
+			delete(isolated, name)
+		}
 	}
 	isolated["PATH"] = cacheActionToolPath
 	return isolated
