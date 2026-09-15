@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 )
 
 func TestRunnerSelectorIsConfigured(t *testing.T) {
@@ -26,5 +28,23 @@ func TestRunnerSelectorIsConfigured(t *testing.T) {
 		if got := runnerSelectorIsConfigured(test.labels, targets); got != test.want {
 			t.Errorf("runnerSelectorIsConfigured(%q) = %v, want %v", test.labels, got, test.want)
 		}
+	}
+}
+
+func TestRunnerRequirementsIncludeExplicitMultiLabelTargets(t *testing.T) {
+	target := compiler.RunnerTarget{Queue: "custom-linux", Platform: compiler.PlatformLinuxAMD64}
+	configured := map[string]compiler.RunnerTarget{"self-hosted": target, "ubuntu-latest": target}
+	jobs := []compiler.JobInstance{
+		{RunsOn: []string{"self-hosted", "Ubuntu-Latest"}},
+		{RunsOn: []string{"macos-latest"}},
+		{RunsOn: []string{"self-hosted", "Ubuntu-Latest"}},
+	}
+	requirements := uniqueRunnerRequirements([]compiler.Report{{Jobs: jobs}}, configured)
+	want := []gharuntime.RunnerRequirement{
+		{ID: "r1", Labels: []string{"self-hosted", "Ubuntu-Latest"}, ConfiguredTarget: &gharuntime.ConfiguredRunnerTarget{Queue: "custom-linux", Platform: "linux/amd64"}},
+		{ID: "r2", Labels: []string{"macos-latest"}},
+	}
+	if !reflect.DeepEqual(requirements, want) {
+		t.Fatalf("requirements = %#v, want %#v", requirements, want)
 	}
 }

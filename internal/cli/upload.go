@@ -314,6 +314,10 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", ctx.Err())
 			return 1
 		}
+		if runnerResolution.validationRequired {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: cannot validate explicit runner mappings: %v\n", err)
+			return 1
+		}
 		// The built-in presets keep the import moving, but they may target a
 		// queue this cluster lacks, so the degradation must be visible.
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: warning: runner resolution unavailable (%v); using built-in runner presets\n", err)
