@@ -426,6 +426,10 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 **🟡 Supported subset.** Calls may use a local path or a literal GitHub reference such as `owner/repository/.github/workflows/ci.yml@v1`. A remote reference resolves once per operation to an immutable commit and repository digest. Nested `./.github/workflows/...` calls resolve in that pinned repository.
 
+Self-repository calls such as `$/.github/workflows/ci.yml` select the repository and exact commit containing the calling workflow. They use the same source verification described under [self-repository actions](#self-repository-actions), and retain the existing reusable-workflow access, secret-forwarding, cycle, and depth limits.
+
+Verified self calls in the root workflow's repository support `secrets: inherit` and explicit secret mappings. Nested `$/` and `./` calls retain this forwarding scope. An explicit `owner/repository/...@ref` call leaves the scope, even if it names the same repository and commit; its nested self or local calls cannot restore it. Every forwarding edge still needs its own `secrets` declaration.
+
 Private references work for the pipeline repository and cross-repository sources available to the importer's existing Git credentials. Enable them with the plugin's default-off `private-reusable-workflows` field or the matching `upload` flag. When the Buildkite Agent repository-provider credential helper supplies access, Buildkite approves each requested repository. Git access is also used when GitHub's anonymous API quota is exhausted, so a rate limit does not fail an otherwise authorized call. Missing and denied repositories, refs, and paths produce the same error.
 
 **✅ Supported:**
@@ -1051,6 +1055,14 @@ Action steps can call public and local actions:
   with:
     target: production
 ```
+
+### Self-repository actions
+
+**🟡 Supported subset.** `uses: $/.github/actions/build` downloads the action from the repository and exact commit containing the workflow, without `actions/checkout`. Inside a remote composite action, `$/` selects that action's repository and commit, not the caller's. `uses: $/` selects an action at the repository root. Existing `./` action paths remain checkout-relative.
+
+For local workflow input, `compile`, `upload`, and event-specific validation treat the event repository and commit as candidates, not proof of workflow identity. Before resolving `$/`, the compiler fetches the same workflow path at that commit and requires its bytes to match the supplied file. This also applies to self references inside local reusable workflows. A fetched remote reusable workflow supplies its own immutable identity instead. Modified local workflow bytes fail verification; no Git `HEAD` or workspace fallback is used. Synthetic `validate --event` input has no source identity and reports self-repository resolution as indeterminate; use an exact `--event-path` snapshot.
+
+Self-repository actions retain the public-action access boundary, immutable tree verification, capability planning, and nested-action limits. A privately fetched reusable workflow does not grant access to private actions in that tree. Self paths must be repository-relative, without traversal, backslashes, or an explicit `@ref`.
 
 ### Background and parallel steps
 

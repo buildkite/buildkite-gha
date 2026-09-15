@@ -62,14 +62,16 @@ func (s PublicActionSource) Fetch(ctx context.Context, ref source.Reference) (so
 }
 
 type actionLockBuilder struct {
-	workspace    string
-	source       ActionSource
-	nodes        map[string]*actionNode
-	ids          map[string]string
-	active       map[string]bool
-	caps         map[string]bool
-	materialized []source.Materialized
-	requiresMise bool
+	workspace             string
+	workflowSource        *RemoteWorkflowSource
+	resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)
+	source                ActionSource
+	nodes                 map[string]*actionNode
+	ids                   map[string]string
+	active                map[string]bool
+	caps                  map[string]bool
+	materialized          []source.Materialized
+	requiresMise          bool
 	// cacheSubstitutions records actions/cache references whose resolved
 	// commit was replaced by an audited release.
 	cacheSubstitutions []CacheSubstitution
@@ -84,6 +86,7 @@ type actionNode struct {
 }
 
 type actionCompilation struct {
+	workflowSource       *RemoteWorkflowSource
 	selectors            []plan.ActionSelector
 	locks                []plan.ActionLock
 	capabilities         []string
@@ -113,7 +116,7 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 				evidence.ActionResolutionComplete = false
 				continue
 			}
-			compiled, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, plan.EventServerURL(ir.Event.Provider), []string{step.Uses}, []map[string]string{step.With})
+			compiled, err := compileWorkflowActionInvocations(ctx, instance.RepositoryRoot, actionSource, plan.EventServerURL(ir.Event.Provider), []string{step.Uses}, []map[string]string{step.With}, workflowSourceResolver(instance, options))
 			evaluation := ActionEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Reference: step.Uses, Step: i + 1, Passed: err == nil, CacheSubstitutions: compiled.cacheSubstitutions}
 			evidence.Actions = append(evidence.Actions, evaluation)
 			if err == nil {
@@ -150,6 +153,10 @@ func actionResolutionMessage(reference string, err error) (message, detail, acti
 	}
 	if message, detail, ok := actionintegration.UnsupportedVersionDiagnostic(action, err); ok {
 		return message, detail, action
+	}
+	var finding *ProcessingFinding
+	if errors.As(err, &finding) && finding.Code == CodeContextRequired {
+		return fmt.Sprintf("Action %q requires the containing workflow's verified repository and commit. Supply an exact event snapshot whose repository contains the unchanged workflow file.", action), "", action
 	}
 	reason := strings.TrimPrefix(err.Error(), fmt.Sprintf("compile action %q: ", action))
 	localPath, localAction := strings.CutPrefix(action, "./")
@@ -237,6 +244,10 @@ func compileActionLocks(ctx context.Context, workspace string, actionSource Acti
 }
 
 func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
+	return compileWorkflowActionInvocations(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil)
+}
+
+func compileWorkflowActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)) (actionCompilation, error) {
 	if workspace == "" {
 		return actionCompilation{}, fmt.Errorf("workflow path must identify a repository root")
 	}
@@ -247,7 +258,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	if err != nil {
 		return actionCompilation{}, fmt.Errorf("resolve workspace: %w", err)
 	}
-	b := &actionLockBuilder{workspace: abs, source: actionSource, nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
+	b := &actionLockBuilder{workspace: abs, source: actionSource, resolveWorkflowSource: resolveWorkflowSource, nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
 	defer func() {
 		for _, materialized := range b.materialized {
 			materialized.Release()
@@ -256,7 +267,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	selectors := make([]plan.ActionSelector, 0, len(refs))
 	roots := make([]*actionNode, 0, len(refs))
 	for _, ref := range refs {
-		n, err := b.add(ctx, ref, 1)
+		n, err := b.add(ctx, ref, 1, b.workflowSource)
 		if err != nil {
 			return actionCompilation{}, err
 		}
@@ -310,6 +321,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	}
 	secretNames := sortedKeys(requiredSecrets)
 	return actionCompilation{
+		workflowSource:       b.workflowSource,
 		selectors:            selectors,
 		locks:                locks,
 		capabilities:         caps,
@@ -368,11 +380,11 @@ func lowerActionProgram(node *actionNode) program.Action {
 	return program.ActionFromMetadata(node.metadata, string(node.runtime), children)
 }
 
-func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*actionNode, error) {
+func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, containing *RemoteWorkflowSource) (*actionNode, error) {
 	if depth > metadata.MaxNestedActionDepth {
 		return nil, fmt.Errorf("action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, raw)
 	}
-	key, lock, root, loadPath, err := b.describe(ctx, raw)
+	key, lock, root, loadPath, err := b.describe(ctx, raw, containing)
 	if err != nil {
 		return nil, fmt.Errorf("compile action %q: %w", raw, err)
 	}
@@ -445,11 +457,15 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 		b.caps[capability] = true
 	}
 	if runtime == metadata.RuntimeComposite {
+		childSource := b.workflowSource
+		if lock.Source == "github" {
+			childSource = &RemoteWorkflowSource{Repository: lock.Repository, Commit: lock.Commit, SourceDigest: lock.SourceDigest}
+		}
 		for _, step := range m.Runs.Steps {
 			if step.Uses == "" {
 				continue
 			}
-			child, err := b.add(ctx, step.Uses, depth+1)
+			child, err := b.add(ctx, step.Uses, depth+1, childSource)
 			if err != nil {
 				return nil, &actionChildError{child: step.Uses, err: err}
 			}
@@ -464,7 +480,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	return n, nil
 }
 
-func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, plan.ActionLock, string, string, error) {
+func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing *RemoteWorkflowSource) (string, plan.ActionLock, string, string, error) {
 	if after, ok := strings.CutPrefix(raw, "./"); ok {
 		p := after
 		if p == "." || p != "" && (path.Clean(p) != p || strings.Contains(p, "\\") || strings.HasPrefix(p, "/")) {
@@ -477,6 +493,23 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 		digest, err := source.DigestTree(m.Path)
 		return "workspace:" + p, plan.ActionLock{Source: "workspace", Path: p, SourceDigest: digest}, b.workspace, p, err
 	}
+	self := strings.HasPrefix(raw, "$/")
+	if self {
+		var err error
+		if containing == nil && b.resolveWorkflowSource != nil {
+			if b.workflowSource == nil {
+				b.workflowSource, err = b.resolveWorkflowSource(ctx)
+				if err != nil {
+					return "", plan.ActionLock{}, "", "", err
+				}
+			}
+			containing = b.workflowSource
+		}
+		raw, err = selfRepositoryReference(raw, containing)
+		if err != nil {
+			return "", plan.ActionLock{}, "", "", err
+		}
+	}
 	ref, err := source.Parse(raw)
 	if err != nil {
 		return "", plan.ActionLock{}, "", "", err
@@ -484,6 +517,9 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 	canonical := strings.ToLower(ref.Owner + "/" + ref.Repository)
 	key := "github:" + canonical + "/" + ref.Path + "@" + ref.Ref
 	if n := b.nodes[key]; n != nil {
+		if self && (n.lock.Commit != containing.Commit || containing.SourceDigest != "" && n.lock.SourceDigest != containing.SourceDigest) {
+			return "", plan.ActionLock{}, "", "", fmt.Errorf("self-repository action source differs from containing source")
+		}
 		return key, n.lock, "", "", nil
 	}
 	if b.source == nil {
@@ -494,6 +530,9 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 		return "", plan.ActionLock{}, "", "", err
 	}
 	b.materialized = append(b.materialized, materialized)
+	if self && (resolved.Commit != containing.Commit || containing.SourceDigest != "" && materialized.SourceDigest != containing.SourceDigest) {
+		return "", plan.ActionLock{}, "", "", fmt.Errorf("self-repository action source differs from containing source")
+	}
 	repositoryRoot, err := canonicalMaterializedRepositoryRoot(materialized.RepositoryRoot)
 	if err != nil {
 		return "", plan.ActionLock{}, "", "", err

@@ -139,6 +139,7 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		validationOptions = request.validationOptions()
 	}
 	validationOptions.RepositorySource = repositorySource
+	validationOptions.WorkflowSource = candidateWorkflowSource(event)
 	processingReport, ok := validatedProcessingReportWithOptions(ctx, out, workflowPath, profile, source, event, loadEvent != nil, &validationOptions)
 	if !ok {
 		return 1
@@ -255,7 +256,7 @@ func validateAllEventsSource(ctx context.Context, out processingOutput, workflow
 	validation, validationErr := compiler.ValidateWithOptionsContext(ctx, workflowPath, source, validationOptions)
 	validationReport := compatibility.InitialProcessingReport(workflowPath, "", false, validation, validationErr)
 	if validationErr != nil {
-		validationReport.Result = "incompatible"
+		validationReport.Result = validationFailureResult(validationReport)
 		report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
 		if out.writeV3(ctx, report) != nil {
 			return 1

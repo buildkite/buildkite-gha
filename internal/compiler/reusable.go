@@ -121,6 +121,7 @@ type reusableResolution struct {
 type reusableResolver struct {
 	workspaceRoot      string
 	repositorySource   RepositorySource
+	workflowSource     *WorkflowSourceReference
 	stack              []reusableSourceIdentity
 	materialized       []actionsource.Materialized
 	context            expression.CompileContext
@@ -144,7 +145,7 @@ type workflowScan struct {
 	sources               map[string]WorkflowSourceReference
 }
 
-func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource) ([]sourcedJob, []Warning, workflowScan, error) {
+func resolveReusableWorkflows(ctx context.Context, path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, repositorySource RepositorySource, workflowSource *WorkflowSourceReference) ([]sourcedJob, []Warning, workflowScan, error) {
 	digest := "sha256:" + sha256Sum(source)
 	scan := workflowScan{runtimeMatrixBoundary: hasRuntimeMatrixBoundary(parsed), referencesVars: workflowReferencesVars(parsed)}
 	if !hasReusableCall(parsed) {
@@ -191,8 +192,10 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 	if err != nil {
 		return nil, nil, scan, err
 	}
+	rootSource.digest = digest
 	resolver := reusableResolver{
-		workspaceRoot: rootSource.repositoryRoot, repositorySource: newMemoizedActionSource(repositorySource), stack: []reusableSourceIdentity{rootSource.identity}, context: context,
+		workflowSource: workflowSource,
+		workspaceRoot:  rootSource.repositoryRoot, repositorySource: newMemoizedActionSource(repositorySource), stack: []reusableSourceIdentity{rootSource.identity}, context: context,
 		rootPermissions: effectivePermissions(nil, parsed.Permissions, nil, false), scan: scan,
 		warnedCancellation:            make(map[workflow.Position]bool),
 		warnedGuardedConcurrency:      make(map[workflow.Position]bool),
@@ -391,7 +394,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			}
 			return reusableResolution{}, locatedJobWrappedError(path, job, call.Span.Start.Line, call.Span.Start.Column, "", err)
 		}
-		if (call.InheritSecrets || len(call.Secrets) != 0) && calleeSource.identity.kind != "workspace" {
+		if (call.InheritSecrets || len(call.Secrets) != 0) && !calleeSource.rootSecretScope {
 			message := fmt.Sprintf("A secrets: map cannot forward secrets to a workflow in another repository. Reusable workflow %q is outside this repository, so no secrets were forwarded. Retrieve each secret by name with buildkite-agent secret get NAME in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use a secrets: map with a ./ call. If you need explicit secret mappings across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.", calleeSource.displayPath)
 			if call.InheritSecrets {
 				message = fmt.Sprintf("secrets: inherit cannot forward secrets to a workflow in another repository. Reusable workflow %q is outside this repository, so no secrets were forwarded. Retrieve each secret by name with buildkite-agent secret get NAME in the jobs of that workflow, or copy the workflow into this repository's .github/workflows and use secrets: inherit with a ./ call. If you need secrets: inherit across repositories, log an issue on github.com/buildkite/buildkite-gha so we can prioritise it.", calleeSource.displayPath)
