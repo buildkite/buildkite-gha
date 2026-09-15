@@ -250,7 +250,7 @@ func validateReleaseEvent(ref, sha string, payload map[string]any) error {
 	if !tagOK || strings.TrimSpace(tag) == "" || !draftOK || !prereleaseOK {
 		return fmt.Errorf("release event snapshot requires payload.release tag_name, draft, and prerelease")
 	}
-	if draft && slices.Contains([]string{"created", "edited", "deleted"}, action) {
+	if draft && slices.Contains([]string{"created", "edited", "deleted", "unpublished"}, action) {
 		return fmt.Errorf("release event snapshot draft %s activity does not trigger GitHub Actions", action)
 	}
 	if ref != "refs/tags/"+tag {

@@ -4693,11 +4693,12 @@ func TestParseEventValidatesReleaseIdentity(t *testing.T) {
 		{name: "malformed draft", old: `"draft":false`, replacement: `"draft":"false"`, want: "draft"},
 		{name: "malformed prerelease", old: `"prerelease":false`, replacement: `"prerelease":"false"`, want: "prerelease"},
 		{name: "draft created", old: `"action":"published"`, replacement: `"action":"created"`, want: "draft created"},
+		{name: "draft unpublished", old: `"action":"published"`, replacement: `"action":"unpublished"`, want: "draft unpublished"},
 		{name: "invalid sha", old: sha, replacement: "HEAD", want: "full lowercase sha"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			changed := strings.Replace(event, test.old, test.replacement, 1)
-			if test.name == "draft created" {
+			if strings.HasPrefix(test.name, "draft ") {
 				changed = strings.Replace(changed, `"draft":false`, `"draft":true`, 1)
 			}
 			if _, err := ParseEvent([]byte(changed)); err == nil || !strings.Contains(err.Error(), test.want) {
@@ -5148,7 +5149,7 @@ func TestCompilerWarningsFlagNativeUndeliveredReleaseActivities(t *testing.T) {
 	parsed := &workflow.Workflow{Triggers: []workflow.Trigger{{Event: "release", Position: position}}}
 	want := Warning{
 		Code: "W_NATIVE_RELEASE_ACTIVITIES_UNDELIVERED", Line: 3, Column: 3,
-		Message: "GitHub Actions Pipeline Triggers deliver all seven release activities. Native Buildkite release builds deliver only published, created, and released, so unpublished, edited, deleted, and prereleased will not run this workflow through the native integration.",
+		Message: "GitHub Actions Pipeline Triggers accept all seven release activities and apply GitHub's draft-release suppression. Native Buildkite release builds deliver only published, created, and released, so unpublished, edited, deleted, and prereleased will not run this workflow through the native integration.",
 	}
 	if warnings := compilerWarnings(parsed, false); !reflect.DeepEqual(warnings, []Warning{want}) {
 		t.Fatalf("warnings = %#v, want %#v", warnings, []Warning{want})
