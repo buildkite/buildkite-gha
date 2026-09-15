@@ -32,7 +32,7 @@ func gitRootCommand(checkoutPath string) *exec.Cmd {
 }
 
 func populateChangedPaths(snapshot *buildkitepipeline.TriggerEventSnapshot, event compiler.Event, origin effectiveEventOrigin, workflows []workflowInput, checkoutPath string) {
-	if event.Event != "pull_request" && event.Event != "push" {
+	if event.Event != "pull_request" && event.Event != "pull_request_target" && event.Event != "push" {
 		return
 	}
 	if event.Event == "push" && snapshot.Tag != nil {
@@ -342,8 +342,12 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 	if !git.ValidObjectID(baseSHA) || !git.ValidObjectID(headSHA) {
 		return nil, nil, fmt.Errorf("event snapshot requires full lowercase payload.pull_request base and head commit SHAs")
 	}
-	if headSHA != event.SHA {
+	if event.Event != "pull_request_target" && headSHA != event.SHA {
 		return nil, nil, fmt.Errorf("pull request head SHA does not match the checked-out event SHA")
+	}
+	sourceRevision := "head"
+	if event.Event == "pull_request_target" {
+		sourceRevision = "default"
 	}
 	rootBytes, err := gitRootCommand(checkoutPath).Output()
 	if err != nil {
@@ -357,8 +361,8 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 		return nil, nil, fmt.Errorf("pull request head commit is unavailable in the local checkout")
 	}
 	checkoutSHA, err := gitCommand(root, "rev-parse", "--verify", "HEAD^{commit}").Output()
-	if err != nil || strings.TrimSpace(string(checkoutSHA)) != headSHA {
-		return nil, nil, fmt.Errorf("pull request head SHA does not match the local checkout")
+	if err != nil || strings.TrimSpace(string(checkoutSHA)) != event.SHA {
+		return nil, nil, fmt.Errorf("pull request %s SHA does not match the local checkout", sourceRevision)
 	}
 	workflowErrors := make(map[string]string)
 	for i, input := range workflows {
@@ -369,9 +373,9 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q is not provider-backed and cannot use pull request path filters", input.CanonicalPath)
 			continue
 		}
-		headSource, err := gitCommand(root, "cat-file", "blob", headSHA+":"+input.CanonicalPath).Output()
-		if err != nil || !bytes.Equal(headSource, input.Source) {
-			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q does not match the pull request head commit", input.CanonicalPath)
+		workflowSource, err := gitCommand(root, "cat-file", "blob", event.SHA+":"+input.CanonicalPath).Output()
+		if err != nil || !bytes.Equal(workflowSource, input.Source) {
+			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q does not match the pull request %s commit", input.CanonicalPath, sourceRevision)
 			continue
 		}
 		workflows[i].PathFiltersIdentityVerified = true

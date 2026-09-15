@@ -353,7 +353,7 @@ func TestBuildkiteWebhookEventSourceUsesPayloadButPreservesExecutionIdentity(t *
 		"BUILDKITE_COMMIT":       strings.Repeat("a", 40),
 		"BUILDKITE_BRANCH":       "executed-branch",
 		"BUILDKITE_BUILD_AUTHOR": "Build Author",
-		"BUILDKITE_GITHUB_EVENT": "pull_request_target",
+		"BUILDKITE_GITHUB_EVENT": "discussion",
 	}
 	webhook := []byte("{\"ref\":\"refs/heads/trigger-branch\",\"after\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"repository\":{\"full_name\":\"other/trigger\"},\"sender\":{\"login\":\"octocat\"},\"nested\":{\"complete\":true}}")
 	source, err := buildkiteWebhookEventSource(func(key string) string { return env[key] }, webhook)
@@ -366,7 +366,7 @@ func TestBuildkiteWebhookEventSourceUsesPayloadButPreservesExecutionIdentity(t *
 	}
 	payload := snapshot["payload"].(map[string]any)
 	repository := snapshot["repository"].(map[string]any)
-	if snapshot["event"] != "pull_request_target" || snapshot["actor"] != "octocat" ||
+	if snapshot["event"] != "discussion" || snapshot["actor"] != "octocat" ||
 		snapshot["sha"] != strings.Repeat("a", 40) || snapshot["ref"] != "refs/heads/executed-branch" ||
 		repository["owner"] != "buildkite" || repository["name"] != "buildkite-gha" ||
 		payload["after"] != strings.Repeat("b", 40) || payload["nested"].(map[string]any)["complete"] != true {

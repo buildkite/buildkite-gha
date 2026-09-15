@@ -711,7 +711,10 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		Actions:              actions.locks,
 	}
 	job.Event.PayloadFile = b.options.EventFile
-	job.Event.PayloadArtifact = actions.requiresEventPayload || job.Event.PayloadFile
+	// The native checkout adapter needs the genuine PR repository IDs and SHAs
+	// to enforce pull_request_target's fork checkout guard, even when the workflow
+	// never reads github.event. The artifact is still digest-bound to this plan.
+	job.Event.PayloadArtifact = actions.requiresEventPayload || job.Event.PayloadFile || job.Event.Name == "pull_request_target"
 	job.RequiresMise = &actions.requiresMise
 	return job
 }

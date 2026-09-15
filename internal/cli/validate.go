@@ -273,7 +273,7 @@ func validateAllEventsSource(ctx context.Context, out processingOutput, workflow
 		declared[trigger.Event] = true
 	}
 	failed := false
-	for _, event := range []string{"push", "pull_request", "merge_group", "release", "deployment", "deployment_status", "create", "delete", "label", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "workflow_dispatch", "schedule"} {
+	for _, event := range []string{"push", "pull_request", "pull_request_target", "merge_group", "release", "deployment", "deployment_status", "create", "delete", "label", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "workflow_dispatch", "schedule"} {
 		if !declared[event] {
 			continue
 		}
@@ -392,8 +392,8 @@ func validateArgs(args []string) (workflowPath, eventPath, eventName, format, pr
 	if eventSeen && profile == "" {
 		return "", "", "", "", "", false, fmt.Errorf("--event requires --profile hosted")
 	}
-	if eventSeen && !slices.Contains([]string{"push", "pull_request", "merge_group", "release", "deployment", "deployment_status", "create", "delete", "label", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "workflow_dispatch", "schedule"}, eventName) {
-		return "", "", "", "", "", false, fmt.Errorf("unsupported --event %q; supported events are push, pull_request, merge_group, release, deployment, deployment_status, create, delete, label, issues, issue_comment, pull_request_review, pull_request_review_comment, workflow_dispatch, and schedule", eventName)
+	if eventSeen && !slices.Contains([]string{"push", "pull_request", "pull_request_target", "merge_group", "release", "deployment", "deployment_status", "create", "delete", "label", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "workflow_dispatch", "schedule"}, eventName) {
+		return "", "", "", "", "", false, fmt.Errorf("unsupported --event %q; supported events are push, pull_request, pull_request_target, merge_group, release, deployment, deployment_status, create, delete, label, issues, issue_comment, pull_request_review, pull_request_review_comment, workflow_dispatch, and schedule", eventName)
 	}
 	if allEvents && (eventPathSeen || eventSeen) {
 		return "", "", "", "", "", false, fmt.Errorf("--all-events is mutually exclusive with --event and --event-path")
@@ -431,8 +431,10 @@ func generatedEventSnapshot(name string) ([]byte, error) {
 		}
 	case "push":
 		event.Payload["ref"] = event.Ref
-	case "pull_request", "pull_request_review", "pull_request_review_comment":
-		event.Ref = "refs/pull/1/merge"
+	case "pull_request", "pull_request_target", "pull_request_review", "pull_request_review_comment":
+		if name != "pull_request_target" {
+			event.Ref = "refs/pull/1/merge"
+		}
 		event.Payload["action"] = "opened"
 		event.Payload["number"] = 1
 		event.Payload["pull_request"] = map[string]any{
@@ -483,7 +485,7 @@ func generatedEventSnapshot(name string) ([]byte, error) {
 		event.Payload["schedule"] = "0 0 * * *"
 	case "workflow_dispatch":
 	default:
-		return nil, fmt.Errorf("unsupported generated event %q; supported events are push, pull_request, merge_group, release, deployment, deployment_status, create, delete, label, issues, issue_comment, pull_request_review, pull_request_review_comment, workflow_dispatch, and schedule", name)
+		return nil, fmt.Errorf("unsupported generated event %q; supported events are push, pull_request, pull_request_target, merge_group, release, deployment, deployment_status, create, delete, label, issues, issue_comment, pull_request_review, pull_request_review_comment, workflow_dispatch, and schedule", name)
 	}
 	return json.Marshal(event)
 }
