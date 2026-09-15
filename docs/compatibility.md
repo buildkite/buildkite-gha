@@ -1192,6 +1192,10 @@ Job-level expressions support the same operators and pure functions with these f
 | `defaults.run` | `github`, `needs`, `matrix`, `env`, `vars`, `inputs` |
 | `outputs` | `github`, `needs`, `matrix`, `runner`, `env`, `vars`, `secrets`, `steps`, `inputs` |
 
+Workflow-level `env` values use the job `env` expression rules, including
+fallbacks such as `${{ github.head_ref || github.ref_name }}`. Workflow-level
+`defaults.run` remains limited to direct context references.
+
 Workflow step fields support `hashFiles()`; composite step and job-level fields
 do not. Composite action `run`, `env`, `with`, and `working-directory` fields do
 support the listed operators and pure functions.
