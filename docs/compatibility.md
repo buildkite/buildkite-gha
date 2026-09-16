@@ -1090,6 +1090,9 @@ actions the way the importer did, including through Git when
 
 Limits and rejected shapes:
 
+- The matrix producer must run on Linux or macOS: its queue also runs the
+  deferred upload, and Windows importers are unsupported. Expanded jobs may
+  target an explicitly enabled Windows queue when its runtime is provided.
 - The producer must be a job with exactly one instance, so it has no matrix or
   a matrix that expands to one row, and its output must be declared in
   `outputs`. The output value is JSON of at most 1 KiB, the

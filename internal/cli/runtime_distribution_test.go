@@ -95,6 +95,26 @@ jobs:
 			t.Fatal("Windows executable was not uploaded intact")
 		}
 	})
+	t.Run("deferred Windows jobs", func(t *testing.T) {
+		initial := runContinueInitialUpload(t, "--runner-queue", "windows-2022=windows", "--runtime-distribution", "windows/amd64="+path)
+		windowsDigest := distributions[compiler.PlatformWindowsAMD64].digest
+		if initial.artifact.Runtimes["windows/amd64"] != windowsDigest {
+			t.Fatalf("deferred runtimes = %#v, want Windows distribution %s", initial.artifact.Runtimes, windowsDigest)
+		}
+		runner := initial.continueRunner(initial.producerManifest(t, "success", `[{"target":"windows","runner":"windows-2022"}]`))
+		code, _, stderr := runContinue(t, runner, initial.digest)
+		if code != 0 {
+			t.Fatalf("continue = %d: %s", code, stderr)
+		}
+		jobs := uploadedPlans(t, runner)["build"]
+		if len(jobs) != 1 || jobs[0].Target.Queue != "windows" || jobs[0].RuntimeDistributionDigest() != windowsDigest {
+			t.Fatalf("deferred Windows plans = %#v", jobs)
+		}
+		_, _, steps := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
+		if len(steps) != 2 || !strings.HasPrefix(steps[0].Command, "pwsh -NoLogo -NoProfile -NonInteractive") {
+			t.Fatalf("deferred Windows pipeline = %s", lastPipelineUpload(t, runner))
+		}
+	})
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
