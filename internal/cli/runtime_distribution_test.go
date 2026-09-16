@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -113,6 +114,25 @@ jobs:
 		_, _, steps := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
 		if len(steps) != 2 || !strings.HasPrefix(steps[0].Command, "pwsh -NoLogo -NoProfile -NonInteractive") {
 			t.Fatalf("deferred Windows pipeline = %s", lastPipelineUpload(t, runner))
+		}
+		for _, missingWindows := range []bool{false, true} {
+			replay := initial.continueRunner(initial.producerManifest(t, "success", `[{"target":"windows","runner":"windows-2022"}]`))
+			replay.pipelineUploadErr = errors.New("pipeline upload: duplicate step key")
+			replay.stepAttributes = make(map[string]map[string]string, len(steps))
+			for _, step := range steps {
+				replay.stepAttributes[step.Key] = map[string]string{"command": step.Command}
+			}
+			if missingWindows {
+				delete(replay.stepAttributes, steps[0].Key)
+			}
+			code, stdout, stderr := runContinue(t, replay, initial.digest)
+			if missingWindows {
+				if code != 1 || !strings.Contains(stderr, continueRetryGuidance) {
+					t.Fatalf("missing Windows step replay = %d: %s", code, stderr)
+				}
+			} else if code != 0 || !strings.Contains(stdout, "were already uploaded by an earlier run") {
+				t.Fatalf("Windows replay = %d: %s\n%s", code, stdout, stderr)
+			}
 		}
 	})
 	contents, err := os.ReadFile(path)

@@ -147,11 +147,32 @@ func TestEmitWindowsBootstrap(t *testing.T) {
 	}
 }
 
+func TestBootstrapHasDigest(t *testing.T) {
+	digest := testDigest("expected plan")
+	for _, test := range []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"Windows matching plan", windowsBootstrapCommand("& $executable run-job --plan-digest '" + digest + "'"), true},
+		{"Windows different plan", windowsBootstrapCommand("& $executable run-job --plan-digest '" + testDigest("other plan") + "'"), false},
+		{"Windows digest outside plan argument", windowsBootstrapCommand("Write-Host '" + digest + "'"), false},
+		{"invalid base64 with plaintext digest", windowsBootstrapPrefix + "!'" + digest + "'", false},
+		{"truncated UTF-16", windowsBootstrapPrefix + "AA==", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := BootstrapHasDigest(test.command, digest); got != test.want {
+				t.Fatalf("BootstrapHasDigest() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestEmitRejectsWindowsMatrixContinuation(t *testing.T) {
 	_, err := Emit(Pipeline{CompilerStep: "compile", DistributionDigest: testDigest("windows distribution"), Jobs: []Job{
 		{Key: "producer", Label: "Producer", Platform: "windows/amd64", PlanDigest: testDigest("producer")},
 		{Key: "matrix", Label: "Matrix", Queue: "windows", Platform: "windows/amd64", Dependencies: []string{"producer"},
-			Continuation: &ContinuationStep{ArtifactDigest: testDigest("continuation")}},
+			Stage: &StageStep{ArtifactDigest: testDigest("continuation")}},
 	}})
 	if err == nil || !strings.Contains(err.Error(), "matrix producer must run on Linux or macOS") {
 		t.Fatalf("Windows continuation error = %v", err)
