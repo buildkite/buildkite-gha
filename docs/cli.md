@@ -354,7 +354,8 @@ option.
 `compile` does not upload the executable, plans, or pipeline, so piping its YAML directly to `buildkite-agent pipeline upload` is incomplete.
 
 A workflow with a
-[matrix from a job output](compatibility.md#matrices-from-job-outputs) has jobs
+[matrix](compatibility.md#matrices-from-job-outputs) or
+[runner selection](compatibility.md#runners-from-job-outputs) from a job output has jobs
 that only exist after a deferred step runs inside the build, so `compile`
 renders its IR but not its pipeline YAML:
 
@@ -654,9 +655,10 @@ The deprecated `--runtime-queue hosted` argument is accepted as a no-op for comp
 
 ### Expand a matrix inside the build
 
-When a workflow takes matrices from job outputs, `upload` creates one deferred
+When a workflow takes matrices or runner selections from job outputs, `upload` creates one deferred
 step per group of overlapping downstream jobs, in addition to the static jobs
-(see [Matrices from job outputs](compatibility.md#matrices-from-job-outputs)).
+(see [Matrices from job outputs](compatibility.md#matrices-from-job-outputs) and
+[Runners from job outputs](compatibility.md#runners-from-job-outputs)).
 The importer needs `BUILDKITE_JOB_ID` for this. Every runtime platform the
 expanded jobs may need must already be configured with `--runtime-distribution`;
 a row that selects an unconfigured platform fails the deferred step. The importer
@@ -669,7 +671,7 @@ deferred steps.
 
 The importer and every deferred step are stages of one compilation. Each
 stage compiles the whole workflow through the same compile path, uploads the
-jobs whose matrix rows it knows, and writes a stage record for each matrix the
+jobs whose scheduling values it knows, and writes a stage record for each boundary the
 compiler still defers. The deferred step downloads the importer's executable,
 then runs the internal form of the same command:
 
@@ -704,7 +706,8 @@ A stage step runs inside a Buildkite job with `BUILDKITE=true`,
    missing or invalid manifest fails the step before any upload; earlier
    producers must still match their recorded results (see
    [matrix retries](compatibility.md#matrices-from-job-outputs))
-3. expands successful outputs with the static-matrix rules and limits, checks
+3. expands successful outputs with the static-matrix rules and limits, or
+   evaluates the runner selection using an output of at most 1 KiB; checks
    that the rows and dependents fit the share of the 1,024-job limit the record
    holds for this step (see
    [Matrices from job outputs](compatibility.md#matrices-from-job-outputs)),
@@ -718,7 +721,7 @@ A stage step runs inside a Buildkite job with `BUILDKITE=true`,
    requires each deferred job to come from the workflow source the importer
    recorded, including the commit of a reusable workflow from another
    repository, and pins each deferred job's actions to the recorded revisions
-4. uploads the plans and a pipeline holding only the deferred jobs whose rows
+4. uploads the plans and a pipeline holding only the deferred jobs whose scheduling values
    exist, including skipped placeholders where needed; joins appear once, and
    outside prerequisites remain references to steps already in the build.
    When some deferred jobs read their matrix from a job this upload compiled,
@@ -737,6 +740,12 @@ it also compares the concurrency group and limit. Any other failure exits 1 with
 
 ```
 Retry the whole build to expand this matrix again. If the matrix producer job was retried, only a new build can expand it.
+```
+
+Runner selection failures instead say:
+
+```
+Retry the whole build to select this runner again. If the producer job was retried, only a new build can select it.
 ```
 
 ### Run Linux jobs as a non-root user

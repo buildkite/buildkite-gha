@@ -1093,27 +1093,27 @@ func TestContinueRetriesWhenOnlySomeGatesRaced(t *testing.T) {
 // workflow's other continuations: the recompilation must defer exactly the
 // recorded set.
 func TestAdvanceRequiresOtherContinuationsUnchanged(t *testing.T) {
-	descriptor := func(job, producer string) compiler.RuntimeMatrixDescriptor {
-		return compiler.RuntimeMatrixDescriptor{Schema: compiler.RuntimeMatrixSchemaV1, Job: job, Shape: compiler.RuntimeMatrixShapeInclude, ProducerJob: producer, ProducerStepKey: "gha-" + producer, ProducerOutput: "matrix"}
+	descriptor := func(job, producer string) compiler.RuntimeOutputDescriptor {
+		return compiler.RuntimeOutputDescriptor{Schema: compiler.RuntimeMatrixSchemaV1, Job: job, Shape: compiler.RuntimeMatrixShapeInclude, ProducerJob: producer, ProducerStepKey: "gha-" + producer, ProducerOutput: "matrix"}
 	}
-	other := compiler.RuntimeMatrixContinuation{Descriptor: descriptor("build-b", "plan-b"), StepKey: "gha-build-b-matrix", ProducerStepKey: "gha-plan-b", Jobs: []string{"build-b", "publish-b"}, Labels: map[string]string{"build-b": "build-b", "publish-b": "publish-b"}}
+	other := compiler.RuntimeContinuation{Descriptor: descriptor("build-b", "plan-b"), StepKey: "gha-build-b-matrix", ProducerStepKey: "gha-plan-b", Jobs: []string{"build-b", "publish-b"}, Labels: map[string]string{"build-b": "build-b", "publish-b": "publish-b"}}
 	moved := other
 	moved.Jobs = []string{"build-b"}
-	extra := compiler.RuntimeMatrixContinuation{Descriptor: descriptor("build-c", "plan-c"), StepKey: "gha-build-c-matrix", ProducerStepKey: "gha-plan-c", Jobs: []string{"build-c"}, Labels: map[string]string{"build-c": "build-c"}}
+	extra := compiler.RuntimeContinuation{Descriptor: descriptor("build-c", "plan-c"), StepKey: "gha-build-c-matrix", ProducerStepKey: "gha-plan-c", Jobs: []string{"build-c"}, Labels: map[string]string{"build-c": "build-c"}}
 	for _, test := range []struct {
 		name                string
-		recorded, remaining []compiler.RuntimeMatrixContinuation
+		recorded, remaining []compiler.RuntimeContinuation
 		want                string
 	}{
 		{name: "single continuation", want: ""},
-		{name: "other continuation still deferred", recorded: []compiler.RuntimeMatrixContinuation{other}, remaining: []compiler.RuntimeMatrixContinuation{other}, want: ""},
-		{name: "unexpected continuation", remaining: []compiler.RuntimeMatrixContinuation{other}, want: `defers job "build-b" through step "gha-build-b-matrix", which the initial upload did not create`},
-		{name: "continuation disappeared", recorded: []compiler.RuntimeMatrixContinuation{other}, want: `no longer defers job "build-b"`},
-		{name: "continuation changed", recorded: []compiler.RuntimeMatrixContinuation{other}, remaining: []compiler.RuntimeMatrixContinuation{moved}, want: `deferred step "gha-build-b-matrix" compiled differently`},
-		{name: "one of two disappeared", recorded: []compiler.RuntimeMatrixContinuation{other, extra}, remaining: []compiler.RuntimeMatrixContinuation{extra}, want: `no longer defers job "build-b"`},
+		{name: "other continuation still deferred", recorded: []compiler.RuntimeContinuation{other}, remaining: []compiler.RuntimeContinuation{other}, want: ""},
+		{name: "unexpected continuation", remaining: []compiler.RuntimeContinuation{other}, want: `defers job "build-b" through step "gha-build-b-matrix", which the initial upload did not create`},
+		{name: "continuation disappeared", recorded: []compiler.RuntimeContinuation{other}, want: `no longer defers job "build-b"`},
+		{name: "continuation changed", recorded: []compiler.RuntimeContinuation{other}, remaining: []compiler.RuntimeContinuation{moved}, want: `deferred step "gha-build-b-matrix" compiled differently`},
+		{name: "one of two disappeared", recorded: []compiler.RuntimeContinuation{other, extra}, remaining: []compiler.RuntimeContinuation{extra}, want: `no longer defers job "build-b"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			record := stageRecord{Continuation: compiler.RuntimeMatrixContinuation{StepKey: "gha-build-a-matrix"}, Others: test.recorded}
+			record := stageRecord{Continuation: compiler.RuntimeContinuation{StepKey: "gha-build-a-matrix"}, Others: test.recorded}
 			var bundle compiler.Bundle
 			bundle.IR.Continuations = test.remaining
 			_, err := record.advance(bundle, nil, nil, nil, "")
@@ -1136,7 +1136,7 @@ func TestAdvanceRequiresRecordedDeferredSources(t *testing.T) {
 	remote := &compiler.RemoteWorkflowSource{Repository: "owner/workflows", RequestedRef: "v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("2", 64)}
 	record := stageRecord{
 		Runtimes: map[string]string{compiler.PlatformLinuxAMD64.String(): digest},
-		Continuation: compiler.RuntimeMatrixContinuation{
+		Continuation: compiler.RuntimeContinuation{
 			StepKey:   "gha-build-matrix",
 			JobBudget: 3,
 			Jobs:      []string{"build", "call.publish"},
@@ -2297,12 +2297,12 @@ func TestContinuationArtifactRebuildsTheImporterRequest(t *testing.T) {
 		Runners:      []stageRunner{{Label: "ubuntu-latest", Queue: "custom-linux", Platform: compiler.PlatformLinuxAMD64.String(), Image: "ubuntu", Cache: cache}},
 		Vars:         stageVars{Organization: map[string]string{"REGION": "us-east-1"}, Repository: map[string]string{"TEAM": "pipelines"}, Resolved: true},
 		OIDC:         oidc,
-		Continuation: compiler.RuntimeMatrixContinuation{Descriptor: compiler.RuntimeMatrixDescriptor{Job: "test"}, ActionLocks: []plan.ActionLock{ownLock}},
-		Others:       []compiler.RuntimeMatrixContinuation{{Descriptor: compiler.RuntimeMatrixDescriptor{Job: "publish"}, ActionLocks: []plan.ActionLock{otherLock}}},
+		Continuation: compiler.RuntimeContinuation{Descriptor: compiler.RuntimeOutputDescriptor{Job: "test"}, ActionLocks: []plan.ActionLock{ownLock}},
+		Others:       []compiler.RuntimeContinuation{{Descriptor: compiler.RuntimeOutputDescriptor{Job: "publish"}, ActionLocks: []plan.ActionLock{otherLock}}},
 	}
 	rows := []map[string]any{{"os": "ubuntu-latest"}, {"os": "macos-latest"}}
 	source := compiler.MemoizeRepositorySource(nil)
-	got := artifact.compileRequest("/checkout/.github/workflows/build.yml", []byte("on: push\n"), []byte("{}"), map[string][]map[string]any{"test": rows}, nil, source)
+	got := artifact.compileRequest("/checkout/.github/workflows/build.yml", []byte("on: push\n"), []byte("{}"), map[string][]map[string]any{"test": rows}, nil, nil, source)
 	want := hostedCompileRequest{
 		WorkflowPath:       "/checkout/.github/workflows/build.yml",
 		WorkflowSource:     []byte("on: push\n"),

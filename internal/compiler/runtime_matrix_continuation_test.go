@@ -267,7 +267,7 @@ func TestRuntimeMatrixClosureOwnership(t *testing.T) {
 			if len(ir.Jobs) != 2 || len(ir.Continuations) != test.components {
 				t.Fatalf("initial jobs = %v, continuations = %#v", jobKeys(ir), ir.Continuations)
 			}
-			var owner RuntimeMatrixContinuation
+			var owner RuntimeContinuation
 			seen := make(map[string]bool)
 			for _, component := range ir.Continuations {
 				for _, job := range component.Jobs {
@@ -300,7 +300,7 @@ func TestRuntimeMatrixClosureOwnership(t *testing.T) {
 				t.Fatalf("expanded jobs = %v", jobKeys(expanded))
 			}
 			for _, remaining := range expanded.Continuations {
-				index := slices.IndexFunc(ir.Continuations, func(c RuntimeMatrixContinuation) bool { return c.StepKey == remaining.StepKey })
+				index := slices.IndexFunc(ir.Continuations, func(c RuntimeContinuation) bool { return c.StepKey == remaining.StepKey })
 				if index < 0 || !reflect.DeepEqual(remaining, ir.Continuations[index]) {
 					t.Fatalf("remaining owner drifted: %#v", remaining)
 				}
@@ -361,7 +361,7 @@ func logicalJobs(ir IR) []string {
 	return jobs
 }
 
-func continuationFor(t *testing.T, ir IR, consumer string) RuntimeMatrixContinuation {
+func continuationFor(t *testing.T, ir IR, consumer string) RuntimeContinuation {
 	t.Helper()
 	for _, continuation := range ir.Continuations {
 		if continuation.Descriptor.Job == consumer {
@@ -369,7 +369,7 @@ func continuationFor(t *testing.T, ir IR, consumer string) RuntimeMatrixContinua
 		}
 	}
 	t.Fatalf("no continuation expands %q: %#v", consumer, ir.Continuations)
-	return RuntimeMatrixContinuation{}
+	return RuntimeContinuation{}
 }
 
 func instanceStepKey(t *testing.T, job string, matrix map[string]any) string {
@@ -930,7 +930,7 @@ func TestRuntimeMatrixSharesJobBudgetBetweenDeferredUploads(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var others []RuntimeMatrixContinuation
+			var others []RuntimeContinuation
 			for _, continuation := range initial.Continuations {
 				if continuation.Descriptor.Job != supplied {
 					others = append(others, continuation)

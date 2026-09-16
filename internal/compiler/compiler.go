@@ -37,9 +37,9 @@ type IR struct {
 	Execution        ExecutionBoundary `json:"execution"`
 	Jobs             []JobInstance     `json:"jobs"`
 	// Continuations are the deferred uploads that expand needs-derived
-	// matrices after their producer jobs run. Their jobs are absent from Jobs
-	// until a continuation recompiles the workflow with RuntimeMatrixRows.
-	Continuations []RuntimeMatrixContinuation `json:"continuations,omitempty"`
+	// matrices or select runners after their producer jobs run. Their jobs are
+	// absent from Jobs until a stage recompiles with the verified outputs.
+	Continuations []RuntimeContinuation `json:"continuations,omitempty"`
 	// RuntimeMatrixSkippedJobs is the forward closure of roots whose verified
 	// producers did not succeed. The continuation renders skipped placeholders.
 	RuntimeMatrixSkippedJobs map[string]bool `json:"runtime_matrix_skipped_jobs,omitempty"`
@@ -197,10 +197,10 @@ type Report struct {
 	// repository and organization variables before compiling only when it is
 	// set, so workflows without vars references cost no resolution request.
 	ReferencesVars  bool
-	RuntimeMatrices []RuntimeMatrixDescriptor
+	RuntimeMatrices []RuntimeOutputDescriptor
 	// Continuations lists the deferred uploads that expand needs-derived
-	// matrices after their producer jobs run. Their jobs are not in Jobs.
-	Continuations         []RuntimeMatrixContinuation
+	// matrices or select runners after their producer jobs run. Their jobs are not in Jobs.
+	Continuations         []RuntimeContinuation
 	ParsedJobs            []ParsedJob
 	NotEvaluatedJobs      map[string]bool
 	NotEvaluatedInstances map[string]bool

@@ -293,8 +293,12 @@ func matrixCombinationsFromValue(name string, value any) ([]workflow.MatrixCombi
 
 func resolveRunsOn(job workflow.Job, context expression.CompileContext, matrix map[string]any) ([]string, error) {
 	context.Matrix = matrix
+	sites := runsOnSites(job)
+	evaluate := func(site expression.Site) (any, error) {
+		return expression.NewEngine().Evaluate(site, expression.Values{Compile: context})
+	}
 	if job.RunsOnExpr != nil {
-		value, err := evaluateCompileSite(job.RunsOnExpr.Text, expression.ProfileCompile, expression.ResultAny, context)
+		value, err := evaluate(sites[0])
 		if err != nil {
 			return nil, fmt.Errorf("runs-on expression cannot be resolved at compile time: %w", err)
 		}
@@ -317,7 +321,7 @@ func resolveRunsOn(job workflow.Job, context expression.CompileContext, matrix m
 	}
 	labels := make([]string, len(job.RunsOn))
 	for i, label := range job.RunsOn {
-		value, err := evaluateCompileSite(label, expression.ProfileCompileTemplate, expression.ResultString, context)
+		value, err := evaluate(sites[i])
 		resolved, _ := value.(string)
 		if err != nil {
 			return nil, fmt.Errorf("runs-on label %q cannot be resolved at compile time: %w", label, err)

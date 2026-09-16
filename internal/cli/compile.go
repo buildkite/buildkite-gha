@@ -116,7 +116,8 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 			processingReport.Result = "compilable"
 			_ = out.write(ctx, processingReport)
 			writeCompilerWarnings(stderr, "compile", workflowPath, warnings)
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: job %q takes its matrix from a job output, so upload expands it with a deferred step inside the build; the pipeline format cannot render it. Use --format ir-json to inspect the compiled graph.\n", bundle.IR.Continuations[0].Descriptor.Job)
+			descriptor := bundle.IR.Continuations[0].Descriptor
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: job %q takes its %s from a job output, so upload expands it with a deferred step inside the build; the pipeline format cannot render it. Use --format ir-json to inspect the compiled graph.\n", descriptor.Job, descriptor.Kind())
 			return 1
 		}
 	}

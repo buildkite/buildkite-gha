@@ -72,6 +72,7 @@ type hostedCompileRequest struct {
 	RuntimeMatrixActionLocks []plan.ActionLock
 	RuntimeSchedulingOutputs map[string]map[string]string
 	RuntimeSchedulingBuildID string
+	RuntimeRunsOnOutputs     map[string]string
 }
 
 // validationOptions returns the options for validating the workflow against
@@ -88,6 +89,7 @@ func (r hostedCompileRequest) validationOptions() compiler.Options {
 	options.RuntimeMatrixRows = r.RuntimeMatrixRows
 	options.RuntimeMatrixSkipped = r.RuntimeMatrixSkipped
 	options.RuntimeSchedulingOutputs = r.RuntimeSchedulingOutputs
+	options.RuntimeRunsOnOutputs = r.RuntimeRunsOnOutputs
 	return options
 }
 
@@ -107,6 +109,7 @@ func (r hostedCompileRequest) options() compiler.Options {
 	options.RuntimeMatrixActionLocks = r.RuntimeMatrixActionLocks
 	options.RuntimeSchedulingOutputs = r.RuntimeSchedulingOutputs
 	options.RuntimeSchedulingBuildID = r.RuntimeSchedulingBuildID
+	options.RuntimeRunsOnOutputs = r.RuntimeRunsOnOutputs
 	return options
 }
 
