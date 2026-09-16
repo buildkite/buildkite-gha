@@ -2079,12 +2079,14 @@ jobs:
 
 func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
 	for _, test := range []struct {
-		reference   string
-		want        string
-		workflowEnv bool
+		reference         string
+		want              string
+		workflowEnv       bool
+		serviceCredential bool
 	}{
 		{reference: "secrets.GITHUB_TOKEN", want: "references secrets.GITHUB_TOKEN"},
 		{reference: "secrets.GITHUB_TOKEN || 'fallback'", want: "references secrets.GITHUB_TOKEN", workflowEnv: true},
+		{reference: "secrets.GITHUB_TOKEN || 'fallback'", want: "references secrets.GITHUB_TOKEN", serviceCredential: true},
 		{reference: "github.token", want: "references github.token"},
 		{reference: "toJSON(github)", want: "references github.token"},
 	} {
@@ -2092,6 +2094,9 @@ func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
 			source := []byte("on: push\n" + permissions + "jobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ " + test.reference + " }}'\n")
 			if test.workflowEnv {
 				source = []byte("on: push\n" + permissions + "env:\n  TOKEN: ${{ " + test.reference + " }}\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+			}
+			if test.serviceCredential {
+				source = []byte("on: push\n" + permissions + "jobs:\n  token:\n    runs-on: ubuntu-latest\n    services:\n      private:\n        image: registry.example.test/app:1\n        credentials:\n          username: user\n          password: ${{ " + test.reference + " }}\n    steps: [{run: true}]\n")
 			}
 			_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 			if err == nil || !strings.Contains(err.Error(), test.want+" but has no effective permissions") {

@@ -149,7 +149,8 @@ func ValidateServiceRuntimeTemplate(source string) error {
 }
 
 func ValidateServiceCredentialTemplate(source string) error {
-	return validateServiceCredentialTemplate(source)
+	_, err := NewEngine().Validate(Site{Source: source, Profile: ProfileServiceCredential, Result: ResultString})
+	return err
 }
 
 func ValidateServiceMapRuntimeExpression(source string) error {

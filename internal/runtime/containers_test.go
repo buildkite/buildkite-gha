@@ -1252,7 +1252,7 @@ func TestEvaluateProgramServicesResolvesCredentialVarsWithEnvironment(t *testing
 		EnvironmentVars: map[string]string{"registry_user": "environment-user"},
 	}
 	services, _, err := evaluateProgramServices(testProgramServices(map[string]plan.ServiceContainer{
-		"private": {Image: "registry.example.test/team/app:1", Credentials: &plan.ContainerCredentials{Username: "${{ vars.REGISTRY_USER }}", Password: "${{ secrets.REGISTRY_PASSWORD }}"}},
+		"private": {Image: "registry.example.test/team/app:1", Credentials: &plan.ContainerCredentials{Username: "${{ vars.REGISTRY_USER || 'fallback-user' }}", Password: "${{ env.PASSWORD || secrets.REGISTRY_PASSWORD }}"}},
 	}), expression.Context{Vars: job.Vars(), Secrets: map[string]string{"REGISTRY_PASSWORD": "registry-password"}})
 	if err != nil {
 		t.Fatal(err)

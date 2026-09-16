@@ -2076,12 +2076,12 @@ func TestEvaluateCompileTemplateUsesGitHubNumberRendering(t *testing.T) {
 }
 
 func TestValidateServiceCredentialTemplateContexts(t *testing.T) {
-	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}"} {
+	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER || 'user' }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}"} {
 		if err := ValidateServiceCredentialTemplate(template); err != nil {
 			t.Errorf("ValidateServiceCredentialTemplate(%q) = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ needs.build.outputs.user }}", "${{ env.USER.extra }}", "${{ secrets }}"} {
+	for _, template := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ needs.build.outputs.user }}", "${{ env.USER.extra }}", "${{ secrets }}", "${{ 'safe' || inputs.user }}", "${{ 'safe' || secrets[env.KEY] }}", "${{ 'safe' || toJSON(github) }}"} {
 		if err := ValidateServiceCredentialTemplate(template); err == nil {
 			t.Errorf("ValidateServiceCredentialTemplate(%q) succeeded", template)
 		}

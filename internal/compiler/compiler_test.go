@@ -4890,7 +4890,7 @@ jobs:
         image: postgres:${{ matrix.postgres }}
         credentials:
           username: ${{ vars.REGISTRY_USER }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
+          password: ${{ 'public' || secrets.REGISTRY_PASSWORD }}
         env: {INSTANCE: '${{ strategy.job-index }}'}
         ports: ['${{ vars.SERVICE_PORT }}']
         volumes: ['database:/var/lib/postgresql/data']
@@ -4910,7 +4910,7 @@ jobs:
 	}
 	for i, image := range []string{"postgres:16", "postgres:17"} {
 		service := plans[i].Services["database"]
-		if service.Image != image || service.Credentials == nil || service.Credentials.Username != "${{ vars.REGISTRY_USER }}" || service.Credentials.Password != "${{ secrets.REGISTRY_PASSWORD }}" || service.Env["INSTANCE"] != strconv.Itoa(i) || !slices.Equal(service.Ports, []string{"5432"}) || len(service.Volumes) != 1 || service.Options == "" || service.Command == "" || service.Entrypoint == "" {
+		if service.Image != image || service.Credentials == nil || service.Credentials.Username != "${{ vars.REGISTRY_USER }}" || service.Credentials.Password != "${{ 'public' || secrets.REGISTRY_PASSWORD }}" || service.Env["INSTANCE"] != strconv.Itoa(i) || !slices.Equal(service.Ports, []string{"5432"}) || len(service.Volumes) != 1 || service.Options == "" || service.Command == "" || service.Entrypoint == "" {
 			t.Fatalf("compiled service %d = %#v", i, service)
 		}
 		if !slices.Equal(plans[i].ServiceOrder, []string{"database"}) {
@@ -4965,7 +4965,7 @@ func TestResolveCompileServicesRejectsUnsupportedCredentialContexts(t *testing.T
 		services := []workflow.Service{{Name: "database", Container: workflow.ServiceContainer{
 			Image: "postgres:16", Credentials: &workflow.ContainerCredentials{Username: value, Password: "literal"},
 		}}}
-		if _, err := resolveCompileServices(services, expression.CompileContext{}); err == nil || !strings.Contains(err.Error(), "credential expression context") {
+		if _, err := resolveCompileServices(services, expression.CompileContext{}); err == nil || !strings.Contains(err.Error(), "credentials: runtime context") {
 			t.Errorf("resolveCompileServices() credential %q error = %v", value, err)
 		}
 	}

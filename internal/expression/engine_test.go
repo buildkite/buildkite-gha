@@ -98,7 +98,7 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 		ProfileRuntimeTemplate:       {"${{ env.NAME }}", ResultString, "value"},
 		ProfileServiceTemplate:       {"${{ needs.build.outputs.value || 'fallback' }}", ResultString, `{"name":"value"}`},
 		ProfileDeferredInput:         {"type=raw,value=${{ needs.build.outputs.value }}", ResultString, `type=raw,value={"name":"value"}`},
-		ProfileServiceCredential:     {"${{ env.NAME }}", ResultString, "value"},
+		ProfileServiceCredential:     {"${{ env.NAME || 'fallback' }}", ResultString, "value"},
 		ProfileServiceMap:            {"${{ fromJSON(needs.build.outputs.value || '{}') }}", ResultObject, []ObjectEntry{{Name: "name", Value: "value"}}},
 		ProfileActionInputDefault:    {"${{ case(true, inputs.name, 'unused') }}", ResultString, "value"},
 		ProfileDockerActionArg:       {"${{ format('{0}', inputs.name || 'fallback') }}", ResultString, "value"},
@@ -569,6 +569,18 @@ func TestEngineAbstractEvaluationNarrowsMonotonicallyToConcrete(t *testing.T) {
 			values:     Values{Runtime: Context{Vars: map[string]string{"ENABLED": "yes"}, GitHub: map[string]any{"token": "ghs_scoped"}}},
 		},
 		{
+			name:       "service credential uses supplied value",
+			site:       Site{Source: "${{ env.PASSWORD || github.token }}", Profile: ProfileServiceCredential, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"env.password": "supplied"},
+			values:     Values{Runtime: Context{Env: map[string]string{"PASSWORD": "supplied"}}},
+		},
+		{
+			name:       "service credential falls back",
+			site:       Site{Source: "${{ env.PASSWORD || github.token }}", Profile: ProfileServiceCredential, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"env.password": "", "github.token": "ghs_scoped"},
+			values:     Values{Runtime: Context{Env: map[string]string{"PASSWORD": ""}, GitHub: map[string]any{"token": "ghs_scoped"}}},
+		},
+		{
 			name:       "known failure status",
 			site:       Site{Source: "failure() && needs.build.result == 'failure'", Profile: ProfileStepCondition, Result: ResultBoolean, Purpose: PurposeExpression},
 			references: map[string]any{"failure": true, "needs.build.result": "failure"},
@@ -721,13 +733,13 @@ func TestEngineCaseFunctionPolicyIsClosedByProfile(t *testing.T) {
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileStepCondition,
 		ProfileCallCondition, ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault,
 		ProfileJobOutput, ProfileStepTemplate, ProfileStepControl, ProfileReusableStepControl, ProfileDeferredInput, ProfileActionInputDefault, ProfileDockerActionArg,
-		ProfileServiceTemplate, ProfileServiceMap,
+		ProfileServiceTemplate, ProfileServiceMap, ProfileServiceCredential,
 	} {
 		if !containsFold(profiles[id].Functions, "case") {
 			t.Errorf("profile %q does not admit case", id)
 		}
 	}
-	for _, id := range []ProfileID{ProfileRuntimeTemplate, ProfileServiceCredential} {
+	for _, id := range []ProfileID{ProfileRuntimeTemplate} {
 		if containsFold(profiles[id].Functions, "case") {
 			t.Errorf("profile %q unexpectedly admits case", id)
 		}

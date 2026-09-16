@@ -184,25 +184,6 @@ func validateServiceRuntimeNode(node actionlint.ExprNode) error {
 	return validationErr
 }
 
-// validateServiceCredentialTemplate matches GitHub's narrower service
-// credential context: github, vars, secrets, and env direct references.
-func validateServiceCredentialTemplate(template string) error {
-	return visitTemplateExpressions(template, validateServiceCredentialNode)
-}
-
-func validateServiceCredentialNode(node actionlint.ExprNode) error {
-	root, path, err := referencePath(node)
-	if err != nil {
-		return fmt.Errorf("service credential expression requires a direct context reference: %w", err)
-	}
-	switch classifyRuntimeReference(root, path) {
-	case runtimeReferenceGitHub, runtimeReferenceVar, runtimeReferenceSecret, runtimeReferenceEnv:
-		return nil
-	default:
-		return fmt.Errorf("service credential expression context %q is unsupported", root)
-	}
-}
-
 func validateServiceMapExpression(source string) error {
 	body, err := expressionBody(source)
 	if err != nil {
