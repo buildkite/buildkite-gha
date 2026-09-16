@@ -348,6 +348,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			// resolveCompileTimeConditions.
 			conditionContext := resolver.context
 			conditionContext.Inputs = inputs.values
+			conditionContext.InputsComplete = len(inputs.deferred) == 0
 			conditionContext.Matrix = nil
 			conditionContext.Strategy = nil
 			conditionContext.Vars = nil
@@ -425,6 +426,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 
 		matrixContext := resolver.context
 		matrixContext.Inputs = inputs.values
+		matrixContext.InputsComplete = len(inputs.deferred) == 0
 		matrixContext.Matrix = nil
 		matrixContext.Strategy = nil
 		matrices, err := expandMatrix(path, job, matrixContext)
@@ -478,6 +480,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			if callee.Concurrency != nil {
 				concurrencyContext := resolver.context
 				concurrencyContext.Inputs = callInputs.values
+				concurrencyContext.InputsComplete = len(callInputs.deferred) == 0
 				concurrencyContext.Matrix = nil
 				concurrencyContext.Strategy = nil
 				group, err := resolveConcurrency(calleeSource.displayPath, "", callee.Concurrency, concurrencyContext, nil)

@@ -113,6 +113,29 @@ jobs:
 	}
 }
 
+func TestCompileMissingInputFallbacksAcrossGraphFields(t *testing.T) {
+	source := []byte(`on: push
+run-name: ${{ inputs.name || 'run fallback' }}
+concurrency: ${{ inputs.group || 'group-fallback' }}
+jobs:
+  test:
+    name: ${{ inputs.name || 'job fallback' }}
+    runs-on: ubuntu-latest
+    container: ${{ inputs.image || 'alpine:3.20' }}
+    steps: [{run: true}]
+`)
+	bundle, err := CompileBundle("fallback.yml", source, pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.IR.Workflow.RunName != "run fallback" || bundle.IR.Workflow.ConcurrencyGroup != "group-fallback" || len(bundle.IR.Jobs) != 1 || bundle.IR.Jobs[0].Label != "job fallback" {
+		t.Fatalf("fallback presentation = %#v, jobs = %#v", bundle.IR.Workflow, bundle.IR.Jobs)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Container == nil || bundle.Plans[0].Job.Container.Image != "alpine:3.20" {
+		t.Fatalf("fallback container = %#v", bundle.Plans)
+	}
+}
+
 func TestCompileTreatsBlankRunNameAsAbsentAndLocatesUnsupportedContext(t *testing.T) {
 	workflow := []byte("name: CI\nrun-name: '   '\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 	compiled, err := CompileWithOptions("blank.yml", workflow, pushEvent(t), defaultOptions())

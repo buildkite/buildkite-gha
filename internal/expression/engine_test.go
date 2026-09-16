@@ -208,6 +208,29 @@ func errorText(err error) string {
 	return err.Error()
 }
 
+func TestCompileInputFallbackDistinguishesMissingAndDeferredValues(t *testing.T) {
+	site := Site{Source: "${{ inputs.name || 'fallback' }}", Profile: ProfileCompileTemplate, Result: ResultString}
+	for _, test := range []struct {
+		name    string
+		context CompileContext
+		want    string
+		known   bool
+	}{
+		{name: "absent", context: CompileContext{Inputs: map[string]any{}, InputsComplete: true}, want: "fallback", known: true},
+		{name: "present", context: CompileContext{Inputs: map[string]any{"name": "provided"}, InputsComplete: true}, want: "provided", known: true},
+		{name: "empty", context: CompileContext{Inputs: map[string]any{"name": ""}, InputsComplete: true}, want: "fallback", known: true},
+		{name: "unavailable", context: CompileContext{InputsComplete: true}},
+		{name: "deferred", context: CompileContext{Inputs: map[string]any{"other": "known"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := NewEngine().Reduce(site, Values{Compile: test.context})
+			if err != nil || got.Known != test.known || test.known && got.Value != test.want || !test.known && got.Source != site.Source {
+				t.Fatalf("Reduce() = %#v, %v; want known=%t value=%q", got, err, test.known, test.want)
+			}
+		})
+	}
+}
+
 func TestEngineProfileScopesAreDistinctAndAuthoritative(t *testing.T) {
 	engine := NewEngine()
 	validate := func(profile ProfileID, source string) error {

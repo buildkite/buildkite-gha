@@ -237,6 +237,11 @@ non-dispatch event, declared dispatch inputs use their typed zero values rather
 than dispatch-only defaults. A skipped workflow does not synthesize dispatch
 inputs.
 
+Absent properties in a known input set are empty, so expressions such as
+`${{ inputs.name || 'default' }}` work in run names, job names, concurrency
+groups, and container images. Inputs waiting for job outputs remain unresolved
+until those outputs are available.
+
 GitHub also documents `vars` in its context-availability reference, but
 `run-name` has no `vars` source here and a reference is rejected. See
 [Repository and organization variables](#repository-and-organization-variables)

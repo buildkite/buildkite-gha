@@ -1886,7 +1886,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "${{ inputs.tags }}" "${{ inputs.flavor }}" ${{ inputs.push }}
+      - run: echo "${{ inputs.tags }}" "${{ inputs.flavor || github.event.ref }}" ${{ inputs.push }}
 `)
 
 	plans, err := compilePlansForTest(t.Context(), callerPath, readFile(t, callerPath), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
@@ -1931,8 +1931,8 @@ jobs:
 		t.Fatalf("build dependencies = %#v, needs outputs = %#v", build.Dependencies, build.NeedOutputs)
 	}
 	step := build.ExecutionJob().Steps[0]
-	if step.Run.Command.Source != `echo "${{ inputs.tags }}" "${{ inputs.flavor }}" true` {
-		t.Fatalf("callee step = %#v", step)
+	if step.Run.Command.Source != `echo "${{ inputs.tags }}" "${{ (inputs.flavor || 'refs/heads/main') }}" true` {
+		t.Fatalf("callee command = %q", step.Run.Command.Source)
 	}
 }
 
