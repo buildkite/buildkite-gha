@@ -1115,8 +1115,21 @@ func TestEmitDarwinActionRuntimeUsesNativePlatformCache(t *testing.T) {
 	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir("darwin/arm64") {
 		t.Fatalf("Darwin mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
 	}
-	if !strings.Contains(step.Command, `shasum -a 256 "$distribution"`) || strings.Contains(step.Command, "--hosted-tool-cache") || strings.Contains(step.Command, HostedToolCachePath) {
+	if !strings.Contains(step.Command, `shasum -a 256 "$distribution"`) || !strings.Contains(step.Command, "--hosted-tool-cache") || strings.Contains(step.Command, HostedToolCachePath) {
 		t.Fatalf("Darwin bootstrap is not native and portable:\n%s", step.Command)
+	}
+	previous := -1
+	for _, required := range []string{
+		`sudo -n mkdir -p '/Users/runner/hostedtoolcache'`,
+		`sudo -n chown -R "$(id -u):$(id -g)" '/Users/runner/hostedtoolcache'`,
+		`sudo -n chmod -R u+rwX '/Users/runner/hostedtoolcache'`,
+		`"$distribution" run-job`,
+	} {
+		position := strings.Index(step.Command, required)
+		if position <= previous {
+			t.Fatalf("Darwin bootstrap is missing or misorders %q:\n%s", required, step.Command)
+		}
+		previous = position
 	}
 }
 

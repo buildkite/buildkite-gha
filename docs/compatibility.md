@@ -1802,9 +1802,15 @@ sets `RUNNER_OS` and `RUNNER_ARCH` to `Linux`/`X64` or `macOS`/`ARM64`, and
 `RUNNER_ENVIRONMENT` to `self-hosted`. Workflow and step environment entries
 cannot override these values.
 
-`RUNNER_TOOL_CACHE` is job-private unless the Linux job selects an immutable
+On Linux, `RUNNER_TOOL_CACHE` is job-private unless the job selects an immutable
 image with `/opt/hostedtoolcache`, which the default and configured
-hosted-toolchains images provide. macOS images are unsupported.
+hosted-toolchains images provide.
+
+On macOS, the bootstrap creates `/Users/runner/hostedtoolcache`, makes it owned
+and writable by the agent user, and selects it as `RUNNER_TOOL_CACHE`. This
+requires non-interactive `sudo` and preserves the fixed installation prefix
+used by actions such as `ruby/setup-ruby`. Agents must still provide compatible
+native dependencies for downloaded tools. macOS container images are unsupported.
 
 ### Results, retries, and cancellation
 

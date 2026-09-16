@@ -67,7 +67,7 @@ func TestEmitRunnerUserIsDefaultForLinuxOnly(t *testing.T) {
 			t.Errorf("Linux runner-user command contains forbidden workspace or permission change %q:\n%s", forbidden, linux)
 		}
 	}
-	if darwin := commands["darwin"]; strings.Contains(darwin, "useradd") || strings.Contains(darwin, "sudo -n") {
+	if darwin := commands["darwin"]; strings.Contains(darwin, "useradd") || strings.Contains(darwin, "--user runner") {
 		t.Fatalf("Darwin command selected Linux runner user:\n%s", darwin)
 	}
 
@@ -76,7 +76,7 @@ func TestEmitRunnerUserIsDefaultForLinuxOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(output), "useradd") || strings.Contains(string(output), "sudo -n") {
+	if strings.Contains(string(output), "useradd") || strings.Contains(string(output), "--user runner") {
 		t.Fatalf("opt-out pipeline selected runner user:\n%s", output)
 	}
 }

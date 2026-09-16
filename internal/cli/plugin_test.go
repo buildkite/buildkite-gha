@@ -1176,7 +1176,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	if expression.Queue != "linux-medium" || expression.Image != defaultNobleRunnerImage || !strings.Contains(expression.Command, "--hosted-tool-cache") || !strings.Contains(expression.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
 		t.Fatalf("expression fallback Linux pipeline step = %#v", expression)
 	}
-	if macos.Queue != "macos-26-medium" || macos.Image != "" || strings.Contains(macos.Command, "--hosted-tool-cache") || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) {
+	if macos.Queue != "macos-26-medium" || macos.Image != "" || !strings.Contains(macos.Command, "--hosted-tool-cache") || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) {
 		t.Fatalf("Darwin pipeline step = %#v", macos)
 	}
 }

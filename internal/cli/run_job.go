@@ -225,6 +225,9 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	runnerToolCache := ""
 	if options.hostedToolCache {
 		runnerToolCache = buildkitepipeline.HostedToolCachePath
+		if runtime.GOOS == "darwin" {
+			runnerToolCache = buildkitepipeline.DarwinHostedToolCachePath
+		}
 	}
 	runner := gharuntime.Runner{
 		Stdout:      stdout,

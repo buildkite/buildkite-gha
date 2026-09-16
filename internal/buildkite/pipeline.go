@@ -25,9 +25,11 @@ const darwinRuntimeCacheRoot = "/tmp/bkcache/buildkite-gha"
 // immutable plan explicitly allows Buildkite to soft-fail.
 const ContinueOnErrorExitStatus = 78
 
-// HostedToolCachePath is the trusted, image-baked Actions tool-cache facade
-// used by explicitly selected runtime images.
+// HostedToolCachePath is the Actions tool-cache path in Linux runtime images.
 const HostedToolCachePath = "/opt/hostedtoolcache"
+
+// DarwinHostedToolCachePath is the fixed prefix used by prebuilt macOS tools.
+const DarwinHostedToolCachePath = "/Users/runner/hostedtoolcache"
 
 // MinimumMiseVersion is the oldest supported mise release and the exact
 // release installed when no compatible runtime executable is available.
@@ -576,7 +578,14 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 				runJob += " --artifact-producer " + shellQuote(artifactProducer)
 			}
 		}
-		if runtimeImage != "" {
+		if platform == "darwin/arm64" {
+			commands = append(commands,
+				"sudo -n mkdir -p "+shellQuote(DarwinHostedToolCachePath),
+				`sudo -n chown -R "$(id -u):$(id -g)" `+shellQuote(DarwinHostedToolCachePath),
+				"sudo -n chmod -R u+rwX "+shellQuote(DarwinHostedToolCachePath),
+			)
+		}
+		if runtimeImage != "" || platform == "darwin/arm64" {
 			runJob += " --hosted-tool-cache"
 		}
 		if experimentalRunnerUser {
