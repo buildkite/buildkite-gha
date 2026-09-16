@@ -1550,10 +1550,12 @@ remain literal. Omitted or empty args keep the image `CMD`; any non-empty array
 replaces `CMD` while preserving the image `ENTRYPOINT`. A prebuilt-image
 action's optional `runs.entrypoint` overrides the image `ENTRYPOINT`.
 
-Args may contain literals and direct `inputs.<name>` or `inputs['name']`
-interpolation. Operators, functions, whole or dynamic inputs, and every other
-context are rejected. Invocation inputs and metadata defaults resolve before
-args evaluation. The compiler stores args as action-authored sites in the
+Args may contain literals and expressions using action `inputs`, operators,
+and the supported pure functions, such as `${{ inputs.name || 'default' }}`.
+Other contexts, credentials, status functions, and `hashFiles()` are rejected,
+including in unreachable branches. Invocation inputs and metadata defaults
+resolve before args evaluation; substituted values remain literal arguments.
+The compiler stores args as action-authored sites in the
 normalized job program. Runtime verifies the locked action tree but does not
 reparse its metadata.
 

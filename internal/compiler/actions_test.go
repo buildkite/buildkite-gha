@@ -2568,6 +2568,8 @@ runs:
   args:
     - literal
     - ${{ inputs.target }}
+    - ${{ inputs.target || 'fallback' }}
+    - ${{ format('{0}', inputs.target) }}
 `)
 	compiled, err := compileActionInvocations(t.Context(), workspace, nil, "https://github.com", []string{"./docker"}, []map[string]string{{}})
 	if err != nil {
@@ -2582,11 +2584,11 @@ runs:
 	}
 
 	invalid := []string{
-		"${{ inputs }}",
+		"${{ inputs.target.value }}",
 		"${{ inputs[env.name] }}",
 		"${{ secrets.token }}",
-		"${{ inputs.target || 'fallback' }}",
-		"${{ format('{0}', inputs.target) }}",
+		"${{ 'safe' || secrets.token }}",
+		"${{ 'safe' || github.token }}",
 	}
 	for _, argument := range invalid {
 		writeAction(t, workspace, "docker", "runs:\n  using: docker\n  image: Dockerfile\n  args:\n    - \""+strings.ReplaceAll(argument, "\"", "\\\"")+"\"\n")

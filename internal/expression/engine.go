@@ -144,7 +144,7 @@ var profiles = map[ProfileID]Profile{
 	ProfileServiceCredential:     {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "secrets", "vars"}, Missing: MissingEmpty, Token: TokenDirect, semantics: semanticsServiceCredential},
 	ProfileServiceMap:            {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: FunctionSet{"fromJSON"}, Missing: MissingError, Token: TokenDenied, semantics: semanticsServiceMap},
 	ProfileActionInputDefault:    {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsActionInputDefault},
-	ProfileDockerActionArg:       {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"inputs"}, Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDockerActionArg},
+	ProfileDockerActionArg:       {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"inputs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsDockerActionArg},
 }
 
 // Profiles returns a copy of the closed profile table for exhaustive tests.
@@ -417,7 +417,7 @@ func (Engine) Validate(site Site) (Validation, error) {
 	case semanticsActionInputDefault:
 		err = validateActionInputDefaultTemplate(site.Source)
 	case semanticsDockerActionArg:
-		err = visitTemplateExpressions(site.Source, validateDockerActionArgNode)
+		err = validateStepProfile(site.Source, profile)
 	}
 	if err == nil {
 		err = validateDeclaredProfile(site.Source, profile)
@@ -578,10 +578,7 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 	case semanticsActionInputDefault:
 		value, err = evaluateRuntimeTemplate(site.Source, values.Runtime, evaluateActionInputDefaultNode)
 	case semanticsDockerActionArg:
-		value, err = evaluateRuntimeTemplate(site.Source, Context{Inputs: values.Runtime.Inputs}, func(node actionlint.ExprNode, context Context) (any, error) {
-			root, path, _ := referencePath(node)
-			return resolveRuntimeReference(root, path, context)
-		})
+		value, err = evaluateStepProfile(site.Source, Context{Inputs: values.Runtime.Inputs}, profile)
 	default:
 		err = fmt.Errorf("unknown expression profile %q", site.Profile)
 	}

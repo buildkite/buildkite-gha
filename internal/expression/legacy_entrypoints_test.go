@@ -69,10 +69,17 @@ func EvaluateActionInputDefault(source string, context Context) (string, error) 
 	return evaluateActionInputDefault(source, context)
 }
 
-func ValidateDockerActionArg(source string) error { return validateDockerActionArg(source) }
+func ValidateDockerActionArg(source string) error {
+	_, err := NewEngine().Validate(Site{Source: source, Profile: ProfileDockerActionArg, Result: ResultString})
+	return err
+}
 
 func EvaluateDockerActionArg(source string, inputs map[string]string) (string, error) {
-	return evaluateDockerActionArg(source, inputs)
+	value, err := NewEngine().Evaluate(Site{Source: source, Profile: ProfileDockerActionArg, Result: ResultString}, Values{Runtime: Context{Inputs: inputs}})
+	if err != nil {
+		return "", err
+	}
+	return value.(string), nil
 }
 
 func ValidateRuntimeTemplate(source string) error { return validateRuntimeTemplate(source) }

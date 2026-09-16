@@ -101,7 +101,7 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 		ProfileServiceCredential:     {"${{ env.NAME }}", ResultString, "value"},
 		ProfileServiceMap:            {"${{ fromJSON(needs.build.outputs.value) }}", ResultObject, []ObjectEntry{{Name: "name", Value: "value"}}},
 		ProfileActionInputDefault:    {"${{ case(true, inputs.name, 'unused') }}", ResultString, "value"},
-		ProfileDockerActionArg:       {"${{ inputs.name }}", ResultString, "value"},
+		ProfileDockerActionArg:       {"${{ format('{0}', inputs.name || 'fallback') }}", ResultString, "value"},
 	}
 	for _, id := range profileIDs() {
 		t.Run(string(id), func(t *testing.T) {
@@ -720,13 +720,13 @@ func TestEngineCaseFunctionPolicyIsClosedByProfile(t *testing.T) {
 		ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileStepCondition,
 		ProfileCallCondition, ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault,
-		ProfileJobOutput, ProfileStepTemplate, ProfileStepControl, ProfileReusableStepControl, ProfileDeferredInput, ProfileActionInputDefault,
+		ProfileJobOutput, ProfileStepTemplate, ProfileStepControl, ProfileReusableStepControl, ProfileDeferredInput, ProfileActionInputDefault, ProfileDockerActionArg,
 	} {
 		if !containsFold(profiles[id].Functions, "case") {
 			t.Errorf("profile %q does not admit case", id)
 		}
 	}
-	for _, id := range []ProfileID{ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileServiceCredential, ProfileServiceMap, ProfileDockerActionArg} {
+	for _, id := range []ProfileID{ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileServiceCredential, ProfileServiceMap} {
 		if containsFold(profiles[id].Functions, "case") {
 			t.Errorf("profile %q unexpectedly admits case", id)
 		}

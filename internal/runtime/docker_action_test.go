@@ -470,14 +470,17 @@ runs:
   using: docker
   image: Dockerfile
   args:
-    - ${{ inputs.supplied }}
-    - prefix-${{ inputs['fallback'] }}
+    - ${{ inputs.supplied || 'unused' }}
+    - ${{ format('prefix-{0}', inputs['fallback']) }}
     - ${{ inputs.blank }}
     - "  "
+    - ${{ inputs.blank || 'blank fallback' }}
+    - ${{ inputs.missing || 'missing fallback' }}
+    - ${{ inputs.literal || 'unused' }}
 `)
 	writeFixtureFile(t, workspace, "action/Dockerfile", "FROM scratch\n")
 	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{
-		ID: "docker", Kind: "uses", Uses: "./action", With: map[string]string{"supplied": "--privileged"},
+		ID: "docker", Kind: "uses", Uses: "./action", With: map[string]string{"supplied": "--privileged", "literal": "${{ '${{ secrets.UNAUTHORIZED }}' }}"},
 	}})
 	job.RequiredCapabilities = []string{"docker", "network"}
 	result, err := (Runner{Docker: fake.path}).runTestJob(t.Context(), job, workspace)
@@ -491,7 +494,7 @@ runs:
 	}
 	image := string(imageBytes)
 	imageIndex := slices.Index(argv, image)
-	want := []string{"--privileged", "prefix-default value", "", "  "}
+	want := []string{"--privileged", "prefix-default value", "", "  ", "blank fallback", "missing fallback", "${{ secrets.UNAUTHORIZED }}"}
 	if imageIndex < 0 {
 		t.Fatalf("image absent from Docker argv: %#v", argv)
 	}
@@ -515,7 +518,7 @@ func TestRunJobRevalidatesDockerArgsWithInputsOnly(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []runtimeTestStep{{ID: "docker", Kind: "uses", Uses: "./action"}})
 	job.RequiredCapabilities = []string{"docker", "network"}
 	_, err := (Runner{Docker: filepath.Join(t.TempDir(), "docker-must-not-run")}).runTestJob(t.Context(), job, workspace)
-	if err == nil || !strings.Contains(err.Error(), "docker action argument") || !strings.Contains(err.Error(), "only inputs.<name>") {
+	if err == nil || !strings.Contains(err.Error(), "normalized execution program") || !strings.Contains(err.Error(), `runtime context "secrets" is unavailable`) {
 		t.Fatalf("RunJob() error = %v, want normalized inputs-only rejection", err)
 	}
 }
