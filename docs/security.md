@@ -173,7 +173,8 @@ exactly as for static jobs, and the recompilation must reproduce the jobs the
 earlier uploads already created before anything is uploaded. The stage record
 and the workflow in the checkout are digest-checked against what the importer
 compiled. When matrices chain, each deferred step writes the next stage's
-record with the rows it accepted; the next step validates those rows
+record with the rows it accepted and their producer result digests; the next
+step verifies those results again before using the rows, validates the rows
 the same way, reads the event and runtimes from the same importer, pins the
 same action revisions, and may only expand the matrices the initial
 compilation left to a later stage.

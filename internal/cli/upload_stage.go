@@ -191,26 +191,46 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	continuation := record.Continuation
 	descriptor := continuation.Descriptor
 	graphKeys := make([]string, 0, len(record.Graph))
+	graph := make(map[string]compiledJob, len(record.Graph))
 	for _, job := range record.Graph {
 		graphKeys = append(graphKeys, job.Key)
+		graph[job.Key] = job
 	}
 	rows := make(map[string][]map[string]any)
 	skipped := make(map[string]bool)
 	// Read every producer before uploading anything. A missing manifest is
 	// not a terminal skip, even if another branch has already failed.
 	manifests := make(map[string]transport.ResultManifest)
+	results := make(map[string]string)
+	readProducer := func(key string) (transport.ResultManifest, error) {
+		if manifest, exists := manifests[key]; exists {
+			return manifest, nil
+		}
+		manifest, err := transport.DownloadResult(r.ctx, r.agent, r.root, r.buildID, transport.ResultSource{StepKey: key, PlanDigest: graph[key].PlanDigest})
+		if err != nil {
+			return transport.ResultManifest{}, err
+		}
+		data, err := transport.MarshalResultManifest(manifest)
+		if err != nil {
+			return transport.ResultManifest{}, err
+		}
+		manifests[key], results[key] = manifest, sha256Digest(data)
+		return manifest, nil
+	}
+	for _, resolved := range record.Resolved {
+		if _, err := readProducer(resolved.ProducerStepKey); err != nil {
+			return fail("earlier matrix %q producer result is unavailable: %v", resolved.Job, err)
+		}
+		if results[resolved.ProducerStepKey] != resolved.ResultDigest {
+			return fail("earlier matrix %q producer result changed after expansion", resolved.Job)
+		}
+	}
 	for _, root := range continuation.Roots() {
 		descriptor := root.Descriptor
-		producer := record.producer(descriptor.Job)
 		_, _ = fmt.Fprintf(r.stdout, "~~~ :github: Read matrix from job %q output %q\n", descriptor.ProducerJob, descriptor.ProducerOutput)
-		manifest, exists := manifests[producer.Key]
-		if !exists {
-			var err error
-			manifest, err = transport.DownloadResult(r.ctx, r.agent, r.root, r.buildID, transport.ResultSource{StepKey: producer.Key, PlanDigest: producer.PlanDigest})
-			if err != nil {
-				return fail("matrix producer %q result is unavailable: %v", descriptor.ProducerJob, err)
-			}
-			manifests[producer.Key] = manifest
+		manifest, err := readProducer(root.ProducerStepKey)
+		if err != nil {
+			return fail("matrix producer %q result is unavailable: %v", descriptor.ProducerJob, err)
 		}
 		if manifest.Result != "success" {
 			_, _ = fmt.Fprintf(r.stdout, "Matrix producer %q finished with result %q; the deferred jobs are skipped for this root.\n", descriptor.ProducerJob, manifest.Result)
@@ -261,7 +281,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	// advance proves the recompilation reproduced the earlier stages and
 	// returns the jobs this stage uploads, with the step and record of the
 	// next stage when some of them feed a later matrix.
-	stage, err := record.advance(bundle, rows, skipped, r.digest)
+	stage, err := record.advance(bundle, rows, skipped, results, r.digest)
 	if err != nil {
 		return fail("%v", err)
 	}

@@ -578,7 +578,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			root, event, stageErr := importerStage(request, importerJobID, os.Getenv("BUILDKITE_COMMIT"), input, label, checkName, effectiveEvent, uploadArguments.experimentalRunnerUser, uploadArguments.privateReusableWorkflows)
 			var stage stageResult
 			if stageErr == nil {
-				stage, stageErr = root.advance(bundle, nil, nil, "")
+				stage, stageErr = root.advance(bundle, nil, nil, nil, "")
 			}
 			if stageErr != nil {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %s: %v\n", input.CanonicalPath, stageErr)
