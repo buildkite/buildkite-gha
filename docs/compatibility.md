@@ -1130,7 +1130,7 @@ macOS jobs reject containers, services, Docker actions, and Docker capability.
 | --- | --- | --- |
 | `name`, `id` | ✅ Supported | Use `id` to read outputs or target background work. IDs must be unique within a job. |
 | `if` | 🟡 Supported subset | May use step status, step outputs, `env`, and service ports in addition to job-condition contexts. |
-| `env` | 🟡 Supported subset | Values override job and workflow values and may use supported direct interpolation. |
+| `env` | 🟡 Supported subset | Values override job and workflow values and may use supported expressions, including fallbacks. |
 | `continue-on-error` | ✅ Supported | Accepts literal booleans or expressions that produce a Boolean. A failure records `outcome: failure` and `conclusion: success`, then the job continues. |
 | `timeout-minutes` | 🟡 Supported subset | Accepts literal numbers or expressions that produce a number greater than 0 and at most 360. |
 
@@ -1177,7 +1177,7 @@ Use an interpreter installed by an earlier step or included in the job image:
   run: conda info
 ```
 
-A `uses` step may call a supported local or public action. Action inputs under `with` may use supported direct interpolation. Direct workflow `uses: docker://...` actions are rejected; prebuilt-image declarations belong in locked action metadata.
+A `uses` step may call a supported local or public action. Action inputs under `with` may use supported expressions, including fallbacks. Direct workflow `uses: docker://...` actions are rejected; prebuilt-image declarations belong in locked action metadata.
 
 Local actions must exist in the event repository when the workflow is compiled. An earlier step cannot create a local action with `actions/checkout`, an artifact download, or a command. Use a public `owner/repository/path@ref` action instead.
 
@@ -1311,6 +1311,12 @@ function, context, or matrix type.
 Reusable-workflow call conditions use the same operators and status functions but only the caller contexts listed in [Reusable workflows](#reusable-workflows). The runtime evaluates their ordered guards before the called job's own condition.
 
 ### Runtime interpolation
+
+The `||` operator selects its right operand when the left is falsy: `false`,
+zero, an empty string, or null. It does not recover from evaluation or
+secret-retrieval errors, grant access to an unavailable context, or make a
+literal-only field accept expressions. Each field retains its context and
+result-type restrictions.
 
 These step fields support the operators and pure functions listed above:
 
