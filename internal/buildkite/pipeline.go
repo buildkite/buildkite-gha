@@ -818,13 +818,36 @@ func windowsBootstrapCommands(distributionPath, distributionDigest, distribution
 
 func powershellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
 
+const windowsBootstrapPrefix = "pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+
 func windowsBootstrapCommand(script string) string {
 	encoded := utf16.Encode([]rune(script))
 	data := make([]byte, len(encoded)*2)
 	for i, value := range encoded {
 		binary.LittleEndian.PutUint16(data[i*2:], value)
 	}
-	return "pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + base64.StdEncoding.EncodeToString(data)
+	return windowsBootstrapPrefix + base64.StdEncoding.EncodeToString(data)
+}
+
+// BootstrapHasPlanDigest checks the plan marker in an emitted command when a
+// continuation verifies an earlier upload. Windows commands encode the script
+// as UTF-16LE; Unix commands carry the quoted digest directly.
+func BootstrapHasPlanDigest(command, digest string) bool {
+	if !digestPattern.MatchString(digest) {
+		return false
+	}
+	if payload, windows := strings.CutPrefix(command, windowsBootstrapPrefix); windows {
+		data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(payload))
+		if err != nil || len(data)%2 != 0 {
+			return false
+		}
+		units := make([]uint16, len(data)/2)
+		for i := range units {
+			units[i] = binary.LittleEndian.Uint16(data[i*2:])
+		}
+		return strings.Contains(string(utf16.Decode(units)), "--plan-digest "+powershellQuote(digest))
+	}
+	return strings.Contains(command, shellQuote(digest))
 }
 
 func emitFailureBody(out *bytes.Buffer, indent, artifactProducer string, failure Failure, exitStatus int) {

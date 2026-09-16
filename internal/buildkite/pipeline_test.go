@@ -147,6 +147,27 @@ func TestEmitWindowsBootstrap(t *testing.T) {
 	}
 }
 
+func TestBootstrapHasPlanDigest(t *testing.T) {
+	digest := testDigest("expected plan")
+	for _, test := range []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"Windows matching plan", windowsBootstrapCommand("& $executable run-job --plan-digest '" + digest + "'"), true},
+		{"Windows different plan", windowsBootstrapCommand("& $executable run-job --plan-digest '" + testDigest("other plan") + "'"), false},
+		{"Windows digest outside plan argument", windowsBootstrapCommand("Write-Host '" + digest + "'"), false},
+		{"invalid base64 with plaintext digest", windowsBootstrapPrefix + "!'" + digest + "'", false},
+		{"truncated UTF-16", windowsBootstrapPrefix + "AA==", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := BootstrapHasPlanDigest(test.command, digest); got != test.want {
+				t.Fatalf("BootstrapHasPlanDigest() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestEmitRejectsWindowsMatrixContinuation(t *testing.T) {
 	_, err := Emit(Pipeline{CompilerStep: "compile", DistributionDigest: testDigest("windows distribution"), Jobs: []Job{
 		{Key: "producer", Label: "Producer", Platform: "windows/amd64", PlanDigest: testDigest("producer")},

@@ -248,9 +248,7 @@ func (r continuationRun) execute(fail func(string, ...any) int) int {
 	expected := make(map[string]string, len(plans))
 	for _, jobPlan := range plans {
 		artifacts = append(artifacts, transport.Artifact{Path: jobPlan.Path, Digest: jobPlan.Digest, Contents: jobPlan.Contents})
-		// Every bootstrap variant the emitter writes single-quotes the plan
-		// digest, and a digest never contains quotes.
-		expected[jobPlan.Job.Target.StepKey] = "'" + jobPlan.Digest + "'"
+		expected[jobPlan.Job.Target.StepKey] = jobPlan.Digest
 	}
 	if err := transport.UploadArtifacts(r.ctx, r.agent, r.root, artifacts, pipeline); err != nil {
 		if r.ctx.Err() != nil || !errors.Is(err, transport.ErrPipelineUpload) {
@@ -634,7 +632,14 @@ func (r continuationRun) alreadyApplied(expected map[string]string, attribute st
 	}
 	for key, want := range expected {
 		value, err := r.agent.GetStepAttribute(r.ctx, key, attribute)
-		if err != nil || !strings.Contains(string(value), want) {
+		if err != nil {
+			return false
+		}
+		if attribute == "command" {
+			if !buildkitepipeline.BootstrapHasPlanDigest(string(value), want) {
+				return false
+			}
+		} else if !strings.Contains(string(value), want) {
 			return false
 		}
 	}
