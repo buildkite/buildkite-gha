@@ -139,10 +139,10 @@ var profiles = map[ProfileID]Profile{
 	ProfileStepControl:           {Form: FormExpression, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: profileFunctions("hashFiles"), Missing: MissingNull, Token: TokenWorkflowContext, semantics: semanticsStepControl},
 	ProfileReusableStepControl:   {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Functions: profileFunctions("hashFiles"), Missing: MissingNull, Token: TokenWorkflowContext, semantics: semanticsReusableStepControl},
 	ProfileRuntimeTemplate:       {Form: FormTemplate, Scope: ScopeStep, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "secrets", "steps", "vars"}, Missing: MissingEmpty, Token: TokenDirect, semantics: semanticsRuntimeTemplate},
-	ProfileServiceTemplate:       {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsServiceTemplate},
+	ProfileServiceTemplate:       {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsServiceTemplate},
 	ProfileDeferredInput:         {Form: FormTemplate, Scope: ScopeCall, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingEmpty, Token: TokenDenied, semantics: semanticsDeferredInput},
 	ProfileServiceCredential:     {Form: FormTemplate, Scope: ScopeJob, Contexts: ContextSet{"env", "github", "secrets", "vars"}, Missing: MissingEmpty, Token: TokenDirect, semantics: semanticsServiceCredential},
-	ProfileServiceMap:            {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: FunctionSet{"fromJSON"}, Missing: MissingError, Token: TokenDenied, semantics: semanticsServiceMap},
+	ProfileServiceMap:            {Form: FormExpression, Scope: ScopeJob, Contexts: ContextSet{"needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsServiceMap},
 	ProfileActionInputDefault:    {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"env", "github", "inputs", "job", "matrix", "needs", "runner", "steps", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDirect, semantics: semanticsActionInputDefault},
 	ProfileDockerActionArg:       {Form: FormTemplate, Scope: ScopeAction, Contexts: ContextSet{"inputs"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsDockerActionArg},
 }
@@ -563,7 +563,7 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 		value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
 	case semanticsJobOutput:
 		value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
-	case semanticsStepTemplate, semanticsDeferredInput:
+	case semanticsStepTemplate, semanticsDeferredInput, semanticsServiceTemplate:
 		value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
 	case semanticsJobControl, semanticsStepControl, semanticsReusableStepControl:
 		var node actionlint.ExprNode
@@ -571,7 +571,7 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 		if err == nil {
 			value, err = evaluateStepRuntimeExpression(node, values.Runtime, profileAllowsFunction(profile, "hashFiles"), profile.Token != TokenDenied, stepProfileContextMap(profile))
 		}
-	case semanticsRuntimeTemplate, semanticsServiceTemplate, semanticsServiceCredential:
+	case semanticsRuntimeTemplate, semanticsServiceCredential:
 		value, err = evaluateRuntimeTemplate(site.Source, values.Runtime, evaluateDirectRuntimeNode)
 	case semanticsServiceMap:
 		value, err = evaluateRuntimeObject(site.Source, values.Runtime)

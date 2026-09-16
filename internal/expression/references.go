@@ -167,11 +167,21 @@ func validateServiceRuntimeTemplate(template string) error {
 }
 
 func validateServiceRuntimeNode(node actionlint.ExprNode) error {
-	root, path, err := referencePath(node)
-	if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") {
-		return fmt.Errorf("service runtime expression must directly reference needs.<job>.outputs.<name>")
+	profile := profiles[ProfileServiceTemplate]
+	if err := validateStepRuntimeExpression(node, false, false, stepProfileContextMap(profile)); err != nil {
+		return err
 	}
-	return nil
+	var validationErr error
+	actionlint.VisitExprNode(node, func(current, parent actionlint.ExprNode, entering bool) {
+		if !entering || validationErr != nil || referenceReceiver(current, parent) {
+			return
+		}
+		root, path, err := referencePath(current)
+		if err == nil && strings.EqualFold(root, "needs") && (len(path) != 3 || !strings.EqualFold(path[1], "outputs")) {
+			validationErr = fmt.Errorf("service runtime expression must directly reference needs.<job>.outputs.<name>")
+		}
+	})
+	return validationErr
 }
 
 // validateServiceCredentialTemplate matches GitHub's narrower service
@@ -204,13 +214,9 @@ func validateServiceMapExpression(source string) error {
 	}
 	call, ok := node.(*actionlint.FuncCallNode)
 	if !ok || !strings.EqualFold(call.Callee, "fromJSON") || len(call.Args) != 1 {
-		return fmt.Errorf("service-map expression must call fromJSON with one needs output")
+		return fmt.Errorf("service-map expression must call fromJSON with one needs-output expression")
 	}
-	root, path, err := referencePath(call.Args[0])
-	if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") {
-		return fmt.Errorf("service-map expression must call fromJSON with one needs output")
-	}
-	return nil
+	return validateServiceRuntimeNode(call.Args[0])
 }
 
 func sortedReferenceNames(found map[string]struct{}) []string {

@@ -1105,8 +1105,8 @@ services:
 Services support `image`, `credentials`, `env`, `ports`, `volumes`, `options`, `command`, and `entrypoint`.
 
 - Job container images can use compile-time `github`, `inputs`, `strategy`, and `matrix` values. A null or exactly empty evaluated image runs the job on the host, including object-form containers, without applying container `env` or `ports`. For example, `container: ${{ matrix.target.container }}` selects host execution when the matrix entry omits `container`. Other results must be strings containing valid image references; whitespace-only results are invalid. Literal images must be non-empty. Secrets, `needs`, step outputs, and whole or dynamic contexts are unsupported.
-- Service fields can use compile-time `github`, `inputs`, `strategy`, and `matrix` values or runtime `needs` outputs. An empty evaluated image skips the service.
-- A complete non-credential service map can use `${{ fromJSON(needs.<job>.outputs.<name>) }}`. Declare credentials statically so the compiler can prove their secret authority.
+- Service fields can use compile-time `github`, `inputs`, `strategy`, and `matrix` values or runtime `needs` outputs, including fallback expressions such as `${{ needs.build.outputs.image || 'redis:7' }}`. An empty evaluated image skips the service.
+- A complete non-credential service map can use `${{ fromJSON(needs.build.outputs.services || '{}') }}`. The argument supports needs-output expressions and pure functions. Declare credentials statically so the compiler can prove their secret authority.
 - Credentials accept direct values and `github`, `vars`, `secrets`, or `env` expressions. Passwords pass to `docker login` through standard input. Authentication uses a private per-job Docker configuration and never reads ambient Docker credentials.
 - Docker options pass through except `--network` and its `--net` aliases, which GitHub Actions does not support. Options can grant privileges, mount host paths, publish ports, and change resource settings.
 - Named, anonymous, and absolute bind volumes are supported.

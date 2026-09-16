@@ -5099,6 +5099,8 @@ jobs:
     services:
       cache:
         image: ${{ needs.producer.outputs.image }}
+      fallback:
+        image: ${{ needs.producer.outputs.image || 'redis:7' }}
     steps: [{run: true}]
 `)
 	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
@@ -5107,6 +5109,12 @@ jobs:
 	}
 	if got := plans[1].Services["cache"].Image; got != "${{ needs.producer.outputs.image }}" {
 		t.Fatalf("runtime service image = %q", got)
+	}
+	for input, want := range map[string]string{"": "redis:7", "valkey:8": "valkey:8"} {
+		got, err := expression.NewEngine().Evaluate(expression.Site{Source: plans[1].Services["fallback"].Image, Profile: expression.ProfileServiceTemplate, Result: expression.ResultString}, expression.Values{Runtime: expression.Context{Needs: map[string]expression.NeedStatus{"producer": {Outputs: map[string]string{"image": input}}}}})
+		if err != nil || got != want {
+			t.Fatalf("service fallback with input %q = %v, %v; want %q", input, got, err, want)
+		}
 	}
 }
 
@@ -5123,7 +5131,7 @@ jobs:
   consumer:
     needs: producer
     runs-on: ubuntu-latest
-    services: ${{ fromJSON(needs.producer.outputs.services) }}
+    services: ${{ fromJSON(needs.producer.outputs.services || '{}') }}
     steps: [{run: true}]
 `)
 	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
@@ -5131,7 +5139,7 @@ jobs:
 		t.Fatal(err)
 	}
 	got := plans[1]
-	if got.ServicesExpression != "${{ fromJSON(needs.producer.outputs.services) }}" || !slices.Contains(got.RequiredCapabilities, "docker") {
+	if got.ServicesExpression != "${{ fromJSON(needs.producer.outputs.services || '{}') }}" || !slices.Contains(got.RequiredCapabilities, "docker") {
 		t.Fatalf("dynamic services plan = expression %q, capabilities %#v", got.ServicesExpression, got.RequiredCapabilities)
 	}
 }

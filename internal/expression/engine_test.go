@@ -96,10 +96,10 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 		ProfileStepTemplate:          {"${{ case(true, format('{0}', inputs.name), 'unused') }}", ResultString, "value"},
 		ProfileStepControl:           {"${{ true }}", ResultBoolean, true},
 		ProfileRuntimeTemplate:       {"${{ env.NAME }}", ResultString, "value"},
-		ProfileServiceTemplate:       {"${{ needs.build.outputs.value }}", ResultString, `{"name":"value"}`},
+		ProfileServiceTemplate:       {"${{ needs.build.outputs.value || 'fallback' }}", ResultString, `{"name":"value"}`},
 		ProfileDeferredInput:         {"type=raw,value=${{ needs.build.outputs.value }}", ResultString, `type=raw,value={"name":"value"}`},
 		ProfileServiceCredential:     {"${{ env.NAME }}", ResultString, "value"},
-		ProfileServiceMap:            {"${{ fromJSON(needs.build.outputs.value) }}", ResultObject, []ObjectEntry{{Name: "name", Value: "value"}}},
+		ProfileServiceMap:            {"${{ fromJSON(needs.build.outputs.value || '{}') }}", ResultObject, []ObjectEntry{{Name: "name", Value: "value"}}},
 		ProfileActionInputDefault:    {"${{ case(true, inputs.name, 'unused') }}", ResultString, "value"},
 		ProfileDockerActionArg:       {"${{ format('{0}', inputs.name || 'fallback') }}", ResultString, "value"},
 	}
@@ -721,14 +721,36 @@ func TestEngineCaseFunctionPolicyIsClosedByProfile(t *testing.T) {
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileStepCondition,
 		ProfileCallCondition, ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault,
 		ProfileJobOutput, ProfileStepTemplate, ProfileStepControl, ProfileReusableStepControl, ProfileDeferredInput, ProfileActionInputDefault, ProfileDockerActionArg,
+		ProfileServiceTemplate, ProfileServiceMap,
 	} {
 		if !containsFold(profiles[id].Functions, "case") {
 			t.Errorf("profile %q does not admit case", id)
 		}
 	}
-	for _, id := range []ProfileID{ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileServiceCredential, ProfileServiceMap} {
+	for _, id := range []ProfileID{ProfileRuntimeTemplate, ProfileServiceCredential} {
 		if containsFold(profiles[id].Functions, "case") {
 			t.Errorf("profile %q unexpectedly admits case", id)
+		}
+	}
+}
+
+func TestEngineServiceFallbacksRejectUnavailableReferences(t *testing.T) {
+	for _, body := range []string{
+		"'safe' || needs.build.result",
+		"'safe' || secrets.TOKEN",
+		"'safe' || github.token",
+		"'safe' || needs.build.outputs[needs.build.outputs.key]",
+		"'safe' || hashFiles('**')",
+	} {
+		for _, profile := range []ProfileID{ProfileServiceTemplate, ProfileServiceMap} {
+			site := Site{Source: "${{ " + body + " }}", Profile: profile, Result: ResultString}
+			if profile == ProfileServiceMap {
+				site.Source = "${{ fromJSON(" + body + ") }}"
+				site.Result = ResultObject
+			}
+			if _, err := NewEngine().Validate(site); err == nil {
+				t.Errorf("%s accepted %s", profile, site.Source)
+			}
 		}
 	}
 }

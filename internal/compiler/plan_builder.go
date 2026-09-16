@@ -379,7 +379,7 @@ var compileReductionProfiles = map[program.Surface]expression.ProfileID{
 	program.SurfaceJobOutput:         expression.ProfileJobOutput,
 	program.SurfaceStepTemplate:      expression.ProfileStepTemplate,
 	program.SurfaceRuntimeTemplate:   expression.ProfileRuntimeTemplate,
-	program.SurfaceServiceTemplate:   expression.ProfileRuntimeTemplate,
+	program.SurfaceServiceTemplate:   expression.ProfileServiceTemplate,
 	program.SurfaceServiceCredential: expression.ProfileServiceCredential,
 	program.SurfaceServiceMap:        expression.ProfileStepTemplate,
 }
