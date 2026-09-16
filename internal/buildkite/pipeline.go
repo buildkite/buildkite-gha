@@ -674,7 +674,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			continue
 		}
 		if platform == "windows/amd64" {
-			commands = windowsBootstrapCommands(distributionPath, distributionDigest, artifactProducer, job)
+			commands = windowsBootstrapCommands(distributionPath, distributionDigest, distributionProducer, artifactProducer, job)
 		}
 		experimentalRunnerUser := !pipeline.DisableRunnerUser && platform == "linux/amd64"
 		runJob := `"$distribution" run-job --plan-digest ` + shellQuote(job.PlanDigest) + " --plan-producer " + shellQuote(artifactProducer)
@@ -785,7 +785,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 	return nil
 }
 
-func windowsBootstrapCommands(distributionPath, distributionDigest, artifactProducer string, job Job) []string {
+func windowsBootstrapCommands(distributionPath, distributionDigest, distributionProducer, artifactProducer string, job Job) []string {
 	runArguments := "run-job --plan-digest " + powershellQuote(job.PlanDigest) + " --plan-producer " + powershellQuote(artifactProducer)
 	if job.EventPayload {
 		runArguments += " --artifact-producer " + powershellQuote(artifactProducer)
@@ -797,7 +797,7 @@ func windowsBootstrapCommands(distributionPath, distributionDigest, artifactProd
 		`$runtimeStatus = 1`,
 		`try {`,
 		`  New-Item -ItemType Directory -Path $bootstrapDir | Out-Null`,
-		"  & buildkite-agent artifact download " + powershellQuote(distributionPath) + " $bootstrapDir --step " + powershellQuote(artifactProducer),
+		"  & buildkite-agent artifact download " + powershellQuote(distributionPath) + " $bootstrapDir --step " + powershellQuote(distributionProducer),
 		`  if ($LASTEXITCODE -ne 0) { throw "buildkite-agent artifact download failed with exit code $LASTEXITCODE" }`,
 		"  $distribution = Join-Path $bootstrapDir " + powershellQuote(distributionPath),
 		`  $actualDigest = 'sha256:' + (Get-FileHash -LiteralPath $distribution -Algorithm SHA256).Hash.ToLowerInvariant()`,
@@ -1111,6 +1111,9 @@ func validateJob(compilerStep string, job Job) error {
 	}
 	switch {
 	case job.Continuation != nil:
+		if job.Platform == "windows/amd64" {
+			return fmt.Errorf("job %q matrix producer must run on Linux or macOS; Windows deferred uploads are unsupported", job.Key)
+		}
 		if preparationResult {
 			return fmt.Errorf("job %q continuation cannot carry a preparation result", job.Key)
 		}

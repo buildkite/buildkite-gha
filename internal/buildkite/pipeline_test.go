@@ -110,7 +110,7 @@ func TestEmitGolden(t *testing.T) {
 
 func TestEmitWindowsBootstrap(t *testing.T) {
 	digest := testDigest("windows distribution")
-	output, err := Emit(Pipeline{CompilerStep: "compile", DistributionDigest: digest, Jobs: []Job{{Key: "windows", Label: "Windows", Queue: "windows", Platform: "windows/amd64", PlanDigest: testDigest("windows plan"), RequiresMise: true}}})
+	output, err := Emit(Pipeline{CompilerStep: "compile", ArtifactProducer: "plan-producer", DistributionProducer: "runtime-producer", DistributionDigest: digest, Jobs: []Job{{Key: "windows", Label: "Windows", Queue: "windows", Platform: "windows/amd64", PlanDigest: testDigest("windows plan"), RequiresMise: true}}})
 	if err != nil {
 		t.Fatalf("Emit() error = %v", err)
 	}
@@ -135,7 +135,7 @@ func TestEmitWindowsBootstrap(t *testing.T) {
 		units[i] = binary.LittleEndian.Uint16(data[i*2:])
 	}
 	command := string(utf16.Decode(units))
-	for _, want := range []string{"$ErrorActionPreference", "[Guid]::NewGuid()", "artifact download", "--step", "Get-FileHash", "buildkite-gha.exe", "$runtimeStatus = $LASTEXITCODE", "finally", "Remove-Item"} {
+	for _, want := range []string{"$ErrorActionPreference", "[Guid]::NewGuid()", "artifact download", "--step 'runtime-producer'", "--plan-producer 'plan-producer'", "Get-FileHash", "buildkite-gha.exe", "$runtimeStatus = $LASTEXITCODE", "finally", "Remove-Item"} {
 		if !strings.Contains(command, want) {
 			t.Errorf("Windows bootstrap lacks %q:\n%s", want, command)
 		}
@@ -144,6 +144,17 @@ func TestEmitWindowsBootstrap(t *testing.T) {
 		if strings.Contains(command, forbidden) || strings.Contains(string(output), forbidden) {
 			t.Errorf("Windows bootstrap contains %q:\n%s", forbidden, command)
 		}
+	}
+}
+
+func TestEmitRejectsWindowsMatrixContinuation(t *testing.T) {
+	_, err := Emit(Pipeline{CompilerStep: "compile", DistributionDigest: testDigest("windows distribution"), Jobs: []Job{
+		{Key: "producer", Label: "Producer", Platform: "windows/amd64", PlanDigest: testDigest("producer")},
+		{Key: "matrix", Label: "Matrix", Queue: "windows", Platform: "windows/amd64", Dependencies: []string{"producer"},
+			Continuation: &ContinuationStep{ArtifactDigest: testDigest("continuation")}},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "matrix producer must run on Linux or macOS") {
+		t.Fatalf("Windows continuation error = %v", err)
 	}
 }
 
@@ -185,7 +196,7 @@ func main() { _ = os.WriteFile(os.Getenv("BOOTSTRAP_ARGS"), []byte(strings.Join(
   Copy-Item -LiteralPath $env:BOOTSTRAP_BINARY -Destination $target
   $global:LASTEXITCODE = 0
 }
-` + strings.Join(windowsBootstrapCommands(distribution, expectedDigest, "producer", job), "\n")
+` + strings.Join(windowsBootstrapCommands(distribution, expectedDigest, "producer", "producer", job), "\n")
 			invocation := strings.Fields(windowsBootstrapCommand(script))
 			cmd := exec.Command(invocation[0], invocation[1:]...)
 			cmd.Env = append(os.Environ(), "BOOTSTRAP_BINARY="+executable, "BOOTSTRAP_ARGS="+arguments, "TMPDIR="+dir, "TMP="+dir, "TEMP="+dir)

@@ -1405,11 +1405,11 @@ func ValidateActionLockList(actions []ActionLock) (map[string]ActionLock, error)
 			return nil, fmt.Errorf("action lock %q has invalid digest or too many children", lock.ID)
 		}
 		if len(lock.ExecutablePaths) > 50000 {
-			return fmt.Errorf("action lock %q has too many executable paths", lock.ID)
+			return nil, fmt.Errorf("action lock %q has too many executable paths", lock.ID)
 		}
 		for i, executable := range lock.ExecutablePaths {
 			if !cleanActionPath(executable) || i > 0 && lock.ExecutablePaths[i-1] >= executable {
-				return fmt.Errorf("action lock %q has invalid executable paths", lock.ID)
+				return nil, fmt.Errorf("action lock %q has invalid executable paths", lock.ID)
 			}
 		}
 		if lock.DockerImage != "" && !ValidContainerImageReference(lock.DockerImage) {

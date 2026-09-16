@@ -965,7 +965,7 @@ func runtimePlatformsForBundle(bundle compiler.Bundle) (map[compiler.Platform]bo
 // is not in this set.
 func deferredRuntimePlatforms(uploadArguments parsedUploadArgs) map[compiler.Platform]bool {
 	platforms := map[compiler.Platform]bool{uploadArguments.importerPlatform: true}
-	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64, compiler.PlatformWindowsAMD64} {
 		if _, configured := uploadArguments.runtimeDistributionPaths[platform]; configured {
 			platforms[platform] = true
 		}

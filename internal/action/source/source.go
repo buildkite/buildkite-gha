@@ -1367,7 +1367,7 @@ func DigestTreeAndExecutablePaths(root string) (string, []string, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("digest action source tree: %w", err)
 	}
-	paths := make([]string, 0)
+	var paths []string
 	for _, file := range m.Files {
 		if file.Mode == 0o755 {
 			paths = append(paths, file.Path)
