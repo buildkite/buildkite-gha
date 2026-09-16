@@ -54,7 +54,7 @@ func loadEffectiveEventSource(ctx context.Context, eventPath string, agent trans
 		if err != nil {
 			return nil, "", err
 		}
-		if event == "label" || event == "create" || event == "delete" || event == "deployment" || event == "deployment_status" || event == "pull_request_review" || event == "pull_request_review_comment" || ((event == "release" || event == "merge_group") && os.Getenv(pipelineTriggerWorkflowPathEnvironment) != "") {
+		if event == "pull_request_target" || event == "label" || event == "create" || event == "delete" || event == "deployment" || event == "deployment_status" || event == "pull_request_review" || event == "pull_request_review_comment" || ((event == "release" || event == "merge_group") && os.Getenv(pipelineTriggerWorkflowPathEnvironment) != "") {
 			return nil, "", fmt.Errorf("%s requires the original buildkite:webhook payload; rebuilds without it are unsupported", event)
 		}
 		source, err := buildkiteEventSource(os.Getenv)
@@ -172,7 +172,7 @@ func selectWorkflowTrigger(triggers []workflow.Trigger, event effectiveEventSele
 
 func pathFilterContextRequired(err error) bool {
 	var pathFilters *buildkitepipeline.UnsupportedPathFiltersError
-	return errors.As(err, &pathFilters) && (pathFilters.Event == "push" || pathFilters.Event == "pull_request") && pathFilters.Reason == ""
+	return errors.As(err, &pathFilters) && (pathFilters.Event == "push" || pathFilters.Event == "pull_request" || pathFilters.Event == "pull_request_target") && pathFilters.Reason == ""
 }
 
 func triggerConditionLiteral(value string) string {
