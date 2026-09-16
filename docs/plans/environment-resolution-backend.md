@@ -5,7 +5,8 @@ Importer jobs resolve
 Buildkite, which already holds the GitHub App installation. The chosen design
 is option 2 below: a dedicated Agent API snapshot endpoint,
 `POST /jobs/{job_id}/github-actions/environments`, implemented on the
-Buildkite backend. There is no feature flag: the endpoint returns no credential or secret value,
+Buildkite backend. The backend can disable resolution per organization with
+`GitHubEnvironmentResolutionOptOut`, which returns 404. The endpoint returns no credential or secret value,
 missing GitHub App permissions already fail closed as 400, and an unavailable
 endpoint fails closed as 404. The
 importer posts one batched request per upload naming every distinct
@@ -32,9 +33,12 @@ output to exactly the fields the compiler consumes.
 
 Remaining before removing this plan:
 
-- Backend endpoint and its `include_variables` extension merged and rolled
-  out, including adding Actions: read and Environments: read to the
-  code-access GitHub App and installation administrator approvals. Environment
+- Verify rollout of the backend endpoint and its `include_variables`
+  extension, including Actions: read and Environments: read permissions on the
+  code-access GitHub App and installation administrator approvals. The
+  endpoint and variable extension are
+  implemented in the [backend controller](https://github.com/buildkite/buildkite/blob/a2293dc339c992159e0e635d033529ee76b6ccbb/app/controllers/agent/github_actions/environments_controller.rb#L19-L76);
+  source inspection does not establish production availability. Environment
   variable listing is covered by Environments: read. The environments
   endpoint carries environment-scoped variables only and will not grow
   repository or organization fields.
@@ -49,9 +53,62 @@ Remaining before removing this plan:
 - A hosted end-to-end proof of an `upload` resolving an environment and gating
   a deploy job.
 
-## Why the importer cannot self-serve today
+## Dynamic environment names require a protection decision
 
-The importer's existing Agent API credentials do not cover environment reads.
+An environment name derived from `needs.<job>.outputs.<name>` must resolve
+before the deployment job is emitted. The continuation must resolve policy,
+environment variables, and secret-name mappings before building that job's
+plan and approval dependencies. `environment.url` is runtime deployment
+metadata, not a scheduling input; it remains accepted with no effect, as
+documented in [deployment environments](../compatibility.md#deployment-environments).
+
+The snapshot endpoint is not an importer-only capability. Its controller
+authorizes a same-job Agent token and accepts `repo_url`, `environment_names`,
+and `include_variables`. A continuation can use its own job identity to read
+snapshots without receiving a GitHub token. The endpoint's existence is
+therefore not a backend blocker to late name resolution.
+
+It does not, however, authorize a deployment. The
+[backend protection decoder](https://github.com/buildkite/buildkite/blob/a2293dc339c992159e0e635d033529ee76b6ccbb/app/models/scm/provider/github_code_access_app/environment_resolver.rb#L67-L106)
+reduces reviewer rules to `required_reviewers` and `prevent_self_review`, and
+branch rules to `branch_policy`. Reviewer identities and allowed branches are
+absent. Two configurations requiring different reviewers can produce the
+same snapshot. Neither the request nor response carries a deployment-bound
+approval decision, approver identity, or protection-completion state.
+
+This prevents a CLI-only implementation from enforcing GitHub-equivalent
+approval before emission. The existing
+[compiler](../../internal/compiler/environment.go) rejects wait timers,
+branch policies, and custom rules, but accepts required reviewers through a
+Buildkite block that does not enforce GitHub reviewer identity or
+`prevent_self_review`. Reusing that block for a late-selected environment
+would retain the documented approximation, not supply the missing protection.
+
+Supporting protected deployments with GitHub-equivalent approval requires an
+agreed backend contract and rollout first: it must bind
+the decision to the repository, ref/commit, resolved environment, and deployment
+attempt, and define when a job may proceed and how retries or policy changes
+invalidate approval. Missing or unsupported protection must prevent emission.
+This plan does not select an approval mechanism or add GitHub deployment
+creation.
+
+The implemented [dynamic-name subset](../compatibility.md#environment-names-from-job-outputs)
+rejects every protected environment before emitting the deployment job or its
+dependents. It uses the matrix continuation's verified producer result,
+source locks, recorded importer authority, and replay checks. Only the
+scheduling name is supplied to recompilation; it does not turn runtime
+`needs` or environment variables into constants for token-authority planning.
+Literal names across the upload are recorded to reject secret-prefix
+collisions. Only one dynamic environment is permitted per upload, avoiding
+collisions between independently selected names. Environment scheduling uses
+the shared staged `upload` path, but does not extend dynamic environments to
+matrix joins or chains. Independent matrix stages keep their existing join
+and chaining support. General cancellation, concurrency, and dynamic runners
+remain separate work.
+
+## Why the importer cannot read GitHub environments directly
+
+The importer's action-source credentials do not cover environment reads.
 Reading environment configuration and protection rules needs the repository
 permission Actions: read; environment secret names need Environments: read.
 
@@ -73,11 +130,10 @@ Environments: read on the pipeline repository, whether or not a workflow
 declares an environment, and would break the backend's documented
 metadata-only contract for that endpoint.
 
-Buildkite's code-access GitHub App holds neither `actions` nor `environments`
-today, and the backend cannot exceed app-granted permissions. The rollout
-therefore requires adding those permissions to the app and waiting for each
-installation's administrators to approve them; installations that have not
-approved must keep failing closed at compile time.
+The backend cannot exceed app-granted permissions. Environment resolution
+requires `actions: read` and `environments: read` on the code-access GitHub App
+and approval from each installation's administrators; installations that have
+not approved must keep failing closed at compile time.
 
 ## Options considered
 
