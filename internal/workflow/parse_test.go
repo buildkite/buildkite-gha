@@ -318,7 +318,7 @@ func TestParseGitHubEnvironment(t *testing.T) {
 		{
 			name:   "expression name",
 			source: "on: push\njobs:\n  deploy:\n    environment: ${{ github.ref_name }}\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
-			want:   "environment names that use expressions are unsupported; use a literal environment name",
+			want:   "environment names that use expressions must be exactly ${{ needs.<job>.outputs.<name> }}",
 		},
 		{
 			name:   "reusable workflow call",

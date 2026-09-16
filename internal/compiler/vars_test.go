@@ -379,7 +379,7 @@ jobs:
     environment: ${{ vars.REGION }}
     steps: [{run: true}]
 `,
-			want: "environment names that use expressions are unsupported",
+			want: "environment names that use expressions must be exactly",
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

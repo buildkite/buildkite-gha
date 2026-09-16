@@ -122,6 +122,8 @@ type Pipeline struct {
 // record that carries everything the deferred compile needs.
 type StageStep struct {
 	ArtifactDigest string
+	// Kind labels the scheduling input; empty preserves matrix continuations.
+	Kind string
 }
 
 // Workflow is one independently conditioned workflow group in an aggregate
@@ -626,7 +628,11 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		}
 		stepLabel := ":github: job · " + job.Label
 		if job.Stage != nil {
-			stepLabel = ":github: matrix · " + job.Label
+			kind := job.Stage.Kind
+			if kind == "" {
+				kind = "matrix"
+			}
+			stepLabel = ":github: " + kind + " · " + job.Label
 		}
 		_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(stepLabel))
 		_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))

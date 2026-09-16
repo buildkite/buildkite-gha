@@ -74,7 +74,7 @@ func TestExpandRuntimeMatrixOutputRejectsMalformedAndTypeConfusedValues(t *testi
 	object := validRuntimeMatrixDescriptor(RuntimeMatrixShapeObject)
 	tests := []struct {
 		name       string
-		descriptor RuntimeMatrixDescriptor
+		descriptor JobOutputDescriptor
 		source     string
 		want       string
 	}{
@@ -236,12 +236,12 @@ func TestRuntimeMatrixDescriptorIsDeterministicStrictAndSchemaValid(t *testing.T
 	if _, err := EncodeRuntimeMatrixDescriptor(changed); err == nil || !strings.Contains(err.Error(), "immutable schema") {
 		t.Fatalf("changed v1 limit error = %v", err)
 	}
-	for _, change := range []func(*RuntimeMatrixDescriptor){
-		func(descriptor *RuntimeMatrixDescriptor) { descriptor.Job = strings.Repeat("a", 256) },
-		func(descriptor *RuntimeMatrixDescriptor) { descriptor.Job = `caller\django` },
-		func(descriptor *RuntimeMatrixDescriptor) { descriptor.SourcePath = string([]byte{'a', 0xff}) },
-		func(descriptor *RuntimeMatrixDescriptor) { descriptor.Source.End.Column = 0 },
-		func(descriptor *RuntimeMatrixDescriptor) {
+	for _, change := range []func(*JobOutputDescriptor){
+		func(descriptor *JobOutputDescriptor) { descriptor.Job = strings.Repeat("a", 256) },
+		func(descriptor *JobOutputDescriptor) { descriptor.Job = `caller\django` },
+		func(descriptor *JobOutputDescriptor) { descriptor.SourcePath = string([]byte{'a', 0xff}) },
+		func(descriptor *JobOutputDescriptor) { descriptor.Source.End.Column = 0 },
+		func(descriptor *JobOutputDescriptor) {
 			descriptor.Source.End.Line = runtimeMatrixMaxSourceCoordinate + 1
 		},
 	} {
@@ -297,8 +297,8 @@ func TestRuntimeMatrixDescriptorIsDeterministicStrictAndSchemaValid(t *testing.T
 	}
 }
 
-func validRuntimeMatrixDescriptor(shape string) RuntimeMatrixDescriptor {
-	return RuntimeMatrixDescriptor{
+func validRuntimeMatrixDescriptor(shape string) JobOutputDescriptor {
+	return JobOutputDescriptor{
 		Schema:          RuntimeMatrixSchemaV1,
 		Job:             "django",
 		Shape:           shape,

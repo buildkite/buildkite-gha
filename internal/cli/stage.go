@@ -80,10 +80,10 @@ type stageRecord struct {
 	// their dependents, and the step that performs the upload. Its action
 	// locks are the component's from the importer's compilation, so every
 	// stage pins the same revisions. The importer's own record has none.
-	Continuation compiler.RuntimeMatrixContinuation `json:"continuation"`
+	Continuation compiler.JobContinuation `json:"continuation"`
 	// Others are the workflow's remaining continuations, each expanded by its
 	// own stage step. A recompilation must leave exactly these deferred.
-	Others []compiler.RuntimeMatrixContinuation `json:"other_continuations,omitempty"`
+	Others []compiler.JobContinuation `json:"other_continuations,omitempty"`
 	// Resolved records, for every root an earlier stage expanded, the rows its
 	// verified producer published or that the producer did not succeed. The
 	// recompilation supplies them again so the jobs the earlier stages
@@ -96,6 +96,9 @@ type stageRecord struct {
 	// ApprovalGates are the gates the earlier stages created, which a later
 	// stage references instead of creating again.
 	ApprovalGates []string `json:"approval_gates,omitempty"`
+	// KnownEnvironmentNames includes literal names from all uploaded workflows,
+	// including deferred jobs, to reject collisions with a late-selected name.
+	KnownEnvironmentNames []string `json:"known_environment_names,omitempty"`
 }
 
 // resolvedMatrix is one root an earlier stage expanded: the rows its producer
@@ -151,7 +154,7 @@ type stageResult struct {
 	// next are the continuations the compilation left deferred for later
 	// stages, with the steps that expand them and the records those steps
 	// read.
-	next    []compiler.RuntimeMatrixContinuation
+	next    []compiler.JobContinuation
 	steps   []buildkitepipeline.Job
 	records []transport.Artifact
 }
@@ -251,6 +254,7 @@ func importerStage(request hostedCompileRequest, importer, buildCommit string, i
 		OIDC:                     request.OIDC,
 		RunnerUser:               runnerUser,
 		PrivateReusableWorkflows: privateReusable,
+		KnownEnvironmentNames:    request.KnownEnvironmentNames,
 	}
 	return record, transport.Artifact{Path: eventPath, Digest: eventDigest, Contents: event.Source}, nil
 }
@@ -369,7 +373,7 @@ func (s stageRecord) advance(bundle compiler.Bundle, rows map[string][]map[strin
 	if reproduced != len(recorded) {
 		return stageResult{}, fmt.Errorf("recompilation reproduced %d of %d jobs from the initial upload; the workflow inputs changed", reproduced, len(recorded))
 	}
-	others := make(map[string]compiler.RuntimeMatrixContinuation, len(s.Others))
+	others := make(map[string]compiler.JobContinuation, len(s.Others))
 	for _, continuation := range s.Others {
 		others[continuation.StepKey] = continuation
 	}
@@ -442,7 +446,7 @@ func (s stageRecord) advance(bundle compiler.Bundle, rows map[string][]map[strin
 			// and dependents, so what this stage leaves covers them.
 			child.Continuation.JobBudget = s.Continuation.JobBudget - len(result.jobs)
 		}
-		child.Others = slices.DeleteFunc(slices.Clone(bundle.IR.Continuations), func(other compiler.RuntimeMatrixContinuation) bool {
+		child.Others = slices.DeleteFunc(slices.Clone(bundle.IR.Continuations), func(other compiler.JobContinuation) bool {
 			return other.StepKey == next.StepKey
 		})
 		child.Resolved, child.ApprovalGates = resolved, gates
@@ -463,7 +467,7 @@ func (s stageRecord) advance(bundle compiler.Bundle, rows map[string][]map[strin
 // sources and action locks it inherits from the parent, so a source that
 // moved between stages is caught here and an action that moved is caught
 // there.
-func checkNextStage(parent, next compiler.RuntimeMatrixContinuation) error {
+func checkNextStage(parent, next compiler.JobContinuation) error {
 	if err := validateContinuationShape(next); err != nil {
 		return fmt.Errorf("deferred step %q for the next stage: %w", next.StepKey, err)
 	}
@@ -571,21 +575,21 @@ func (s stageRecord) write(bundle compiler.Bundle) (transport.Artifact, buildkit
 	step := buildkitepipeline.Job{
 		Key:                continuation.StepKey,
 		Label:              continuation.JobLabel(continuation.Descriptor.Job),
-		CheckLabel:         stageCheckLabel(continuation.Descriptor.Job),
+		CheckLabel:         stageCheckLabel(continuation.Descriptor),
 		Queue:              producer.Queue,
 		Platform:           producer.Platform,
 		DistributionDigest: producer.DistributionDigest,
 		RuntimeImage:       producer.RuntimeImage,
 		Dependencies:       dependencies,
-		Stage:              &buildkitepipeline.StageStep{ArtifactDigest: digest},
+		Stage:              &buildkitepipeline.StageStep{ArtifactDigest: digest, Kind: continuation.Descriptor.Kind()},
 	}
 	return transport.Artifact{Path: path, Digest: digest, Contents: encoded}, step, nil
 }
 
 // stageCheckLabel names the GitHub check of a stage step. Expanded instances
 // are labelled "job (key=value)", so the suffix cannot collide with them.
-func stageCheckLabel(job string) string {
-	return job + " (matrix)"
+func stageCheckLabel(descriptor compiler.JobOutputDescriptor) string {
+	return descriptor.Job + " (" + descriptor.Kind() + ")"
 }
 
 func sha256Digest(data []byte) string {
@@ -654,7 +658,7 @@ func decodeStageRecord(data []byte, version string) (stageRecord, error) {
 		}
 	}
 	owners := make(map[string]string)
-	for _, component := range append([]compiler.RuntimeMatrixContinuation{record.Continuation}, record.Others...) {
+	for _, component := range append([]compiler.JobContinuation{record.Continuation}, record.Others...) {
 		for _, job := range component.Jobs {
 			if owner, exists := owners[job]; exists {
 				return stageRecord{}, fmt.Errorf("job %q has duplicate continuation owners %q and %q", job, owner, component.StepKey)
@@ -715,7 +719,7 @@ func validateResolvedMatrix(resolved resolvedMatrix) error {
 
 // validateContinuationShape checks that a recorded continuation names its
 // step, its producer instance, and its deferred jobs, consumer first.
-func validateContinuationShape(continuation compiler.RuntimeMatrixContinuation) error {
+func validateContinuationShape(continuation compiler.JobContinuation) error {
 	if err := continuation.Descriptor.Validate(); err != nil {
 		return fmt.Errorf("descriptor: %w", err)
 	}
@@ -790,7 +794,7 @@ func validateContinuationShape(continuation compiler.RuntimeMatrixContinuation) 
 // repository source reads remote reusable workflows and actions the way the
 // importer did. Runner resolution and the environment source are live policy
 // the caller attaches before compiling.
-func (s stageRecord) compileRequest(workflowPath string, workflowSource, eventSource []byte, rows map[string][]map[string]any, skipped map[string]bool, repositorySource compiler.RepositorySource) hostedCompileRequest {
+func (s stageRecord) compileRequest(workflowPath string, workflowSource, eventSource []byte, rows map[string][]map[string]any, skipped map[string]bool, environments map[string]string, repositorySource compiler.RepositorySource) hostedCompileRequest {
 	allRows := make(map[string][]map[string]any, len(rows)+len(s.Resolved))
 	allSkipped := make(map[string]bool, len(skipped))
 	for _, resolved := range s.Resolved {
@@ -834,5 +838,7 @@ func (s stageRecord) compileRequest(workflowPath string, workflowSource, eventSo
 		RuntimeMatrixRows:        allRows,
 		RuntimeMatrixSkipped:     allSkipped,
 		RuntimeMatrixActionLocks: locks,
+		RuntimeEnvironmentNames:  environments,
+		KnownEnvironmentNames:    s.KnownEnvironmentNames,
 	}
 }

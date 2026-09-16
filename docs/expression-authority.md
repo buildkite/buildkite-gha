@@ -185,6 +185,12 @@ The following boundaries are deliberate:
   and runs the same compiler, so authority analysis, admission, and plan
   digests for the expanded jobs are those of a static matrix with the same
   rows.
+- A direct job-output reference in `environment.name` selects only the
+  scheduling environment. The continuation verifies its producer result and
+  resolves an unprotected environment before emitting the job. It does not
+  supply those `needs` values to other compile-time positions or let
+  environment variables narrow token authority. `environment.url` remains
+  ignored runtime metadata, not a scheduling input.
 
 This architecture does not broaden expression syntax, allow dynamic secret
 access, make private actions available, or weaken immutable source
