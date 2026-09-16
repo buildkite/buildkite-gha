@@ -1799,14 +1799,15 @@ jobs:
 }
 
 func TestCompileBundleDeclaresSecretCapabilityAndNames(t *testing.T) {
-	source := []byte("name: secrets\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets['deploy_token'] }}\n    steps:\n      - run: echo \\\"${{ secrets.CANARY }}\\\"\n")
+	source := []byte("name: secrets\non: push\nenv:\n  FALLBACK: ${{ 'public' || secrets.WORKFLOW_ENV }}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets['deploy_token'] }}\n    steps:\n      - run: echo \\\"${{ secrets.CANARY }}\\\"\n")
 	event := readFile(t, smokePath("events", "push.json"))
 	bundle, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err != nil {
 		t.Fatal(err)
 	}
 	job := bundle.Plans[0].Job
-	if !reflect.DeepEqual(job.RequiredSecrets, []string{"CANARY", "DEPLOY_TOKEN"}) || !reflect.DeepEqual(job.RequiredCapabilities, []string{"secrets"}) {
+	// Ordinary secrets remain exhaustively inventoried, even in an unreachable fallback.
+	if !reflect.DeepEqual(job.RequiredSecrets, []string{"CANARY", "DEPLOY_TOKEN", "WORKFLOW_ENV"}) || !reflect.DeepEqual(job.RequiredCapabilities, []string{"secrets"}) || job.GitHubToken != nil {
 		t.Fatalf("secret boundary = names %#v capabilities %#v", job.RequiredSecrets, job.RequiredCapabilities)
 	}
 }
@@ -2078,15 +2079,20 @@ jobs:
 
 func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
 	for _, test := range []struct {
-		reference string
-		want      string
+		reference   string
+		want        string
+		workflowEnv bool
 	}{
 		{reference: "secrets.GITHUB_TOKEN", want: "references secrets.GITHUB_TOKEN"},
+		{reference: "secrets.GITHUB_TOKEN || 'fallback'", want: "references secrets.GITHUB_TOKEN", workflowEnv: true},
 		{reference: "github.token", want: "references github.token"},
 		{reference: "toJSON(github)", want: "references github.token"},
 	} {
 		for _, permissions := range []string{"permissions: {}\n", "permissions:\n  contents: none\n"} {
 			source := []byte("on: push\n" + permissions + "jobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ " + test.reference + " }}'\n")
+			if test.workflowEnv {
+				source = []byte("on: push\n" + permissions + "env:\n  TOKEN: ${{ " + test.reference + " }}\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+			}
 			_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 			if err == nil || !strings.Contains(err.Error(), test.want+" but has no effective permissions") {
 				t.Fatalf("CompileBundle() error = %v, want empty permission rejection for %s", err, test.reference)

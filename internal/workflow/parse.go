@@ -112,7 +112,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	}
 	sort.Strings(envNames)
 	for _, name := range envNames {
-		if err := validateExpressionSite(owned.Env[name], expression.ProfileRuntimeTemplate, expression.ResultString); err != nil {
+		if err := validateExpressionSite(owned.Env[name], expression.ProfileJobEnvironment, expression.ResultString); err != nil {
 			return nil, fmt.Errorf("%s: workflow env %q: %w", path, name, err)
 		}
 	}
