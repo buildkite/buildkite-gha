@@ -45,6 +45,7 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 	options := compiler.DefaultOptions()
 	options.EventFile = true // --event-path supplies the caller's event payload.
 	options.RepositorySource = repositorySource
+	options.WorkflowSource = candidateWorkflowSource(event)
 	// Environments resolve only through the job-scoped Agent API, so compile
 	// resolves them when it runs inside a Buildkite job and otherwise leaves
 	// workflows that declare environments to fail at compile time.

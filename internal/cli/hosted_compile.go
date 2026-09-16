@@ -68,6 +68,7 @@ type hostedCompileRequest struct {
 // inputs that never affect admission.
 func (r hostedCompileRequest) validationOptions() compiler.Options {
 	options := hostedOptions("", r.RunnerTargets, nil)
+	options.WorkflowSource = candidateWorkflowSource(r.EventSource)
 	applyRunnerResolution(&options, r.RunnerResolution)
 	options.StepKeyNamespace = r.StepKeyNamespace
 	options.RepositorySource = r.RepositorySource
@@ -79,6 +80,7 @@ func (r hostedCompileRequest) validationOptions() compiler.Options {
 // repository source is attached.
 func (r hostedCompileRequest) options() compiler.Options {
 	options := hostedOptions(r.GroupLabel, r.RunnerTargets, r.RuntimeDistributions)
+	options.WorkflowSource = candidateWorkflowSource(r.EventSource)
 	options.EventFile = r.EventFile
 	applyRunnerResolution(&options, r.RunnerResolution)
 	options.StepKeyNamespace = r.StepKeyNamespace
