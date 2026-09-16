@@ -19,8 +19,8 @@ type jobGraphExpansionResult struct {
 	sources               map[string]WorkflowSourceReference
 	runtimeMatrixBoundary bool
 	referencesVars        bool
-	runtimeMatrices       []RuntimeMatrixDescriptor
-	continuations         []RuntimeMatrixContinuation
+	runtimeMatrices       []RuntimeOutputDescriptor
+	continuations         []RuntimeContinuation
 	skippedJobs           map[string]bool
 	deferredActions       map[string][]deferredAction
 	jobs                  []ParsedJob
@@ -64,10 +64,11 @@ type jobGraphExpansion struct {
 	// from the whole graph, so a continuation upload that compiles part of a
 	// component from supplied rows sees the same components as the initial
 	// compilation and reproduces its budgets.
-	owners       map[string]string
-	byLogicalID  map[string][]JobInstance
-	instanceKeys map[string]string
-	diagnostics  []error
+	owners         map[string]string
+	runsOnContexts map[string]expression.CompileContext
+	byLogicalID    map[string][]JobInstance
+	instanceKeys   map[string]string
+	diagnostics    []error
 }
 
 func parsedJobs(path string, parsed *workflow.Workflow) []ParsedJob {
@@ -126,6 +127,7 @@ func expandJobGraph(ctx context.Context, path string, source []byte, parsed *wor
 		failedJobs:     make(map[string]bool, len(resolved)),
 		failedMatrices: make(map[string]bool),
 		deferred:       make(map[string]int),
+		runsOnContexts: make(map[string]expression.CompileContext),
 		instanceKeys:   make(map[string]string),
 	}
 	expansion.acceptJobs(resolved)
@@ -217,6 +219,37 @@ func (e *jobGraphExpansion) expandMatrices() {
 		sourced := e.accepted[e.acceptedIndex[id]]
 		job := sourced.Job
 		continuation := e.deferredContinuation(sourced)
+		if hasRuntimeRunsOn(sourced) {
+			var output *string
+			if value, provided := e.options.RuntimeRunsOnOutputs[id]; provided {
+				output = &value
+			}
+			descriptor, runnerContext, err := describeRuntimeRunsOn(sourced, e.context, e.topologyJobs, e.matricesByJob, output)
+			if err == nil && continuation >= 0 {
+				err = errors.New("job-output-derived runs-on cannot depend on a deferred upload")
+			}
+			if err == nil && (e.workflowConcurrency || len(sourced.concurrencyGates) != 0) {
+				err = errors.New("workflow concurrency cannot be combined with job-output-derived runs-on")
+			}
+			if err != nil {
+				e.rejectRuntimeRunsOn(sourced, err)
+				continue
+			}
+			e.result.runtimeMatrices = append(e.result.runtimeMatrices, descriptor)
+			if output == nil {
+				producerKey, err := namespacedInstanceKey(e.options.StepKeyNamespace, descriptor.ProducerJob, e.matricesByJob[descriptor.ProducerJob][0])
+				if err != nil {
+					e.rejectRuntimeRunsOn(sourced, err)
+					continue
+				}
+				e.result.continuations = append(e.result.continuations, RuntimeContinuation{
+					Descriptor: descriptor, ProducerStepKey: producerKey, Labels: make(map[string]string), Sources: make(map[string]RuntimeMatrixJobSource),
+				})
+				e.deferJob(sourced, len(e.result.continuations)-1, nil)
+				continue
+			}
+			e.runsOnContexts[id] = runnerContext
+		}
 		descriptor, deferred, err := describeRuntimeMatrix(job, sourced.path, sourced.digest, sourced.needBindings, e.topologyJobs, e.matricesByJob)
 		var matrices []map[string]any
 		if deferred {
@@ -263,7 +296,7 @@ func (e *jobGraphExpansion) expandMatrices() {
 					e.rejectRuntimeMatrix(sourced, fmt.Errorf("runtime matrix producer %q: %w", descriptor.ProducerJob, keyErr))
 					continue
 				}
-				e.result.continuations = append(e.result.continuations, RuntimeMatrixContinuation{
+				e.result.continuations = append(e.result.continuations, RuntimeContinuation{
 					Descriptor: descriptor, ProducerStepKey: producerKey, Labels: make(map[string]string), Sources: make(map[string]RuntimeMatrixJobSource),
 				})
 				e.deferJob(sourced, len(e.result.continuations)-1, nil)
@@ -421,6 +454,18 @@ func (e *jobGraphExpansion) mergeContinuations() {
 		}
 	}
 	e.owners = owners
+	// Matrix components retain their joined and recursive stages. Runner
+	// selection remains a single-root slice, including when its output is
+	// supplied during recompilation, so it cannot join or feed another stage.
+	rootCounts := make(map[string]int)
+	for _, descriptor := range e.result.runtimeMatrices {
+		rootCounts[owners[descriptor.Job]]++
+	}
+	for _, descriptor := range e.result.runtimeMatrices {
+		if descriptor.Shape == RuntimeRunsOnShape && rootCounts[owners[descriptor.Job]] != 1 {
+			e.rejectRuntimeRunsOn(e.accepted[e.acceptedIndex[descriptor.Job]], errors.New("job-output-derived runs-on cannot join or feed another deferred stage"))
+		}
+	}
 	// A continuation upload supplies rows for every root of its stage at
 	// once. A root of the same component without rows must belong to a later
 	// stage: one whose producer the component compiles, so its rows cannot
@@ -429,7 +474,9 @@ func (e *jobGraphExpansion) mergeContinuations() {
 	unresolved := make(map[string]bool)
 	for _, descriptor := range e.result.runtimeMatrices {
 		owner := owners[descriptor.Job]
-		if _, ok := e.options.RuntimeMatrixRows[descriptor.Job]; ok {
+		_, matrixProvided := e.options.RuntimeMatrixRows[descriptor.Job]
+		_, runnerProvided := e.options.RuntimeRunsOnOutputs[descriptor.Job]
+		if matrixProvided || runnerProvided {
 			provided[owner] = true
 		} else if owners[descriptor.ProducerJob] == "" {
 			unresolved[owner] = true
@@ -440,7 +487,7 @@ func (e *jobGraphExpansion) mergeContinuations() {
 			e.rejectRuntimeMatrix(e.accepted[e.acceptedIndex[owner]], errors.New("all intersecting deferred matrices must be expanded by the same continuation"))
 		}
 	}
-	var merged []RuntimeMatrixContinuation
+	var merged []RuntimeContinuation
 	indices := make(map[string]int)
 	for _, original := range e.result.continuations {
 		owner := owners[original.Descriptor.Job]
@@ -612,7 +659,7 @@ func (e *jobGraphExpansion) assignContinuationKeys() {
 			continue
 		}
 		continuation.JobBudget = budget
-		key := continuationStepKey(e.options.StepKeyNamespace, consumer)
+		key := LogicalJobStepKey(e.options.StepKeyNamespace, consumer) + "-" + continuation.Descriptor.Kind()
 		if owner, exists := e.instanceKeys[key]; exists {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", sourced.path, 0, 0, consumer, "", "", 0, jobError(sourced.path, sourced.Job, fmt.Sprintf("deferred upload step key %q collides with a step from job %q", key, owner))))
 			continue
@@ -620,11 +667,17 @@ func (e *jobGraphExpansion) assignContinuationKeys() {
 		e.instanceKeys[key] = consumer
 		continuation.StepKey = key
 		line, column := matrixErrorPosition(sourced.Job, nil)
-		message := fmt.Sprintf("matrix values come from output %q of job %q; jobs %s are compiled and uploaded by step %q after that job finishes, so this report leaves them not-evaluated", continuation.Descriptor.ProducerOutput, continuation.Descriptor.ProducerJob, quotedList(continuation.Jobs), key)
+		code, subject := "W_MATRIX_DEFERRED", "matrix values"
+		if continuation.Descriptor.Shape == RuntimeRunsOnShape {
+			code, subject = "W_RUNS_ON_DEFERRED", "runs-on values"
+			position := runsOnPosition(sourced.Job)
+			line, column = position.Line, position.Column
+		}
+		message := fmt.Sprintf("%s come from output %q of job %q; jobs %s are compiled and uploaded by step %q after that job finishes, so this report leaves them not-evaluated", subject, continuation.Descriptor.ProducerOutput, continuation.Descriptor.ProducerJob, quotedList(continuation.Jobs), key)
 		if len(continuation.LaterMatrices) != 0 {
 			message += fmt.Sprintf("; the matrices of jobs %s come from jobs that upload compiles, so later steps expand them in turn", quotedList(continuation.LaterMatrices))
 		}
-		e.result.warnings = append(e.result.warnings, Warning{Code: "W_MATRIX_DEFERRED", Path: sourced.path, Line: line, Column: column, Job: consumer, Message: message})
+		e.result.warnings = append(e.result.warnings, Warning{Code: code, Path: sourced.path, Line: line, Column: column, Job: consumer, Message: message})
 	}
 }
 
@@ -746,7 +799,11 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, err))
 			valid = false
 		}
-		labels, runsOnErr := resolveRunsOn(job, jobContext, matrix)
+		runnerContext := jobContext
+		if supplied, ok := e.runsOnContexts[id]; ok {
+			runnerContext = supplied
+		}
+		labels, runsOnErr := resolveRunsOn(job, runnerContext, matrix)
 		if runsOnErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, key, "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, runsOnErr.Error())))
 			valid = false

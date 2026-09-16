@@ -82,9 +82,10 @@ func uploadStageContext(ctx context.Context, options stageOptions, stdout, stder
 	if os.Getenv("BUILDKITE") != "true" || os.Getenv("BUILDKITE_BUILD_ID") == "" || os.Getenv("BUILDKITE_JOB_ID") == "" {
 		return usageError(stderr, "upload: BUILDKITE=true, BUILDKITE_BUILD_ID, and BUILDKITE_JOB_ID are required")
 	}
+	retryGuidance := stageRetryGuidance
 	fail := func(format string, args ...any) int {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: "+format+"\n", args...)
-		_, _ = fmt.Fprintln(stderr, stageRetryGuidance)
+		_, _ = fmt.Fprintln(stderr, retryGuidance)
 		return 1
 	}
 	root, err := os.MkdirTemp("", "buildkite-gha-stage-")
@@ -112,6 +113,9 @@ func uploadStageContext(ctx context.Context, options stageOptions, stdout, stder
 	record, err := decodeStageRecord(data, version)
 	if err != nil {
 		return fail("%v", err)
+	}
+	if record.Continuation.Descriptor.Shape == compiler.RuntimeRunsOnShape {
+		retryGuidance = "Retry the whole build to select this runner again. If the producer job was retried, only a new build can select it."
 	}
 	// The importer writes the first record of a component and each stage
 	// writes the next one, so the record comes from the job the step names.
@@ -196,24 +200,29 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	}
 	rows := make(map[string][]map[string]any)
 	skipped := make(map[string]bool)
+	runnerOutputs := make(map[string]string)
 	// Read every producer before uploading anything. A missing manifest is
 	// not a terminal skip, even if another branch has already failed.
 	manifests := make(map[string]transport.ResultManifest)
 	for _, root := range continuation.Roots() {
 		descriptor := root.Descriptor
 		producer := record.producer(descriptor.Job)
-		_, _ = fmt.Fprintf(r.stdout, "~~~ :github: Read matrix from job %q output %q\n", descriptor.ProducerJob, descriptor.ProducerOutput)
+		_, _ = fmt.Fprintf(r.stdout, "~~~ :github: Read %s from job %q output %q\n", descriptor.Kind(), descriptor.ProducerJob, descriptor.ProducerOutput)
 		manifest, exists := manifests[producer.Key]
 		if !exists {
 			var err error
 			manifest, err = transport.DownloadResult(r.ctx, r.agent, r.root, r.buildID, transport.ResultSource{StepKey: producer.Key, PlanDigest: producer.PlanDigest})
 			if err != nil {
-				return fail("matrix producer %q result is unavailable: %v", descriptor.ProducerJob, err)
+				return fail("%s producer %q result is unavailable: %v", descriptor.Kind(), descriptor.ProducerJob, err)
 			}
 			manifests[producer.Key] = manifest
 		}
 		if manifest.Result != "success" {
-			_, _ = fmt.Fprintf(r.stdout, "Matrix producer %q finished with result %q; the deferred jobs are skipped for this root.\n", descriptor.ProducerJob, manifest.Result)
+			subject := "Matrix"
+			if descriptor.Shape == compiler.RuntimeRunsOnShape {
+				subject = "Runner selection"
+			}
+			_, _ = fmt.Fprintf(r.stdout, "%s producer %q finished with result %q; the deferred jobs are skipped for this root.\n", subject, descriptor.ProducerJob, manifest.Result)
 			if len(continuation.Joined) == 0 {
 				return r.uploadSkipped(fail, manifest.Result, graphKeys)
 			}
@@ -230,7 +239,11 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 			}
 		}
 		if output == nil {
-			return fail("matrix producer %q did not publish output %q", descriptor.ProducerJob, descriptor.ProducerOutput)
+			return fail("%s producer %q did not publish output %q", descriptor.Kind(), descriptor.ProducerJob, descriptor.ProducerOutput)
+		}
+		if descriptor.Shape == compiler.RuntimeRunsOnShape {
+			runnerOutputs[descriptor.Job] = *output
+			continue
 		}
 		expanded, err := compiler.ExpandRuntimeMatrixOutput(descriptor, []byte(*output), graphKeys)
 		if err != nil {
@@ -239,7 +252,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 		rows[descriptor.Job] = expanded
 		_, _ = fmt.Fprintf(r.stdout, "Expanding job %q into %d matrix instances.\n", descriptor.Job, len(expanded))
 	}
-	wanted := continuation.DependentInstances()
+	wanted := continuation.DependentInstances() + len(runnerOutputs)
 	for job, expanded := range rows {
 		wanted += len(expanded)
 		if skipped[job] {
@@ -252,7 +265,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	}
 
 	_, _ = fmt.Fprintln(r.stdout, "~~~ :github: Compile deferred jobs")
-	preflight, report, err := r.compile(rows, skipped)
+	preflight, report, err := r.compile(rows, skipped, runnerOutputs)
 	if err != nil {
 		_ = r.out.write(r.ctx, report)
 		return fail("compile deferred jobs: %v", err)
@@ -323,7 +336,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 // hosted compile request as the importer: the recorded runner mapping,
 // variables, OIDC, runtime digests, and repository source, with the live
 // runner resolution and environment source this job observes.
-func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]bool) (hostedCompilation, compatibility.ProcessingReport, error) {
+func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]bool, runnerOutputs map[string]string) (hostedCompilation, compatibility.ProcessingReport, error) {
 	record := r.record
 	repositorySource, cleanupSource, err := r.repositorySource()
 	if err != nil {
@@ -331,7 +344,7 @@ func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]b
 		return hostedCompilation{}, report, hostedError(hostedEnvironmentFailure, err)
 	}
 	defer cleanupSource()
-	request := record.compileRequest(r.workflowPath, r.workflowSource, r.eventSource, rows, skipped, repositorySource)
+	request := record.compileRequest(r.workflowPath, r.workflowSource, r.eventSource, rows, skipped, runnerOutputs, repositorySource)
 	validation, validationErr := validateHostedRequest(r.ctx, request)
 	resolution, err := suggestedRunnerTargets(r.ctx, []compiler.Report{validation}, request.RunnerTargets, r.clientVersion)
 	if err != nil {
@@ -344,6 +357,7 @@ func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]b
 		request.RunnerResolution = resolution
 		validation, validationErr = validateHostedRequest(r.ctx, request)
 	}
+	r.out.annotateRunnerResolutionWarnings(r.ctx, resolution.warnings)
 	report := compatibility.InitialProcessingReport(record.Workflow.Path, hostedProfile, true, validation, validationErr)
 	if validationErr != nil {
 		report.Result = "incompatible"
@@ -483,7 +497,7 @@ func quotedKeys(keys []string) string {
 func (r stageRun) uploadSkipped(fail func(string, ...any) int, result string, graphKeys []string) int {
 	record := r.record
 	producer := record.Continuation.Descriptor.ProducerJob
-	reason := fmt.Sprintf("matrix producer job %q finished with result %s", producer, result)
+	reason := fmt.Sprintf("%s producer job %q finished with result %s", record.Continuation.Descriptor.Kind(), producer, result)
 	jobs := make([]buildkitepipeline.Job, 0, len(record.Continuation.Jobs))
 	expected := make(map[string]string, len(record.Continuation.Jobs))
 	// The consumer's instances are unknown, so it gets one placeholder under

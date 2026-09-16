@@ -475,8 +475,8 @@ diagnostics, and their dependants are skipped. Independent jobs keep their
 compiled plans and run normally. The items keep their normal labels, keys,
 checks, and `needs` links. A runnable job is never emitted unless every job it
 needs also has a plan. If compilation fails before the complete graph is known,
-or the workflow takes a matrix from a job output (see
-[Matrices from job outputs](#matrices-from-job-outputs)), upload uses one
+or the workflow takes a [matrix](#matrices-from-job-outputs) or
+[runner selection](#runners-from-job-outputs) from a job output, upload uses one
 workflow-level failing item instead.
 
 For a local call with `secrets: inherit`, each flattened callee job requests only the static ordinary secret names referenced by that job or its workflow-authored action inputs. Inheritance is one hop: an omitted nested `secrets: inherit` removes ordinary secret authority from every job below that edge. It does not affect direct caller jobs or `GITHUB_TOKEN`.
@@ -666,7 +666,7 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 | --- | --- | --- |
 | `name` | ✅ Supported | Labels may use static `github`, reusable-workflow `inputs`, and matrix values. |
 | `needs` | ✅ Supported | Accepts a string or list of static job IDs. Matrix fan-out and fan-in are automatic. |
-| `runs-on` | 🟡 Supported subset | Explicit mappings are authoritative. The Agent API returns a complete target for every other selector and can return a fallback warning annotation. The local preset accepts `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04`, and `macos-latest`. Labels are case-insensitive. Static expressions may resolve to an accepted label or label list. |
+| `runs-on` | 🟡 Supported subset | Explicit mappings are authoritative. The Agent API returns a complete target for every other selector and can return a fallback warning annotation. The local preset accepts `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04`, and `macos-latest`. Labels are case-insensitive. Expressions may resolve to an accepted label or label list, including [values from a job output](#runners-from-job-outputs). |
 | `if` | 🟡 Supported subset | Runs before the job starts. See [Conditions](#conditions). |
 | `outputs` | 🟡 Supported subset | Maps step outputs for consumption through `needs`. A job may publish 64 outputs of up to 1 KiB each. Ambiguous matrix output values stop the job with an error. |
 | `env`, `defaults.run` | 🟡 Supported subset | Uses the [workflow-level behavior](#environment-and-defaults). |
@@ -766,6 +766,60 @@ syntax or action inputs.
 
 `validate --profile hosted` has no job-scoped API and admits only the local
 `macos-latest` preset.
+
+#### Runners from job outputs
+
+**🟡 Supported subset.** A job without a matrix can select its runner from one
+declared output of a prerequisite with exactly one static instance:
+
+```yaml
+plan:
+  runs-on: ubuntu-latest
+  outputs:
+    runner: ${{ steps.select.outputs.runner }}
+  steps:
+    - id: select
+      run: echo 'runner=["ubuntu-22.04"]' >> "$GITHUB_OUTPUT"
+build:
+  needs: plan
+  runs-on: ${{ fromJSON(needs.plan.outputs.runner) }}
+  steps:
+    - run: echo ready
+```
+
+A plain output can supply a single label with
+`runs-on: ${{ needs.plan.outputs.runner }}`. Label templates, label lists, and
+expressions using the existing pure functions are also supported. Every
+output reference, including in an unselected branch, must name the same
+producer output through `needs.<job>.outputs.<name>`. A reusable workflow may
+receive that value through a string input and forward the input unchanged to
+another workflow. Its caller's output retains its original producer binding;
+it does not become part of the callee's `needs` context.
+
+The initial upload creates `:github: runs-on · build`, with check
+`build (runs-on)`, and reports `W_RUNS_ON_DEFERRED`. This step reads the verified
+output, recompiles the workflow, and uploads `build` and every job that
+transitively depends on it. Runner mappings, live Agent API resolution,
+platform availability, admission, and token authority apply as for static
+jobs. Runner fallback warnings appear as annotations on the deferred step.
+The output supplies scheduling data only, never workflow source or
+credential authority.
+
+Runner selection uses the same [deferred upload rules](#matrices-from-job-outputs)
+for snapshots, action locks, graph budgets, downstream ownership, skipped
+producers, and retries. The producer output is limited to 1 KiB. Independent
+runner and matrix continuations may coexist, but a component containing runner
+selection cannot join or start another deferred stage. Matrix-only components
+retain their supported joins and chained stages. A dynamic-runner consumer cannot also
+declare a matrix. Workflow-level concurrency is unsupported on the root or
+on a reusable workflow containing or depending on a deferred job. This does
+not add dynamic environments or concurrency values. Missing outputs, invalid
+label types, and rejected runner targets fail the deferred step without
+uploading its jobs.
+
+Use `validate` or `compile --format ir-json` to inspect the deferred graph;
+`compile --format pipeline` cannot emit it. See
+[Deferred uploads inside the build](cli.md#expand-a-matrix-inside-the-build).
 
 ### Deployment environments
 
@@ -1114,8 +1168,8 @@ Limits and rejected shapes:
   missing, the whole workflow is replaced with one failing step,
   `E_PIPELINE_GENERATION` names the deferred jobs, and no job of the workflow
   runs. A per-job upload would keep only the static jobs and drop the deferred
-  steps, so the build could pass without them. Without a needs-derived
-  matrix, only the failed job is replaced and independent jobs run; see
+  steps, so the build could pass without them. Without deferred uploads,
+  only the failed job is replaced and independent jobs run; see
   [Reusable workflows](#reusable-workflows).
 - Retrying the deferred step is safe: a replayed upload is rejected by
   Buildkite because its step keys already exist, and the step then confirms

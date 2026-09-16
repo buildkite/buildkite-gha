@@ -161,6 +161,11 @@ than resolving their source before checkout.
 Reusable workflows flatten before program construction. Direct and called
 jobs therefore use the same lowering and authority paths.
 
+Deferred runner selection supplies verified job outputs only to the `runs-on`
+expression profiles. It does not resolve job conditions or reusable inputs in
+the execution program. Those inputs retain their producer bindings, so
+credential authority still analyzes runtime-dependent branches conservatively.
+
 ## Security invariants
 
 The following boundaries are deliberate:

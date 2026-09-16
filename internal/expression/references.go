@@ -18,6 +18,20 @@ type NeedOutputReference struct {
 	Output string
 }
 
+// NeedOutputs returns the statically named outputs a validated scheduling
+// site reads, including unselected branches. It never evaluates source text.
+func (engine Engine) NeedOutputs(site Site) ([]NeedOutputReference, error) {
+	if _, err := engine.Validate(site); err != nil {
+		return nil, err
+	}
+	var references []NeedOutputReference
+	err := visitTemplateExpressions(site.Source, func(node actionlint.ExprNode) error {
+		references = appendNeedOutputReferences(references, node)
+		return nil
+	})
+	return references, err
+}
+
 // staticReferencePath extracts one complete static variable reference. Dot and
 // literal string index access are accepted; functions, operators, literals,
 // compound templates, and dynamic indexes return an error.

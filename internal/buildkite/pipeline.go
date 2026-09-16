@@ -122,6 +122,8 @@ type Pipeline struct {
 // record that carries everything the deferred compile needs.
 type StageStep struct {
 	ArtifactDigest string
+	// Kind is matrix (the default) or runs-on.
+	Kind string
 }
 
 // Workflow is one independently conditioned workflow group in an aggregate
@@ -627,6 +629,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		stepLabel := ":github: job · " + job.Label
 		if job.Stage != nil {
 			stepLabel = ":github: matrix · " + job.Label
+			if job.Stage.Kind == "runs-on" {
+				stepLabel = ":github: runs-on · " + job.Label
+			}
 		}
 		_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(stepLabel))
 		_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))
