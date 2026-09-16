@@ -145,7 +145,7 @@ func continueUploadContext(ctx context.Context, args []string, stdout, stderr io
 
 	run := continuationRun{
 		ctx: ctx, stdout: stdout, stderr: stderr, version: version, clientVersion: clientVersion,
-		agent: agent, root: root, artifact: artifact, eventSource: eventSource, workflowPath: workflowPath, workflowSource: workflowSource,
+		agent: agent, root: root, artifact: artifact, digest: options.digest, eventSource: eventSource, workflowPath: workflowPath, workflowSource: workflowSource,
 		buildID: os.Getenv("BUILDKITE_BUILD_ID"), jobID: os.Getenv("BUILDKITE_JOB_ID"),
 		out: newProcessingOutput(ctx, "continue", "text", stderr, stderr, agent),
 	}
@@ -173,6 +173,7 @@ type continuationRun struct {
 	agent                  transport.Agent
 	root                   string
 	artifact               continuationArtifact
+	digest                 string
 	eventSource            []byte
 	workflowPath           string
 	workflowSource         []byte
@@ -185,43 +186,70 @@ type continuationRun struct {
 func (r continuationRun) execute(fail func(string, ...any) int) int {
 	artifact := r.artifact
 	descriptor := artifact.Continuation.Descriptor
-	_, _ = fmt.Fprintf(r.stdout, "~~~ :github: Read matrix from job %q output %q\n", descriptor.ProducerJob, descriptor.ProducerOutput)
-	manifest, err := transport.DownloadResult(r.ctx, r.agent, r.root, r.buildID, transport.ResultSource{StepKey: artifact.Producer.StepKey, PlanDigest: artifact.Producer.PlanDigest})
-	if err != nil {
-		return fail("matrix producer %q result is unavailable: %v", descriptor.ProducerJob, err)
-	}
 	graphKeys := make([]string, 0, len(artifact.Graph))
 	for _, job := range artifact.Graph {
 		graphKeys = append(graphKeys, job.Key)
 	}
-	if manifest.Result != "success" {
-		_, _ = fmt.Fprintf(r.stdout, "Matrix producer %q finished with result %q; the deferred jobs are skipped.\n", descriptor.ProducerJob, manifest.Result)
-		return r.uploadSkipped(fail, manifest.Result, graphKeys)
+	rows := make(map[string][]map[string]any)
+	skipped := make(map[string]bool)
+	// Read every producer before uploading anything. A missing manifest is
+	// not a terminal skip, even if another branch has already failed.
+	manifests := make(map[string]transport.ResultManifest)
+	for _, root := range artifact.Continuation.Roots() {
+		descriptor := root.Descriptor
+		producer := artifact.producer(descriptor.Job)
+		_, _ = fmt.Fprintf(r.stdout, "~~~ :github: Read matrix from job %q output %q\n", descriptor.ProducerJob, descriptor.ProducerOutput)
+		manifest, exists := manifests[producer.StepKey]
+		if !exists {
+			var err error
+			manifest, err = transport.DownloadResult(r.ctx, r.agent, r.root, r.buildID, transport.ResultSource{StepKey: producer.StepKey, PlanDigest: producer.PlanDigest})
+			if err != nil {
+				return fail("matrix producer %q result is unavailable: %v", descriptor.ProducerJob, err)
+			}
+			manifests[producer.StepKey] = manifest
+		}
+		if manifest.Result != "success" {
+			_, _ = fmt.Fprintf(r.stdout, "Matrix producer %q finished with result %q; the deferred jobs are skipped for this root.\n", descriptor.ProducerJob, manifest.Result)
+			if len(artifact.Continuation.Joined) == 0 {
+				return r.uploadSkipped(fail, manifest.Result, graphKeys)
+			}
+			skipped[descriptor.Job] = true
+			rows[descriptor.Job] = nil
+			continue
+		}
+		var output *string
+		for _, candidate := range manifest.Outputs {
+			if strings.EqualFold(candidate.Name, descriptor.ProducerOutput) {
+				value := candidate.Value
+				output = &value
+				break
+			}
+		}
+		if output == nil {
+			return fail("matrix producer %q did not publish output %q", descriptor.ProducerJob, descriptor.ProducerOutput)
+		}
+		expanded, err := compiler.ExpandRuntimeMatrixOutput(descriptor, []byte(*output), graphKeys)
+		if err != nil {
+			return fail("matrix from job %q output %q is invalid: %v", descriptor.ProducerJob, descriptor.ProducerOutput, err)
+		}
+		rows[descriptor.Job] = expanded
+		_, _ = fmt.Fprintf(r.stdout, "Expanding job %q into %d matrix instances.\n", descriptor.Job, len(expanded))
 	}
-	var output *string
-	for _, candidate := range manifest.Outputs {
-		if strings.EqualFold(candidate.Name, descriptor.ProducerOutput) {
-			value := candidate.Value
-			output = &value
-			break
+	continuation := artifact.Continuation
+	wanted := continuation.DependentInstances()
+	for job, expanded := range rows {
+		wanted += len(expanded)
+		if skipped[job] {
+			wanted++
 		}
 	}
-	if output == nil {
-		return fail("matrix producer %q did not publish output %q", descriptor.ProducerJob, descriptor.ProducerOutput)
-	}
-	rows, err := compiler.ExpandRuntimeMatrixOutput(descriptor, []byte(*output), graphKeys)
-	if err != nil {
-		return fail("matrix from job %q output %q is invalid: %v", descriptor.ProducerJob, descriptor.ProducerOutput, err)
-	}
-	_, _ = fmt.Fprintf(r.stdout, "Expanding job %q into %d matrix instances.\n", descriptor.Job, len(rows))
-	continuation := artifact.Continuation
-	if wanted := len(rows) + continuation.DependentInstances(); wanted > continuation.JobBudget {
+	if wanted > continuation.JobBudget {
 		return fail("job %q produced %d matrix rows, but step %q may upload at most %d jobs (%d rows plus their dependents): the workflow's deferred uploads share the %d-job graph bound. Reduce the matrix or the number of deferred matrices in the workflow.",
-			descriptor.ProducerJob, len(rows), continuation.StepKey, continuation.JobBudget, continuation.JobBudget-continuation.DependentInstances(), compiler.MaxRuntimeMatrixGraphJobs)
+			descriptor.ProducerJob, wanted-continuation.DependentInstances(), continuation.StepKey, continuation.JobBudget, continuation.JobBudget-continuation.DependentInstances(), compiler.MaxRuntimeMatrixGraphJobs)
 	}
 
 	_, _ = fmt.Fprintln(r.stdout, "~~~ :github: Compile deferred jobs")
-	preflight, report, err := r.compile(rows)
+	preflight, report, err := r.compile(rows, skipped)
 	if err != nil {
 		_ = r.out.write(r.ctx, report)
 		return fail("compile deferred jobs: %v", err)
@@ -234,13 +262,14 @@ func (r continuationRun) execute(fail func(string, ...any) int) int {
 	if err != nil {
 		return fail("%v", err)
 	}
-	if len(plans) > continuation.JobBudget {
-		return fail("step %q compiled %d deferred jobs, but may upload at most %d: the workflow's deferred uploads share the %d-job graph bound", continuation.StepKey, len(plans), continuation.JobBudget, compiler.MaxRuntimeMatrixGraphJobs)
+	uploadedJobs := len(plans) + len(r.skippedJobs(bundle.IR.RuntimeMatrixSkippedJobs))
+	if uploadedJobs > continuation.JobBudget {
+		return fail("step %q compiled %d deferred jobs, but may upload at most %d: the workflow's deferred uploads share the %d-job graph bound", continuation.StepKey, uploadedJobs, continuation.JobBudget, compiler.MaxRuntimeMatrixGraphJobs)
 	}
 	writeCompilerWarnings(r.stderr, "continue", artifact.Workflow.Path, bundle.IR.Warnings)
 	_ = compatibility.WriteProcessing(r.stderr, "text", report)
 
-	_, _ = fmt.Fprintf(r.stdout, "~~~ :github: Upload %d deferred jobs\n", len(plans))
+	_, _ = fmt.Fprintf(r.stdout, "~~~ :github: Upload %d deferred jobs\n", uploadedJobs)
 	artifacts := make([]transport.Artifact, 0, len(plans)+1)
 	if bundle.EventArtifact != nil {
 		artifacts = append(artifacts, *bundle.EventArtifact)
@@ -252,12 +281,15 @@ func (r continuationRun) execute(fail func(string, ...any) int) int {
 		// digest, and a digest never contains quotes.
 		expected[jobPlan.Job.Target.StepKey] = "'" + jobPlan.Digest + "'"
 	}
+	for _, job := range r.skippedJobs(bundle.IR.RuntimeMatrixSkippedJobs) {
+		expected[job.Key] = "'" + job.SkipDigest + "'"
+	}
 	if err := transport.UploadArtifacts(r.ctx, r.agent, r.root, artifacts, pipeline); err != nil {
 		if r.ctx.Err() != nil || !errors.Is(err, transport.ErrPipelineUpload) {
 			return fail("%v", err)
 		}
 		if r.alreadyApplied(expected, "command") {
-			_, _ = fmt.Fprintf(r.stdout, "The %d deferred jobs were already uploaded by an earlier run of this step; nothing to do.\n", len(plans))
+			_, _ = fmt.Fprintf(r.stdout, "The %d deferred jobs were already uploaded by an earlier run of this step; nothing to do.\n", uploadedJobs)
 			return 0
 		}
 		raced := r.existingSteps(createdGates)
@@ -268,7 +300,7 @@ func (r continuationRun) execute(fail func(string, ...any) int) int {
 			return fail("%v", err)
 		}
 	}
-	_, _ = fmt.Fprintf(r.stdout, "Uploaded %d jobs for %q from job %q output %q.\n", len(plans), descriptor.Job, descriptor.ProducerJob, descriptor.ProducerOutput)
+	_, _ = fmt.Fprintf(r.stdout, "Uploaded %d jobs for %q from job %q output %q.\n", uploadedJobs, descriptor.Job, descriptor.ProducerJob, descriptor.ProducerOutput)
 	return 0
 }
 
@@ -276,7 +308,7 @@ func (r continuationRun) execute(fail func(string, ...any) int) int {
 // hosted compile request as the importer: the recorded runner mapping,
 // variables, OIDC, runtime digests, and repository source, with the live
 // runner resolution and environment source this job observes.
-func (r continuationRun) compile(rows []map[string]any) (hostedCompilation, compatibility.ProcessingReport, error) {
+func (r continuationRun) compile(rows map[string][]map[string]any, skipped map[string]bool) (hostedCompilation, compatibility.ProcessingReport, error) {
 	artifact := r.artifact
 	repositorySource, cleanupSource, err := r.repositorySource()
 	if err != nil {
@@ -285,6 +317,7 @@ func (r continuationRun) compile(rows []map[string]any) (hostedCompilation, comp
 	}
 	defer cleanupSource()
 	request := artifact.compileRequest(r.workflowPath, r.workflowSource, r.eventSource, rows, repositorySource)
+	request.RuntimeMatrixSkipped = skipped
 	validation, validationErr := validateHostedRequest(r.ctx, request)
 	resolution, err := suggestedRunnerTargets(r.ctx, []compiler.Report{validation}, request.RunnerTargets, r.clientVersion)
 	if err != nil {
@@ -479,6 +512,7 @@ func (r continuationRun) deferredPipeline(bundle compiler.Bundle, sharedGates ma
 		}
 		jobs = append(jobs, job)
 	}
+	jobs = append(jobs, r.skippedJobs(bundle.IR.RuntimeMatrixSkippedJobs)...)
 	if len(jobs) == 0 {
 		return nil, nil, nil, errors.New("recompilation produced no deferred jobs")
 	}
@@ -526,6 +560,26 @@ func (r continuationRun) deferredPipeline(bundle compiler.Bundle, sharedGates ma
 		return nil, nil, nil, fmt.Errorf("emit deferred jobs: %w", err)
 	}
 	return pipeline, plans, created, nil
+}
+
+// skippedJobs renders only the failed roots' closures, preserving the other
+// branches in the component and emitting a shared join once.
+func (r continuationRun) skippedJobs(skipped map[string]bool) []buildkitepipeline.Job {
+	var jobs []buildkitepipeline.Job
+	for _, job := range r.artifact.Continuation.Jobs {
+		if !skipped[job] {
+			continue
+		}
+		instances := r.artifact.Continuation.Instances[job]
+		if len(instances) == 0 {
+			instances = []compiler.RuntimeMatrixInstance{{Key: compiler.LogicalJobStepKey(r.artifact.Workflow.Namespace, job), Label: r.artifact.Continuation.JobLabel(job), CheckLabel: job}}
+		}
+		for _, instance := range instances {
+			jobs = append(jobs, buildkitepipeline.Job{Key: instance.Key, Label: instance.Label, CheckLabel: instance.CheckLabel,
+				SkipReason: "matrix producer did not succeed", SkipDigest: r.digest})
+		}
+	}
+	return jobs
 }
 
 // uploadAfterGateRace handles two continuations that share an approval gate

@@ -1354,6 +1354,232 @@ func TestContinueReplayIsIdempotent(t *testing.T) {
 	})
 }
 
+const continueJoinedWorkflow = continueDeferredMatrixWorkflow + `  plan_other:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: [{one: true}]
+    outputs:
+      matrix: ${{ steps.rows.outputs.matrix }}
+    steps:
+      - id: rows
+        run: true
+  test:
+    needs: plan_other
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.plan_other.outputs.matrix) }}
+    steps:
+      - run: true
+  test_tail:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  join:
+    needs: [publish, test_tail, lint]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`
+
+func joinedContinueRunner(t *testing.T, initial continueInitialUpload, firstResult, secondResult string) *cliCaptureRunner {
+	t.Helper()
+	matrix := ""
+	if firstResult == "success" {
+		matrix = `[{"target":"x","runner":"ubuntu-latest"},{"target":"y","runner":"ubuntu-latest"}]`
+	}
+	runner := initial.continueRunner(initial.producerManifest(t, firstResult, matrix))
+	producer := initial.artifact.JoinedProducers["test"]
+	const jobID = "0192f7d0-0000-4000-8000-00000000bbb2"
+	manifest := transport.ResultManifest{PlanDigest: producer.PlanDigest, Producer: transport.Producer{BuildID: continueBuildID, JobID: jobID, StepKey: producer.StepKey}, Result: secondResult}
+	if secondResult == "success" {
+		manifest.Outputs = []transport.Output{{Name: "matrix", Value: `[{"target":"z"}]`}}
+	}
+	data, err := transport.MarshalResultManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.jobByStep[producer.StepKey] = jobID
+	runner.dataByPath[transport.ResultPath(producer.StepKey, producer.PlanDigest)] = data
+	return runner
+}
+
+func TestContinueJoinedClosures(t *testing.T) {
+	initials := runContinueInitialUploads(t, continueJoinedWorkflow)
+	if len(initials) != 1 {
+		t.Fatalf("continuations = %d, want one owner", len(initials))
+	}
+	initial := initials[0]
+	prefix := strings.TrimSuffix(initial.artifact.Producer.StepKey, "plan")
+	producer := initial.artifact.JoinedProducers["test"]
+	if producer.StepKey == prefix+"plan_other" || !strings.HasPrefix(producer.StepKey, prefix+"plan_other-") {
+		t.Fatalf("producer lost its matrix instance key: %#v", producer)
+	}
+	_, _, initialSteps := decodeContinuePipeline(t, []byte(initial.pipeline))
+	for _, step := range initialSteps {
+		if step.Key == initial.artifact.Continuation.StepKey {
+			if len(step.DependsOn) != 2 || step.DependsOn[0].Step != initial.artifact.Producer.StepKey || step.DependsOn[1].Step != producer.StepKey {
+				t.Fatalf("owner dependencies = %#v", step.DependsOn)
+			}
+		}
+	}
+	for _, test := range []struct {
+		first, second string
+		runnable      int
+		skipped       []string
+	}{
+		{first: "success", second: "success", runnable: 6},
+		{first: "failure", second: "success", runnable: 2, skipped: []string{"build", "join", "publish"}},
+		{first: "success", second: "cancelled", runnable: 3, skipped: []string{"join", "test", "test_tail"}},
+		{first: "skipped", second: "failure", runnable: 0, skipped: []string{"build", "join", "publish", "test", "test_tail"}},
+	} {
+		t.Run(test.first+"/"+test.second, func(t *testing.T) {
+			runner := joinedContinueRunner(t, initial, test.first, test.second)
+			if code, stdout, stderr := runContinue(t, runner, initial.digest); code != 0 {
+				t.Fatalf("continue = %d\n%s\n%s", code, stdout, stderr)
+			}
+			_, _, steps := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
+			seen := make(map[string]bool)
+			var skipped []string
+			var runnable int
+			existing := make(map[string]map[string]string)
+			for _, step := range steps {
+				if seen[step.Key] {
+					t.Fatalf("duplicate upload of %s", step.Key)
+				}
+				seen[step.Key] = true
+				if step.Skip != "" {
+					skipped = append(skipped, strings.TrimPrefix(step.Key, prefix))
+					if step.Command != "exit 1 # skipped continuation '"+initial.digest+"'" {
+						t.Fatalf("skip is not bound to owner artifact: %q", step.Command)
+					}
+				} else {
+					runnable++
+				}
+				if step.Key == prefix+"join" && step.Skip == "" {
+					var dependencies []string
+					for _, dependency := range step.DependsOn {
+						dependencies = append(dependencies, dependency.Step)
+					}
+					slices.Sort(dependencies)
+					if !slices.Equal(dependencies, []string{prefix + "lint", prefix + "publish", prefix + "test_tail"}) {
+						t.Fatalf("join dependencies = %v", dependencies)
+					}
+				}
+				existing[step.Key] = map[string]string{"command": step.Command}
+			}
+			slices.Sort(skipped)
+			if runnable != test.runnable || !reflect.DeepEqual(skipped, test.skipped) || !seen[prefix+"join"] {
+				t.Fatalf("runnable=%d skipped=%v steps=%#v", runnable, skipped, steps)
+			}
+			if seen[initial.artifact.Producer.StepKey] || seen[producer.StepKey] || seen[prefix+"lint"] {
+				t.Fatal("uploaded a parent-owned prerequisite")
+			}
+			plans := uploadedPlans(t, runner)
+			for _, job := range test.skipped {
+				if len(plans[job]) != 0 {
+					t.Fatalf("skipped %s has executable plans", job)
+				}
+			}
+			replay := joinedContinueRunner(t, initial, test.first, test.second)
+			replay.pipelineUploadErr = errors.New("duplicate step key")
+			replay.stepAttributes = existing
+			if code, _, stderr := runContinue(t, replay, initial.digest); code != 0 {
+				t.Fatalf("replay = %d: %s", code, stderr)
+			}
+			join := existing[prefix+"join"]
+			existing[prefix+"join"] = map[string]string{"command": "different plan or owner"}
+			if code, _, _ := runContinue(t, replay, initial.digest); code != 1 {
+				t.Fatalf("different join binding accepted as replay: %d", code)
+			}
+			existing[prefix+"join"] = join
+			delete(existing, prefix+"join")
+			if code, _, _ := runContinue(t, replay, initial.digest); code != 1 {
+				t.Fatalf("missing join accepted as replay: %d", code)
+			}
+		})
+	}
+	t.Run("missing manifest is not a skip", func(t *testing.T) {
+		runner := joinedContinueRunner(t, initial, "failure", "success")
+		delete(runner.dataByPath, transport.ResultPath(producer.StepKey, producer.PlanDigest))
+		if code, _, stderr := runContinue(t, runner, initial.digest); code != 1 || !strings.Contains(stderr, "result is unavailable") {
+			t.Fatalf("code=%d: %s", code, stderr)
+		}
+		if pipelineUploads(runner) != 0 || len(runner.uploaded) != 0 {
+			t.Fatal("uploaded jobs without every manifest")
+		}
+	})
+	t.Run("second producer retried", func(t *testing.T) {
+		runner := joinedContinueRunner(t, initial, "success", "success")
+		runner.jobByStep[producer.StepKey] = "0192f7d0-0000-4000-8000-00000000bbb3"
+		if code, _, stderr := runContinue(t, runner, initial.digest); code != 1 || !strings.Contains(stderr, "result is unavailable") || pipelineUploads(runner) != 0 {
+			t.Fatalf("retried producer code=%d: %s", code, stderr)
+		}
+	})
+	for _, test := range []struct {
+		name string
+		edit func(*continuationArtifact)
+	}{
+		{name: "wrong plan", edit: func(a *continuationArtifact) {
+			p := a.JoinedProducers["test"]
+			p.PlanDigest = a.Producer.PlanDigest
+			a.JoinedProducers["test"] = p
+		}},
+		{name: "logical key instead of instance", edit: func(a *continuationArtifact) {
+			p := a.JoinedProducers["test"]
+			p.StepKey = prefix + "plan_other"
+			a.JoinedProducers["test"] = p
+		}},
+		{name: "missing producer", edit: func(a *continuationArtifact) { delete(a.JoinedProducers, "test") }},
+		{name: "duplicate root", edit: func(a *continuationArtifact) {
+			a.Continuation.Joined = append(a.Continuation.Joined, a.Continuation.Joined[0])
+		}},
+		{name: "outside prerequisite claimed", edit: func(a *continuationArtifact) { a.Continuation.Joined[0].Descriptor.ProducerJob = "lint" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			a, err := decodeContinuationArtifact(initial.data, "dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.edit(&a)
+			data, err := json.Marshal(a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := decodeContinuationArtifact(data, "dev"); err == nil {
+				t.Fatal("accepted incorrect producer binding")
+			}
+		})
+	}
+	for _, budget := range []int{5, 6} {
+		t.Run(fmt.Sprintf("component budget %d", budget), func(t *testing.T) {
+			limited := initial
+			limited.artifact.Continuation.JobBudget = budget
+			data, err := json.Marshal(limited.artifact)
+			if err != nil {
+				t.Fatal(err)
+			}
+			limited.data, limited.digest = data, transport.Digest(data)
+			limited.artifactPath, err = buildkitepipeline.ContinuationPath(limited.digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := joinedContinueRunner(t, limited, "success", "success")
+			code, _, stderr := runContinue(t, runner, limited.digest)
+			if budget == 5 {
+				if code != 1 || !strings.Contains(stderr, "may upload at most 5 jobs") || pipelineUploads(runner) != 0 {
+					t.Fatalf("over-budget code=%d: %s", code, stderr)
+				}
+			} else if code != 0 || pipelineUploads(runner) != 1 {
+				t.Fatalf("at-budget code=%d: %s", code, stderr)
+			}
+		})
+	}
+}
+
 // TestContinuationArtifactRoundTrip proves the artifact decodes strictly and
 // records the values the continuation needs.
 func TestContinuationArtifactRoundTrip(t *testing.T) {
@@ -1449,7 +1675,7 @@ func TestContinuationArtifactRebuildsTheImporterRequest(t *testing.T) {
 	}
 	rows := []map[string]any{{"os": "ubuntu-latest"}, {"os": "macos-latest"}}
 	source := compiler.MemoizeRepositorySource(nil)
-	got := artifact.compileRequest("/checkout/.github/workflows/build.yml", []byte("on: push\n"), []byte("{}"), rows, source)
+	got := artifact.compileRequest("/checkout/.github/workflows/build.yml", []byte("on: push\n"), []byte("{}"), map[string][]map[string]any{"test": rows}, source)
 	want := hostedCompileRequest{
 		WorkflowPath:       "/checkout/.github/workflows/build.yml",
 		WorkflowSource:     []byte("on: push\n"),

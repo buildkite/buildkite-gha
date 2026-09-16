@@ -1262,8 +1262,8 @@ jobs:
 		t.Fatalf("text report = %q", stdout.String())
 	}
 
-	// A job that needs two deferred consumers would have to join two
-	// continuation uploads, which is the one shape the deferral rejects.
+	// A deferred matrix that needs another deferred job still requires a
+	// serial continuation, which this bounded expansion rejects.
 	unsupportedPath := filepath.Join(t.TempDir(), "two-matrices.yml")
 	if err := os.WriteFile(unsupportedPath, []byte(`on: push
 jobs:
@@ -1284,7 +1284,7 @@ jobs:
     steps:
       - run: true
   macos:
-    needs: plan
+    needs: [plan, linux]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -1314,10 +1314,10 @@ jobs:
 			errors = append(errors, diagnostic)
 		}
 	}
-	if len(errors) != 1 || errors[0].Code != compiler.CodeMatrixInvalid || errors[0].Job != "publish" {
+	if len(errors) != 1 || errors[0].Code != compiler.CodeMatrixInvalid || errors[0].Job != "macos" {
 		t.Fatalf("diagnostics = %#v", report.Diagnostics)
 	}
-	if !strings.Contains(errors[0].Message, "does not meet its requirements") || !strings.Contains(errors[0].Detail, `depends on needs-derived matrices "linux" and "macos"`) {
+	if !strings.Contains(errors[0].Message, "does not meet its requirements") || !strings.Contains(errors[0].Detail, "cannot depend on a job that is itself expanded by a deferred upload") {
 		t.Fatalf("diagnostic = %#v", errors[0])
 	}
 }

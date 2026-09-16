@@ -48,6 +48,9 @@ const runtimeMatrixDeferredMessage = "matrix values come from a job output that 
 // expanded jobs with deterministic keys.
 type RuntimeMatrixContinuation struct {
 	Descriptor RuntimeMatrixDescriptor `json:"descriptor"`
+	// Joined contains the other roots whose forward closures intersect this
+	// root's closure, directly or transitively. They share this upload owner.
+	Joined []RuntimeMatrixRoot `json:"joined,omitempty"`
 	// StepKey is the deterministic key of the deferred upload step.
 	StepKey string `json:"step_key"`
 	// ProducerStepKey is the generated step key of the producer's single
@@ -86,6 +89,17 @@ type RuntimeMatrixContinuation struct {
 	// against these locks and refuses a plan whose locks differ. It is empty
 	// when the compilation did not resolve remote actions.
 	ActionLocks []plan.ActionLock `json:"action_locks,omitempty"`
+}
+
+// RuntimeMatrixRoot binds another matrix to its exact producer instance.
+type RuntimeMatrixRoot struct {
+	Descriptor      RuntimeMatrixDescriptor `json:"descriptor"`
+	ProducerStepKey string                  `json:"producer_step_key"`
+}
+
+// Roots returns all matrix boundaries owned by this continuation, in order.
+func (c RuntimeMatrixContinuation) Roots() []RuntimeMatrixRoot {
+	return append([]RuntimeMatrixRoot{{Descriptor: c.Descriptor, ProducerStepKey: c.ProducerStepKey}}, c.Joined...)
 }
 
 // DependentInstances counts the jobs the continuation uploads regardless of the
