@@ -46,14 +46,18 @@ func evaluateCompileTemplate(template string, context CompileContext) (string, e
 	}
 }
 
-// evaluateCompileStringTemplate evaluates a compile-time template whose
-// complete-expression form must produce a string. Interpolated scalar values
+// evaluateCompileStringTemplate evaluates container image templates. A null
+// complete expression renders as an empty image, disabling the container.
+// Other complete expressions must produce strings; interpolated scalar values
 // retain the normal template rendering rules.
 func evaluateCompileStringTemplate(template string, context CompileContext) (string, error) {
 	if expr, err := parseExpression(template, 1, 1); err == nil {
 		value, err := evaluateCompile(expr, context)
 		if err != nil {
 			return "", err
+		}
+		if value == nil {
+			return "", nil
 		}
 		text, ok := value.(string)
 		if !ok {

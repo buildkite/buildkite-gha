@@ -4803,6 +4803,52 @@ jobs:
 	}
 }
 
+func TestCompilePlansOptionalMatrixContainer(t *testing.T) {
+	const image = "node:24"
+	for _, object := range []bool{false, true} {
+		for _, test := range []struct {
+			name, hostContainer string
+		}{
+			{name: "missing"},
+			{name: "null", hostContainer: ", container: null"},
+			{name: "empty", hostContainer: ", container: ''"},
+		} {
+			t.Run(fmt.Sprintf("object=%t/%s", object, test.name), func(t *testing.T) {
+				container := "${{ matrix.target.container }}"
+				if object {
+					container = "{image: '${{ matrix.target.container }}', env: {CONTAINER_ONLY: yes}, ports: ['8080']}"
+				}
+				source := []byte(fmt.Sprintf(`on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        target:
+          - {name: container, container: %s}
+          - {name: host%s}
+    runs-on: ubuntu-latest
+    container: %s
+    steps: [{run: 'echo container-probe'}]
+`, image, test.hostContainer, container))
+				plans, err := compilePlansForTest(t.Context(), "containers.yml", source, pushEvent(t), "dev", testDistributionDigest, defaultOptions())
+				if err != nil || len(plans) != 2 {
+					t.Fatalf("compile = %d plans, %v", len(plans), err)
+				}
+				containerized, host := plans[0], plans[1]
+				if containerized.Container == nil || containerized.Container.Image != image || !slices.Contains(containerized.RequiredCapabilities, "docker") {
+					t.Fatalf("container = %#v, capabilities = %v", containerized.Container, containerized.RequiredCapabilities)
+				}
+				if object && (containerized.Container.Env["CONTAINER_ONLY"] != "yes" || !slices.Equal(containerized.Container.Ports, []string{"8080"})) {
+					t.Fatalf("container settings lost: %#v", containerized.Container)
+				}
+				if host.Container != nil || host.Program.Job.Container != nil || slices.Contains(host.RequiredCapabilities, "docker") || host.Env["CONTAINER_ONLY"] != "" {
+					t.Fatalf("host retained container settings: %#v", host)
+				}
+			})
+		}
+	}
+}
+
 func TestCompilePlansRejectInvalidJobContainerImageExpressions(t *testing.T) {
 	for name, image := range map[string]string{
 		"secret":        "${{ secrets.IMAGE }}",
@@ -4810,8 +4856,11 @@ func TestCompilePlansRejectInvalidJobContainerImageExpressions(t *testing.T) {
 		"step output":   "${{ steps.build.outputs.image }}",
 		"whole context": "${{ github }}",
 		"boolean":       "${{ true }}",
-		"empty":         "${{ '' }}",
+		"number":        "${{ 42 }}",
+		"whitespace":    "${{ ' ' }}",
 		"invalid":       "${{ 'bad image' }}",
+		"lazy secret":   "${{ case(true, null, secrets.IMAGE) }}",
+		"token":         "${{ github.token }}",
 	} {
 		t.Run(name, func(t *testing.T) {
 			workflowSource := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: \"" + image + "\"\n    steps: [{run: true}]\n")
