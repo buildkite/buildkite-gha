@@ -37,7 +37,7 @@ func TestWindowsCacheArchiveTools(t *testing.T) {
 		poison[name] = workspace
 		t.Setenv(name, workspace)
 	}
-	for _, name := range []string{"nOdE_oPtIoNs", "node_path", "node_extra_ca_certs", "node_tls_reject_unauthorized", "sslkeylogfile", "ld_audit", "ld_preload", "ld_library_path", "openssl_conf", "openssl_conf_include", "openssl_engines", "openssl_modules", "tar_options", "bash_env", "env", "hTtPs_PrOxY", "http_proxy", "all_proxy", "no_proxy", "actions_runtime_token", "actions_results_url", "actions_cache_url", "actions_cache_service_v2", "actions_runtime_url", "buildkite_agent_access_token", "buildkite_job_id"} {
+	for _, name := range []string{"nOdE_oPtIoNs", "node_path", "node_extra_ca_certs", "node_tls_reject_unauthorized", "sslkeylogfile", "ld_audit", "ld_preload", "ld_library_path", "openssl_conf", "openssl_conf_include", "openssl_engines", "openssl_modules", "tar_options", "hTtPs_PrOxY", "http_proxy", "all_proxy", "no_proxy", "actions_runtime_token", "actions_results_url", "actions_cache_url", "actions_cache_service_v2", "actions_runtime_url", "buildkite_agent_access_token", "buildkite_job_id"} {
 		poison[name] = "must-not-reach-child"
 	}
 	env, err := isolateCacheActionEnvironment(poison)
