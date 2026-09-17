@@ -378,7 +378,7 @@ jobs:
 		t.Fatalf("uploaded plans by job = %v, want the static jobs only", plans)
 	}
 	pipeline := string(runner.commands[len(runner.commands)-1].stdin)
-	for _, want := range []string{defaultNobleRunnerImage, `group: ":github: workflow · .github/workflows/build.yml"`, `label: ":github: matrix · build / build"`, `key: "gha-5c3fa597431eda03-build-build-matrix"`, "continue --continuation-digest 'sha256:"} {
+	for _, want := range []string{defaultNobleRunnerImage, `group: ":github: workflow · .github/workflows/build.yml"`, `label: ":github: matrix · build / build"`, `key: "gha-5c3fa597431eda03-build-build-matrix"`, "upload --stage-digest 'sha256:"} {
 		if !strings.Contains(pipeline, want) {
 			t.Fatalf("pipeline missing %q:\n%s", want, pipeline)
 		}

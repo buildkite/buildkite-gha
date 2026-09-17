@@ -977,6 +977,35 @@ otherwise independent matrices. Prerequisites outside the downstream sets stay
 in the initial upload. The owner waits for all its matrix producers before
 expanding any branch.
 
+Deferred matrices can chain. When a matrix reads its rows from a job that is
+itself deferred, the component expands in stages:
+
+```yaml
+package:
+  needs: build            # build is the deferred matrix above
+  runs-on: ubuntu-latest
+  outputs:
+    targets: ${{ steps.targets.outputs.targets }}
+deploy:
+  needs: package
+  runs-on: ${{ matrix.runner }}
+  strategy:
+    matrix:
+      include: ${{ fromJSON(needs.package.outputs.targets) }}
+release:
+  needs: [publish, deploy]
+  runs-on: ubuntu-latest
+```
+
+The initial upload still creates one deferred step for the component,
+`:github: matrix · build`, which owns `build`, `package`, `publish`, `deploy`,
+and `release`. After `plan` runs, that step expands `build`, uploads `package`
+and `publish`, and adds the next stage's step, `:github: matrix · deploy`,
+which waits for `package` and uploads `deploy` and `release`. Each stage
+recompiles the workflow with the rows the stages before it resolved and
+uploads only the jobs whose rows now exist, to any depth. `W_MATRIX_DEFERRED`
+names the matrices that later stages expand.
+
 The expanded jobs are identical to the jobs a literal matrix with the same rows
 produces: same step keys, labels, checks, `needs`, and outputs. Row values
 reach `runs-on`, `name`, `if`, `env`, and steps exactly as static matrix values
@@ -999,25 +1028,27 @@ Limits and rejected shapes:
   1,024-job limits.
 - The deferred uploads of a workflow share the jobs the 1,024-job limit leaves
   after the jobs uploaded up front, in equal parts: with 4 static jobs and 2
-  independent deferred components, each deferred step may upload at most 510
+  independent deferred components, each component may upload at most 510
   jobs, counting every root's rows and each downstream instance once. The share
   is recorded at upload time, so the deferred steps together cannot grow the
-  build past the limit whatever the producers publish. A producer output that
-  needs more than the share fails the deferred step before it uploads
-  anything, and a share too small for the jobs a deferred step already
+  build past the limit whatever the producers publish. In a chained component
+  each stage passes the share it did not use to the next stage. A producer
+  output that needs more than the share fails the deferred step before it
+  uploads anything, and a share too small for the jobs a deferred step already
   promises fails the workflow with `E_MATRIX_INVALID` at upload time.
 - An output that is missing, not JSON, the wrong shape, has zero rows, exceeds a
   limit, or names a runner that fails compilation or admission fails the
   deferred step, and the dependent jobs never run. The step prints the
   compile diagnostics.
-- A deferred matrix cannot need another deferred job. A called workflow with
-  workflow-level `concurrency` can neither hold a needs-derived matrix nor need
-  a deferred job. A workflow with its own workflow-level `concurrency` cannot
+- A called workflow with workflow-level `concurrency` can neither hold a
+  needs-derived matrix nor need a deferred job. A workflow with its own
+  workflow-level `concurrency` cannot
   hold a needs-derived matrix: the group is released when the jobs of the
   initial upload finish, before the jobs a deferred step adds. These fail the
   workflow with `E_MATRIX_INVALID` at upload time.
-- The step keys of the deferred step, of the consumer's placeholder, of every
-  statically known instance of a deferred dependent, and of the approval gate
+- The step keys of the deferred step of every stage, of each consumer's
+  placeholder, of every statically known instance of a deferred dependent, and
+  of the approval gate
   of every environment a deferred job declares are reserved at upload time. A
   key that collides with another job's key or gate, such as a static or
   deferred job `build-matrix` next to a needs-derived matrix `build`, a
@@ -1044,32 +1075,37 @@ Limits and rejected shapes:
   shared by every deferred step, so many needs-derived matrices do not multiply
   the artifact size.
 - When a producer fails, is skipped, or is cancelled, the deferred step uploads
-  skipped placeholders for the deferred jobs: one for the consumer, and one per
-  statically known matrix instance of each dependent, under the keys and check
-  names a static expansion would use. Dependents with `if: always()` are
-  skipped as well; this subset does not run descendants of an unknown matrix.
-  In a merged component, only that root's downstream jobs are skipped; healthy
-  branches still expand, and a shared join is skipped once. Missing or invalid
+  skipped placeholders for the deferred jobs: one for the consumer, one for
+  each matrix a later stage would have expanded, and one per statically known
+  matrix instance of each dependent, under the keys and check names a static
+  expansion would use. Dependents with `if: always()` are skipped as well;
+  this subset does not run descendants of an unknown matrix. In a merged
+  component, only that root's downstream jobs are skipped; healthy branches
+  still expand, and a shared join is skipped once. In a chained component, a
+  producer that does not succeed skips only the jobs from its stage on; the
+  jobs earlier stages uploaded stay as they are. Missing or invalid
   result manifests fail the deferred step without uploading jobs, even when
   another producer did not succeed. They are never treated as skips.
 - The deferred step recompiles the workflow from the checkout at the build
-  commit with the event, variables, runner mappings, and OIDC settings the
-  importer recorded, and requires the result to reproduce the jobs the
-  importer uploaded, to leave the workflow's other deferred matrices exactly
-  as recorded, and to compile every deferred job from the workflow source the
-  importer recorded for it: the same file content and, for a reusable
+  commit with the event, variables, runner mappings, OIDC settings, and rows
+  of earlier stages the importer or the step before it recorded, and requires
+  the result to reproduce the jobs the earlier uploads created, to leave the
+  workflow's other deferred matrices exactly as recorded, to defer the next
+  stage exactly as the initial upload promised, and to compile every deferred
+  job from the workflow source the importer recorded for it: the same file
+  content and, for a reusable
   workflow from another repository, the same commit. Any difference, such as a
   reusable-workflow tag that now resolves to another commit, fails the step
   with instructions to retry the whole build.
 - The initial upload resolves the actions the deferred jobs use, so an action
   that cannot be resolved fails the workflow before anything runs, and records
-  each resolved commit and source digest in the continuation. The deferred
+  each resolved commit and source digest in the stage record. The deferred
   jobs use those revisions: a public action tag that moves between the initial
   upload and the deferred step does not change them, and a local action whose
   files changed in the checkout fails the step.
 - Repository and organization variables are resolved once, at upload time, when
   any job of the workflow reads `vars` in the workflow file or in an action it
-  uses, deferred jobs included. The scopes are recorded in the continuation,
+  uses, deferred jobs included. The scopes are recorded in the stage record,
   so a deferred job whose action defaults an input to `${{ vars.REGION }}`
   sees the same value a static job would, and the deferred step never
   requests variables itself.

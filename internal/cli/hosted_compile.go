@@ -19,10 +19,10 @@ import (
 // admitted workflow, the runtimes the upload acquires, and the compiled
 // pipeline cannot disagree about policy.
 //
-// A request always compiles the whole workflow. A later compilation stage
-// that continues an earlier upload builds the same request from the inputs
-// the importer recorded and uploads only the jobs it is allowed to add;
-// compiledJobs gives it the identities the earlier upload must reproduce.
+// A request always compiles the whole workflow. A later stage of an upload
+// builds the same request from the inputs the importer recorded and uploads
+// only the jobs it is allowed to add; compiledJobs gives it the identities
+// the earlier stages must reproduce.
 type hostedCompileRequest struct {
 	WorkflowPath   string
 	WorkflowSource []byte
@@ -63,10 +63,10 @@ type hostedCompileRequest struct {
 	ActionAuthentication *actionSourceAuthentication
 
 	// RuntimeMatrixRows supplies, per consumer job, the verified rows of a
-	// matrix whose values come from a job output. An initial compilation
-	// leaves it empty and defers those jobs to a continuation; the
-	// continuation compiles the same request with the rows the producer
-	// published. RuntimeMatrixActionLocks pins the actions of the deferred
+	// matrix whose values come from a job output. The importer's compilation
+	// leaves it empty and defers those jobs to a later stage, which compiles
+	// the same request with the rows the producer published.
+	// RuntimeMatrixActionLocks pins the actions of the deferred
 	// jobs to the revisions the initial compilation resolved.
 	RuntimeMatrixRows        map[string][]map[string]any
 	RuntimeMatrixSkipped     map[string]bool
@@ -185,9 +185,9 @@ func compileHostedRequest(ctx context.Context, request hostedCompileRequest) (ho
 // pipeline uses, the logical job it expands, the step keys it depends on,
 // and the digest of its plan. Two compilations of the same request agree on
 // every field; a compilation with different variables agrees on everything
-// but the plan digest. The continuation artifact records the initial
-// upload's instances in this form so the deferred upload can prove that its
-// recompilation reproduced them.
+// but the plan digest. The stage record holds the earlier stages' instances
+// in this form so a later stage can prove that its recompilation reproduced
+// them.
 type compiledJob struct {
 	Key        string   `json:"key"`
 	LogicalJob string   `json:"job"`
