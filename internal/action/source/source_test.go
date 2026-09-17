@@ -583,6 +583,45 @@ func TestDigestTreeExcludesGitMetadata(t *testing.T) {
 	}
 }
 
+func TestDigestTreeExecutablePathProvenanceRestoresLostModes(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, contents string, mode os.FileMode) {
+		t.Helper()
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, []byte(contents), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("action.yml", "runs: {}", 0o644)
+	write("runner.js", "console.log('ok')", 0o755)
+	want, paths, err := DigestTreeAndExecutablePaths(root)
+	if err != nil || !slices.Equal(paths, []string{"runner.js"}) {
+		t.Fatalf("DigestTreeAndExecutablePaths() = %q, %v, %v", want, paths, err)
+	}
+	if err := os.Chmod(filepath.Join(root, "runner.js"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DigestTreeWithExecutablePaths(root, paths); err != nil || got != want {
+		t.Fatalf("digest with provenance = %q, %v; want %q", got, err, want)
+	}
+	if got, err := DigestTreeWithExecutablePaths(root, nil); err != nil || got == want {
+		t.Fatalf("digest without provenance = %q, %v; want mismatch", got, err)
+	}
+	if _, err := DigestTreeWithExecutablePaths(root, []string{"missing"}); err == nil {
+		t.Fatal("missing executable path was accepted")
+	}
+	write("extra", "extra", 0o644)
+	if got, err := DigestTreeWithExecutablePaths(root, paths); err != nil || got == want {
+		t.Fatalf("digest with extra file = %q, %v; want mismatch", got, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "runner.js"), []byte("tampered"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DigestTreeWithExecutablePaths(root, paths); err != nil || got == want {
+		t.Fatalf("digest with changed content = %q, %v; want mismatch", got, err)
+	}
+}
+
 func tarBytes(t *testing.T, entries []tar.Header) []byte {
 	t.Helper()
 	var b bytes.Buffer

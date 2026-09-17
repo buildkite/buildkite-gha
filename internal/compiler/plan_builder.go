@@ -149,9 +149,6 @@ func reducePlanEventExpressions(ir IR) (IR, error) {
 }
 
 func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest string) (plan.Job, PlanAuthorization, []byte, error) {
-	if runtimeDistributionDigest == "" {
-		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
-	}
 	workflowProgram := lowerWorkflowProgram(instance)
 	actions, err := b.buildActions(instance, &workflowProgram)
 	if err != nil {
@@ -182,8 +179,13 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 	}
 	sort.Strings(actions.capabilities)
 	actions.capabilities = slices.Compact(actions.capabilities)
-	if instance.Platform == PlatformDarwinARM64 && slices.Contains(actions.capabilities, "docker") {
-		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on darwin/arm64", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
+	if instance.Platform != PlatformLinuxAMD64 && slices.Contains(actions.capabilities, "docker") {
+		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on %s", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, instance.Platform)
+	}
+	// Runtime discovery omits failed jobs. Preserve their compatibility error
+	// when upload recompiles without acquiring a runtime for those jobs.
+	if runtimeDistributionDigest == "" {
+		return plan.Job{}, PlanAuthorization{}, nil, fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
 	}
 	job := b.lowerPlanJob(instance, workflowProgram, runtimeDistributionDigest, actions, needSources, buildPlanNeedOutputs(instance), deferredInputs, callGuards, secrets, secretMappings, githubToken)
 	if err := job.ProjectProgram(); err != nil {

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -102,7 +103,11 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandOutputProcess
 	if err != nil {
 		return result, fmt.Errorf("%s discover Git: %w", adapter, err)
 	}
-	if lfs && (!filepath.IsAbs(git) || filepath.Base(git) != "git") {
+	canonicalGitName := filepath.Base(git) == "git"
+	if runtime.GOOS == "windows" {
+		canonicalGitName = strings.EqualFold(filepath.Base(git), "git.exe")
+	}
+	if lfs && (!filepath.IsAbs(git) || !canonicalGitName) {
 		return result, fmt.Errorf("checkout adapter requires Git LFS to use a canonical Git executable named git")
 	}
 	env := map[string]string{

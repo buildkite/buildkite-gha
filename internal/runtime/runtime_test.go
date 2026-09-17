@@ -294,7 +294,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     env:
-      DEFAULT_SHELL: pwsh
+      DEFAULT_SHELL: cmd
     steps:
       - shell: ${{ env.DEFAULT_SHELL }}
         run: Write-Output test
@@ -326,8 +326,8 @@ jobs:
 		t.Fatalf("ClassifyFailure() = %q, want %q", got, FailureClassUnsupportedFeature)
 	}
 	for _, want := range []string{
-		`shell "pwsh" is unsupported`,
-		"Use bash, sh, python, or a valid custom shell template whose command is available on PATH",
+		`shell "cmd" is unsupported`,
+		"Use bash, sh, pwsh, powershell, python, or a valid custom shell template whose command is available on PATH",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("RunJob() error = %v, want %q", err, want)

@@ -2,12 +2,16 @@ package cli
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -28,6 +32,126 @@ func TestImporterPlatform(t *testing.T) {
 	}
 	if _, err := importerPlatform("linux", "arm64"); err == nil || !strings.Contains(err.Error(), "linux/amd64 or darwin/arm64") {
 		t.Fatalf("unsupported importer error = %v", err)
+	}
+}
+
+func TestWindowsRuntimeDistributionValidatesPEAndNeedsNoUnixExecuteBit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "buildkite-gha.exe")
+	command := exec.Command("go", "build", "-o", path, "../../cmd/buildkite-gha")
+	command.Env = append(os.Environ(), "GOOS=windows", "GOARCH=amd64", "CGO_ENABLED=0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("cross-build Windows runtime: %v\n%s", err, output)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	distributions, err := loadRuntimeDistributions(map[compiler.Platform]string{compiler.PlatformWindowsAMD64: path})
+	if err != nil || len(distributions) != 1 {
+		t.Fatalf("load Windows distribution = %#v, %v", distributions, err)
+	}
+	t.Run("mixed upload", func(t *testing.T) {
+		requireImporterHost(t)
+		workflow := filepath.Join(t.TempDir(), "mixed.yml")
+		if err := os.WriteFile(workflow, []byte(`on: push
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps: [{run: echo linux}]
+  windows:
+    needs: linux
+    runs-on: windows-2022
+    steps: [{run: Write-Output windows}]
+`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BUILDKITE", "true")
+		t.Setenv("BUILDKITE_STEP_KEY", "mixed-importer")
+		runner := &cliCaptureRunner{}
+		var stdout, stderr bytes.Buffer
+		args := []string{"upload", "--event-path", "../../testdata/smoke/events/push.json",
+			"--runner-queue", "ubuntu-latest=linux", "--runner-queue", "windows-2022=windows",
+			"--runtime-distribution", "windows/amd64=" + path, workflow}
+		if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
+			t.Fatalf("upload = %d: %s", code, stderr.String())
+		}
+		plans := map[string]string{}
+		for artifactPath, content := range runner.uploaded {
+			if strings.HasPrefix(artifactPath, ".buildkite-gha/plans/") {
+				job, err := plan.Decode(content)
+				if err != nil {
+					t.Fatal(err)
+				}
+				plans[job.Workflow.LogicalJobID] = job.RuntimeDistributionDigest()
+			}
+		}
+		windowsDigest := distributions[compiler.PlatformWindowsAMD64].digest
+		if len(plans) != 2 || plans["linux"] != cliTestRuntimeDigest() || plans["windows"] != windowsDigest {
+			t.Fatalf("plan runtime bindings = %#v", plans)
+		}
+		artifactPath, err := buildkitepipeline.DistributionPath(windowsDigest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if transport.Digest(runner.uploaded[artifactPath]) != windowsDigest {
+			t.Fatal("Windows executable was not uploaded intact")
+		}
+	})
+	t.Run("deferred Windows jobs", func(t *testing.T) {
+		initial := runContinueInitialUpload(t, "--runner-queue", "windows-2022=windows", "--runtime-distribution", "windows/amd64="+path)
+		windowsDigest := distributions[compiler.PlatformWindowsAMD64].digest
+		if initial.artifact.Runtimes["windows/amd64"] != windowsDigest {
+			t.Fatalf("deferred runtimes = %#v, want Windows distribution %s", initial.artifact.Runtimes, windowsDigest)
+		}
+		runner := initial.continueRunner(initial.producerManifest(t, "success", `[{"target":"windows","runner":"windows-2022"}]`))
+		code, _, stderr := runContinue(t, runner, initial.digest)
+		if code != 0 {
+			t.Fatalf("continue = %d: %s", code, stderr)
+		}
+		jobs := uploadedPlans(t, runner)["build"]
+		if len(jobs) != 1 || jobs[0].Target.Queue != "windows" || jobs[0].RuntimeDistributionDigest() != windowsDigest {
+			t.Fatalf("deferred Windows plans = %#v", jobs)
+		}
+		_, _, steps := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
+		if len(steps) != 2 || !strings.HasPrefix(steps[0].Command, "pwsh -NoLogo -NoProfile -NonInteractive") {
+			t.Fatalf("deferred Windows pipeline = %s", lastPipelineUpload(t, runner))
+		}
+		for _, missingWindows := range []bool{false, true} {
+			replay := initial.continueRunner(initial.producerManifest(t, "success", `[{"target":"windows","runner":"windows-2022"}]`))
+			replay.pipelineUploadErr = errors.New("pipeline upload: duplicate step key")
+			replay.stepAttributes = make(map[string]map[string]string, len(steps))
+			for _, step := range steps {
+				replay.stepAttributes[step.Key] = map[string]string{"command": step.Command}
+			}
+			if missingWindows {
+				delete(replay.stepAttributes, steps[0].Key)
+			}
+			code, stdout, stderr := runContinue(t, replay, initial.digest)
+			if missingWindows {
+				if code != 1 || !strings.Contains(stderr, continueRetryGuidance) {
+					t.Fatalf("missing Windows step replay = %d: %s", code, stderr)
+				}
+			} else if code != 0 || !strings.Contains(stdout, "were already uploaded by an earlier run") {
+				t.Fatalf("Windows replay = %d: %s\n%s", code, stdout, stderr)
+			}
+		}
+	})
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents[0] = 0
+	if err := validateRuntimeDistributionBinary(compiler.PlatformWindowsAMD64, contents); err == nil || !strings.Contains(err.Error(), "PE") {
+		t.Fatalf("malformed PE error = %v", err)
+	}
+	contents, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peOffset := binary.LittleEndian.Uint32(contents[0x3c:0x40])
+	characteristics := contents[peOffset+4+18 : peOffset+4+20]
+	binary.LittleEndian.PutUint16(characteristics, binary.LittleEndian.Uint16(characteristics)|0x2000)
+	if err := validateRuntimeDistributionBinary(compiler.PlatformWindowsAMD64, contents); err == nil || !strings.Contains(err.Error(), "not a DLL") {
+		t.Fatalf("DLL error = %v", err)
 	}
 }
 

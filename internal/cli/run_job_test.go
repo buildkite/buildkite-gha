@@ -788,8 +788,8 @@ func TestRunJobTelemetryClassifiesExecutionFailure(t *testing.T) {
 
 func TestRunJobTelemetryClassifiesUnsupportedShell(t *testing.T) {
 	job := cliRunJobPlan()
-	job.Program.Job.Steps[0].Run.Shell.Source = "pwsh"
-	job.Program.Job.Steps[0].Run.Command.Source = "Get-Location"
+	job.Program.Job.Steps[0].Run.Shell.Source = "cmd"
+	job.Program.Job.Steps[0].Run.Command.Source = "echo test"
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
 	events := captureCommandTelemetry(t)
@@ -804,7 +804,7 @@ func TestRunJobTelemetryClassifiesUnsupportedShell(t *testing.T) {
 	if event.Blocker != "shell" || event.BlockerDetail != "" {
 		t.Fatalf("telemetry blocker = %q / %q", event.Blocker, event.BlockerDetail)
 	}
-	if !strings.Contains(event.ErrorMessage, `shell "pwsh" is unsupported`) {
+	if !strings.Contains(event.ErrorMessage, `shell "cmd" is unsupported`) {
 		t.Fatalf("telemetry error message = %q", event.ErrorMessage)
 	}
 }
