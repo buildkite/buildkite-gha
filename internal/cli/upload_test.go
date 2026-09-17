@@ -401,6 +401,13 @@ func TestRunUploadPublishesMixedRuntimeDistributions(t *testing.T) {
 	darwinDigest := transport.Digest(darwinContents)
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "mixed-importer")
+	server, _ := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+		"ubuntu-latest": {"validated": true, "target": map[string]string{"queue": "linux", "platform": "linux/amd64"}},
+		"macos-15":      {"validated": true, "target": map[string]string{"queue": "macos", "platform": "darwin/arm64"}},
+	})
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	args := []string{
@@ -2777,6 +2784,12 @@ func TestRunUploadUsesExplicitTargetQueueAndRunnerUserDefault(t *testing.T) {
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "explicit-queue-importer")
+	server, _ := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+		"ubuntu-latest": {"validated": true, "target": map[string]string{"queue": "hosted", "platform": "linux/amd64"}},
+	})
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"upload", "--event-path", eventPath, "--runner-queue", "ubuntu-latest=hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
@@ -2894,6 +2907,12 @@ func TestRunUploadUsesExplicitRuntimeImage(t *testing.T) {
 	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "runtime-image-importer")
+	server, _ := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+		"ubuntu-latest": {"validated": true, "target": map[string]string{"queue": "hosted", "platform": "linux/amd64"}},
+	})
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"upload", "--event-path", eventPath, "--runner-queue", "ubuntu-latest=hosted", "--runner-image", "ubuntu-latest=" + image, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {

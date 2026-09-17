@@ -734,9 +734,14 @@ Noble or Jammy hosted-toolchains image; an explicit immutable image overrides
 it for a configured profile. Linux labels use default Buildkite agent targeting
 with that image when unmapped.
 
-An explicit mapping is authoritative and bypasses Agent API resolution. It
+An explicit mapping overrides automatic runner selection. It
 declares that the selector runs on Linux x86-64, except for the known macOS
-labels, which select Darwin arm64 and reject images. For every other selector,
+labels, which select Darwin arm64 and reject images. During import, the
+job-scoped Agent API checks that the configured queue exists in the job's
+cluster and that a hosted queue matches the declared OS and architecture.
+Self-hosted queues are checked for existence only; their operators remain
+responsible for the agents' platform. Successful validation preserves the
+configured queue, image, and cache. For every other selector,
 the job-scoped Agent API owns compatibility and returns the complete queue,
 platform, and immutable Linux image. The importer applies that target verbatim
 and publishes returned fallback warnings as annotations.
@@ -751,19 +756,24 @@ queue fails before pipeline upload with the cluster and queue named:
 | `missing_queue` | The labels are compatible, but the job's cluster has none of the hosted queues they need. Create the named queue or configure an explicit runner mapping. |
 | `incompatible_labels` | The labels require an operating system or architecture hosted agents do not provide. |
 | `no_cluster` | The job is not in a cluster, so no hosted queue can be selected. |
+| `queue_not_found` | The explicitly configured queue is not active in the job's cluster. Correct the mapping or create the queue. |
+| `queue_platform_mismatch` | The configured hosted queue has a different OS or architecture. Map the label to a compatible queue. |
 
 Windows labels keep the local Windows guidance. Unknown rejection codes render
-the server message with generic mapping guidance. Explicit mappings are not
-checked against the cluster yet.
+the server message with generic mapping guidance.
 
-If the Agent API cannot be reached, the importer warns on stderr, adds a
-warning annotation, and falls back to the built-in presets.
+Imports using explicit mappings require job-scoped Agent API credentials and
+a server that acknowledges configured-target validation. If validation is
+unavailable, the import stops before uploading jobs rather than trusting an
+unchecked mapping. Imports without explicit mappings still warn and fall back
+to built-in presets when the Agent API cannot be reached.
 
 Explicit mappings can also attach one [Buildkite Hosted cache
 volume](cli.md#configure-generated-job-cache-volumes) to generated jobs. This
 configuration is outside the GitHub workflow and does not change workflow
 syntax or action inputs.
 
+Offline `validate` and `compile` do not check queues against the cluster.
 `validate --profile hosted` has no job-scoped API and admits only the local
 `macos-latest` preset.
 
