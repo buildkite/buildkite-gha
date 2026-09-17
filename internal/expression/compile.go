@@ -15,12 +15,15 @@ import (
 // a workflow graph. Values are snapshots supplied by the compiler; evaluation
 // never reads the process environment or a secret provider.
 type CompileContext struct {
-	GitHub   map[string]any
-	Event    map[string]any
-	Vars     map[string]string
-	Inputs   map[string]any
-	Matrix   map[string]any
-	Strategy map[string]any
+	GitHub map[string]any
+	Event  map[string]any
+	Vars   map[string]string
+	Inputs map[string]any
+	// InputsComplete distinguishes absent properties from inputs that have
+	// not been resolved yet, such as reusable inputs supplied by job outputs.
+	InputsComplete bool
+	Matrix         map[string]any
+	Strategy       map[string]any
 }
 
 // evaluateCompile evaluates one complete graph-time expression. The supported
@@ -507,6 +510,7 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 		return nil, compileRuntimeDependencyError{fmt.Errorf("unsupported compile-time context %q", root)}
 	}
 	legalMissing := strings.EqualFold(root, "event") || strings.EqualFold(root, "vars") || strings.EqualFold(root, "matrix") ||
+		strings.EqualFold(root, "inputs") && context.InputsComplete ||
 		strings.EqualFold(root, "github") && len(path) != 0 && strings.EqualFold(path[0], "event")
 	missing := false
 	for _, part := range path {

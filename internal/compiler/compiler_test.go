@@ -1886,7 +1886,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "${{ inputs.tags }}" "${{ inputs.flavor }}" ${{ inputs.push }}
+      - run: echo "${{ inputs.tags }}" "${{ inputs.flavor || github.event.ref }}" ${{ inputs.push }}
 `)
 
 	plans, err := compilePlansForTest(t.Context(), callerPath, readFile(t, callerPath), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
@@ -1931,8 +1931,8 @@ jobs:
 		t.Fatalf("build dependencies = %#v, needs outputs = %#v", build.Dependencies, build.NeedOutputs)
 	}
 	step := build.ExecutionJob().Steps[0]
-	if step.Run.Command.Source != `echo "${{ inputs.tags }}" "${{ inputs.flavor }}" true` {
-		t.Fatalf("callee step = %#v", step)
+	if step.Run.Command.Source != `echo "${{ inputs.tags }}" "${{ (inputs.flavor || 'refs/heads/main') }}" true` {
+		t.Fatalf("callee command = %q", step.Run.Command.Source)
 	}
 }
 
@@ -4890,7 +4890,7 @@ jobs:
         image: postgres:${{ matrix.postgres }}
         credentials:
           username: ${{ vars.REGISTRY_USER }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
+          password: ${{ 'public' || secrets.REGISTRY_PASSWORD }}
         env: {INSTANCE: '${{ strategy.job-index }}'}
         ports: ['${{ vars.SERVICE_PORT }}']
         volumes: ['database:/var/lib/postgresql/data']
@@ -4910,7 +4910,7 @@ jobs:
 	}
 	for i, image := range []string{"postgres:16", "postgres:17"} {
 		service := plans[i].Services["database"]
-		if service.Image != image || service.Credentials == nil || service.Credentials.Username != "${{ vars.REGISTRY_USER }}" || service.Credentials.Password != "${{ secrets.REGISTRY_PASSWORD }}" || service.Env["INSTANCE"] != strconv.Itoa(i) || !slices.Equal(service.Ports, []string{"5432"}) || len(service.Volumes) != 1 || service.Options == "" || service.Command == "" || service.Entrypoint == "" {
+		if service.Image != image || service.Credentials == nil || service.Credentials.Username != "${{ vars.REGISTRY_USER }}" || service.Credentials.Password != "${{ 'public' || secrets.REGISTRY_PASSWORD }}" || service.Env["INSTANCE"] != strconv.Itoa(i) || !slices.Equal(service.Ports, []string{"5432"}) || len(service.Volumes) != 1 || service.Options == "" || service.Command == "" || service.Entrypoint == "" {
 			t.Fatalf("compiled service %d = %#v", i, service)
 		}
 		if !slices.Equal(plans[i].ServiceOrder, []string{"database"}) {
@@ -4965,7 +4965,7 @@ func TestResolveCompileServicesRejectsUnsupportedCredentialContexts(t *testing.T
 		services := []workflow.Service{{Name: "database", Container: workflow.ServiceContainer{
 			Image: "postgres:16", Credentials: &workflow.ContainerCredentials{Username: value, Password: "literal"},
 		}}}
-		if _, err := resolveCompileServices(services, expression.CompileContext{}); err == nil || !strings.Contains(err.Error(), "credential expression context") {
+		if _, err := resolveCompileServices(services, expression.CompileContext{}); err == nil || !strings.Contains(err.Error(), "credentials: runtime context") {
 			t.Errorf("resolveCompileServices() credential %q error = %v", value, err)
 		}
 	}
@@ -5099,6 +5099,8 @@ jobs:
     services:
       cache:
         image: ${{ needs.producer.outputs.image }}
+      fallback:
+        image: ${{ needs.producer.outputs.image || 'redis:7' }}
     steps: [{run: true}]
 `)
 	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
@@ -5107,6 +5109,12 @@ jobs:
 	}
 	if got := plans[1].Services["cache"].Image; got != "${{ needs.producer.outputs.image }}" {
 		t.Fatalf("runtime service image = %q", got)
+	}
+	for input, want := range map[string]string{"": "redis:7", "valkey:8": "valkey:8"} {
+		got, err := expression.NewEngine().Evaluate(expression.Site{Source: plans[1].Services["fallback"].Image, Profile: expression.ProfileServiceTemplate, Result: expression.ResultString}, expression.Values{Runtime: expression.Context{Needs: map[string]expression.NeedStatus{"producer": {Outputs: map[string]string{"image": input}}}}})
+		if err != nil || got != want {
+			t.Fatalf("service fallback with input %q = %v, %v; want %q", input, got, err, want)
+		}
 	}
 }
 
@@ -5123,7 +5131,7 @@ jobs:
   consumer:
     needs: producer
     runs-on: ubuntu-latest
-    services: ${{ fromJSON(needs.producer.outputs.services) }}
+    services: ${{ fromJSON(needs.producer.outputs.services || '{}') }}
     steps: [{run: true}]
 `)
 	plans, err := compilePlansForTest(t.Context(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
@@ -5131,7 +5139,7 @@ jobs:
 		t.Fatal(err)
 	}
 	got := plans[1]
-	if got.ServicesExpression != "${{ fromJSON(needs.producer.outputs.services) }}" || !slices.Contains(got.RequiredCapabilities, "docker") {
+	if got.ServicesExpression != "${{ fromJSON(needs.producer.outputs.services || '{}') }}" || !slices.Contains(got.RequiredCapabilities, "docker") {
 		t.Fatalf("dynamic services plan = expression %q, capabilities %#v", got.ServicesExpression, got.RequiredCapabilities)
 	}
 }

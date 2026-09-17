@@ -237,6 +237,11 @@ non-dispatch event, declared dispatch inputs use their typed zero values rather
 than dispatch-only defaults. A skipped workflow does not synthesize dispatch
 inputs.
 
+Absent properties in a known input set are empty, so expressions such as
+`${{ inputs.name || 'default' }}` work in run names, job names, concurrency
+groups, and container images. Inputs waiting for job outputs remain unresolved
+until those outputs are available.
+
 GitHub also documents `vars` in its context-availability reference, but
 `run-name` has no `vars` source here and a reference is rejected. See
 [Repository and organization variables](#repository-and-organization-variables)
@@ -1100,9 +1105,9 @@ services:
 Services support `image`, `credentials`, `env`, `ports`, `volumes`, `options`, `command`, and `entrypoint`.
 
 - Job container images can use compile-time `github`, `inputs`, `strategy`, and `matrix` values. A null or exactly empty evaluated image runs the job on the host, including object-form containers, without applying container `env` or `ports`. For example, `container: ${{ matrix.target.container }}` selects host execution when the matrix entry omits `container`. Other results must be strings containing valid image references; whitespace-only results are invalid. Literal images must be non-empty. Secrets, `needs`, step outputs, and whole or dynamic contexts are unsupported.
-- Service fields can use compile-time `github`, `inputs`, `strategy`, and `matrix` values or runtime `needs` outputs. An empty evaluated image skips the service.
-- A complete non-credential service map can use `${{ fromJSON(needs.<job>.outputs.<name>) }}`. Declare credentials statically so the compiler can prove their secret authority.
-- Credentials accept direct values and `github`, `vars`, `secrets`, or `env` expressions. Passwords pass to `docker login` through standard input. Authentication uses a private per-job Docker configuration and never reads ambient Docker credentials.
+- Service fields can use compile-time `github`, `inputs`, `strategy`, and `matrix` values or runtime `needs` outputs, including fallback expressions such as `${{ needs.build.outputs.image || 'redis:7' }}`. An empty evaluated image skips the service.
+- A complete non-credential service map can use `${{ fromJSON(needs.build.outputs.services || '{}') }}`. The argument supports needs-output expressions and pure functions. Declare credentials statically so the compiler can prove their secret authority.
+- Credentials accept values and expressions using `github`, `vars`, `secrets`, or `env`, including `${{ vars.REGISTRY_USER || 'default-user' }}`. Ordinary secrets remain in the job's required inventory even in an unused fallback. Passwords pass to `docker login` through standard input. Authentication uses a private per-job Docker configuration and never reads ambient Docker credentials.
 - Docker options pass through except `--network` and its `--net` aliases, which GitHub Actions does not support. Options can grant privileges, mount host paths, publish ports, and change resource settings.
 - Named, anonymous, and absolute bind volumes are supported.
 - A job can define 32 services. Each service can define 256 environment entries and 128 ports or volumes.
@@ -1125,7 +1130,7 @@ macOS jobs reject containers, services, Docker actions, and Docker capability.
 | --- | --- | --- |
 | `name`, `id` | ✅ Supported | Use `id` to read outputs or target background work. IDs must be unique within a job. |
 | `if` | 🟡 Supported subset | May use step status, step outputs, `env`, and service ports in addition to job-condition contexts. |
-| `env` | 🟡 Supported subset | Values override job and workflow values and may use supported direct interpolation. |
+| `env` | 🟡 Supported subset | Values override job and workflow values and may use supported expressions, including fallbacks. |
 | `continue-on-error` | ✅ Supported | Accepts literal booleans or expressions that produce a Boolean. A failure records `outcome: failure` and `conclusion: success`, then the job continues. |
 | `timeout-minutes` | 🟡 Supported subset | Accepts literal numbers or expressions that produce a number greater than 0 and at most 360. |
 
@@ -1172,7 +1177,7 @@ Use an interpreter installed by an earlier step or included in the job image:
   run: conda info
 ```
 
-A `uses` step may call a supported local or public action. Action inputs under `with` may use supported direct interpolation. Direct workflow `uses: docker://...` actions are rejected; prebuilt-image declarations belong in locked action metadata.
+A `uses` step may call a supported local or public action. Action inputs under `with` may use supported expressions, including fallbacks. Direct workflow `uses: docker://...` actions are rejected; prebuilt-image declarations belong in locked action metadata.
 
 Local actions must exist in the event repository when the workflow is compiled. An earlier step cannot create a local action with `actions/checkout`, an artifact download, or a command. Use a public `owner/repository/path@ref` action instead.
 
@@ -1306,6 +1311,12 @@ function, context, or matrix type.
 Reusable-workflow call conditions use the same operators and status functions but only the caller contexts listed in [Reusable workflows](#reusable-workflows). The runtime evaluates their ordered guards before the called job's own condition.
 
 ### Runtime interpolation
+
+The `||` operator selects its right operand when the left is falsy: `false`,
+zero, an empty string, or null. It does not recover from evaluation or
+secret-retrieval errors, grant access to an unavailable context, or make a
+literal-only field accept expressions. Each field retains its context and
+result-type restrictions.
 
 These step fields support the operators and pure functions listed above:
 
@@ -1545,10 +1556,12 @@ remain literal. Omitted or empty args keep the image `CMD`; any non-empty array
 replaces `CMD` while preserving the image `ENTRYPOINT`. A prebuilt-image
 action's optional `runs.entrypoint` overrides the image `ENTRYPOINT`.
 
-Args may contain literals and direct `inputs.<name>` or `inputs['name']`
-interpolation. Operators, functions, whole or dynamic inputs, and every other
-context are rejected. Invocation inputs and metadata defaults resolve before
-args evaluation. The compiler stores args as action-authored sites in the
+Args may contain literals and expressions using action `inputs`, operators,
+and the supported pure functions, such as `${{ inputs.name || 'default' }}`.
+Other contexts, credentials, status functions, and `hashFiles()` are rejected,
+including in unreachable branches. Invocation inputs and metadata defaults
+resolve before args evaluation; substituted values remain literal arguments.
+The compiler stores args as action-authored sites in the
 normalized job program. Runtime verifies the locked action tree but does not
 reparse its metadata.
 

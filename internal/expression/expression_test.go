@@ -155,7 +155,7 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 	}
 }
 
-func TestDockerActionArgsUseOnlyDirectInputs(t *testing.T) {
+func TestDockerActionArgsUseOnlyInputs(t *testing.T) {
 	tests := []struct {
 		name     string
 		template string
@@ -165,12 +165,17 @@ func TestDockerActionArgsUseOnlyDirectInputs(t *testing.T) {
 		{name: "literal", template: " --flag=$value; ", want: " --flag=$value; "},
 		{name: "property", template: "prefix-${{ inputs.Name }}-suffix", want: "prefix-value-suffix"},
 		{name: "literal index", template: "${{ inputs['name'] }}", want: "value"},
-		{name: "whole inputs", template: "${{ inputs }}", invalid: true},
+		{name: "computed input", template: "${{ inputs[format('{0}', 'name')] }}", want: "value"},
 		{name: "dynamic input", template: "${{ inputs[env.name] }}", invalid: true},
 		{name: "nested input", template: "${{ inputs.name.value }}", invalid: true},
 		{name: "other context", template: "${{ secrets.token }}", invalid: true},
-		{name: "operator", template: "${{ inputs.name || 'fallback' }}", invalid: true},
-		{name: "function", template: "${{ format('{0}', inputs.name) }}", invalid: true},
+		{name: "provided", template: "${{ inputs.name || 'fallback' }}", want: "value"},
+		{name: "fallback", template: "${{ inputs.missing || 'fallback' }}", want: "fallback"},
+		{name: "function", template: "${{ format('--{0}', inputs.name) }}", want: "--value"},
+		{name: "lazy function", template: "${{ inputs.name || fromJSON('invalid') }}", want: "value"},
+		{name: "unreachable secret", template: "${{ 'safe' || secrets.token }}", invalid: true},
+		{name: "unreachable token", template: "${{ 'safe' || github.token }}", invalid: true},
+		{name: "unavailable function", template: "${{ 'safe' || hashFiles('**') }}", invalid: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -2071,12 +2076,12 @@ func TestEvaluateCompileTemplateUsesGitHubNumberRendering(t *testing.T) {
 }
 
 func TestValidateServiceCredentialTemplateContexts(t *testing.T) {
-	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}"} {
+	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER || 'user' }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}"} {
 		if err := ValidateServiceCredentialTemplate(template); err != nil {
 			t.Errorf("ValidateServiceCredentialTemplate(%q) = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ needs.build.outputs.user }}", "${{ env.USER.extra }}", "${{ secrets }}"} {
+	for _, template := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ needs.build.outputs.user }}", "${{ env.USER.extra }}", "${{ secrets }}", "${{ 'safe' || inputs.user }}", "${{ 'safe' || secrets[env.KEY] }}", "${{ 'safe' || toJSON(github) }}"} {
 		if err := ValidateServiceCredentialTemplate(template); err == nil {
 			t.Errorf("ValidateServiceCredentialTemplate(%q) succeeded", template)
 		}

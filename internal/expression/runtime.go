@@ -149,7 +149,7 @@ func evaluateRuntimeObject(source string, context Context) ([]ObjectEntry, error
 	if !ok || !strings.EqualFold(call.Callee, "fromJSON") || len(call.Args) != 1 {
 		return nil, fmt.Errorf("expression must call fromJSON with one argument")
 	}
-	value, err := evaluateDirectRuntimeNode(call.Args[0], context)
+	value, err := evaluateStepRuntimeExpression(call.Args[0], context, false, false, stepProfileContextMap(profiles[ProfileServiceMap]))
 	if err != nil {
 		return nil, err
 	}

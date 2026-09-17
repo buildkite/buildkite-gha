@@ -80,6 +80,27 @@ func TestCompiledBracketSecretResolvesAndMasks(t *testing.T) {
 	}
 }
 
+func TestServiceCredentialFallbackDoesNotBypassSecretRetrieval(t *testing.T) {
+	requireLinuxAMD64(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/service.yml"
+	source := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      database:\n        image: postgres:16\n        credentials:\n          username: user\n          password: ${{ 'public' || secrets.PASSWORD }}\n    steps: [{run: true}]\n"
+	writeFixtureFile(t, workspace, workflowPath, source)
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(source), event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &countingSecretResolver{calls: map[string]int{}}
+	_, err = (Runner{Secrets: resolver, Redactor: &testRedactor{}, Docker: newFakeDocker(t, "success").path}).runTestJob(t.Context(), plans[0], workspace)
+	if err == nil || !strings.Contains(err.Error(), "denied") || resolver.calls["PASSWORD"] != 1 {
+		t.Fatalf("secret retrieval error = %v, calls = %#v", err, resolver.calls)
+	}
+}
+
 func TestAgentSecretsUsesOnlyJobBoundConfiguration(t *testing.T) {
 	agent := filepath.Join(t.TempDir(), "buildkite-agent")
 	writeFixtureFile(t, filepath.Dir(agent), filepath.Base(agent), `#!/bin/sh

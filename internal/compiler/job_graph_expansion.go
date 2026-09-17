@@ -278,6 +278,7 @@ func (e *jobGraphExpansion) expandMatrices() {
 			}
 			matrixContext := e.context
 			matrixContext.Inputs = sourced.inputs.values
+			matrixContext.InputsComplete = len(sourced.inputs.deferred) == 0
 			matrixContext.Matrix = nil
 			matrixContext.Strategy = nil
 			matrices, err = expandMatrix(sourced.path, job, matrixContext)
@@ -546,6 +547,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 	concurrencyGroups := make(map[string]struct{}, len(matrices))
 	jobContext := e.context
 	jobContext.Inputs = sourced.inputs.values
+	jobContext.InputsComplete = len(sourced.inputs.deferred) == 0
 	for matrixIndex, matrix := range matrices {
 		strategy := matrixStrategy(job, matrixIndex, len(matrices))
 		instanceContext := jobContext

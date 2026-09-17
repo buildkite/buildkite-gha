@@ -205,6 +205,7 @@ func (b planBuilder) buildPlan(instance JobInstance, runtimeDistributionDigest s
 func (b planBuilder) validateShellCompatibility(instance JobInstance, workflowProgram program.Program) error {
 	context := compileContext(b.ir.Event, nil, instance.SourcePath, b.workflowName)
 	context.Inputs = instance.Inputs
+	context.InputsComplete = len(instance.DeferredInputs) == 0
 	context.Matrix = instance.Matrix
 	var diagnostics []error
 	validate := func(site program.Site, step int) {
@@ -250,6 +251,7 @@ func (b planBuilder) validateShellCompatibility(instance JobInstance, workflowPr
 func (b planBuilder) reducePlanInstanceEventExpressions(instance JobInstance) (JobInstance, error) {
 	context := compileContext(b.ir.Event, nil, instance.SourcePath, b.workflowName)
 	context.Inputs = instance.Inputs
+	context.InputsComplete = len(instance.DeferredInputs) == 0
 	context.Matrix = instance.Matrix
 	reduceTemplate := func(value string, profile expression.ProfileID) (string, error) {
 		if value == "" {
@@ -377,7 +379,7 @@ var compileReductionProfiles = map[program.Surface]expression.ProfileID{
 	program.SurfaceJobOutput:         expression.ProfileJobOutput,
 	program.SurfaceStepTemplate:      expression.ProfileStepTemplate,
 	program.SurfaceRuntimeTemplate:   expression.ProfileRuntimeTemplate,
-	program.SurfaceServiceTemplate:   expression.ProfileRuntimeTemplate,
+	program.SurfaceServiceTemplate:   expression.ProfileServiceTemplate,
 	program.SurfaceServiceCredential: expression.ProfileServiceCredential,
 	program.SurfaceServiceMap:        expression.ProfileStepTemplate,
 }

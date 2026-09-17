@@ -96,12 +96,12 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 		ProfileStepTemplate:          {"${{ case(true, format('{0}', inputs.name), 'unused') }}", ResultString, "value"},
 		ProfileStepControl:           {"${{ true }}", ResultBoolean, true},
 		ProfileRuntimeTemplate:       {"${{ env.NAME }}", ResultString, "value"},
-		ProfileServiceTemplate:       {"${{ needs.build.outputs.value }}", ResultString, `{"name":"value"}`},
+		ProfileServiceTemplate:       {"${{ needs.build.outputs.value || 'fallback' }}", ResultString, `{"name":"value"}`},
 		ProfileDeferredInput:         {"type=raw,value=${{ needs.build.outputs.value }}", ResultString, `type=raw,value={"name":"value"}`},
-		ProfileServiceCredential:     {"${{ env.NAME }}", ResultString, "value"},
-		ProfileServiceMap:            {"${{ fromJSON(needs.build.outputs.value) }}", ResultObject, []ObjectEntry{{Name: "name", Value: "value"}}},
+		ProfileServiceCredential:     {"${{ env.NAME || 'fallback' }}", ResultString, "value"},
+		ProfileServiceMap:            {"${{ fromJSON(needs.build.outputs.value || '{}') }}", ResultObject, []ObjectEntry{{Name: "name", Value: "value"}}},
 		ProfileActionInputDefault:    {"${{ case(true, inputs.name, 'unused') }}", ResultString, "value"},
-		ProfileDockerActionArg:       {"${{ inputs.name }}", ResultString, "value"},
+		ProfileDockerActionArg:       {"${{ format('{0}', inputs.name || 'fallback') }}", ResultString, "value"},
 	}
 	for _, id := range profileIDs() {
 		t.Run(string(id), func(t *testing.T) {
@@ -206,6 +206,29 @@ func errorText(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func TestCompileInputFallbackDistinguishesMissingAndDeferredValues(t *testing.T) {
+	site := Site{Source: "${{ inputs.name || 'fallback' }}", Profile: ProfileCompileTemplate, Result: ResultString}
+	for _, test := range []struct {
+		name    string
+		context CompileContext
+		want    string
+		known   bool
+	}{
+		{name: "absent", context: CompileContext{Inputs: map[string]any{}, InputsComplete: true}, want: "fallback", known: true},
+		{name: "present", context: CompileContext{Inputs: map[string]any{"name": "provided"}, InputsComplete: true}, want: "provided", known: true},
+		{name: "empty", context: CompileContext{Inputs: map[string]any{"name": ""}, InputsComplete: true}, want: "fallback", known: true},
+		{name: "unavailable", context: CompileContext{InputsComplete: true}},
+		{name: "deferred", context: CompileContext{Inputs: map[string]any{"other": "known"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := NewEngine().Reduce(site, Values{Compile: test.context})
+			if err != nil || got.Known != test.known || test.known && got.Value != test.want || !test.known && got.Source != site.Source {
+				t.Fatalf("Reduce() = %#v, %v; want known=%t value=%q", got, err, test.known, test.want)
+			}
+		})
+	}
 }
 
 func TestEngineProfileScopesAreDistinctAndAuthoritative(t *testing.T) {
@@ -546,6 +569,18 @@ func TestEngineAbstractEvaluationNarrowsMonotonicallyToConcrete(t *testing.T) {
 			values:     Values{Runtime: Context{Vars: map[string]string{"ENABLED": "yes"}, GitHub: map[string]any{"token": "ghs_scoped"}}},
 		},
 		{
+			name:       "service credential uses supplied value",
+			site:       Site{Source: "${{ env.PASSWORD || github.token }}", Profile: ProfileServiceCredential, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"env.password": "supplied"},
+			values:     Values{Runtime: Context{Env: map[string]string{"PASSWORD": "supplied"}}},
+		},
+		{
+			name:       "service credential falls back",
+			site:       Site{Source: "${{ env.PASSWORD || github.token }}", Profile: ProfileServiceCredential, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"env.password": "", "github.token": "ghs_scoped"},
+			values:     Values{Runtime: Context{Env: map[string]string{"PASSWORD": ""}, GitHub: map[string]any{"token": "ghs_scoped"}}},
+		},
+		{
 			name:       "known failure status",
 			site:       Site{Source: "failure() && needs.build.result == 'failure'", Profile: ProfileStepCondition, Result: ResultBoolean, Purpose: PurposeExpression},
 			references: map[string]any{"failure": true, "needs.build.result": "failure"},
@@ -697,15 +732,37 @@ func TestEngineCaseFunctionPolicyIsClosedByProfile(t *testing.T) {
 		ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileStepCondition,
 		ProfileCallCondition, ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault,
-		ProfileJobOutput, ProfileStepTemplate, ProfileStepControl, ProfileReusableStepControl, ProfileDeferredInput, ProfileActionInputDefault,
+		ProfileJobOutput, ProfileStepTemplate, ProfileStepControl, ProfileReusableStepControl, ProfileDeferredInput, ProfileActionInputDefault, ProfileDockerActionArg,
+		ProfileServiceTemplate, ProfileServiceMap, ProfileServiceCredential,
 	} {
 		if !containsFold(profiles[id].Functions, "case") {
 			t.Errorf("profile %q does not admit case", id)
 		}
 	}
-	for _, id := range []ProfileID{ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileServiceCredential, ProfileServiceMap, ProfileDockerActionArg} {
+	for _, id := range []ProfileID{ProfileRuntimeTemplate} {
 		if containsFold(profiles[id].Functions, "case") {
 			t.Errorf("profile %q unexpectedly admits case", id)
+		}
+	}
+}
+
+func TestEngineServiceFallbacksRejectUnavailableReferences(t *testing.T) {
+	for _, body := range []string{
+		"'safe' || needs.build.result",
+		"'safe' || secrets.TOKEN",
+		"'safe' || github.token",
+		"'safe' || needs.build.outputs[needs.build.outputs.key]",
+		"'safe' || hashFiles('**')",
+	} {
+		for _, profile := range []ProfileID{ProfileServiceTemplate, ProfileServiceMap} {
+			site := Site{Source: "${{ " + body + " }}", Profile: profile, Result: ResultString}
+			if profile == ProfileServiceMap {
+				site.Source = "${{ fromJSON(" + body + ") }}"
+				site.Result = ResultObject
+			}
+			if _, err := NewEngine().Validate(site); err == nil {
+				t.Errorf("%s accepted %s", profile, site.Source)
+			}
 		}
 	}
 }

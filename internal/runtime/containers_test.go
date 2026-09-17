@@ -1167,17 +1167,17 @@ func TestEvaluateServicesResolvesNeedsAndSkipsEmptyImages(t *testing.T) {
 	services := map[string]plan.ServiceContainer{
 		"database": {
 			Image:      "postgres:${{ needs.build.outputs.version }}",
-			Env:        map[string]string{"SOURCE": "${{ needs.build.outputs.source }}"},
-			Ports:      []string{"${{ needs.build.outputs.port }}"},
+			Env:        map[string]string{"SOURCE": "${{ needs.build.outputs.source || 'fallback' }}"},
+			Ports:      []string{"${{ needs.build.outputs.port || '5432' }}"},
 			Volumes:    []string{"data:${{ needs.build.outputs.target }}"},
 			Options:    "--label version=${{ needs.build.outputs.version }}",
 			Command:    "postgres -c ${{ needs.build.outputs.setting }}",
 			Entrypoint: "${{ needs.build.outputs.entrypoint }}",
 		},
-		"optional": {Image: "${{ needs.build.outputs.optional }}"},
+		"optional": {Image: "${{ needs.build.outputs.optional || '' }}"},
 	}
 	got, _, err := evaluateProgramServices(testProgramServices(services), expression.Context{Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{
-		"version": "16", "source": "runtime", "port": "5432", "target": "/data", "setting": "fsync=off", "entrypoint": "docker-entrypoint.sh", "optional": "",
+		"version": "16", "source": "runtime", "port": "", "target": "/data", "setting": "fsync=off", "entrypoint": "docker-entrypoint.sh", "optional": "",
 	}}}})
 	if err != nil {
 		t.Fatal(err)
@@ -1193,7 +1193,7 @@ func TestEvaluateServicesResolvesNeedsAndSkipsEmptyImages(t *testing.T) {
 
 func TestEvaluateServiceMapExpression(t *testing.T) {
 	eval := expression.Context{Needs: map[string]expression.NeedStatus{"build": {Outputs: map[string]string{"services": `{"database":{"image":"postgres:16","env":{"MODE":"test","RETRIES":3.0,"NEGATIVE_ZERO":-0,"ENABLED":true},"ports":[5.432e3],"volumes":[2],"options":1e20,"command":1e2,"entrypoint":false},"cache":"redis:7"}`}}}}
-	site := testProgramSite("${{ fromJSON(needs.build.outputs.services) }}", executionprogram.SurfaceServiceMap, executionprogram.ResultObject)
+	site := testProgramSite("${{ fromJSON(needs.build.outputs.services || '{}') }}", executionprogram.SurfaceServiceMap, executionprogram.ResultObject)
 	got, order, err := evaluateProgramServices(executionprogram.Services{Dynamic: &site}, eval)
 	if err != nil {
 		t.Fatal(err)
@@ -1201,6 +1201,11 @@ func TestEvaluateServiceMapExpression(t *testing.T) {
 	database := got["database"]
 	if len(got) != 2 || database.Image != "postgres:16" || database.Env["MODE"] != "test" || database.Env["RETRIES"] != "3" || database.Env["NEGATIVE_ZERO"] != "0" || database.Env["ENABLED"] != "true" || database.Ports[0] != "5432" || database.Volumes[0] != "2" || database.Options != "1E+20" || database.Command != "100" || database.Entrypoint != "false" || got["cache"].Image != "redis:7" || !slices.Equal(order, []string{"database", "cache"}) {
 		t.Fatalf("evaluated services = %#v, order = %#v", got, order)
+	}
+	eval.Needs["build"] = expression.NeedStatus{Outputs: map[string]string{}}
+	got, order, err = evaluateProgramServices(executionprogram.Services{Dynamic: &site}, eval)
+	if err != nil || len(got) != 0 || len(order) != 0 {
+		t.Fatalf("fallback services = %#v, order = %#v, error = %v", got, order, err)
 	}
 }
 
@@ -1247,7 +1252,7 @@ func TestEvaluateProgramServicesResolvesCredentialVarsWithEnvironment(t *testing
 		EnvironmentVars: map[string]string{"registry_user": "environment-user"},
 	}
 	services, _, err := evaluateProgramServices(testProgramServices(map[string]plan.ServiceContainer{
-		"private": {Image: "registry.example.test/team/app:1", Credentials: &plan.ContainerCredentials{Username: "${{ vars.REGISTRY_USER }}", Password: "${{ secrets.REGISTRY_PASSWORD }}"}},
+		"private": {Image: "registry.example.test/team/app:1", Credentials: &plan.ContainerCredentials{Username: "${{ vars.REGISTRY_USER || 'fallback-user' }}", Password: "${{ env.PASSWORD || secrets.REGISTRY_PASSWORD }}"}},
 	}), expression.Context{Vars: job.Vars(), Secrets: map[string]string{"REGISTRY_PASSWORD": "registry-password"}})
 	if err != nil {
 		t.Fatal(err)

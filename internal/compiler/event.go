@@ -282,8 +282,9 @@ func compileContext(event Event, vars map[string]string, workflowPath, workflowN
 			"actor":            event.Actor,
 			"workflow":         workflowName,
 		},
-		Event: event.Payload,
-		Vars:  vars,
+		Event:          event.Payload,
+		Vars:           vars,
+		InputsComplete: true,
 	}
 }
 
