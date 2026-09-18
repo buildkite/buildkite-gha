@@ -228,6 +228,13 @@ func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []str
 		return []byte(r.jobByStep[args[4]] + "\n"), nil
 	}
 	if len(args) >= 2 && args[0] == "artifact" && args[1] == "download" {
+		info, err := os.Stat(args[3])
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			return nil, errors.New("artifact destination is not a directory")
+		}
 		contents, ok := r.dataByPath[args[2]]
 		if !ok {
 			return nil, errors.New("missing fixture artifact")

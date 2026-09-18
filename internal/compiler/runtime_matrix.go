@@ -51,6 +51,10 @@ type RuntimeMatrixContinuation struct {
 	// Joined contains the other roots whose forward closures intersect this
 	// root's closure, directly or transitively. They share this upload owner.
 	Joined []RuntimeMatrixRoot `json:"joined,omitempty"`
+	// Scheduling means the consumer also reads producer outputs for scheduling.
+	// Its uploader must wait for the entire static graph before entering any
+	// newly resolved ordered concurrency queue; it never holds a group itself.
+	Scheduling bool `json:"scheduling,omitempty"`
 	// StepKey is the deterministic key of the deferred upload step.
 	StepKey string `json:"step_key"`
 	// ProducerStepKey is the generated step key of the producer's single

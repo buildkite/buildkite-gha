@@ -206,6 +206,15 @@ bk build create --pipeline buildkite/buildkite-gha \
 
 This suite covers shell jobs, concurrent steps, public and Docker actions, container runtime behavior, summaries, annotations, artifact upload, and artifact roundtrip. Use `COMPATIBILITY_PROOF=<target>` with `COMPATIBILITY_PROOF_COMMIT=<commit>` only when diagnosing one target. The available target names are in [`.buildkite/pipeline.yml`](../.buildkite/pipeline.yml).
 
+Use `COMPATIBILITY_PROOF=scheduling` to probe output-derived matrix concurrency
+and parallel limits. Check job start and finish times: the group consumers must
+not overlap, the parallel consumers must run at most two at a time, and each
+publish job must follow all its consumers. A hosted replay probe needs a failed
+deferred upload step: generated steps do not enable
+[`permit_on_passed`](https://buildkite.com/docs/pipelines/configure/retry#retry-attributes-manual-retry-attributes),
+so Buildkite rejects retries of passed steps. A successful initial run does not
+verify replay against the hosted scheduler's attributes.
+
 Some Buildkite APIs are advisory, so a passing job does not prove that the result was persisted. Check those results independently after the build:
 
 ```sh

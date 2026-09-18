@@ -695,10 +695,18 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		}
 		if in.Strategy.MaxParallel != nil {
 			if in.Strategy.MaxParallel.Expression != nil {
-				return Job{}, locatedError(path, in.Strategy.MaxParallel.Expression.Pos, in.ID.Value, "expression-valued matrix max-parallel is unsupported")
+				expr, err := adaptExpression(in.Strategy.MaxParallel.Expression)
+				if err != nil {
+					return Job{}, err
+				}
+				if _, err := expression.RuntimeMatrixOutput(expr); err != nil {
+					return Job{}, locatedError(path, in.Strategy.MaxParallel.Expression.Pos, in.ID.Value, "expression-valued matrix max-parallel is unsupported except fromJSON(needs.<job>.outputs.<name>) on a needs-derived matrix")
+				}
+				out.MaxParallelExpression = &expr
+			} else {
+				v := in.Strategy.MaxParallel.Value
+				out.MaxParallel = &v
 			}
-			v := in.Strategy.MaxParallel.Value
-			out.MaxParallel = &v
 		}
 		if in.Strategy.Matrix != nil {
 			matrix, err := adaptMatrix(path, in.ID.Value, in.Strategy.Matrix, scalars)

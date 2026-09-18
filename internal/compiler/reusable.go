@@ -433,6 +433,9 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		if err != nil {
 			return reusableResolution{}, err
 		}
+		if job.MaxParallelExpression != nil {
+			return reusableResolution{}, jobError(path, job, "needs-derived max-parallel on a reusable-workflow call is unsupported")
+		}
 		if job.MaxParallel != nil && len(matrices) > 1 {
 			return reusableResolution{}, jobError(path, job, "strategy.max-parallel on a reusable-workflow matrix cannot be preserved when the called jobs are flattened")
 		}
@@ -1315,6 +1318,9 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 	jobRuntimeValues = appendMapValues(jobRuntimeValues, job.Outputs)
 	if job.Concurrency != nil {
 		jobValues = append(jobValues, job.Concurrency.Group)
+	}
+	if job.MaxParallelExpression != nil {
+		jobValues = append(jobValues, job.MaxParallelExpression.Text)
 	}
 	jobValues = append(jobValues, job.RunsOn...)
 	for _, service := range job.Services {
