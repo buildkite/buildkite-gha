@@ -36,10 +36,10 @@ type IR struct {
 	RepositoryVars   map[string]string `json:"repository_vars,omitempty"`
 	Execution        ExecutionBoundary `json:"execution"`
 	Jobs             []JobInstance     `json:"jobs"`
-	// Continuations are the deferred uploads that expand needs-derived
-	// matrices after their producer jobs run. Their jobs are absent from Jobs
-	// until a continuation recompiles the workflow with RuntimeMatrixRows.
-	Continuations []RuntimeMatrixContinuation `json:"continuations,omitempty"`
+	// Continuations defer jobs whose matrix or environment name comes from a
+	// producer output. Their jobs are absent from Jobs until recompilation
+	// supplies RuntimeMatrixRows or RuntimeEnvironmentNames.
+	Continuations []JobContinuation `json:"continuations,omitempty"`
 	// RuntimeMatrixSkippedJobs is the forward closure of roots whose verified
 	// producers did not succeed. The continuation renders skipped placeholders.
 	RuntimeMatrixSkippedJobs map[string]bool `json:"runtime_matrix_skipped_jobs,omitempty"`
@@ -130,6 +130,7 @@ type JobInstance struct {
 	ConcurrencyGates          []WorkflowConcurrencyGate `json:"workflow_concurrency_gates,omitempty"`
 	Environment               string                    `json:"environment,omitempty"`
 	EnvironmentApproval       bool                      `json:"environment_approval,omitempty"`
+	DynamicEnvironment        bool                      `json:"dynamic_environment,omitempty"`
 	Steps                     []workflow.Step           `json:"steps"`
 	Env                       map[string]string         `json:"env,omitempty"`
 	Permissions               map[string]string         `json:"permissions,omitempty"`
@@ -197,10 +198,13 @@ type Report struct {
 	// repository and organization variables before compiling only when it is
 	// set, so workflows without vars references cost no resolution request.
 	ReferencesVars  bool
-	RuntimeMatrices []RuntimeMatrixDescriptor
-	// Continuations lists the deferred uploads that expand needs-derived
-	// matrices after their producer jobs run. Their jobs are not in Jobs.
-	Continuations         []RuntimeMatrixContinuation
+	RuntimeMatrices []JobOutputDescriptor
+	// LiteralEnvironments includes names in deferred jobs as well as static
+	// jobs. An upload records their union before any dynamic name resolves.
+	LiteralEnvironments []string
+	// Continuations lists uploads deferred until a producer's scheduling
+	// output is available. Their jobs are not in Jobs.
+	Continuations         []JobContinuation
 	ParsedJobs            []ParsedJob
 	NotEvaluatedJobs      map[string]bool
 	NotEvaluatedInstances map[string]bool
@@ -394,6 +398,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 	expanded, expandErr := expandJobGraph(ctx, path, source, parsed, context, options)
 	jobGraphComplete := expandErr == nil
 	if jobGraphComplete {
+		options.KnownEnvironmentNames = append(slices.Clone(options.KnownEnvironmentNames), expanded.literalEnvironments...)
 		expandErr = resolveJobEnvironments(ctx, expanded.instances, event, options)
 	}
 	digest := sha256.Sum256(source)

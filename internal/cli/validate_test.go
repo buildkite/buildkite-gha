@@ -71,8 +71,8 @@ func TestValidateReportsActionableWorkflowSyntaxDiagnostics(t *testing.T) {
 		{
 			name:     "GitHub environment expression name",
 			source:   "on: push\njobs:\n  deploy:\n    environment: ${{ github.ref_name }}\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
-			headline: `job "deploy": environment names that use expressions are unsupported; use a literal environment name`,
-			message:  `job "deploy": environment names that use expressions are unsupported; use a literal environment name`,
+			headline: `job "deploy": environment names that use expressions must be exactly ${{ needs.<job>.outputs.<name> }}`,
+			message:  `job "deploy": environment names that use expressions must be exactly ${{ needs.<job>.outputs.<name> }}`,
 			job:      "deploy",
 			column:   18,
 		},

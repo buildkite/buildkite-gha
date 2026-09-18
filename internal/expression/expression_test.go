@@ -72,6 +72,31 @@ func TestDirectSecretReferenceAcceptsOnlyOneStaticSecret(t *testing.T) {
 	}
 }
 
+func TestDirectNeedOutput(t *testing.T) {
+	for _, source := range []string{
+		"${{ needs.Plan-Env.outputs.Target_1 }}",
+		"${{ needs['Plan-Env']['outputs']['Target_1'] }}",
+	} {
+		got, err := DirectNeedOutput(source)
+		if err != nil || !strings.EqualFold(got.Job, "Plan-Env") || !strings.EqualFold(got.Output, "Target_1") {
+			t.Fatalf("DirectNeedOutput(%q) = %#v, %v", source, got, err)
+		}
+	}
+	for _, source := range []string{
+		"prefix-${{ needs.plan.outputs.environment }}",
+		"${{ needs.plan.outputs.environment }}${{ needs.plan.outputs.other }}",
+		"${{ needs.plan.outputs.environment || 'production' }}",
+		"${{ needs.plan.outputs[vars.KEY] }}",
+		"${{ fromJSON(needs.plan.outputs.environment) }}",
+		"${{ needs.plan.result }}",
+		"${{ github.token }}",
+	} {
+		if _, err := DirectNeedOutput(source); err == nil {
+			t.Fatalf("DirectNeedOutput(%q) succeeded", source)
+		}
+	}
+}
+
 func TestRuntimeMatrixOutputAcceptsOnlyExactDirectNeedOutput(t *testing.T) {
 	for _, source := range []string{
 		"${{ fromJSON(needs.build_django_matrix.outputs.include) }}",

@@ -352,6 +352,30 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			processingReports[i].Result = "incompatible"
 		}
 	}
+	// Only one name may arrive after this upload. Record every literal name,
+	// including other workflows and deferred jobs, so its secret prefix cannot
+	// alias one the initial compilation already admitted.
+	var environmentNames []string
+	dynamicEnvironments := 0
+	for i, report := range validations {
+		if !workflows[i].Applicable {
+			continue
+		}
+		environmentNames = append(environmentNames, report.LiteralEnvironments...)
+		for _, continuation := range report.Continuations {
+			if continuation.Descriptor.Shape == compiler.RuntimeEnvironmentShape {
+				dynamicEnvironments++
+			}
+		}
+	}
+	if dynamicEnvironments > 1 {
+		return usageError(stderr, "upload: only one dynamic environment name is supported per upload; separate these workflows into different builds")
+	}
+	for _, request := range requests {
+		if request != nil {
+			request.KnownEnvironmentNames = environmentNames
+		}
+	}
 	executablePath, executableContents, distributionDigest, err := executable()
 	if err != nil {
 		for i, input := range workflows {

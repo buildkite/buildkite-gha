@@ -134,6 +134,7 @@ type Job struct {
 	MaxParallel               *int                   `json:"max_parallel,omitempty"`
 	Concurrency               *Concurrency           `json:"concurrency,omitempty"`
 	Environment               string                 `json:"environment,omitempty"`
+	EnvironmentExpression     *expression.Expression `json:"environment_expression,omitempty"`
 	Reusable                  *ReusableWorkflowCall  `json:"reusable_workflow,omitempty"`
 	Env                       map[string]string      `json:"env,omitempty"`
 	Permissions               *Permissions           `json:"permissions,omitempty"`
