@@ -75,6 +75,17 @@ func newJobDocker(t *testing.T, scenario string) fakeJobDocker {
 	return fakeJobDocker{wrapper, root}
 }
 
+func TestJobDockerCallsBeforeFirstWrite(t *testing.T) {
+	f := newJobDocker(t, "service-starting")
+	// The subprocess creates the file before it acquires the write lock.
+	if err := os.WriteFile(filepath.Join(f.root, "calls"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.calls(t); len(calls) != 0 {
+		t.Fatalf("calls before first write = %#v", calls)
+	}
+}
+
 func (f fakeJobDocker) calls(t *testing.T) []jobDockerCall {
 	t.Helper()
 	file, err := os.Open(filepath.Join(f.root, "calls"))
@@ -92,6 +103,9 @@ func (f fakeJobDocker) calls(t *testing.T) []jobDockerCall {
 	_ = testFileLock(file, false)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(b) == 0 {
+		return nil
 	}
 	var out []jobDockerCall
 	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
