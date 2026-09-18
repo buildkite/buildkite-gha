@@ -235,13 +235,10 @@ func TestRuntimeMatrixRejectsEmptyRows(t *testing.T) {
 // of the "production" environment.
 var productionGateJobID = strings.TrimPrefix(environmentGateKey("", "production"), "gha-")
 
-func TestRuntimeMatrixRejectsUnsupportedGraphs(t *testing.T) {
-	tests := []struct {
-		name, source, want string
-	}{
-		{
-			name: "job needing two deferred matrices",
-			source: runtimeMatrixWorkflow + `  test:
+func TestRuntimeMatrixClosureOwnership(t *testing.T) {
+	source := runtimeMatrixWorkflow
+	for _, job := range []string{"test", "package", "independent"} {
+		source += fmt.Sprintf(`  %s:
     needs: plan
     runs-on: ubuntu-latest
     strategy:
@@ -249,14 +246,78 @@ func TestRuntimeMatrixRejectsUnsupportedGraphs(t *testing.T) {
         include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - run: true
-  report:
-    needs: [build, test]
-    runs-on: ubuntu-latest
-    steps:
-      - run: true
-`,
-			want: `depends on needs-derived matrices "build" and "test"`,
-		},
+`, job)
+	}
+	for _, test := range []struct {
+		name       string
+		joins      string
+		components int
+		owned      []string
+	}{
+		{name: "shared producer does not merge", components: 4, owned: []string{"build", "publish"}},
+		{name: "join merges full branches", components: 3, joins: "  join:\n    needs: [build, test, lint]\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n", owned: []string{"build", "join", "publish", "test"}},
+		{name: "overlap merges transitively", components: 2, joins: "  join:\n    needs: [build, test, lint]\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n  second:\n    needs: [test, package]\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n  tail:\n    needs: second\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n", owned: []string{"build", "join", "package", "publish", "second", "tail", "test"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ir, err := compileRuntimeMatrix(t, source+test.joins, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ir.Jobs) != 2 || len(ir.Continuations) != test.components {
+				t.Fatalf("initial jobs = %v, continuations = %#v", jobKeys(ir), ir.Continuations)
+			}
+			var owner RuntimeMatrixContinuation
+			seen := make(map[string]bool)
+			for _, component := range ir.Continuations {
+				for _, job := range component.Jobs {
+					if seen[job] || job == "plan" || job == "lint" {
+						t.Fatalf("invalid ownership of %s", job)
+					}
+					seen[job] = true
+				}
+				if slices.Contains(component.Jobs, "build") {
+					owner = component
+				}
+			}
+			owned := slices.Clone(owner.Jobs)
+			slices.Sort(owned)
+			if !reflect.DeepEqual(owned, test.owned) {
+				t.Fatalf("owned = %v, want %v", owned, test.owned)
+			}
+			if owner.JobBudget != (MaxRuntimeMatrixGraphJobs-2)/test.components {
+				t.Fatalf("budget = %d", owner.JobBudget)
+			}
+			rows := make(map[string][]map[string]any)
+			for _, root := range owner.Roots() {
+				rows[root.Descriptor.Job] = []map[string]any{{"target": root.Descriptor.Job, "runner": "ubuntu-latest"}}
+			}
+			expanded, err := compileRuntimeMatrix(t, source+test.joins, rows)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(expanded.Jobs) != 2+len(test.owned) {
+				t.Fatalf("expanded jobs = %v", jobKeys(expanded))
+			}
+			for _, remaining := range expanded.Continuations {
+				index := slices.IndexFunc(ir.Continuations, func(c RuntimeMatrixContinuation) bool { return c.StepKey == remaining.StepKey })
+				if index < 0 || !reflect.DeepEqual(remaining, ir.Continuations[index]) {
+					t.Fatalf("remaining owner drifted: %#v", remaining)
+				}
+			}
+			if len(owner.Joined) != 0 {
+				delete(rows, owner.Joined[0].Descriptor.Job)
+				if _, err := compileRuntimeMatrix(t, source+test.joins, rows); err == nil || !strings.Contains(err.Error(), "same continuation") {
+					t.Fatalf("partial component error = %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestRuntimeMatrixRejectsUnsupportedGraphs(t *testing.T) {
+	tests := []struct {
+		name, source, want string
+	}{
 		{
 			name: "consumer needing a deferred job",
 			source: runtimeMatrixWorkflow + `  package:

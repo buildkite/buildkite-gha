@@ -967,6 +967,16 @@ reports, so `validate` and `compile --format ir-json` show the graph shape
 while `compile` cannot render the pipeline YAML for the workflow. See
 [Expand a matrix inside the build](cli.md#expand-a-matrix-inside-the-build).
 
+Deferred matrices can join. Each matrix owns every downstream job, including
+dependencies introduced by reusable-workflow inputs and call conditions. When
+two downstream sets intersect, they merge under one deferred step; merging
+continues through indirect intersections. A job with `needs: [build, test]`
+gives the deferred `build` and `test` matrices one owner, which uploads both
+branches and their join once. Sharing only a producer does not merge
+otherwise independent matrices. Prerequisites outside the downstream sets stay
+in the initial upload. The owner waits for all its matrix producers before
+expanding any branch.
+
 The expanded jobs are identical to the jobs a literal matrix with the same rows
 produces: same step keys, labels, checks, `needs`, and outputs. Row values
 reach `runs-on`, `name`, `if`, `env`, and steps exactly as static matrix values
@@ -989,8 +999,8 @@ Limits and rejected shapes:
   1,024-job limits.
 - The deferred uploads of a workflow share the jobs the 1,024-job limit leaves
   after the jobs uploaded up front, in equal parts: with 4 static jobs and 2
-  needs-derived matrices, each deferred step may upload at most 510 jobs,
-  counting the consumer's rows and every instance of its dependents. The share
+  independent deferred components, each deferred step may upload at most 510
+  jobs, counting every root's rows and each downstream instance once. The share
   is recorded at upload time, so the deferred steps together cannot grow the
   build past the limit whatever the producers publish. A producer output that
   needs more than the share fails the deferred step before it uploads
@@ -1000,15 +1010,12 @@ Limits and rejected shapes:
   limit, or names a runner that fails compilation or admission fails the
   deferred step, and the dependent jobs never run. The step prints the
   compile diagnostics.
-- A workflow may hold several needs-derived matrices, each with its own
-  deferred step, as long as their subgraphs stay apart: a job may need at most
-  one deferred matrix, a deferred matrix cannot need another deferred job, and
-  a called workflow with workflow-level `concurrency` can neither hold a
-  needs-derived matrix nor need a deferred job. A workflow with its own
-  workflow-level `concurrency` cannot hold a needs-derived matrix: the group
-  is released when the jobs of the initial upload finish, before the jobs a
-  deferred step adds. These fail the workflow with `E_MATRIX_INVALID` at
-  upload time.
+- A deferred matrix cannot need another deferred job. A called workflow with
+  workflow-level `concurrency` can neither hold a needs-derived matrix nor need
+  a deferred job. A workflow with its own workflow-level `concurrency` cannot
+  hold a needs-derived matrix: the group is released when the jobs of the
+  initial upload finish, before the jobs a deferred step adds. These fail the
+  workflow with `E_MATRIX_INVALID` at upload time.
 - The step keys of the deferred step, of the consumer's placeholder, of every
   statically known instance of a deferred dependent, and of the approval gate
   of every environment a deferred job declares are reserved at upload time. A
@@ -1036,11 +1043,15 @@ Limits and rejected shapes:
 - The importer records the workflow event once per upload, as one artifact
   shared by every deferred step, so many needs-derived matrices do not multiply
   the artifact size.
-- When the producer fails or is cancelled, the deferred step uploads skipped
-  placeholders for the deferred jobs: one for the consumer, and one per
+- When a producer fails, is skipped, or is cancelled, the deferred step uploads
+  skipped placeholders for the deferred jobs: one for the consumer, and one per
   statically known matrix instance of each dependent, under the keys and check
   names a static expansion would use. Dependents with `if: always()` are
-  skipped as well; they cannot run because their matrix is unknown.
+  skipped as well; this subset does not run descendants of an unknown matrix.
+  In a merged component, only that root's downstream jobs are skipped; healthy
+  branches still expand, and a shared join is skipped once. Missing or invalid
+  result manifests fail the deferred step without uploading jobs, even when
+  another producer did not succeed. They are never treated as skips.
 - The deferred step recompiles the workflow from the checkout at the build
   commit with the event, variables, runner mappings, and OIDC settings the
   importer recorded, and requires the result to reproduce the jobs the

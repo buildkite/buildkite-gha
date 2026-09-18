@@ -40,6 +40,9 @@ type IR struct {
 	// matrices after their producer jobs run. Their jobs are absent from Jobs
 	// until a continuation recompiles the workflow with RuntimeMatrixRows.
 	Continuations []RuntimeMatrixContinuation `json:"continuations,omitempty"`
+	// RuntimeMatrixSkippedJobs is the forward closure of roots whose verified
+	// producers did not succeed. The continuation renders skipped placeholders.
+	RuntimeMatrixSkippedJobs map[string]bool `json:"runtime_matrix_skipped_jobs,omitempty"`
 	// deferredActions lists, per continuation consumer job ID, the `uses`
 	// steps of its deferred jobs. It is process-local input to
 	// resolveContinuationActions, which records the resulting locks on the
@@ -408,7 +411,7 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 			Supported: true,
 			Reason:    "run-job rejects unsupported shells and local actions",
 		},
-		Jobs: expanded.instances, Continuations: expanded.continuations, deferredActions: expanded.deferredActions, JobGraphComplete: jobGraphComplete, Sources: expanded.sources,
+		Jobs: expanded.instances, Continuations: expanded.continuations, RuntimeMatrixSkippedJobs: expanded.skippedJobs, deferredActions: expanded.deferredActions, JobGraphComplete: jobGraphComplete, Sources: expanded.sources,
 	}
 	return ir, errors.Join(runNameErr, concurrencyErr, cancellationErr, expandErr)
 }

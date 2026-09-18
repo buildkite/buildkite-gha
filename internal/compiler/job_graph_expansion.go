@@ -21,6 +21,7 @@ type jobGraphExpansionResult struct {
 	referencesVars        bool
 	runtimeMatrices       []RuntimeMatrixDescriptor
 	continuations         []RuntimeMatrixContinuation
+	skippedJobs           map[string]bool
 	deferredActions       map[string][]deferredAction
 	jobs                  []ParsedJob
 	notEvaluatedJobs      map[string]bool
@@ -59,14 +60,14 @@ type jobGraphExpansion struct {
 	deferred map[string]int
 	// supplied marks the jobs a continuation upload compiles from the rows
 	// Options.RuntimeMatrixRows supplies, with their dependents, and
-	// suppliedConsumers counts those consumers. The initial compilation
+	// suppliedComponents counts their merged owners. The initial compilation
 	// deferred them, so continuation budgets treat them as deferred.
-	supplied          map[string]bool
-	suppliedConsumers int
-	suppliedInstances int
-	byLogicalID       map[string][]JobInstance
-	instanceKeys      map[string]string
-	diagnostics       []error
+	supplied           map[string]bool
+	suppliedComponents int
+	suppliedInstances  int
+	byLogicalID        map[string][]JobInstance
+	instanceKeys       map[string]string
+	diagnostics        []error
 }
 
 func parsedJobs(path string, parsed *workflow.Workflow) []ParsedJob {
@@ -131,6 +132,7 @@ func expandJobGraph(ctx context.Context, path string, source []byte, parsed *wor
 	expansion.acceptJobs(resolved)
 	expansion.orderJobs()
 	expansion.expandMatrices()
+	expansion.mergeContinuations()
 	expansion.expandInstances()
 	expansion.assignContinuationKeys()
 	return expansion.result, errors.Join(expansion.diagnostics...)
@@ -215,15 +217,13 @@ func (e *jobGraphExpansion) expandMatrices() {
 	for _, id := range e.order {
 		sourced := e.accepted[e.acceptedIndex[id]]
 		job := sourced.Job
-		continuation, deferredErr := e.deferredContinuation(sourced)
+		continuation := e.deferredContinuation(sourced)
 		descriptor, deferred, err := describeRuntimeMatrix(job, sourced.path, sourced.digest, sourced.needBindings, e.topologyJobs, e.matricesByJob)
 		var matrices []map[string]any
 		if deferred {
 			e.result.runtimeMatrixBoundary = true
 			switch {
 			case err != nil:
-			case deferredErr != nil:
-				err = deferredErr
 			case continuation >= 0:
 				err = errors.New("a needs-derived matrix cannot depend on a job that is itself expanded by a deferred upload")
 			case len(sourced.concurrencyGates) != 0:
@@ -252,21 +252,21 @@ func (e *jobGraphExpansion) expandMatrices() {
 				e.recordDeferredActions(id, sourced)
 				continue
 			}
-			if len(rows) == 0 {
+			if e.options.RuntimeMatrixSkipped[id] && len(rows) == 0 {
+				if e.result.skippedJobs == nil {
+					e.result.skippedJobs = make(map[string]bool)
+				}
+				e.result.skippedJobs[id] = true
+			} else if len(rows) == 0 || e.options.RuntimeMatrixSkipped[id] {
 				e.rejectRuntimeMatrix(sourced, fmt.Errorf("output %q of job %q expanded to no matrix instances", descriptor.ProducerOutput, descriptor.ProducerJob))
 				continue
 			}
 			e.supplied[id] = true
-			e.suppliedConsumers++
 			matrices = make([]map[string]any, len(rows))
 			for i, row := range rows {
 				matrices[i] = cloneAnyMap(row)
 			}
 		} else {
-			if deferredErr != nil {
-				e.rejectRuntimeMatrix(sourced, deferredErr)
-				continue
-			}
 			if continuation >= 0 && len(sourced.concurrencyGates) != 0 {
 				e.rejectRuntimeMatrix(sourced, errors.New("reusable-workflow concurrency cannot depend on a needs-derived matrix"))
 				continue
@@ -274,6 +274,9 @@ func (e *jobGraphExpansion) expandMatrices() {
 			for _, member := range e.prerequisites[id] {
 				if e.supplied[member] {
 					e.supplied[id] = true
+				}
+				if e.result.skippedJobs[member] {
+					e.result.skippedJobs[id] = true
 				}
 			}
 			matrixContext := e.context
@@ -339,23 +342,102 @@ func deferredJobSource(sourced sourcedJob) RuntimeMatrixJobSource {
 	return RuntimeMatrixJobSource{Path: sourced.path, Digest: sourced.digest, Remote: cloneRemoteWorkflowSource(sourced.remote)}
 }
 
-// deferredContinuation returns the continuation index that every deferred
-// prerequisite of the job shares, or -1 when none is deferred. Prerequisites
-// from two continuations are an error: each continuation uploads its own
-// disjoint subgraph, and a job cannot join two of them.
-func (e *jobGraphExpansion) deferredContinuation(sourced sourcedJob) (int, error) {
+// deferredContinuation assigns a provisional owner. mergeContinuations merges
+// intersecting forward closures after every matrix boundary is known.
+func (e *jobGraphExpansion) deferredContinuation(sourced sourcedJob) int {
 	continuation := -1
 	for _, member := range e.prerequisites[sourced.ID] {
 		index, deferred := e.deferred[member]
 		if !deferred {
 			continue
 		}
-		if continuation >= 0 && index != continuation {
-			return -1, fmt.Errorf("job depends on needs-derived matrices %q and %q, but a job can depend on only one deferred matrix expansion", e.result.continuations[continuation].Descriptor.Job, e.result.continuations[index].Descriptor.Job)
-		}
 		continuation = index
 	}
-	return continuation, nil
+	return continuation
+}
+
+// mergeContinuations computes ownership from forward reachability, including
+// supplied roots so a continuation reproduces the original component budgets.
+// Outside prerequisites never acquire an owner merely by feeding a component.
+func (e *jobGraphExpansion) mergeContinuations() {
+	owners := make(map[string]string)
+	for _, descriptor := range e.result.runtimeMatrices {
+		owners[descriptor.Job] = descriptor.Job
+	}
+	for _, id := range e.order {
+		for _, need := range e.prerequisites[id] {
+			owner := owners[need]
+			if owner == "" {
+				continue
+			}
+			if prior := owners[id]; prior != "" && prior != owner {
+				// Pick a stable representative and relabel the entire component,
+				// including branches seen before this transitive intersection.
+				keep, drop := min(prior, owner), max(prior, owner)
+				for job, component := range owners {
+					if component == drop {
+						owners[job] = keep
+					}
+				}
+				owner = keep
+			}
+			owners[id] = owner
+		}
+	}
+	provided := make(map[string]bool)
+	unresolved := make(map[string]bool)
+	for _, descriptor := range e.result.runtimeMatrices {
+		owner := owners[descriptor.Job]
+		if _, ok := e.options.RuntimeMatrixRows[descriptor.Job]; ok {
+			provided[owner] = true
+		} else {
+			unresolved[owner] = true
+		}
+	}
+	e.suppliedComponents = len(provided)
+	for owner := range provided {
+		if unresolved[owner] {
+			e.rejectRuntimeMatrix(e.accepted[e.acceptedIndex[owner]], errors.New("all intersecting deferred matrices must be expanded by the same continuation"))
+		}
+	}
+	var merged []RuntimeMatrixContinuation
+	indices := make(map[string]int)
+	for _, original := range e.result.continuations {
+		owner := owners[original.Descriptor.Job]
+		index, exists := indices[owner]
+		if !exists {
+			index = len(merged)
+			indices[owner] = index
+			merged = append(merged, original)
+			continue
+		}
+		target := &merged[index]
+		target.Joined = append(target.Joined, RuntimeMatrixRoot{Descriptor: original.Descriptor, ProducerStepKey: original.ProducerStepKey})
+		for job, label := range original.Labels {
+			target.Labels[job] = label
+			target.Sources[job] = original.Sources[job]
+		}
+		if target.Instances == nil {
+			target.Instances = make(map[string][]RuntimeMatrixInstance)
+		}
+		for job, instances := range original.Instances {
+			target.Instances[job] = instances
+		}
+		if actions := e.result.deferredActions[original.Descriptor.Job]; len(actions) != 0 {
+			e.result.deferredActions[target.Descriptor.Job] = append(e.result.deferredActions[target.Descriptor.Job], actions...)
+		}
+	}
+	for i := range merged {
+		merged[i].Jobs = nil
+	}
+	for _, id := range e.order {
+		if _, deferred := e.deferred[id]; deferred {
+			index := indices[owners[id]]
+			e.deferred[id] = index
+			merged[index].Jobs = append(merged[index].Jobs, id)
+		}
+	}
+	e.result.continuations = merged
 }
 
 // rejectRuntimeMatrix records why a needs-derived matrix, or a job that
@@ -408,8 +490,10 @@ func (e *jobGraphExpansion) reserveDeferredKeys() {
 		}
 		sourced := e.accepted[e.acceptedIndex[id]]
 		var keys []string
-		if e.result.continuations[e.deferred[id]].Descriptor.Job == id {
-			keys = []string{LogicalJobStepKey(e.options.StepKeyNamespace, id)}
+		for _, root := range e.result.continuations[e.deferred[id]].Roots() {
+			if root.Descriptor.Job == id {
+				keys = []string{LogicalJobStepKey(e.options.StepKeyNamespace, id)}
+			}
 		}
 		for _, matrix := range e.matricesByJob[id] {
 			key, err := namespacedInstanceKey(e.options.StepKeyNamespace, id, matrix)
@@ -457,7 +541,7 @@ func (e *jobGraphExpansion) assignContinuationKeys() {
 	// consumer; counting that subgraph as deferred reproduces the budgets the
 	// initial compilation recorded.
 	staticJobs := len(e.result.candidates) - e.suppliedInstances
-	uploads := len(e.result.continuations) + e.suppliedConsumers
+	uploads := len(e.result.continuations) + e.suppliedComponents
 	budget := 0
 	if uploads != 0 {
 		budget = (MaxRuntimeMatrixGraphJobs - staticJobs) / uploads
@@ -466,7 +550,7 @@ func (e *jobGraphExpansion) assignContinuationKeys() {
 		continuation := &e.result.continuations[i]
 		consumer := continuation.Descriptor.Job
 		sourced := e.accepted[e.acceptedIndex[consumer]]
-		if promised := 1 + continuation.DependentInstances(); budget < promised {
+		if promised := len(continuation.Roots()) + continuation.DependentInstances(); budget < promised {
 			e.rejectRuntimeMatrix(sourced, fmt.Errorf("the graph bound of %d jobs leaves %d for each of the workflow's %d deferred uploads after its %d static jobs, but jobs %s already need %d", MaxRuntimeMatrixGraphJobs, max(budget, 0), uploads, staticJobs, quotedList(continuation.Jobs), promised))
 			continue
 		}
@@ -519,7 +603,7 @@ func matrixErrorPosition(job workflow.Job, err error) (int, int) {
 func (e *jobGraphExpansion) expandInstances() {
 	e.byLogicalID = make(map[string][]JobInstance, len(e.accepted))
 	for _, id := range e.order {
-		if e.failedMatrices[id] {
+		if e.failedMatrices[id] || e.result.skippedJobs[id] {
 			continue
 		}
 		if _, deferred := e.deferred[id]; deferred {

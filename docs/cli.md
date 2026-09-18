@@ -654,11 +654,12 @@ The deprecated `--runtime-queue hosted` argument is accepted as a no-op for comp
 
 ### Expand a matrix inside the build
 
-When a workflow takes a matrix from a job output, `upload` creates one deferred
-step per such job in addition to the static jobs. The importer needs
-`BUILDKITE_JOB_ID` for this, and every runtime platform the expanded jobs may
-need must already be configured with `--runtime-distribution`; a row that
-selects an unconfigured platform fails the deferred step. The importer
+When a workflow takes matrices from job outputs, `upload` creates one deferred
+step per group of overlapping downstream jobs, in addition to the static jobs
+(see [Matrices from job outputs](compatibility.md#matrices-from-job-outputs)).
+The importer needs `BUILDKITE_JOB_ID` for this. Every runtime platform the
+expanded jobs may need must already be configured with `--runtime-distribution`;
+a row that selects an unconfigured platform fails the deferred step. The importer
 resolves repository and organization variables when any job of the workflow,
 deferred or not, reads `vars` in the workflow or in an action it uses, and
 records the scopes for the deferred steps. Such a workflow is never uploaded
@@ -683,11 +684,12 @@ buildkite-gha continue \
    checkout is byte-for-byte the one the importer compiled; the artifact also
    records the action revisions and the variable scopes the importer resolved
    for the deferred jobs, so `continue` never requests variables itself
-2. reads the producer job's verified result through the same manifest path
-   that `needs` outputs use; when the producer did not succeed, it uploads
-   skipped placeholder steps for the deferred jobs and exits 0
-3. expands the output with the static-matrix rules and limits, checks that the
-   rows and the dependents fit the share of the 1,024-job limit the artifact
+2. reads each producer's verified result through the same manifest path
+   that `needs` outputs use, bound to its exact instance key and plan digest;
+   a verified non-success result skips that root's downstream jobs, while a
+   missing or invalid manifest fails the step before any upload
+3. expands successful outputs with the static-matrix rules and limits, checks
+   that the rows and dependents fit the share of the 1,024-job limit the artifact
    records for this step (see
    [Matrices from job outputs](compatibility.md#matrices-from-job-outputs)),
    recompiles the
@@ -699,13 +701,16 @@ buildkite-gha continue \
    each deferred job to come from the workflow source the importer recorded,
    including the commit of a reusable workflow from another repository, and
    pins each deferred job's actions to the recorded revisions
-4. uploads the plans and a pipeline holding only the deferred jobs, whose
-   `depends_on` reference the steps already in the build
+4. uploads the plans and a pipeline holding only the deferred jobs, including
+   skipped placeholders where needed; joins appear once, and outside
+   prerequisites remain references to steps already in the build
 
 Buildkite rejects an upload whose step keys already exist. When that happens,
 `continue` confirms through `buildkite-agent step get` that each expected step
 carries the plan it just compiled and exits 0, so retrying the deferred step
-never duplicates jobs. Any other failure exits 1 with:
+never duplicates jobs. For skipped jobs in a merged component, it also verifies
+the command marker bound to the continuation artifact digest. A missing step
+or a different binding fails the replay. Any other failure exits 1 with:
 
 ```
 Retry the whole build to expand this matrix again. If the matrix producer job was retried, only a new build can expand it.

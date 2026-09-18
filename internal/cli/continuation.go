@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -76,6 +77,8 @@ type continuationArtifact struct {
 	Others []compiler.RuntimeMatrixContinuation `json:"other_continuations,omitempty"`
 	// Producer is the generated job whose verified result supplies the matrix.
 	Producer continuationProducer `json:"producer"`
+	// JoinedProducers binds each additional root to its parent-owned plan.
+	JoinedProducers map[string]continuationProducer `json:"joined_producers,omitempty"`
 	// Graph records every job the initial upload created so the continuation
 	// can prove that its recompilation reproduced them before uploading.
 	Graph         []compiledJob `json:"graph"`
@@ -256,6 +259,21 @@ func buildContinuationArtifacts(inputs continuationInputs) (transport.Artifact, 
 		if !ok {
 			return transport.Artifact{}, nil, nil, fmt.Errorf("matrix producer %q of job %q has no generated step", continuation.Descriptor.ProducerJob, continuation.Descriptor.Job)
 		}
+		var joined map[string]continuationProducer
+		dependencies := []string{producerKey}
+		for _, root := range continuation.Joined {
+			digest, ok := plans[root.ProducerStepKey]
+			if !ok {
+				return transport.Artifact{}, nil, nil, fmt.Errorf("matrix producer %q of job %q has no plan", root.Descriptor.ProducerJob, root.Descriptor.Job)
+			}
+			if joined == nil {
+				joined = make(map[string]continuationProducer)
+			}
+			joined[root.Descriptor.Job] = continuationProducer{StepKey: root.ProducerStepKey, PlanDigest: digest}
+			if !slices.Contains(dependencies, root.ProducerStepKey) {
+				dependencies = append(dependencies, root.ProducerStepKey)
+			}
+		}
 		artifact := continuationArtifact{
 			Schema:       continuationSchema,
 			Version:      request.Version,
@@ -278,6 +296,7 @@ func buildContinuationArtifacts(inputs continuationInputs) (transport.Artifact, 
 			Continuation:             continuation,
 			Others:                   append(append([]compiler.RuntimeMatrixContinuation(nil), bundle.IR.Continuations[:i]...), bundle.IR.Continuations[i+1:]...),
 			Producer:                 continuationProducer{StepKey: producerKey, PlanDigest: producerDigest},
+			JoinedProducers:          joined,
 			Graph:                    graph,
 			ApprovalGates:            gates,
 		}
@@ -302,7 +321,7 @@ func buildContinuationArtifacts(inputs continuationInputs) (transport.Artifact, 
 			Platform:           producer.Platform,
 			DistributionDigest: producer.DistributionDigest,
 			RuntimeImage:       producer.RuntimeImage,
-			Dependencies:       []string{producerKey},
+			Dependencies:       dependencies,
 			Continuation:       &buildkitepipeline.ContinuationStep{ArtifactDigest: digest},
 		})
 	}
@@ -362,6 +381,32 @@ func decodeContinuationArtifact(data []byte, version string) (continuationArtifa
 	if artifact.Producer.StepKey == "" || len(artifact.Graph) == 0 {
 		return continuationArtifact{}, errors.New("continuation artifact does not record the initial job graph")
 	}
+	if len(artifact.JoinedProducers) != len(artifact.Continuation.Joined) {
+		return continuationArtifact{}, errors.New("continuation artifact must bind every joined producer")
+	}
+	graph := make(map[string]compiledJob, len(artifact.Graph))
+	for _, job := range artifact.Graph {
+		if _, exists := graph[job.Key]; exists {
+			return continuationArtifact{}, fmt.Errorf("continuation artifact repeats graph key %q", job.Key)
+		}
+		graph[job.Key] = job
+	}
+	for _, root := range artifact.Continuation.Roots() {
+		producer := artifact.producer(root.Descriptor.Job)
+		job, exists := graph[producer.StepKey]
+		if !exists || producer.StepKey != root.ProducerStepKey || job.LogicalJob != root.Descriptor.ProducerJob || job.PlanDigest != producer.PlanDigest || !continuationDigestPattern.MatchString(producer.PlanDigest) {
+			return continuationArtifact{}, fmt.Errorf("continuation artifact producer binding for %q does not match the initial graph", root.Descriptor.Job)
+		}
+	}
+	owners := make(map[string]string)
+	for _, component := range append([]compiler.RuntimeMatrixContinuation{artifact.Continuation}, artifact.Others...) {
+		for _, job := range component.Jobs {
+			if owner, exists := owners[job]; exists {
+				return continuationArtifact{}, fmt.Errorf("job %q has duplicate continuation owners %q and %q", job, owner, component.StepKey)
+			}
+			owners[job] = component.StepKey
+		}
+	}
 	for _, runner := range artifact.Runners {
 		if _, err := compiler.ParsePlatform(runner.Platform); err != nil {
 			return continuationArtifact{}, fmt.Errorf("continuation artifact runner %q: %w", runner.Label, err)
@@ -375,6 +420,13 @@ func decodeContinuationArtifact(data []byte, version string) (continuationArtifa
 	return artifact, nil
 }
 
+func (a continuationArtifact) producer(job string) continuationProducer {
+	if job == a.Continuation.Descriptor.Job {
+		return a.Producer
+	}
+	return a.JoinedProducers[job]
+}
+
 // validateContinuationShape checks that a recorded continuation names its
 // step, its producer instance, and its deferred jobs, consumer first.
 func validateContinuationShape(continuation compiler.RuntimeMatrixContinuation) error {
@@ -384,10 +436,27 @@ func validateContinuationShape(continuation compiler.RuntimeMatrixContinuation) 
 	if continuation.StepKey == "" || continuation.ProducerStepKey == "" || len(continuation.Jobs) == 0 || continuation.Jobs[0] != continuation.Descriptor.Job {
 		return errors.New("does not name its deferred jobs")
 	}
-	if _, exists := continuation.Instances[continuation.Descriptor.Job]; exists || len(continuation.Instances) != len(continuation.Jobs)-1 {
+	roots := make(map[string]bool)
+	for _, root := range continuation.Roots() {
+		if err := root.Descriptor.Validate(); err != nil {
+			return fmt.Errorf("descriptor: %w", err)
+		}
+		job := root.Descriptor.Job
+		if roots[job] || root.ProducerStepKey == "" || !slices.Contains(continuation.Jobs, job) {
+			return fmt.Errorf("invalid or duplicate deferred root %q", job)
+		}
+		if _, exists := continuation.Instances[job]; exists {
+			return errors.New("must record the instances of every deferred dependent and none for the consumer")
+		}
+		roots[job] = true
+	}
+	if len(continuation.Instances) != len(continuation.Jobs)-len(roots) {
 		return errors.New("must record the instances of every deferred dependent and none for the consumer")
 	}
-	for _, job := range continuation.Jobs[1:] {
+	for _, job := range continuation.Jobs {
+		if roots[job] {
+			continue
+		}
 		instances := continuation.Instances[job]
 		if len(instances) == 0 {
 			return fmt.Errorf("records no instances for deferred dependent %q", job)
@@ -413,7 +482,7 @@ func validateContinuationShape(continuation compiler.RuntimeMatrixContinuation) 
 	if _, err := plan.ValidateActionLockList(continuation.ActionLocks); err != nil {
 		return fmt.Errorf("action locks: %w", err)
 	}
-	if continuation.JobBudget < 1+continuation.DependentInstances() || continuation.JobBudget > compiler.MaxRuntimeMatrixGraphJobs {
+	if continuation.JobBudget < len(roots)+continuation.DependentInstances() || continuation.JobBudget > compiler.MaxRuntimeMatrixGraphJobs {
 		return fmt.Errorf("records an invalid job budget %d", continuation.JobBudget)
 	}
 	return nil
@@ -427,7 +496,7 @@ func validateContinuationShape(continuation compiler.RuntimeMatrixContinuation) 
 // has verified their digests; the repository source reads remote reusable
 // workflows and actions the way the importer did. Runner resolution and the
 // environment source are live policy the caller attaches before compiling.
-func (a continuationArtifact) compileRequest(workflowPath string, workflowSource, eventSource []byte, rows []map[string]any, repositorySource compiler.RepositorySource) hostedCompileRequest {
+func (a continuationArtifact) compileRequest(workflowPath string, workflowSource, eventSource []byte, rows map[string][]map[string]any, repositorySource compiler.RepositorySource) hostedCompileRequest {
 	targets := make(map[string]compiler.RunnerTarget, len(a.Runners))
 	for _, runner := range a.Runners {
 		platform, _ := compiler.ParsePlatform(runner.Platform)
@@ -458,7 +527,7 @@ func (a continuationArtifact) compileRequest(workflowPath string, workflowSource
 		OIDC:                     a.OIDC,
 		Vars:                     compiler.VariableSources{Organization: a.Vars.Organization, Repository: a.Vars.Repository, Resolved: a.Vars.Resolved},
 		RepositorySource:         repositorySource,
-		RuntimeMatrixRows:        map[string][]map[string]any{a.Continuation.Descriptor.Job: rows},
+		RuntimeMatrixRows:        rows,
 		RuntimeMatrixActionLocks: locks,
 	}
 }

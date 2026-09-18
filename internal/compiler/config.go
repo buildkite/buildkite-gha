@@ -210,6 +210,10 @@ type Options struct {
 	// continuation: it and every job depending on it are compiled later by a
 	// deferred pipeline upload instead of failing compilation.
 	RuntimeMatrixRows map[string][]map[string]any
+	// RuntimeMatrixSkipped names roots with verified non-success producers.
+	// Their complete forward closures have no executable plans. Each root
+	// must also have an entry in RuntimeMatrixRows, with no rows.
+	RuntimeMatrixSkipped map[string]bool
 	// RuntimeMatrixActionLocks pins remote actions to the commits an earlier
 	// compilation resolved, as RuntimeMatrixContinuation.ActionLocks records
 	// them. A deferred upload sets it so the jobs it expands use exactly the

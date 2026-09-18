@@ -189,8 +189,11 @@ type Job struct {
 	// Failure and SkipReason represent a job whose workflow could not be
 	// prepared. Other jobs in the workflow may remain runnable when they do not
 	// depend on a failed preparation path.
-	Failure            *Failure
-	SkipReason         string
+	Failure    *Failure
+	SkipReason string
+	// SkipDigest binds a skipped continuation placeholder to its upload
+	// artifact through a command marker that fails if unskipped, readable by step get.
+	SkipDigest         string
 	Queue              string
 	Platform           string
 	DistributionDigest string
@@ -588,6 +591,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			} else {
 				_, _ = fmt.Fprintf(out, "%sskip: %s\n", attributeIndent, yamlScalar(job.SkipReason))
 				out.WriteString(attributeIndent + "type: command\n")
+				if job.SkipDigest != "" {
+					_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar("exit 1 # skipped continuation "+shellQuote(job.SkipDigest)))
+				}
 				emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, job.Key, checkLabel, "", "")
 			}
 			_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
@@ -1041,6 +1047,9 @@ func validateJob(compilerStep string, job Job) error {
 	}
 	if utf8.RuneCountInString(job.SkipReason) > maxSkipReasonLength {
 		return fmt.Errorf("job %q skip reason exceeds %d characters", job.Key, maxSkipReasonLength)
+	}
+	if job.SkipDigest != "" && (job.SkipReason == "" || !digestPattern.MatchString(job.SkipDigest)) {
+		return fmt.Errorf("job %q requires a skip reason and valid skip digest", job.Key)
 	}
 	if job.Cache != nil {
 		if err := ValidateCacheVolume(*job.Cache); err != nil {

@@ -69,6 +69,7 @@ type hostedCompileRequest struct {
 	// published. RuntimeMatrixActionLocks pins the actions of the deferred
 	// jobs to the revisions the initial compilation resolved.
 	RuntimeMatrixRows        map[string][]map[string]any
+	RuntimeMatrixSkipped     map[string]bool
 	RuntimeMatrixActionLocks []plan.ActionLock
 }
 
@@ -84,6 +85,7 @@ func (r hostedCompileRequest) validationOptions() compiler.Options {
 	options.RepositorySource = r.RepositorySource
 	options.Vars = r.Vars
 	options.RuntimeMatrixRows = r.RuntimeMatrixRows
+	options.RuntimeMatrixSkipped = r.RuntimeMatrixSkipped
 	return options
 }
 
@@ -99,6 +101,7 @@ func (r hostedCompileRequest) options() compiler.Options {
 	options.EnvironmentSource = r.EnvironmentSource
 	options.Vars = r.Vars
 	options.RuntimeMatrixRows = r.RuntimeMatrixRows
+	options.RuntimeMatrixSkipped = r.RuntimeMatrixSkipped
 	options.RuntimeMatrixActionLocks = r.RuntimeMatrixActionLocks
 	return options
 }
