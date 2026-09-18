@@ -1119,8 +1119,11 @@ Limits and rejected shapes:
   [Reusable workflows](#reusable-workflows).
 - Retrying the deferred step is safe: a replayed upload is rejected by
   Buildkite because its step keys already exist, and the step then confirms
-  the earlier upload. Retrying the producer job after the deferred step ran
-  makes its result ambiguous, so retry the whole build instead. See
+  the earlier upload. Each later stage re-reads earlier producers' verified
+  manifests and compares them with the result digests recorded when their
+  matrices expanded. A missing manifest or a changed result, including a new
+  attempt with identical output, fails before any upload; it is not a skip.
+  Retry the whole build after retrying a producer. See
   [Results, retries, and cancellation](#results-retries-and-cancellation).
 
 The `detail` line of `E_MATRIX_INVALID` says why a reference is not supported.
