@@ -547,6 +547,15 @@ func (s stageRecord) write(bundle compiler.Bundle) (transport.Artifact, buildkit
 			dependencies = append(dependencies, root.ProducerStepKey)
 		}
 	}
+	if continuation.Scheduling {
+		// Ordered queues can add edges to jobs uploaded earlier. Finish all
+		// static jobs, including external needs of downstream owned jobs,
+		// before admitting output-derived groups. This step holds no slot.
+		dependencies = make([]string, 0, len(s.Graph))
+		for _, job := range s.Graph {
+			dependencies = append(dependencies, job.Key)
+		}
+	}
 	var producer *buildkitepipeline.Job
 	for i, job := range bundle.GeneratedWorkflow.Jobs {
 		if job.Key == continuation.ProducerStepKey {
@@ -718,6 +727,9 @@ func validateResolvedMatrix(resolved resolvedMatrix) error {
 func validateContinuationShape(continuation compiler.RuntimeMatrixContinuation) error {
 	if err := continuation.Descriptor.Validate(); err != nil {
 		return fmt.Errorf("descriptor: %w", err)
+	}
+	if continuation.Scheduling && (len(continuation.Joined) != 0 || len(continuation.LaterMatrices) != 0) {
+		return errors.New("needs-derived scheduling requires a single-root, single-stage component")
 	}
 	if continuation.StepKey == "" || continuation.ProducerStepKey == "" || len(continuation.Jobs) == 0 || continuation.Jobs[0] != continuation.Descriptor.Job {
 		return errors.New("does not name its deferred jobs")

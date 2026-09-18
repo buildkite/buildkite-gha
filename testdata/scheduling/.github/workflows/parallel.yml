@@ -1,0 +1,29 @@
+name: Output-derived parallelism proof
+on: push
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      parallel: ${{ steps.plan.outputs.parallel }}
+    steps:
+      - id: plan
+        run: |
+          echo 'matrix=[{"target":"one"},{"target":"two"},{"target":"three"},{"target":"four"}]' >> "$GITHUB_OUTPUT"
+          echo 'parallel=2' >> "$GITHUB_OUTPUT"
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: ${{ fromJSON(needs.plan.outputs.parallel) }}
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - run: |
+          echo "parallel consumer ${{ matrix.target }}"
+          sleep 15
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'All parallel consumers finished'

@@ -580,7 +580,17 @@ func GeneratePlannedWorkflow(bundle Bundle, options Options) (buildkitepipeline.
 			if options.StepKeyNamespace != "" {
 				workflowScope += "/" + options.StepKeyNamespace
 			}
-			jobs[i].ConcurrencyGroup = "buildkite-gha/" + workflowScope + "/" + instance.LogicalJobID
+			group := "buildkite-gha/" + workflowScope + "/" + instance.LogicalJobID
+			if _, scheduling := options.RuntimeSchedulingOutputs[instance.LogicalJobID]; scheduling {
+				if options.RuntimeSchedulingBuildID == "" {
+					return buildkitepipeline.Workflow{}, errors.New("needs-derived max-parallel requires the current build ID")
+				}
+				// Bound the complete scope, including long logical job IDs,
+				// without sharing limits across workflows, jobs, or builds.
+				digest := sha256.Sum256([]byte(group + "/" + options.RuntimeSchedulingBuildID))
+				group = "buildkite-gha/parallel/" + hex.EncodeToString(digest[:])
+			}
+			jobs[i].ConcurrencyGroup = group
 		}
 	}
 	var approvalGates []buildkitepipeline.ApprovalGate
