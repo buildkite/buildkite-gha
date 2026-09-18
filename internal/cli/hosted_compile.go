@@ -9,8 +9,10 @@ import (
 	"slices"
 
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
 // hostedCompileRequest is every input to one hosted compilation of one
@@ -54,13 +56,10 @@ type hostedCompileRequest struct {
 	EnvironmentSource    compiler.EnvironmentSource
 	Vars                 compiler.VariableSources
 
-	// RepositorySource reads remote reusable workflows and actions. When nil,
-	// compileHostedRequest builds a source authenticated for the workflow's
-	// own repository through ActionAuthentication and rooted at
-	// ActionCacheDir, or a temporary directory when that is empty.
-	RepositorySource     compiler.RepositorySource
-	ActionCacheDir       string
-	ActionAuthentication *actionSourceAuthentication
+	// RepositorySource reads remote reusable workflows and actions; see
+	// hostedRepositorySource. When nil, compileHostedRequest reads public
+	// repositories anonymously.
+	RepositorySource compiler.RepositorySource
 
 	// RuntimeMatrixRows supplies, per consumer job, the verified rows of a
 	// matrix whose values come from a job output. The importer's compilation
@@ -111,6 +110,98 @@ func validateHostedRequest(ctx context.Context, request hostedCompileRequest) (c
 	return compiler.ValidateEventWithOptionsContext(ctx, request.WorkflowPath, request.WorkflowSource, request.EventSource, request.validationOptions())
 }
 
+// hostedRepositorySource builds the source through which an upload reads
+// remote reusable workflows and actions: the importer job's GitHub token for
+// the workflow's own repository when the event comes from GitHub, and the
+// agent's Git credentials for private reusable workflows when the plugin
+// enables them. The importer and every later stage build their source this
+// way, so a stage reads exactly what the importer could.
+func hostedRepositorySource(ctx context.Context, clientVersion string, eventSource []byte, authentication *actionSourceAuthentication, privateReusableWorkflows bool) (compiler.RepositorySource, func(), error) {
+	privateOptions, err := privateRepositorySourceOptions(privateReusableWorkflows)
+	if err != nil {
+		return nil, nil, err
+	}
+	sourceOptions := slices.Clone(privateOptions)
+	if event, err := compiler.ParseEvent(eventSource); err == nil && event.Provider == "github" {
+		if option := authentication.option(event.Repository.Owner + "/" + event.Repository.Name); option != nil {
+			sourceOptions = append(sourceOptions, option)
+		}
+	}
+	return newHostedActionSource(ctx, "", clientVersion, sourceOptions, privateOptions)
+}
+
+// validateHostedRequests validates every non-nil request against its event
+// with the agent's live runner resolution and starts each one's processing
+// report. The requests are validated once to learn the runner labels they
+// use, the agent resolves those labels in one call, and the requests are
+// validated again with the verdict attached, so the compile that follows
+// sees the same runner targets. When resolution is unavailable the built-in
+// presets stand in and out records the degradation. The requests share one
+// configured runner mapping. The call fails only when ctx is done.
+func validateHostedRequests(ctx context.Context, out processingOutput, requests []*hostedCompileRequest, clientVersion string) ([]compiler.Report, []compatibility.ProcessingReport, error) {
+	validations := make([]compiler.Report, len(requests))
+	validationErrs := make([]error, len(requests))
+	var runnerTargets map[string]compiler.RunnerTarget
+	for i, request := range requests {
+		if request == nil {
+			continue
+		}
+		runnerTargets = request.RunnerTargets
+		validations[i], validationErrs[i] = validateHostedRequest(ctx, *request)
+	}
+	resolution, err := suggestedRunnerTargets(ctx, validations, runnerTargets, clientVersion)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		// The built-in presets keep the upload moving, but they may target a
+		// queue this cluster lacks, so the degradation must be visible.
+		_, _ = fmt.Fprintf(out.stderr, "buildkite-gha: %s: warning: runner resolution unavailable (%v); using built-in runner presets\n", out.command, err)
+		out.annotateRunnerResolutionUnavailable(ctx, err)
+	}
+	if !resolution.empty() {
+		for i, request := range requests {
+			if request == nil {
+				continue
+			}
+			request.RunnerResolution = resolution
+			validations[i], validationErrs[i] = validateHostedRequest(ctx, *request)
+		}
+	}
+	out.annotateRunnerResolutionWarnings(ctx, resolution.warnings)
+	reports := make([]compatibility.ProcessingReport, len(requests))
+	for i, request := range requests {
+		if request == nil {
+			continue
+		}
+		reports[i] = compatibility.InitialProcessingReport(request.WorkflowPath, hostedProfile, true, validations[i], validationErrs[i])
+		if validationErrs[i] != nil {
+			reports[i].Result = "incompatible"
+		}
+	}
+	return validations, reports, nil
+}
+
+// applyHostedCompilation folds a compilation into the report: the sources,
+// evidence, warnings, and admission it produced, then the result it implies,
+// which is admitted unless err classifies a failure.
+func applyHostedCompilation(report *compatibility.ProcessingReport, workflowPath string, compiled hostedCompilation, err error) {
+	if compiled.Bundle.IR.Sources != nil {
+		report.Sources = compiled.Bundle.IR.Sources
+	}
+	report.ApplyEvidence(compiled.Bundle.Processing)
+	report.ApplyWarnings(report.Workflow, compiled.Bundle.IR.Warnings)
+	if compiled.Admitted {
+		report.SetStage(workflowprocessing.StageAdmission, compatibility.Passed)
+		report.Admission.Result = "admitted"
+	}
+	if err != nil {
+		report.Result = classifyHostedFailure(report, workflowPath, err)
+		return
+	}
+	report.Result = "admitted"
+}
+
 // compileHostedRequest compiles the request's workflow, admits the result
 // for hosted execution, and generates its pipeline. The returned error is a
 // hostedFailure whose kind says whether the environment, evaluation, or
@@ -120,15 +211,8 @@ func compileHostedRequest(ctx context.Context, request hostedCompileRequest) (ho
 	repositorySource := request.RepositorySource
 	cleanup := func() {}
 	if repositorySource == nil {
-		var sourceOptions []actionsource.Option
-		if event, eventErr := compiler.ParseEvent(request.EventSource); eventErr == nil && event.Provider == "github" {
-			authenticationOption := request.ActionAuthentication.option(event.Repository.Owner + "/" + event.Repository.Name)
-			if authenticationOption != nil {
-				sourceOptions = append(sourceOptions, authenticationOption)
-			}
-		}
 		var err error
-		repositorySource, cleanup, err = newHostedActionSource(ctx, request.ActionCacheDir, request.Version, sourceOptions, nil)
+		repositorySource, cleanup, err = newHostedActionSource(ctx, "", request.Version, nil, nil)
 		if err != nil {
 			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, err)
 		}

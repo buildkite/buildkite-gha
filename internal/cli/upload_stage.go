@@ -12,7 +12,6 @@ import (
 	"strings"
 	"syscall"
 
-	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -319,66 +318,26 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	return 0
 }
 
-// compile recompiles the workflow with the expanded rows through the same
-// hosted compile request as the importer: the recorded runner mapping,
-// variables, OIDC, runtime digests, and repository source, with the live
-// runner resolution and environment source this job observes.
+// compile recompiles the workflow with the expanded rows through the
+// importer's compile path: the recorded inputs become one hosted compile
+// request, which is validated with the live runner resolution and compiled
+// with the environment source this job observes.
 func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]bool) (hostedCompilation, compatibility.ProcessingReport, error) {
 	record := r.record
-	repositorySource, cleanupSource, err := r.repositorySource()
+	repositorySource, cleanupSource, err := hostedRepositorySource(r.ctx, r.clientVersion, r.eventSource, importerJobActionSourceAuthentication(r.stderr, r.clientVersion), record.PrivateReusableWorkflows)
 	if err != nil {
-		report := compatibility.EnvironmentProcessingReport(record.Workflow.Path, hostedProfile, "repository source could not be configured")
-		return hostedCompilation{}, report, hostedError(hostedEnvironmentFailure, err)
+		return hostedCompilation{}, compatibility.EnvironmentProcessingReport(record.Workflow.Path, hostedProfile, "repository source could not be configured"), err
 	}
 	defer cleanupSource()
 	request := record.compileRequest(r.workflowPath, r.workflowSource, r.eventSource, rows, skipped, repositorySource)
-	validation, validationErr := validateHostedRequest(r.ctx, request)
-	resolution, err := suggestedRunnerTargets(r.ctx, []compiler.Report{validation}, request.RunnerTargets, r.clientVersion)
-	if err != nil {
-		if r.ctx.Err() != nil {
-			return hostedCompilation{}, compatibility.ProcessingReport{}, r.ctx.Err()
-		}
-		_, _ = fmt.Fprintf(r.stderr, "buildkite-gha: upload: warning: runner resolution unavailable (%v); using built-in runner presets\n", err)
-	}
-	if !resolution.empty() {
-		request.RunnerResolution = resolution
-		validation, validationErr = validateHostedRequest(r.ctx, request)
-	}
-	report := compatibility.InitialProcessingReport(record.Workflow.Path, hostedProfile, true, validation, validationErr)
-	if validationErr != nil {
-		report.Result = "incompatible"
-	}
 	request.EnvironmentSource = environmentSourceFromAgent(r.clientVersion)
-	preflight, err := compileHostedRequest(r.ctx, request)
-	applyHostedPreflight(&report, preflight)
+	_, reports, err := validateHostedRequests(r.ctx, r.out, []*hostedCompileRequest{&request}, r.clientVersion)
 	if err != nil {
-		report.Result = classifyHostedFailure(&report, record.Workflow.Path, err)
-		return preflight, report, err
+		return hostedCompilation{}, compatibility.ProcessingReport{}, err
 	}
-	report.Result = "admitted"
-	return preflight, report, nil
-}
-
-// repositorySource builds the source the importer used for remote reusable
-// workflows and actions: the job-scoped GitHub token for the workflow's own
-// repository and, when the importer was configured to read private reusable
-// workflows, the agent's Git credentials. Validation and compilation share
-// the returned memoized source, as they do in the importer.
-func (r stageRun) repositorySource() (compiler.RepositorySource, func(), error) {
-	privateOptions, err := privateRepositorySourceOptions(r.record.PrivateReusableWorkflows)
-	if err != nil {
-		return nil, nil, err
-	}
-	sourceOptions := append([]actionsource.Option(nil), privateOptions...)
-	if r.record.Event.Provider == "github" {
-		if event, eventErr := compiler.ParseEvent(r.eventSource); eventErr == nil {
-			authentication := importerJobActionSourceAuthentication(r.stderr, r.clientVersion)
-			if option := authentication.option(event.Repository.Owner + "/" + event.Repository.Name); option != nil {
-				sourceOptions = append(sourceOptions, option)
-			}
-		}
-	}
-	return newHostedActionSource(r.ctx, "", r.clientVersion, sourceOptions, privateOptions)
+	compiled, err := compileHostedRequest(r.ctx, request)
+	applyHostedCompilation(&reports[0], record.Workflow.Path, compiled, err)
+	return compiled, reports[0], err
 }
 
 // deferredPipeline emits the pipeline for the jobs this stage adds, with the

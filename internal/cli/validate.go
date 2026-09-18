@@ -131,7 +131,6 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 		EventSource:      event,
 		Version:          commandVersion(clientVersion),
 		ImporterStep:     "buildkite-gha-profile-importer",
-		ActionCacheDir:   actionCacheDir,
 		RepositorySource: repositorySource,
 	}
 	validationOptions := compiler.DefaultOptions()
@@ -166,13 +165,12 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 			compiler.PlatformDarwinARM64: distributionDigest,
 		}
 		preflight, profileErr := compileHostedRequest(ctx, request)
-		applyHostedPreflight(&processingReport, preflight)
+		applyHostedCompilation(&processingReport, workflowPath, preflight, profileErr)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: profile evaluation interrupted: %v\n", profileErr)
 				return 1
 			}
-			processingReport.Result = classifyHostedFailure(&processingReport, workflowPath, profileErr)
 			_ = out.write(ctx, processingReport)
 			return 1
 		}
@@ -195,9 +193,6 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 			}
 			return 1
 		}
-		processingReport.SetStage(workflowprocessing.StageAdmission, compatibility.Passed)
-		processingReport.Admission.Result = "admitted"
-		processingReport.Result = "admitted"
 		if out.write(ctx, processingReport) != nil {
 			return 1
 		}

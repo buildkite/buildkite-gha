@@ -769,22 +769,8 @@ func validationFailureResult(report compatibility.ProcessingReport) string {
 	return "incompatible"
 }
 
-// applyHostedPreflight folds hosted preflight evidence and any admission
-// grant into the report.
-func applyHostedPreflight(report *compatibility.ProcessingReport, preflight hostedCompilation) {
-	if preflight.Bundle.IR.Sources != nil {
-		report.Sources = preflight.Bundle.IR.Sources
-	}
-	report.ApplyEvidence(preflight.Bundle.Processing)
-	report.ApplyWarnings(report.Workflow, preflight.Bundle.IR.Warnings)
-	if preflight.Admitted {
-		report.SetStage(workflowprocessing.StageAdmission, compatibility.Passed)
-		report.Admission.Result = "admitted"
-	}
-}
-
-// classifyHostedFailure records a failed hosted preflight in the
-// report and returns the report result it implies.
+// classifyHostedFailure records a failed hosted compilation in the report
+// and returns the report result it implies.
 func classifyHostedFailure(report *compatibility.ProcessingReport, workflowPath string, err error) string {
 	var failure *hostedFailure
 	if errors.As(err, &failure) && failure.Kind == hostedAdmissionFailure {

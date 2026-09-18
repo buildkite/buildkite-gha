@@ -611,7 +611,12 @@ func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 			redactor := &cliRedactor{}
 			var warnings bytes.Buffer
 			authentication := &actionSourceAuthentication{provider: provider, redactor: redactor, warnings: &warnings}
-			if _, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: workflowSource, EventSource: test.event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("0", 64), ImporterStep: "importer", ActionAuthentication: authentication}); err != nil {
+			repositorySource, cleanup, err := hostedRepositorySource(t.Context(), "dev", test.event, authentication, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			if _, err := compileHostedRequest(t.Context(), hostedCompileRequest{WorkflowPath: workflowPath, WorkflowSource: workflowSource, EventSource: test.event, Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("0", 64), ImporterStep: "importer", RepositorySource: repositorySource}); err != nil {
 				t.Fatal(err)
 			}
 			if provider.calls != 0 || len(redactor.values) != 0 || warnings.Len() != 0 {
