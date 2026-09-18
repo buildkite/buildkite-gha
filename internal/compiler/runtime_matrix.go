@@ -70,11 +70,20 @@ type RuntimeMatrixContinuation struct {
 	// The consumer's instances are unknown until the producer runs, so it is
 	// absent here.
 	Instances map[string][]RuntimeMatrixInstance `json:"instances,omitempty"`
-	// JobBudget is the most jobs this continuation may upload: consumer
-	// instances plus dependent instances. The initial compilation divides the
-	// jobs MaxRuntimeMatrixGraphJobs leaves after the static graph equally
-	// between the workflow's continuations, so the deferred uploads together
-	// cannot grow the build past that bound whatever the producers publish.
+	// LaterMatrices are the deferred jobs whose own matrix comes from a
+	// producer this continuation compiles. Their rows exist only after this
+	// upload's jobs run, so the upload compiles their producers, leaves them
+	// deferred, and writes a child continuation whose step expands them
+	// next. Each has no known instances and promises one skipped placeholder
+	// under its logical key when this upload's producer does not succeed.
+	LaterMatrices []string `json:"later_matrices,omitempty"`
+	// JobBudget is the most jobs this continuation and the child
+	// continuations it writes may upload together: consumer instances plus
+	// dependent instances. The initial compilation divides the jobs
+	// MaxRuntimeMatrixGraphJobs leaves after the static graph equally between
+	// the workflow's components, and each upload passes what it did not use
+	// to its child, so the deferred uploads together cannot grow the build
+	// past that bound whatever the producers publish.
 	JobBudget int `json:"job_budget"`
 	// Sources records, for every deferred job, the workflow file it came from
 	// as the initial compilation resolved it, including the commit a remote
@@ -102,11 +111,12 @@ func (c RuntimeMatrixContinuation) Roots() []RuntimeMatrixRoot {
 	return append([]RuntimeMatrixRoot{{Descriptor: c.Descriptor, ProducerStepKey: c.ProducerStepKey}}, c.Joined...)
 }
 
-// DependentInstances counts the jobs the continuation uploads regardless of the
-// producer's output: one per statically known instance of every deferred
-// dependent. The consumer adds one job per matrix row on top of these.
+// DependentInstances counts the jobs the continuation and its children upload
+// regardless of the producer's output: one per statically known instance of
+// every deferred dependent and one placeholder per later matrix. The roots add
+// one job per matrix row on top of these.
 func (continuation RuntimeMatrixContinuation) DependentInstances() int {
-	count := 0
+	count := len(continuation.LaterMatrices)
 	for _, instances := range continuation.Instances {
 		count += len(instances)
 	}

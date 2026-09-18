@@ -58,16 +58,16 @@ type jobGraphExpansion struct {
 	// deferred maps each job compiled by a continuation upload, rather than
 	// by this compilation, to its index in result.continuations.
 	deferred map[string]int
-	// supplied marks the jobs a continuation upload compiles from the rows
-	// Options.RuntimeMatrixRows supplies, with their dependents, and
-	// suppliedComponents counts their merged owners. The initial compilation
-	// deferred them, so continuation budgets treat them as deferred.
-	supplied           map[string]bool
-	suppliedComponents int
-	suppliedInstances  int
-	byLogicalID        map[string][]JobInstance
-	instanceKeys       map[string]string
-	diagnostics        []error
+	// owners maps every job downstream of a needs-derived matrix to the
+	// representative of its component: the roots whose forward closures
+	// intersect, with everything they reach. mergeContinuations computes it
+	// from the whole graph, so a continuation upload that compiles part of a
+	// component from supplied rows sees the same components as the initial
+	// compilation and reproduces its budgets.
+	owners       map[string]string
+	byLogicalID  map[string][]JobInstance
+	instanceKeys map[string]string
+	diagnostics  []error
 }
 
 func parsedJobs(path string, parsed *workflow.Workflow) []ParsedJob {
@@ -126,7 +126,6 @@ func expandJobGraph(ctx context.Context, path string, source []byte, parsed *wor
 		failedJobs:     make(map[string]bool, len(resolved)),
 		failedMatrices: make(map[string]bool),
 		deferred:       make(map[string]int),
-		supplied:       make(map[string]bool),
 		instanceKeys:   make(map[string]string),
 	}
 	expansion.acceptJobs(resolved)
@@ -224,8 +223,6 @@ func (e *jobGraphExpansion) expandMatrices() {
 			e.result.runtimeMatrixBoundary = true
 			switch {
 			case err != nil:
-			case continuation >= 0:
-				err = errors.New("a needs-derived matrix cannot depend on a job that is itself expanded by a deferred upload")
 			case len(sourced.concurrencyGates) != 0:
 				err = errors.New("reusable-workflow concurrency cannot be combined with a needs-derived matrix")
 			case e.workflowConcurrency:
@@ -235,49 +232,60 @@ func (e *jobGraphExpansion) expandMatrices() {
 				e.rejectRuntimeMatrix(sourced, err)
 				continue
 			}
+			// Every root is recorded, including the ones this compilation
+			// skips or leaves to a later stage, so each compilation of the
+			// workflow sees the same components and shares the budget the
+			// same way.
 			e.result.runtimeMatrices = append(e.result.runtimeMatrices, descriptor)
 			rows, provided := e.options.RuntimeMatrixRows[id]
-			if !provided {
+			producerStage, producerDeferred := e.deferred[descriptor.ProducerJob]
+			switch {
+			case e.skippedPrerequisite(id):
+				// A job this matrix needs is skipped, so the matrix is
+				// skipped like any other dependent, whatever its own
+				// producer published.
+				e.skip(id)
+			case producerDeferred:
+				// The producer is itself deferred, so the rows exist only
+				// after the continuation that compiles it has uploaded: that
+				// upload writes the child continuation whose step expands
+				// this matrix. Rows supplied for it without its producer's
+				// rows leave the component partly unresolved, which
+				// mergeContinuations rejects.
+				owner := &e.result.continuations[producerStage]
+				owner.LaterMatrices = append(owner.LaterMatrices, id)
+				e.deferJob(sourced, producerStage, nil)
+				continue
+			case !provided:
 				// describeRuntimeMatrix guarantees exactly one producer instance.
 				producerKey, keyErr := namespacedInstanceKey(e.options.StepKeyNamespace, descriptor.ProducerJob, e.matricesByJob[descriptor.ProducerJob][0])
 				if keyErr != nil {
 					e.rejectRuntimeMatrix(sourced, fmt.Errorf("runtime matrix producer %q: %w", descriptor.ProducerJob, keyErr))
 					continue
 				}
-				e.deferred[id] = len(e.result.continuations)
 				e.result.continuations = append(e.result.continuations, RuntimeMatrixContinuation{
-					Descriptor: descriptor, ProducerStepKey: producerKey, Jobs: []string{id}, Labels: map[string]string{id: instanceLabel(job, nil, e.context)},
-					Sources: map[string]RuntimeMatrixJobSource{id: deferredJobSource(sourced)},
+					Descriptor: descriptor, ProducerStepKey: producerKey, Labels: make(map[string]string), Sources: make(map[string]RuntimeMatrixJobSource),
 				})
-				e.recordDeferredActions(id, sourced)
+				e.deferJob(sourced, len(e.result.continuations)-1, nil)
 				continue
-			}
-			if e.options.RuntimeMatrixSkipped[id] && len(rows) == 0 {
-				if e.result.skippedJobs == nil {
-					e.result.skippedJobs = make(map[string]bool)
-				}
-				e.result.skippedJobs[id] = true
-			} else if len(rows) == 0 || e.options.RuntimeMatrixSkipped[id] {
+			case e.options.RuntimeMatrixSkipped[id] && len(rows) == 0:
+				e.skip(id)
+			case len(rows) == 0 || e.options.RuntimeMatrixSkipped[id]:
 				e.rejectRuntimeMatrix(sourced, fmt.Errorf("output %q of job %q expanded to no matrix instances", descriptor.ProducerOutput, descriptor.ProducerJob))
 				continue
-			}
-			e.supplied[id] = true
-			matrices = make([]map[string]any, len(rows))
-			for i, row := range rows {
-				matrices[i] = cloneAnyMap(row)
+			default:
+				matrices = make([]map[string]any, len(rows))
+				for i, row := range rows {
+					matrices[i] = cloneAnyMap(row)
+				}
 			}
 		} else {
 			if continuation >= 0 && len(sourced.concurrencyGates) != 0 {
 				e.rejectRuntimeMatrix(sourced, errors.New("reusable-workflow concurrency cannot depend on a needs-derived matrix"))
 				continue
 			}
-			for _, member := range e.prerequisites[id] {
-				if e.supplied[member] {
-					e.supplied[id] = true
-				}
-				if e.result.skippedJobs[member] {
-					e.result.skippedJobs[id] = true
-				}
+			if e.skippedPrerequisite(id) {
+				e.skip(id)
 			}
 			matrixContext := e.context
 			matrixContext.Inputs = sourced.inputs.values
@@ -286,25 +294,7 @@ func (e *jobGraphExpansion) expandMatrices() {
 			matrixContext.Strategy = nil
 			matrices, err = expandMatrix(sourced.path, job, matrixContext)
 			if err == nil && continuation >= 0 {
-				e.deferred[id] = continuation
-				deferred := &e.result.continuations[continuation]
-				deferred.Jobs = append(deferred.Jobs, id)
-				deferred.Labels[id] = instanceLabel(job, nil, e.context)
-				deferred.Sources[id] = deferredJobSource(sourced)
-				e.recordDeferredActions(deferred.Descriptor.Job, sourced)
-				if deferred.Instances == nil {
-					deferred.Instances = make(map[string][]RuntimeMatrixInstance)
-				}
-				for _, matrix := range matrices {
-					// reserveDeferredKeys reports keys that cannot be derived.
-					key, keyErr := namespacedInstanceKey(e.options.StepKeyNamespace, id, matrix)
-					if keyErr != nil {
-						continue
-					}
-					deferred.Instances[id] = append(deferred.Instances[id], RuntimeMatrixInstance{
-						Key: key, Label: instanceLabel(job, matrix, e.context), CheckLabel: instanceCheckLabel(JobInstance{LogicalJobID: id, Matrix: matrix}),
-					})
-				}
+				e.deferJob(sourced, continuation, matrices)
 			}
 		}
 		if err != nil {
@@ -319,6 +309,52 @@ func (e *jobGraphExpansion) expandMatrices() {
 			continue
 		}
 		e.matricesByJob[id] = matrices
+	}
+}
+
+// skippedPrerequisite reports whether a job needs a job this compilation
+// skips because a matrix producer did not succeed.
+func (e *jobGraphExpansion) skippedPrerequisite(id string) bool {
+	for _, member := range e.prerequisites[id] {
+		if e.result.skippedJobs[member] {
+			return true
+		}
+	}
+	return false
+}
+
+// skip marks a job the continuation upload records as skipped instead of
+// compiling, because its matrix producer, or a job it needs, did not succeed.
+func (e *jobGraphExpansion) skip(id string) {
+	if e.result.skippedJobs == nil {
+		e.result.skippedJobs = make(map[string]bool)
+	}
+	e.result.skippedJobs[id] = true
+}
+
+// deferJob hands a job to the continuation at index, which compiles it once
+// the rows of its roots are known. matrices are the instances the job's
+// static matrix expands to; a root whose rows the producer supplies has none.
+func (e *jobGraphExpansion) deferJob(sourced sourcedJob, index int, matrices []map[string]any) {
+	id, job := sourced.ID, sourced.Job
+	e.deferred[id] = index
+	deferred := &e.result.continuations[index]
+	deferred.Jobs = append(deferred.Jobs, id)
+	deferred.Labels[id] = instanceLabel(job, nil, e.context)
+	deferred.Sources[id] = deferredJobSource(sourced)
+	e.recordDeferredActions(deferred.Descriptor.Job, sourced)
+	for _, matrix := range matrices {
+		// reserveDeferredKeys reports keys that cannot be derived.
+		key, err := namespacedInstanceKey(e.options.StepKeyNamespace, id, matrix)
+		if err != nil {
+			continue
+		}
+		if deferred.Instances == nil {
+			deferred.Instances = make(map[string][]RuntimeMatrixInstance)
+		}
+		deferred.Instances[id] = append(deferred.Instances[id], RuntimeMatrixInstance{
+			Key: key, Label: instanceLabel(job, matrix, e.context), CheckLabel: instanceCheckLabel(JobInstance{LogicalJobID: id, Matrix: matrix}),
+		})
 	}
 }
 
@@ -384,17 +420,21 @@ func (e *jobGraphExpansion) mergeContinuations() {
 			owners[id] = owner
 		}
 	}
+	e.owners = owners
+	// A continuation upload supplies rows for every root of its stage at
+	// once. A root of the same component without rows must belong to a later
+	// stage: one whose producer the component compiles, so its rows cannot
+	// exist yet.
 	provided := make(map[string]bool)
 	unresolved := make(map[string]bool)
 	for _, descriptor := range e.result.runtimeMatrices {
 		owner := owners[descriptor.Job]
 		if _, ok := e.options.RuntimeMatrixRows[descriptor.Job]; ok {
 			provided[owner] = true
-		} else {
+		} else if owners[descriptor.ProducerJob] == "" {
 			unresolved[owner] = true
 		}
 	}
-	e.suppliedComponents = len(provided)
 	for owner := range provided {
 		if unresolved[owner] {
 			e.rejectRuntimeMatrix(e.accepted[e.acceptedIndex[owner]], errors.New("all intersecting deferred matrices must be expanded by the same continuation"))
@@ -423,6 +463,7 @@ func (e *jobGraphExpansion) mergeContinuations() {
 		for job, instances := range original.Instances {
 			target.Instances[job] = instances
 		}
+		target.LaterMatrices = append(target.LaterMatrices, original.LaterMatrices...)
 		if actions := e.result.deferredActions[original.Descriptor.Job]; len(actions) != 0 {
 			e.result.deferredActions[target.Descriptor.Job] = append(e.result.deferredActions[target.Descriptor.Job], actions...)
 		}
@@ -490,10 +531,16 @@ func (e *jobGraphExpansion) reserveDeferredKeys() {
 		}
 		sourced := e.accepted[e.acceptedIndex[id]]
 		var keys []string
-		for _, root := range e.result.continuations[e.deferred[id]].Roots() {
+		continuation := e.result.continuations[e.deferred[id]]
+		for _, root := range continuation.Roots() {
 			if root.Descriptor.Job == id {
 				keys = []string{LogicalJobStepKey(e.options.StepKeyNamespace, id)}
 			}
+		}
+		if slices.Contains(continuation.LaterMatrices, id) {
+			// A later matrix takes its placeholder key and the key of the
+			// child step that expands it.
+			keys = []string{LogicalJobStepKey(e.options.StepKeyNamespace, id), continuationStepKey(e.options.StepKeyNamespace, id)}
 		}
 		for _, matrix := range e.matricesByJob[id] {
 			key, err := namespacedInstanceKey(e.options.StepKeyNamespace, id, matrix)
@@ -532,16 +579,26 @@ func (e *jobGraphExpansion) reserveDeferredKeys() {
 // reported.
 func (e *jobGraphExpansion) assignContinuationKeys() {
 	e.reserveDeferredKeys()
-	// The deferred uploads share the jobs the graph bound leaves after the
-	// static graph equally, so together they cannot exceed it whatever the
-	// producers publish. Each share must at least hold the jobs the
-	// continuation already promised: one consumer row and every dependent
-	// instance.
-	// A continuation upload recompiles with rows supplied for its own
-	// consumer; counting that subgraph as deferred reproduces the budgets the
-	// initial compilation recorded.
-	staticJobs := len(e.result.candidates) - e.suppliedInstances
-	uploads := len(e.result.continuations) + e.suppliedComponents
+	// The components share the jobs the graph bound leaves after the static
+	// graph equally, so together they cannot exceed it whatever the producers
+	// publish. Each share must at least hold the jobs the continuation already
+	// promised: one row per root and every dependent instance.
+	// A continuation upload recompiles with rows supplied for the roots of
+	// its stage. The instances that compiles belong to the component, not to
+	// the static graph, so every compilation of the workflow derives the same
+	// shares. A stage that leaves later matrices to a child continuation
+	// passes on the share it did not use itself.
+	staticJobs := 0
+	for _, candidate := range e.result.candidates {
+		if e.owners[candidate.LogicalJobID] == "" {
+			staticJobs++
+		}
+	}
+	components := make(map[string]bool)
+	for _, descriptor := range e.result.runtimeMatrices {
+		components[e.owners[descriptor.Job]] = true
+	}
+	uploads := len(components)
 	budget := 0
 	if uploads != 0 {
 		budget = (MaxRuntimeMatrixGraphJobs - staticJobs) / uploads
@@ -563,10 +620,11 @@ func (e *jobGraphExpansion) assignContinuationKeys() {
 		e.instanceKeys[key] = consumer
 		continuation.StepKey = key
 		line, column := matrixErrorPosition(sourced.Job, nil)
-		e.result.warnings = append(e.result.warnings, Warning{
-			Code: "W_MATRIX_DEFERRED", Path: sourced.path, Line: line, Column: column, Job: consumer,
-			Message: fmt.Sprintf("matrix values come from output %q of job %q; jobs %s are compiled and uploaded by step %q after that job finishes, so this report leaves them not-evaluated", continuation.Descriptor.ProducerOutput, continuation.Descriptor.ProducerJob, quotedList(continuation.Jobs), key),
-		})
+		message := fmt.Sprintf("matrix values come from output %q of job %q; jobs %s are compiled and uploaded by step %q after that job finishes, so this report leaves them not-evaluated", continuation.Descriptor.ProducerOutput, continuation.Descriptor.ProducerJob, quotedList(continuation.Jobs), key)
+		if len(continuation.LaterMatrices) != 0 {
+			message += fmt.Sprintf("; the matrices of jobs %s come from jobs that upload compiles, so later steps expand them in turn", quotedList(continuation.LaterMatrices))
+		}
+		e.result.warnings = append(e.result.warnings, Warning{Code: "W_MATRIX_DEFERRED", Path: sourced.path, Line: line, Column: column, Job: consumer, Message: message})
 	}
 }
 
@@ -610,11 +668,7 @@ func (e *jobGraphExpansion) expandInstances() {
 			e.result.notEvaluatedJobs[id] = true
 			continue
 		}
-		before := len(e.result.candidates)
 		e.expandJobInstances(id)
-		if e.supplied[id] {
-			e.suppliedInstances += len(e.result.candidates) - before
-		}
 	}
 	for _, id := range e.order {
 		e.result.instances = append(e.result.instances, e.byLogicalID[id]...)

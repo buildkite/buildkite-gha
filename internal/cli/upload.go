@@ -48,6 +48,15 @@ func uploadFromPlatform(goos, goarch string, args []string, stdout, stderr io.Wr
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
+	// A stage step compiles from the record an earlier stage uploaded instead
+	// of from live inputs; everything after the compile is shared.
+	if isStageUpload(args) {
+		options, err := stageArgs(args)
+		if err != nil {
+			return usageError(stderr, "upload: %v", err)
+		}
+		return uploadStage(options, stdout, stderr, version, clientVersion, agent)
+	}
 	uploadArguments, err := parseUploadArgs(args)
 	if err != nil {
 		return usageError(stderr, "upload: %v", err)
@@ -431,9 +440,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	planArtifacts := make([]compiler.PlanArtifact, 0)
 	var eventArtifact *transport.Artifact
 	failureArtifacts := make([]transport.Artifact, 0)
-	continuationArtifacts := make([]transport.Artifact, 0)
-	// Every continuation of this upload shares one event source artifact.
-	var continuationEvent *transport.Artifact
+	stageRecords := make([]transport.Artifact, 0)
+	// Every stage of this upload shares one event source artifact.
+	var stageEvent *transport.Artifact
 	jobCount := 0
 	bundleCompilerStep := importerStep
 	if bundleCompilerStep == "" {
@@ -563,24 +572,26 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 				return usageError(stderr, "upload: BUILDKITE_JOB_ID is required when a workflow defers a matrix to a job output")
 			}
 			// request holds the variables the admitted compile used, so the
-			// continuation records the inputs that produced this bundle.
-			event, artifacts, steps, continuationErr := buildContinuationArtifacts(continuationInputs{
-				request: request, bundle: bundle, importer: importerJobID, buildCommit: os.Getenv("BUILDKITE_COMMIT"),
-				workflow: input, groupLabel: label, checkName: checkName, event: effectiveEvent,
-				runnerUser: uploadArguments.experimentalRunnerUser, privateReusable: uploadArguments.privateReusableWorkflows,
-			})
-			if continuationErr != nil {
-				_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %s: %v\n", input.CanonicalPath, continuationErr)
+			// stage record holds the inputs that produced this bundle. The
+			// importer's stage advances from it exactly as a later stage does,
+			// writing the record and step of every stage the compile deferred.
+			root, event, stageErr := importerStage(request, importerJobID, os.Getenv("BUILDKITE_COMMIT"), input, label, checkName, effectiveEvent, uploadArguments.experimentalRunnerUser, uploadArguments.privateReusableWorkflows)
+			var stage stageResult
+			if stageErr == nil {
+				stage, stageErr = root.advance(bundle, nil, nil, "")
+			}
+			if stageErr != nil {
+				_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %s: %v\n", input.CanonicalPath, stageErr)
 				return 1
 			}
-			if continuationEvent != nil && continuationEvent.Digest != event.Digest {
-				_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: compiled workflows produced different continuation event artifacts")
+			if stageEvent != nil && stageEvent.Digest != event.Digest {
+				_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: compiled workflows produced different stage event artifacts")
 				return 1
 			}
-			continuationEvent = &event
-			continuationArtifacts = append(continuationArtifacts, artifacts...)
-			generated.Jobs = append(generated.Jobs, steps...)
-			jobCount += len(steps)
+			stageEvent = &event
+			stageRecords = append(stageRecords, stage.records...)
+			generated.Jobs = append(generated.Jobs, stage.steps...)
+			jobCount += len(stage.steps)
 		}
 		generatedWorkflows = append(generatedWorkflows, generated)
 		if input.AnnotationReason != "" {
@@ -653,11 +664,11 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		artifactPaths[artifact.Path] = struct{}{}
 		artifacts = append(artifacts, artifact)
 	}
-	if continuationEvent != nil {
-		artifactPaths[continuationEvent.Path] = struct{}{}
-		artifacts = append(artifacts, *continuationEvent)
+	if stageEvent != nil {
+		artifactPaths[stageEvent.Path] = struct{}{}
+		artifacts = append(artifacts, *stageEvent)
 	}
-	for _, artifact := range continuationArtifacts {
+	for _, artifact := range stageRecords {
 		if _, exists := artifactPaths[artifact.Path]; exists {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: duplicate aggregate artifact path %q\n", artifact.Path)
 			return 1
@@ -749,7 +760,7 @@ func sameExpandedJobGraph(left, right compiler.Bundle) bool {
 // partialUploadPreservesGraph reports whether a workflow that failed
 // preparation can still be uploaded job by job, with each failed job rendered
 // as a failing step and the rest left runnable. A workflow that defers a
-// matrix cannot: its continuation step and deferred jobs are emitted only by
+// matrix cannot: its stage step and deferred jobs are emitted only by
 // a complete compilation, so a per-job upload would drop them and the build
 // could pass without ever running them. Such a workflow fails as a whole.
 func partialUploadPreservesGraph(bundle compiler.Bundle) bool {
@@ -928,7 +939,7 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 // requiredRuntimePlatforms compiles the request once before any runtime
 // distribution is acquired, with the importer's own digest standing in for
 // every platform, to learn which platforms the planned jobs need, whether the
-// workflow defers jobs to a continuation, and whether hosted admission would
+// workflow defers jobs to a later stage, and whether hosted admission would
 // reject the workflow. The plans it produces are discarded.
 func requiredRuntimePlatforms(ctx context.Context, request hostedCompileRequest) (map[compiler.Platform]bool, bool, error, error) {
 	request.RuntimeDistributions = map[compiler.Platform]string{
@@ -960,7 +971,7 @@ func runtimePlatformsForBundle(bundle compiler.Bundle) (map[compiler.Platform]bo
 
 // deferredRuntimePlatforms lists the platforms whose runtime distribution the
 // importer can provide for jobs whose runs-on is unknown until a producer job
-// runs. A continuation fails closed when a deferred job needs a platform that
+// runs. A stage fails closed when a deferred job needs a platform that
 // is not in this set.
 func deferredRuntimePlatforms(uploadArguments parsedUploadArgs) map[compiler.Platform]bool {
 	platforms := map[compiler.Platform]bool{uploadArguments.importerPlatform: true}

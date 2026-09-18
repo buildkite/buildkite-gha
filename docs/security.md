@@ -170,9 +170,13 @@ recorded event, variables, runner mappings, and OIDC settings. Rows can only
 supply `matrix` values. Runner labels, queues, images, permissions, secrets,
 and admission come from that recompilation and its Buildkite policy checks,
 exactly as for static jobs, and the recompilation must reproduce the jobs the
-importer already uploaded before anything is uploaded. The continuation
-artifact and the workflow in the checkout are digest-checked against what the
-importer compiled.
+earlier uploads already created before anything is uploaded. The stage record
+and the workflow in the checkout are digest-checked against what the importer
+compiled. When matrices chain, each deferred step writes the next stage's
+record with the rows it accepted; the next step validates those rows
+the same way, reads the event and runtimes from the same importer, pins the
+same action revisions, and may only expand the matrices the initial
+compilation left to a later stage.
 
 ## Credential boundaries
 

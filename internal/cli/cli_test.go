@@ -837,9 +837,9 @@ jobs:
 		var continuations, events int
 		for path := range runner.uploaded {
 			switch {
-			case strings.HasPrefix(path, ".buildkite-gha/continuations/events/"):
+			case strings.HasPrefix(path, ".buildkite-gha/stages/events/"):
 				events++
-			case strings.HasPrefix(path, ".buildkite-gha/continuations/"):
+			case strings.HasPrefix(path, ".buildkite-gha/stages/"):
 				continuations++
 			}
 		}
@@ -847,7 +847,7 @@ jobs:
 			t.Fatalf("uploaded artifacts = %v, want one continuation and one shared event", slices.Sorted(maps.Keys(runner.uploaded)))
 		}
 		pipeline := string(runner.commands[len(runner.commands)-1].stdin)
-		for _, want := range []string{`label: ":github: matrix · generated"`, `key: "gha-generated-matrix"`, `build.yml / generated (matrix) (push)"`, "continue --continuation-digest 'sha256:", "--continuation-producer '0192f7d0-0000-7000-8000-000000000001'", `- step: "gha-producer"`} {
+		for _, want := range []string{`label: ":github: matrix · generated"`, `key: "gha-generated-matrix"`, `build.yml / generated (matrix) (push)"`, "upload --stage-digest 'sha256:", "--stage-producer '0192f7d0-0000-7000-8000-000000000001'", `- step: "gha-producer"`} {
 			if !strings.Contains(pipeline, want) {
 				t.Fatalf("pipeline missing %q:\n%s", want, pipeline)
 			}
@@ -1262,16 +1262,15 @@ jobs:
 		t.Fatalf("text report = %q", stdout.String())
 	}
 
-	// A deferred matrix that needs another deferred job still requires a
-	// serial continuation, which this bounded expansion rejects.
-	unsupportedPath := filepath.Join(t.TempDir(), "two-matrices.yml")
-	if err := os.WriteFile(unsupportedPath, []byte(`on: push
+	// A matrix read from a job that a deferred upload compiles is expanded by
+	// a later stage of the same component; the report names the stages.
+	chainedPath := filepath.Join(t.TempDir(), "chained-matrices.yml")
+	if err := os.WriteFile(chainedPath, []byte(`on: push
 jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
       linux: ${{ steps.plan.outputs.linux }}
-      macos: ${{ steps.plan.outputs.macos }}
     steps:
       - id: plan
         run: true
@@ -1283,12 +1282,20 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.linux) }}
     steps:
       - run: true
+  package:
+    needs: linux
+    runs-on: ubuntu-latest
+    outputs:
+      macos: ${{ steps.package.outputs.macos }}
+    steps:
+      - id: package
+        run: true
   macos:
-    needs: [plan, linux]
+    needs: package
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        include: ${{ fromJSON(needs.plan.outputs.macos) }}
+        include: ${{ fromJSON(needs.package.outputs.macos) }}
     steps:
       - run: true
   publish:
@@ -1301,24 +1308,20 @@ jobs:
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"validate", "--format", "json", unsupportedPath}, &stdout, &stderr, "dev"); code != 1 {
-		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	if code := Run([]string{"validate", "--format", "json", chainedPath}, &stdout, &stderr, "dev"); code != 0 {
+		t.Fatalf("Run() code = %d, want 0; stderr = %q", code, stderr.String())
 	}
 	report = compatibility.ProcessingReport{}
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	var errors []compatibility.Diagnostic
-	for _, diagnostic := range report.Diagnostics {
-		if diagnostic.Level == "error" {
-			errors = append(errors, diagnostic)
+	if report.Result != "compilable" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "W_MATRIX_DEFERRED" || report.Diagnostics[0].Job != "linux" {
+		t.Fatalf("report = %#v", report)
+	}
+	for _, want := range []string{`jobs "linux", "package", "macos", "publish" are compiled and uploaded by step "gha-linux-matrix"`, `the matrices of jobs "macos" come from jobs that upload compiles, so later steps expand them in turn`} {
+		if !strings.Contains(report.Diagnostics[0].Message, want) {
+			t.Fatalf("message %q lacks %q", report.Diagnostics[0].Message, want)
 		}
-	}
-	if len(errors) != 1 || errors[0].Code != compiler.CodeMatrixInvalid || errors[0].Job != "macos" {
-		t.Fatalf("diagnostics = %#v", report.Diagnostics)
-	}
-	if !strings.Contains(errors[0].Message, "does not meet its requirements") || !strings.Contains(errors[0].Detail, "cannot depend on a job that is itself expanded by a deferred upload") {
-		t.Fatalf("diagnostic = %#v", errors[0])
 	}
 }
 

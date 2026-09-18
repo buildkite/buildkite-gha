@@ -11,8 +11,8 @@ to validate a workflow, inspect generated output, or build a custom importer.
 | `compile` | Render pipeline YAML or compiler IR without uploading it. |
 | `upload` | Upload workflows from a custom importer. |
 
-`run-job` and `continue` are internal commands that generated steps run. Do
-not invoke them directly.
+`run-job` and the `upload --stage-digest` form are internal commands that
+generated steps run. Do not invoke them directly.
 
 ## Before you begin
 
@@ -667,49 +667,68 @@ job by job: when any of its jobs fails compilation, the whole workflow is
 replaced with one failing step, because a partial upload would drop the
 deferred steps.
 
-The deferred step downloads the importer's executable, then runs the internal
-command:
+The importer and every deferred step are stages of one compilation. Each
+stage compiles the whole workflow through the same compile path, uploads the
+jobs whose matrix rows it knows, and writes a stage record for each matrix the
+compiler still defers. The deferred step downloads the importer's executable,
+then runs the internal form of the same command:
 
 ```sh
-buildkite-gha continue \
-  --continuation-digest sha256:<digest> \
-  --continuation-producer <importer-job-id>
+buildkite-gha upload \
+  --stage-digest sha256:<digest> \
+  --stage-producer <job-id>
 ```
 
-`continue` runs inside a Buildkite job with `BUILDKITE=true`,
+This form accepts no other options or operands. `--stage-producer` is the job
+whose artifacts hold the stage record: the importer for the first deferred
+step of a component, or the earlier deferred step when a matrix chains from a
+job that step compiled (see
+[Matrices from job outputs](compatibility.md#matrices-from-job-outputs)). The
+event source and the runtimes always come from the importer the record names.
+Releases before this form emitted a separate `continue` command; a deferred
+step always runs the executable digest its own importer uploaded, so the two
+never mix inside one build.
+
+A stage step runs inside a Buildkite job with `BUILDKITE=true`,
 `BUILDKITE_BUILD_ID`, `BUILDKITE_JOB_ID`, and the default checkout. It:
 
-1. downloads the continuation artifact the importer wrote, verifies its
-   digest, compiler version, and importer, and checks that the workflow in the
-   checkout is byte-for-byte the one the importer compiled; the artifact also
-   records the action revisions and the variable scopes the importer resolved
-   for the deferred jobs, so `continue` never requests variables itself
+1. downloads the stage record, verifies its digest and compiler version, and
+   checks that the workflow in the checkout is byte-for-byte the one the
+   importer compiled; the record also holds the action revisions and the
+   variable scopes the importer resolved for the deferred jobs, so a stage
+   never requests variables itself, and the rows every earlier stage of a
+   chained component resolved
 2. reads each producer's verified result through the same manifest path
    that `needs` outputs use, bound to its exact instance key and plan digest;
    a verified non-success result skips that root's downstream jobs, while a
    missing or invalid manifest fails the step before any upload
 3. expands successful outputs with the static-matrix rules and limits, checks
-   that the rows and dependents fit the share of the 1,024-job limit the artifact
-   records for this step (see
+   that the rows and dependents fit the share of the 1,024-job limit the record
+   holds for this step (see
    [Matrices from job outputs](compatibility.md#matrices-from-job-outputs)),
    recompiles the
    workflow with the recorded event, variables, runner mappings, OIDC, and
-   `private-reusable-workflows` settings, reads remote reusable workflows and
+   `private-reusable-workflows` settings and the recorded rows of earlier
+   stages, reads remote reusable workflows and
    actions through the same repository source as `upload`, resolves runners
    through the Agent API as `upload` does,
-   requires the jobs the importer uploaded to compile identically, requires
-   each deferred job to come from the workflow source the importer recorded,
-   including the commit of a reusable workflow from another repository, and
-   pins each deferred job's actions to the recorded revisions
-4. uploads the plans and a pipeline holding only the deferred jobs, including
-   skipped placeholders where needed; joins appear once, and outside
-   prerequisites remain references to steps already in the build
+   requires the jobs the earlier uploads created to compile identically,
+   requires each deferred job to come from the workflow source the importer
+   recorded, including the commit of a reusable workflow from another
+   repository, and pins each deferred job's actions to the recorded revisions
+4. uploads the plans and a pipeline holding only the deferred jobs whose rows
+   exist, including skipped placeholders where needed; joins appear once, and
+   outside prerequisites remain references to steps already in the build.
+   When some deferred jobs read their matrix from a job this upload compiled,
+   the pipeline also holds the next stage's deferred step, and the upload
+   writes that step's stage record with the rows accepted so far and the
+   unused part of this step's job share
 
 Buildkite rejects an upload whose step keys already exist. When that happens,
-`continue` confirms through `buildkite-agent step get` that each expected step
+the stage confirms through `buildkite-agent step get` that each expected step
 carries the plan it just compiled and exits 0, so retrying the deferred step
 never duplicates jobs. For skipped jobs in a merged component, it also verifies
-the command marker bound to the continuation artifact digest. A missing step
+the command marker bound to the stage record digest. A missing step
 or a different binding fails the replay. Any other failure exits 1 with:
 
 ```

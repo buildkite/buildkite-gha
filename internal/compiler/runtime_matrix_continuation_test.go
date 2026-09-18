@@ -3,6 +3,7 @@ package compiler
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strconv"
@@ -314,22 +315,265 @@ func TestRuntimeMatrixClosureOwnership(t *testing.T) {
 	}
 }
 
-func TestRuntimeMatrixRejectsUnsupportedGraphs(t *testing.T) {
-	tests := []struct {
-		name, source, want string
-	}{
-		{
-			name: "consumer needing a deferred job",
-			source: runtimeMatrixWorkflow + `  package:
-    needs: [build, plan]
+// runtimeMatrixStagesWorkflow chains three needs-derived matrices: build's
+// rows come from the static job plan, deploy's from package, which needs
+// build, and release's from verify, which needs deploy. Each matrix can be
+// expanded only after the jobs of the earlier stage have run.
+const runtimeMatrixStagesWorkflow = runtimeMatrixWorkflow + `  package:
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        run: echo 'matrix=[]' >> "$GITHUB_OUTPUT"
+  deploy:
+    needs: package
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.package.outputs.matrix) }}
+    steps:
+      - run: echo ${{ matrix.region }}
+  verify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        run: echo 'matrix=[]' >> "$GITHUB_OUTPUT"
+  release:
+    needs: [verify, lint]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.verify.outputs.matrix) }}
+    steps:
+      - run: echo ${{ matrix.channel }}
+`
+
+func logicalJobs(ir IR) []string {
+	jobs := make([]string, 0, len(ir.Jobs))
+	for _, job := range ir.Jobs {
+		jobs = append(jobs, job.LogicalJobID)
+	}
+	return jobs
+}
+
+func continuationFor(t *testing.T, ir IR, consumer string) RuntimeMatrixContinuation {
+	t.Helper()
+	for _, continuation := range ir.Continuations {
+		if continuation.Descriptor.Job == consumer {
+			return continuation
+		}
+	}
+	t.Fatalf("no continuation expands %q: %#v", consumer, ir.Continuations)
+	return RuntimeMatrixContinuation{}
+}
+
+func instanceStepKey(t *testing.T, job string, matrix map[string]any) string {
+	t.Helper()
+	key, err := instanceKey(job, matrix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+func TestRuntimeMatrixChainsStagesThroughLaterMatrices(t *testing.T) {
+	buildRows := []map[string]any{{"target": "x", "runner": "ubuntu-latest"}, {"target": "y", "runner": "ubuntu-latest"}}
+	deployRows := []map[string]any{{"region": "eu"}, {"region": "us"}, {"region": "ap"}}
+	releaseRows := []map[string]any{{"channel": "stable"}}
+
+	// The initial compilation defers the whole component to build's step;
+	// deploy and release are later matrices with no instances of their own.
+	initial, err := compileRuntimeMatrix(t, runtimeMatrixStagesWorkflow, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := logicalJobs(initial); !slices.Equal(got, []string{"lint", "plan"}) || len(initial.Continuations) != 1 {
+		t.Fatalf("initial jobs = %v, continuations = %#v", got, initial.Continuations)
+	}
+	first := initial.Continuations[0]
+	if first.Descriptor.Job != "build" || len(first.Joined) != 0 || !slices.Equal(first.Jobs, []string{"build", "package", "deploy", "publish", "verify", "release"}) || !slices.Equal(first.LaterMatrices, []string{"deploy", "release"}) {
+		t.Fatalf("first stage = %#v", first)
+	}
+	if got := slices.Sorted(maps.Keys(first.Instances)); !slices.Equal(got, []string{"package", "publish", "verify"}) || first.DependentInstances() != 5 || first.JobBudget != MaxRuntimeMatrixGraphJobs-2 {
+		t.Fatalf("first stage instances = %v, budget = %d", got, first.JobBudget)
+	}
+
+	// Rows for build compile everything up to deploy's producer and leave a
+	// continuation rooted at deploy, with release still a later matrix.
+	second, err := compileRuntimeMatrix(t, runtimeMatrixStagesWorkflow, map[string][]map[string]any{"build": buildRows})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := logicalJobs(second); !slices.Equal(got, []string{"lint", "plan", "build", "build", "package", "publish"}) || len(second.Continuations) != 1 {
+		t.Fatalf("second stage jobs = %v, continuations = %#v", got, second.Continuations)
+	}
+	next := second.Continuations[0]
+	if next.Descriptor.Job != "deploy" || next.StepKey != "gha-deploy-matrix" || next.ProducerStepKey != "gha-package" || !slices.Equal(next.Jobs, []string{"deploy", "verify", "release"}) || !slices.Equal(next.LaterMatrices, []string{"release"}) {
+		t.Fatalf("second stage continuation = %#v", next)
+	}
+	if !reflect.DeepEqual(next.Instances, map[string][]RuntimeMatrixInstance{"verify": first.Instances["verify"]}) || next.Sources["release"] != first.Sources["release"] {
+		t.Fatalf("second stage continuation = %#v", next)
+	}
+
+	third, err := compileRuntimeMatrix(t, runtimeMatrixStagesWorkflow, map[string][]map[string]any{"build": buildRows, "deploy": deployRows})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := logicalJobs(third); len(got) != 10 || len(third.Continuations) != 1 || third.Continuations[0].Descriptor.Job != "release" || !slices.Equal(third.Continuations[0].Jobs, []string{"release"}) {
+		t.Fatalf("third stage jobs = %v, continuations = %#v", got, third.Continuations)
+	}
+
+	final, err := compileRuntimeMatrix(t, runtimeMatrixStagesWorkflow, map[string][]map[string]any{"build": buildRows, "deploy": deployRows, "release": releaseRows})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalKeys := jobKeys(final)
+	if len(final.Continuations) != 0 || len(finalKeys) != 11 {
+		t.Fatalf("final stage jobs = %v, continuations = %#v", logicalJobs(final), final.Continuations)
+	}
+	if release := finalKeys[instanceStepKey(t, "release", releaseRows[0])]; !slices.Equal(release.Needs, []string{"gha-lint", "gha-verify"}) {
+		t.Fatalf("release needs = %v", release.Needs)
+	}
+
+	t.Run("rows for a later stage need the earlier rows", func(t *testing.T) {
+		_, err := compileRuntimeMatrix(t, runtimeMatrixStagesWorkflow, map[string][]map[string]any{"deploy": deployRows})
+		if err == nil || !strings.Contains(err.Error(), "same continuation") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("skipped stage skips every later stage", func(t *testing.T) {
+		options := defaultOptions()
+		options.RuntimeMatrixRows = map[string][]map[string]any{"build": buildRows, "deploy": nil}
+		options.RuntimeMatrixSkipped = map[string]bool{"deploy": true}
+		ir, err := CompileIRWithOptionsContext(t.Context(), "runtime.yml", []byte(runtimeMatrixStagesWorkflow), readFile(t, smokePath("events", "push.json")), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := map[string]bool{"deploy": true, "verify": true, "release": true}; len(ir.Continuations) != 0 || !reflect.DeepEqual(ir.RuntimeMatrixSkippedJobs, want) {
+			t.Fatalf("skipped = %v, continuations = %#v", ir.RuntimeMatrixSkippedJobs, ir.Continuations)
+		}
+	})
+
+	t.Run("root with a static producer joins the stage of a deferred prerequisite", func(t *testing.T) {
+		// macos reads its rows from plan, which the initial upload runs, but
+		// needs build, so it is expanded in build's stage with rows for both
+		// roots rather than in a stage of its own.
+		source := strings.Replace(runtimeMatrixWorkflow, "      matrix: ${{ steps.plan.outputs.matrix }}\n", "      matrix: ${{ steps.plan.outputs.matrix }}\n      macos: ${{ steps.plan.outputs.macos }}\n", 1) + `  macos:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.macos) }}
+    steps:
+      - run: true
+`
+		initial, err := compileRuntimeMatrix(t, source, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first := continuationFor(t, initial, "build")
+		if len(initial.Continuations) != 1 || len(first.Joined) != 1 || first.Joined[0].Descriptor.Job != "macos" || len(first.LaterMatrices) != 0 {
+			t.Fatalf("continuations = %#v", initial.Continuations)
+		}
+		if _, err := compileRuntimeMatrix(t, source, map[string][]map[string]any{"build": buildRows}); err == nil || !strings.Contains(err.Error(), "same continuation") {
+			t.Fatalf("rows for build only: err = %v", err)
+		}
+		// build's producer failing skips macos although its own producer
+		// published rows.
+		options := defaultOptions()
+		options.RuntimeMatrixRows = map[string][]map[string]any{"build": nil, "macos": {{"arch": "arm64"}}}
+		options.RuntimeMatrixSkipped = map[string]bool{"build": true}
+		skipped, err := CompileIRWithOptionsContext(t.Context(), "runtime.yml", []byte(source), readFile(t, smokePath("events", "push.json")), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(skipped.RuntimeMatrixSkippedJobs, map[string]bool{"build": true, "macos": true, "publish": true}) {
+			t.Fatalf("skipped = %v", skipped.RuntimeMatrixSkippedJobs)
+		}
+	})
+
+	t.Run("later stage joins another root", func(t *testing.T) {
+		// test's rows come from plan like build's, and deploy needs test as
+		// well as package, so build, test, and everything after deploy form
+		// one component with deploy as a later stage.
+		source := strings.Replace(runtimeMatrixStagesWorkflow, "  deploy:\n    needs: package\n", "  deploy:\n    needs: [package, test]\n", 1) + `  test:
+    needs: plan
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - run: true
-`,
-			want: "cannot depend on a job that is itself expanded by a deferred upload",
+`
+		initial, err := compileRuntimeMatrix(t, source, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first := continuationFor(t, initial, "build")
+		if len(initial.Continuations) != 1 || len(first.Joined) != 1 || first.Joined[0].Descriptor.Job != "test" || !slices.Equal(first.LaterMatrices, []string{"deploy", "release"}) {
+			t.Fatalf("continuations = %#v", initial.Continuations)
+		}
+		second, err := compileRuntimeMatrix(t, source, map[string][]map[string]any{"build": buildRows, "test": {{"target": "t"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if next := continuationFor(t, second, "deploy"); len(second.Continuations) != 1 || len(next.Joined) != 0 || !slices.Equal(next.Jobs, []string{"deploy", "verify", "release"}) {
+			t.Fatalf("second stage = %#v", second.Continuations)
+		}
+	})
+
+	t.Run("other components keep their share across stages", func(t *testing.T) {
+		source := runtimeMatrixStagesWorkflow + `  other:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - run: true
+`
+		initial, err := compileRuntimeMatrix(t, source, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := (MaxRuntimeMatrixGraphJobs - 2) / 2
+		if len(initial.Continuations) != 2 || continuationFor(t, initial, "build").JobBudget != want || continuationFor(t, initial, "other").JobBudget != want {
+			t.Fatalf("continuations = %#v", initial.Continuations)
+		}
+		second, err := compileRuntimeMatrix(t, source, map[string][]map[string]any{"build": buildRows})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(second.Continuations) != 2 || !reflect.DeepEqual(continuationFor(t, second, "other"), continuationFor(t, initial, "other")) {
+			t.Fatalf("other component drifted: %#v", second.Continuations)
+		}
+	})
+
+	t.Run("later stage upload step key is reserved", func(t *testing.T) {
+		source := strings.Replace(runtimeMatrixStagesWorkflow, "  lint:\n", "  deploy-matrix:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n  lint:\n", 1)
+		_, err := compileRuntimeMatrix(t, source, nil)
+		if err == nil || !strings.Contains(err.Error(), `"gha-deploy-matrix" collides with a step from job "deploy-matrix"`) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestRuntimeMatrixRejectsUnsupportedGraphs(t *testing.T) {
+	tests := []struct {
+		name, source, want string
+	}{
+		{
+			// The consumer's own instances are unknown until its producer
+			// runs, so a matrix cannot read its output.
+			name:   "matrix read from a deferred consumer's output",
+			source: strings.Replace(strings.Replace(runtimeMatrixWorkflow, "    runs-on: ${{ matrix.runner }}\n", "    runs-on: ${{ matrix.runner }}\n    outputs:\n      matrix: ${{ matrix.target }}\n", 1), "  publish:\n    needs: [build, lint]\n    runs-on: ubuntu-latest\n", "  publish:\n    needs: [build, lint]\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        include: ${{ fromJSON(needs.build.outputs.matrix) }}\n", 1),
+			want:   `producer "build" must have exactly one statically expanded instance`,
 		},
 		{
 			name: "static job owning the deferred step key",

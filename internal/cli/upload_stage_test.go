@@ -66,11 +66,16 @@ type continueInitialUpload struct {
 	artifactPath string
 	digest       string
 	data         []byte
-	artifact     continuationArtifact
+	artifact     stageRecord
 	eventPath    string
 	eventData    []byte
 	pipeline     string
 	plans        map[string][]byte
+}
+
+// rootProducer returns the graph entry of the first root's producer.
+func (s stageRecord) rootProducer() compiledJob {
+	return s.producer(s.Continuation.Descriptor.Job)
 }
 
 // artifactData returns the artifacts a continuation reads from the importer:
@@ -122,18 +127,18 @@ func runContinueInitialUploadsInCheckout(t *testing.T, workflows []string, event
 	var continuations []continueInitialUpload
 	for path, contents := range runner.uploaded {
 		switch {
-		case strings.HasPrefix(path, ".buildkite-gha/continuations/events/"):
+		case strings.HasPrefix(path, ".buildkite-gha/stages/events/"):
 			events = append(events, path)
 			if got := strings.TrimPrefix(transport.Digest(contents), "sha256:"); !strings.HasSuffix(path, "/"+got+".json") {
 				t.Fatalf("event artifact %s is not addressed by its digest %s", path, got)
 			}
-		case strings.HasPrefix(path, ".buildkite-gha/continuations/"):
-			artifact, err := decodeContinuationArtifact(contents, "dev")
+		case strings.HasPrefix(path, ".buildkite-gha/stages/"):
+			artifact, err := decodeStageRecord(contents, "dev")
 			if err != nil {
 				t.Fatal(err)
 			}
 			digest := transport.Digest(contents)
-			if !strings.Contains(pipeline, "--continuation-digest '"+digest+"'") {
+			if !strings.Contains(pipeline, "--stage-digest '"+digest+"'") {
 				t.Fatalf("pipeline does not reference continuation %s:\n%s", digest, pipeline)
 			}
 			continuations = append(continuations, continueInitialUpload{artifactPath: path, digest: digest, data: contents, artifact: artifact, pipeline: pipeline, plans: plans})
@@ -148,7 +153,7 @@ func runContinueInitialUploadsInCheckout(t *testing.T, workflows []string, event
 		t.Fatalf("upload wrote %d event artifacts, want exactly one shared by every continuation: %v", len(events), events)
 	}
 	for i := range continuations {
-		eventPath, err := buildkitepipeline.ContinuationEventPath(continuations[i].artifact.Event.Digest)
+		eventPath, err := buildkitepipeline.StageEventPath(continuations[i].artifact.Event.Digest)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -173,12 +178,12 @@ func (initial continueInitialUpload) producerManifest(t *testing.T, result, matr
 func (initial continueInitialUpload) producerManifestFrom(t *testing.T, jobID, result, matrix string) []byte {
 	t.Helper()
 	manifest := transport.ResultManifest{
-		PlanDigest: initial.artifact.Producer.PlanDigest,
-		Producer:   transport.Producer{BuildID: continueBuildID, JobID: jobID, StepKey: initial.artifact.Producer.StepKey},
+		PlanDigest: initial.artifact.rootProducer().PlanDigest,
+		Producer:   transport.Producer{BuildID: continueBuildID, JobID: jobID, StepKey: initial.artifact.rootProducer().Key},
 		Result:     result,
 	}
 	if matrix != "" {
-		manifest.Outputs = []transport.Output{{Name: "matrix", Value: matrix}}
+		manifest.Outputs = []transport.Output{{Name: initial.artifact.Continuation.Descriptor.ProducerOutput, Value: matrix}}
 	}
 	encoded, err := transport.MarshalResultManifest(manifest)
 	if err != nil {
@@ -191,7 +196,7 @@ func (initial continueInitialUpload) producerManifestFrom(t *testing.T, jobID, r
 // and the producer's published result.
 func (initial continueInitialUpload) continueRunner(manifest []byte) *cliCaptureRunner {
 	return &cliCaptureRunner{
-		jobByStep:  map[string]string{initial.artifact.Producer.StepKey: continueProducerJobID},
+		jobByStep:  map[string]string{initial.artifact.rootProducer().Key: continueProducerJobID},
 		dataByPath: initial.dataByPath(manifest),
 	}
 }
@@ -199,17 +204,25 @@ func (initial continueInitialUpload) continueRunner(manifest []byte) *cliCapture
 // dataByPath is artifactData plus the producer's published result.
 func (initial continueInitialUpload) dataByPath(manifest []byte) map[string][]byte {
 	data := initial.artifactData()
-	data[transport.ResultPath(initial.artifact.Producer.StepKey, initial.artifact.Producer.PlanDigest)] = manifest
+	data[transport.ResultPath(initial.artifact.rootProducer().Key, initial.artifact.rootProducer().PlanDigest)] = manifest
 	return data
 }
 
 func runContinue(t *testing.T, runner *cliCaptureRunner, digest string) (int, string, string) {
 	t.Helper()
+	return runContinueAs(t, runner, digest, continueImporterJobID, continueContinuationJobID)
+}
+
+// runContinueAs runs the deferred step as job jobID, reading the continuation
+// the job producer wrote: the importer for the first stage of a component,
+// the earlier stage's step for every later one.
+func runContinueAs(t *testing.T, runner *cliCaptureRunner, digest, producer, jobID string) (int, string, string) {
+	t.Helper()
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_BUILD_ID", continueBuildID)
-	t.Setenv("BUILDKITE_JOB_ID", continueContinuationJobID)
+	t.Setenv("BUILDKITE_JOB_ID", jobID)
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"continue", "--continuation-digest", digest, "--continuation-producer", continueImporterJobID}, &stdout, &stderr, "dev", runner)
+	code := run([]string{"upload", "--stage-digest", digest, "--stage-producer", producer}, &stdout, &stderr, "dev", runner)
 	return code, stdout.String(), stderr.String()
 }
 
@@ -275,8 +288,8 @@ func pipelineUploads(runner *cliCaptureRunner) int {
 // uploaded again.
 func TestContinueExpandsNeedsDerivedMatrix(t *testing.T) {
 	initial := runContinueInitialUpload(t, "--runner-queue", "ubuntu-latest=custom-linux")
-	prefix := strings.TrimSuffix(initial.artifact.Producer.StepKey, "plan")
-	if initial.artifact.Producer.StepKey != prefix+"plan" || !slices.Equal(initial.artifact.Continuation.Jobs, []string{"build", "publish"}) || initial.artifact.Continuation.StepKey != prefix+"build-matrix" {
+	prefix := strings.TrimSuffix(initial.artifact.rootProducer().Key, "plan")
+	if initial.artifact.rootProducer().Key != prefix+"plan" || !slices.Equal(initial.artifact.Continuation.Jobs, []string{"build", "publish"}) || initial.artifact.Continuation.StepKey != prefix+"build-matrix" {
 		t.Fatalf("continuation = %+v", initial.artifact.Continuation)
 	}
 	if strings.Contains(initial.pipeline, `key: "`+prefix+`publish"`) || strings.Contains(initial.pipeline, `key: "`+prefix+`build"`) {
@@ -387,7 +400,7 @@ func TestContinueRejectsRowsThatEscapeThePolicy(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			runner := initial.continueRunner(initial.producerManifest(t, "success", test.matrix))
 			code, stdout, stderr := runContinue(t, runner, initial.digest)
-			if code != 1 || !strings.Contains(stderr, test.want) || !strings.Contains(stderr, continueRetryGuidance) {
+			if code != 1 || !strings.Contains(stderr, test.want) || !strings.Contains(stderr, stageRetryGuidance) {
 				t.Fatalf("continue code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
 			}
 			if pipelineUploads(runner) != 0 || len(runner.uploaded) != 0 {
@@ -419,7 +432,7 @@ func TestContinueRejectsRowsThatEscapeThePolicy(t *testing.T) {
 }
 
 // TestContinueVerifiesItsInputs proves the deferred step trusts only the
-// continuation the named importer wrote and only the workflow it compiled.
+// continuation its step names by digest and only the workflow it compiled.
 func TestContinueVerifiesItsInputs(t *testing.T) {
 	initial := runContinueInitialUpload(t)
 	manifest := initial.producerManifest(t, "success", `[{"target":"x","runner":"ubuntu-latest"}]`)
@@ -430,18 +443,6 @@ func TestContinueVerifiesItsInputs(t *testing.T) {
 		code, _, stderr := runContinue(t, runner, initial.digest)
 		if code != 1 || !strings.Contains(stderr, "does not match expected") || pipelineUploads(runner) != 0 {
 			t.Fatalf("continue code = %d, stderr = %q", code, stderr)
-		}
-	})
-
-	t.Run("continuation from another importer", func(t *testing.T) {
-		runner := initial.continueRunner(manifest)
-		var stdout, stderr bytes.Buffer
-		t.Setenv("BUILDKITE", "true")
-		t.Setenv("BUILDKITE_BUILD_ID", continueBuildID)
-		t.Setenv("BUILDKITE_JOB_ID", continueContinuationJobID)
-		code := run([]string{"continue", "--continuation-digest", initial.digest, "--continuation-producer", continueProducerJobID}, &stdout, &stderr, "dev", runner)
-		if code != 1 || !strings.Contains(stderr.String(), "was written by importer") || pipelineUploads(runner) != 0 {
-			t.Fatalf("continue code = %d, stderr = %q", code, stderr.String())
 		}
 	})
 
@@ -464,11 +465,33 @@ func TestContinueVerifiesItsInputs(t *testing.T) {
 		t.Setenv("BUILDKITE_BUILD_ID", continueBuildID)
 		t.Setenv("BUILDKITE_JOB_ID", "")
 		var stdout, stderr bytes.Buffer
-		code := run([]string{"continue", "--continuation-digest", initial.digest, "--continuation-producer", continueImporterJobID}, &stdout, &stderr, "dev", runner)
+		code := run([]string{"upload", "--stage-digest", initial.digest, "--stage-producer", continueImporterJobID}, &stdout, &stderr, "dev", runner)
 		if code != 2 || !strings.Contains(stderr.String(), "BUILDKITE_JOB_ID") || len(runner.commands) != 0 {
 			t.Fatalf("continue code = %d, stderr = %q, commands = %#v", code, stderr.String(), runner.commands)
 		}
 	})
+	// The stage form takes only the record and its producer; the importer's
+	// options and workflow operands are recorded inputs it must not override,
+	// and the command the earlier releases emitted no longer exists.
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "workflow operand", args: []string{"upload", "--stage-digest", initial.digest, "--stage-producer", continueImporterJobID, "build.yml"}, want: `"build.yml" cannot be combined with --stage-digest`},
+		{name: "importer option", args: []string{"upload", "--stage-digest", initial.digest, "--stage-producer", continueImporterJobID, "--runner-queue", "ubuntu-latest=q"}, want: `"--runner-queue" cannot be combined with --stage-digest`},
+		{name: "missing producer", args: []string{"upload", "--stage-digest", initial.digest}, want: "--stage-producer requires"},
+		{name: "invalid digest", args: []string{"upload", "--stage-digest", "sha256:nope", "--stage-producer", continueImporterJobID}, want: "--stage-digest requires a sha256 digest"},
+		{name: "continue command removed", args: []string{"continue", "--continuation-digest", initial.digest, "--continuation-producer", continueImporterJobID}, want: `unknown command "continue"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := initial.continueRunner(manifest)
+			var stdout, stderr bytes.Buffer
+			if code := run(test.args, &stdout, &stderr, "dev", runner); code != 2 || !strings.Contains(stderr.String(), test.want) || len(runner.commands) != 0 {
+				t.Fatalf("code = %d, stderr = %q, want %q; commands = %#v", code, stderr.String(), test.want, runner.commands)
+			}
+		})
+	}
 }
 
 // TestContinueFindsProducerWithOneRowMatrix covers a producer whose single
@@ -487,7 +510,7 @@ func TestContinueFindsProducerWithOneRowMatrix(t *testing.T) {
 		t.Fatal("workflow fixture did not change")
 	}
 	initial := runContinueInitialUploads(t, source)[0]
-	producerKey := initial.artifact.Producer.StepKey
+	producerKey := initial.artifact.rootProducer().Key
 	logicalKey := compiler.LogicalJobStepKey(initial.artifact.Workflow.Namespace, "plan")
 	if producerKey == logicalKey || !strings.HasPrefix(producerKey, logicalKey+"-") {
 		t.Fatalf("producer step key = %q, want the matrix instance key under %q", producerKey, logicalKey)
@@ -701,7 +724,7 @@ func TestContinueExpandsIndependentMatrices(t *testing.T) {
 	if len(a.artifact.Others) != 1 || a.artifact.Others[0].StepKey != b.artifact.Continuation.StepKey || len(b.artifact.Others) != 1 || b.artifact.Others[0].StepKey != a.artifact.Continuation.StepKey {
 		t.Fatalf("artifacts do not record each other: %+v / %+v", a.artifact.Others, b.artifact.Others)
 	}
-	for _, key := range []string{a.artifact.Continuation.StepKey, b.artifact.Continuation.StepKey, a.artifact.Producer.StepKey, b.artifact.Producer.StepKey} {
+	for _, key := range []string{a.artifact.Continuation.StepKey, b.artifact.Continuation.StepKey, a.artifact.rootProducer().Key, b.artifact.rootProducer().Key} {
 		if !strings.Contains(a.pipeline, `key: "`+key+`"`) {
 			t.Fatalf("initial upload is missing step %q:\n%s", key, a.pipeline)
 		}
@@ -709,13 +732,13 @@ func TestContinueExpandsIndependentMatrices(t *testing.T) {
 
 	const producerBJobID = "0192f7d0-0000-4000-8000-00000000bbb2"
 	runner := &cliCaptureRunner{
-		jobByStep: map[string]string{a.artifact.Producer.StepKey: continueProducerJobID, b.artifact.Producer.StepKey: producerBJobID},
+		jobByStep: map[string]string{a.artifact.rootProducer().Key: continueProducerJobID, b.artifact.rootProducer().Key: producerBJobID},
 		dataByPath: map[string][]byte{
 			a.artifactPath: a.data,
 			b.artifactPath: b.data,
 			a.eventPath:    a.eventData,
-			transport.ResultPath(a.artifact.Producer.StepKey, a.artifact.Producer.PlanDigest): a.producerManifest(t, "success", `[{"target":"a1"},{"target":"a2"}]`),
-			transport.ResultPath(b.artifact.Producer.StepKey, b.artifact.Producer.PlanDigest): b.producerManifestFrom(t, producerBJobID, "success", `[{"target":"b1"}]`),
+			transport.ResultPath(a.artifact.rootProducer().Key, a.artifact.rootProducer().PlanDigest): a.producerManifest(t, "success", `[{"target":"a1"},{"target":"a2"}]`),
+			transport.ResultPath(b.artifact.rootProducer().Key, b.artifact.rootProducer().PlanDigest): b.producerManifestFrom(t, producerBJobID, "success", `[{"target":"b1"}]`),
 		},
 	}
 	// build-a expands to two instances; build-b to one instance plus publish-b.
@@ -872,13 +895,13 @@ func TestContinueSharesApprovalGates(t *testing.T) {
 	const producerBJobID = "0192f7d0-0000-4000-8000-00000000bbb2"
 	newRunner := func() *cliCaptureRunner {
 		return &cliCaptureRunner{
-			jobByStep: map[string]string{a.artifact.Producer.StepKey: continueProducerJobID, b.artifact.Producer.StepKey: producerBJobID},
+			jobByStep: map[string]string{a.artifact.rootProducer().Key: continueProducerJobID, b.artifact.rootProducer().Key: producerBJobID},
 			dataByPath: map[string][]byte{
 				a.artifactPath: a.data,
 				b.artifactPath: b.data,
 				a.eventPath:    a.eventData,
-				transport.ResultPath(a.artifact.Producer.StepKey, a.artifact.Producer.PlanDigest): a.producerManifest(t, "success", `[{"target":"a1"}]`),
-				transport.ResultPath(b.artifact.Producer.StepKey, b.artifact.Producer.PlanDigest): b.producerManifestFrom(t, producerBJobID, "success", `[{"target":"b1"}]`),
+				transport.ResultPath(a.artifact.rootProducer().Key, a.artifact.rootProducer().PlanDigest): a.producerManifest(t, "success", `[{"target":"a1"}]`),
+				transport.ResultPath(b.artifact.rootProducer().Key, b.artifact.rootProducer().PlanDigest): b.producerManifestFrom(t, producerBJobID, "success", `[{"target":"b1"}]`),
 			},
 			stepAttributes: map[string]map[string]string{},
 		}
@@ -988,12 +1011,12 @@ func TestContinueRetriesWhenOnlySomeGatesRaced(t *testing.T) {
 	a, b := continuations[0], continuations[1]
 	const producerBJobID = "0192f7d0-0000-4000-8000-00000000bbb2"
 	runner := &cliCaptureRunner{
-		jobByStep: map[string]string{a.artifact.Producer.StepKey: continueProducerJobID, b.artifact.Producer.StepKey: producerBJobID},
+		jobByStep: map[string]string{a.artifact.rootProducer().Key: continueProducerJobID, b.artifact.rootProducer().Key: producerBJobID},
 		dataByPath: map[string][]byte{
 			a.artifactPath: a.data,
 			b.artifactPath: b.data,
 			a.eventPath:    a.eventData,
-			transport.ResultPath(b.artifact.Producer.StepKey, b.artifact.Producer.PlanDigest): b.producerManifestFrom(t, producerBJobID, "success", `[{"target":"b1"}]`),
+			transport.ResultPath(b.artifact.rootProducer().Key, b.artifact.rootProducer().PlanDigest): b.producerManifestFrom(t, producerBJobID, "success", `[{"target":"b1"}]`),
 		},
 		stepAttributes: map[string]map[string]string{},
 	}
@@ -1064,9 +1087,10 @@ func TestContinueRetriesWhenOnlySomeGatesRaced(t *testing.T) {
 	}
 }
 
-// TestCheckContinuationsUnchanged pins the drift rule for the workflow's other
-// continuations: the recompilation must defer exactly the recorded set.
-func TestCheckContinuationsUnchanged(t *testing.T) {
+// TestAdvanceRequiresOtherContinuationsUnchanged pins the drift rule for the
+// workflow's other continuations: the recompilation must defer exactly the
+// recorded set.
+func TestAdvanceRequiresOtherContinuationsUnchanged(t *testing.T) {
 	descriptor := func(job, producer string) compiler.RuntimeMatrixDescriptor {
 		return compiler.RuntimeMatrixDescriptor{Schema: compiler.RuntimeMatrixSchemaV1, Job: job, Shape: compiler.RuntimeMatrixShapeInclude, ProducerJob: producer, ProducerStepKey: "gha-" + producer, ProducerOutput: "matrix"}
 	}
@@ -1087,7 +1111,10 @@ func TestCheckContinuationsUnchanged(t *testing.T) {
 		{name: "one of two disappeared", recorded: []compiler.RuntimeMatrixContinuation{other, extra}, remaining: []compiler.RuntimeMatrixContinuation{extra}, want: `no longer defers job "build-b"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := checkContinuationsUnchanged(test.recorded, test.remaining)
+			record := stageRecord{Continuation: compiler.RuntimeMatrixContinuation{StepKey: "gha-build-a-matrix"}, Others: test.recorded}
+			var bundle compiler.Bundle
+			bundle.IR.Continuations = test.remaining
+			_, err := record.advance(bundle, nil, nil, "")
 			switch {
 			case test.want == "" && err != nil:
 				t.Fatalf("unexpected error: %v", err)
@@ -1098,23 +1125,25 @@ func TestCheckContinuationsUnchanged(t *testing.T) {
 	}
 }
 
-// TestCheckDriftRequiresRecordedDeferredSources pins the provenance rule for
+// TestAdvanceRequiresRecordedDeferredSources pins the provenance rule for
 // deferred jobs: every expanded job must come from the workflow source the
 // importer compiled, including the commit a remote reusable workflow was pinned
 // to, because a deferred job has no earlier plan digest to compare.
-func TestCheckDriftRequiresRecordedDeferredSources(t *testing.T) {
+func TestAdvanceRequiresRecordedDeferredSources(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("1", 64)
 	remote := &compiler.RemoteWorkflowSource{Repository: "owner/workflows", RequestedRef: "v1", Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("2", 64)}
-	run := continuationRun{artifact: continuationArtifact{
+	record := stageRecord{
 		Runtimes: map[string]string{compiler.PlatformLinuxAMD64.String(): digest},
 		Continuation: compiler.RuntimeMatrixContinuation{
-			Jobs: []string{"build", "call.publish"},
+			StepKey:   "gha-build-matrix",
+			JobBudget: 3,
+			Jobs:      []string{"build", "call.publish"},
 			Sources: map[string]compiler.RuntimeMatrixJobSource{
 				"build":        {Path: "./.github/workflows/build.yml", Digest: digest},
 				"call.publish": {Path: "owner/workflows/.github/workflows/publish.yml@v1", Digest: digest, Remote: remote},
 			},
 		},
-	}}
+	}
 	instance := func(job, path string, remote *compiler.RemoteWorkflowSource) compiler.JobInstance {
 		return compiler.JobInstance{Key: "gha-" + strings.ReplaceAll(job, ".", "-"), LogicalJobID: job, Platform: compiler.PlatformLinuxAMD64, SourcePath: path, SourceDigest: digest, RemoteWorkflow: remote}
 	}
@@ -1132,6 +1161,7 @@ func TestCheckDriftRequiresRecordedDeferredSources(t *testing.T) {
 		for _, job := range jobs {
 			b.IR.Jobs = append(b.IR.Jobs, job)
 			b.Plans = append(b.Plans, compiler.PlanArtifact{Job: plan.Job{Target: plan.Target{StepKey: job.Key}}, Digest: digest})
+			b.GeneratedWorkflow.Jobs = append(b.GeneratedWorkflow.Jobs, buildkitepipeline.Job{Key: job.Key})
 		}
 		return b
 	}
@@ -1146,7 +1176,7 @@ func TestCheckDriftRequiresRecordedDeferredSources(t *testing.T) {
 		{name: "job not in the initial upload", jobs: []compiler.JobInstance{build, publish, unrecorded}, want: `job "gha-extra" did not exist in the initial upload`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := run.checkDrift(bundle(test.jobs...))
+			_, err := record.advance(bundle(test.jobs...), nil, nil, "")
 			switch {
 			case test.want == "" && err != nil:
 				t.Fatalf("unexpected error: %v", err)
@@ -1162,7 +1192,7 @@ func TestCheckDriftRequiresRecordedDeferredSources(t *testing.T) {
 // way a skipped static job would.
 func TestContinueSkipsDeferredJobsWhenProducerFails(t *testing.T) {
 	initial := runContinueInitialUpload(t)
-	prefix := strings.TrimSuffix(initial.artifact.Producer.StepKey, "plan")
+	prefix := strings.TrimSuffix(initial.artifact.rootProducer().Key, "plan")
 	runner := initial.continueRunner(initial.producerManifest(t, "failure", ""))
 	code, stdout, stderr := runContinue(t, runner, initial.digest)
 	if code != 0 || !strings.Contains(stdout, `finished with result "failure"; the deferred jobs are skipped`) {
@@ -1234,7 +1264,7 @@ func TestUploadFailsWholeWorkflowWhenStaticJobCannotJoinDeferredGraph(t *testing
 				}
 			}
 			for path := range runner.uploaded {
-				if strings.HasPrefix(path, ".buildkite-gha/plans/") || strings.HasPrefix(path, ".buildkite-gha/continuations/") {
+				if strings.HasPrefix(path, ".buildkite-gha/plans/") || strings.HasPrefix(path, ".buildkite-gha/stages/") {
 					t.Fatalf("failed workflow uploaded a runnable artifact %s: %v", path, slices.Sorted(maps.Keys(runner.uploaded)))
 				}
 			}
@@ -1242,7 +1272,7 @@ func TestUploadFailsWholeWorkflowWhenStaticJobCannotJoinDeferredGraph(t *testing
 	}
 	t.Run("intact workflow still defers the matrix", func(t *testing.T) {
 		initial := runContinueInitialUpload(t)
-		if !strings.Contains(initial.pipeline, "gha-lint") || !strings.Contains(initial.pipeline, "gha-plan") || !strings.Contains(initial.pipeline, "--continuation-digest") {
+		if !strings.Contains(initial.pipeline, "gha-lint") || !strings.Contains(initial.pipeline, "gha-plan") || !strings.Contains(initial.pipeline, "--stage-digest") {
 			t.Fatalf("intact workflow pipeline = %s", initial.pipeline)
 		}
 	})
@@ -1259,7 +1289,7 @@ func TestContinueSkipsStaticMatrixInstancesWhenProducerFails(t *testing.T) {
 	if len(initial.artifact.Continuation.Instances["publish"]) != 2 {
 		t.Fatalf("continuation instances = %#v", initial.artifact.Continuation.Instances)
 	}
-	prefix := strings.TrimSuffix(initial.artifact.Producer.StepKey, "plan")
+	prefix := strings.TrimSuffix(initial.artifact.rootProducer().Key, "plan")
 	runner := initial.continueRunner(initial.producerManifest(t, "failure", ""))
 	code, stdout, stderr := runContinue(t, runner, initial.digest)
 	if code != 0 {
@@ -1320,7 +1350,7 @@ func TestContinueReplayIsIdempotent(t *testing.T) {
 		partial.pipelineUploadErr = errors.New("pipeline upload: rejected")
 		partial.stepAttributes = map[string]map[string]string{steps[0].Key: existing[steps[0].Key]}
 		code, _, stderr := runContinue(t, partial, initial.digest)
-		if code != 1 || !strings.Contains(stderr, "pipeline upload: rejected") || !strings.Contains(stderr, continueRetryGuidance) {
+		if code != 1 || !strings.Contains(stderr, "pipeline upload: rejected") || !strings.Contains(stderr, stageRetryGuidance) {
 			t.Fatalf("partial code = %d, stderr = %q", code, stderr)
 		}
 	})
@@ -1330,7 +1360,7 @@ func TestContinueReplayIsIdempotent(t *testing.T) {
 		changed.pipelineUploadErr = errors.New("pipeline upload: rejected")
 		changed.stepAttributes = existing
 		code, _, stderr := runContinue(t, changed, initial.digest)
-		if code != 1 || !strings.Contains(stderr, continueRetryGuidance) {
+		if code != 1 || !strings.Contains(stderr, stageRetryGuidance) {
 			t.Fatalf("changed code = %d, stderr = %q", code, stderr)
 		}
 	})
@@ -1392,9 +1422,9 @@ func joinedContinueRunner(t *testing.T, initial continueInitialUpload, firstResu
 		matrix = `[{"target":"x","runner":"ubuntu-latest"},{"target":"y","runner":"ubuntu-latest"}]`
 	}
 	runner := initial.continueRunner(initial.producerManifest(t, firstResult, matrix))
-	producer := initial.artifact.JoinedProducers["test"]
+	producer := initial.artifact.producer("test")
 	const jobID = "0192f7d0-0000-4000-8000-00000000bbb2"
-	manifest := transport.ResultManifest{PlanDigest: producer.PlanDigest, Producer: transport.Producer{BuildID: continueBuildID, JobID: jobID, StepKey: producer.StepKey}, Result: secondResult}
+	manifest := transport.ResultManifest{PlanDigest: producer.PlanDigest, Producer: transport.Producer{BuildID: continueBuildID, JobID: jobID, StepKey: producer.Key}, Result: secondResult}
 	if secondResult == "success" {
 		manifest.Outputs = []transport.Output{{Name: "matrix", Value: `[{"target":"z"}]`}}
 	}
@@ -1402,8 +1432,8 @@ func joinedContinueRunner(t *testing.T, initial continueInitialUpload, firstResu
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner.jobByStep[producer.StepKey] = jobID
-	runner.dataByPath[transport.ResultPath(producer.StepKey, producer.PlanDigest)] = data
+	runner.jobByStep[producer.Key] = jobID
+	runner.dataByPath[transport.ResultPath(producer.Key, producer.PlanDigest)] = data
 	return runner
 }
 
@@ -1413,15 +1443,15 @@ func TestContinueJoinedClosures(t *testing.T) {
 		t.Fatalf("continuations = %d, want one owner", len(initials))
 	}
 	initial := initials[0]
-	prefix := strings.TrimSuffix(initial.artifact.Producer.StepKey, "plan")
-	producer := initial.artifact.JoinedProducers["test"]
-	if producer.StepKey == prefix+"plan_other" || !strings.HasPrefix(producer.StepKey, prefix+"plan_other-") {
+	prefix := strings.TrimSuffix(initial.artifact.rootProducer().Key, "plan")
+	producer := initial.artifact.producer("test")
+	if producer.Key == prefix+"plan_other" || !strings.HasPrefix(producer.Key, prefix+"plan_other-") {
 		t.Fatalf("producer lost its matrix instance key: %#v", producer)
 	}
 	_, _, initialSteps := decodeContinuePipeline(t, []byte(initial.pipeline))
 	for _, step := range initialSteps {
 		if step.Key == initial.artifact.Continuation.StepKey {
-			if len(step.DependsOn) != 2 || step.DependsOn[0].Step != initial.artifact.Producer.StepKey || step.DependsOn[1].Step != producer.StepKey {
+			if len(step.DependsOn) != 2 || step.DependsOn[0].Step != initial.artifact.rootProducer().Key || step.DependsOn[1].Step != producer.Key {
 				t.Fatalf("owner dependencies = %#v", step.DependsOn)
 			}
 		}
@@ -1453,7 +1483,7 @@ func TestContinueJoinedClosures(t *testing.T) {
 				seen[step.Key] = true
 				if step.Skip != "" {
 					skipped = append(skipped, strings.TrimPrefix(step.Key, prefix))
-					if step.Command != "exit 1 # skipped continuation '"+initial.digest+"'" {
+					if step.Command != "exit 1 # skipped by stage '"+initial.digest+"'" {
 						t.Fatalf("skip is not bound to owner artifact: %q", step.Command)
 					}
 				} else {
@@ -1475,7 +1505,7 @@ func TestContinueJoinedClosures(t *testing.T) {
 			if runnable != test.runnable || !reflect.DeepEqual(skipped, test.skipped) || !seen[prefix+"join"] {
 				t.Fatalf("runnable=%d skipped=%v steps=%#v", runnable, skipped, steps)
 			}
-			if seen[initial.artifact.Producer.StepKey] || seen[producer.StepKey] || seen[prefix+"lint"] {
+			if seen[initial.artifact.rootProducer().Key] || seen[producer.Key] || seen[prefix+"lint"] {
 				t.Fatal("uploaded a parent-owned prerequisite")
 			}
 			plans := uploadedPlans(t, runner)
@@ -1504,7 +1534,7 @@ func TestContinueJoinedClosures(t *testing.T) {
 	}
 	t.Run("missing manifest is not a skip", func(t *testing.T) {
 		runner := joinedContinueRunner(t, initial, "failure", "success")
-		delete(runner.dataByPath, transport.ResultPath(producer.StepKey, producer.PlanDigest))
+		delete(runner.dataByPath, transport.ResultPath(producer.Key, producer.PlanDigest))
 		if code, _, stderr := runContinue(t, runner, initial.digest); code != 1 || !strings.Contains(stderr, "result is unavailable") {
 			t.Fatalf("code=%d: %s", code, stderr)
 		}
@@ -1514,33 +1544,34 @@ func TestContinueJoinedClosures(t *testing.T) {
 	})
 	t.Run("second producer retried", func(t *testing.T) {
 		runner := joinedContinueRunner(t, initial, "success", "success")
-		runner.jobByStep[producer.StepKey] = "0192f7d0-0000-4000-8000-00000000bbb3"
+		runner.jobByStep[producer.Key] = "0192f7d0-0000-4000-8000-00000000bbb3"
 		if code, _, stderr := runContinue(t, runner, initial.digest); code != 1 || !strings.Contains(stderr, "result is unavailable") || pipelineUploads(runner) != 0 {
 			t.Fatalf("retried producer code=%d: %s", code, stderr)
 		}
 	})
 	for _, test := range []struct {
 		name string
-		edit func(*continuationArtifact)
+		edit func(*stageRecord)
 	}{
-		{name: "wrong plan", edit: func(a *continuationArtifact) {
-			p := a.JoinedProducers["test"]
-			p.PlanDigest = a.Producer.PlanDigest
-			a.JoinedProducers["test"] = p
+		{name: "producer without plan", edit: func(a *stageRecord) {
+			for i := range a.Graph {
+				if a.Graph[i].Key == producer.Key {
+					a.Graph[i].PlanDigest = ""
+				}
+			}
 		}},
-		{name: "logical key instead of instance", edit: func(a *continuationArtifact) {
-			p := a.JoinedProducers["test"]
-			p.StepKey = prefix + "plan_other"
-			a.JoinedProducers["test"] = p
+		{name: "logical key instead of instance", edit: func(a *stageRecord) { a.Continuation.Joined[0].ProducerStepKey = prefix + "plan_other" }},
+		{name: "producer of another job", edit: func(a *stageRecord) { a.Continuation.Joined[0].ProducerStepKey = prefix + "lint" }},
+		{name: "missing producer", edit: func(a *stageRecord) {
+			a.Graph = slices.DeleteFunc(a.Graph, func(job compiledJob) bool { return job.Key == producer.Key })
 		}},
-		{name: "missing producer", edit: func(a *continuationArtifact) { delete(a.JoinedProducers, "test") }},
-		{name: "duplicate root", edit: func(a *continuationArtifact) {
+		{name: "duplicate root", edit: func(a *stageRecord) {
 			a.Continuation.Joined = append(a.Continuation.Joined, a.Continuation.Joined[0])
 		}},
-		{name: "outside prerequisite claimed", edit: func(a *continuationArtifact) { a.Continuation.Joined[0].Descriptor.ProducerJob = "lint" }},
+		{name: "outside prerequisite claimed", edit: func(a *stageRecord) { a.Continuation.Joined[0].Descriptor.ProducerJob = "lint" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			a, err := decodeContinuationArtifact(initial.data, "dev")
+			a, err := decodeStageRecord(initial.data, "dev")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1549,7 +1580,7 @@ func TestContinueJoinedClosures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := decodeContinuationArtifact(data, "dev"); err == nil {
+			if _, err := decodeStageRecord(data, "dev"); err == nil {
 				t.Fatal("accepted incorrect producer binding")
 			}
 		})
@@ -1563,7 +1594,7 @@ func TestContinueJoinedClosures(t *testing.T) {
 				t.Fatal(err)
 			}
 			limited.data, limited.digest = data, transport.Digest(data)
-			limited.artifactPath, err = buildkitepipeline.ContinuationPath(limited.digest)
+			limited.artifactPath, err = buildkitepipeline.StagePath(limited.digest)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1580,12 +1611,583 @@ func TestContinueJoinedClosures(t *testing.T) {
 	}
 }
 
-// TestContinuationArtifactRoundTrip proves the artifact decodes strictly and
+// continueChainedWorkflow chains two needs-derived matrices: build's rows come
+// from plan, and deploy's rows come from package, a job that needs build and
+// so exists only after build's deferred upload compiled it. release joins
+// both matrices through publish and deploy.
+const continueChainedWorkflow = continueDeferredMatrixWorkflow + `  package:
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - id: targets
+        run: true
+  deploy:
+    needs: package
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.package.outputs.targets) }}
+    steps:
+      - run: true
+  release:
+    needs: [publish, deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`
+
+const (
+	continuePackageJobID     = "0192f7d0-0000-4000-8000-00000000bbb4"
+	continueSecondStageJobID = "0192f7d0-0000-4000-8000-00000000ccc2"
+)
+
+// continueStage is one deferred upload of a chained component: the artifact
+// its step reads and the job that wrote it.
+type continueStage struct {
+	initial continueInitialUpload
+	// writer is the job whose artifacts hold the stage's continuation.
+	writer string
+	// runner is the job the stage runs as.
+	runner string
+}
+
+func firstStage(initial continueInitialUpload) continueStage {
+	return continueStage{initial: initial, writer: continueImporterJobID, runner: continueContinuationJobID}
+}
+
+// run executes the stage against the verified result of its producer.
+func (stage continueStage) run(t *testing.T, result, matrix string, producerJobID string, edit func(*cliCaptureRunner)) (*cliCaptureRunner, int, string, string) {
+	t.Helper()
+	manifest := stage.initial.producerManifestFrom(t, producerJobID, result, matrix)
+	runner := &cliCaptureRunner{
+		jobByStep:  map[string]string{stage.initial.artifact.rootProducer().Key: producerJobID},
+		dataByPath: stage.initial.dataByPath(manifest),
+	}
+	if edit != nil {
+		edit(runner)
+	}
+	code, stdout, stderr := runContinueAs(t, runner, stage.initial.digest, stage.writer, stage.runner)
+	return runner, code, stdout, stderr
+}
+
+// nextStage returns the stage the runner's upload wrote for the rest of the
+// component: exactly one child continuation. The event source stays with the
+// importer, which every stage reads it from.
+func (stage continueStage) nextStage(t *testing.T, runner *cliCaptureRunner) continueStage {
+	t.Helper()
+	next := continueInitialUpload{plans: map[string][]byte{}, eventPath: stage.initial.eventPath, eventData: stage.initial.eventData}
+	for path, contents := range runner.uploaded {
+		switch {
+		case path == stage.initial.eventPath:
+			t.Fatalf("stage re-uploaded the event source %s", path)
+		case strings.HasPrefix(path, ".buildkite-gha/stages/"):
+			if next.data != nil {
+				t.Fatalf("stage wrote two continuations: %v", slices.Sorted(maps.Keys(runner.uploaded)))
+			}
+			artifact, err := decodeStageRecord(contents, "dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			next.artifactPath, next.data, next.digest, next.artifact = path, contents, transport.Digest(contents), artifact
+		case strings.HasPrefix(path, ".buildkite-gha/plans/"):
+			next.plans[path] = contents
+		}
+	}
+	if next.data == nil {
+		t.Fatalf("stage did not write a child continuation: %v", slices.Sorted(maps.Keys(runner.uploaded)))
+	}
+	next.pipeline = string(lastPipelineUpload(t, runner))
+	if !strings.Contains(next.pipeline, "--stage-digest '"+next.digest+"'") || !strings.Contains(next.pipeline, "--stage-producer '"+stage.runner+"'") {
+		t.Fatalf("pipeline does not run the child continuation %s from job %s:\n%s", next.digest, stage.runner, next.pipeline)
+	}
+	return continueStage{initial: next, writer: stage.runner, runner: continueSecondStageJobID}
+}
+
+func stepKeys(steps []continuePipelineStep) []string {
+	keys := make([]string, 0, len(steps))
+	for _, step := range steps {
+		keys = append(keys, step.Key)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+func dependencyKeys(step continuePipelineStep) []string {
+	keys := make([]string, 0, len(step.DependsOn))
+	for _, dependency := range step.DependsOn {
+		keys = append(keys, dependency.Step)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// TestContinueChainsStages expands a component whose second matrix comes
+// from a job the first deferred upload compiles. The importer writes one
+// continuation for the component; its step compiles the jobs whose rows
+// exist and adds a child step that reads the rows package publishes; the
+// child step compiles the rest against the graph the first stage left.
+func TestContinueChainsStages(t *testing.T) {
+	initials := runContinueInitialUploads(t, continueChainedWorkflow)
+	if len(initials) != 1 {
+		t.Fatalf("continuations = %d, want one for the whole component", len(initials))
+	}
+	first := firstStage(initials[0])
+	parent := first.initial.artifact
+	prefix := strings.TrimSuffix(parent.rootProducer().Key, "plan")
+	if !slices.Equal(parent.Continuation.Jobs, []string{"build", "package", "deploy", "publish", "release"}) {
+		t.Fatalf("component jobs = %v", parent.Continuation.Jobs)
+	}
+	if !slices.Equal(parent.Continuation.LaterMatrices, []string{"deploy"}) {
+		t.Fatalf("later matrices = %v", parent.Continuation.LaterMatrices)
+	}
+	if strings.Contains(first.initial.pipeline, `key: "`+prefix+`deploy-matrix"`) {
+		t.Fatalf("initial upload created the second stage's step before its rows can exist:\n%s", first.initial.pipeline)
+	}
+	// lint and plan are static; the one component gets everything else, and
+	// its stages share that budget between them.
+	if parent.Continuation.JobBudget != compiler.MaxRuntimeMatrixGraphJobs-2 {
+		t.Fatalf("component budget = %d", parent.Continuation.JobBudget)
+	}
+
+	buildRows := `[{"target":"amd64","runner":"ubuntu-latest"},{"target":"arm64","runner":"ubuntu-latest"}]`
+	runner, code, stdout, stderr := first.run(t, "success", buildRows, continueProducerJobID, nil)
+	if code != 0 {
+		t.Fatalf("first stage code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, `Uploaded 4 jobs for "build"`) || !strings.Contains(stdout, `Step "`+prefix+`deploy-matrix" expands "deploy", "release" once these jobs have run.`) {
+		t.Fatalf("first stage stdout = %q", stdout)
+	}
+	_, _, steps := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
+	var childStep continuePipelineStep
+	var buildKeys []string
+	for _, step := range steps {
+		switch {
+		case step.Key == prefix+"deploy-matrix":
+			childStep = step
+		case strings.HasPrefix(step.Key, prefix+"build-"):
+			buildKeys = append(buildKeys, step.Key)
+		case step.Key != prefix+"package" && step.Key != prefix+"publish":
+			t.Fatalf("first stage uploaded %q, which needs rows that do not exist yet", step.Key)
+		}
+	}
+	if len(steps) != 5 || len(buildKeys) != 2 || childStep.Key == "" || childStep.Skip != "" {
+		t.Fatalf("first stage steps = %v", stepKeys(steps))
+	}
+	if !slices.Equal(dependencyKeys(childStep), []string{prefix + "package"}) || !strings.Contains(childStep.Command, "upload --stage-digest") {
+		t.Fatalf("child step = %#v, want a continuation that waits for package", childStep)
+	}
+	plans := uploadedPlans(t, runner)
+	if len(plans) != 3 || len(plans["build"]) != 2 || len(plans["package"]) != 1 || len(plans["publish"]) != 1 {
+		t.Fatalf("first stage uploaded plans for %v", slices.Sorted(maps.Keys(plans)))
+	}
+	firstSteps := steps
+
+	second := first.nextStage(t, runner)
+	child := second.initial.artifact
+	if child.Importer != continueImporterJobID || child.Continuation.Descriptor.Job != "deploy" || child.Continuation.StepKey != prefix+"deploy-matrix" || !slices.Equal(child.Continuation.Jobs, []string{"deploy", "release"}) || len(child.Continuation.LaterMatrices) != 0 {
+		t.Fatalf("child continuation = %+v", child.Continuation)
+	}
+	packagePlan, err := buildkitepipeline.PlanPath(child.rootProducer().PlanDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, uploaded := second.initial.plans[packagePlan]; child.rootProducer().Key != prefix+"package" || !uploaded {
+		t.Fatalf("child producer = %+v, want the package plan this stage uploaded %v", child.rootProducer(), slices.Sorted(maps.Keys(second.initial.plans)))
+	}
+	if len(child.Resolved) != 1 || child.Resolved[0].Job != "build" || len(child.Resolved[0].Rows) != 2 || child.Resolved[0].Skipped {
+		t.Fatalf("child resolved matrices = %+v", child.Resolved)
+	}
+	if !reflect.DeepEqual(child.Continuation.ActionLocks, parent.Continuation.ActionLocks) || child.Workflow != parent.Workflow || child.Event != parent.Event {
+		t.Fatalf("child records different inputs than the importer: %+v", child)
+	}
+	graph := make([]string, 0, len(child.Graph))
+	for _, job := range child.Graph {
+		graph = append(graph, job.Key)
+	}
+	slices.Sort(graph)
+	slices.Sort(buildKeys)
+	if want := slices.Sorted(slices.Values(append([]string{prefix + "lint", prefix + "plan", prefix + "package", prefix + "publish"}, buildKeys...))); !slices.Equal(graph, want) {
+		t.Fatalf("child graph = %v, want %v", graph, want)
+	}
+	if 4+child.Continuation.JobBudget != parent.Continuation.JobBudget {
+		t.Fatalf("first stage uploaded 4 jobs and left %d to the child, parent budget %d", child.Continuation.JobBudget, parent.Continuation.JobBudget)
+	}
+
+	deployRows := `[{"target":"staging","runner":"ubuntu-latest"},{"target":"production","runner":"ubuntu-latest"},{"target":"canary","runner":"ubuntu-latest"}]`
+	runner, code, stdout, stderr = second.run(t, "success", deployRows, continuePackageJobID, nil)
+	if code != 0 {
+		t.Fatalf("second stage code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, `Expanding job "deploy" into 3 matrix instances.`) || !strings.Contains(stdout, `Uploaded 4 jobs for "deploy" from job "package" output "targets".`) || strings.Contains(stdout, "once these jobs have run") {
+		t.Fatalf("second stage stdout = %q", stdout)
+	}
+	if !slices.Equal(runner.commands[0].args[:3], []string{"artifact", "download", second.initial.artifactPath}) || runner.commands[0].args[5] != continueContinuationJobID {
+		t.Fatalf("child continuation was not read from the first stage: %#v", runner.commands[0])
+	}
+	_, _, steps = decodeContinuePipeline(t, lastPipelineUpload(t, runner))
+	var deployKeys []string
+	var release continuePipelineStep
+	for _, step := range steps {
+		switch {
+		case strings.HasPrefix(step.Key, prefix+"deploy-"):
+			deployKeys = append(deployKeys, step.Key)
+			if !slices.Equal(dependencyKeys(step), []string{prefix + "package"}) {
+				t.Fatalf("deploy instance %q depends on %v", step.Key, dependencyKeys(step))
+			}
+		case step.Key == prefix+"release":
+			release = step
+		default:
+			t.Fatalf("second stage uploaded %q again", step.Key)
+		}
+	}
+	if len(steps) != 4 || len(deployKeys) != 3 || release.Key == "" {
+		t.Fatalf("second stage steps = %v", stepKeys(steps))
+	}
+	slices.Sort(deployKeys)
+	// release joins the first stage's publish with this stage's instances.
+	if want := slices.Sorted(slices.Values(append([]string{prefix + "publish"}, deployKeys...))); !slices.Equal(dependencyKeys(release), want) {
+		t.Fatalf("release depends on %v, want %v", dependencyKeys(release), want)
+	}
+	plans = uploadedPlans(t, runner)
+	if len(plans) != 2 || len(plans["deploy"]) != 3 || len(plans["release"]) != 1 {
+		t.Fatalf("second stage uploaded plans for %v", slices.Sorted(maps.Keys(plans)))
+	}
+	for path := range runner.uploaded {
+		if strings.HasPrefix(path, ".buildkite-gha/stages/") {
+			t.Fatalf("last stage wrote a continuation %s", path)
+		}
+		if _, earlier := second.initial.plans[path]; earlier {
+			t.Fatalf("second stage re-uploaded plan %s", path)
+		}
+	}
+
+	t.Run("replay of the first stage", func(t *testing.T) {
+		existing := map[string]map[string]string{}
+		for _, step := range firstSteps {
+			existing[step.Key] = map[string]string{"command": step.Command}
+		}
+		if !strings.Contains(existing[prefix+"deploy-matrix"]["command"], "'"+second.initial.digest+"'") {
+			t.Fatalf("child step does not name the child artifact: %q", existing[prefix+"deploy-matrix"]["command"])
+		}
+		replay, code, stdout, stderr := first.run(t, "success", buildRows, continueProducerJobID, func(replay *cliCaptureRunner) {
+			replay.pipelineUploadErr = errors.New("pipeline upload: duplicate step key")
+			replay.stepAttributes = existing
+		})
+		if code != 0 || !strings.Contains(stdout, "were already uploaded by an earlier run of this step") || pipelineUploads(replay) != 1 {
+			t.Fatalf("replay code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+		}
+		// A child step bound to another artifact is not this stage's upload.
+		existing[prefix+"deploy-matrix"] = map[string]string{"command": strings.Replace(existing[prefix+"deploy-matrix"]["command"], second.initial.digest, first.initial.digest, 1)}
+		_, code, _, stderr = first.run(t, "success", buildRows, continueProducerJobID, func(replay *cliCaptureRunner) {
+			replay.pipelineUploadErr = errors.New("pipeline upload: duplicate step key")
+			replay.stepAttributes = existing
+		})
+		if code != 1 || !strings.Contains(stderr, stageRetryGuidance) {
+			t.Fatalf("replay with another child accepted: code = %d, stderr = %q", code, stderr)
+		}
+	})
+	t.Run("replay of the second stage", func(t *testing.T) {
+		existing := map[string]map[string]string{}
+		for _, step := range steps {
+			existing[step.Key] = map[string]string{"command": step.Command}
+		}
+		replay, code, stdout, stderr := second.run(t, "success", deployRows, continuePackageJobID, func(replay *cliCaptureRunner) {
+			replay.pipelineUploadErr = errors.New("pipeline upload: duplicate step key")
+			replay.stepAttributes = existing
+		})
+		if code != 0 || !strings.Contains(stdout, "were already uploaded by an earlier run of this step") || pipelineUploads(replay) != 1 {
+			t.Fatalf("replay code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+		}
+		delete(existing, deployKeys[0])
+		_, code, _, stderr = second.run(t, "success", deployRows, continuePackageJobID, func(replay *cliCaptureRunner) {
+			replay.pipelineUploadErr = errors.New("pipeline upload: duplicate step key")
+			replay.stepAttributes = existing
+		})
+		if code != 1 || !strings.Contains(stderr, stageRetryGuidance) {
+			t.Fatalf("partial replay accepted: code = %d, stderr = %q", code, stderr)
+		}
+	})
+	t.Run("first stage rows leave room for the later stage", func(t *testing.T) {
+		// A budget of 5 holds this stage's 4 jobs, but deploy's placeholder
+		// and release count against the rows before anything is compiled.
+		limited := parent
+		limited.Continuation.JobBudget = 5
+		stage := first
+		stage.initial = reencodeContinuation(t, first.initial, limited)
+		runner, code, _, stderr := stage.run(t, "success", buildRows, continueProducerJobID, nil)
+		if code != 1 || !strings.Contains(stderr, "may upload at most 5 jobs (1 rows plus their dependents)") || pipelineUploads(runner) != 0 {
+			t.Fatalf("under-funded first stage code = %d, stderr = %q", code, stderr)
+		}
+	})
+	t.Run("second stage rows are bounded by what the first stage left", func(t *testing.T) {
+		// The child's budget covers its rows plus release.
+		for budget, want := range map[int]int{3: 1, 4: 0} {
+			limited := child
+			limited.Continuation.JobBudget = budget
+			stage := second
+			stage.initial = reencodeContinuation(t, second.initial, limited)
+			runner, code, _, stderr := stage.run(t, "success", deployRows, continuePackageJobID, nil)
+			if code != want || want == 1 && (!strings.Contains(stderr, "may upload at most 3 jobs") || pipelineUploads(runner) != 0) {
+				t.Fatalf("second stage with budget %d code = %d, stderr = %q", budget, code, stderr)
+			}
+		}
+	})
+	t.Run("second stage needs the first stage's resolved rows", func(t *testing.T) {
+		// A child recording other build rows cannot reproduce the build
+		// instances the first stage uploaded, so its recompilation drifts.
+		forgetful := child
+		forgetful.Resolved = []resolvedMatrix{{Job: "build", Rows: child.Resolved[0].Rows[:1]}}
+		stage := second
+		stage.initial = reencodeContinuation(t, second.initial, forgetful)
+		runner, code, _, stderr := stage.run(t, "success", deployRows, continuePackageJobID, nil)
+		if code != 1 || !strings.Contains(stderr, "the workflow inputs changed") || pipelineUploads(runner) != 0 {
+			t.Fatalf("child with other resolved rows code = %d, stderr = %q", code, stderr)
+		}
+		// Without any resolved rows, build is still deferred in the
+		// recompilation and deploy's rows cannot be joined to it.
+		forgetful.Resolved = nil
+		stage.initial = reencodeContinuation(t, second.initial, forgetful)
+		if _, code, _, stderr := stage.run(t, "success", deployRows, continuePackageJobID, nil); code != 1 || !strings.Contains(stderr, "compile deferred jobs") {
+			t.Fatalf("child without resolved rows code = %d, stderr = %q", code, stderr)
+		}
+	})
+	t.Run("second stage rejects rows its parent promised to a later stage", func(t *testing.T) {
+		// The child owns deploy; a child that still lists deploy as a later
+		// matrix while expanding it contradicts itself.
+		contradictory := child
+		contradictory.Continuation.LaterMatrices = []string{"deploy"}
+		if _, err := decodeStageRecord(mustJSON(t, contradictory), "dev"); err == nil {
+			t.Fatal("accepted a continuation that both expands and defers deploy")
+		}
+	})
+}
+
+// reencodeContinuation replaces the artifact of an upload with an edited one,
+// re-addressing it by digest so the deferred step accepts the bytes.
+func reencodeContinuation(t *testing.T, initial continueInitialUpload, artifact stageRecord) continueInitialUpload {
+	t.Helper()
+	data, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.artifact, initial.data, initial.digest = artifact, data, transport.Digest(data)
+	initial.artifactPath, err = buildkitepipeline.StagePath(initial.digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return initial
+}
+
+// TestContinueChainsThreeStages proves a chain has no fixed depth: every
+// stage's step writes the next stage's artifact until no matrix remains, the
+// rows resolved so far accumulate, and the stages together spend exactly the
+// component's budget.
+func TestContinueChainsThreeStages(t *testing.T) {
+	source := continueChainedWorkflow + `  verify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    outputs:
+      channels: ${{ steps.channels.outputs.channels }}
+    steps:
+      - id: channels
+        run: true
+  announce:
+    needs: [verify, lint]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.verify.outputs.channels) }}
+    steps:
+      - run: true
+`
+	stage := firstStage(runContinueInitialUploads(t, source)[0])
+	parent := stage.initial.artifact
+	prefix := strings.TrimSuffix(parent.rootProducer().Key, "plan")
+	if got := parent.Continuation.LaterMatrices; !slices.Equal(got, []string{"deploy", "announce"}) {
+		t.Fatalf("later matrices = %v", got)
+	}
+	rows := map[string]string{
+		"build":    `[{"target":"x","runner":"ubuntu-latest"}]`,
+		"deploy":   `[{"target":"eu","runner":"ubuntu-latest"},{"target":"us","runner":"ubuntu-latest"}]`,
+		"announce": `[{"channel":"stable","runner":"ubuntu-latest"}]`,
+	}
+	producers := map[string]string{"build": continueProducerJobID, "deploy": continuePackageJobID, "announce": "0192f7d0-0000-4000-8000-00000000bbb5"}
+	var expanded []string
+	total := 0
+	for len(expanded) < len(rows) {
+		job := stage.initial.artifact.Continuation.Descriptor.Job
+		budget := stage.initial.artifact.Continuation.JobBudget
+		runner, code, stdout, stderr := stage.run(t, "success", rows[job], producers[job], nil)
+		if code != 0 {
+			t.Fatalf("stage %q code = %d, stdout = %q, stderr = %q", job, code, stdout, stderr)
+		}
+		expanded = append(expanded, job)
+		uploaded := 0
+		for _, plans := range uploadedPlans(t, runner) {
+			uploaded += len(plans)
+		}
+		total += uploaded
+		var resolved []string
+		for _, matrix := range stage.initial.artifact.Resolved {
+			resolved = append(resolved, matrix.Job)
+		}
+		if !slices.Equal(resolved, expanded[:len(expanded)-1]) {
+			t.Fatalf("stage %q recorded rows for %v, want the earlier stages %v", job, resolved, expanded[:len(expanded)-1])
+		}
+		if len(expanded) == len(rows) {
+			for path := range runner.uploaded {
+				if strings.HasPrefix(path, ".buildkite-gha/stages/") {
+					t.Fatalf("last stage %q wrote a continuation %s", job, path)
+				}
+			}
+			if uploaded > budget || total > parent.Continuation.JobBudget {
+				t.Fatalf("stages uploaded %d jobs in total and %d in the last, budgets %d and %d", total, uploaded, parent.Continuation.JobBudget, budget)
+			}
+			break
+		}
+		next := stage.nextStage(t, runner)
+		if next.initial.artifact.Continuation.JobBudget != budget-uploaded {
+			t.Fatalf("stage %q uploaded %d jobs from budget %d and left %d", job, uploaded, budget, next.initial.artifact.Continuation.JobBudget)
+		}
+		// Each stage runs as a new job; the runner ID only matters for the
+		// artifact producer the next stage reads from.
+		next.runner = fmt.Sprintf("0192f7d0-0000-4000-8000-00000000ccc%d", len(expanded)+1)
+		stage = next
+	}
+	if !slices.Equal(expanded, []string{"build", "deploy", "announce"}) {
+		t.Fatalf("stages expanded %v", expanded)
+	}
+	// The last stage's step key was reserved by the initial compilation and
+	// depends on the job the second stage compiled.
+	if stage.initial.artifact.Continuation.StepKey != prefix+"announce-matrix" || stage.initial.artifact.rootProducer().Key != prefix+"verify" {
+		t.Fatalf("last stage = %+v", stage.initial.artifact.Continuation)
+	}
+}
+
+// TestContinueChainedStagesSkipWhenProducersFail proves each stage of a chain
+// resolves the jobs it cannot run. A failed first producer skips the whole
+// component, including the matrix a later stage would have expanded, under
+// one placeholder each; a failed second producer skips only the jobs the
+// second stage owns, and the first stage's jobs stay as uploaded.
+func TestContinueChainedStagesSkipWhenProducersFail(t *testing.T) {
+	first := firstStage(runContinueInitialUploads(t, continueChainedWorkflow)[0])
+	prefix := strings.TrimSuffix(first.initial.artifact.rootProducer().Key, "plan")
+
+	t.Run("first producer fails", func(t *testing.T) {
+		runner, code, stdout, stderr := first.run(t, "failure", "", continueProducerJobID, nil)
+		if code != 0 || !strings.Contains(stdout, `finished with result "failure"; the deferred jobs are skipped`) {
+			t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+		}
+		if len(runner.uploaded) != 0 {
+			t.Fatalf("skipped component uploaded artifacts: %v", slices.Sorted(maps.Keys(runner.uploaded)))
+		}
+		_, _, steps := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
+		if want := []string{prefix + "build", prefix + "deploy", prefix + "package", prefix + "publish", prefix + "release"}; !slices.Equal(stepKeys(steps), want) {
+			t.Fatalf("skipped steps = %v, want the whole component under one placeholder each %v", stepKeys(steps), want)
+		}
+		for _, step := range steps {
+			if !strings.Contains(step.Skip, `matrix producer job "plan" finished with result failure`) || !slices.Equal(dependencyKeys(step), []string{prefix + "plan"}) {
+				t.Fatalf("skipped step = %#v", step)
+			}
+		}
+	})
+
+	t.Run("second producer fails", func(t *testing.T) {
+		runner, code, _, stderr := first.run(t, "success", `[{"target":"x","runner":"ubuntu-latest"}]`, continueProducerJobID, nil)
+		if code != 0 {
+			t.Fatalf("first stage code = %d, stderr = %q", code, stderr)
+		}
+		second := first.nextStage(t, runner)
+		runner, code, stdout, stderr := second.run(t, "failure", "", continuePackageJobID, nil)
+		if code != 0 || !strings.Contains(stdout, `Matrix producer "package" finished with result "failure"`) {
+			t.Fatalf("second stage code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+		}
+		if len(runner.uploaded) != 0 {
+			t.Fatalf("skipped stage uploaded artifacts: %v", slices.Sorted(maps.Keys(runner.uploaded)))
+		}
+		_, _, steps := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
+		if want := []string{prefix + "deploy", prefix + "release"}; !slices.Equal(stepKeys(steps), want) {
+			t.Fatalf("skipped steps = %v, want only the second stage's jobs", stepKeys(steps))
+		}
+		for _, step := range steps {
+			if !strings.Contains(step.Skip, `matrix producer job "package" finished with result failure`) || !slices.Equal(dependencyKeys(step), []string{prefix + "package"}) {
+				t.Fatalf("skipped step = %#v", step)
+			}
+		}
+		// Skipping is idempotent when the placeholders already exist.
+		replay, code, stdout, stderr := second.run(t, "failure", "", continuePackageJobID, func(replay *cliCaptureRunner) {
+			replay.pipelineUploadErr = errors.New("pipeline upload: duplicate step key")
+			replay.stepAttributes = map[string]map[string]string{}
+			for _, step := range steps {
+				replay.stepAttributes[step.Key] = map[string]string{"label": step.Label}
+			}
+		})
+		if code != 0 || !strings.Contains(stdout, "already uploaded") || pipelineUploads(replay) != 1 {
+			t.Fatalf("skip replay code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+		}
+	})
+}
+
+// TestContinueRejectsMalformedResolvedMatrices proves a child artifact's
+// recorded rows are checked the way live producer output is before they
+// reach the compiler.
+func TestContinueRejectsMalformedResolvedMatrices(t *testing.T) {
+	first := firstStage(runContinueInitialUploads(t, continueChainedWorkflow)[0])
+	runner, code, _, stderr := first.run(t, "success", `[{"target":"x","runner":"ubuntu-latest"}]`, continueProducerJobID, nil)
+	if code != 0 {
+		t.Fatalf("first stage code = %d, stderr = %q", code, stderr)
+	}
+	child := first.nextStage(t, runner).initial.artifact
+	if _, err := decodeStageRecord(mustJSON(t, child), "dev"); err != nil {
+		t.Fatalf("intact child rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*stageRecord)
+	}{
+		{name: "rows for a skipped matrix", edit: func(a *stageRecord) { a.Resolved[0].Skipped = true }},
+		{name: "no rows and not skipped", edit: func(a *stageRecord) { a.Resolved[0].Rows = nil }},
+		{name: "nested row value", edit: func(a *stageRecord) { a.Resolved[0].Rows[0]["runner"] = []any{"ubuntu-latest"} }},
+		{name: "empty row", edit: func(a *stageRecord) { a.Resolved[0].Rows[0] = map[string]any{} }},
+		{name: "job still deferred", edit: func(a *stageRecord) { a.Resolved[0].Job = "deploy" }},
+		{name: "unnamed job", edit: func(a *stageRecord) { a.Resolved[0].Job = "" }},
+		{name: "duplicate job", edit: func(a *stageRecord) { a.Resolved = append(a.Resolved, a.Resolved[0]) }},
+		{name: "too many rows", edit: func(a *stageRecord) {
+			for len(a.Resolved[0].Rows) <= compiler.MaxRuntimeMatrixInstances {
+				a.Resolved[0].Rows = append(a.Resolved[0].Rows, a.Resolved[0].Rows[0])
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			edited, err := decodeStageRecord(mustJSON(t, child), "dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.edit(&edited)
+			if _, err := decodeStageRecord(mustJSON(t, edited), "dev"); err == nil {
+				t.Fatal("accepted malformed resolved matrices")
+			}
+		})
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// TestStageRecordRoundTrip proves the artifact decodes strictly and
 // records the values the continuation needs.
-func TestContinuationArtifactRoundTrip(t *testing.T) {
+func TestStageRecordRoundTrip(t *testing.T) {
 	initial := runContinueInitialUpload(t, "--runner-queue", "ubuntu-latest=custom-linux")
 	artifact := initial.artifact
-	if artifact.Schema != continuationSchema || artifact.Importer != continueImporterJobID || artifact.Workflow.Path != ".github/workflows/build.yml" {
+	if artifact.Schema != stageSchema || artifact.Importer != continueImporterJobID || artifact.Workflow.Path != ".github/workflows/build.yml" {
 		t.Fatalf("artifact = %+v", artifact)
 	}
 	// --event-path supplies a payload file, which every plan digest records.
@@ -1609,13 +2211,13 @@ func TestContinuationArtifactRoundTrip(t *testing.T) {
 	}
 	loose["extra"] = true
 	extra, _ := json.Marshal(loose)
-	if _, err := decodeContinuationArtifact(extra, "dev"); err == nil || !strings.Contains(err.Error(), "unknown field") {
+	if _, err := decodeStageRecord(extra, "dev"); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("unknown field error = %v", err)
 	}
 	delete(loose, "extra")
 	delete(loose["continuation"].(map[string]any), "sources")
 	withoutSources, _ := json.Marshal(loose)
-	if _, err := decodeContinuationArtifact(withoutSources, "dev"); err == nil || !strings.Contains(err.Error(), "must record the source of every deferred job") {
+	if _, err := decodeStageRecord(withoutSources, "dev"); err == nil || !strings.Contains(err.Error(), "must record the source of every deferred job") {
 		t.Fatalf("missing sources error = %v", err)
 	}
 	// lint and plan are static, so the one deferred upload gets the rest of
@@ -1626,11 +2228,11 @@ func TestContinuationArtifactRoundTrip(t *testing.T) {
 	}
 	for _, budget := range []int{0, 1, compiler.MaxRuntimeMatrixGraphJobs + 1} {
 		withBudget := bytes.Replace(initial.data, []byte(fmt.Sprintf(`"job_budget":%d`, artifact.Continuation.JobBudget)), []byte(fmt.Sprintf(`"job_budget":%d`, budget)), 1)
-		if _, err := decodeContinuationArtifact(withBudget, "dev"); err == nil || !strings.Contains(err.Error(), "records an invalid job budget") {
+		if _, err := decodeStageRecord(withBudget, "dev"); err == nil || !strings.Contains(err.Error(), "records an invalid job budget") {
 			t.Fatalf("job budget %d error = %v", budget, err)
 		}
 	}
-	if _, err := decodeContinuationArtifact(initial.data, "other"); err == nil || !strings.Contains(err.Error(), "written by buildkite-gha dev") {
+	if _, err := decodeStageRecord(initial.data, "other"); err == nil || !strings.Contains(err.Error(), "written by buildkite-gha dev") {
 		t.Fatalf("version error = %v", err)
 	}
 	// The workflow path must stay inside the checkout; ".." within a filename
@@ -1639,12 +2241,12 @@ func TestContinuationArtifactRoundTrip(t *testing.T) {
 		return bytes.Replace(initial.data, []byte(`".github/workflows/build.yml"`), []byte(`"`+workflowPath+`"`), 1)
 	}
 	for _, valid := range []string{".github/workflows/ci..matrix.yml", ".github/workflows/..build.yml"} {
-		if _, err := decodeContinuationArtifact(withPath(valid), "dev"); err != nil {
+		if _, err := decodeStageRecord(withPath(valid), "dev"); err != nil {
 			t.Fatalf("path %q: %v", valid, err)
 		}
 	}
 	for _, invalid := range []string{"../build.yml", ".github/../../build.yml", "/etc/build.yml", ".github//workflows/build.yml", ""} {
-		if _, err := decodeContinuationArtifact(withPath(invalid), "dev"); err == nil || !strings.Contains(err.Error(), "invalid workflow path") {
+		if _, err := decodeStageRecord(withPath(invalid), "dev"); err == nil || !strings.Contains(err.Error(), "invalid workflow path") {
 			t.Fatalf("path %q error = %v", invalid, err)
 		}
 	}
@@ -1661,21 +2263,21 @@ func TestContinuationArtifactRebuildsTheImporterRequest(t *testing.T) {
 	cache := &buildkitepipeline.CacheVolume{Paths: []string{"~/.cache/go-build"}, Name: "go", Size: "10g"}
 	ownLock := plan.ActionLock{ID: "actions/checkout@v4", Source: "github", Repository: "actions/checkout", RequestedRef: "v4", Commit: strings.Repeat("a", 40)}
 	otherLock := plan.ActionLock{ID: "./.github/actions/setup", Source: "workspace", Path: ".github/actions/setup"}
-	artifact := continuationArtifact{
+	artifact := stageRecord{
 		Version:      "dev",
 		Distribution: "sha256:" + strings.Repeat("d", 64),
 		Runtimes:     map[string]string{compiler.PlatformLinuxAMD64.String(): "sha256:" + strings.Repeat("1", 64), compiler.PlatformDarwinARM64.String(): "sha256:" + strings.Repeat("2", 64)},
-		Workflow:     continuationWorkflow{Path: ".github/workflows/build.yml", Namespace: "build"},
-		Event:        continuationEvent{Name: "push", Provider: "github", File: true},
-		Runners:      []continuationRunner{{Label: "ubuntu-latest", Queue: "custom-linux", Platform: compiler.PlatformLinuxAMD64.String(), Image: "ubuntu", Cache: cache}},
-		Vars:         continuationVars{Organization: map[string]string{"REGION": "us-east-1"}, Repository: map[string]string{"TEAM": "pipelines"}, Resolved: true},
+		Workflow:     stageWorkflow{Path: ".github/workflows/build.yml", Namespace: "build"},
+		Event:        stageEvent{Name: "push", Provider: "github", File: true},
+		Runners:      []stageRunner{{Label: "ubuntu-latest", Queue: "custom-linux", Platform: compiler.PlatformLinuxAMD64.String(), Image: "ubuntu", Cache: cache}},
+		Vars:         stageVars{Organization: map[string]string{"REGION": "us-east-1"}, Repository: map[string]string{"TEAM": "pipelines"}, Resolved: true},
 		OIDC:         oidc,
 		Continuation: compiler.RuntimeMatrixContinuation{Descriptor: compiler.RuntimeMatrixDescriptor{Job: "test"}, ActionLocks: []plan.ActionLock{ownLock}},
 		Others:       []compiler.RuntimeMatrixContinuation{{Descriptor: compiler.RuntimeMatrixDescriptor{Job: "publish"}, ActionLocks: []plan.ActionLock{otherLock}}},
 	}
 	rows := []map[string]any{{"os": "ubuntu-latest"}, {"os": "macos-latest"}}
 	source := compiler.MemoizeRepositorySource(nil)
-	got := artifact.compileRequest("/checkout/.github/workflows/build.yml", []byte("on: push\n"), []byte("{}"), map[string][]map[string]any{"test": rows}, source)
+	got := artifact.compileRequest("/checkout/.github/workflows/build.yml", []byte("on: push\n"), []byte("{}"), map[string][]map[string]any{"test": rows}, nil, source)
 	want := hostedCompileRequest{
 		WorkflowPath:       "/checkout/.github/workflows/build.yml",
 		WorkflowSource:     []byte("on: push\n"),
@@ -1694,6 +2296,7 @@ func TestContinuationArtifactRebuildsTheImporterRequest(t *testing.T) {
 		Vars:                     compiler.VariableSources{Organization: map[string]string{"REGION": "us-east-1"}, Repository: map[string]string{"TEAM": "pipelines"}, Resolved: true},
 		RepositorySource:         source,
 		RuntimeMatrixRows:        map[string][]map[string]any{"test": rows},
+		RuntimeMatrixSkipped:     map[string]bool{},
 		RuntimeMatrixActionLocks: []plan.ActionLock{ownLock, otherLock},
 	}
 	if !reflect.DeepEqual(got, want) {
