@@ -98,6 +98,8 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 		ProfileRuntimeTemplate:       {"${{ env.NAME }}", ResultString, "value"},
 		ProfileServiceTemplate:       {"${{ needs.build.outputs.value || 'fallback' }}", ResultString, `{"name":"value"}`},
 		ProfileDeferredInput:         {"type=raw,value=${{ needs.build.outputs.value }}", ResultString, `type=raw,value={"name":"value"}`},
+		ProfileSchedulingGroup:       {"group-${{ needs.build.outputs.value }}", ResultString, `group-{"name":"value"}`},
+		ProfileSchedulingParallel:    {"${{ fromJSON('2') }}", ResultNumber, float64(2)},
 		ProfileServiceCredential:     {"${{ env.NAME || 'fallback' }}", ResultString, "value"},
 		ProfileServiceMap:            {"${{ fromJSON(needs.build.outputs.value || '{}') }}", ResultObject, []ObjectEntry{{Name: "name", Value: "value"}}},
 		ProfileActionInputDefault:    {"${{ case(true, inputs.name, 'unused') }}", ResultString, "value"},
@@ -773,6 +775,7 @@ func profileIDs() []ProfileID {
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileJobControl, ProfileStepCondition, ProfileCallCondition,
 		ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput, ProfileStepTemplate,
 		ProfileStepControl, ProfileReusableStepControl, ProfileRuntimeTemplate, ProfileServiceTemplate, ProfileDeferredInput, ProfileServiceCredential, ProfileServiceMap,
+		ProfileSchedulingGroup, ProfileSchedulingParallel,
 		ProfileActionInputDefault, ProfileDockerActionArg,
 	}
 }

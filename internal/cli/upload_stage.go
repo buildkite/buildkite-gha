@@ -99,6 +99,9 @@ func uploadStageContext(ctx context.Context, options stageOptions, stdout, stder
 		return fail("%v", err)
 	}
 	downloadDir := filepath.Join(root, "stage")
+	if err := os.Mkdir(downloadDir, 0o700); err != nil {
+		return fail("create stage download directory: %v", err)
+	}
 	if err := agent.DownloadArtifact(ctx, recordPath, downloadDir, options.producer); err != nil {
 		return fail("download stage record from job %q: %v", options.producer, err)
 	}
@@ -181,6 +184,7 @@ type stageRun struct {
 	workflowPath           string
 	workflowSource         []byte
 	buildID, jobID         string
+	producerOutputs        map[string]string
 	out                    processingOutput
 }
 
@@ -220,6 +224,12 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 			skipped[descriptor.Job] = true
 			rows[descriptor.Job] = nil
 			continue
+		}
+		if continuation.Scheduling {
+			r.producerOutputs = make(map[string]string, len(manifest.Outputs))
+			for _, output := range manifest.Outputs {
+				r.producerOutputs[output.Name] = output.Value
+			}
 		}
 		var output *string
 		for _, candidate := range manifest.Outputs {
@@ -300,7 +310,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 		if r.ctx.Err() != nil || !errors.Is(err, transport.ErrPipelineUpload) {
 			return fail("%v", err)
 		}
-		if r.alreadyApplied(expected, "command") {
+		if r.alreadyApplied(expected, "command") && r.schedulingAlreadyApplied(stage.jobs) {
 			_, _ = fmt.Fprintf(r.stdout, "The %d deferred jobs were already uploaded by an earlier run of this step; nothing to do.\n", len(stage.jobs))
 			return 0
 		}
@@ -332,6 +342,10 @@ func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]b
 	}
 	defer cleanupSource()
 	request := record.compileRequest(r.workflowPath, r.workflowSource, r.eventSource, rows, skipped, repositorySource)
+	if record.Continuation.Scheduling {
+		request.RuntimeSchedulingOutputs = map[string]map[string]string{record.Continuation.Descriptor.Job: r.producerOutputs}
+		request.RuntimeSchedulingBuildID = r.buildID
+	}
 	validation, validationErr := validateHostedRequest(r.ctx, request)
 	resolution, err := suggestedRunnerTargets(r.ctx, []compiler.Report{validation}, request.RunnerTargets, r.clientVersion)
 	if err != nil {
@@ -522,6 +536,27 @@ func (r stageRun) uploadSkipped(fail func(string, ...any) int, result string, gr
 	}
 	_, _ = fmt.Fprintf(r.stdout, "Uploaded %d skipped jobs for %q.\n", len(jobs), record.Continuation.Descriptor.Job)
 	return 0
+}
+
+// schedulingAlreadyApplied checks scheduler attributes independently of the
+// command's plan digest: concurrency groups are pipeline fields, not plan data.
+func (r stageRun) schedulingAlreadyApplied(jobs []buildkitepipeline.Job) bool {
+	if !r.record.Continuation.Scheduling {
+		return true
+	}
+	for _, job := range jobs {
+		if job.Concurrency == 0 {
+			continue
+		}
+		// The step API names these differently from pipeline YAML.
+		for attribute, want := range map[string]string{"concurrency_key": job.ConcurrencyGroup, "concurrency_limit": fmt.Sprint(job.Concurrency)} {
+			value, err := r.agent.GetStepAttribute(r.ctx, job.Key, attribute)
+			if err != nil || strings.TrimSpace(string(value)) != want {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // alreadyApplied decides whether a rejected upload was a replay of this

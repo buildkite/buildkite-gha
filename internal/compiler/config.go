@@ -214,6 +214,12 @@ type Options struct {
 	// Their complete forward closures have no executable plans. Each root
 	// must also have an entry in RuntimeMatrixRows, with no rows.
 	RuntimeMatrixSkipped map[string]bool
+	// RuntimeSchedulingOutputs supplies the same verified producer manifest's
+	// outputs, scoped to its matrix consumer and scheduling expressions only.
+	RuntimeSchedulingOutputs map[string]map[string]string
+	// RuntimeSchedulingBuildID isolates output-derived max-parallel limits to
+	// one build; different runs must not change each other's matrix limit.
+	RuntimeSchedulingBuildID string
 	// RuntimeMatrixActionLocks pins remote actions to the commits an earlier
 	// compilation resolved, as RuntimeMatrixContinuation.ActionLocks records
 	// them. A deferred upload sets it so the jobs it expands use exactly the

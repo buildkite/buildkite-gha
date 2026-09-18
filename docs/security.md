@@ -178,6 +178,13 @@ the same way, reads the event and runtimes from the same importer, pins the
 same action revisions, and may only expand the matrices the initial
 compilation left to a later stage.
 
+The same verified producer manifest can supply the matrix consumer's
+[scheduling values](compatibility.md#scheduling-from-matrix-producer-outputs).
+Only the scheduling expression profiles receive those outputs; general
+compile-time contexts and authority analysis do not. These profiles reject
+tokens and secrets even in unreachable branches. A resolved group remains
+data, never another expression. Scheduling does not grant credential authority.
+
 ## Credential boundaries
 
 | Credential | Boundary |
