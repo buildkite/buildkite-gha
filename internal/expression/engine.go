@@ -16,6 +16,8 @@ const (
 	ProfileCompile               ProfileID = "compile"
 	ProfileCompileTemplate       ProfileID = "compile-template"
 	ProfileCompileContainerImage ProfileID = "compile-container-image"
+	ProfileRunsOn                ProfileID = "runs-on"
+	ProfileRunsOnTemplate        ProfileID = "runs-on-template"
 	ProfilePartialTemplate       ProfileID = "partial-template"
 	ProfileCompileJobCondition   ProfileID = "compile-job-condition"
 	ProfileCompileStepCondition  ProfileID = "compile-step-condition"
@@ -89,6 +91,7 @@ const (
 	semanticsCompile profileSemantics = iota
 	semanticsCompileTemplate
 	semanticsCompileStringTemplate
+	semanticsRunsOn
 	semanticsPartialTemplate
 	semanticsCompileCondition
 	semanticsReusableInput
@@ -118,6 +121,8 @@ func profileFunctions(additional ...string) FunctionSet {
 }
 
 var profiles = map[ProfileID]Profile{
+	ProfileRunsOn:                {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars", "needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsRunsOn},
+	ProfileRunsOnTemplate:        {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars", "needs"}, Functions: profileFunctions(), Missing: MissingError, Token: TokenDenied, semantics: semanticsRunsOn},
 	ProfileCompile:               {Form: FormExpression, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompile},
 	ProfileCompileTemplate:       {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileTemplate},
 	ProfileCompileContainerImage: {Form: FormTemplate, Scope: ScopeCompile, Contexts: ContextSet{"event", "github", "inputs", "matrix", "strategy", "vars"}, Functions: profileFunctions(), Missing: MissingNull, Token: TokenDenied, semantics: semanticsCompileStringTemplate},
@@ -360,6 +365,16 @@ func (Engine) Validate(site Site) (Validation, error) {
 		}
 	case semanticsCompileTemplate, semanticsCompileStringTemplate:
 		err = visitTemplateExpressions(site.Source, validateCompileExpressionNode)
+	case semanticsRunsOn:
+		if profile.Form == FormExpression {
+			var node actionlint.ExprNode
+			node, err = parseCompleteExpression(site.Source)
+			if err == nil {
+				err = validateDeferredInputCompileNode(node)
+			}
+		} else {
+			err = visitTemplateExpressions(site.Source, validateDeferredInputCompileNode)
+		}
 	case semanticsPartialTemplate:
 		err = visitTemplateExpressions(site.Source, func(actionlint.ExprNode) error { return nil })
 	case semanticsCompileCondition:
@@ -541,6 +556,18 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 		value, err = evaluateCompileTemplate(site.Source, values.Compile)
 	case semanticsCompileStringTemplate:
 		value, err = evaluateCompileStringTemplate(site.Source, values.Compile)
+	case semanticsRunsOn:
+		if profile.Form == FormExpression {
+			var node actionlint.ExprNode
+			node, err = parseCompleteExpression(site.Source)
+			if err == nil {
+				value, err = evaluateCompileNode(node, values.Compile)
+			}
+		} else {
+			value, err = evaluateRuntimeTemplate(site.Source, Context{}, func(node actionlint.ExprNode, _ Context) (any, error) {
+				return evaluateCompileNode(node, values.Compile)
+			})
+		}
 	case semanticsPartialTemplate:
 		value, err = evaluateAvailableCompileTemplate(site.Source, values.Compile)
 	case semanticsCompileCondition:

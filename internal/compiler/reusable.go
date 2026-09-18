@@ -1325,7 +1325,11 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 	if job.Concurrency != nil {
 		jobValues = append(jobValues, job.Concurrency.Group)
 	}
-	jobValues = append(jobValues, job.RunsOn...)
+	for _, site := range runsOnSites(job) {
+		if hasUnresolvedTemplateInput(site.Source, deferredInputs) {
+			return rejectJob("reusable-workflow input expression is not statically resolvable")
+		}
+	}
 	for _, service := range job.Services {
 		container := service.Container
 		jobValues = append(jobValues, container.Image, container.Options, container.Command, container.Entrypoint)
@@ -1335,9 +1339,6 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job, deferredInp
 		if container.Credentials != nil {
 			jobValues = append(jobValues, container.Credentials.Username, container.Credentials.Password)
 		}
-	}
-	if job.RunsOnExpr != nil {
-		jobValues = append(jobValues, job.RunsOnExpr.Text)
 	}
 	if job.Matrix != nil {
 		if job.Matrix.Expression != nil {

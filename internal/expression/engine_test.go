@@ -76,6 +76,8 @@ func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 	}
 	examples := map[ProfileID]example{
 		ProfileCompile:               {"${{ case(true, contains('abc', 'b'), false) }}", ResultBoolean, true},
+		ProfileRunsOn:                {"${{ inputs.name }}", ResultString, "value"},
+		ProfileRunsOnTemplate:        {"linux-${{ inputs.name }}", ResultString, "linux-value"},
 		ProfileCompileTemplate:       {"${{ case(true, true, false) }}", ResultString, "true"},
 		ProfileCompileContainerImage: {"node:${{ case(true, 24, 25) }}", ResultString, "node:24"},
 		ProfilePartialTemplate:       {"value-${{ inputs.name }}", ResultString, "value-value"},
@@ -769,6 +771,7 @@ func TestEngineServiceFallbacksRejectUnavailableReferences(t *testing.T) {
 
 func profileIDs() []ProfileID {
 	return []ProfileID{
+		ProfileRunsOn, ProfileRunsOnTemplate,
 		ProfileCompile, ProfileCompileTemplate, ProfileCompileContainerImage, ProfilePartialTemplate, ProfileCompileJobCondition, ProfileCompileStepCondition, ProfileCompileCallCondition,
 		ProfileReusableInput, ProfileRunName, ProfileJobCondition, ProfileJobControl, ProfileStepCondition, ProfileCallCondition,
 		ProfileActionLifecycle, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput, ProfileStepTemplate,
