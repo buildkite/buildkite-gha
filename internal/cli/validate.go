@@ -140,7 +140,7 @@ func validateOneSource(ctx context.Context, out processingOutput, workflowPath s
 	}
 	validationOptions.RepositorySource = repositorySource
 	validationOptions.WorkflowSource = candidateWorkflowSource(event)
-	processingReport, ok := validatedProcessingReportWithOptions(ctx, out, workflowPath, profile, source, event, loadEvent != nil, &validationOptions)
+	processingReport, ok := validatedProcessingReport(ctx, out, workflowPath, profile, source, event, loadEvent != nil, validationOptions)
 	if !ok {
 		return 1
 	}

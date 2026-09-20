@@ -150,12 +150,12 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			return out.fail(ctx, report, fmt.Errorf("read workflow %s: %w", workflows[i].CanonicalPath, err))
 		}
 		if len(workflows[i].Source) > compiler.MaxReusableWorkflowBytes {
-			_, _ = validatedProcessingReport(ctx, out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false)
+			_, _ = validatedProcessingReport(ctx, out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false, compiler.DefaultOptions())
 			return 1
 		}
 		parsed, parseErr := workflow.Parse(workflows[i].Path, workflows[i].Source)
 		if parseErr != nil {
-			_, _ = validatedProcessingReport(ctx, out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false)
+			_, _ = validatedProcessingReport(ctx, out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false, compiler.DefaultOptions())
 			return 1
 		}
 		if uploadArguments.serverSelectedWorkflow != nil && uploadArguments.serverSelectedWorkflow.Name != "" {
@@ -231,7 +231,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	if eventParseErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				_, _ = validatedProcessingReport(ctx, out, input.Path, hostedProfile, input.Source, eventSource, true)
+				_, _ = validatedProcessingReport(ctx, out, input.Path, hostedProfile, input.Source, eventSource, true, compiler.DefaultOptions())
 				return 1
 			}
 		}
@@ -1147,11 +1147,6 @@ type parsedUploadArgs struct {
 	pluginAcquisition        *pluginRuntimeAcquisition
 	importerPlatform         compiler.Platform
 	telemetry                *commandTelemetryDetails
-}
-
-func uploadArgs(args []string) (workflowOperands []string, eventPath string, err error) {
-	parsed, err := parseUploadArgs(args)
-	return parsed.workflowOperands, parsed.eventPath, err
 }
 
 func parseUploadArgs(args []string) (parsedUploadArgs, error) {
