@@ -191,24 +191,24 @@ func (s commitActionSource) Fetch(_ context.Context, r source.Reference) (source
 	return source.Resolved{Reference: r, Commit: commit}, source.Materialized{RepositoryRoot: root, ActionRoot: filepath.Join(root, r.Path), SourceDigest: d}, err
 }
 
-func writeAction(t *testing.T, root, name, body string) {
-	t.Helper()
+func writeAction(tb testing.TB, root, name, body string) {
+	tb.Helper()
 	d := filepath.Join(root, name)
 	if err := os.MkdirAll(d, 0o755); err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(d, "action.yml"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	if strings.Contains(body, "using: docker") {
 		if err := os.WriteFile(filepath.Join(d, "Dockerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
-			t.Fatal(err)
+			tb.Fatal(err)
 		}
 	}
 	for _, entry := range []string{"index.js"} {
 		if strings.Contains(body, entry) {
 			if err := os.WriteFile(filepath.Join(d, entry), []byte("// fixture\n"), 0o644); err != nil {
-				t.Fatal(err)
+				tb.Fatal(err)
 			}
 		}
 	}
@@ -787,6 +787,81 @@ runs:
 	}
 	if actionSource.calls["owner/action@v1"] != 2 {
 		t.Fatalf("remote action resolutions = %#v, want two", actionSource.calls)
+	}
+}
+
+func TestActionGraphAnalysisDoesNotDependOnSourceOrPriorInputs(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  token:
+    default: ${{ github.token }}
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, workspace, "parent", `name: parent
+inputs:
+  token:
+    default: ''
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        token: ${{ inputs.token }}
+`)
+	refs := []string{"./child", "./parent"}
+	graph, err := buildActionGraph(t.Context(), workspace, nil, refs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := json.Marshal(graph.planningPrograms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Released materializations may be evicted before analysis. Neither source
+	// reads nor a previous invocation's authority may affect subsequent calls.
+	if err := os.RemoveAll(workspace); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		inputs    []map[string]string
+		serverURL string
+		want      []bool
+	}{
+		{inputs: []map[string]string{{"token": ""}, {"token": "${{ github.token }}"}}, want: []bool{false, true}},
+		{inputs: []map[string]string{{}, {"token": ""}}, want: []bool{true, false}},
+		{inputs: []map[string]string{{"token": ""}, {"token": ""}}, want: []bool{false, false}},
+		{inputs: []map[string]string{{"token": "${{ github.server_url == 'https://github.com' && github.token || '' }}"}, {"token": ""}}, serverURL: "https://github.com", want: []bool{true, false}},
+		{inputs: []map[string]string{{"token": "${{ github.server_url == 'https://github.com' && github.token || '' }}"}, {"token": ""}}, serverURL: "https://origin.example", want: []bool{false, false}},
+		{inputs: nil, want: nil},
+	} {
+		serverURL := test.serverURL
+		if serverURL == "" {
+			serverURL = "https://github.com"
+		}
+		compiled, err := graph.analyzeInvocations(serverURL, refs, test.inputs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []bool
+		for _, authority := range compiled.rootAuthorities {
+			got = append(got, authority.GitHubToken)
+		}
+		if !reflect.DeepEqual(got, test.want) {
+			t.Fatalf("inputs %#v on %s: token authority = %v, want %v", test.inputs, serverURL, got, test.want)
+		}
+		if compiled.selectors[0].Lock == compiled.selectors[1].Lock || len(compiled.locks) != 2 {
+			t.Fatalf("graph roots/locks changed: %#v / %#v", compiled.selectors, compiled.locks)
+		}
+	}
+	after, err := json.Marshal(graph.planningPrograms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("invocation analysis changed the serialized programs")
 	}
 }
 
