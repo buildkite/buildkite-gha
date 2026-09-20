@@ -85,6 +85,21 @@ type actionNode struct {
 	native   bool
 }
 
+// actionGraph is a completed, source-independent graph. Construction releases
+// its source leases before returning; analysis uses only loaded metadata and
+// programs, never their source paths. Analysis must remain sequential because
+// authority inventory reassigns positional site semantics in the programs.
+type actionGraph struct {
+	workflowSource     *RemoteWorkflowSource
+	roots              []*actionNode
+	locks              []plan.ActionLock
+	capabilities       []string
+	requiresMise       bool
+	programs           map[string]program.Action
+	planningPrograms   map[string]program.Action
+	cacheSubstitutions []CacheSubstitution
+}
+
 type actionCompilation struct {
 	workflowSource       *RemoteWorkflowSource
 	selectors            []plan.ActionSelector
@@ -244,9 +259,17 @@ func compileWorkflowActionInvocations(ctx context.Context, workspace string, act
 	if suppliedInputs != nil && len(suppliedInputs) != len(refs) {
 		return actionCompilation{}, fmt.Errorf("action references and supplied inputs have different lengths")
 	}
+	graph, err := buildActionGraph(ctx, workspace, actionSource, refs, resolveWorkflowSource)
+	if err != nil {
+		return actionCompilation{}, err
+	}
+	return graph.analyzeInvocations(serverURL, refs, suppliedInputs)
+}
+
+func buildActionGraph(ctx context.Context, workspace string, actionSource ActionSource, refs []string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)) (actionGraph, error) {
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
-		return actionCompilation{}, fmt.Errorf("resolve workspace: %w", err)
+		return actionGraph{}, fmt.Errorf("resolve workspace: %w", err)
 	}
 	b := &actionLockBuilder{workspace: abs, source: actionSource, resolveWorkflowSource: resolveWorkflowSource, nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
 	defer func() {
@@ -254,15 +277,13 @@ func compileWorkflowActionInvocations(ctx context.Context, workspace string, act
 			materialized.Release()
 		}
 	}()
-	selectors := make([]plan.ActionSelector, 0, len(refs))
 	roots := make([]*actionNode, 0, len(refs))
 	for _, ref := range refs {
 		n, err := b.add(ctx, ref, 1, b.workflowSource, "")
 		if err != nil {
-			return actionCompilation{}, err
+			return actionGraph{}, err
 		}
 		roots = append(roots, n)
-		selectors = append(selectors, plan.ActionSelector{Lock: n.lock.ID})
 	}
 	locks := make([]plan.ActionLock, 0, len(b.nodes))
 	for _, n := range b.nodes {
@@ -283,18 +304,31 @@ func compileWorkflowActionInvocations(ctx context.Context, workspace string, act
 		}
 		programs[node.lock.ID] = planningPrograms[node.lock.ID]
 	}
+	return actionGraph{
+		workflowSource: b.workflowSource, roots: roots, locks: locks,
+		capabilities: caps, requiresMise: b.requiresMise,
+		programs: programs, planningPrograms: planningPrograms,
+		cacheSubstitutions: b.cacheSubstitutions,
+	}, nil
+}
+
+func (graph actionGraph) analyzeInvocations(serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
+	selectors := make([]plan.ActionSelector, 0, len(graph.roots))
+	for _, root := range graph.roots {
+		selectors = append(selectors, plan.ActionSelector{Lock: root.lock.ID})
+	}
 	requiresGitHubToken := false
 	requiresEventPayload := false
 	requiredSecrets := map[string]bool{}
 	var githubTokenActions []string
 	var rootAuthorities []program.ActionAuthority
 	if suppliedInputs != nil {
-		rootAuthorities = make([]program.ActionAuthority, len(roots))
-		for i, root := range roots {
+		rootAuthorities = make([]program.ActionAuthority, len(graph.roots))
+		for i, root := range graph.roots {
 			if err := validateActionAdapterInputs(root); err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
-			authority, err := program.InventoryActionAuthority(planningPrograms, root.lock.ID, workflowActionBindings(suppliedInputs[i]), program.ActionAuthorityOptions{ServerURL: serverURL})
+			authority, err := program.InventoryActionAuthority(graph.planningPrograms, root.lock.ID, workflowActionBindings(suppliedInputs[i]), program.ActionAuthorityOptions{ServerURL: serverURL})
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
@@ -311,18 +345,18 @@ func compileWorkflowActionInvocations(ctx context.Context, workspace string, act
 	}
 	secretNames := sortedKeys(requiredSecrets)
 	return actionCompilation{
-		workflowSource:       b.workflowSource,
+		workflowSource:       graph.workflowSource,
 		selectors:            selectors,
-		locks:                locks,
-		capabilities:         caps,
+		locks:                graph.locks,
+		capabilities:         graph.capabilities,
 		requiredSecrets:      secretNames,
 		githubTokenActions:   githubTokenActions,
-		requiresMise:         b.requiresMise,
+		requiresMise:         graph.requiresMise,
 		requiresGitHubToken:  requiresGitHubToken,
 		requiresEventPayload: requiresEventPayload,
-		programs:             programs,
+		programs:             graph.programs,
 		rootAuthorities:      rootAuthorities,
-		cacheSubstitutions:   b.cacheSubstitutions,
+		cacheSubstitutions:   graph.cacheSubstitutions,
 	}, nil
 }
 
