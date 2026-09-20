@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -419,10 +420,11 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			if lock.Source != "github" || usesNativeAdapter(lock) {
 				continue
 			}
-			action, _, resolveErr := actions.resolve(runCtx, plan.ActionSelector{Lock: lock.ID})
+			resolved, resolveErr := actions.resolve(runCtx, plan.ActionSelector{Lock: lock.ID})
 			if resolveErr != nil {
 				return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, resolveErr))
 			}
+			action := resolved.metadata
 			actionRuntime, runtimeErr := action.Runtime()
 			if runtimeErr != nil {
 				return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, runtimeErr))
@@ -1657,14 +1659,15 @@ func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockR
 	if source != "github" {
 		return nil
 	}
-	action, lock, err := actions.resolve(ctx, selector)
+	resolved, err := actions.resolve(ctx, selector)
 	if err != nil {
 		return err
 	}
+	action, lock := resolved.metadata, resolved.lock
 	if slices.Contains(stack, lock.ID) {
 		return fmt.Errorf("action recursion detected at lock %q", lock.ID)
 	}
-	if usesNativeAdapter(lock) {
+	if resolved.integration.Adapter != "" {
 		return nil
 	}
 	runtime, err := action.Runtime()
@@ -1678,13 +1681,14 @@ func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockR
 		return nil
 	}
 	stack = append(append([]string(nil), stack...), lock.ID)
-	for i, child := range action.Runs.Steps {
-		if child.Uses == "" {
+	for i, child := range resolved.program.Steps {
+		if child.Invocation == nil || child.Invocation.Uses.Source == "" {
 			continue
 		}
-		childSelector, ok := lock.Children[child.Uses]
+		uses := child.Invocation.Uses.Source
+		childSelector, ok := lock.Children[uses]
 		if !ok || childSelector.Lock == "" {
-			return markHardJobFailure(fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, child.Uses))
+			return markHardJobFailure(fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, uses))
 		}
 		if err := r.verifyRemoteActionTree(ctx, actions, childSelector, stack); err != nil {
 			return err
@@ -1717,7 +1721,7 @@ func (r *jobRun) actionContainerMounts(ctx context.Context, actions *actionLockR
 		}
 		actionRuntime := metadata.Runtime(planned.Runtime)
 		if lock.Source == "github" {
-			if _, _, err := actions.resolve(ctx, selector); err != nil {
+			if _, err := actions.resolve(ctx, selector); err != nil {
 				return nil, err
 			}
 		}
@@ -1795,20 +1799,17 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutp
 	if source != "github" {
 		return result, nil
 	}
-	action, lock, err := actions.resolve(ctx, selector)
+	resolved, err := actions.resolve(ctx, selector)
 	if err != nil {
 		return result, err
 	}
-	actionProgram := actions.program(selector)
 	// The native adapters replace the verified action's lifecycle as one
 	// indivisible operation, so upstream metadata never classifies and no
 	// upstream cleanup is registered for phases this runtime never executes.
-	if usesCheckoutAdapter(lock) || usesUploadArtifactAdapter(lock) || usesDownloadArtifactAdapter(lock) {
+	if resolved.integration.Adapter != "" {
 		return result, nil
 	}
-	if actionProgram == nil {
-		return result, markHardJobFailure(fmt.Errorf("action %q has no normalized execution program", stepUses(step)))
-	}
+	action, lock, actionProgram := resolved.metadata, resolved.lock, resolved.program
 	runtime, err := action.Runtime()
 	if err != nil {
 		return result, fmt.Errorf("action %q uses %w", stepUses(step), err)
@@ -1825,7 +1826,7 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutp
 		major, _ := actionNodeMajor(runtime)
 		explicit := r.explicitNode(major)
 		jobStatusInputs := actionJobStatusInputs(*actionProgram, bindingSources(step.Invocation.With))
-		javascript := javaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: usesCacheService(lock), CacheClientCompatibility: usesCacheClientCompatibility(lock), nodeMajor: major, reference: stepUses(step), jobStatusInputs: jobStatusInputs}
+		javascript := javaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: resolved.integration.Service == actionintegration.ServiceCache, CacheClientCompatibility: resolved.integration.CacheClientCompatibility, nodeMajor: major, reference: stepUses(step), jobStatusInputs: jobStatusInputs}
 		invocationEval := cloneExpressionContext(eval)
 		bindHashFilesContext(ctx, &invocationEval)
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}, eval: invocationEval, isolated: !workflowStep}
@@ -1919,7 +1920,7 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutp
 		bindActionReferenceContext(&eval, &lock)
 		eval.Inputs = inputs
 		// github.action_path scopes to this composite invocation for child pre
-		// hooks too, mirroring the main-phase overlay in runCompositeMetadata.
+		// hooks too, mirroring the main-phase overlay in runCompositeAction.
 		contextActionPath := action.Path
 		if r.jobContainer != nil {
 			contextActionPath = r.jobContainer.containerPath(action.Path)
@@ -1929,17 +1930,17 @@ func (r *jobRun) prepareRemoteAction(ctx context.Context, processor *commandOutp
 		compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
 		compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
 		lifecycleEnvOverlay := mergeStringMaps(inheritedEnvOverlay, stepEnv)
-		for i, normalizedChild := range actionProgram.Steps {
-			if normalizedChild.Invocation == nil {
+		for i := range actionProgram.Steps {
+			childStep := &actionProgram.Steps[i]
+			if childStep.Invocation == nil {
 				continue
 			}
-			childStep := action.Runs.Steps[i]
-			selector, ok := lock.Children[childStep.Uses]
+			uses := childStep.Invocation.Uses.Source
+			selector, ok := lock.Children[uses]
 			if !ok || selector.Lock == "" {
-				return result, markHardJobFailure(fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, childStep.Uses))
+				return result, markHardJobFailure(fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, uses))
 			}
-			execution := normalizedChild
-			child := *actionProgramStep(&execution)
+			child := *actionProgramStep(childStep)
 			child.Invocation.Lock = selector.Lock
 			childProcessEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 			eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
@@ -1994,20 +1995,16 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandOutputProc
 		return r.runWorkflowShellStep(ctx, processor, workspace, job, step, environment.process(), eval)
 	}
 
-	var action metadata.Metadata
-	var actionLock *plan.ActionLock
-	var actionProgram *executionprogram.Action
 	selector, ok := stepActionSelector(step)
 	if !ok {
 		return result, markHardJobFailure(fmt.Errorf("action %q has no immutable selector", stepUses(step)))
 	}
-	resolvedAction, lock, err := actions.resolve(ctx, selector)
+	resolved, err := actions.resolve(ctx, selector)
 	if err != nil {
 		return result, err
 	}
-	action, actionLock = resolvedAction, &lock
-	actionProgram = actions.program(selector)
-	if usesCheckoutAdapter(lock) {
+	action, actionLock, actionProgram := resolved.metadata, &resolved.lock, resolved.program
+	if resolved.integration.Adapter != "" {
 		inputs := evaluatedWith
 		if inputs == nil {
 			inputs, err = evaluatePlanStepWith(step, eval)
@@ -2015,33 +2012,19 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandOutputProc
 				return result, err
 			}
 		}
-		if err := validateCheckoutRefProvenance(step.Invocation.With, inputs, job.Event.SHA); err != nil {
-			return result, err
-		}
-		return r.runCheckout(ctx, processor, workspace, job, lock.Commit, inputs)
-	}
-	if usesUploadArtifactAdapter(lock) {
-		inputs := evaluatedWith
-		if inputs == nil {
-			inputs, err = evaluatePlanStepWith(step, eval)
-			if err != nil {
+		switch resolved.integration.Adapter {
+		case actionintegration.AdapterCheckoutExactEventSHA:
+			if err := validateCheckoutRefProvenance(step.Invocation.With, inputs, job.Event.SHA); err != nil {
 				return result, err
 			}
+			return r.runCheckout(ctx, processor, workspace, job, actionLock.Commit, inputs)
+		case actionintegration.AdapterUploadArtifactBuildkite:
+			return r.runUploadArtifactCommit(ctx, processor, workspace, actionLock.Commit, inputs)
+		case actionintegration.AdapterDownloadArtifactBuildkite:
+			return r.runDownloadArtifact(ctx, processor, workspace, job.Needs, actionLock.Commit, inputs)
+		default:
+			return result, fmt.Errorf("unsupported native action adapter %q", resolved.integration.Adapter)
 		}
-		return r.runUploadArtifactCommit(ctx, processor, workspace, lock.Commit, inputs)
-	}
-	if usesDownloadArtifactAdapter(lock) {
-		inputs := evaluatedWith
-		if inputs == nil {
-			inputs, err = evaluatePlanStepWith(step, eval)
-			if err != nil {
-				return result, err
-			}
-		}
-		return r.runDownloadArtifact(ctx, processor, workspace, job.Needs, lock.Commit, inputs)
-	}
-	if actionProgram == nil {
-		return result, markHardJobFailure(fmt.Errorf("action %q has no normalized execution program", stepUses(step)))
 	}
 	actionRuntime, err := action.Runtime()
 	if err != nil {
@@ -2085,7 +2068,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandOutputProc
 			return result, err
 		}
 		actionEnv := environment.process()
-		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: usesCacheService(*actionLock), CacheClientCompatibility: usesCacheClientCompatibility(*actionLock), nodeMajor: major, reference: stepUses(step), jobStatusInputs: jobStatusInputs}
+		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: resolved.integration.Service == actionintegration.ServiceCache, CacheClientCompatibility: resolved.integration.CacheClientCompatibility, nodeMajor: major, reference: stepUses(step), jobStatusInputs: jobStatusInputs}
 		state := map[string]string{}
 		wasPrepared := false
 		invocation := prepared[invocationID]
@@ -2152,8 +2135,7 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandOutputProc
 		}
 		return result, nil
 	case metadata.RuntimeComposite:
-		composite, err := r.runCompositeMetadata(ctx, processor, workspace, job, actionPath, action, actionProgram, inputs, invocationID, jobEnv, stepEnv, lifecycleEnvOverlay, actionEval, posts, actions, prepared, actionLock, actionStack)
-		return composite, err
+		return r.runCompositeAction(ctx, processor, workspace, job, resolved, inputs, invocationID, jobEnv, stepEnv, lifecycleEnvOverlay, actionEval, posts, actions, prepared, actionStack)
 	case metadata.RuntimeDocker:
 		if goruntime.GOOS == "darwin" {
 			return result, errUnsupportedf("docker action %q is unsupported on macOS runners", stepUses(step))
@@ -2187,14 +2169,15 @@ func (r *jobRun) runActionStep(ctx context.Context, processor *commandOutputProc
 	return result, errUnsupportedFeature("action_ref", "", "action %q uses unsupported runtime %q", stepUses(step), actionRuntime)
 }
 
-func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, actionProgram *executionprogram.Action, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionLock *plan.ActionLock, actionStack []string) (Result, error) {
+func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutputProcessor, workspace string, job plan.Job, action resolvedAction, inputs map[string]string, invocationID string, jobEnv, stepEnv, lifecycleEnvOverlay map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string) (Result, error) {
 	result := newResult()
+	actionPath := action.metadata.Path
 	// Keep hashFiles unavailable to composite step metadata while retaining the
 	// context binder for nested JavaScript lifecycle conditions.
 	eval.HashFiles = nil
 	eval.Inputs = inputs
 	eval.Steps = make(map[string]expression.StepStatus)
-	bindActionReferenceContext(&eval, actionLock)
+	bindActionReferenceContext(&eval, &action.lock)
 	compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
 	compositeProcessEnv["GITHUB_ACTION_PATH"] = actionPath
 	// github.action_path is scoped to this composite invocation; nested
@@ -2211,8 +2194,8 @@ func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandOut
 	inheritedCancelled := eval.JobStatus == "cancelled"
 	inheritedUnsuccessful := inheritedFailure || inheritedCancelled
 	var runErr error
-	for i, step := range action.Runs.Steps {
-		executionStep := &actionProgram.Steps[i]
+	for i := range action.program.Steps {
+		step := &action.program.Steps[i]
 		childInvocationID := fmt.Sprintf("%s/%d", invocationID, i)
 		failure := inheritedFailure || runErr != nil
 		cancelled := inheritedCancelled || ctx.Err() != nil
@@ -2240,7 +2223,7 @@ func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandOut
 			inputs[name] = value
 		}
 		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, Steps: eval.Steps, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
-		run, err := evaluateProgramTyped[bool](executionStep.Condition, executionprogram.EvaluationContext{Expression: eval, Condition: condition})
+		run, err := evaluateProgramTyped[bool](step.Condition, executionprogram.EvaluationContext{Expression: eval, Condition: condition})
 		if err != nil {
 			childErr := fmt.Errorf("composite action step %d condition: %w", i+1, err)
 			execution := classifyStepExecution(ctx, ctx, step.ID, step.ContinueOnError, newResult(), childErr)
@@ -2269,31 +2252,29 @@ func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandOut
 		childJobEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 		childJobEnv["GITHUB_ACTION_PATH"] = actionPath
 		switch {
-		case step.Uses != "":
+		case step.Invocation != nil && step.Invocation.Uses.Source != "":
 			// Resolve composite child fields before entering workflow-authored
 			// action evaluation.
 			var childEnv map[string]string
-			childEnv, childErr = executionprogram.EvaluateBindings(executionStep.Env, executionprogram.EvaluationContext{Expression: eval})
+			childEnv, childErr = executionprogram.EvaluateBindings(step.Env, executionprogram.EvaluationContext{Expression: eval})
 			var childWith map[string]string
 			if childErr == nil {
-				childWith, childErr = executionprogram.EvaluateBindings(executionStep.Invocation.With, executionprogram.EvaluationContext{Expression: eval})
+				childWith, childErr = executionprogram.EvaluateBindings(step.Invocation.With, executionprogram.EvaluationContext{Expression: eval})
 			}
-			child := *actionProgramStep(executionStep)
-			if actionLock != nil {
-				selector, ok := actionLock.Children[step.Uses]
-				if !ok {
-					childErr = markHardJobFailure(fmt.Errorf("composite action child %q has no immutable selector", step.Uses))
-				} else {
-					child.Invocation.Lock = selector.Lock
-				}
+			child := *actionProgramStep(step)
+			selector, ok := action.lock.Children[step.Invocation.Uses.Source]
+			if !ok {
+				childErr = markHardJobFailure(fmt.Errorf("composite action child %q has no immutable selector", step.Invocation.Uses.Source))
+			} else {
+				child.Invocation.Lock = selector.Lock
 			}
 			if childErr == nil {
 				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, childInvocationID, childJobEnv, childEnv, childWith, eval, posts, actions, prepared, actionStack, lifecycleEnvOverlay)
 			}
-		case strings.TrimSpace(step.Run) == "":
+		case step.Run == nil || strings.TrimSpace(step.Run.Command.Source) == "":
 			childErr = fmt.Errorf("composite action step %d has no run command", i+1)
 		default:
-			childErr = r.runCompositeShellStep(ctx, processor, workspace, executionStep, childJobEnv, eval, &stepResult)
+			childErr = r.runCompositeShellStep(ctx, processor, workspace, step, childJobEnv, eval, &stepResult)
 		}
 		mergeInto(result.Env, stepResult.Env)
 		if stepResult.pathBaseSet {
@@ -2313,7 +2294,7 @@ func (r *jobRun) runCompositeMetadata(ctx context.Context, processor *commandOut
 			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d: %w", i+1, childErr))
 		}
 	}
-	for _, output := range actionProgram.Outputs {
+	for _, output := range action.program.Outputs {
 		value, err := evaluateProgramString(output.Value, eval)
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("composite output %q: %w", output.Name, err))

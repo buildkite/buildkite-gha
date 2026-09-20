@@ -570,7 +570,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 
 func resolveCallSecretAuthority(path string, job workflow.Job, call *workflow.ReusableWorkflowCall, callee *workflow.Workflow, parent secretAuthority) (secretAuthority, error) {
 	if call.InheritSecrets {
-		for _, name := range sortedValueKeys(callee.CallSecrets) {
+		for _, name := range sortedKeys(callee.CallSecrets) {
 			declaration := callee.CallSecrets[name]
 			if declaration.Required && !parent.has(name) {
 				return secretAuthority{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable workflow %q requires secret %q", call.Uses, declaration.Name))
@@ -580,7 +580,7 @@ func resolveCallSecretAuthority(path string, job workflow.Job, call *workflow.Re
 	}
 
 	forwarded := secretAuthority{bindings: make(map[string]secretBinding, len(call.Secrets))}
-	for _, target := range sortedValueKeys(call.Secrets) {
+	for _, target := range sortedKeys(call.Secrets) {
 		mapping := call.Secrets[target]
 		_, declared := callee.CallSecrets[target]
 		if !declared {
@@ -597,7 +597,7 @@ func resolveCallSecretAuthority(path string, job workflow.Job, call *workflow.Re
 			forwarded.bindings[target] = binding
 		}
 	}
-	for _, name := range sortedValueKeys(callee.CallSecrets) {
+	for _, name := range sortedKeys(callee.CallSecrets) {
 		declaration := callee.CallSecrets[name]
 		if declaration.Required && !forwarded.has(name) {
 			return secretAuthority{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable workflow %q requires secret %q", call.Uses, declaration.Name))
@@ -716,7 +716,7 @@ func bindingMembers(bindings map[string]needBinding) []string {
 
 func resolveWorkflowCallOutputs(path string, declarations map[string]workflow.CallOutput, jobs map[string]workflow.Job, replacements map[string]needBinding) ([]needOutputBinding, error) {
 	var resolved []needOutputBinding
-	for _, declarationID := range sortedValueKeys(declarations) {
+	for _, declarationID := range sortedKeys(declarations) {
 		declaration := declarations[declarationID]
 		if !callOutputNamePattern.MatchString(declaration.Name) {
 			return nil, workflowCallOutputError(path, declaration, "has an invalid name")
@@ -860,7 +860,7 @@ func namespacedJobID(namespace, id string) string {
 func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWorkflowCall, callee *workflow.Workflow, parentInputs reusableInputs, callNeeds map[string]needBinding, matrix map[string]any, context expression.CompileContext) (reusableInputs, error) {
 	values := make(map[string]any, len(call.Inputs))
 	deferredValues := make(map[string]deferredInput)
-	for _, name := range sortedValueKeys(call.Inputs) {
+	for _, name := range sortedKeys(call.Inputs) {
 		value := call.Inputs[name]
 		if _, ok := callee.CallInputs[name]; !ok {
 			return reusableInputs{}, locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, fmt.Sprintf("input %q is not declared by reusable workflow %q", name, call.Uses))
@@ -909,7 +909,7 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 
 	resolved := make(map[string]any, len(callee.CallInputs))
 	deferred := make(map[string]deferredInput, len(deferredValues))
-	for _, name := range sortedValueKeys(callee.CallInputs) {
+	for _, name := range sortedKeys(callee.CallInputs) {
 		declaration := callee.CallInputs[name]
 		value, supplied := values[name]
 		deferredValue, deferredSupplied := deferredValues[name]
@@ -1108,15 +1108,6 @@ func containsExpression(value any) bool {
 		}
 	}
 	return false
-}
-
-func sortedValueKeys[V any](values map[string]V) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 func zeroInputValue(inputType string) any {

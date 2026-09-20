@@ -141,7 +141,7 @@ func workflowBindings(values map[string]string, location program.Location, field
 		return nil
 	}
 	bindings := make([]program.Binding, 0, len(values))
-	for _, name := range sortedValueKeys(values) {
+	for _, name := range sortedKeys(values) {
 		bindings = append(bindings, program.Binding{
 			Name:  name,
 			Value: workflowSite(values[name], location, field+"."+name),

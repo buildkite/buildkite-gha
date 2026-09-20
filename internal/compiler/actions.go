@@ -233,16 +233,6 @@ func unsupportedMetadataFields(reason string) string {
 	return strings.Join(formatted, " and ")
 }
 
-// compileActionLocks builds one shared action DAG for all roots. Selectors are
-// returned in the same order as refs.
-func compileActionLocks(ctx context.Context, workspace string, actionSource ActionSource, refs []string) ([]plan.ActionSelector, []plan.ActionLock, []string, bool, error) {
-	compiled, err := compileActionInvocations(ctx, workspace, actionSource, plan.EventServerURL("github"), refs, nil)
-	if err != nil {
-		return nil, nil, nil, true, err
-	}
-	return compiled.selectors, compiled.locks, compiled.capabilities, compiled.requiresMise, nil
-}
-
 func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
 	return compileWorkflowActionInvocations(ctx, workspace, actionSource, serverURL, refs, suppliedInputs, nil)
 }

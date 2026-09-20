@@ -726,22 +726,13 @@ func loadProcessingInputsSource(ctx context.Context, out processingOutput, workf
 // validatedProcessingReport validates the workflow, against the event when
 // one was evaluated, and starts the processing report. It emits the report
 // when validation rejects the workflow.
-func validatedProcessingReport(ctx context.Context, out processingOutput, workflowPath, profile string, source, event []byte, eventEvaluated bool) (compatibility.ProcessingReport, bool) {
-	return validatedProcessingReportWithOptions(ctx, out, workflowPath, profile, source, event, eventEvaluated, nil)
-}
-
-func validatedProcessingReportWithOptions(ctx context.Context, out processingOutput, workflowPath, profile string, source, event []byte, eventEvaluated bool, options *compiler.Options) (compatibility.ProcessingReport, bool) {
+func validatedProcessingReport(ctx context.Context, out processingOutput, workflowPath, profile string, source, event []byte, eventEvaluated bool, options compiler.Options) (compatibility.ProcessingReport, bool) {
 	var validation compiler.Report
 	var err error
-	switch {
-	case eventEvaluated && options != nil:
-		validation, err = compiler.ValidateEventWithOptionsContext(ctx, workflowPath, source, event, *options)
-	case eventEvaluated:
-		validation, err = compiler.ValidateEventWithOptionsContext(ctx, workflowPath, source, event, compiler.DefaultOptions())
-	case options != nil:
-		validation, err = compiler.ValidateWithOptionsContext(ctx, workflowPath, source, *options)
-	default:
-		validation, err = compiler.ValidateWithOptionsContext(ctx, workflowPath, source, compiler.DefaultOptions())
+	if eventEvaluated {
+		validation, err = compiler.ValidateEventWithOptionsContext(ctx, workflowPath, source, event, options)
+	} else {
+		validation, err = compiler.ValidateWithOptionsContext(ctx, workflowPath, source, options)
 	}
 	report := compatibility.InitialProcessingReport(workflowPath, profile, eventEvaluated, validation, err)
 	if err != nil {

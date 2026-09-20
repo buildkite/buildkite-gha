@@ -27,6 +27,11 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
+func uploadArgs(args []string) (workflowOperands []string, eventPath string, err error) {
+	parsed, err := parseUploadArgs(args)
+	return parsed.workflowOperands, parsed.eventPath, err
+}
+
 type failureArtifactDownload struct {
 	From string `yaml:"from"`
 	To   string `yaml:"to"`

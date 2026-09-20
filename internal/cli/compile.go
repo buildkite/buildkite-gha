@@ -65,7 +65,7 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 		}
 		options.Vars = vars
 	}
-	processingReport, ok := validatedProcessingReportWithOptions(ctx, out, workflowPath, "", source, event, true, &options)
+	processingReport, ok := validatedProcessingReport(ctx, out, workflowPath, "", source, event, true, options)
 	if !ok {
 		return 1
 	}

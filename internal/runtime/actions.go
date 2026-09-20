@@ -49,6 +49,16 @@ type actionLockResolver struct {
 	locks        map[string]*actionLockEntry
 }
 
+// resolvedAction binds verified source to its admitted integration and executable
+// program. Only native adapters may omit the program. Do not cache this value:
+// source integrity must be checked again for each resolution.
+type resolvedAction struct {
+	metadata    metadata.Metadata
+	lock        plan.ActionLock
+	program     *executionprogram.Action
+	integration actionintegration.Descriptor
+}
+
 type prebuiltDockerBackend struct {
 	docker string
 	config string
@@ -176,22 +186,24 @@ func usesCacheService(lock plan.ActionLock) bool {
 	return descriptor.Service == actionintegration.ServiceCache
 }
 
-func usesCacheClientCompatibility(lock plan.ActionLock) bool {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-	return descriptor.CacheClientCompatibility
-}
-
-func (r *actionLockResolver) source(selector plan.ActionSelector) (_ string, err error) {
-	defer func() { err = markHardJobFailure(err) }()
+func (r *actionLockResolver) entry(selector plan.ActionSelector) (*actionLockEntry, error) {
 	if r == nil || selector.Lock == "" {
-		return "", fmt.Errorf("resolve action lock: selector is missing")
+		return nil, fmt.Errorf("resolve action lock: selector is missing")
 	}
 	entry, ok := r.locks[selector.Lock]
 	if !ok || entry == nil {
-		return "", fmt.Errorf("resolve action lock %q: lock is missing", selector.Lock)
+		return nil, fmt.Errorf("resolve action lock %q: lock is missing", selector.Lock)
 	}
 	if entry.duplicate || entry.lock.ID != selector.Lock {
-		return "", fmt.Errorf("resolve action lock %q: lock identity is ambiguous", selector.Lock)
+		return nil, fmt.Errorf("resolve action lock %q: lock identity is ambiguous", selector.Lock)
+	}
+	return entry, nil
+}
+
+func (r *actionLockResolver) source(selector plan.ActionSelector) (string, error) {
+	entry, err := r.entry(selector)
+	if err != nil {
+		return "", markHardJobFailure(err)
 	}
 	return entry.lock.Source, nil
 }
@@ -207,24 +219,19 @@ func (r *actionLockResolver) program(selector plan.ActionSelector) *executionpro
 	return &action
 }
 
-func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSelector) (_ metadata.Metadata, _ plan.ActionLock, err error) {
+func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSelector) (_ resolvedAction, err error) {
 	defer func() {
 		if ctxErr := ctx.Err(); ctxErr == nil || !errors.Is(err, ctxErr) {
 			err = markHardJobFailure(err)
 		}
 	}()
-	if r == nil || selector.Lock == "" {
-		return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock: selector is missing")
+	entry, err := r.entry(selector)
+	if err != nil {
+		return resolvedAction{}, err
 	}
-	entry, ok := r.locks[selector.Lock]
-	if !ok || entry == nil {
-		return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock %q: lock is missing", selector.Lock)
-	}
-	if entry.duplicate || entry.lock.ID != selector.Lock {
-		return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock %q: lock identity is ambiguous", selector.Lock)
-	}
-	if _, _, err := actionintegration.Admit(actionintegration.Identity{Source: entry.lock.Source, Repository: entry.lock.Repository, Path: entry.lock.Path}, entry.lock.Commit); err != nil {
-		return metadata.Metadata{}, plan.ActionLock{}, err
+	descriptor, _, err := actionintegration.Admit(actionintegration.Identity{Source: entry.lock.Source, Repository: entry.lock.Repository, Path: entry.lock.Path}, entry.lock.Commit)
+	if err != nil {
+		return resolvedAction{}, err
 	}
 
 	var m metadata.Metadata
@@ -232,22 +239,21 @@ func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSe
 	case "workspace":
 		m, err = r.verifyWorkspace(entry.lock)
 	case "github":
-		m, err = r.verifyGitHub(ctx, entry)
+		m, err = r.verifyGitHub(ctx, entry, descriptor.Adapter != "")
 	default:
 		err = fmt.Errorf("unsupported action lock source %q", entry.lock.Source)
 	}
 	if err != nil {
-		return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock %q: %w", selector.Lock, err)
+		return resolvedAction{}, fmt.Errorf("resolve action lock %q: %w", selector.Lock, err)
 	}
-	planned, ok := r.job.Program.Actions[selector.Lock]
-	if !ok {
-		if usesNativeAdapter(entry.lock) {
-			return m, entry.lock, nil
-		}
-		return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock %q: action program is missing", selector.Lock)
+	planned := r.program(selector)
+	if planned == nil && descriptor.Adapter == "" {
+		return resolvedAction{}, fmt.Errorf("resolve action lock %q: action program is missing", selector.Lock)
 	}
-	m = planned.Metadata(m.Path, m.SourceRoot)
-	return m, entry.lock, nil
+	if planned != nil {
+		m = planned.Metadata(m.Path, m.SourceRoot)
+	}
+	return resolvedAction{metadata: m, lock: entry.lock, program: planned, integration: descriptor}, nil
 }
 
 func (r *actionLockResolver) verifyWorkspace(lock plan.ActionLock) (metadata.Metadata, error) {
@@ -271,7 +277,7 @@ func (r *actionLockResolver) verifyWorkspace(lock plan.ActionLock) (metadata.Met
 	return metadata.Metadata{Path: actionPath, SourceRoot: actionPath}, nil
 }
 
-func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLockEntry) (metadata.Metadata, error) {
+func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLockEntry, nativeAdapter bool) (metadata.Metadata, error) {
 	lock := entry.lock
 	if !r.job.HasCapability("network") {
 		return metadata.Metadata{}, fmt.Errorf("GitHub action materialization requires the plan's network capability")
@@ -326,7 +332,7 @@ func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLock
 	}
 	actionPath, err := verifiedActionPath(repositoryRoot, lock.Path)
 	if err != nil {
-		if usesNativeAdapter(lock) {
+		if nativeAdapter {
 			return metadata.Metadata{SourceRoot: repositoryRoot}, nil
 		}
 		return metadata.Metadata{}, fmt.Errorf("resolve materialized action path: %w", err)
