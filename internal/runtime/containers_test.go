@@ -299,8 +299,8 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 			_ = os.WriteFile(filepath.Join(root, "volumes-"+name), []byte(strings.Join(volumes, "\n")), 0o600)
 			vf, _ := os.OpenFile(filepath.Join(root, "current-volumes"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 			_, _ = vf.WriteString(strings.Join(volumes, "\n") + "\n")
-			if scenario == "fail-create" || scenario == "fail-create-reconcile-once" || scenario == "fail-job-volume-tracking-once" {
-				// Another backend creates an unattached volume after our snapshot.
+			if scenario == "fail-create" || scenario == "fail-create-reconcile-once" {
+				// Another backend creates an unattached volume during setup.
 				_, _ = vf.WriteString("unrelated-volume\n")
 			}
 			_ = vf.Close()
@@ -364,13 +364,6 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 			os.Exit(1)
 		}
 		if strings.Contains(strings.Join(args, " "), ".Mounts") {
-			if scenario == "fail-job-volume-tracking-once" {
-				marker := filepath.Join(root, "failed-volume-inspect")
-				if _, err := os.Stat(marker); errors.Is(err, os.ErrNotExist) {
-					_ = os.WriteFile(marker, nil, 0o600)
-					os.Exit(43)
-				}
-			}
 			data, _ := os.ReadFile(filepath.Join(root, "volumes-"+name))
 			fmt.Print(string(data))
 			os.Exit(0)
@@ -529,6 +522,11 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		if scenario == "fail-volume-snapshot" {
 			os.Exit(43)
 		}
+		if slices.Contains(args, "--filter") {
+			owned, _ := os.ReadFile(filepath.Join(root, "owned-volumes"))
+			fmt.Print(string(owned))
+			os.Exit(0)
+		}
 		if data, err := os.ReadFile(filepath.Join(root, "existing-volumes")); err == nil {
 			fmt.Print(string(data))
 		}
@@ -546,6 +544,26 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 				fmt.Print(string(data))
 			}
 		}
+		os.Exit(0)
+	case "volume-create":
+		name := args[len(args)-1]
+		if len(args) == 6 {
+			name = "anonymous-volume"
+		}
+		existing, _ := os.ReadFile(filepath.Join(root, "existing-volumes"))
+		if !lineSet(string(existing))[name] && scenario != "concurrent-named-volume" {
+			owned, _ := os.OpenFile(filepath.Join(root, "owned-volumes"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+			_, _ = owned.WriteString(name + "\n")
+			_ = owned.Close()
+		}
+		if scenario == "fail-volume-create" {
+			os.Exit(43)
+		}
+		if scenario == "block-volume-create" {
+			_ = os.WriteFile(filepath.Join(root, "volume-create-ready"), nil, 0o600)
+			select {}
+		}
+		fmt.Print(name)
 		os.Exit(0)
 	case "volume-rm":
 		_ = os.WriteFile(filepath.Join(root, "removed-volumes"), []byte(strings.Join(args[3:], "\n")), 0o600)
@@ -715,10 +733,10 @@ func TestRunJobContainerLifecycleAndEnvironment(t *testing.T) {
 		t.Fatalf("workspace mode %o", m.Mode().Perm())
 	}
 	calls := f.calls(t)
-	if len(calls) != 15 {
+	if len(calls) != 14 {
 		t.Fatalf("calls=%d: %#v", len(calls), calls)
 	}
-	want := []string{"volume ls", "pull", "network create", "create", "inspect", "start", "exec", "exec", "exec", "ps", "rm", "network ls", "network rm", "ps", "network ls"}
+	want := []string{"pull", "network create", "create", "start", "exec", "exec", "exec", "volume ls", "ps", "rm", "network ls", "network rm", "ps", "network ls"}
 	for i, c := range calls {
 		if c.ConfigMode != 0o700 || c.ConfigEntries != 0 || c.Host != nil || c.Context != nil || c.Builder != nil || c.Kit != nil {
 			t.Fatalf("private env call %d: %#v", i, c)
@@ -727,7 +745,7 @@ func TestRunJobContainerLifecycleAndEnvironment(t *testing.T) {
 			t.Fatalf("call %d=%q want %q", i, c.Args, want[i])
 		}
 	}
-	create := strings.Join(calls[3].Args, " ")
+	create := strings.Join(calls[2].Args, " ")
 	for _, s := range []string{"target=" + jobContainerWorkspace, "target=" + jobContainerTemp, "target=" + jobContainerRuntime + ",readonly", "--workdir " + jobContainerWorkspace} {
 		if !strings.Contains(create, s) {
 			t.Errorf("create missing %q", s)
@@ -937,7 +955,7 @@ func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 	// network, and verification.
 	joined := fmt.Sprint(calls)
 	arm, zrm := strings.Index(joined, "rm --force --volumes docker-id-"+creates[0].Args[2]), strings.Index(joined, "rm --force --volumes docker-id-"+creates[1].Args[2])
-	jobrm, netrm := strings.Index(joined, "rm --force docker-id-"+creates[2].Args[2]), strings.Index(joined, "network rm")
+	jobrm, netrm := strings.Index(joined, "rm --force --volumes docker-id-"+creates[2].Args[2]), strings.Index(joined, "network rm")
 	if jobrm < 0 || jobrm >= arm || arm >= zrm || zrm >= netrm {
 		t.Fatalf("cleanup order: %s", joined)
 	}
@@ -971,19 +989,60 @@ func TestRunJobContainerOptionsAndVolumesExactArguments(t *testing.T) {
 			"--workdir", jobContainerWorkspace, "--entrypoint", "sh",
 			"--privileged", "--label", "description=two words", "--mount", "type=tmpfs,dst=/scratch", "--volume", "option-cache:/option",
 			"--env", "A=first", "--env", "Z=last", "--publish", "8080",
-			"--volume", "cache:/cache:ro", "--volume", "/anonymous", "--volume", w + ":/host-workspace:ro",
+			"--volume", "cache:/cache:ro", "--volume", "anonymous-volume:/anonymous", "--volume", w + ":/host-workspace:ro",
 			"node:24", "-c", "while :; do sleep 3600; done",
 		}
 		if !slices.Equal(call.Args, want) {
 			t.Fatalf("job container create argv = %#v\nwant = %#v", call.Args, want)
 		}
+		var volumeCreates [][]string
+		for _, c := range f.calls(t) {
+			if len(c.Args) >= 2 && c.Args[0] == "volume" && c.Args[1] == "create" {
+				volumeCreates = append(volumeCreates, c.Args)
+			}
+		}
+		wantVolumeCreates := [][]string{
+			{"volume", "create", "--driver", "", "--label", call.Args[6], "cache"},
+			{"volume", "create", "--driver", "", "--label", call.Args[6]},
+		}
+		if !slices.EqualFunc(volumeCreates, wantVolumeCreates, slices.Equal[[]string]) {
+			t.Fatalf("volume create argv = %#v; want %#v", volumeCreates, wantVolumeCreates)
+		}
 		removed, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
-		if readErr != nil || strings.TrimSpace(string(removed)) != "anonymous-volume\ncache\noption-cache" {
+		if readErr != nil || strings.TrimSpace(string(removed)) != "anonymous-volume\ncache" {
 			t.Fatalf("removed job volumes = %q, %v", removed, readErr)
 		}
 		return
 	}
 	t.Fatal("job container create call not found")
+}
+
+func TestRunJobContainerCustomVolumeDriver(t *testing.T) {
+	for _, options := range []string{"--volume-driver custom", "--volume-driver=custom"} {
+		t.Run(options, func(t *testing.T) {
+			f := newJobDocker(t, "")
+			w := t.TempDir()
+			j := jobContainerPlan(t, w, nil)
+			j.Container.Options = options
+			j.Container.Volumes = []string{"cache:/cache", "/anonymous"}
+			if _, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).runTestJob(t.Context(), j, w); err != nil {
+				t.Fatal(err)
+			}
+			var create []string
+			for _, call := range f.calls(t) {
+				if call.Args[0] == "volume" && (call.Args[1] == "create" || call.Args[1] == "rm") {
+					t.Fatalf("custom driver volumes must not be claimed: %#v", call.Args)
+				}
+				if call.Args[0] == "create" {
+					create = call.Args
+				}
+			}
+			want := append(strings.Fields(options), "--volume", "cache:/cache", "--volume", "/anonymous", j.Container.Image, "-c", "while :; do sleep 3600; done")
+			if len(create) < len(want) || !slices.Equal(create[len(create)-len(want):], want) {
+				t.Fatalf("container create argv = %#v; want suffix %#v", create, want)
+			}
+		})
+	}
 }
 
 func TestRunJobContainerOptionNameUsesCreatedReference(t *testing.T) {
@@ -999,7 +1058,7 @@ func TestRunJobContainerOptionNameUsesCreatedReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := f.calls(t)
-	if jobDockerCallIndex(calls, "start", "docker-id-custom-job") < 0 || jobDockerCallIndex(calls, "rm", "--force", "docker-id-custom-job") < 0 {
+	if jobDockerCallIndex(calls, "start", "docker-id-custom-job") < 0 || jobDockerCallIndex(calls, "rm", "--force", "--volumes", "docker-id-custom-job") < 0 {
 		t.Fatalf("custom job reference was not used for lifecycle: %#v", calls)
 	}
 }
@@ -1616,7 +1675,7 @@ func TestRunJobContainerCleanupRetriesAmbiguousCreateReconciliation(t *testing.T
 		if len(call.Args) != 0 && call.Args[0] == "ps" && slices.Contains(call.Args, "--no-trunc") {
 			reconciles++
 		}
-		removed = removed || slices.Equal(call.Args, []string{"rm", "--force", "job-container-id"})
+		removed = removed || slices.Equal(call.Args, []string{"rm", "--force", "--volumes", "job-container-id"})
 	}
 	removedVolumes, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
 	if reconciles != 2 || !removed || readErr != nil || strings.TrimSpace(string(removedVolumes)) != "cache" {
@@ -1624,13 +1683,13 @@ func TestRunJobContainerCleanupRetriesAmbiguousCreateReconciliation(t *testing.T
 	}
 }
 
-func TestRunJobContainerCleanupRetriesSuccessfulCreateVolumeTracking(t *testing.T) {
-	f := newJobDocker(t, "fail-job-volume-tracking-once")
+func TestRunJobContainerCleanupReconcilesAmbiguousVolumeCreation(t *testing.T) {
+	f := newJobDocker(t, "fail-volume-create")
 	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
 		t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(),
 		&plan.Container{Image: "alpine", Volumes: []string{"cache:/cache"}}, nil,
 	)
-	if err == nil || !strings.Contains(err.Error(), "inspect job container volumes") {
+	if err == nil || !strings.Contains(err.Error(), "create job volume") {
 		t.Fatalf("startJobContainer() error = %v", err)
 	}
 	removedVolumes, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
@@ -1639,17 +1698,20 @@ func TestRunJobContainerCleanupRetriesSuccessfulCreateVolumeTracking(t *testing.
 	}
 }
 
-func TestRunJobContainerFailedVolumeSnapshotDoesNotClaimHostVolumes(t *testing.T) {
+func TestRunJobContainerFailedOwnershipQueryDoesNotClaimHostVolumes(t *testing.T) {
 	f := newJobDocker(t, "fail-volume-snapshot")
 	if err := os.WriteFile(filepath.Join(f.root, "existing-volumes"), []byte("shared\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
+	b, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
 		t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(),
 		&plan.Container{Image: "alpine", Volumes: []string{"cache:/cache"}}, nil,
 	)
-	if err == nil || !strings.Contains(err.Error(), "snapshot Docker volumes") {
+	if err != nil {
 		t.Fatalf("startJobContainer() error = %v", err)
+	}
+	if err := b.cleanup(t.Context()); err == nil || !strings.Contains(err.Error(), "discover owned job volumes") {
+		t.Fatalf("cleanup() error = %v", err)
 	}
 	for _, call := range f.calls(t) {
 		if len(call.Args) >= 2 && call.Args[0] == "volume" && call.Args[1] == "rm" {
@@ -1659,51 +1721,58 @@ func TestRunJobContainerFailedVolumeSnapshotDoesNotClaimHostVolumes(t *testing.T
 }
 
 func TestRunJobContainerCreateCancellationCleansAnonymousVolume(t *testing.T) {
-	f := newJobDocker(t, "block-job-create")
-	w, tmp := t.TempDir(), t.TempDir()
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() {
-		_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
-			ctx, newCommandOutputProcessor(io.Discard, io.Discard), w, tmp,
-			&plan.Container{Image: "alpine", Volumes: []string{"/cache"}}, nil,
-		)
-		done <- err
-	}()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if _, err := os.Stat(filepath.Join(f.root, "job-create-ready")); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
+	for _, kind := range []string{"job", "volume"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newJobDocker(t, "block-"+kind+"-create")
+			w, tmp := t.TempDir(), t.TempDir()
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() {
+				_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
+					ctx, newCommandOutputProcessor(io.Discard, io.Discard), w, tmp,
+					&plan.Container{Image: "alpine", Volumes: []string{"/cache"}}, nil,
+				)
+				done <- err
+			}()
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				if _, err := os.Stat(filepath.Join(f.root, kind+"-create-ready")); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					cancel()
+					t.Fatal("job container create did not start")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 			cancel()
-			t.Fatal("job container create did not start")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	cancel()
-	if err := <-done; err == nil || !strings.Contains(err.Error(), "create job container") {
-		t.Fatalf("startJobContainer() error = %v", err)
-	}
-	removed, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
-	if readErr != nil || strings.TrimSpace(string(removed)) != "anonymous-volume" {
-		t.Fatalf("removed volumes = %q, %v", removed, readErr)
+			if err := <-done; err == nil || !strings.Contains(err.Error(), "create job") {
+				t.Fatalf("startJobContainer() error = %v", err)
+			}
+			removed, readErr := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
+			if readErr != nil || strings.TrimSpace(string(removed)) != "anonymous-volume" {
+				t.Fatalf("removed volumes = %q, %v", removed, readErr)
+			}
+		})
 	}
 }
 
-func TestTrackJobContainerVolumesSurvivesSetupCancellation(t *testing.T) {
-	f := newJobDocker(t, "")
-	if err := os.WriteFile(filepath.Join(f.root, "container"), nil, 0o600); err != nil {
+func TestJobContainerPreservesConcurrentlyCreatedNamedVolume(t *testing.T) {
+	f := newJobDocker(t, "concurrent-named-volume")
+	b, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
+		t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(),
+		&plan.Container{Image: "alpine", Volumes: []string{"cache:/cache"}}, nil,
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(f.root, "volumes-job"), []byte("cache\n"), 0o600); err != nil {
+	if err := b.cleanup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	b := &jobContainerBackend{runner: Runner{Docker: f.path}, docker: f.path, env: map[string]string{"DOCKER_CONFIG": t.TempDir()}, container: "job", existingVolumes: map[string]bool{}}
-	if err := b.trackJobContainerVolumes(ctx); err != nil || !slices.Equal(b.ownedVolumes, []string{"cache"}) {
-		t.Fatalf("trackJobContainerVolumes() volumes = %#v, error = %v", b.ownedVolumes, err)
+	for _, call := range f.calls(t) {
+		if len(call.Args) >= 2 && call.Args[0] == "volume" && call.Args[1] == "rm" {
+			t.Fatalf("cleanup claimed concurrently created volume: %#v", call.Args)
+		}
 	}
 }
 
@@ -1855,7 +1924,7 @@ func TestRunJobContainerSetupFailuresCleanOwnedResources(t *testing.T) {
 				if strings.HasPrefix(joined, "rm ") && !strings.Contains(joined, "buildkite-gha-job-") && !strings.Contains(joined, "job-container-id") {
 					t.Fatalf("unowned removal %q", joined)
 				}
-				removedContainer = removedContainer || strings.HasPrefix(joined, "rm --force docker-id-buildkite-gha-job-") || joined == "rm --force job-container-id"
+				removedContainer = removedContainer || strings.HasPrefix(joined, "rm --force --volumes docker-id-buildkite-gha-job-") || joined == "rm --force --volumes job-container-id"
 				if strings.HasPrefix(joined, "network rm") && !strings.Contains(joined, "buildkite-gha-network-") {
 					t.Fatalf("unowned removal %q", joined)
 				}
@@ -1884,7 +1953,7 @@ func TestRunJobContainerCleanupQueryFailureStillRemovesExactResources(t *testing
 		t.Fatalf("error=%v", err)
 	}
 	joined := fmt.Sprint(f.calls(t))
-	if !strings.Contains(joined, "rm --force docker-id-buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
+	if !strings.Contains(joined, "rm --force --volumes docker-id-buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
 		t.Fatalf("cleanup %s", joined)
 	}
 }
@@ -2143,7 +2212,7 @@ func TestRunJobContainerNodeProbeFailureCleansOwnedResources(t *testing.T) {
 			}
 			calls := f.calls(t)
 			joined := fmt.Sprint(calls)
-			if !strings.Contains(joined, "rm --force docker-id-buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
+			if !strings.Contains(joined, "rm --force --volumes docker-id-buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
 				t.Fatalf("owned resources not cleaned: %s", joined)
 			}
 			for _, call := range calls {
@@ -2318,7 +2387,7 @@ func TestRunJobContainerReadOnlyMountProbeFailureCleansOwnedResources(t *testing
 	}
 	calls := f.calls(t)
 	joined := fmt.Sprint(calls)
-	if !strings.Contains(joined, "rm --force docker-id-buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
+	if !strings.Contains(joined, "rm --force --volumes docker-id-buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
 		t.Fatalf("owned resources not cleaned: %s", joined)
 	}
 	if len(calls) == 0 {
