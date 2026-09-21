@@ -592,6 +592,7 @@ func TestParseRejectsUnsupportedJobContainerOptionsAndVolumes(t *testing.T) {
 		"option expression":       "options: --cpus ${{ matrix.cpus }}",
 		"volume expression":       "volumes: ['${{ matrix.name }}:/data']",
 		"unsupported volume mode": "volumes: ['cache:/data:z']",
+		"short volume name":       "volumes: ['v:/data']",
 	} {
 		t.Run(name, func(t *testing.T) {
 			source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      " + body + "\n    steps: [{run: true}]\n")
@@ -603,7 +604,7 @@ func TestParseRejectsUnsupportedJobContainerOptionsAndVolumes(t *testing.T) {
 }
 
 func TestParseAcceptsGitHubJobContainerOptionsAndVolumes(t *testing.T) {
-	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      options: --privileged --cap-add SYS_ADMIN\n      volumes: ['v:/data', '/anonymous', '/tmp:/host', 'one:/same', 'two:/same', 'cache:/__w/repo']\n    steps: [{run: true}]\n")
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      options: --privileged --cap-add SYS_ADMIN\n      volumes: ['vv:/data', '/anonymous', '/tmp:/host', 'one:/same', 'two:/same', 'cache:/__w/repo']\n    steps: [{run: true}]\n")
 	if _, err := Parse("containers.yml", source); err != nil {
 		t.Fatalf("Parse() rejected GitHub-compatible job container controls: %v", err)
 	}

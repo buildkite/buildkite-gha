@@ -10,9 +10,10 @@ import (
 )
 
 const MaxJobVolumes = 128
+const MaxJobVolumeLength = 4096
 const MaxJobOptionsLength = 65536
 
-var volumeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+var volumeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]+$`)
 
 // JobOptions splits options using the GitHub runner's argument rules and
 // rejects the network and entrypoint overrides that GitHub does not support.
@@ -35,7 +36,7 @@ func JobOptions(value string) ([]string, error) {
 // ValidateJobVolume accepts GitHub's named, anonymous, and absolute host-bind
 // volume syntax with an absolute container destination.
 func ValidateJobVolume(value string) error {
-	if value == "" || len(value) > 4096 || hasASCIIControl(value) {
+	if value == "" || len(value) > MaxJobVolumeLength || hasASCIIControl(value) {
 		return fmt.Errorf("volume is empty, too long, or contains a control character")
 	}
 	parts := strings.Split(value, ":")

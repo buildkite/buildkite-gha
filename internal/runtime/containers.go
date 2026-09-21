@@ -839,7 +839,8 @@ func (b *jobContainerBackend) cleanup(parent context.Context) error {
 	var out string
 	var queryErr error
 	if b.container != "" {
-		volumes, volumeErr := boundedDockerOutput(ctx, b.env, b.docker, "volume", "ls", "--quiet", "--filter", "label="+b.owner)
+		const volumeOutputLimit = containerpolicy.MaxJobVolumes * (containerpolicy.MaxJobVolumeLength + 1)
+		volumes, volumeErr := boundedDockerOutputLimit(ctx, b.env, b.docker, volumeOutputLimit, "volume", "ls", "--quiet", "--filter", "label="+b.owner)
 		if volumeErr != nil {
 			err = errors.Join(err, fmt.Errorf("discover owned job volumes: %w", volumeErr))
 		} else {
@@ -909,10 +910,16 @@ func (b *jobContainerBackend) cleanup(parent context.Context) error {
 		}
 	}
 	if len(b.ownedVolumes) != 0 {
-		if _, e := boundedDockerOutput(ctx, b.env, b.docker, append([]string{"volume", "rm", "--force"}, b.ownedVolumes...)...); e != nil {
+		outputLimit := 0
+		query := []string{"volume", "ls", "--quiet"}
+		for _, volume := range b.ownedVolumes {
+			outputLimit += len(volume) + 1
+			query = append(query, "--filter", "name=^"+regexp.QuoteMeta(volume)+"$")
+		}
+		if _, e := boundedDockerOutputLimit(ctx, b.env, b.docker, outputLimit, append([]string{"volume", "rm", "--force"}, b.ownedVolumes...)...); e != nil {
 			err = errors.Join(err, fmt.Errorf("remove job volumes: %w", e))
 		}
-		remaining, e := boundedDockerOutput(ctx, b.env, b.docker, "volume", "ls", "--quiet")
+		remaining, e := boundedDockerOutputLimit(ctx, b.env, b.docker, outputLimit, query...)
 		if e != nil {
 			err = errors.Join(err, fmt.Errorf("verify owned Docker volume cleanup query: %w", e))
 		} else {

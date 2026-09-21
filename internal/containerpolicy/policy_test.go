@@ -63,14 +63,14 @@ func TestArgumentList(t *testing.T) {
 
 func TestValidateJobVolume(t *testing.T) {
 	for _, value := range []string{
-		"v:/data", "cache:/cache", "cache.v1:/var/cache:ro", "CACHE_1:/data:rw",
+		"vv:/data", "cache:/cache", "cache.v1:/var/cache:ro", "CACHE_1:/data:rw",
 		"/anonymous", "/srv/cache:/cache", "/srv/cache:/cache:rw",
 	} {
 		if err := ValidateJobVolume(value); err != nil {
 			t.Errorf("ValidateJobVolume(%q) = %v", value, err)
 		}
 	}
-	for _, value := range []string{"-bad:/data", "relative/path:/data", "cache:data", "cache:/data:z", ":/data", "/anonymous:ro"} {
+	for _, value := range []string{"v:/data", "-bad:/data", "relative/path:/data", "cache:data", "cache:/data:z", ":/data", "/anonymous:ro"} {
 		if err := ValidateJobVolume(value); err == nil {
 			t.Errorf("ValidateJobVolume(%q) accepted invalid volume", value)
 		}

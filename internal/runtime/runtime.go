@@ -604,10 +604,14 @@ func dockerBuilderDriver(inspection string) string {
 }
 
 func boundedDockerOutput(ctx context.Context, env map[string]string, docker string, args ...string) (string, error) {
+	return boundedDockerOutputLimit(ctx, env, docker, 4096, args...)
+}
+
+func boundedDockerOutputLimit(ctx context.Context, env map[string]string, docker string, limit int, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, docker, args...)
 	cmd.Env = processEnv(env)
 	var output strings.Builder
-	w := &limitedWriter{writer: &output, remaining: 4096}
+	w := &limitedWriter{writer: &output, remaining: limit}
 	cmd.Stdout, cmd.Stderr = w, io.Discard
 	err := cmd.Run()
 	if w.exceeded {

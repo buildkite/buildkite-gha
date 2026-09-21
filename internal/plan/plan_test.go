@@ -1479,6 +1479,7 @@ func TestJobContainerPlanRejectsUnsupportedOptionsAndVolumes(t *testing.T) {
 		"network":            {Image: "node:24", Options: "--network=host"},
 		"entrypoint":         {Image: "node:24", Options: "--entrypoint sh"},
 		"unsupported volume": {Image: "node:24", Volumes: []string{"cache:/data:z"}},
+		"short volume name":  {Image: "node:24", Volumes: []string{"v:/data"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			job := validJob()
@@ -1497,7 +1498,7 @@ func TestJobContainerPlanAcceptsGitHubOptionsAndVolumes(t *testing.T) {
 	job.Container = &Container{
 		Image:   "node:24",
 		Options: `--privileged --label "description=two words" --memory-swap -1`,
-		Volumes: []string{"v:/data", "/anonymous", "/tmp:/host", "one:/same", "two:/same", "cache:/__buildkite-gha/runtime"},
+		Volumes: []string{"vv:/data", "/anonymous", "/tmp:/host", "one:/same", "two:/same", "cache:/__buildkite-gha/runtime"},
 	}
 	if err := job.Validate(); err != nil {
 		t.Fatalf("Validate() rejected GitHub-compatible job container controls: %v", err)

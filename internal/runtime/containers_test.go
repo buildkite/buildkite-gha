@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -522,9 +523,31 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		if scenario == "fail-volume-snapshot" {
 			os.Exit(43)
 		}
-		if slices.Contains(args, "--filter") {
+		if slices.ContainsFunc(args, func(arg string) bool { return strings.HasPrefix(arg, "label=") }) {
 			owned, _ := os.ReadFile(filepath.Join(root, "owned-volumes"))
 			fmt.Print(string(owned))
+			os.Exit(0)
+		}
+		if slices.Contains(args, "--filter") {
+			volumes := map[string]bool{}
+			for _, file := range []string{"owned-volumes", "existing-volumes", "current-volumes"} {
+				data, _ := os.ReadFile(filepath.Join(root, file))
+				maps.Copy(volumes, lineSet(string(data)))
+			}
+			removed, _ := os.ReadFile(filepath.Join(root, "removed-volumes"))
+			for volume := range lineSet(string(removed)) {
+				if scenario != "volume-leftover" {
+					delete(volumes, volume)
+				}
+			}
+			for volume := range volumes {
+				for _, arg := range args {
+					if pattern, ok := strings.CutPrefix(arg, "name="); ok && regexp.MustCompile(pattern).MatchString(volume) {
+						fmt.Println(volume)
+						break
+					}
+				}
+			}
 			os.Exit(0)
 		}
 		if data, err := os.ReadFile(filepath.Join(root, "existing-volumes")); err == nil {
@@ -567,6 +590,7 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		os.Exit(0)
 	case "volume-rm":
 		_ = os.WriteFile(filepath.Join(root, "removed-volumes"), []byte(strings.Join(args[3:], "\n")), 0o600)
+		fmt.Println(strings.Join(args[3:], "\n"))
 		os.Exit(0)
 	case "volume-inspect":
 		removed, _ := os.ReadFile(filepath.Join(root, "removed-volumes"))
@@ -1773,6 +1797,44 @@ func TestJobContainerPreservesConcurrentlyCreatedNamedVolume(t *testing.T) {
 		if len(call.Args) >= 2 && call.Args[0] == "volume" && call.Args[1] == "rm" {
 			t.Fatalf("cleanup claimed concurrently created volume: %#v", call.Args)
 		}
+	}
+}
+
+func TestJobContainerCleanupMaximumVolumeOutput(t *testing.T) {
+	for _, scenario := range []string{"", "volume-leftover"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newJobDocker(t, scenario)
+			b, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(
+				t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(),
+				&plan.Container{Image: "alpine"}, nil,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Docker generates 64-character anonymous volume names. The maximum
+			// supported list must fit discovery, removal output, and verification.
+			names := make([]string, 128)
+			for i := range names {
+				names[i] = fmt.Sprintf("%064x", i)
+			}
+			if err := os.WriteFile(filepath.Join(f.root, "owned-volumes"), []byte(strings.Join(names, "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(f.root, "existing-volumes"), []byte(strings.Repeat(names[0]+"-unrelated\n", 128)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err = b.cleanup(t.Context())
+			if scenario == "" && err != nil || scenario != "" && (err == nil || !strings.Contains(err.Error(), "leftover volume")) {
+				t.Fatalf("cleanup() = %v", err)
+			}
+			if err != nil && strings.Contains(err.Error(), "output exceeds limit") {
+				t.Fatalf("cleanup truncated the supported volume list: %v", err)
+			}
+			removed, err := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
+			if err != nil || !slices.Equal(strings.Fields(string(removed)), names) {
+				t.Fatalf("removed volumes = %q, %v; want exactly the owned volumes", removed, err)
+			}
+		})
 	}
 }
 
