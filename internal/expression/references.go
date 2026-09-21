@@ -18,6 +18,16 @@ type NeedOutputReference struct {
 	Output string
 }
 
+// DirectNeedOutput accepts a complete, statically named needs output. It does
+// not evaluate templates, operators, functions, or dynamic indexes.
+func DirectNeedOutput(text string) (NeedOutputReference, error) {
+	root, path, err := staticReferencePath(text)
+	if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") || !runtimeMatrixIdentifier(path[0]) || !runtimeMatrixIdentifier(path[2]) {
+		return NeedOutputReference{}, fmt.Errorf("environment names that use expressions must be exactly ${{ needs.<job>.outputs.<name> }}")
+	}
+	return NeedOutputReference{Job: path[0], Output: path[2]}, nil
+}
+
 // staticReferencePath extracts one complete static variable reference. Dot and
 // literal string index access are accepted; functions, operators, literals,
 // compound templates, and dynamic indexes return an error.

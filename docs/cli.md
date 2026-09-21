@@ -344,7 +344,7 @@ Inside a Buildkite job, the IR includes the resolved
 when the workflow references `vars`.
 
 Workflows whose jobs declare a GitHub
-[`environment`](compatibility.md#deployment-environments) need GitHub
+[`environment`](compatibility.md#deployment-environments) with a literal name need GitHub
 environment access at compile time. Inside a Buildkite job, `upload` and
 `compile` resolve environments automatically through the job-scoped Agent API;
 no GitHub token reaches the importer. Outside a job, `compile` fails for such
@@ -354,7 +354,8 @@ option.
 `compile` does not upload the executable, plans, or pipeline, so piping its YAML directly to `buildkite-agent pipeline upload` is incomplete.
 
 A workflow with a
-[matrix from a job output](compatibility.md#matrices-from-job-outputs) has jobs
+[matrix](compatibility.md#matrices-from-job-outputs) or
+[environment name](compatibility.md#environment-names-from-job-outputs) from a job output has jobs
 that only exist after a deferred step runs inside the build, so `compile`
 renders its IR but not its pipeline YAML:
 
@@ -667,11 +668,19 @@ job by job: when any of its jobs fails compilation, the whole workflow is
 replaced with one failing step, because a partial upload would drop the
 deferred steps.
 
+The same deferred mechanism supports one unprotected
+[environment name from a job output](compatibility.md#environment-names-from-job-outputs)
+per upload. Instead of expanding matrix rows, the deferred step resolves the
+selected environment's snapshot and rejects any protection before compiling
+its jobs. Environment variables and secret-name mappings come from that
+snapshot; repository and organization variables remain those the importer
+recorded. `environment.url` is not a scheduling input.
+
 The importer and every deferred step are stages of one compilation. Each
 stage compiles the whole workflow through the same compile path, uploads the
-jobs whose matrix rows it knows, and writes a stage record for each matrix the
-compiler still defers. The deferred step downloads the importer's executable,
-then runs the internal form of the same command:
+jobs whose scheduling inputs it knows, and writes a stage record for each
+continuation the compiler still defers. The deferred step downloads the
+importer's executable, then runs the internal form of the same command:
 
 ```sh
 buildkite-gha upload \
@@ -734,7 +743,7 @@ the command marker bound to the stage record digest. A missing step
 or a different binding fails the replay. Any other failure exits 1 with:
 
 ```
-Retry the whole build to expand this matrix again. If the matrix producer job was retried, only a new build can expand it.
+Retry the whole build to schedule these jobs again. If the producer job was retried, only a new build can schedule them.
 ```
 
 ### Run Linux jobs as a non-root user

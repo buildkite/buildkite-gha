@@ -214,8 +214,15 @@ type Options struct {
 	// Their complete forward closures have no executable plans. Each root
 	// must also have an entry in RuntimeMatrixRows, with no rows.
 	RuntimeMatrixSkipped map[string]bool
+	// RuntimeEnvironmentNames contains verified producer outputs for dynamic
+	// environment consumers. Only this scheduling field sees these values.
+	RuntimeEnvironmentNames map[string]string
+	// KnownEnvironmentNames records literal names from every workflow in the
+	// initial upload, including deferred jobs, to prevent cross-stage secret
+	// prefix collisions. It contains names, not snapshots or secret values.
+	KnownEnvironmentNames []string
 	// RuntimeMatrixActionLocks pins remote actions to the commits an earlier
-	// compilation resolved, as RuntimeMatrixContinuation.ActionLocks records
+	// compilation resolved, as JobContinuation.ActionLocks records
 	// them. A deferred upload sets it so the jobs it expands use exactly the
 	// action revisions the initial compilation admitted, even when a mutable
 	// ref such as a tag moved in between. Refs the locks do not cover resolve

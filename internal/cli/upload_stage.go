@@ -22,7 +22,7 @@ import (
 // stageRetryGuidance tells the reader how to recover from a failed stage.
 // Retrying only the stage step is safe when nothing about the producer
 // changed; anything that changed the producer needs a new build.
-const stageRetryGuidance = "Retry the whole build to expand this matrix again. If the matrix producer job was retried, only a new build can expand it."
+const stageRetryGuidance = "Retry the whole build to schedule these jobs again. If the producer job was retried, only a new build can schedule them."
 
 // stageOptions is the `upload --stage-digest <digest> --stage-producer <job>`
 // form: the record to compile from and the job whose artifacts hold it.
@@ -197,6 +197,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	}
 	rows := make(map[string][]map[string]any)
 	skipped := make(map[string]bool)
+	environments := make(map[string]string)
 	// Read every producer before uploading anything. A missing manifest is
 	// not a terminal skip, even if another branch has already failed.
 	manifests := make(map[string]transport.ResultManifest)
@@ -226,13 +227,14 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	}
 	for _, root := range continuation.Roots() {
 		descriptor := root.Descriptor
-		_, _ = fmt.Fprintf(r.stdout, "~~~ :github: Read matrix from job %q output %q\n", descriptor.ProducerJob, descriptor.ProducerOutput)
+		kind := descriptor.Kind()
+		_, _ = fmt.Fprintf(r.stdout, "~~~ :github: Read %s from job %q output %q\n", kind, descriptor.ProducerJob, descriptor.ProducerOutput)
 		manifest, err := readProducer(root.ProducerStepKey)
 		if err != nil {
-			return fail("matrix producer %q result is unavailable: %v", descriptor.ProducerJob, err)
+			return fail("%s producer %q result is unavailable: %v", kind, descriptor.ProducerJob, err)
 		}
 		if manifest.Result != "success" {
-			_, _ = fmt.Fprintf(r.stdout, "Matrix producer %q finished with result %q; the deferred jobs are skipped for this root.\n", descriptor.ProducerJob, manifest.Result)
+			_, _ = fmt.Fprintf(r.stdout, "%s producer %q finished with result %q; the deferred jobs are skipped for this root.\n", strings.ToUpper(kind[:1])+kind[1:], descriptor.ProducerJob, manifest.Result)
 			if len(continuation.Joined) == 0 {
 				return r.uploadSkipped(fail, manifest.Result, graphKeys)
 			}
@@ -249,7 +251,15 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 			}
 		}
 		if output == nil {
-			return fail("matrix producer %q did not publish output %q", descriptor.ProducerJob, descriptor.ProducerOutput)
+			return fail("%s producer %q did not publish output %q", kind, descriptor.ProducerJob, descriptor.ProducerOutput)
+		}
+		if descriptor.Shape == compiler.RuntimeEnvironmentShape {
+			if err := compiler.ValidateRuntimeEnvironmentName(*output); err != nil {
+				return fail("environment from job %q output %q is invalid: %v", descriptor.ProducerJob, descriptor.ProducerOutput, err)
+			}
+			environments[descriptor.Job] = *output
+			_, _ = fmt.Fprintf(r.stdout, "Resolving the environment before compiling job %q.\n", descriptor.Job)
+			continue
 		}
 		expanded, err := compiler.ExpandRuntimeMatrixOutput(descriptor, []byte(*output), graphKeys)
 		if err != nil {
@@ -258,7 +268,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 		rows[descriptor.Job] = expanded
 		_, _ = fmt.Fprintf(r.stdout, "Expanding job %q into %d matrix instances.\n", descriptor.Job, len(expanded))
 	}
-	wanted := continuation.DependentInstances()
+	wanted := continuation.DependentInstances() + len(environments)
 	for job, expanded := range rows {
 		wanted += len(expanded)
 		if skipped[job] {
@@ -271,7 +281,7 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	}
 
 	_, _ = fmt.Fprintln(r.stdout, "~~~ :github: Compile deferred jobs")
-	preflight, report, err := r.compile(rows, skipped)
+	preflight, report, err := r.compile(rows, skipped, environments)
 	if err != nil {
 		_ = r.out.write(r.ctx, report)
 		return fail("compile deferred jobs: %v", err)
@@ -342,14 +352,14 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 // importer's compile path: the recorded inputs become one hosted compile
 // request, which is validated with the live runner resolution and compiled
 // with the environment source this job observes.
-func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]bool) (hostedCompilation, compatibility.ProcessingReport, error) {
+func (r stageRun) compile(rows map[string][]map[string]any, skipped map[string]bool, environments map[string]string) (hostedCompilation, compatibility.ProcessingReport, error) {
 	record := r.record
 	repositorySource, cleanupSource, err := hostedRepositorySource(r.ctx, r.clientVersion, r.eventSource, importerJobActionSourceAuthentication(r.stderr, r.clientVersion), record.PrivateReusableWorkflows)
 	if err != nil {
 		return hostedCompilation{}, compatibility.EnvironmentProcessingReport(record.Workflow.Path, hostedProfile, "repository source could not be configured"), err
 	}
 	defer cleanupSource()
-	request := record.compileRequest(r.workflowPath, r.workflowSource, r.eventSource, rows, skipped, repositorySource)
+	request := record.compileRequest(r.workflowPath, r.workflowSource, r.eventSource, rows, skipped, environments, repositorySource)
 	request.EnvironmentSource = environmentSourceFromAgent(r.clientVersion)
 	_, reports, err := validateHostedRequests(r.ctx, r.out, []*hostedCompileRequest{&request}, r.clientVersion)
 	if err != nil {

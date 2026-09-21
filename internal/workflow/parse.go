@@ -537,6 +537,14 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 			return Job{}, err
 		}
 		out.Environment = environment
+		if in.Environment.Name.ContainsExpression() {
+			expr, err := adaptExpression(in.Environment.Name)
+			if err != nil {
+				return Job{}, err
+			}
+			out.Environment = ""
+			out.EnvironmentExpression = &expr
+		}
 	}
 	ownedConcurrency, err := adaptConcurrency(path, in.ID.Value, in.Concurrency)
 	if err != nil {
@@ -807,8 +815,8 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 	return out, nil
 }
 
-// adaptEnvironment owns the statically supported subset of the GitHub
-// environment key: one literal environment name. The optional url is used only
+// adaptEnvironment accepts a literal name or one direct needs output. The
+// compiler schedules output-derived names before dispatch. The optional url is used only
 // for GitHub deployment records, which buildkite-gha never creates, so it is
 // accepted and ignored.
 func adaptEnvironment(path string, in *actionlint.Job) (string, error) {
@@ -821,7 +829,10 @@ func adaptEnvironment(path string, in *actionlint.Job) (string, error) {
 	}
 	name := environment.Name
 	if name.ContainsExpression() {
-		return "", locatedError(path, name.Pos, in.ID.Value, "environment names that use expressions are unsupported; use a literal environment name")
+		if _, err := expression.DirectNeedOutput(name.Value); err != nil {
+			return "", locatedError(path, name.Pos, in.ID.Value, err.Error())
+		}
+		return name.Value, nil
 	}
 	if utf8.RuneCountInString(name.Value) > 255 || strings.ContainsAny(name.Value, "\x00\r\n") {
 		return "", locatedError(path, name.Pos, in.ID.Value, "environment name must be at most 255 characters without control characters")

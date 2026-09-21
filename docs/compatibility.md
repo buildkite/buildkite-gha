@@ -47,7 +47,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Reusable-workflow jobs use the top-level workflow permissions. |
 | [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs and locally inherited or explicitly mapped reusable jobs resolve through the destination job's Buildkite secret authority. |
 | [Job and service containers](#containers-and-services) | 🟡 Supported subset | Linux job containers and broadly compatible service definitions, including explicit registry credentials. |
-| [Environments and snapshots](#deployment-environments) | 🟡 Supported subset | Literal environments on top-level jobs, with required-reviewer approval gates and environment-scoped secret names. Wait timers, branch policies, and custom rules are rejected. Snapshots are accepted with no effect. |
+| [Environments and snapshots](#deployment-environments) | 🟡 Supported subset | Literal environments with approximate reviewer gates, or one unprotected environment selected from a job output. Environment-scoped variables and secret names resolve before job upload. Snapshots are accepted with no effect. |
 | [Variables](#repository-and-organization-variables) | 🟡 Supported subset | Repository, organization, and environment `vars` resolve inside a Buildkite job with GitHub's per-position scoping. `run-name` rejects `vars`. |
 | [OIDC](#other-secrets-and-oidc) | 🟡 Supported subset | Host JavaScript and composite actions can request Buildkite OIDC tokens in jobs with `id-token: write`. |
 | [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers are outside the initial release. |
@@ -782,19 +782,22 @@ path; there is no GitHub token option. Resolution is GitHub.com-only, so
 GitHub Enterprise Server repositories cannot declare environments. Any
 resolution failure fails the compile instead of degrading to an unprotected
 default, and environments are only resolved when a workflow declares them.
-One upload resolves all of its distinct environments in one batched request.
+The initial upload resolves distinct literal names in one batched request;
+a deferred upload resolves its selected dynamic name before emitting the job.
 The backend owns the resolution limits — at most 20 environments per request
 plus per-job and per-App-installation hourly budgets — and its rejection
 fails the compile with the backend's error.
 
 Outside a Buildkite job, `compile` has no environment access, so workflows
-that declare environments fail to compile with an error naming the job.
+that declare literal environments fail to compile with an error naming the job.
 `validate --profile hosted` reports the same failure as a diagnostic.
+Dynamic names remain deferred in the initial IR and validation report.
 
 | Environment feature | Behavior |
 | --- | --- |
-| Literal `environment` name, with or without `url` | ✅ Supported on top-level workflow jobs. Expression names and reusable-workflow jobs are rejected. |
-| Required reviewers | 🟡 One Buildkite block step per workflow and environment gates the affected jobs. Any user who can unblock the pipeline can approve; GitHub reviewer lists, `prevent_self_review`, and administrator bypass are not enforced. |
+| Literal `environment` name, with or without `url` | ✅ Supported on top-level workflow jobs. Reusable-workflow jobs are rejected. |
+| Name from a job output | 🟡 One unprotected, matrix-free top-level job per upload; see [Environment names from job outputs](#environment-names-from-job-outputs). |
+| Required reviewers | 🟡 For literal names only, one Buildkite block step per workflow and environment gates the affected jobs. Any user who can unblock the pipeline can approve; GitHub reviewer lists, `prevent_self_review`, and administrator bypass are not enforced. Dynamic names reject all protection rules. |
 | Environment secrets | 🟡 Referenced secret names defined in the environment resolve to the Buildkite secret `<ENVIRONMENT>_<NAME>`. Other names resolve unchanged. Values stay in Buildkite Secrets; only names are read from GitHub. |
 | Environment variables | 🟡 `${{ vars.NAME }}` resolves in runner-evaluated fields of jobs that declare the environment, over repository and organization variables. Job `if` and compile-time fields never see environment variables. See [Repository and organization variables](#repository-and-organization-variables). |
 | Wait timers | ❌ Rejected at compile time. |
@@ -818,9 +821,65 @@ workflow compiles, even if the gated job's own condition would skip it. Matrix
 instances of one job share one gate. Gated jobs cannot be retried manually; run
 a new build for a fresh approval.
 
-Environment configuration is read once per compile, so changes on GitHub apply
-to the next build. Buildkite OIDC tokens do not carry a GitHub `environment`
-claim.
+Environment configuration is read during the compile that emits the job; it
+is not rechecked at dispatch or runtime. Buildkite OIDC tokens do not carry a
+GitHub `environment` claim.
+
+#### Environment names from job outputs
+
+A top-level job without a matrix can select an unprotected environment from
+one earlier job's output:
+
+```yaml
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.select.outputs.environment }}
+    steps:
+      - id: select
+        run: echo 'environment=staging-eu' >> "$GITHUB_OUTPUT"
+  deploy:
+    needs: plan
+    environment: ${{ needs.plan.outputs.environment }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./deploy.sh
+        env:
+          KEY: ${{ secrets.DEPLOY_KEY }}
+          REGION: ${{ vars.REGION }}
+```
+
+The name must be one direct `needs.<job>.outputs.<name>` expression (literal
+bracket references also work), not a template or function call. The output is
+a plain UTF-8 name, not JSON: nonblank, at most 255 characters and 1,024 bytes,
+without control characters. The producer must have exactly one static
+instance. Chained deferred producers, reusable-workflow consumers, and
+workflow-level concurrency are unsupported. An environment job and its
+dependents cannot join or chain with output-derived matrix jobs; independent
+matrix stages retain their join and chaining support. Only one dynamic environment name
+is allowed across an upload's workflows, so independent deferred uploads
+cannot choose conflicting secret prefixes.
+
+The initial upload emits the producer and a deferred step, not the deployment
+job or its dependents. After verifying the successful producer's result, the
+deferred step resolves the environment's protection rules, variables, and
+secret-name mappings through its own job-scoped Agent API. Missing or invalid
+snapshots, any protection rule (including reviewers or `prevent_self_review`),
+or a secret-prefix collision with any declared literal environment prevents
+the deferred jobs from being emitted. Protected dynamic names need a
+[backend approval contract](plans/environment-resolution-backend.md#dynamic-environment-names-require-a-protection-decision).
+
+Resolved names do not make `needs` values compile-time constants elsewhere.
+Environment variables stay out of job `if` and token-authority planning;
+workflow permissions and importer authority remain unchanged. The deferred
+step also retains the [source, retry, and replay checks](cli.md#expand-a-matrix-inside-the-build)
+used for matrices. An unsuccessful producer skips the deferred jobs.
+
+`environment.name` is a pre-dispatch scheduling input. `environment.url` can
+refer to later step outputs: it is runtime metadata, remains accepted with no
+effect, and never delays or selects a deployment job. No GitHub deployment
+record or status is created.
 
 ### Repository and organization variables
 
@@ -855,7 +914,7 @@ and runtime build the `vars` context per position the way GitHub does:
 | --- | --- |
 | `jobs.<id>.if` and reusable-workflow call `if` | Repository over organization variables. GitHub evaluates these before the job's environment applies, so environment variables are never visible here. Check environment variables in a step `if`. |
 | Job `env`, `defaults.run`, `outputs`, service credentials, every step field, and action input defaults | Environment over repository over organization variables. |
-| Compile-time fields (`runs-on`, `strategy`, `concurrency`, job names, container images, reusable-workflow inputs) | Repository over organization variables. Without a source, such as `compile` outside a Buildkite job, a reference fails to compile. `environment` names must stay literal. See [Compile-time expressions](#compile-time-expressions). |
+| Compile-time fields (`runs-on`, `strategy`, `concurrency`, job names, container images, reusable-workflow inputs) | Repository over organization variables. Without a source, such as `compile` outside a Buildkite job, a reference fails to compile. Environment names accept only literals or the bounded [job-output form](#environment-names-from-job-outputs), not `vars`. See [Compile-time expressions](#compile-time-expressions). |
 
 Names match case-insensitively, and a higher scope replaces a lower scope's
 name spelled differently. A name no scope defines evaluates to an empty

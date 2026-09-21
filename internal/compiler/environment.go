@@ -8,7 +8,18 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
+
+// ValidateRuntimeEnvironmentName validates an untrusted producer output
+// without quoting its contents in diagnostics. It is a name, never a template.
+func ValidateRuntimeEnvironmentName(name string) error {
+	if !utf8.ValidString(name) || len(name) > MaxRuntimeMatrixStringBytes || strings.TrimSpace(name) == "" || utf8.RuneCountInString(name) > 255 || strings.ContainsFunc(name, unicode.IsControl) {
+		return errors.New("dynamic environment name must be nonempty UTF-8, at most 255 characters and 1024 bytes, without control characters")
+	}
+	return nil
+}
 
 // EnvironmentProtection is the compile-time snapshot of one GitHub deployment
 // environment: its protection rules and the names of its environment secrets.
@@ -75,6 +86,19 @@ func resolveJobEnvironments(ctx context.Context, instances []JobInstance, event 
 		finding := func(err error) {
 			errs = append(errs, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, instance.Key, "", 0, err))
 		}
+		if instance.DynamicEnvironment {
+			var collision bool
+			for _, known := range options.KnownEnvironmentNames {
+				if !strings.EqualFold(known, instance.Environment) && EnvironmentSecretPrefix(known) == EnvironmentSecretPrefix(instance.Environment) {
+					finding(fmt.Errorf("job %q dynamic environment collides with the Buildkite secret prefix of environment %q from the initial upload", instance.LogicalJobID, known))
+					collision = true
+					break
+				}
+			}
+			if collision {
+				continue
+			}
+		}
 		if instance.reusableCall.Line != 0 {
 			finding(fmt.Errorf("job %q declares environment %q inside a reusable workflow; environments are only supported on jobs of the top-level workflow", instance.LogicalJobID, instance.Environment))
 			continue
@@ -105,6 +129,10 @@ func resolveJobEnvironments(ctx context.Context, instances []JobInstance, event 
 		}
 		if result.err != nil {
 			finding(fmt.Errorf("job %q environment %q: %w", instance.LogicalJobID, instance.Environment, result.err))
+			continue
+		}
+		if instance.DynamicEnvironment && (result.protection.RequiredReviewers || result.protection.PreventSelfReview || result.protection.WaitTimerMinutes != 0 || result.protection.BranchPolicy || len(result.protection.UnsupportedRules) != 0) {
+			finding(fmt.Errorf("job %q selects a protected dynamic environment; only unprotected environments are supported until the backend supplies a deployment-bound approval contract", instance.LogicalJobID))
 			continue
 		}
 		if err := unsupportedEnvironmentProtection(instance.Environment, result.protection); err != nil {
