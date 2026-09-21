@@ -32,7 +32,7 @@ func runtimeSchedulingSites(job workflow.Job) ([]expression.Site, error) {
 
 // validateRuntimeScheduling admits only outputs of the matrix's already
 // verified producer. It neither creates another continuation nor joins stages.
-func (e *jobGraphExpansion) validateRuntimeScheduling(sourced sourcedJob, descriptor RuntimeMatrixDescriptor, deferred bool) (bool, error) {
+func (e *jobGraphExpansion) validateRuntimeScheduling(sourced sourcedJob, descriptor RuntimeOutputDescriptor, deferred bool) (bool, error) {
 	sites, err := runtimeSchedulingSites(sourced.Job)
 	if err != nil || len(sites) == 0 {
 		return false, err

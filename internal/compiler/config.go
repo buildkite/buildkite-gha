@@ -210,6 +210,8 @@ type Options struct {
 	// continuation: it and every job depending on it are compiled later by a
 	// deferred pipeline upload instead of failing compilation.
 	RuntimeMatrixRows map[string][]map[string]any
+	// RuntimeRunsOnOutputs supplies verified output data only to runs-on.
+	RuntimeRunsOnOutputs map[string]string
 	// RuntimeMatrixSkipped names roots with verified non-success producers.
 	// Their complete forward closures have no executable plans. Each root
 	// must also have an entry in RuntimeMatrixRows, with no rows.
@@ -221,7 +223,7 @@ type Options struct {
 	// one build; different runs must not change each other's matrix limit.
 	RuntimeSchedulingBuildID string
 	// RuntimeMatrixActionLocks pins remote actions to the commits an earlier
-	// compilation resolved, as RuntimeMatrixContinuation.ActionLocks records
+	// compilation resolved, as RuntimeContinuation.ActionLocks records
 	// them. A deferred upload sets it so the jobs it expands use exactly the
 	// action revisions the initial compilation admitted, even when a mutable
 	// ref such as a tag moved in between. Refs the locks do not cover resolve

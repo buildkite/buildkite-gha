@@ -186,6 +186,14 @@ compile-time contexts and authority analysis do not. These profiles reject
 tokens and secrets even in unreachable branches. A resolved group remains
 data, never another expression. Scheduling does not grant credential authority.
 
+[Runner selection from a job output](compatibility.md#runners-from-job-outputs)
+uses the same verified manifests and continuation checks. The output is
+available only to scheduling expressions. Other expressions retain their
+runtime dependencies, including reusable-workflow inputs used by credential
+authority analysis. Output text is never parsed as workflow source. A selected
+label must pass the importer's mappings, live runner resolution, and hosted
+admission before any deferred job is uploaded.
+
 ## Credential boundaries
 
 | Credential | Boundary |

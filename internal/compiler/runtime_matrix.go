@@ -41,13 +41,13 @@ const (
 // pipeline upload. Detail names the requirement the workflow misses.
 const runtimeMatrixDeferredMessage = "matrix values come from a job output that exists only after that job runs; buildkite-gha expands such a matrix with a deferred pipeline upload, and this workflow does not meet its requirements (https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#matrices-from-job-outputs)"
 
-// RuntimeMatrixContinuation is one deferred pipeline upload recorded by the
-// initial compilation: the consumer whose matrix comes from a producer job
+// RuntimeContinuation is one deferred pipeline upload recorded by the
+// initial compilation: the consumer whose scheduling value comes from a producer job
 // output plus every job that transitively depends on it. The deferred step
 // runs after the producer, reads its verified output, and uploads the
 // expanded jobs with deterministic keys.
-type RuntimeMatrixContinuation struct {
-	Descriptor RuntimeMatrixDescriptor `json:"descriptor"`
+type RuntimeContinuation struct {
+	Descriptor RuntimeOutputDescriptor `json:"descriptor"`
 	// Joined contains the other roots whose forward closures intersect this
 	// root's closure, directly or transitively. They share this upload owner.
 	Joined []RuntimeMatrixRoot `json:"joined,omitempty"`
@@ -106,12 +106,12 @@ type RuntimeMatrixContinuation struct {
 
 // RuntimeMatrixRoot binds another matrix to its exact producer instance.
 type RuntimeMatrixRoot struct {
-	Descriptor      RuntimeMatrixDescriptor `json:"descriptor"`
+	Descriptor      RuntimeOutputDescriptor `json:"descriptor"`
 	ProducerStepKey string                  `json:"producer_step_key"`
 }
 
 // Roots returns all matrix boundaries owned by this continuation, in order.
-func (c RuntimeMatrixContinuation) Roots() []RuntimeMatrixRoot {
+func (c RuntimeContinuation) Roots() []RuntimeMatrixRoot {
 	return append([]RuntimeMatrixRoot{{Descriptor: c.Descriptor, ProducerStepKey: c.ProducerStepKey}}, c.Joined...)
 }
 
@@ -119,7 +119,7 @@ func (c RuntimeMatrixContinuation) Roots() []RuntimeMatrixRoot {
 // regardless of the producer's output: one per statically known instance of
 // every deferred dependent and one placeholder per later matrix. The roots add
 // one job per matrix row on top of these.
-func (continuation RuntimeMatrixContinuation) DependentInstances() int {
+func (continuation RuntimeContinuation) DependentInstances() int {
 	count := len(continuation.LaterMatrices)
 	for _, instances := range continuation.Instances {
 		count += len(instances)
@@ -176,7 +176,7 @@ func (a deferredAction) workflowSourceResolver(options Options) func(context.Con
 // deferred jobs have no plan yet, so ActionsReferenceVars could not find the
 // reference in the bundle, and the importer must resolve the scopes before it
 // records them for the continuation.
-func resolveContinuationActions(ctx context.Context, ir IR, options Options) (continuations []RuntimeMatrixContinuation, referencesVars bool, err error) {
+func resolveContinuationActions(ctx context.Context, ir IR, options Options) (continuations []RuntimeContinuation, referencesVars bool, err error) {
 	if len(ir.Continuations) == 0 || !options.ResolveActions {
 		return ir.Continuations, false, nil
 	}
@@ -242,7 +242,7 @@ type RuntimeMatrixInstance struct {
 
 // JobLabel returns the display name of a deferred job, or its ID when the
 // continuation carries no label for it.
-func (c RuntimeMatrixContinuation) JobLabel(jobID string) string {
+func (c RuntimeContinuation) JobLabel(jobID string) string {
 	if label := c.Labels[jobID]; label != "" {
 		return label
 	}
@@ -270,9 +270,9 @@ var runtimeMatrixStepKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var runtimeMatrixDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var runtimeMatrixKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,254}$`)
 
-// RuntimeMatrixDescriptor is a compile-time-only description of one validated
-// deferred matrix boundary. It is not an executable plan or upload authority.
-type RuntimeMatrixDescriptor struct {
+// RuntimeOutputDescriptor is a compile-time-only description of one validated
+// deferred scheduling boundary. It is not an executable plan or upload authority.
+type RuntimeOutputDescriptor struct {
 	Schema          string        `json:"schema"`
 	Job             string        `json:"job"`
 	Shape           string        `json:"shape"`
@@ -304,9 +304,9 @@ func hasRuntimeMatrixBoundary(parsed *workflow.Workflow) bool {
 	return false
 }
 
-func describeRuntimeMatrix(job workflow.Job, sourcePath, sourceDigest string, needs map[string]needBinding, jobs map[string]workflow.Job, matricesByJob map[string][]map[string]any) (RuntimeMatrixDescriptor, bool, error) {
+func describeRuntimeMatrix(job workflow.Job, sourcePath, sourceDigest string, needs map[string]needBinding, jobs map[string]workflow.Job, matricesByJob map[string][]map[string]any) (RuntimeOutputDescriptor, bool, error) {
 	if job.Matrix == nil {
-		return RuntimeMatrixDescriptor{}, false, nil
+		return RuntimeOutputDescriptor{}, false, nil
 	}
 	shape := ""
 	expr := job.Matrix.Expression
@@ -317,67 +317,78 @@ func describeRuntimeMatrix(job workflow.Job, sourcePath, sourceDigest string, ne
 		expr = job.Matrix.IncludeExpression
 	}
 	if expr == nil {
-		return RuntimeMatrixDescriptor{}, false, nil
+		return RuntimeOutputDescriptor{}, false, nil
 	}
 	reference, err := expression.RuntimeMatrixOutput(*expr)
 	if err != nil {
-		return RuntimeMatrixDescriptor{}, false, nil
+		return RuntimeOutputDescriptor{}, false, nil
 	}
 	if shape == RuntimeMatrixShapeInclude && (len(job.Matrix.Rows) != 0 || len(job.Matrix.Include) != 0 || len(job.Matrix.Exclude) != 0 || job.Matrix.ExcludeExpression != nil) {
-		return RuntimeMatrixDescriptor{}, true, errors.New("runtime matrix include output must be the complete matrix definition")
+		return RuntimeOutputDescriptor{}, true, errors.New("runtime matrix include output must be the complete matrix definition")
 	}
+	span := workflow.Span{Start: workflow.Position{Line: expr.Span.Start.Line, Column: expr.Span.Start.Column}, End: workflow.Position{Line: expr.Span.End.Line, Column: expr.Span.End.Column}}
+	descriptor, err := describeRuntimeOutput(job.ID, sourcePath, sourceDigest, span, shape, reference, needs, jobs, matricesByJob)
+	return descriptor, true, err
+}
 
+// describeRuntimeOutput binds a scheduling value to one producer instance.
+func describeRuntimeOutput(job, sourcePath, sourceDigest string, span workflow.Span, shape string, reference expression.NeedOutputReference, needs map[string]needBinding, jobs map[string]workflow.Job, matricesByJob map[string][]map[string]any) (RuntimeOutputDescriptor, error) {
 	binding, err := exactRuntimeMatrixNeed(needs, reference.Job)
 	if err != nil {
-		return RuntimeMatrixDescriptor{}, true, err
+		return RuntimeOutputDescriptor{}, err
 	}
 	producerID := ""
 	requestedOutput := reference.Output
 	if binding.projectOutputs {
 		producerID, requestedOutput, err = exactRuntimeMatrixProjectedOutput(binding, reference.Output)
 		if err != nil {
-			return RuntimeMatrixDescriptor{}, true, fmt.Errorf("runtime matrix producer %q: %w", reference.Job, err)
+			return RuntimeOutputDescriptor{}, fmt.Errorf("runtime matrix producer %q: %w", reference.Job, err)
 		}
 	} else {
 		if len(binding.members) != 1 {
-			return RuntimeMatrixDescriptor{}, true, fmt.Errorf("runtime matrix producer %q must resolve to exactly one job", reference.Job)
+			return RuntimeOutputDescriptor{}, fmt.Errorf("runtime matrix producer %q must resolve to exactly one job", reference.Job)
 		}
 		producerID = binding.members[0]
 	}
 	producer, exists := jobs[producerID]
 	if !exists {
-		return RuntimeMatrixDescriptor{}, true, fmt.Errorf("runtime matrix producer %q is unavailable after graph resolution", reference.Job)
+		return RuntimeOutputDescriptor{}, fmt.Errorf("runtime matrix producer %q is unavailable after graph resolution", reference.Job)
 	}
 	output, err := exactRuntimeMatrixOutput(producer.Outputs, requestedOutput)
 	if err != nil {
-		return RuntimeMatrixDescriptor{}, true, fmt.Errorf("runtime matrix producer %q: %w", producerID, err)
+		return RuntimeOutputDescriptor{}, fmt.Errorf("runtime matrix producer %q: %w", producerID, err)
 	}
 	producerMatrices, exists := matricesByJob[producerID]
 	if !exists || len(producerMatrices) != 1 {
-		return RuntimeMatrixDescriptor{}, true, fmt.Errorf("runtime matrix producer %q must have exactly one statically expanded instance", producerID)
+		return RuntimeOutputDescriptor{}, fmt.Errorf("runtime matrix producer %q must have exactly one statically expanded instance", producerID)
 	}
 	producerStepKey, err := instanceKey(producerID, producerMatrices[0])
 	if err != nil {
-		return RuntimeMatrixDescriptor{}, true, fmt.Errorf("runtime matrix producer %q: %w", producerID, err)
+		return RuntimeOutputDescriptor{}, fmt.Errorf("runtime matrix producer %q: %w", producerID, err)
 	}
-	descriptor := RuntimeMatrixDescriptor{
+	descriptor := RuntimeOutputDescriptor{
 		Schema:          RuntimeMatrixSchemaV1,
-		Job:             job.ID,
+		Job:             job,
 		Shape:           shape,
 		ProducerJob:     producerID,
 		ProducerStepKey: producerStepKey,
 		ProducerOutput:  output,
 		SourcePath:      sourcePath,
 		SourceDigest:    sourceDigest,
-		Source:          workflow.Span{Start: workflow.Position{Line: expr.Span.Start.Line, Column: expr.Span.Start.Column}, End: workflow.Position{Line: expr.Span.End.Line, Column: expr.Span.End.Column}},
+		Source:          span,
 		MaxOutputBytes:  MaxRuntimeMatrixBytes,
 		MaxInstances:    MaxRuntimeMatrixInstances,
 		MaxGraphJobs:    MaxRuntimeMatrixGraphJobs,
 	}
-	if err := descriptor.Validate(); err != nil {
-		return RuntimeMatrixDescriptor{}, true, err
+	if shape == RuntimeRunsOnShape {
+		descriptor.Schema = RuntimeRunsOnSchemaV1
+		descriptor.MaxOutputBytes = MaxRuntimeRunsOnBytes
+		descriptor.MaxInstances = 1
 	}
-	return descriptor, true, nil
+	if err := descriptor.Validate(); err != nil {
+		return RuntimeOutputDescriptor{}, err
+	}
+	return descriptor, nil
 }
 
 func exactRuntimeMatrixNeed(needs map[string]needBinding, requested string) (needBinding, error) {
@@ -433,14 +444,18 @@ func exactRuntimeMatrixOutput(outputs map[string]string, requested string) (stri
 }
 
 // Validate enforces the immutable v1 descriptor meaning.
-func (descriptor RuntimeMatrixDescriptor) Validate() error {
-	if descriptor.Schema != RuntimeMatrixSchemaV1 {
+func (descriptor RuntimeOutputDescriptor) Validate() error {
+	if descriptor.Schema != RuntimeMatrixSchemaV1 && descriptor.Schema != RuntimeRunsOnSchemaV1 {
 		return fmt.Errorf("unsupported runtime matrix schema %q", descriptor.Schema)
 	}
 	if len(descriptor.Job) > 255 || len(descriptor.ProducerJob) > 255 || !runtimeMatrixLogicalJobPattern.MatchString(descriptor.Job) || !runtimeMatrixLogicalJobPattern.MatchString(descriptor.ProducerJob) || strings.EqualFold(descriptor.Job, descriptor.ProducerJob) {
 		return errors.New("runtime matrix requires distinct valid consumer and producer jobs")
 	}
-	if descriptor.Shape != RuntimeMatrixShapeObject && descriptor.Shape != RuntimeMatrixShapeInclude {
+	if descriptor.Schema == RuntimeRunsOnSchemaV1 {
+		if descriptor.Shape != RuntimeRunsOnShape || descriptor.MaxOutputBytes != MaxRuntimeRunsOnBytes || descriptor.MaxInstances != 1 || descriptor.MaxGraphJobs != MaxRuntimeMatrixGraphJobs {
+			return errors.New("runtime runs-on v1 shape or limits do not match the immutable schema")
+		}
+	} else if descriptor.Shape != RuntimeMatrixShapeObject && descriptor.Shape != RuntimeMatrixShapeInclude {
 		return fmt.Errorf("unsupported runtime matrix shape %q", descriptor.Shape)
 	}
 	if !runtimeMatrixStepKeyPattern.MatchString(descriptor.ProducerStepKey) || !runtimeMatrixStepKeyPattern.MatchString(descriptor.ProducerOutput) {
@@ -456,14 +471,14 @@ func (descriptor RuntimeMatrixDescriptor) Validate() error {
 		descriptor.Source.End.Line == descriptor.Source.Start.Line && descriptor.Source.End.Column < descriptor.Source.Start.Column {
 		return errors.New("runtime matrix requires a valid source span")
 	}
-	if descriptor.MaxOutputBytes != MaxRuntimeMatrixBytes || descriptor.MaxInstances != MaxRuntimeMatrixInstances || descriptor.MaxGraphJobs != MaxRuntimeMatrixGraphJobs {
+	if descriptor.Schema == RuntimeMatrixSchemaV1 && (descriptor.MaxOutputBytes != MaxRuntimeMatrixBytes || descriptor.MaxInstances != MaxRuntimeMatrixInstances || descriptor.MaxGraphJobs != MaxRuntimeMatrixGraphJobs) {
 		return errors.New("runtime matrix v1 limits do not match the immutable schema")
 	}
 	return nil
 }
 
 // EncodeRuntimeMatrixDescriptor returns deterministic descriptor JSON.
-func EncodeRuntimeMatrixDescriptor(descriptor RuntimeMatrixDescriptor) ([]byte, error) {
+func EncodeRuntimeMatrixDescriptor(descriptor RuntimeOutputDescriptor) ([]byte, error) {
 	if err := descriptor.Validate(); err != nil {
 		return nil, err
 	}
@@ -481,30 +496,30 @@ func EncodeRuntimeMatrixDescriptor(descriptor RuntimeMatrixDescriptor) ([]byte, 
 }
 
 // DecodeRuntimeMatrixDescriptor rejects unknown, duplicate, and trailing data.
-func DecodeRuntimeMatrixDescriptor(source []byte) (RuntimeMatrixDescriptor, error) {
+func DecodeRuntimeMatrixDescriptor(source []byte) (RuntimeOutputDescriptor, error) {
 	if len(source) > MaxRuntimeMatrixDescriptorBytes {
-		return RuntimeMatrixDescriptor{}, fmt.Errorf("runtime matrix descriptor is %d bytes, maximum is %d", len(source), MaxRuntimeMatrixDescriptorBytes)
+		return RuntimeOutputDescriptor{}, fmt.Errorf("runtime matrix descriptor is %d bytes, maximum is %d", len(source), MaxRuntimeMatrixDescriptorBytes)
 	}
 	if !utf8.Valid(source) {
-		return RuntimeMatrixDescriptor{}, errors.New("runtime matrix descriptor is not valid UTF-8")
+		return RuntimeOutputDescriptor{}, errors.New("runtime matrix descriptor is not valid UTF-8")
 	}
 	if err := rejectRuntimeMatrixDuplicateKeys(source); err != nil {
-		return RuntimeMatrixDescriptor{}, fmt.Errorf("decode runtime matrix descriptor: %w", err)
+		return RuntimeOutputDescriptor{}, fmt.Errorf("decode runtime matrix descriptor: %w", err)
 	}
 	if err := rejectRuntimeMatrixDescriptorKeyAliases(source); err != nil {
-		return RuntimeMatrixDescriptor{}, fmt.Errorf("decode runtime matrix descriptor: %w", err)
+		return RuntimeOutputDescriptor{}, fmt.Errorf("decode runtime matrix descriptor: %w", err)
 	}
-	var descriptor RuntimeMatrixDescriptor
+	var descriptor RuntimeOutputDescriptor
 	decoder := json.NewDecoder(bytes.NewReader(source))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&descriptor); err != nil {
-		return RuntimeMatrixDescriptor{}, fmt.Errorf("decode runtime matrix descriptor: %w", err)
+		return RuntimeOutputDescriptor{}, fmt.Errorf("decode runtime matrix descriptor: %w", err)
 	}
 	if err := requireRuntimeMatrixEOF(decoder); err != nil {
-		return RuntimeMatrixDescriptor{}, fmt.Errorf("decode runtime matrix descriptor: %w", err)
+		return RuntimeOutputDescriptor{}, fmt.Errorf("decode runtime matrix descriptor: %w", err)
 	}
 	if err := descriptor.Validate(); err != nil {
-		return RuntimeMatrixDescriptor{}, err
+		return RuntimeOutputDescriptor{}, err
 	}
 	return descriptor, nil
 }
@@ -551,9 +566,12 @@ func rejectRuntimeMatrixDescriptorKeyAliases(source []byte) error {
 
 // ExpandRuntimeMatrixOutput strictly decodes one untrusted producer output and
 // expands only matrix values. It does not construct plans or upload a pipeline.
-func ExpandRuntimeMatrixOutput(descriptor RuntimeMatrixDescriptor, source []byte, existingStepKeys []string) ([]map[string]any, error) {
+func ExpandRuntimeMatrixOutput(descriptor RuntimeOutputDescriptor, source []byte, existingStepKeys []string) ([]map[string]any, error) {
 	if err := descriptor.Validate(); err != nil {
 		return nil, err
+	}
+	if descriptor.Schema != RuntimeMatrixSchemaV1 {
+		return nil, errors.New("matrix expansion requires a runtime matrix descriptor")
 	}
 	if len(existingStepKeys) > MaxRuntimeMatrixGraphJobs {
 		return nil, fmt.Errorf("existing graph has %d jobs, maximum is %d", len(existingStepKeys), MaxRuntimeMatrixGraphJobs)

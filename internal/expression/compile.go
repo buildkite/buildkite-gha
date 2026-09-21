@@ -24,6 +24,8 @@ type CompileContext struct {
 	InputsComplete bool
 	Matrix         map[string]any
 	Strategy       map[string]any
+	// Needs is supplied only to verified output-derived scheduling sites.
+	Needs map[string]any
 }
 
 // evaluateCompile evaluates one complete graph-time expression. The supported
@@ -506,6 +508,8 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 		current, available = context.Matrix, context.Matrix != nil
 	case strings.EqualFold(root, "strategy"):
 		current, available = context.Strategy, context.Strategy != nil
+	case strings.EqualFold(root, "needs") && context.Needs != nil:
+		current, available = context.Needs, true
 	default:
 		return nil, compileRuntimeDependencyError{fmt.Errorf("unsupported compile-time context %q", root)}
 	}
