@@ -319,6 +319,8 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 			os.Exit(42)
 		}
 		if scenario == "block-job-create" && !strings.HasPrefix(name, "buildkite-gha-service-") {
+			// Signal only once the container and its mount metadata are durable.
+			_ = os.WriteFile(filepath.Join(root, "job-create-ready"), nil, 0o600)
 			select {}
 		}
 		fmt.Print("docker-id-" + name)
@@ -1670,7 +1672,7 @@ func TestRunJobContainerCreateCancellationCleansAnonymousVolume(t *testing.T) {
 	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if _, err := os.Stat(filepath.Join(f.root, "container")); err == nil {
+		if _, err := os.Stat(filepath.Join(f.root, "job-create-ready")); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
