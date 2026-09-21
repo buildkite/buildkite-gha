@@ -1,6 +1,10 @@
 package compiler
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // Eight invocations share a composite and its child, but supply distinct inputs.
 // The local fixture measures graph/analysis work without network variability.
@@ -62,4 +66,44 @@ runs:
 			}
 		}
 	})
+}
+
+// Exercise both per-step validation and per-job planning across matrix jobs.
+func BenchmarkBundleRepeatedCompositeActions(b *testing.B) {
+	workspace := b.TempDir()
+	writeAction(b, workspace, "child", "name: child\nruns:\n  using: node24\n  main: index.js\n")
+	writeAction(b, workspace, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./child\n")
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "ci.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		b.Fatal(err)
+	}
+	workflow := []byte(`on: push
+jobs:
+  repeated:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [a, b, c, d, e, f, g, h]
+    steps:
+      - uses: ./parent
+      - uses: ./parent
+      - uses: ./parent
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+		b.Fatal(err)
+	}
+	event, err := os.ReadFile(smokePath("events", "push.json"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		bundle, err := CompileBundlePlansContext(b.Context(), workflowPath, workflow, event, "0.0.0-test", testDistributionDigest, DefaultOptions())
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(bundle.Plans) != 8 {
+			b.Fatalf("plans = %d, want 8", len(bundle.Plans))
+		}
+	}
 }

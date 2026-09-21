@@ -86,7 +86,8 @@ func TestLivePytestSelfRepositoryAction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	builder := planBuilder{ctx: ctx, options: options, actionSource: source, ir: IR{Event: event, Workflow: WorkflowSource{WorkflowTokenPermissions: parsed.Permissions.Scopes}}}
+	options.ActionSource = source
+	builder := planBuilder{ctx: ctx, options: options, actionGraphs: newActionGraphCache(options), ir: IR{Event: event, Workflow: WorkflowSource{WorkflowTokenPermissions: parsed.Permissions.Scopes}}}
 	workflowProgram := lowerWorkflowProgram(instance)
 	compiled, err := builder.buildActions(instance, &workflowProgram)
 	if err != nil {

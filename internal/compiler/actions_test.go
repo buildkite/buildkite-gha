@@ -274,7 +274,7 @@ func TestValidateActionResolutionsAttributesMissingCalledWorkflowAction(t *testi
 			Steps:          []workflow.Step{{Kind: "uses", Uses: reference, Span: workflow.Span{Start: workflow.Position{Line: 281, Column: 15}}}},
 		}},
 	}
-	evidence, err := validateActionResolutions(t.Context(), ir, Options{})
+	evidence, err := validateActionResolutions(t.Context(), ir, Options{}, newActionGraphCache(Options{}))
 	if err == nil || len(evidence.Actions) != 1 || evidence.Actions[0].Passed {
 		t.Fatalf("validateActionResolutions() evidence = %#v, error = %v", evidence, err)
 	}

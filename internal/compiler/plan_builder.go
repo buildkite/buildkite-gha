@@ -27,7 +27,7 @@ type planBuilder struct {
 	compilerVersion            string
 	compilerDistributionDigest string
 	options                    Options
-	actionSource               ActionSource
+	actionGraphs               *actionGraphCache
 	workflowName               string
 	workflowRunPath            string
 	eventDigest                [sha256.Size]byte
@@ -50,7 +50,7 @@ type builtPlanActions struct {
 	programs             map[string]program.Action
 }
 
-func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, []PlanAuthorization, []JobEvaluation, error) {
+func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options, graphs *actionGraphCache) ([]plan.Job, []PlanAuthorization, []JobEvaluation, error) {
 	payload, err := json.Marshal(ir.Event.Payload)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("encode event payload: %w", err)
@@ -65,7 +65,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 	}
 	builder := planBuilder{
 		ctx: ctx, ir: ir, compilerVersion: compilerVersion, compilerDistributionDigest: compilerDistributionDigest,
-		options: options, actionSource: newMemoizedActionSource(options.ActionSource), workflowName: workflowName, workflowRunPath: workflowRunPath,
+		options: options, actionGraphs: graphs, workflowName: workflowName, workflowRunPath: workflowRunPath,
 		eventDigest: sha256.Sum256(payload), planDigests: make(map[string]string, len(ir.Jobs)),
 	}
 	plans := make([]plan.Job, 0, len(ir.Jobs))
@@ -491,7 +491,7 @@ func (b planBuilder) buildActions(instance JobInstance, workflowProgram *program
 		built.capabilities = capabilities
 		return built, nil
 	}
-	compiled, err := compileWorkflowActionInvocations(b.ctx, instance.RepositoryRoot, b.actionSource, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs, workflowSourceResolver(instance, b.options))
+	compiled, err := b.actionGraphs.compile(b.ctx, instance, plan.EventServerURL(b.ir.Event.Provider), actionRefs, actionInputs)
 	if err != nil {
 		return built, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 	}

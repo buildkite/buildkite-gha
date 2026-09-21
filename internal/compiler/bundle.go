@@ -94,6 +94,7 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	}
 	ir, reductionErr := reducePlanEventExpressions(ir)
 	options.ActionSource = newPinnedActionSource(options.ActionSource, options.RuntimeMatrixActionLocks)
+	graphs := newActionGraphCache(options)
 	directFailures := failedInstancesFromError(compileErr)
 	for key := range failedInstancesFromError(reductionErr) {
 		directFailures[key] = true
@@ -105,7 +106,7 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	}
 	failed := failedDependencyClosure(ir, maps.Clone(directFailures))
 	planningIR := irWithoutJobs(ir, failed)
-	evidence, actionErr := validateActionResolutions(ctx, planningIR, options)
+	evidence, actionErr := validateActionResolutions(ctx, planningIR, options, graphs)
 	continuations, deferredActionsReferenceVars, continuationErr := resolveContinuationActions(ctx, ir, options)
 	ir.Continuations = continuations
 	ir.deferredActionsReferenceVars = deferredActionsReferenceVars
@@ -136,7 +137,7 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		planningIR = irWithoutJobs(ir, failed)
 		actionErr = errors.Join(actionErr, continuationErr)
 	}
-	plans, authorizations, planEvaluations, planErr := compilePlansWithAuthorization(ctx, planningIR, compilerVersion, compilerDistributionDigest, options)
+	plans, authorizations, planEvaluations, planErr := compilePlansWithAuthorization(ctx, planningIR, compilerVersion, compilerDistributionDigest, options, graphs)
 	bundle.Processing.Plans = planEvaluations
 	bundle.JobOutcomes = jobOutcomes(ir, directFailures, failed, planEvaluations)
 	if len(authorizations) != len(plans) {

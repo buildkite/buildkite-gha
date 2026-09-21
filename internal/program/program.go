@@ -414,7 +414,7 @@ func cloneProgram(source Program) Program {
 	result.Job = job
 	result.Actions = make(map[string]Action, len(source.Actions))
 	for id, action := range source.Actions {
-		result.Actions[id] = cloneAction(action)
+		result.Actions[id] = action.Clone()
 	}
 	result.Job.Guards = append([]Guard(nil), job.Guards...)
 	if job.ContinueOnError.Expression != nil {
