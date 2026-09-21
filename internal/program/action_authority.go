@@ -22,7 +22,7 @@ type ActionAuthorityOptions struct {
 
 // InventoryActionAuthority interprets action input resolution and nested
 // composite invocations. Workflow-authored supplied inputs can grant
-// authority; action-authored metadata cannot.
+// authority; action-authored metadata cannot. It does not mutate actions.
 func InventoryActionAuthority(actions map[string]Action, root string, supplied []Binding, options ActionAuthorityOptions) (ActionAuthority, error) {
 	found := map[string]struct{}{}
 	authority := ActionAuthority{}
@@ -35,34 +35,31 @@ func InventoryActionAuthority(actions map[string]Action, root string, supplied [
 		if !ok {
 			return fmt.Errorf("action program %q is missing", id)
 		}
-		if err := walkActionSites(&action, func(*Site) error { return nil }); err != nil {
-			return err
-		}
 		if active[id] {
 			return fmt.Errorf("action recursion detected at program %q", id)
 		}
 		active[id] = true
 		defer delete(active, id)
 		native := action.Runtime == ""
+		action = action.Clone()
 
 		// Event retention remains exhaustive across action-authored lifecycle and
 		// operation fields. Those fields do not independently grant credentials.
-		if !native {
-			if err := action.VisitSites(func(site Site) error {
-				// Defaults are interpreted below in declaration order with prior input
-				// values. Docker arguments follow defaults to retain deterministic error
-				// ownership.
-				if site.Surface == SurfaceActionInputDefault || site.Surface == SurfaceDockerActionArg {
-					return nil
-				}
-				analysis, err := engine.Analyze(site.expressionSite(), expression.AbstractValues{})
-				if err == nil {
-					authority.EventPayload = authority.EventPayload || analysis.Effects.EventPayload
-				}
-				return err
-			}); err != nil {
-				return err
+		// Derive positional semantics on the private copy in the same traversal.
+		if err := walkActionSites(&action, func(site *Site) error {
+			// Defaults are interpreted below in declaration order with prior input
+			// values. Docker arguments follow defaults to retain deterministic error
+			// ownership. Native adapters do not execute action-authored fields.
+			if native || site.Source == "" || site.Surface == SurfaceActionInputDefault || site.Surface == SurfaceDockerActionArg {
+				return nil
 			}
+			analysis, err := engine.Analyze(site.expressionSite(), expression.AbstractValues{})
+			if err == nil {
+				authority.EventPayload = authority.EventPayload || analysis.Effects.EventPayload
+			}
+			return err
+		}); err != nil {
+			return err
 		}
 
 		provided := make(map[string]Binding, len(supplied))
