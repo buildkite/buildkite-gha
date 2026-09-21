@@ -38,7 +38,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. `workflow_call` is supported for composition. |
 | [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64. The Agent API can map compatible selectors to hosted Linux or native macOS arm64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
-| [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Whole matrices or `include` lists from `fromJSON(needs.<job>.outputs.<name>)` expand inside the build. Maximum 256 instances per job. `fail-fast` has no effect. |
+| [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Needs-derived matrices can also read their producer's parallel limit. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `python`, and custom shell templates. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local, public, and approved private GitHub workflows with static inputs, string inputs that embed needs outputs, and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. Private access requires a separate importer opt-in and existing Git access. |
@@ -586,7 +586,7 @@ defaults:
 
 ### Concurrency
 
-**🟡 Supported subset with different queue behavior.** A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use supported `github` fields, static reusable-workflow inputs, and concrete matrix values at job level. Core operators, `fromJSON`, and the case-insensitive string functions `startsWith`, `contains`, and `endsWith` are supported when the whole expression resolves during compilation. Runtime `needs` and `strategy` values remain unsupported.
+**🟡 Supported subset with different queue behavior.** A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use supported `github` fields, static reusable-workflow inputs, and concrete matrix values at job level. Core operators, `fromJSON`, and the case-insensitive string functions `startsWith`, `contains`, and `endsWith` are supported when the whole expression resolves during compilation. A needs-derived matrix consumer can also read its producer's outputs for its job group; see [Scheduling from matrix-producer outputs](#scheduling-from-matrix-producer-outputs). Other runtime `needs` and `strategy` values remain unsupported.
 
 A workflow can set a group and cancellation expression while a job uses a matrix-derived group:
 
@@ -898,7 +898,7 @@ errors never carry values. See
 | --- | --- | --- |
 | `matrix` | 🟡 Supported subset | Literal rows. Authored values and expression-valued definitions can use compile-time `github`, `event`, reusable-workflow `inputs`, and `fromJSON` values. A whole matrix can be `fromJSON(needs.<job>.outputs.<name>)`; see [Matrices from job outputs](#matrices-from-job-outputs). |
 | `include`, `exclude` | 🟡 Supported subset | Literal combinations or expressions that resolve to arrays of objects during compilation. A whole `include` list can be `fromJSON(needs.<job>.outputs.<name>)`. |
-| `max-parallel` | 🟡 Supported subset | Literal value on ordinary job matrices. Reusable-workflow call matrices with more than one instance are rejected because flattening cannot preserve invocation-level parallelism. |
+| `max-parallel` | 🟡 Supported subset | Literal value on ordinary job matrices, or [a limit from the matrix producer's output](#scheduling-from-matrix-producer-outputs). Reusable-workflow call matrices with more than one instance are rejected because flattening cannot preserve invocation-level parallelism. |
 | `fail-fast` | ➖ Accepted, no effect | A failed matrix entry does not cancel its siblings. |
 
 A strategy can combine parallelism, static matrix values, and exclusions:
@@ -1012,8 +1012,9 @@ reach `runs-on`, `name`, `if`, `env`, and steps exactly as static matrix values
 do, and nothing else. `runs-on: ${{ matrix.runner }}` resolves through the
 importer's explicit runner mappings or the same Agent API resolution as static
 jobs, with the same admission, capability, and token rules, so a producer
-cannot select an unmapped queue, widen permissions, or change anything outside
-matrix values. The deferred step also reads remote reusable workflows and
+cannot select an unmapped queue or widen permissions. Separate declared outputs
+can supply the consumer's [scheduling values](#scheduling-from-matrix-producer-outputs)
+within that subset's limits. The deferred step also reads remote reusable workflows and
 actions the way the importer did, including through Git when
 `private-reusable-workflows` is enabled.
 
@@ -1129,6 +1130,55 @@ Limits and rejected shapes:
 The `detail` line of `E_MATRIX_INVALID` says why a reference is not supported.
 Matrices derived from `steps` or from anything other than exactly one
 `fromJSON(needs.<job>.outputs.<name>)` remain unsupported.
+
+#### Scheduling from matrix-producer outputs
+
+A job whose matrix comes from a producer output can read other declared outputs
+of that same ordinary, single-instance producer for scheduling:
+
+```yaml
+build:
+  needs: plan
+  runs-on: ubuntu-latest
+  strategy:
+    max-parallel: ${{ fromJSON(needs.plan.outputs.parallel) }}
+    matrix:
+      include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+  steps:
+    - run: ./build "${{ matrix.target }}"
+```
+
+`parallel` must contain a JSON integer from 1 through 256. The generated limit
+applies only to this job's matrix in this Buildkite build. See the complete
+[parallelism example](../testdata/scheduling/.github/workflows/parallel.yml).
+
+Alternatively, set `concurrency: ${{ needs.plan.outputs.group }}` on the matrix
+job. The group can be a template with direct `needs.<job>.outputs.<name>`
+references and supported pure functions, but no other expression contexts.
+It must resolve to a nonempty string and uses the same repository-scoped,
+case-insensitive group mapping as a static group. All instances use that
+group and run one at a time; adding `max-parallel` does not raise this limit.
+See the complete [group example](../testdata/scheduling/.github/workflows/group.yml).
+
+The deferred uploader waits for every job in the workflow's initial upload,
+not just the producer, before uploading the consumer and its complete
+downstream graph. It holds no concurrency slot. This conservative delay avoids
+ordered-queue edges blocking unfinished static prerequisites. Missing,
+ambiguous, or invalid scheduling outputs fail the deferred upload. Retrying
+it verifies the scheduling attributes as well as the job-plan digests.
+
+This support requires a real needs-derived matrix. Scheduling on static
+matrices, non-matrix jobs, downstream dependents, or reusable-workflow calls
+remains unsupported, as do projected called-workflow outputs and outputs from
+other producers. The scheduling consumer's deferred component must have only
+one matrix and one expansion stage: it cannot join or chain another
+needs-derived matrix. Independent components and components without
+output-derived scheduling retain the join and chaining support described above.
+Workflow-level concurrency remains rejected, including
+called-workflow gates anywhere in the workflow. This slice does not change
+gate lifetimes or weaken the early-release rejection above. The existing
+retry and cancellation rules still apply; this does not add
+`cancel-in-progress` support.
 
 ### Containers and services
 

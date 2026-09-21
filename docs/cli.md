@@ -731,7 +731,9 @@ the stage confirms through `buildkite-agent step get` that each expected step
 carries the plan it just compiled and exits 0, so retrying the deferred step
 never duplicates jobs. For skipped jobs in a merged component, it also verifies
 the command marker bound to the stage record digest. A missing step
-or a different binding fails the replay. Any other failure exits 1 with:
+or a different binding fails the replay. For
+[output-derived scheduling](compatibility.md#scheduling-from-matrix-producer-outputs),
+it also compares the concurrency group and limit. Any other failure exits 1 with:
 
 ```
 Retry the whole build to expand this matrix again. If the matrix producer job was retried, only a new build can expand it.

@@ -132,6 +132,7 @@ type Job struct {
 	Matrix                    *Matrix                `json:"matrix,omitempty"`
 	FailFast                  *bool                  `json:"fail_fast,omitempty"`
 	MaxParallel               *int                   `json:"max_parallel,omitempty"`
+	MaxParallelExpression     *expression.Expression `json:"max_parallel_expression,omitempty"`
 	Concurrency               *Concurrency           `json:"concurrency,omitempty"`
 	Environment               string                 `json:"environment,omitempty"`
 	Reusable                  *ReusableWorkflowCall  `json:"reusable_workflow,omitempty"`

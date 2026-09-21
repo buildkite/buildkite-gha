@@ -227,12 +227,14 @@ func runContinueAs(t *testing.T, runner *cliCaptureRunner, digest, producer, job
 }
 
 type continuePipelineStep struct {
-	Key       string `yaml:"key"`
-	Label     string `yaml:"label"`
-	Command   string `yaml:"command"`
-	Skip      string `yaml:"skip"`
-	Agents    struct{ Queue string }
-	DependsOn []struct {
+	Key              string `yaml:"key"`
+	Label            string `yaml:"label"`
+	Command          string `yaml:"command"`
+	Skip             string `yaml:"skip"`
+	Concurrency      int    `yaml:"concurrency"`
+	ConcurrencyGroup string `yaml:"concurrency_group"`
+	Agents           struct{ Queue string }
+	DependsOn        []struct {
 		Step string `yaml:"step"`
 	} `yaml:"depends_on"`
 	Notify []struct {

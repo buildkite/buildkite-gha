@@ -218,6 +218,11 @@ func (e *jobGraphExpansion) expandMatrices() {
 		job := sourced.Job
 		continuation := e.deferredContinuation(sourced)
 		descriptor, deferred, err := describeRuntimeMatrix(job, sourced.path, sourced.digest, sourced.needBindings, e.topologyJobs, e.matricesByJob)
+		scheduling, schedulingErr := e.validateRuntimeScheduling(sourced, descriptor, deferred)
+		if schedulingErr != nil && err == nil {
+			e.rejectRuntimeMatrix(sourced, schedulingErr)
+			continue
+		}
 		var matrices []map[string]any
 		if deferred {
 			e.result.runtimeMatrixBoundary = true
@@ -265,6 +270,7 @@ func (e *jobGraphExpansion) expandMatrices() {
 				}
 				e.result.continuations = append(e.result.continuations, RuntimeMatrixContinuation{
 					Descriptor: descriptor, ProducerStepKey: producerKey, Labels: make(map[string]string), Sources: make(map[string]RuntimeMatrixJobSource),
+					Scheduling: scheduling,
 				})
 				e.deferJob(sourced, len(e.result.continuations)-1, nil)
 				continue
@@ -421,6 +427,19 @@ func (e *jobGraphExpansion) mergeContinuations() {
 		}
 	}
 	e.owners = owners
+	// Scheduling remains a single-root, single-stage subset. Check the
+	// complete component even when its rows were supplied by an earlier stage,
+	// so joins and chains cannot silently lose scheduling inputs on replay.
+	rootsByOwner := make(map[string]int)
+	for _, descriptor := range e.result.runtimeMatrices {
+		rootsByOwner[owners[descriptor.Job]]++
+	}
+	for _, descriptor := range e.result.runtimeMatrices {
+		sourced := e.accepted[e.acceptedIndex[descriptor.Job]]
+		if sites, _ := runtimeSchedulingSites(sourced.Job); len(sites) != 0 && rootsByOwner[owners[descriptor.Job]] > 1 {
+			e.rejectRuntimeMatrix(sourced, errors.New("needs-derived scheduling cannot be combined with joined or chained matrices in the same deferred component"))
+		}
+	}
 	// A continuation upload supplies rows for every root of its stage at
 	// once. A root of the same component without rows must belong to a later
 	// stage: one whose producer the component compiles, so its rows cannot
@@ -677,7 +696,11 @@ func (e *jobGraphExpansion) expandInstances() {
 
 func (e *jobGraphExpansion) expandJobInstances(id string) {
 	sourced := e.accepted[e.acceptedIndex[id]]
-	job := sourced.Job
+	job, schedulingGroup, schedulingErr := resolveRuntimeScheduling(sourced.Job, e.options.RuntimeSchedulingOutputs[id])
+	if schedulingErr != nil {
+		e.rejectRuntimeMatrix(sourced, schedulingErr)
+		return
+	}
 	jobPath := sourced.path
 	jobBlocked := e.jobBlocked(id)
 	jobFailed := e.failedJobs[id]
@@ -775,7 +798,13 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 				valid = false
 			}
 		}
-		concurrencyGroup, concurrencyErr := resolveConcurrency(jobPath, job.ID, job.Concurrency, jobContext, matrix)
+		var concurrencyGroup string
+		var concurrencyErr error
+		if schedulingGroup != nil {
+			concurrencyGroup = *schedulingGroup
+		} else {
+			concurrencyGroup, concurrencyErr = resolveConcurrency(jobPath, job.ID, job.Concurrency, jobContext, matrix)
+		}
 		if concurrencyErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, concurrencyErr))
 			valid = false
