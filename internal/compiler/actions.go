@@ -118,8 +118,7 @@ type actionCompilation struct {
 // validateActionResolutions resolves each independent root invocation before
 // plan construction. It deliberately aggregates failures while sharing one
 // immutable source snapshot; no plan can be emitted unless every root passes.
-func validateActionResolutions(ctx context.Context, ir IR, options Options) (ProcessingEvidence, error) {
-	actionSource := newMemoizedActionSource(options.ActionSource)
+func validateActionResolutions(ctx context.Context, ir IR, options Options, graphs *actionGraphCache) (ProcessingEvidence, error) {
 	evidence := ProcessingEvidence{ActionResolutionComplete: true}
 	var diagnostics []error
 	for _, instance := range ir.Jobs {
@@ -131,7 +130,7 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 				evidence.ActionResolutionComplete = false
 				continue
 			}
-			compiled, err := compileWorkflowActionInvocations(ctx, instance.RepositoryRoot, actionSource, plan.EventServerURL(ir.Event.Provider), []string{step.Uses}, []map[string]string{step.With}, workflowSourceResolver(instance, options))
+			compiled, err := graphs.compile(ctx, instance, plan.EventServerURL(ir.Event.Provider), []string{step.Uses}, []map[string]string{step.With})
 			evaluation := ActionEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Reference: step.Uses, Step: i + 1, Passed: err == nil, CacheSubstitutions: compiled.cacheSubstitutions}
 			evidence.Actions = append(evidence.Actions, evaluation)
 			if err == nil {
@@ -253,9 +252,6 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 }
 
 func compileWorkflowActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)) (actionCompilation, error) {
-	if workspace == "" {
-		return actionCompilation{}, fmt.Errorf("workflow path must identify a repository root")
-	}
 	if suppliedInputs != nil && len(suppliedInputs) != len(refs) {
 		return actionCompilation{}, fmt.Errorf("action references and supplied inputs have different lengths")
 	}
@@ -267,6 +263,9 @@ func compileWorkflowActionInvocations(ctx context.Context, workspace string, act
 }
 
 func buildActionGraph(ctx context.Context, workspace string, actionSource ActionSource, refs []string, resolveWorkflowSource func(context.Context) (*RemoteWorkflowSource, error)) (actionGraph, error) {
+	if workspace == "" {
+		return actionGraph{}, fmt.Errorf("workflow path must identify a repository root")
+	}
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
 		return actionGraph{}, fmt.Errorf("resolve workspace: %w", err)

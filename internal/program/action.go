@@ -22,7 +22,7 @@ type ActionInput struct {
 // VisitSites walks every action-authored expression site once in normalized
 // execution order.
 func (action Action) VisitSites(visit func(Site) error) error {
-	derived := cloneAction(action)
+	derived := action.Clone()
 	return walkActionSites(&derived, func(site *Site) error {
 		if site.Source == "" {
 			return nil
@@ -31,7 +31,8 @@ func (action Action) VisitSites(visit func(Site) error) error {
 	})
 }
 
-func cloneAction(source Action) Action {
+// Clone returns an independently mutable copy of the action program.
+func (source Action) Clone() Action {
 	result := source
 	result.Inputs = append([]ActionInput(nil), source.Inputs...)
 	for i := range result.Inputs {
