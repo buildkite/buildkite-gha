@@ -164,6 +164,12 @@ func TestCallGuardPlanAndSchemaRoundTrip(t *testing.T) {
 			NeedSources: map[string][]NeedSource{"prepare": {{StepKey: "gha-prepare", PlanDigest: digest}}},
 			NeedOutputs: map[string][]NeedOutput{"prepare": {{Name: "subject", StepKey: "gha-prepare", Output: "subject"}}},
 		},
+		"enabled": {
+			Type:        "boolean",
+			Template:    "${{ needs.prepare.outputs.subject != '' }}",
+			NeedSources: map[string][]NeedSource{"prepare": {{StepKey: "gha-prepare", PlanDigest: digest}}},
+			NeedOutputs: map[string][]NeedOutput{"prepare": {{Name: "subject", StepKey: "gha-prepare", Output: "subject"}}},
+		},
 	}
 	job.CallGuards = []CallGuard{{
 		Condition: "always() && needs.prepare.result == 'failure' && needs.prepare.outputs.ready && inputs.enabled",
@@ -221,6 +227,16 @@ func TestDeferredInputTemplateValidation(t *testing.T) {
 		want         string
 	}{
 		{name: "valid", edit: func(*DeferredInput) {}},
+		{name: "boolean", edit: func(input *DeferredInput) {
+			input.Type = "boolean"
+			input.Template = "${{ needs.prepare.outputs.tag == 'true' }}"
+		}},
+		{name: "number", edit: func(input *DeferredInput) {
+			input.Type = "number"
+			input.Template = "${{ fromJSON(needs.prepare.outputs.tag) }}"
+		}},
+		{name: "unknown type", edit: func(input *DeferredInput) { input.Type = "object" }, want: "invalid type"},
+		{name: "boolean template", edit: func(input *DeferredInput) { input.Type = "boolean" }, want: "invalid template"},
 		{name: "empty template", edit: func(input *DeferredInput) { input.Template = "" }, want: "has an invalid template"},
 		{name: "no needs reference", edit: func(input *DeferredInput) { input.Template = "literal ${{ github.ref }}" }, want: "template"},
 		{name: "need result", edit: func(input *DeferredInput) { input.Template = "${{ needs.prepare.result }}" }, want: "needs.<job>.outputs.<name>"},

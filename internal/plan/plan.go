@@ -273,13 +273,15 @@ type ServiceContainer struct {
 	Entrypoint  string                `json:"entrypoint,omitempty"`
 }
 
-// DeferredInput is one string workflow_call input whose value embeds caller
+// DeferredInput is one workflow_call input whose value embeds caller
 // needs outputs. Template contains only needs.<job>.outputs.<name> references
 // to the logical prerequisites in NeedSources, each hydrated from exact,
 // verified producer outputs. The runtime renders it before evaluating callee
 // fields; the callee never sees the caller's needs context.
 type DeferredInput struct {
-	Template    string                  `json:"template"`
+	Template string `json:"template"`
+	// An omitted type retains string rendering for existing plans.
+	Type        string                  `json:"type,omitempty"`
 	NeedSources map[string][]NeedSource `json:"need_sources"`
 	NeedOutputs map[string][]NeedOutput `json:"need_outputs"`
 }
@@ -1094,6 +1096,14 @@ func validateDeferredInputs(inputs map[string]any, deferred map[string]DeferredI
 		names[lowerName] = struct{}{}
 		if input.Template == "" || len(input.Template) > 65536 || !utf8.ValidString(input.Template) || strings.ContainsRune(input.Template, 0) {
 			return nil, fmt.Errorf("input %q has an invalid template", name)
+		}
+		switch input.Type {
+		case "", "string", "boolean", "number":
+		default:
+			return nil, fmt.Errorf("input %q has invalid type %q", name, input.Type)
+		}
+		if _, err := expression.NewEngine().Validate(expression.Site{Source: input.Template, Profile: expression.ProfileDeferredInput, Result: expression.ResultType(input.Type)}); err != nil {
+			return nil, fmt.Errorf("input %q has an invalid template: %w", name, err)
 		}
 		references, err := expression.DeferredInputReferences(input.Template)
 		if err != nil {

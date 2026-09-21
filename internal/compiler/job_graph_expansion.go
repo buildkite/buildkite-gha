@@ -1042,7 +1042,7 @@ func resolveDeferredInputBindings(inputs map[string]deferredInput, byLogicalID m
 		if err != nil {
 			return nil, nil, fmt.Errorf("input %q: %w", name, err)
 		}
-		resolved[name] = DeferredInput{Template: input.template, NeedGroups: groups, NeedOutputs: outputs}
+		resolved[name] = DeferredInput{Template: input.template, Type: input.inputType, NeedGroups: groups, NeedOutputs: outputs}
 		dependencies = append(dependencies, inputDependencies...)
 	}
 	return resolved, dependencies, nil

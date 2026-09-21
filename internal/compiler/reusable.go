@@ -87,13 +87,14 @@ type reusableInputs struct {
 	deferred map[string]deferredInput
 }
 
-// deferredInput is one string reusable-workflow input whose value embeds caller
+// deferredInput is one reusable-workflow input whose value embeds caller
 // needs outputs. template is the caller value with every graph-time part
 // folded; needs binds each referenced caller need to its members and the
 // referenced outputs.
 type deferredInput struct {
-	template string
-	needs    map[string]needBinding
+	template  string
+	inputType string
+	needs     map[string]needBinding
 }
 
 type needBinding struct {
@@ -836,7 +837,7 @@ func cloneDeferredInputs(inputs map[string]deferredInput) map[string]deferredInp
 }
 
 func cloneDeferredInput(input deferredInput) deferredInput {
-	return deferredInput{template: input.template, needs: cloneNeedBindings(input.needs)}
+	return deferredInput{template: input.template, inputType: input.inputType, needs: cloneNeedBindings(input.needs)}
 }
 
 func cloneSourcedCallGuards(guards []sourcedCallGuard) []sourcedCallGuard {
@@ -871,6 +872,13 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 		resolved := value.Data
 		if text, ok := resolved.(string); ok && strings.Contains(text, "${{") {
 			if deferred, ok := forwardedDeferredInput(text, parentInputs.deferred); ok {
+				inputType := deferred.inputType
+				if inputType == "" {
+					inputType = "string"
+				}
+				if inputType != callee.CallInputs[name].Type {
+					return reusableInputs{}, locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, fmt.Sprintf("reusable-workflow input %q must be %s, forwarded input is %s", name, callee.CallInputs[name].Type, inputType))
+				}
 				deferredValues[name] = deferred
 				continue
 			}
@@ -897,7 +905,7 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 				case errors.As(err, &forwarded):
 					message = fmt.Sprintf("Reusable workflow input %q combines parent input %q, which carries a needs value, with other text. Forward it as exactly ${{ inputs.%s }}, or compute the value where the needs output is referenced directly.", name, forwarded.input, forwarded.input)
 				case needsDependent:
-					message = fmt.Sprintf("Reusable workflow input %q uses a needs expression in an unsupported form: %v. Reference job outputs as needs.<job>.outputs.<name>, list each job in the call's needs, and keep the rest of the value resolvable before jobs run (literals, github, vars, matrix, and static inputs). Only string inputs can take a needs value; Buildkite resolves the referenced outputs before the called job runs.", name, err)
+					message = fmt.Sprintf("Reusable workflow input %q uses a needs expression in an unsupported form: %v. Reference job outputs as needs.<job>.outputs.<name>, list each job in the call's needs, and keep the rest of the value resolvable before jobs run (literals, github, vars, matrix, and static inputs). Buildkite resolves the referenced outputs before the called job runs.", name, err)
 				}
 				return reusableInputs{}, &ProcessingFinding{
 					Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
@@ -919,8 +927,12 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 		ok := supplied || deferredSupplied
 		if deferredSupplied {
 			if declaration.Type != "string" {
-				span := call.Inputs[name].Span
-				return reusableInputs{}, locatedJobError(path, job, span.Start.Line, span.Start.Column, fmt.Sprintf("deferred reusable-workflow input %q must be string", name))
+				deferredValue.inputType = declaration.Type
+				_, err := expression.NewEngine().Validate(expression.Site{Source: deferredValue.template, Profile: expression.ProfileDeferredInput, Result: expression.ResultType(declaration.Type)})
+				if err != nil {
+					span := call.Inputs[name].Span
+					return reusableInputs{}, locatedJobError(path, job, span.Start.Line, span.Start.Column, fmt.Sprintf("deferred reusable-workflow input %q: %v", name, err))
+				}
 			}
 			deferred[name] = cloneDeferredInput(deferredValue)
 			continue

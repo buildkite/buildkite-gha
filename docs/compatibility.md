@@ -41,7 +41,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Needs-derived matrices can also read their producer's parallel limit. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `python`, and custom shell templates. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
-| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local, public, and approved private GitHub workflows with static inputs, string inputs that embed needs outputs, and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. Private access requires a separate importer opt-in and existing Git access. |
+| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local, public, and approved private GitHub workflows with static or needs-derived typed inputs and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. Private access requires a separate importer opt-in and existing Git access. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile and public prebuilt-image actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Reusable-workflow jobs use the top-level workflow permissions. |
@@ -445,7 +445,8 @@ Private references work for the pipeline repository and cross-repository sources
 - `boolean`, `number`, and `string` inputs.
 - Static input values. Caller values may use graph-time `github`, matrix, and parent reusable-workflow inputs with the supported operators and pure functions.
 - String inputs that read `needs.<job>.outputs.<name>`, alone or inside a larger value such as `type=raw,value=${{ needs.meta.outputs.tag }}` or `${{ format('{0}-{1}', github.ref_name, needs.meta.outputs.tag) }}`. The call must list each job in `needs`. Every other part of the value must resolve before jobs run: literals, graph-time `github`, `vars`, matrix values, static parent inputs, and the supported operators and pure functions. Buildkite resolves the verified outputs and renders the value before each flattened callee job runs.
-- Forwarding a needs-dependent parent input to a nested call as exactly `${{ inputs.<name> }}`.
+- Boolean and number inputs derived from needs outputs through a single expression, such as `deps: ${{ needs.detect.outputs.deps == 'true' }}` or `count: ${{ fromJSON(needs.detect.outputs.count) }}`. The same dependency and graph-time restrictions apply. Runtime evaluation preserves the declared type and rejects a mismatched result; a raw output string is not a boolean or number.
+- Forwarding a needs-dependent parent input to a nested call as exactly `${{ inputs.<name> }}`, with the same declared type.
 - Literal defaults and expression defaults over graph-time `github` values.
 - Nested calls up to four levels.
 - `secrets: inherit` for repository-local calls. Each nested edge must repeat it.

@@ -428,7 +428,15 @@ func (Engine) Validate(site Site) (Validation, error) {
 	case semanticsServiceTemplate:
 		err = visitTemplateExpressions(site.Source, validateServiceRuntimeNode)
 	case semanticsDeferredInput:
-		err = visitTemplateExpressions(site.Source, validateDeferredInputNode)
+		if site.Result == ResultBoolean || site.Result == ResultNumber {
+			var node actionlint.ExprNode
+			node, err = parseCompleteExpression(site.Source)
+			if err == nil {
+				err = validateDeferredInputNode(node)
+			}
+		} else {
+			err = visitTemplateExpressions(site.Source, validateDeferredInputNode)
+		}
 	case semanticsServiceCredential:
 		err = validateStepProfile(site.Source, profile)
 	case semanticsServiceMap:
@@ -594,8 +602,18 @@ func (engine Engine) Evaluate(site Site, values Values) (any, error) {
 		value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
 	case semanticsJobOutput:
 		value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
-	case semanticsStepTemplate, semanticsDeferredInput, semanticsServiceTemplate, semanticsServiceCredential:
+	case semanticsStepTemplate, semanticsServiceTemplate, semanticsServiceCredential:
 		value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
+	case semanticsDeferredInput:
+		if site.Result == ResultBoolean || site.Result == ResultNumber {
+			var node actionlint.ExprNode
+			node, err = parseCompleteExpression(site.Source)
+			if err == nil {
+				value, err = evaluateStepRuntimeExpression(node, values.Runtime, false, false, stepProfileContextMap(profile))
+			}
+		} else {
+			value, err = evaluateStepProfile(site.Source, values.Runtime, profile)
+		}
 	case semanticsJobControl, semanticsStepControl, semanticsReusableStepControl:
 		var node actionlint.ExprNode
 		node, err = parseCompleteExpression(site.Source)
@@ -736,12 +754,13 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 		value, err := engine.Evaluate(site, values)
 		return Reduced{Known: err == nil, Value: value}, err
 	}
-	if profile.Form == FormExpression {
+	typedDeferred := profile.semantics == semanticsDeferredInput && (site.Result == ResultBoolean || site.Result == ResultNumber)
+	if profile.Form == FormExpression || typedDeferred {
 		reduced, err := reduceCompileCondition(site.Source, values.Compile)
 		if err != nil {
 			return Reduced{}, siteError(site, err)
 		}
-		if profile.semantics == semanticsJobControl || profile.semantics == semanticsStepControl {
+		if profile.semantics == semanticsJobControl || profile.semantics == semanticsStepControl || typedDeferred {
 			node, empty, parseErr := parseCondition(reduced)
 			if parseErr != nil {
 				return Reduced{}, siteError(site, parseErr)
@@ -759,7 +778,7 @@ func (engine Engine) Reduce(site Site, values Values) (Reduced, error) {
 		}
 		residual := site
 		residual.Source = reduced
-		if profile.semantics == semanticsJobControl || profile.semantics == semanticsStepControl || profile.semantics == semanticsServiceMap {
+		if profile.semantics == semanticsJobControl || profile.semantics == semanticsStepControl || profile.semantics == semanticsServiceMap || typedDeferred {
 			residual.Source = "${{ " + reduced + " }}"
 		}
 		if _, err := engine.Validate(residual); err != nil {
@@ -821,7 +840,7 @@ func (engine Engine) Analyze(site Site, values AbstractValues) (Analysis, error)
 	}
 	analysis := Analysis{}
 	var err error
-	if profile.Form == FormExpression {
+	if profile.Form == FormExpression || (profile.semantics == semanticsDeferredInput && (site.Result == ResultBoolean || site.Result == ResultNumber)) {
 		var node actionlint.ExprNode
 		var empty bool
 		node, empty, err = parseCondition(site.Source)

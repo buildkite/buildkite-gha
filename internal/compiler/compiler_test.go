@@ -2207,7 +2207,7 @@ jobs:
 			t.Fatal("Compile() error = nil, want unsupported needs input finding")
 		}
 		var finding *ProcessingFinding
-		wantMessage := `Reusable workflow input "target" uses a needs expression in an unsupported form: reusable-workflow input needs reference "needs.prepare.result" must be needs.<job>.outputs.<name>. Reference job outputs as needs.<job>.outputs.<name>, list each job in the call's needs, and keep the rest of the value resolvable before jobs run (literals, github, vars, matrix, and static inputs). Only string inputs can take a needs value; Buildkite resolves the referenced outputs before the called job runs.`
+		wantMessage := `Reusable workflow input "target" uses a needs expression in an unsupported form: reusable-workflow input needs reference "needs.prepare.result" must be needs.<job>.outputs.<name>. Reference job outputs as needs.<job>.outputs.<name>, list each job in the call's needs, and keep the rest of the value resolvable before jobs run (literals, github, vars, matrix, and static inputs). Buildkite resolves the referenced outputs before the called job runs.`
 		wantDetail := `Reusable-workflow input "target" is not statically resolvable: reusable-workflow input needs reference "needs.prepare.result" must be needs.<job>.outputs.<name>`
 		if !errors.As(err, &finding) || finding.Message != wantMessage || finding.Detail != wantDetail || finding.Path != "./.github/workflows/caller.yml" || finding.Line != 14 || finding.Column != 15 || finding.Job != "call" {
 			t.Fatalf("Compile() finding = %#v", finding)
@@ -2294,8 +2294,8 @@ jobs:
 `)
 		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      count:\n        type: number\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-		if err == nil || !strings.Contains(err.Error(), `deferred reusable-workflow input "count" must be string`) || !strings.Contains(err.Error(), "./.github/workflows/caller.yml:14:14") {
-			t.Fatalf("Compile() error = %v, want non-string deferred input rejection", err)
+		if err == nil || !strings.Contains(err.Error(), `deferred reusable-workflow input "count": expression contains an embedded closing delimiter`) || !strings.Contains(err.Error(), "./.github/workflows/caller.yml:14:14") {
+			t.Fatalf("Compile() error = %v, want compound number input rejection", err)
 		}
 	})
 
@@ -3435,7 +3435,7 @@ jobs:
 	}
 }
 
-func TestCompileRejectsDeferredNonStringReusableWorkflowInput(t *testing.T) {
+func TestCompileRejectsForwardedDeferredInputTypeMismatch(t *testing.T) {
 	repository := t.TempDir()
 	path := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -3450,19 +3450,29 @@ jobs:
     needs: prepare
     uses: ./.github/workflows/reusable.yml
     with:
-      enabled: ${{ needs.prepare.outputs.enabled }}
+      enabled: ${{ needs.prepare.outputs.enabled == 'true' }}
 `)
 	writeWorkflow(t, repository, "reusable.yml", `on:
   workflow_call:
     inputs:
       enabled: {type: boolean}
 jobs:
+  call:
+    uses: ./.github/workflows/leaf.yml
+    with:
+      enabled: ${{ inputs.enabled }}
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      enabled: {type: string}
+jobs:
   test:
     runs-on: ubuntu-latest
     steps: [{run: true}]
 `)
 	_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-	if err == nil || !strings.Contains(err.Error(), `deferred reusable-workflow input "enabled" must be string`) {
+	if err == nil || !strings.Contains(err.Error(), `reusable-workflow input "enabled" must be string, forwarded input is boolean`) {
 		t.Fatalf("Compile() error = %v", err)
 	}
 }

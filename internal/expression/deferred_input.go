@@ -1,4 +1,4 @@
-// Deferred reusable-workflow inputs: caller-authored string inputs that embed
+// Deferred reusable-workflow inputs: caller-authored inputs that embed
 // needs.<job>.outputs.<name> references inside a larger template or
 // expression. Graph construction folds every graph-time subtree and keeps the
 // needs references; Buildkite evaluates the residual template against verified

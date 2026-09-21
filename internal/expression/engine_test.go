@@ -34,6 +34,58 @@ func TestEngineLiteralPreservesExpressionTypes(t *testing.T) {
 	}
 }
 
+func TestDeferredInputPreservesDeclaredType(t *testing.T) {
+	engine := NewEngine()
+	for _, test := range []struct {
+		name, source, output string
+		result               ResultType
+		want                 any
+		wantErr              string
+	}{
+		{name: "true", source: "${{ needs.detect.outputs.deps == 'true' }}", output: "true", result: ResultBoolean, want: true},
+		{name: "false", source: "${{ needs.detect.outputs.deps == 'true' }}", output: "false", result: ResultBoolean, want: false},
+		{name: "missing", source: "${{ needs.detect.outputs.deps == 'true' }}", result: ResultBoolean, want: false},
+		{name: "number", source: "${{ fromJSON(needs.detect.outputs.deps) }}", output: "7", result: ResultNumber, want: float64(7)},
+		{name: "string remains string", source: "${{ needs.detect.outputs.deps == 'true' }}", output: "false", result: ResultString, want: "false"},
+		{name: "boolean rejects string", source: "${{ needs.detect.outputs.deps }}", output: "false", result: ResultBoolean, wantErr: "want boolean"},
+		{name: "number rejects string", source: "${{ needs.detect.outputs.deps }}", output: "7", result: ResultNumber, wantErr: "want number"},
+		{name: "boolean rejects template", source: "prefix-${{ needs.detect.outputs.deps }}", output: "true", result: ResultBoolean, wantErr: "expression"},
+		{name: "unreachable secret", source: "${{ needs.detect.outputs.deps == 'true' || secrets.TOKEN }}", output: "true", result: ResultBoolean, wantErr: "secrets"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			site := Site{Source: test.source, Profile: ProfileDeferredInput, Result: test.result}
+			values := Values{Runtime: Context{Needs: map[string]NeedStatus{"detect": {Outputs: map[string]string{"deps": test.output}}}}}
+			got, err := engine.Evaluate(site, values)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("Evaluate() = %#v, %v; want %q", got, err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("Evaluate() = %#v, %v; want %#v", got, err, test.want)
+			}
+			analysis, err := engine.Analyze(site, AbstractValues{References: map[string]any{"needs.detect.outputs.deps": test.output}})
+			if err != nil || !analysis.Value.Known || !reflect.DeepEqual(analysis.Value.Value, test.want) || analysis.Effects != (Effects{}) {
+				t.Fatalf("known Analyze() = %#v, %v", analysis, err)
+			}
+			unknown, err := engine.Analyze(site, AbstractValues{})
+			if err != nil || unknown.Value.Known || unknown.Effects != (Effects{}) {
+				t.Fatalf("unknown Analyze() = %#v, %v", unknown, err)
+			}
+			reduced, err := engine.Reduce(site, Values{})
+			if err != nil || reduced.Known {
+				t.Fatalf("Reduce() = %#v, %v", reduced, err)
+			}
+			site.Source = reduced.Source
+			got, err = engine.Evaluate(site, values)
+			if err != nil || !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("Evaluate(reduced) = %#v, %v; want %#v", got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestEngineProfilesExerciseEveryOperation(t *testing.T) {
 	engine := NewEngine()
 	profiles := Profiles()
