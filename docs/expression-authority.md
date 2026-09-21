@@ -142,8 +142,10 @@ source-oriented compiler input; it is not the runtime execution model.
 Within one bundle compilation, validation and plan construction reuse completed
 action graphs for identical ordered references, workspace, and workflow source
 identity. Failed graphs are not retained. Authority analysis still runs
-sequentially for each invocation's inputs and provider; plans receive independent
-copies of mutable graph data. Graphs are not shared between compilations.
+for each invocation's inputs and provider, deriving positional site semantics on
+private copies without mutating the graph. Bundle compilation remains sequential,
+and plans receive independent copies of mutable graph data. Graphs are not shared
+between compilations.
 
 The program owns:
 

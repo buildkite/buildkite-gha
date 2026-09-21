@@ -87,8 +87,7 @@ type actionNode struct {
 
 // actionGraph is a completed, source-independent graph. Construction releases
 // its source leases before returning; analysis uses only loaded metadata and
-// programs, never their source paths. Analysis must remain sequential because
-// authority inventory reassigns positional site semantics in the programs.
+// programs, never their source paths, and does not mutate the graph.
 type actionGraph struct {
 	workflowSource     *RemoteWorkflowSource
 	roots              []*actionNode

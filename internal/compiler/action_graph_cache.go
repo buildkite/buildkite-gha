@@ -51,8 +51,7 @@ func (cache *actionGraphCache) compile(ctx context.Context, instance JobInstance
 	if err != nil {
 		return actionCompilation{}, err
 	}
-	// Plans own their executable programs; later analysis of a cached graph
-	// must not mutate an earlier plan's positional site annotations.
+	// Plans own their mutable data independently of the cached graph.
 	compiled.programs = make(map[string]program.Action, len(graph.programs))
 	for id, action := range graph.programs {
 		compiled.programs[id] = action.Clone()

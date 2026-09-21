@@ -1,10 +1,64 @@
 package program
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 )
+
+func TestInventoryActionAuthorityDoesNotMutateSharedActions(t *testing.T) {
+	// Leave positional annotations unset, as on wire-format sites. JSON
+	// comparisons cannot detect writes to these non-serialized fields.
+	actions := map[string]Action{
+		"root": {Runtime: "composite", Inputs: []ActionInput{{Name: "token", Default: &Site{Source: "${{ github.server_url == 'https://github.com' && github.token || '' }}"}}}, Steps: []ActionStep{
+			{Invocation: &Invocation{Lock: "child", Uses: Site{Source: "./child"}, With: []Binding{{Name: "token", Value: Site{Source: "${{ inputs.token }}"}}}}},
+		}},
+		"child": {Runtime: "node24", Inputs: []ActionInput{
+			{Name: "token", Default: &Site{Source: "${{ github.token }}"}},
+			{Name: "message", Default: &Site{Source: "safe"}},
+		}},
+		"broken": {Runtime: "composite", Steps: []ActionStep{{Invocation: &Invocation{Lock: "missing", Uses: Site{Source: "./missing"}}}}},
+	}
+	want := make(map[string]Action, len(actions))
+	for id, action := range actions {
+		want[id] = action.Clone()
+	}
+	t.Run("shared readers", func(t *testing.T) {
+		for _, test := range []struct {
+			name, root, server string
+			supplied           []Binding
+			token              bool
+			err                string
+		}{
+			{name: "GitHub default", root: "root", server: "https://github.com", token: true},
+			{name: "other provider", root: "root", server: "https://other.example"},
+			{name: "explicit empty input", root: "root", server: "https://github.com", supplied: []Binding{{Name: "token", Value: Site{Surface: SurfaceStepTemplate, Result: ResultString, Provenance: ProvenanceWorkflow, Purpose: PurposeActionInput}}}},
+			{name: "failed child", root: "broken", server: "https://github.com", err: `action program "missing" is missing`},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				t.Parallel()
+				got, err := InventoryActionAuthority(actions, test.root, test.supplied, ActionAuthorityOptions{ServerURL: test.server})
+				if test.err != "" {
+					if err == nil || !strings.Contains(err.Error(), test.err) {
+						t.Fatalf("error = %v, want %q", err, test.err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.GitHubToken != test.token || got.EventPayload || len(got.Secrets) != 0 {
+					t.Fatalf("authority = %#v, want token=%v and no event or secrets", got, test.token)
+				}
+			})
+		}
+	})
+	if !reflect.DeepEqual(actions, want) {
+		t.Fatal("authority analysis mutated shared action programs")
+	}
+}
 
 func TestInventoryActionAuthorityRefinesOrderedKnownDefaults(t *testing.T) {
 	aDefault := Site{Source: "${{ false }}", Surface: SurfaceActionInputDefault, Result: ResultString, Provenance: ProvenanceAction, Purpose: PurposeExpression}
