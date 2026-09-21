@@ -19,7 +19,6 @@ import (
 	"strings"
 	"syscall"
 
-	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -238,14 +237,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		return 1
 	}
 	out.sourceLinks = sourceLinksForEvent(effectiveEvent.Event)
-	authentication := importerJobActionSourceAuthentication(stderr, uploadArguments.clientVersion)
-	sourceOptions := append([]actionsource.Option(nil), privateSourceOptions...)
-	if effectiveEvent.Event.Provider == "github" {
-		if authenticationOption := authentication.option(effectiveEvent.Event.Repository.Owner + "/" + effectiveEvent.Event.Repository.Name); authenticationOption != nil {
-			sourceOptions = append(sourceOptions, authenticationOption)
-		}
-	}
-	authenticatedSource, cleanupSource, sourceErr := newHostedActionSource(ctx, "", uploadArguments.clientVersion, sourceOptions, privateSourceOptions)
+	authenticatedSource, cleanupSource, sourceErr := hostedRepositorySource(ctx, uploadArguments.clientVersion, effectiveEvent.Source, importerJobActionSourceAuthentication(stderr, uploadArguments.clientVersion), uploadArguments.privateReusableWorkflows)
 	if sourceErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
@@ -300,56 +292,32 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	// event, runner policy, variables, or repository source. A nil entry is
 	// a workflow the upload reports without compiling.
 	requests := make([]*hostedCompileRequest, len(workflows))
-	validations := make([]compiler.Report, len(workflows))
-	validationErrs := make([]error, len(workflows))
 	for i, input := range workflows {
 		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 			continue
 		}
 		requests[i] = &hostedCompileRequest{
-			WorkflowPath:         input.Path,
-			WorkflowSource:       input.Source,
-			EventSource:          effectiveEvent.Source,
-			EventFile:            effectiveEvent.Origin != effectiveEventFromBuild,
-			Version:              version,
-			StepKeyNamespace:     input.StepKeyNamespace,
-			RunnerTargets:        uploadArguments.runnerTargets,
-			OIDC:                 uploadArguments.oidc,
-			EnvironmentSource:    uploadArguments.environmentSource,
-			Vars:                 vars,
-			RepositorySource:     repositorySource,
-			ActionAuthentication: authentication,
+			WorkflowPath:      input.Path,
+			WorkflowSource:    input.Source,
+			EventSource:       effectiveEvent.Source,
+			EventFile:         effectiveEvent.Origin != effectiveEventFromBuild,
+			Version:           version,
+			StepKeyNamespace:  input.StepKeyNamespace,
+			RunnerTargets:     uploadArguments.runnerTargets,
+			OIDC:              uploadArguments.oidc,
+			EnvironmentSource: uploadArguments.environmentSource,
+			Vars:              vars,
+			RepositorySource:  repositorySource,
 		}
-		validations[i], validationErrs[i] = validateHostedRequest(ctx, *requests[i])
 	}
-	runnerResolution, err := suggestedRunnerTargets(ctx, validations, uploadArguments.runnerTargets, uploadArguments.clientVersion)
+	validations, validationReports, err := validateHostedRequests(ctx, out, requests, uploadArguments.clientVersion)
 	if err != nil {
-		if ctx.Err() != nil {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", ctx.Err())
-			return 1
-		}
-		// The built-in presets keep the import moving, but they may target a
-		// queue this cluster lacks, so the degradation must be visible.
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: warning: runner resolution unavailable (%v); using built-in runner presets\n", err)
-		out.annotateRunnerResolutionUnavailable(ctx, err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+		return 1
 	}
-	if !runnerResolution.empty() {
-		for i, request := range requests {
-			if request == nil {
-				continue
-			}
-			request.RunnerResolution = runnerResolution
-			validations[i], validationErrs[i] = validateHostedRequest(ctx, *request)
-		}
-	}
-	out.annotateRunnerResolutionWarnings(ctx, runnerResolution.warnings)
-	for i, input := range workflows {
-		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
-			continue
-		}
-		processingReports[i] = compatibility.InitialProcessingReport(input.Path, hostedProfile, true, validations[i], validationErrs[i])
-		if validationErrs[i] != nil {
-			processingReports[i].Result = "incompatible"
+	for i, request := range requests {
+		if request != nil {
+			processingReports[i] = validationReports[i]
 		}
 	}
 	executablePath, executableContents, distributionDigest, err := executable()
@@ -524,9 +492,8 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 				}
 			}
 		}
-		applyHostedPreflight(&processingReports[i], preflight)
+		applyHostedCompilation(&processingReports[i], input.Path, preflight, err)
 		if err != nil {
-			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
 			var failure *hostedFailure
 			if errors.As(err, &failure) && failure.Kind == hostedEvaluationFailure {
 				if !partialUploadPreservesGraph(preflight.Bundle) {
@@ -611,9 +578,6 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			eventArtifact = &artifact
 		}
 		jobCount += len(bundle.Plans)
-		processingReports[i].SetStage(workflowprocessing.StageAdmission, compatibility.Passed)
-		processingReports[i].Admission.Result = "admitted"
-		processingReports[i].Result = "admitted"
 		writeCompilerWarnings(stderr, "upload", input.CanonicalPath, bundle.IR.Warnings)
 		if uploadArguments.telemetry != nil {
 			uploadArguments.telemetry.addWarnings(input.Path, bundle.IR.Warnings)

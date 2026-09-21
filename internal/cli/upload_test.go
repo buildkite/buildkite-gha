@@ -137,11 +137,11 @@ func TestGeneratedFailureLinksFetchedRevisionInsteadOfCallerOrTag(t *testing.T) 
 	const target = "https://github.com/owner/shared/blob/" + commit + "/.github/workflows/build%27s.yml#L35"
 	report := compatibility.NewProcessingReport("ci.yml", "hosted")
 	// Use the same preflight-to-report path as upload, not a renderer-only map.
-	applyHostedPreflight(&report, hostedCompilation{Bundle: compiler.Bundle{IR: compiler.IR{
+	applyHostedCompilation(&report, "ci.yml", hostedCompilation{Bundle: compiler.Bundle{IR: compiler.IR{
 		Sources: map[string]compiler.WorkflowSourceReference{display: {
 			Repository: "owner/shared", Path: ".github/workflows/build's.yml", Commit: commit,
 		}},
-	}}})
+	}}}, nil)
 	report.Diagnostics = []compatibility.Diagnostic{{Level: "error", Message: "Invalid workflow",
 		Location: &compatibility.SourceLocation{Path: display, Line: 35, Column: 5}}}
 	caller := sourceLinkContext{serverURL: "https://github.example.com", repository: "caller/project", sha: strings.Repeat("b", 40)}
