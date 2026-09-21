@@ -942,7 +942,15 @@ func evaluateProgramContainer(container executionprogram.Container, eval express
 	if err != nil {
 		return nil, fmt.Errorf("ports: %w", err)
 	}
-	return &plan.Container{Image: image, Env: env, Ports: ports}, nil
+	volumes, err := evaluateProgramStrings(container.Volumes, eval)
+	if err != nil {
+		return nil, fmt.Errorf("volumes: %w", err)
+	}
+	options, err := evaluateProgramString(container.Options, eval)
+	if err != nil {
+		return nil, fmt.Errorf("options: %w", err)
+	}
+	return &plan.Container{Image: image, Env: env, Ports: ports, Volumes: volumes, Options: options}, nil
 }
 
 func evaluateProgramServices(services executionprogram.Services, eval expression.Context) (map[string]plan.ServiceContainer, []string, error) {

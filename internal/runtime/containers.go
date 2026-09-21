@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/buildkite/buildkite-gha/internal/containerpolicy"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
@@ -48,6 +49,7 @@ type jobContainerBackend struct {
 	env                       map[string]string
 	config                    string
 	owner, container, network string
+	containerCreated          bool
 	services                  []serviceContainer
 	workspace, temp           string
 	imagePATH                 string
@@ -83,6 +85,9 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 	if spec != nil {
 		if err := validateEnvironmentNames(spec.Env); err != nil {
 			return nil, fmt.Errorf("job container environment: %w", err)
+		}
+		if err := containerpolicy.ValidateJobVolumes(spec.Volumes); err != nil {
+			return nil, fmt.Errorf("job container: %w", err)
 		}
 	}
 	for serviceID, service := range services {
@@ -229,10 +234,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 		b.services = append(b.services, serviceContainer{id: serviceID, name: name})
 		serviceArgs := []string{"create", "--name", name, "--label", "com.buildkite.gha=true", "--label", b.owner, "--network", b.network, "--network-alias", serviceID}
 		serviceArgs = appendPublishedPorts(serviceArgs, service.Ports)
-		options, optionErr := dockerArgumentList(service.Options)
-		if optionErr != nil {
-			return nil, fmt.Errorf("parse service %q options: %w", serviceID, optionErr)
-		}
+		options := containerpolicy.ArgumentList(service.Options)
 		if err = validateServiceOptions(options); err != nil {
 			return nil, fmt.Errorf("service %q options: %w", serviceID, err)
 		}
@@ -247,11 +249,7 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 			serviceArgs = append(serviceArgs, "--entrypoint", service.Entrypoint)
 		}
 		serviceArgs = append(serviceArgs, service.Image)
-		command, commandErr := dockerArgumentList(service.Command)
-		if commandErr != nil {
-			return nil, fmt.Errorf("parse service %q command: %w", serviceID, commandErr)
-		}
-		serviceArgs = append(serviceArgs, command...)
+		serviceArgs = append(serviceArgs, containerpolicy.ArgumentList(service.Command)...)
 		created, createErr := boundedDockerOutput(ctx, env, docker, serviceArgs...)
 		if reference := strings.TrimSpace(created); reference != "" {
 			b.services[len(b.services)-1].name = reference
@@ -305,13 +303,42 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 			}
 			args = append(args, "--mount", mount)
 		}
+		options, optionErr := containerpolicy.JobOptions(spec.Options)
+		if optionErr != nil {
+			return nil, fmt.Errorf("job container options: %w", optionErr)
+		}
+		args = append(args, options...)
 		for _, name := range sortedKeys(spec.Env) {
 			args = append(args, "--env", name+"="+spec.Env[name])
 		}
 		args = appendPublishedPorts(args, spec.Ports)
+		volumes := spec.Volumes
+		// Custom drivers must create volumes through Docker's container path.
+		// Their named volumes remain unowned rather than being guessed at.
+		if !slices.ContainsFunc(options, func(arg string) bool {
+			return arg == "--volume-driver" || strings.HasPrefix(arg, "--volume-driver=")
+		}) {
+			var volumeErr error
+			volumes, volumeErr = b.prepareJobVolumes(ctx, volumes)
+			if volumeErr != nil {
+				return nil, volumeErr
+			}
+		}
+		for _, volume := range volumes {
+			args = append(args, "--volume", volume)
+		}
 		args = append(args, spec.Image, "-c", "while :; do sleep 3600; done")
-		if _, err = boundedDockerOutput(ctx, env, docker, args...); err != nil {
-			return nil, fmt.Errorf("create job container: %w", err)
+		created, createErr := boundedDockerOutput(ctx, env, docker, args...)
+		reference := strings.TrimSpace(created)
+		if reference != "" {
+			b.container = reference
+			b.containerCreated = true
+		}
+		if createErr != nil {
+			reconcileCtx, cancelReconcile := context.WithTimeout(context.WithoutCancel(ctx), r.cleanupTimeout())
+			createErr = errors.Join(createErr, b.reconcileCreatedJob(reconcileCtx))
+			cancelReconcile()
+			return nil, fmt.Errorf("create job container: %w", createErr)
 		}
 		if _, err = boundedDockerOutput(ctx, env, docker, "start", b.container); err != nil {
 			return nil, fmt.Errorf("start job container: %w", err)
@@ -434,17 +461,79 @@ func (b *jobContainerBackend) reconcileCreatedService(ctx context.Context, index
 	return nil
 }
 
+func (b *jobContainerBackend) reconcileCreatedJob(ctx context.Context) error {
+	if b.containerCreated {
+		return nil
+	}
+	output, err := boundedDockerOutput(ctx, b.env, b.docker, "ps", "--all", "--quiet", "--no-trunc", "--filter", "label="+b.owner)
+	if err != nil {
+		return fmt.Errorf("reconcile ambiguous job container create: %w", err)
+	}
+	known := map[string]bool{}
+	for _, service := range b.services {
+		if service.created {
+			known[service.name] = true
+		}
+	}
+	var unmatched []string
+	for reference := range lineSet(output) {
+		if !known[reference] {
+			unmatched = append(unmatched, reference)
+		}
+	}
+	slices.Sort(unmatched)
+	if len(unmatched) > 1 {
+		return fmt.Errorf("reconcile ambiguous job container create: found %d new owned containers", len(unmatched))
+	}
+	if len(unmatched) == 1 {
+		b.container = unmatched[0]
+		b.containerCreated = true
+	}
+	return nil
+}
+
+// Docker preserves an existing volume's labels on create. Only volumes actually
+// created by this backend receive its unique owner label, even when names race.
+func (b *jobContainerBackend) prepareJobVolumes(ctx context.Context, volumes []string) ([]string, error) {
+	prepared := make([]string, 0, len(volumes))
+	for _, volume := range volumes {
+		source, _, named := strings.Cut(volume, ":")
+		if named && filepath.IsAbs(source) {
+			prepared = append(prepared, volume)
+			continue
+		}
+		// An empty driver lets Docker reuse volumes from any driver, rather
+		// than conflicting with the CLI's default of "local".
+		args := []string{"volume", "create", "--driver", "", "--label", b.owner}
+		if named {
+			args = append(args, source)
+		}
+		created, err := boundedDockerOutput(ctx, b.env, b.docker, args...)
+		if err != nil {
+			return nil, fmt.Errorf("create job volume: %w", err)
+		}
+		if !named {
+			volume = strings.TrimSpace(created) + ":" + volume
+		}
+		prepared = append(prepared, volume)
+	}
+	return prepared, nil
+}
+
 func (b *jobContainerBackend) trackServiceVolumes(ctx context.Context, serviceID, reference string) error {
 	const format = `{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}`
 	output, err := boundedDockerOutput(ctx, b.env, b.docker, "inspect", "--format", format, reference)
 	if err != nil {
 		return fmt.Errorf("inspect service %q volumes: %w", serviceID, err)
 	}
+	volumes := make([]string, 0)
 	for volume := range lineSet(output) {
 		if !b.existingVolumes[volume] && !slices.Contains(b.ownedVolumes, volume) {
-			b.ownedVolumes = append(b.ownedVolumes, volume)
+			volumes = append(volumes, volume)
 		}
 	}
+	slices.Sort(volumes)
+	b.ownedVolumes = append(b.ownedVolumes, volumes...)
 	return nil
 }
 
@@ -455,55 +544,6 @@ func validateServiceOptions(options []string) error {
 		}
 	}
 	return nil
-}
-
-// dockerArgumentList matches the argument splitting used by the pinned
-// actions/runner ProcessStartInfo.Arguments path. Single quotes are ordinary
-// characters; double quotes group arguments; backslashes only escape quotes.
-func dockerArgumentList(value string) ([]string, error) {
-	var args []string
-	for i := 0; i < len(value); {
-		for i < len(value) && (value[i] == ' ' || value[i] == '\t') {
-			i++
-		}
-		if i == len(value) {
-			break
-		}
-		var arg strings.Builder
-		quoted := false
-		for i < len(value) {
-			if !quoted && (value[i] == ' ' || value[i] == '\t') {
-				break
-			}
-			backslashes := 0
-			for i < len(value) && value[i] == '\\' {
-				backslashes++
-				i++
-			}
-			copyCharacter := true
-			if i < len(value) && value[i] == '"' {
-				if backslashes%2 == 0 {
-					if quoted && i+1 < len(value) && value[i+1] == '"' {
-						i++
-					} else {
-						copyCharacter = false
-						quoted = !quoted
-					}
-				}
-				backslashes /= 2
-			}
-			arg.WriteString(strings.Repeat("\\", backslashes))
-			if i == len(value) || !quoted && (value[i] == ' ' || value[i] == '\t') {
-				break
-			}
-			if copyCharacter {
-				arg.WriteByte(value[i])
-			}
-			i++
-		}
-		args = append(args, arg.String())
-	}
-	return args, nil
 }
 
 var dockerPortLine = regexp.MustCompile(`^([0-9]+)/([A-Za-z0-9]+) -> (?:[^:]+|\[[^]]+\]):([0-9]+)$`)
@@ -799,14 +839,29 @@ func (b *jobContainerBackend) cleanup(parent context.Context) error {
 	var out string
 	var queryErr error
 	if b.container != "" {
-		out, queryErr = boundedDockerOutput(ctx, b.env, b.docker, "ps", "--all", "--quiet", "--filter", "label="+b.owner, "--filter", "name=^/"+b.container+"$")
-		if queryErr != nil {
-			err = errors.Join(err, fmt.Errorf("query job container: %w", queryErr))
+		const volumeOutputLimit = containerpolicy.MaxJobVolumes * (containerpolicy.MaxJobVolumeLength + 1)
+		volumes, volumeErr := boundedDockerOutputLimit(ctx, b.env, b.docker, volumeOutputLimit, "volume", "ls", "--quiet", "--filter", "label="+b.owner)
+		if volumeErr != nil {
+			err = errors.Join(err, fmt.Errorf("discover owned job volumes: %w", volumeErr))
+		} else {
+			for _, volume := range strings.Fields(volumes) {
+				if !slices.Contains(b.ownedVolumes, volume) {
+					b.ownedVolumes = append(b.ownedVolumes, volume)
+				}
+			}
+			slices.Sort(b.ownedVolumes)
 		}
-		if queryErr != nil || strings.TrimSpace(out) != "" {
-			_, e := boundedDockerOutput(ctx, b.env, b.docker, "rm", "--force", "--volumes", b.container)
-			if e != nil {
-				err = errors.Join(err, fmt.Errorf("remove job container: %w", e))
+		err = errors.Join(err, b.reconcileCreatedJob(ctx))
+		if b.containerCreated {
+			out, queryErr = boundedDockerOutput(ctx, b.env, b.docker, "ps", "--all", "--quiet", "--filter", "id="+b.container)
+			if queryErr != nil {
+				err = errors.Join(err, fmt.Errorf("query job container: %w", queryErr))
+			}
+			if queryErr != nil || strings.TrimSpace(out) != "" {
+				_, e := boundedDockerOutput(ctx, b.env, b.docker, "rm", "--force", "--volumes", b.container)
+				if e != nil {
+					err = errors.Join(err, fmt.Errorf("remove job container: %w", e))
+				}
 			}
 		}
 	}
@@ -855,10 +910,16 @@ func (b *jobContainerBackend) cleanup(parent context.Context) error {
 		}
 	}
 	if len(b.ownedVolumes) != 0 {
-		if _, e := boundedDockerOutput(ctx, b.env, b.docker, append([]string{"volume", "rm", "--force"}, b.ownedVolumes...)...); e != nil {
+		outputLimit := 0
+		query := []string{"volume", "ls", "--quiet"}
+		for _, volume := range b.ownedVolumes {
+			outputLimit += len(volume) + 1
+			query = append(query, "--filter", "name=^"+regexp.QuoteMeta(volume)+"$")
+		}
+		if _, e := boundedDockerOutputLimit(ctx, b.env, b.docker, outputLimit, append([]string{"volume", "rm", "--force"}, b.ownedVolumes...)...); e != nil {
 			err = errors.Join(err, fmt.Errorf("remove job volumes: %w", e))
 		}
-		remaining, e := boundedDockerOutput(ctx, b.env, b.docker, "volume", "ls", "--quiet")
+		remaining, e := boundedDockerOutputLimit(ctx, b.env, b.docker, outputLimit, query...)
 		if e != nil {
 			err = errors.Join(err, fmt.Errorf("verify owned Docker volume cleanup query: %w", e))
 		} else {

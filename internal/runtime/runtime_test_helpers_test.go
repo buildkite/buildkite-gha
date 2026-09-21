@@ -135,9 +135,11 @@ func attachTestProgram(job *plan.Job) {
 	}
 	if job.Container != nil {
 		program.Job.Container = &executionprogram.Container{
-			Image: testProgramSite(job.Container.Image, executionprogram.SurfaceRuntimeTemplate, executionprogram.ResultString),
-			Env:   testProgramBindings(job.Container.Env, executionprogram.SurfaceRuntimeTemplate),
-			Ports: testProgramSites(job.Container.Ports, executionprogram.SurfaceRuntimeTemplate),
+			Image:   testProgramSite(job.Container.Image, executionprogram.SurfaceRuntimeTemplate, executionprogram.ResultString),
+			Env:     testProgramBindings(job.Container.Env, executionprogram.SurfaceRuntimeTemplate),
+			Ports:   testProgramSites(job.Container.Ports, executionprogram.SurfaceRuntimeTemplate),
+			Volumes: testProgramSites(job.Container.Volumes, executionprogram.SurfaceRuntimeTemplate),
+			Options: testProgramSite(job.Container.Options, executionprogram.SurfaceRuntimeTemplate, executionprogram.ResultString),
 		}
 	}
 	if job.ServicesExpression != "" {

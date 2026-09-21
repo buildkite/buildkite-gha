@@ -435,6 +435,8 @@ func projectReducedProgram(instance *JobInstance, reduced program.Program) {
 		container.Image = reduced.Job.Container.Image.Source
 		container.Env = programBindingMap(reduced.Job.Container.Env)
 		container.Ports = programSiteSources(reduced.Job.Container.Ports)
+		container.Volumes = programSiteSources(reduced.Job.Container.Volumes)
+		container.Options = reduced.Job.Container.Options.Source
 		instance.Container = &container
 	}
 	for i := range instance.Services {

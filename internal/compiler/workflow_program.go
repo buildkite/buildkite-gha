@@ -35,9 +35,11 @@ func lowerWorkflowProgram(instance JobInstance) program.Program {
 	}
 	if instance.Container != nil {
 		result.Job.Container = &program.Container{
-			Image: workflowSite(instance.Container.Image, jobLocation, "job.container.image"),
-			Env:   workflowBindings(instance.Container.Env, jobLocation, "job.container.env"),
-			Ports: workflowSites(instance.Container.Ports, jobLocation, "job.container.ports"),
+			Image:   workflowSite(instance.Container.Image, jobLocation, "job.container.image"),
+			Env:     workflowBindings(instance.Container.Env, jobLocation, "job.container.env"),
+			Ports:   workflowSites(instance.Container.Ports, jobLocation, "job.container.ports"),
+			Volumes: workflowSites(instance.Container.Volumes, jobLocation, "job.container.volumes"),
+			Options: workflowSite(instance.Container.Options, jobLocation, "job.container.options"),
 		}
 	}
 	if len(instance.Services) != 0 {
