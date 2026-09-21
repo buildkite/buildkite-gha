@@ -51,7 +51,7 @@ func ResolveNeeds(ctx context.Context, agent transport.Agent, root, buildID stri
 	return needs, nil
 }
 
-// ResolveDeferredInputs renders each workflow_call string input template from
+// ResolveDeferredInputs evaluates each workflow_call input from
 // exact producer outputs without adding the caller's needs context to the
 // callee expression scope. Only the outputs the template references are
 // available; the caller's need results stay hidden.
@@ -68,8 +68,12 @@ func ResolveDeferredInputs(ctx context.Context, agent transport.Agent, root, bui
 		for job, need := range needs {
 			outputs[job] = expression.NeedStatus{Outputs: need.Outputs}
 		}
+		resultType := expression.ResultType(input.Type)
+		if resultType == "" {
+			resultType = expression.ResultString
+		}
 		value, err := engine.Evaluate(
-			expression.Site{Source: input.Template, Profile: expression.ProfileDeferredInput, Result: expression.ResultString, Purpose: expression.PurposeExpression},
+			expression.Site{Source: input.Template, Profile: expression.ProfileDeferredInput, Result: resultType, Purpose: expression.PurposeExpression},
 			expression.Values{Runtime: expression.Context{Needs: outputs}},
 		)
 		if err != nil {

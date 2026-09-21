@@ -138,6 +138,127 @@ func TestNeedStatusesCopiesOnlyExpressionVisibleState(t *testing.T) {
 	}
 }
 
+func TestDeferredTypedInputsCompileAndRunNestedWorkflow(t *testing.T) {
+	for _, enabled := range []string{"true", "false", ""} {
+		t.Run("deps="+enabled, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/ci.yaml"
+			caller := `on: push
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      deps: ${{ steps.classify.outputs.deps }}
+      count: ${{ steps.classify.outputs.count }}
+    steps:
+      - id: classify
+        run: echo unused
+  supply-chain:
+    needs: detect
+    uses: ./.github/workflows/middle.yml
+    with:
+      deps: ${{ needs.detect.outputs.deps == 'true' }}
+      count: ${{ fromJSON(needs.detect.outputs.count) }}
+`
+			writeFixtureFile(t, workspace, workflowPath, caller)
+			writeFixtureFile(t, workspace, ".github/workflows/middle.yml", `on:
+  workflow_call:
+    inputs:
+      deps: {type: boolean}
+      count: {type: number}
+jobs:
+  call:
+    if: inputs.deps
+    uses: ./.github/workflows/leaf.yml
+    with:
+      deps: ${{ inputs.deps }}
+      count: ${{ inputs.count }}
+`)
+			writeFixtureFile(t, workspace, ".github/workflows/leaf.yml", `on:
+  workflow_call:
+    inputs:
+      deps: {type: boolean}
+      count: {type: number}
+jobs:
+  scan:
+    if: inputs.deps
+    runs-on: ubuntu-latest
+    outputs:
+      ran: ${{ steps.scan.outputs.ran }}
+    steps:
+      - id: scan
+        if: inputs.deps && inputs.count == 7
+        run: echo ran=yes >> "$GITHUB_OUTPUT"
+`)
+			event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(caller), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(jobs) != 2 {
+				t.Fatalf("jobs = %d, want producer and callee", len(jobs))
+			}
+			encoded, err := plan.Encode(jobs[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			job, err := plan.Decode(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const buildID = "11111111-1111-4111-8111-111111111111"
+			const jobID = "22222222-2222-4222-8222-222222222222"
+			producer := job.DeferredInputs["deps"].NeedSources["detect"][0]
+			outputs := []transport.Output{{Name: "count", Value: "7"}}
+			if enabled != "" {
+				outputs = append(outputs, transport.Output{Name: "deps", Value: enabled})
+			}
+			manifest, err := transport.MarshalResultManifest(transport.ResultManifest{
+				PlanDigest: producer.PlanDigest,
+				Producer:   transport.Producer{BuildID: buildID, JobID: jobID, StepKey: producer.StepKey},
+				Result:     "success",
+				Outputs:    outputs,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent := transport.Agent{Runner: deferredInputRunner{jobID: jobID, path: transport.ResultPath(producer.StepKey, producer.PlanDigest), data: manifest}}
+			job.DeferredInputValues, err = ResolveDeferredInputs(t.Context(), agent, t.TempDir(), buildID, job.DeferredInputs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.DeferredInputValues["deps"] != (enabled == "true") {
+				t.Fatalf("deps = %#v, want boolean", job.DeferredInputValues["deps"])
+			}
+			if job.DeferredInputValues["count"] != float64(7) {
+				t.Fatalf("count = %#v, want number 7", job.DeferredInputValues["count"])
+			}
+			job.CallGuards, err = ResolveCallGuards(t.Context(), agent, t.TempDir(), buildID, job.CallGuards)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job.Needs, err = ResolveNeeds(t.Context(), agent, t.TempDir(), buildID, job.NeedSources, job.NeedOutputs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if enabled == "true" {
+				if result.Conclusion != "success" || result.Outputs["ran"] != "yes" {
+					t.Fatalf("enabled result = %#v", result)
+				}
+			} else if result.Conclusion != "skipped" || result.Outputs["ran"] != "" {
+				t.Fatalf("disabled result = %#v", result)
+			}
+		})
+	}
+}
+
 func TestDeferredReusableWorkflowInputFlowsFromVerifiedOutputToCalleeStep(t *testing.T) {
 	const (
 		buildID = "11111111-1111-4111-8111-111111111111"
