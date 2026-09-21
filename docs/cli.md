@@ -701,7 +701,9 @@ A stage step runs inside a Buildkite job with `BUILDKITE=true`,
 2. reads each producer's verified result through the same manifest path
    that `needs` outputs use, bound to its exact instance key and plan digest;
    a verified non-success result skips that root's downstream jobs, while a
-   missing or invalid manifest fails the step before any upload
+   missing or invalid manifest fails the step before any upload; earlier
+   producers must still match their recorded results (see
+   [matrix retries](compatibility.md#matrices-from-job-outputs))
 3. expands successful outputs with the static-matrix rules and limits, checks
    that the rows and dependents fit the share of the 1,024-job limit the record
    holds for this step (see

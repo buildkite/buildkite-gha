@@ -100,11 +100,15 @@ type stageRecord struct {
 
 // resolvedMatrix is one root an earlier stage expanded: the rows its producer
 // published, or Skipped when the producer did not succeed and the stage
-// uploaded the root's closure as skipped.
+// uploaded the root's closure as skipped. The producer's plan is in Graph;
+// ResultDigest binds its verified result, including the job attempt, so later
+// stages cannot combine recorded rows with a changed producer.
 type resolvedMatrix struct {
-	Job     string           `json:"job"`
-	Rows    []map[string]any `json:"rows,omitempty"`
-	Skipped bool             `json:"skipped,omitempty"`
+	Job             string           `json:"job"`
+	Rows            []map[string]any `json:"rows,omitempty"`
+	Skipped         bool             `json:"skipped,omitempty"`
+	ProducerStepKey string           `json:"producer_step_key"`
+	ResultDigest    string           `json:"result_digest"`
 }
 
 type stageWorkflow struct {
@@ -293,9 +297,10 @@ func (s stageRecord) producer(job string) compiledJob {
 // this stage leaves. Anything else means the inputs moved between compiles,
 // and a pipeline with mismatched plans would be wrong to upload.
 //
-// rows and skipped are the matrices this stage resolved, recorded for the
-// next stage; digest addresses this record in skipped placeholders.
-func (s stageRecord) advance(bundle compiler.Bundle, rows map[string][]map[string]any, skipped map[string]bool, digest string) (stageResult, error) {
+// rows and skipped are the matrices this stage resolved, recorded with their
+// producer result digests for the next stage; digest addresses this record in
+// skipped placeholders.
+func (s stageRecord) advance(bundle compiler.Bundle, rows map[string][]map[string]any, skipped map[string]bool, results map[string]string, digest string) (stageResult, error) {
 	recorded := make(map[string]compiledJob, len(s.Graph))
 	for _, job := range s.Graph {
 		recorded[job.Key] = job
@@ -431,7 +436,10 @@ func (s stageRecord) advance(bundle compiler.Bundle, rows map[string][]map[strin
 	if !s.importer() {
 		for _, root := range s.Continuation.Roots() {
 			job := root.Descriptor.Job
-			resolved = append(resolved, resolvedMatrix{Job: job, Rows: rows[job], Skipped: skipped[job]})
+			resolved = append(resolved, resolvedMatrix{
+				Job: job, Rows: rows[job], Skipped: skipped[job],
+				ProducerStepKey: root.ProducerStepKey, ResultDigest: results[root.ProducerStepKey],
+			})
 		}
 	}
 	for _, next := range result.next {
@@ -669,6 +677,10 @@ func decodeStageRecord(data []byte, version string) (stageRecord, error) {
 		owners[resolved.Job] = "resolved"
 		if err := validateResolvedMatrix(resolved); err != nil {
 			return stageRecord{}, fmt.Errorf("stage record resolved matrix of job %q: %w", resolved.Job, err)
+		}
+		producer, exists := graph[resolved.ProducerStepKey]
+		if !exists || !stageDigestPattern.MatchString(producer.PlanDigest) || !stageDigestPattern.MatchString(resolved.ResultDigest) {
+			return stageRecord{}, fmt.Errorf("stage record resolved matrix of job %q has an invalid producer result binding", resolved.Job)
 		}
 	}
 	for _, runner := range record.Runners {
