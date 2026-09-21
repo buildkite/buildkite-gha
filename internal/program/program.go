@@ -133,9 +133,11 @@ type Defaults struct {
 }
 
 type Container struct {
-	Image Site      `json:"image"`
-	Env   []Binding `json:"env,omitempty"`
-	Ports []Site    `json:"ports,omitempty"`
+	Image   Site      `json:"image"`
+	Env     []Binding `json:"env,omitempty"`
+	Ports   []Site    `json:"ports,omitempty"`
+	Volumes []Site    `json:"volumes,omitempty"`
+	Options Site      `json:"options"`
 }
 
 type ContainerCredentials struct {
@@ -433,6 +435,7 @@ func cloneProgram(source Program) Program {
 		value := *job.Container
 		value.Env = cloneBindings(value.Env)
 		value.Ports = append([]Site(nil), value.Ports...)
+		value.Volumes = append([]Site(nil), value.Volumes...)
 		result.Job.Container = &value
 	}
 	for i := range result.Job.Services.Static {

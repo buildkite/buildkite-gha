@@ -127,6 +127,12 @@ func (p *Program) walkWorkflowSites(visit func(*Site) error) error {
 		if err := walkSlice(job.Container.Ports, workflowSemantics(SurfaceRuntimeTemplate, ResultString, PurposeExpression), visit); err != nil {
 			return err
 		}
+		if err := walkSlice(job.Container.Volumes, workflowSemantics(SurfaceRuntimeTemplate, ResultString, PurposeExpression), visit); err != nil {
+			return err
+		}
+		if err := w(&job.Container.Options, SurfaceRuntimeTemplate, ResultString, PurposeExpression); err != nil {
+			return err
+		}
 	}
 	for i := range job.Services.Static {
 		container := &job.Services.Static[i].Container

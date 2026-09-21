@@ -19,7 +19,7 @@ func TestPositionalWalkerVisitsAndTransformsEverySiteExactlyOnce(t *testing.T) {
 	program := Program{Version: Version, Job: Job{
 		Guards: []Guard{{Condition: site()}}, Condition: site(), Env: []Binding{binding()},
 		Defaults:  Defaults{Shell: site(), WorkingDirectory: site()},
-		Container: &Container{Image: site(), Env: []Binding{binding()}, Ports: []Site{site()}},
+		Container: &Container{Image: site(), Env: []Binding{binding()}, Ports: []Site{site()}, Volumes: []Site{site()}, Options: site()},
 		Services: Services{Static: []Service{{Name: "db", Container: ServiceContainer{
 			Image: site(), Credentials: &ContainerCredentials{Username: site(), Password: site()},
 			Env: []Binding{binding()}, Ports: []Site{site()}, Volumes: []Site{site()},

@@ -42,7 +42,7 @@ func (job *Job) ProjectProgram() error {
 	job.Outputs = bindingMap(source.Outputs)
 	job.Container = nil
 	if source.Container != nil {
-		job.Container = &Container{Image: source.Container.Image.Source, Env: bindingMap(source.Container.Env), Ports: siteSources(source.Container.Ports)}
+		job.Container = &Container{Image: source.Container.Image.Source, Env: bindingMap(source.Container.Env), Ports: siteSources(source.Container.Ports), Volumes: siteSources(source.Container.Volumes), Options: source.Container.Options.Source}
 	}
 	job.Services = nil
 	job.ServiceOrder = nil
