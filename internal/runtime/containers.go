@@ -58,7 +58,6 @@ type jobContainerBackend struct {
 	probedNodes               map[string]bool
 	servicePorts              map[string]expression.ServiceContext
 	existingVolumes           map[string]bool
-	volumeBaselineCaptured    bool
 	ownedVolumes              []string
 	volumesTracked            bool
 }
@@ -175,7 +174,6 @@ func (r Runner) startJobContainerOrdered(ctx context.Context, processor *command
 			return nil, fmt.Errorf("snapshot Docker volumes: %w", volumeErr)
 		}
 		b.existingVolumes = lineSet(volumes)
-		b.volumeBaselineCaptured = true
 	}
 	if spec != nil {
 		if err = r.pullContainerImage(ctx, processor, env, docker, spec.Image); err != nil {
@@ -494,13 +492,13 @@ func (b *jobContainerBackend) reconcileFailedJobCreate(ctx context.Context) erro
 		}
 	}
 	if b.containerCreated {
-		err = errors.Join(err, b.trackContainerVolumes(ctx, "job container", b.container))
+		trackErr := b.trackContainerVolumes(ctx, "job container", b.container)
+		if trackErr == nil {
+			b.volumesTracked = true
+		}
+		err = errors.Join(err, trackErr)
 	}
-	trackErr := b.trackCreatedVolumes(ctx)
-	if trackErr == nil {
-		b.volumesTracked = true
-	}
-	return errors.Join(err, trackErr)
+	return err
 }
 
 func (b *jobContainerBackend) trackServiceVolumes(ctx context.Context, serviceID, reference string) error {
@@ -510,11 +508,7 @@ func (b *jobContainerBackend) trackServiceVolumes(ctx context.Context, serviceID
 func (b *jobContainerBackend) trackJobContainerVolumes(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), b.runner.cleanupTimeout())
 	defer cancel()
-	inspectErr := b.trackContainerVolumes(ctx, "job container", b.container)
-	if inspectErr == nil {
-		return nil
-	}
-	return errors.Join(inspectErr, b.trackCreatedVolumes(ctx))
+	return b.trackContainerVolumes(ctx, "job container", b.container)
 }
 
 func (b *jobContainerBackend) trackContainerVolumes(ctx context.Context, subject, reference string) error {
@@ -522,22 +516,6 @@ func (b *jobContainerBackend) trackContainerVolumes(ctx context.Context, subject
 	output, err := boundedDockerOutput(ctx, b.env, b.docker, "inspect", "--format", format, reference)
 	if err != nil {
 		return fmt.Errorf("inspect %s volumes: %w", subject, err)
-	}
-	volumes := make([]string, 0)
-	for volume := range lineSet(output) {
-		if !b.existingVolumes[volume] && !slices.Contains(b.ownedVolumes, volume) {
-			volumes = append(volumes, volume)
-		}
-	}
-	slices.Sort(volumes)
-	b.ownedVolumes = append(b.ownedVolumes, volumes...)
-	return nil
-}
-
-func (b *jobContainerBackend) trackCreatedVolumes(ctx context.Context) error {
-	output, err := boundedDockerOutput(ctx, b.env, b.docker, "volume", "ls", "--quiet")
-	if err != nil {
-		return fmt.Errorf("reconcile created Docker volumes: %w", err)
 	}
 	volumes := make([]string, 0)
 	for volume := range lineSet(output) {
@@ -852,13 +830,6 @@ func (b *jobContainerBackend) cleanup(parent context.Context) error {
 	var out string
 	var queryErr error
 	if b.container != "" {
-		if b.volumeBaselineCaptured && !b.volumesTracked {
-			if trackErr := b.trackCreatedVolumes(ctx); trackErr != nil {
-				err = errors.Join(err, trackErr)
-			} else {
-				b.volumesTracked = true
-			}
-		}
 		if !b.containerCreated {
 			reference, reconcileErr := b.reconcileCreatedJob(ctx)
 			if reconcileErr != nil {
@@ -869,6 +840,13 @@ func (b *jobContainerBackend) cleanup(parent context.Context) error {
 			}
 		}
 		if b.containerCreated {
+			if !b.volumesTracked {
+				if trackErr := b.trackContainerVolumes(ctx, "job container", b.container); trackErr != nil {
+					err = errors.Join(err, trackErr)
+				} else {
+					b.volumesTracked = true
+				}
+			}
 			out, queryErr = boundedDockerOutput(ctx, b.env, b.docker, "ps", "--all", "--quiet", "--filter", "id="+b.container)
 			if queryErr != nil {
 				err = errors.Join(err, fmt.Errorf("query job container: %w", queryErr))

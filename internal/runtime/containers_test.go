@@ -193,6 +193,10 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 	container, network := filepath.Join(root, "container"), filepath.Join(root, "network")
 	actionContainer, actionImage := filepath.Join(root, "action-container"), filepath.Join(root, "action-image")
 	containerName := func(reference string) string {
+		if reference == "job-container-id" {
+			name, _ := os.ReadFile(filepath.Join(root, "job-container-name"))
+			return string(name)
+		}
 		return strings.TrimPrefix(reference, "docker-id-")
 	}
 	containerPath := func(name string) string {
@@ -288,11 +292,17 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		_ = os.WriteFile(containerPath(name), nil, 0o600)
 		if strings.HasPrefix(name, "buildkite-gha-service-") {
 			_ = os.WriteFile(containerPath(name)+".ports", []byte(strings.Join(publications, "\n")), 0o600)
+		} else {
+			_ = os.WriteFile(filepath.Join(root, "job-container-name"), []byte(name), 0o600)
 		}
 		if len(volumes) != 0 {
 			_ = os.WriteFile(filepath.Join(root, "volumes-"+name), []byte(strings.Join(volumes, "\n")), 0o600)
 			vf, _ := os.OpenFile(filepath.Join(root, "current-volumes"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 			_, _ = vf.WriteString(strings.Join(volumes, "\n") + "\n")
+			if scenario == "fail-create" || scenario == "fail-create-reconcile-once" || scenario == "fail-job-volume-tracking-once" {
+				// Another backend creates an unattached volume after our snapshot.
+				_, _ = vf.WriteString("unrelated-volume\n")
+			}
 			_ = vf.Close()
 		}
 		if scenario == "fail-later-service-create" && strings.HasPrefix(name, "buildkite-gha-service-") {
@@ -516,15 +526,6 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 	case "volume-ls":
 		if scenario == "fail-volume-snapshot" {
 			os.Exit(43)
-		}
-		if scenario == "fail-create-reconcile-once" || scenario == "fail-job-volume-tracking-once" {
-			if _, err := os.Stat(filepath.Join(root, "current-volumes")); err == nil {
-				marker := filepath.Join(root, "failed-volume-reconcile")
-				if _, err := os.Stat(marker); errors.Is(err, os.ErrNotExist) {
-					_ = os.WriteFile(marker, nil, 0o600)
-					os.Exit(43)
-				}
-			}
 		}
 		if data, err := os.ReadFile(filepath.Join(root, "existing-volumes")); err == nil {
 			fmt.Print(string(data))

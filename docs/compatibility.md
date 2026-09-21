@@ -1274,7 +1274,7 @@ Each job uses a private Docker bridge network. Container jobs reach services by 
 
 A service with a Docker health check must become healthy before steps run. A service without one is ready after it starts. Failures include bounded status, health, port, and log diagnostics.
 
-Cleanup removes the job container, emits masked and bounded service logs, then removes services in declaration order, the network, newly created volumes, and private Docker configuration. Pre-existing named volumes can be attached but are not removed. Remaining owned resources fail the job. Docker resources are not a security or resource-isolation boundary: the hosted queue must isolate the whole job and enforce host CPU, memory, disk, and network limits. See the [security model](security.md#isolate-the-whole-job).
+Cleanup removes the job container, emits masked and bounded service logs, then removes services in declaration order, the network, newly created volumes identified through container mounts, and private Docker configuration. Pre-existing named volumes can be attached but are not removed. Failed creation or inspection can leave volumes whose ownership cannot be established; cleanup does not delete unrelated volumes to recover them. Remaining owned resources fail the job. Docker resources are not a security or resource-isolation boundary: the hosted queue must isolate the whole job and enforce host CPU, memory, disk, and network limits. See the [security model](security.md#isolate-the-whole-job).
 
 macOS jobs reject containers, services, Docker actions, and Docker capability.
 
