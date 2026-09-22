@@ -49,6 +49,7 @@ var supportedEvents = map[string]bool{
 	"workflow_dispatch":           true,
 	"schedule":                    true,
 	"fork":                        true,
+	"public":                      true,
 }
 
 var supportedWorkflowResults = map[string]bool{
