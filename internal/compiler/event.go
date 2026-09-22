@@ -76,8 +76,8 @@ func parseEvent(source []byte) (Event, error) {
 	if input.Payload == nil {
 		input.Payload = map[string]any{}
 	}
-	if input.Event == "discussion" {
-		if err := validateDiscussionEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+	if input.Event == "discussion" || input.Event == "discussion_comment" {
+		if err := validateDiscussionEvent(input.Event, input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
 			return Event{}, err
 		}
 	}
@@ -177,16 +177,16 @@ func validateGollumEvent(provider string, repository Repository, ref, sha string
 	return nil
 }
 
-func validateDiscussionEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+func validateDiscussionEvent(event, provider string, repository Repository, ref, sha string, payload map[string]any) error {
 	repo, _ := payload["repository"].(map[string]any)
 	fullName, _ := repo["full_name"].(string)
 	id, _ := repo["id"].(json.Number)
 	number, err := id.Int64()
 	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
-		return fmt.Errorf("discussion requires the original repository identity and a full commit SHA")
+		return fmt.Errorf("%s requires the original repository identity and a full commit SHA", event)
 	}
 	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
-		return fmt.Errorf("discussion must execute the resolved default branch")
+		return fmt.Errorf("%s must execute the resolved default branch", event)
 	}
 	discussion, _ := payload["discussion"].(map[string]any)
 	for _, key := range []string{"id", "number"} {
@@ -199,9 +199,17 @@ func validateDiscussionEvent(provider string, repository Repository, ref, sha st
 	if _, ok := discussion["title"].(string); !ok {
 		return fmt.Errorf("discussion requires payload.discussion title")
 	}
+	if event == "discussion_comment" {
+		comment, _ := payload["comment"].(map[string]any)
+		id, _ = comment["id"].(json.Number)
+		number, err = id.Int64()
+		if err != nil || number <= 0 || comment["discussion_id"] != discussion["id"] {
+			return fmt.Errorf("discussion_comment requires comment id and matching discussion_id")
+		}
+	}
 	action, _ := payload["action"].(string)
-	if !buildkitepipeline.SupportedDiscussionAction(action) {
-		return fmt.Errorf("unsupported discussion activity %q", action)
+	if !buildkitepipeline.SupportedDiscussionAction(event, action) {
+		return fmt.Errorf("unsupported %s activity %q", event, action)
 	}
 	return nil
 }
