@@ -76,6 +76,11 @@ func parseEvent(source []byte) (Event, error) {
 	if input.Payload == nil {
 		input.Payload = map[string]any{}
 	}
+	if input.Event == "branch_protection_rule" {
+		if err := validateBranchProtectionRuleEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
 	if input.Event == "milestone" {
 		if err := validateMilestoneEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
 			return Event{}, err
@@ -163,6 +168,30 @@ func validateGollumEvent(provider string, repository Repository, ref, sha string
 		if strings.TrimSpace(name) == "" || (action != "created" && action != "edited") || !git.ValidObjectID(commit) {
 			return fmt.Errorf("gollum requires valid wiki page names, actions, and commits")
 		}
+	}
+	return nil
+}
+
+func validateBranchProtectionRuleEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	repositoryID, _ := repo["id"].(json.Number)
+	number, err := repositoryID.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("branch_protection_rule requires the original repository identity and a full commit SHA")
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("branch_protection_rule must execute the resolved default branch")
+	}
+	rule, _ := payload["rule"].(map[string]any)
+	id, _ := rule["id"].(json.Number)
+	number, err = id.Int64()
+	_, named := rule["name"].(string)
+	if err != nil || number <= 0 || !named || rule["repository_id"] != repositoryID {
+		return fmt.Errorf("branch_protection_rule requires payload.rule id, name, and matching repository_id")
+	}
+	if action := payload["action"]; action != "created" && action != "edited" && action != "deleted" {
+		return fmt.Errorf("branch_protection_rule action must be created, edited, or deleted")
 	}
 	return nil
 }
