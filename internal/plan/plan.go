@@ -30,6 +30,10 @@ const MaxNeedOutputs = 64
 const MaxCallGuards = 4
 const MaxEventPayloadBytes = 25 << 20
 
+// MaxActionExecutablePathBytes bounds the sum of executable path lengths across
+// action locks, including repeated repository-wide provenance in distinct locks.
+const MaxActionExecutablePathBytes = 1 << 20
+
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var compilerVersionPattern = regexp.MustCompile(`^[ -~]{1,256}$`)
 var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
@@ -1417,6 +1421,7 @@ func ValidateActionLockList(actions []ActionLock) (map[string]ActionLock, error)
 		return nil, fmt.Errorf("job plan has more than 1024 action locks")
 	}
 	locks := make(map[string]ActionLock, len(actions))
+	var executablePathBytes int
 	for i, lock := range actions {
 		if !actionLockIDPattern.MatchString(lock.ID) || i > 0 && actions[i-1].ID >= lock.ID {
 			return nil, fmt.Errorf("action locks must have valid, unique, sorted IDs")
@@ -1430,6 +1435,10 @@ func ValidateActionLockList(actions []ActionLock) (map[string]ActionLock, error)
 		for i, executable := range lock.ExecutablePaths {
 			if !cleanSourcePath(executable) || i > 0 && lock.ExecutablePaths[i-1] >= executable {
 				return nil, fmt.Errorf("action lock %q has invalid executable paths", lock.ID)
+			}
+			executablePathBytes += len(executable)
+			if executablePathBytes > MaxActionExecutablePathBytes {
+				return nil, fmt.Errorf("action executable paths exceed %d-byte limit", MaxActionExecutablePathBytes)
 			}
 		}
 		if lock.DockerImage != "" && !ValidContainerImageReference(lock.DockerImage) {

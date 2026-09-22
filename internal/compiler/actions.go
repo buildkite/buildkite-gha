@@ -72,6 +72,7 @@ type actionLockBuilder struct {
 	caps                  map[string]bool
 	materialized          []source.Materialized
 	requiresMise          bool
+	executablePathBytes   int
 	// cacheSubstitutions records actions/cache references whose resolved
 	// commit was replaced by an audited release.
 	cacheSubstitutions []CacheSubstitution
@@ -415,6 +416,14 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, cont
 			return nil, fmt.Errorf("action recursion detected at %q", raw)
 		}
 		return n, nil
+	}
+	// Charge each distinct lock before retaining or serializing it. The same
+	// repository-wide provenance is serialized again for every remote child.
+	for _, executable := range lock.ExecutablePaths {
+		b.executablePathBytes += len(executable)
+		if b.executablePathBytes > plan.MaxActionExecutablePathBytes {
+			return nil, fmt.Errorf("action executable paths exceed %d-byte limit", plan.MaxActionExecutablePathBytes)
+		}
 	}
 	identityBytes, _ := json.Marshal(lock)
 	identity := string(identityBytes)

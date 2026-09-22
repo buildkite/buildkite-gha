@@ -841,6 +841,26 @@ func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 	}
 }
 
+func TestActionExecutablePathsAggregateBudget(t *testing.T) {
+	paths := make([]string, 128)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("%03d/", i) + strings.Repeat(strings.Repeat("a", 254)+"/", 16) + strings.Repeat("b", 12)
+	}
+	// Each lock contributes 128 * 4096 bytes. The 1 MiB budget counts repeated
+	// provenance in distinct locks because every copy is serialized.
+	locks := []ActionLock{
+		{ID: "a-0000000000000001", Source: "workspace", Path: "a", SourceDigest: "sha256:" + strings.Repeat("a", 64), ExecutablePaths: paths},
+		{ID: "a-0000000000000002", Source: "workspace", Path: "b", SourceDigest: "sha256:" + strings.Repeat("b", 64), ExecutablePaths: paths},
+	}
+	if _, err := ValidateActionLockList(locks); err != nil {
+		t.Fatalf("exactly 1 MiB of executable paths rejected: %v", err)
+	}
+	locks[1].ExecutablePaths = append(slices.Clone(paths), "z")
+	if _, err := ValidateActionLockList(locks); err == nil || !strings.Contains(err.Error(), "executable paths exceed") {
+		t.Fatalf("aggregate provenance limit error = %v", err)
+	}
+}
+
 func TestReachableActionLocksRequireProgramsExceptNativeAdapters(t *testing.T) {
 	job := validJob()
 	setTestSteps(&job, []testStep{{ID: "local", Kind: "uses", Uses: "./action", Action: &ActionSelector{Lock: "a-0000000000000001"}}})

@@ -133,6 +133,9 @@ source digest. Paths are relative to the local action directory for workspace
 actions and the entire repository for GitHub actions, including substituted
 `actions/cache` releases. The plan digest binds this metadata. An absent list
 uses filesystem modes; an explicit empty list records no executable files.
+The compiler and plan validator limit the sum of executable path lengths to
+1 MiB per action graph or job plan, counting each distinct lock's list. Reusing
+one lock does not consume the budget again.
 
 Linux and macOS verification always reads executable bits from the filesystem,
 so declared paths cannot hide mode changes. The source verifier can use recorded

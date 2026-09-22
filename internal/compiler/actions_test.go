@@ -507,6 +507,43 @@ func TestCompileActionExecutablePathsBeyondActionReferenceLimit(t *testing.T) {
 	}
 }
 
+func TestCompileActionExecutablePathsAggregateBudget(t *testing.T) {
+	remote := t.TempDir()
+	for i := range 128 {
+		name := fmt.Sprintf("%03d-", i) + strings.Repeat("x", 240)
+		if err := os.WriteFile(filepath.Join(remote, name), nil, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 64 {
+		writeAction(t, remote, fmt.Sprintf("child%d", i), "name: child\nruns:\n  using: node20\n  main: index.js\n")
+	}
+	commit := strings.Repeat("a", 40)
+	for _, distinct := range []bool{false, true} {
+		t.Run(fmt.Sprintf("distinct=%v", distinct), func(t *testing.T) {
+			body := "name: root\nruns:\n  using: composite\n  steps:\n"
+			for i := range 64 {
+				child := 0
+				if distinct {
+					child = i
+				}
+				body += fmt.Sprintf("    - uses: $/child%d\n", child)
+			}
+			writeAction(t, remote, "root", body)
+			_, locks, _, _, err := compileActionLocks(t.Context(), t.TempDir(), commitActionSource{roots: map[string]string{commit: remote}}, []string{"owner/repo/root@" + commit})
+			if distinct {
+				// Each lock is small; repeating the repository-wide list across
+				// distinct children must fail during construction, before encode.
+				if err == nil || !strings.Contains(err.Error(), "executable paths exceed") {
+					t.Fatalf("aggregate provenance error = %v", err)
+				}
+			} else if err != nil || len(locks) != 2 {
+				t.Fatalf("reused child was charged more than once: locks=%d, error=%v", len(locks), err)
+			}
+		})
+	}
+}
+
 func TestCompileActionInvocationsDetectsEffectiveGitHubTokenDefaults(t *testing.T) {
 	w := t.TempDir()
 	writeAction(t, w, "token", `name: token default
