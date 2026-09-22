@@ -1064,8 +1064,10 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	if err != nil {
 		return Materialized{}, err
 	}
-	defer partialLock.unlock()
-	defer func() { _ = os.RemoveAll(tmp) }()
+	defer func() {
+		partialLock.unlock()
+		_ = os.RemoveAll(tmp)
+	}()
 	authenticated, err := s.downloadExtract(ctx, resolved, filepath.Join(tmp, "tree"))
 	if err != nil {
 		return Materialized{}, err
@@ -1085,7 +1087,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	if err = os.WriteFile(filepath.Join(tmp, manifestName), data, 0o644); err != nil {
 		return Materialized{}, err
 	}
-	if err = s.publishCacheEntry(ctx, tmp, base); err != nil {
+	if err = s.publishCacheEntry(ctx, tmp, base, partialLock); err != nil {
 		m, verifyErr = s.verify(base, resolved)
 		if verifyErr != nil {
 			return Materialized{}, fmt.Errorf("publish cache: %w (existing cache invalid: %v)", err, verifyErr)
