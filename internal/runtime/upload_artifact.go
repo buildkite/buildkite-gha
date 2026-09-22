@@ -145,6 +145,13 @@ func (r *jobRun) runUploadArtifactCommit(ctx context.Context, processor *command
 	if err != nil {
 		return result, fmt.Errorf("bounded upload-artifact adapter: %w", err)
 	}
+	if r.jobContainer != nil {
+		for _, root := range o.paths {
+			if path.IsAbs(root) || strings.Contains(root, ":") {
+				return result, fmt.Errorf("absolute upload-artifact paths are unsupported in job containers; use a workspace-relative path")
+			}
+		}
+	}
 	if o.retentionDays != nil {
 		message := fmt.Sprintf("retention-days: %d is advisory: Buildkite artifact retention is controlled by Buildkite, not actions/upload-artifact", *o.retentionDays)
 		_ = processor.process(processor.stdout, "::warning::"+escapeWorkflowCommandData(message))

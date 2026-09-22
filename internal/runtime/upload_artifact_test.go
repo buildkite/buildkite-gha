@@ -126,6 +126,45 @@ func TestUploadArtifactAbsolutePathsUseSearchRoot(t *testing.T) {
 	}
 }
 
+func TestUploadArtifactContainerPathsDoNotReadHostAbsolutePaths(t *testing.T) {
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureFile(t, workspace, "dist/package.whl", "host file")
+	for _, test := range []struct {
+		name, selection string
+		jobContainer    bool
+		wantError       bool
+	}{
+		{"absolute container path", filepath.Join(workspace, "dist/*"), true, true},
+		{"relative container path", "dist/*", true, false},
+		{"absolute host services path", filepath.Join(workspace, "dist/*"), false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			uploader := &captureArtifactUploader{}
+			r := newJobRun(Runner{Artifacts: uploader})
+			r.jobDocker = &jobContainerBackend{}
+			if test.jobContainer {
+				r.jobContainer = r.jobDocker
+			}
+			_, err := r.runUploadArtifact(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), workspace, map[string]string{"path": test.selection, "if-no-files-found": "error"})
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "absolute upload-artifact paths are unsupported in job containers") || len(uploader.uploads) != 0 {
+					t.Fatalf("container absolute upload = %v, uploads = %d", err, len(uploader.uploads))
+				}
+				return
+			}
+			if err != nil || len(uploader.uploads) != 1 {
+				t.Fatalf("upload = %v, uploads = %d", err, len(uploader.uploads))
+			}
+			if got := readUploadZIP(t, uploader.uploads[0].data); !reflect.DeepEqual(got, map[string]string{"package.whl": "host file"}) {
+				t.Fatalf("archive = %#v", got)
+			}
+		})
+	}
+}
+
 func TestUploadArtifactArchiveRootAtVolumeBoundary(t *testing.T) {
 	root := filepath.VolumeName(t.TempDir()) + string(filepath.Separator)
 	if got := commonArchiveRoot([]string{filepath.Join(root, "one"), filepath.Join(root, "two")}); got != root {
