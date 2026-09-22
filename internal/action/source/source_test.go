@@ -790,6 +790,10 @@ func TestStoreArchiveHTTPClassification(t *testing.T) {
 					t.Fatalf("error = %v", err)
 				}
 			}
+			_, partials, err := store.cacheEntries()
+			if err != nil || len(partials) != 0 {
+				t.Fatalf("partials after failed download = %v, error %v", partials, err)
+			}
 		})
 	}
 }
@@ -1918,6 +1922,66 @@ func TestStoreConcurrentMaterialize(t *testing.T) {
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("archive requests = %d, want 1", requests.Load())
+	}
+}
+
+func TestStorePublishClosesPartialUnderMaintenanceLock(t *testing.T) {
+	for _, failAccounting := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failAccounting=%t", failAccounting), func(t *testing.T) {
+			store, err := NewStore(t.TempDir(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tmp, partialLock, err := store.createPartial(t.Context(), store.root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer partialLock.unlock()
+			if failAccounting {
+				if err := os.WriteFile(filepath.Join(store.root, ".size-v1"), []byte("invalid"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			base := filepath.Join(store.root, testSHA)
+			file := partialLock.file.file
+			release := partialLock.release
+			releases := 0
+			partialLock.release = func() {
+				if release != nil {
+					defer release()
+				}
+				releases++
+				if _, err := file.Stat(); !errors.Is(err, os.ErrClosed) {
+					t.Errorf("partial handle is not closed: %v", err)
+				}
+				if _, err := os.Stat(tmp); err != nil {
+					t.Errorf("partial was moved before closing its handle: %v", err)
+				}
+				maintenance, err := lockActionCache(t.Context(), filepath.Join(store.root, ".maintenance.lock"), actionCacheLockExclusive, true)
+				maintenance.unlock()
+				if !errors.Is(err, errActionCacheLockUnavailable) {
+					t.Errorf("maintenance lock not held while closing partial: %v", err)
+				}
+			}
+			err = store.publishCacheEntry(t.Context(), tmp, base, partialLock)
+			if (err != nil) != failAccounting {
+				t.Fatalf("publish error = %v, want error %t", err, failAccounting)
+			}
+			if releases != 1 {
+				t.Fatalf("partial releases at publication = %d, want 1", releases)
+			}
+			partialLock.unlock()
+			if releases != 1 {
+				t.Fatalf("partial released again during cleanup: %d", releases)
+			}
+			if _, err := os.Stat(tmp); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("partial still exists after rename: %v", err)
+			}
+			_, err = os.Stat(base)
+			if failAccounting && !errors.Is(err, os.ErrNotExist) || !failAccounting && err != nil {
+				t.Fatalf("published entry after accounting (failed=%t): %v", failAccounting, err)
+			}
+		})
 	}
 }
 
