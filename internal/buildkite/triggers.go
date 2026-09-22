@@ -88,6 +88,7 @@ var supportedTriggerEvents = map[string]bool{
 	"milestone":                   true,
 	"branch_protection_rule":      true,
 	"discussion":                  true,
+	"discussion_comment":          true,
 	"issues":                      true,
 	"issue_comment":               true,
 	"pull_request_review":         true,
@@ -115,7 +116,10 @@ func SupportedMilestoneAction(action string) bool {
 }
 
 // SupportedDiscussionAction reports whether action is a GitHub Actions discussion activity.
-func SupportedDiscussionAction(action string) bool {
+func SupportedDiscussionAction(event, action string) bool {
+	if event == "discussion_comment" {
+		return slices.Contains([]string{"created", "edited", "deleted"}, action)
+	}
 	return slices.Contains([]string{"created", "edited", "deleted", "transferred", "pinned", "unpinned", "labeled", "unlabeled", "locked", "unlocked", "category_changed", "answered", "unanswered"}, action)
 }
 
@@ -452,9 +456,9 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 			if snapshot.RuleAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.RuleAction) {
 				return fmt.Sprintf("Branch protection activity %q does not match this workflow's branch_protection_rule activity filters.", *snapshot.RuleAction), nil
 			}
-		case "discussion":
+		case "discussion", "discussion_comment":
 			if snapshot.DiscussionAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.DiscussionAction) {
-				return fmt.Sprintf("Discussion activity %q does not match this workflow's discussion activity filters.", *snapshot.DiscussionAction), nil
+				return fmt.Sprintf("Discussion activity %q does not match this workflow's %s activity filters.", *snapshot.DiscussionAction, event), nil
 			}
 		case "issue_comment":
 			if snapshot.IssueCommentAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.IssueCommentAction) {
@@ -515,7 +519,7 @@ func LiveEventPredicate(event string) string {
 		return predicate
 	case "schedule":
 		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source == "schedule"))`
-	case "merge_group", "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete", "label", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion":
+	case "merge_group", "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete", "label", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment":
 		return predicate
 	default:
 		return ""
@@ -793,20 +797,20 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 			actions = append(actions, expressions.RuleAction+` == `+yamlScalar(action))
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
-	case "discussion":
+	case "discussion", "discussion_comment":
 		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
 			return "", false, unsupportedEventFilter(t)
 		}
 		if expressions.EventPredicate == "" || expressions.DiscussionAction == "" || expressions.DiscussionAction == "null" {
-			return "", false, fmt.Errorf("discussion requires effective event and action expressions")
+			return "", false, fmt.Errorf("%s requires effective event and action expressions", t.Event)
 		}
 		if len(t.Types) == 0 {
 			return expressions.EventPredicate, true, nil
 		}
 		actions := make([]string, 0, len(t.Types))
 		for _, action := range t.Types {
-			if !SupportedDiscussionAction(action) {
-				return "", false, triggerFilterError(t, fmt.Errorf("discussion activity type %q cannot be mapped exactly", action), "types")
+			if !SupportedDiscussionAction(t.Event, action) {
+				return "", false, triggerFilterError(t, fmt.Errorf("%s activity type %q cannot be mapped exactly", t.Event, action), "types")
 			}
 			actions = append(actions, expressions.DiscussionAction+` == `+yamlScalar(action))
 		}

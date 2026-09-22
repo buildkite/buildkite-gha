@@ -54,7 +54,7 @@ func loadEffectiveEventSource(ctx context.Context, eventPath string, agent trans
 		if err != nil {
 			return nil, "", err
 		}
-		if event == "discussion" || event == "branch_protection_rule" || event == "milestone" || event == "watch" || event == "page_build" || event == "gollum" || event == "public" || event == "fork" || event == "label" || event == "create" || event == "delete" || event == "deployment" || event == "deployment_status" || event == "pull_request_review" || event == "pull_request_review_comment" || ((event == "release" || event == "merge_group") && os.Getenv(pipelineTriggerWorkflowPathEnvironment) != "") {
+		if event == "discussion_comment" || event == "discussion" || event == "branch_protection_rule" || event == "milestone" || event == "watch" || event == "page_build" || event == "gollum" || event == "public" || event == "fork" || event == "label" || event == "create" || event == "delete" || event == "deployment" || event == "deployment_status" || event == "pull_request_review" || event == "pull_request_review_comment" || ((event == "release" || event == "merge_group") && os.Getenv(pipelineTriggerWorkflowPathEnvironment) != "") {
 			return nil, "", fmt.Errorf("%s requires the original buildkite:webhook payload; rebuilds without it are unsupported", event)
 		}
 		source, err := buildkiteEventSource(os.Getenv)

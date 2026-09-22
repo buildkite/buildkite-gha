@@ -56,6 +56,7 @@ var supportedEvents = map[string]bool{
 	"milestone":                   true,
 	"branch_protection_rule":      true,
 	"discussion":                  true,
+	"discussion_comment":          true,
 }
 
 var supportedWorkflowResults = map[string]bool{
