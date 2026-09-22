@@ -76,6 +76,11 @@ func parseEvent(source []byte) (Event, error) {
 	if input.Payload == nil {
 		input.Payload = map[string]any{}
 	}
+	if input.Event == "milestone" {
+		if err := validateMilestoneEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
 	if input.Event == "watch" {
 		if err := validateWatchEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
 			return Event{}, err
@@ -158,6 +163,35 @@ func validateGollumEvent(provider string, repository Repository, ref, sha string
 		if strings.TrimSpace(name) == "" || (action != "created" && action != "edited") || !git.ValidObjectID(commit) {
 			return fmt.Errorf("gollum requires valid wiki page names, actions, and commits")
 		}
+	}
+	return nil
+}
+
+func validateMilestoneEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	id, _ := repo["id"].(json.Number)
+	number, err := id.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("milestone requires the original repository identity and a full commit SHA")
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("milestone must execute the resolved default branch")
+	}
+	milestone, _ := payload["milestone"].(map[string]any)
+	for _, key := range []string{"id", "number"} {
+		id, _ = milestone[key].(json.Number)
+		number, err = id.Int64()
+		if err != nil || number <= 0 {
+			return fmt.Errorf("milestone requires payload.milestone %s", key)
+		}
+	}
+	if _, ok := milestone["title"].(string); !ok {
+		return fmt.Errorf("milestone requires payload.milestone title")
+	}
+	action, _ := payload["action"].(string)
+	if !buildkitepipeline.SupportedMilestoneAction(action) {
+		return fmt.Errorf("milestone action must be created, closed, opened, edited, or deleted")
 	}
 	return nil
 }

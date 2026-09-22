@@ -29,6 +29,7 @@ type TriggerConditionExpressions struct {
 	IssueCommentAction      string
 	PullRequestReviewAction string
 	LabelAction             string
+	MilestoneAction         string
 }
 
 // ChangedPathEvaluation records either the available changed paths or why
@@ -56,6 +57,7 @@ type TriggerEventSnapshot struct {
 	IssueCommentAction      *string
 	PullRequestReviewAction *string
 	LabelAction             *string
+	MilestoneAction         *string
 	ChangedPaths            ChangedPathEvaluation
 }
 
@@ -79,6 +81,7 @@ var supportedTriggerEvents = map[string]bool{
 	"gollum":                      true,
 	"page_build":                  true,
 	"watch":                       true,
+	"milestone":                   true,
 	"issues":                      true,
 	"issue_comment":               true,
 	"pull_request_review":         true,
@@ -99,6 +102,11 @@ var supportedIssueCommentAction = map[string]bool{
 }
 
 var supportedReleaseActions = []string{"published", "unpublished", "created", "edited", "deleted", "prereleased", "released"}
+
+// SupportedMilestoneAction reports whether action is a milestone lifecycle activity.
+func SupportedMilestoneAction(action string) bool {
+	return slices.Contains([]string{"created", "closed", "opened", "edited", "deleted"}, action)
+}
 
 // SupportedReleaseAction reports whether action is a GitHub Actions release activity.
 func SupportedReleaseAction(action string) bool {
@@ -209,6 +217,7 @@ func LiveTriggerConditionExpressions(eventPredicate string) TriggerConditionExpr
 		IssueCommentAction:      "build.source_action",
 		PullRequestReviewAction: "build.source_action",
 		LabelAction:             "build.source_action",
+		MilestoneAction:         "build.source_action",
 	}
 }
 
@@ -422,6 +431,10 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, snap
 			if snapshot.LabelAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.LabelAction) {
 				return fmt.Sprintf("Label activity %q does not match this workflow's label activity filters.", *snapshot.LabelAction), nil
 			}
+		case "milestone":
+			if snapshot.MilestoneAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.MilestoneAction) {
+				return fmt.Sprintf("Milestone activity %q does not match this workflow's milestone activity filters.", *snapshot.MilestoneAction), nil
+			}
 		case "issue_comment":
 			if snapshot.IssueCommentAction != nil && len(trigger.Types) != 0 && !slices.Contains(trigger.Types, *snapshot.IssueCommentAction) {
 				return fmt.Sprintf("Issue comment activity %q does not match this workflow's issue_comment activity filters.", *snapshot.IssueCommentAction), nil
@@ -481,7 +494,7 @@ func LiveEventPredicate(event string) string {
 		return predicate
 	case "schedule":
 		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source == "schedule"))`
-	case "merge_group", "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete", "label", "fork", "public", "gollum", "page_build", "watch":
+	case "merge_group", "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete", "label", "fork", "public", "gollum", "page_build", "watch", "milestone":
 		return predicate
 	default:
 		return ""
@@ -723,6 +736,24 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 			return "", false, fmt.Errorf("watch requires an effective event expression")
 		}
 		return expressions.EventPredicate, true, nil
+	case "milestone":
+		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t)
+		}
+		if expressions.EventPredicate == "" || expressions.MilestoneAction == "" || expressions.MilestoneAction == "null" {
+			return "", false, fmt.Errorf("milestone requires effective event and action expressions")
+		}
+		if len(t.Types) == 0 {
+			return expressions.EventPredicate, true, nil
+		}
+		actions := make([]string, 0, len(t.Types))
+		for _, action := range t.Types {
+			if !SupportedMilestoneAction(action) {
+				return "", false, triggerFilterError(t, fmt.Errorf("milestone activity type %q cannot be mapped exactly", action), "types")
+			}
+			actions = append(actions, expressions.MilestoneAction+` == `+yamlScalar(action))
+		}
+		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "label":
 		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
 			return "", false, unsupportedEventFilter(t)
