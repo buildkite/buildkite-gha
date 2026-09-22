@@ -87,6 +87,60 @@ func TestUploadArtifactArchiveAndOutputs(t *testing.T) {
 	}
 }
 
+func TestUploadArtifactAbsolutePathsUseSearchRoot(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(root, "workspace")
+	writeFixtureFile(t, workspace, "log.txt", "workspace")
+	writeFixtureFile(t, root, "baipp/dist/package.tar.gz", "package")
+	writeFixtureFile(t, root, "baipp/dist/nested/report.txt", "report")
+	writeFixtureFile(t, root, "baipp/dist/.private", "hidden")
+	for _, test := range []struct {
+		name, paths string
+		want        map[string]string
+	}{
+		{"package glob", filepath.Join(root, "baipp/dist/*"), map[string]string{"package.tar.gz": "package", "nested/report.txt": "report"}},
+		{"single file", filepath.Join(root, "baipp/dist/package.tar.gz"), map[string]string{"package.tar.gz": "package"}},
+		{"directory", filepath.Join(root, "baipp/dist") + "/", map[string]string{"package.tar.gz": "package", "nested/report.txt": "report"}},
+		{"mixed roots", filepath.Join(root, "baipp/dist/*") + "\nlog.txt", map[string]string{"baipp/dist/package.tar.gz": "package", "baipp/dist/nested/report.txt": "report", "workspace/log.txt": "workspace"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			uploader := &captureArtifactUploader{}
+			r := newJobRun(Runner{Artifacts: uploader})
+			_, err := r.runUploadArtifact(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), workspace, map[string]string{"path": test.paths, "if-no-files-found": "error"})
+			if err != nil || len(uploader.uploads) != 1 {
+				t.Fatalf("upload = %#v, %v", uploader.uploads, err)
+			}
+			if got := readUploadZIP(t, uploader.uploads[0].data); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("archive = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+	uploader := &captureArtifactUploader{}
+	r := newJobRun(Runner{Artifacts: uploader})
+	_, err = r.runUploadArtifact(t.Context(), newCommandOutputProcessor(io.Discard, io.Discard), workspace, map[string]string{"path": filepath.Join(root, "missing/dist/*"), "if-no-files-found": "error"})
+	if err == nil || !strings.Contains(err.Error(), "No files were found") || len(uploader.uploads) != 0 {
+		t.Fatalf("missing absolute glob = %v, uploads = %d", err, len(uploader.uploads))
+	}
+}
+
+func TestUploadArtifactArchiveRootAtVolumeBoundary(t *testing.T) {
+	root := filepath.VolumeName(t.TempDir()) + string(filepath.Separator)
+	if got := commonArchiveRoot([]string{filepath.Join(root, "one"), filepath.Join(root, "two")}); got != root {
+		t.Fatalf("common root = %q, want %q", got, root)
+	}
+	if filepath.Separator == '\\' {
+		if got := commonArchiveRoot([]string{`C:\build`, `D:\build`}); got != "" {
+			t.Fatalf("different-volume root = %q, want none", got)
+		}
+		if got := commonArchiveRoot([]string{`C:\Build\one`, `c:\build\two`}); got != `C:\Build` {
+			t.Fatalf("case-insensitive common root = %q", got)
+		}
+	}
+}
+
 func TestUploadArtifactRuntimeVersionMatrix(t *testing.T) {
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, "payload", "versioned")
@@ -258,11 +312,11 @@ func TestUploadArtifactZIPIsDeterministicAtSupportedCompressionLevels(t *testing
 	for _, level := range []int{0, 1, 6, 9} {
 		t.Run(strconv.Itoa(level), func(t *testing.T) {
 			first, second := filepath.Join(t.TempDir(), "first.zip"), filepath.Join(t.TempDir(), "second.zip")
-			firstDigest, firstSize, err := writeUploadZIP(t.Context(), first, workspace, files, level)
+			firstDigest, firstSize, err := writeUploadZIP(t.Context(), first, files, level)
 			if err != nil {
 				t.Fatal(err)
 			}
-			secondDigest, secondSize, err := writeUploadZIP(t.Context(), second, workspace, files, level)
+			secondDigest, secondSize, err := writeUploadZIP(t.Context(), second, files, level)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -501,7 +555,7 @@ func TestUploadArtifactCancellationStopsEveryArchiveStage(t *testing.T) {
 		t.Fatal(err)
 	}
 	archive := filepath.Join(t.TempDir(), "payload.zip")
-	digest, size, err := writeUploadZIP(t.Context(), archive, workspace, files, 0)
+	digest, size, err := writeUploadZIP(t.Context(), archive, files, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +565,7 @@ func TestUploadArtifactCancellationStopsEveryArchiveStage(t *testing.T) {
 	if _, err := collectUploadFiles(ctx, workspace, []string{"payload"}, false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("collect cancellation = %v", err)
 	}
-	if _, _, err := writeUploadZIP(ctx, filepath.Join(t.TempDir(), "cancelled.zip"), workspace, files, 0); !errors.Is(err, context.Canceled) {
+	if _, _, err := writeUploadZIP(ctx, filepath.Join(t.TempDir(), "cancelled.zip"), files, 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("ZIP cancellation = %v", err)
 	}
 	if err := verifyUploadZIP(ctx, archive, digest, size); !errors.Is(err, context.Canceled) {
@@ -556,7 +610,7 @@ func TestUploadArtifactRejectsFIFOReplacementWithoutBlockingPastCancellation(t *
 	done := make(chan error, 1)
 	archive := filepath.Join(t.TempDir(), "fifo.zip")
 	go func() {
-		_, _, err := writeUploadZIP(ctx, archive, workspace, files, 0)
+		_, _, err := writeUploadZIP(ctx, archive, files, 0)
 		done <- err
 	}()
 	select {
@@ -580,7 +634,7 @@ func TestUploadArtifactRejectsSameSizeFileReplacement(t *testing.T) {
 	if err := os.Rename(filepath.Join(workspace, "replacement"), filepath.Join(workspace, "payload")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := writeUploadZIP(t.Context(), filepath.Join(t.TempDir(), "payload.zip"), workspace, files, 0); err == nil || !strings.Contains(err.Error(), "changed while archiving") {
+	if _, _, err := writeUploadZIP(t.Context(), filepath.Join(t.TempDir(), "payload.zip"), files, 0); err == nil || !strings.Contains(err.Error(), "changed while archiving") {
 		t.Fatalf("same-size replacement error = %v", err)
 	}
 }
@@ -588,14 +642,23 @@ func TestUploadArtifactRejectsSameSizeFileReplacement(t *testing.T) {
 func TestUploadArtifactRejectsSymlinkComponentReplacementToSelectedInode(t *testing.T) {
 	for _, test := range []struct {
 		name, path, link, target string
+		absolute                 bool
 	}{
 		{name: "file", path: "payload", link: "payload", target: "moved"},
 		{name: "directory", path: "selected/payload", link: "selected", target: "moved"},
+		{name: "absolute root", path: "selected/payload", link: "selected", target: "moved", absolute: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			workspace := t.TempDir()
+			workspace, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
 			writeFixtureFile(t, workspace, test.path, "selected")
-			files, err := collectUploadFiles(t.Context(), workspace, []string{test.path}, false)
+			selection := test.path
+			if test.absolute {
+				selection = filepath.ToSlash(filepath.Join(workspace, selection))
+			}
+			files, err := collectUploadFiles(t.Context(), workspace, []string{selection}, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -605,8 +668,11 @@ func TestUploadArtifactRejectsSymlinkComponentReplacementToSelectedInode(t *test
 			if err := os.Symlink(test.target, filepath.Join(workspace, test.link)); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := writeUploadZIP(t.Context(), filepath.Join(t.TempDir(), "payload.zip"), workspace, files, 0); err == nil || !strings.Contains(err.Error(), "symlink") {
+			if _, _, err := writeUploadZIP(t.Context(), filepath.Join(t.TempDir(), "payload.zip"), files, 0); err == nil || !strings.Contains(err.Error(), "symlink") {
 				t.Fatalf("symlink replacement error = %v", err)
+			}
+			if _, err := collectUploadFiles(t.Context(), workspace, []string{selection}, false); err == nil || !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("symlink selection error = %v", err)
 			}
 		})
 	}

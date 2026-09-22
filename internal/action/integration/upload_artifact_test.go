@@ -207,17 +207,18 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 	}
 }
 
-func TestUploadArtifactPathsNormalizesSafeRelativeSpellings(t *testing.T) {
-	got, err := UploadArtifactPaths("./artifacts.tar.gz\nlog/\ntmp/capybara/\nreports/test (1).txt\n")
+func TestUploadArtifactPathsNormalizesSafeSpellings(t *testing.T) {
+	got, err := UploadArtifactPaths("./artifacts.tar.gz\nlog/\ntmp/capybara/\nreports/test (1).txt\n/tmp/baipp/dist/*\nC:\\build\\dist\\*.zip\n/\nC:\\\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"artifacts.tar.gz", "log/", "tmp/capybara/", "reports/test (1).txt"}
+	want := []string{"artifacts.tar.gz", "log/", "tmp/capybara/", "reports/test (1).txt", "/tmp/baipp/dist/*", "C:/build/dist/*.zip", "/", "C:/"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("UploadArtifactPaths() = %#v, want %#v", got, want)
 	}
 	for _, unsafe := range []string{
-		"../outside", "safe/../outside", "/absolute", `dir\file`, "./tests/**/*.log", "tests/*.log/", "tests/./*.log",
+		"../outside", "safe/../outside", "/absolute/../outside", `dir\file`, "./tests/**/*.log", "tests/*.log/", "tests/./*.log",
+		`C:\safe\..\outside`, `C:relative`, `//server/share/file`, `\\server\share\file`, `C:/safe/file:stream`,
 		"tests/@(a|b).log", "tests/+(a|b).log", "tests/?(a|b).log", "tests/*(a|b).log", "tests/!(a|b).log",
 	} {
 		if _, err := UploadArtifactPaths(unsafe); err == nil {

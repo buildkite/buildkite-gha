@@ -130,9 +130,9 @@ func parseUploadOptions(commit string, inputs map[string]string) (uploadOptions,
 }
 
 type archiveFile struct {
-	disk, name string
-	size       int64
-	info       os.FileInfo
+	disk, name, root string
+	size             int64
+	info             os.FileInfo
 }
 
 func (r *jobRun) runUploadArtifactCommit(ctx context.Context, processor *commandOutputProcessor, workspace, commit string, inputs map[string]string) (result Result, returnErr error) {
@@ -169,7 +169,11 @@ func (r *jobRun) runUploadArtifactCommit(ctx context.Context, processor *command
 	}
 	emptyV1Directory := false
 	if actionintegration.UploadArtifactUsesV1Contract(commit) {
-		info, statErr := os.Stat(filepath.Join(workspace, filepath.FromSlash(o.paths[0])))
+		disk := filepath.FromSlash(o.paths[0])
+		if !filepath.IsAbs(disk) {
+			disk = filepath.Join(workspace, disk)
+		}
+		info, statErr := os.Stat(disk)
 		emptyV1Directory = statErr == nil && info.IsDir()
 	}
 	if len(files) == 0 && !emptyV1Directory {
@@ -202,7 +206,7 @@ func (r *jobRun) runUploadArtifactCommit(ctx context.Context, processor *command
 		return result, err
 	}
 	defer func() { _ = os.Remove(tmp) }()
-	digest, size, err := writeUploadZIP(ctx, tmp, workspace, files, o.level)
+	digest, size, err := writeUploadZIP(ctx, tmp, files, o.level)
 	if err != nil {
 		return result, err
 	}
@@ -279,11 +283,11 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 	}
 	var files []archiveFile
 	var archiveBases []string
-	add := func(disk string, info os.FileInfo) error {
+	add := func(scope, disk string, info os.FileInfo) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		files = append(files, archiveFile{disk: disk, size: info.Size(), info: info})
+		files = append(files, archiveFile{disk: disk, root: scope, size: info.Size(), info: info})
 		if len(files) > transport.MaxResultArtifactFileCount {
 			return fmt.Errorf("artifact has more than 10000 selected files")
 		}
@@ -298,15 +302,22 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 		}
 		before := len(files)
 		directoryOnly := strings.HasSuffix(root, "/")
+		scope, root, err := uploadSourcePath(ctx, workspace, root)
+		if err != nil {
+			return nil, err
+		}
 		if strings.ContainsAny(root, "*?[") {
-			err := filepath.Walk(workspace, func(disk string, info os.FileInfo, walkErr error) error {
+			err := filepath.Walk(scope, func(disk string, info os.FileInfo, walkErr error) error {
 				if err := ctx.Err(); err != nil {
 					return err
+				}
+				if disk == scope && os.IsNotExist(walkErr) {
+					return nil
 				}
 				if walkErr != nil {
 					return walkErr
 				}
-				rel, err := filepath.Rel(workspace, disk)
+				rel, err := filepath.Rel(scope, disk)
 				if err != nil {
 					return err
 				}
@@ -332,21 +343,21 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 				if !info.Mode().IsRegular() {
 					return fmt.Errorf("non-regular path %q is unsupported", rel)
 				}
-				return add(disk, info)
+				return add(scope, disk, info)
 			})
 			if err != nil {
 				return nil, err
 			}
 			if len(files) > before {
 				base, _ := doublestar.SplitPattern(root)
-				archiveBases = append(archiveBases, base)
+				archiveBases = append(archiveBases, filepath.Join(scope, base))
 			}
 			continue
 		}
-		if err := rejectUploadSymlinkComponents(ctx, workspace, root); err != nil {
+		if err := rejectUploadSymlinkComponents(ctx, scope, root); err != nil {
 			return nil, err
 		}
-		disk := filepath.Join(workspace, root)
+		disk := filepath.Join(scope, root)
 		info, err := os.Lstat(disk)
 		if os.IsNotExist(err) {
 			continue
@@ -361,10 +372,10 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 			continue
 		}
 		if info.Mode().IsRegular() {
-			if err := add(disk, info); err != nil {
+			if err := add(scope, disk, info); err != nil {
 				return nil, err
 			}
-			archiveBases = append(archiveBases, filepath.Dir(root))
+			archiveBases = append(archiveBases, filepath.Dir(disk))
 			continue
 		}
 		if !info.IsDir() {
@@ -377,7 +388,7 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 			if e != nil {
 				return e
 			}
-			rel, _ := filepath.Rel(workspace, p)
+			rel, _ := filepath.Rel(scope, p)
 			if p != disk && hiddenPath(rel) && !hidden {
 				if i.IsDir() {
 					return filepath.SkipDir
@@ -396,25 +407,28 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 			if !i.Mode().IsRegular() {
 				return fmt.Errorf("non-regular path %q is unsupported", rel)
 			}
-			return add(p, i)
+			return add(scope, p, i)
 		})
 		if err != nil {
 			return nil, err
 		}
 		if len(files) > before {
-			archiveBases = append(archiveBases, root)
+			archiveBases = append(archiveBases, disk)
 		}
 	}
 	if len(files) == 0 {
 		return files, nil
 	}
 	base := commonArchiveRoot(archiveBases)
+	if base == "" {
+		return nil, fmt.Errorf("artifact paths on different volumes have no common archive root")
+	}
 	seen := make(map[string]string, len(files))
 	for i := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		relative, err := filepath.Rel(filepath.Join(workspace, base), files[i].disk)
+		relative, err := filepath.Rel(base, files[i].disk)
 		if err != nil {
 			return nil, err
 		}
@@ -434,6 +448,37 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
 	return files, nil
+}
+
+// uploadSourcePath keeps relative selections inside the workspace. An explicit
+// absolute selection gets its own literal search root without widening the
+// workspace root used for other selections.
+func uploadSourcePath(ctx context.Context, workspace, selection string) (string, string, error) {
+	if !path.IsAbs(selection) && !strings.Contains(selection, ":") {
+		return workspace, selection, nil
+	}
+	absolute := filepath.FromSlash(selection)
+	if !filepath.IsAbs(absolute) {
+		return "", "", fmt.Errorf("absolute artifact path %q is not supported on this platform", selection)
+	}
+	base := filepath.Dir(absolute)
+	if strings.ContainsAny(selection, "*?[") {
+		prefix, _ := doublestar.SplitPattern(selection)
+		base = filepath.FromSlash(prefix)
+		if base == filepath.VolumeName(absolute) {
+			base += string(filepath.Separator)
+		}
+	}
+	volume := filepath.VolumeName(base) + string(filepath.Separator)
+	components, err := filepath.Rel(volume, base)
+	if err != nil {
+		return "", "", err
+	}
+	if err := rejectUploadSymlinkComponents(ctx, volume, components); err != nil {
+		return "", "", err
+	}
+	relative, err := filepath.Rel(base, absolute)
+	return base, filepath.ToSlash(relative), err
 }
 
 func uploadGlobMatches(pattern, relative string) (bool, error) {
@@ -484,12 +529,18 @@ func commonArchiveRoot(bases []string) string {
 	}
 	parts := strings.Split(filepath.ToSlash(filepath.Clean(bases[0])), "/")
 	for _, r := range bases[1:] {
+		if !strings.EqualFold(filepath.VolumeName(bases[0]), filepath.VolumeName(r)) {
+			return ""
+		}
 		q := strings.Split(filepath.ToSlash(filepath.Clean(r)), "/")
 		n := 0
-		for n < len(parts) && n < len(q) && parts[n] == q[n] {
+		for n < len(parts) && n < len(q) && (parts[n] == q[n] || filepath.Separator == '\\' && strings.EqualFold(parts[n], q[n])) {
 			n++
 		}
 		parts = parts[:n]
+	}
+	if len(parts) == 1 && filepath.IsAbs(bases[0]) {
+		return filepath.VolumeName(bases[0]) + string(filepath.Separator)
 	}
 	if len(parts) == 0 {
 		return "."
@@ -497,7 +548,7 @@ func commonArchiveRoot(bases []string) string {
 	return filepath.FromSlash(strings.Join(parts, "/"))
 }
 
-func writeUploadZIP(ctx context.Context, path, workspace string, files []archiveFile, level int) (_ string, _ int64, err error) {
+func writeUploadZIP(ctx context.Context, path string, files []archiveFile, level int) (_ string, _ int64, err error) {
 	if err := ctx.Err(); err != nil {
 		return "", 0, err
 	}
@@ -506,15 +557,12 @@ func writeUploadZIP(ctx context.Context, path, workspace string, files []archive
 		return "", 0, e
 	}
 	defer func() { err = errors.Join(err, f.Close()) }()
-	workspace, e = filepath.EvalSymlinks(workspace)
-	if e != nil {
-		return "", 0, fmt.Errorf("resolve upload workspace: %w", e)
-	}
-	workspaceRoot, e := os.OpenRoot(workspace)
-	if e != nil {
-		return "", 0, fmt.Errorf("open upload workspace: %w", e)
-	}
-	defer func() { err = errors.Join(err, workspaceRoot.Close()) }()
+	roots := make(map[string]*os.Root)
+	defer func() {
+		for _, root := range roots {
+			err = errors.Join(err, root.Close())
+		}
+	}()
 	h := sha256.New()
 	w := io.MultiWriter(f, h)
 	z := zip.NewWriter(w)
@@ -524,6 +572,22 @@ func writeUploadZIP(ctx context.Context, path, workspace string, files []archive
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return "", 0, err
+		}
+		root := roots[file.root]
+		if root == nil {
+			volume := filepath.VolumeName(file.root) + string(filepath.Separator)
+			components, e := filepath.Rel(volume, file.root)
+			if e != nil {
+				return "", 0, e
+			}
+			if e = rejectUploadSymlinkComponents(ctx, volume, components); e != nil {
+				return "", 0, e
+			}
+			root, e = os.OpenRoot(file.root)
+			if e != nil {
+				return "", 0, fmt.Errorf("open upload source: %w", e)
+			}
+			roots[file.root] = root
 		}
 		method := uint16(zip.Deflate)
 		if level == 0 {
@@ -535,16 +599,16 @@ func writeUploadZIP(ctx context.Context, path, workspace string, files []archive
 		if e != nil {
 			return "", 0, e
 		}
-		relative, e := filepath.Rel(workspace, file.disk)
+		relative, e := filepath.Rel(file.root, file.disk)
 		if e != nil {
 			return "", 0, e
 		}
-		if e = rejectUploadSymlinkComponents(ctx, workspace, relative); e != nil {
+		if e = rejectUploadSymlinkComponents(ctx, file.root, relative); e != nil {
 			return "", 0, e
 		}
 		// Root confines a concurrent path swap; O_NONBLOCK lets the regular-file
 		// check below reject a special-file replacement without hanging.
-		in, e := workspaceRoot.OpenFile(relative, os.O_RDONLY|nonBlockingOpenFlag, 0)
+		in, e := root.OpenFile(relative, os.O_RDONLY|nonBlockingOpenFlag, 0)
 		if e != nil {
 			return "", 0, e
 		}

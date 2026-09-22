@@ -1913,7 +1913,9 @@ Maintainers can refresh the frozen tags, branches, and per-commit profiles with 
 | `include-hidden-files` | When declared: GitHub Actions boolean, default `false`. Earlier contracts without this input retain hidden paths. |
 | `archive` | When declared: omitted or `true`. |
 
-Unsupported path forms include exclusions, symlinks, absolute paths, traversal, braces, extglobs, leading glob comments, and special files. At most 32 path roots may be selected. Contracts that declare `include-hidden-files` exclude hidden path segments unless explicitly enabled.
+Paths may be workspace-relative or absolute on the execution platform, including Windows drive paths such as `C:\build\dist\*.zip`. An absolute glob such as `/tmp/baipp/dist/*` archives paths relative to its literal search root (`package.whl`, not `tmp/baipp/dist/package.whl`). Multiple selections use their least common ancestor as the archive root.
+
+Unsupported path forms include exclusions, symlinks, traversal, UNC and drive-relative paths, alternate data streams, braces, extglobs, leading glob comments, and special files. Selections on different Windows volumes cannot share an archive root. At most 32 path roots may be selected. Contracts that declare `include-hidden-files` exclude hidden path segments unless explicitly enabled.
 
 An artifact may contain at most 10,000 files. `buildkite-gha` does not impose a source or ZIP byte limit; the Buildkite Agent and configured artifact storage enforce their limits. A job may publish 64 artifacts.
 
