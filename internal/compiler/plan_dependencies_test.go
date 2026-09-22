@@ -57,8 +57,8 @@ func TestBuildPlanDependenciesOwnsGraphToPlanBoundary(t *testing.T) {
 	if !reflect.DeepEqual(guards[0].NeedSources, wantGuardSources) {
 		t.Fatalf("call guard sources = %#v", guards[0].NeedSources)
 	}
-	if _, emitted := guards[0].NeedOutputs["status"]; emitted {
-		t.Fatalf("status-only call guard output was emitted: %#v", guards[0].NeedOutputs)
+	if selected, emitted := guards[0].NeedOutputs["status"]; !emitted || len(selected) != 0 {
+		t.Fatalf("status-only call guard projection was not preserved: %#v", guards[0].NeedOutputs)
 	}
 	if !reflect.DeepEqual(guards[0].NeedOutputs["build"], []plan.NeedOutput{output}) {
 		t.Fatalf("call guard outputs = %#v", guards[0].NeedOutputs)

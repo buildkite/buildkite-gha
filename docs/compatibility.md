@@ -516,6 +516,8 @@ A call condition runs in caller scope before static call-matrix expansion. It ke
 
 A call's `needs` governs its condition and scheduling, but does not appear in the called jobs' `needs` context. Each called job sees only dependencies it declares within its own workflow; a job without `needs` sees `{}` when serialized with `toJSON(needs)`.
 
+A call without `if` checks only dependency results; conflicting matrix outputs do not affect that implicit success check.
+
 The called workflow declares its inputs and outputs:
 
 ```yaml

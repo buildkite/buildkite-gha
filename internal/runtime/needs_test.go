@@ -297,6 +297,90 @@ jobs:
 	}
 }
 
+func TestImplicitReusableCallGuardIgnoresConflictingMatrixOutputs(t *testing.T) {
+	workspace := t.TempDir()
+	const workflowPath = ".github/workflows/caller.yml"
+	const source = `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [one, two]
+    outputs:
+      target: ${{ matrix.target }}
+    steps: [{run: true}]
+  delegated:
+    needs: prepare
+    uses: ./.github/workflows/callee.yml
+`
+	writeFixtureFile(t, workspace, workflowPath, source)
+	writeFixtureFile(t, workspace, ".github/workflows/callee.yml", `on: workflow_call
+jobs:
+  test:
+    if: always()
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(source), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := plan.Encode(jobs[len(jobs)-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := plan.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(job.CallGuards) != 1 || len(job.CallGuards[0].NeedSources["prepare"]) != 2 {
+		t.Fatalf("matrix guard sources = %#v", job.CallGuards)
+	}
+	const buildID = "11111111-1111-4111-8111-111111111111"
+	for _, secondResult := range []string{"success", "failure"} {
+		runner := resultManifestRunner{}
+		for i, producer := range job.CallGuards[0].NeedSources["prepare"] {
+			status := "success"
+			if i == 1 {
+				status = secondResult
+			}
+			jobID := fmt.Sprintf("2222222%d-2222-4222-8222-222222222222", i)
+			manifest, err := transport.MarshalResultManifest(transport.ResultManifest{
+				PlanDigest: producer.PlanDigest,
+				Producer:   transport.Producer{BuildID: buildID, JobID: jobID, StepKey: producer.StepKey},
+				Result:     status, Outputs: []transport.Output{{Name: "target", Value: []string{"one", "two"}[i]}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner[transport.ResultPath(producer.StepKey, producer.PlanDigest)] = struct {
+				jobID string
+				data  []byte
+			}{jobID: jobID, data: manifest}
+		}
+		job.CallGuards, err = ResolveCallGuards(t.Context(), transport.Agent{Runner: runner}, t.TempDir(), buildID, job.CallGuards)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if need := job.CallGuards[0].Needs["prepare"]; need.Result != secondResult || len(need.Outputs) != 0 {
+			t.Fatalf("status-only guard = %#v", need)
+		}
+		result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+		want := "success"
+		if secondResult == "failure" {
+			want = "skipped"
+		}
+		if err != nil || result.Conclusion != want {
+			t.Fatalf("second producer %s: RunJob() = %#v, %v, want %s", secondResult, result, err, want)
+		}
+	}
+}
+
 func TestDeferredTypedInputsCompileAndRunNestedWorkflow(t *testing.T) {
 	for _, enabled := range []string{"true", "false", ""} {
 		t.Run("deps="+enabled, func(t *testing.T) {

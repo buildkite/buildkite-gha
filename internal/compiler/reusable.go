@@ -335,7 +335,8 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 
 		call := job.Reusable
 		calleeGuards := callGuards
-		if strings.TrimSpace(job.If) == "" && len(job.Needs) != 0 {
+		implicitSuccess := strings.TrimSpace(job.If) == "" && len(job.Needs) != 0
+		if implicitSuccess {
 			// Caller prerequisites govern the call, not the callee's needs
 			// context. Keep the implicit success check in its caller scope.
 			job.If = "success()"
@@ -364,6 +365,15 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 			}
 			guard := sourcedCallGuard{
 				condition: reduced.Source, inputs: cloneReusableInputs(inputs), needBindings: cloneNeedBindings(needBindings),
+			}
+			if implicitSuccess {
+				// This guard reads results only. Matrix outputs may conflict
+				// without affecting whether all caller prerequisites succeeded.
+				for name, binding := range guard.needBindings {
+					binding.projectOutputs = true
+					binding.outputs = nil
+					guard.needBindings[name] = binding
+				}
 			}
 			if reduced.Known {
 				guard.known = true
