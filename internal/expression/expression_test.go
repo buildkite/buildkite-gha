@@ -852,9 +852,9 @@ func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
 		"${{ github[env.KEY] }}",
 		"${{ false && secrets[env.KEY] || '' }}",
 		"${{ steps[env.KEY].outputs.image }}",
-		"${{ toJSON(needs) }}",
+		"${{ toJSON(needs.*) }}",
 		"${{ matrix[steps[env.KEY].outputs.image] || 'fallback' }}",
-		"${{ matrix[toJSON(needs)] }}",
+		"${{ matrix[toJSON(needs[env.KEY])] }}",
 	} {
 		if _, err := EvaluateStep(template, context); err == nil {
 			t.Errorf("EvaluateStep(%q) allowed prohibited access", template)
@@ -1040,7 +1040,7 @@ func TestEvaluateJobSurfacesErrors(t *testing.T) {
 		{name: "job env excludes steps", evaluate: EvaluateJobEnvironment, template: "${{ false && steps.build.outputs.value || 'ok' }}"},
 		{name: "job default excludes steps", evaluate: EvaluateJobDefault, template: "${{ false && steps.build.outputs.value || 'ok' }}"},
 		{name: "dynamic secret", evaluate: EvaluateJobEnvironment, template: "${{ false && secrets[env.KEY] || 'ok' }}"},
-		{name: "aggregate needs", evaluate: EvaluateJobDefault, template: "${{ false && toJSON(needs) || 'ok' }}"},
+		{name: "projected needs", evaluate: EvaluateJobDefault, template: "${{ false && toJSON(needs.*) || 'ok' }}"},
 		{name: "aggregate steps", evaluate: EvaluateJobOutput, template: "${{ false && toJSON(steps) || 'ok' }}"},
 		{name: "hash files", evaluate: EvaluateJobDefault, template: "${{ false && hashFiles('go.sum') || 'ok' }}"},
 	}

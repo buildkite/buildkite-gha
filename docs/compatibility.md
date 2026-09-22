@@ -1536,9 +1536,11 @@ These step fields support the operators and pure functions listed above:
 - `continue-on-error` and `timeout-minutes`
 
 They support computed indexes and projections over available `matrix`,
-`inputs`, `env`, `vars`, and `runner` values. Computed, whole, and projected
-`steps` or `needs` access is unsupported. Reading an unavailable background
-output is an error.
+`inputs`, `env`, `vars`, and `runner` values. `toJSON(needs)` serializes only
+direct dependencies, with each job's `result` and `outputs` object (empty when
+there are no outputs). Transitive dependencies are not included. Computed and
+projected `needs` access and computed, whole, and projected `steps` access
+remain unsupported. Reading an unavailable background output is an error.
 
 Before creating a job plan, the compiler resolves scalar `github.event.*`
 values and event-dependent parts of otherwise runtime expressions.
@@ -1570,8 +1572,8 @@ support the listed operators and pure functions.
 
 Outside `continue-on-error`, the runtime has no equivalent value for
 `strategy`; job outputs also have no `job` value. Those contexts remain
-unsupported. Other job-level fields reject computed, whole, and projected
-`steps` and `needs` access.
+unsupported. The listed job-level fields also support `toJSON(needs)`, with
+the same direct-dependency scope and access restrictions as step fields.
 
 Expression-valued `continue-on-error` must produce a Boolean. Expression-valued `timeout-minutes` must produce a number greater than 0 and at most 360.
 

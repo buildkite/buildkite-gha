@@ -34,6 +34,44 @@ func TestEngineLiteralPreservesExpressionTypes(t *testing.T) {
 	}
 }
 
+func TestNeedsJSONUsesRuntimeValuesWithoutGrantingAuthority(t *testing.T) {
+	engine := NewEngine()
+	const want = "{\n  \"build\": {\n    \"outputs\": {},\n    \"result\": \"failure\"\n  }\n}"
+	values := Values{Runtime: Context{Needs: map[string]NeedStatus{"build": {Result: "failure"}}}}
+	known := AbstractValues{References: map[string]any{
+		"needs": map[string]any{"build": map[string]any{"outputs": map[string]string{}, "result": "failure"}},
+	}}
+	for _, profile := range []ProfileID{ProfileStepTemplate, ProfileJobEnvironment, ProfileJobDefault, ProfileJobOutput} {
+		t.Run(string(profile), func(t *testing.T) {
+			site := Site{Source: "${{ toJSON(needs) }}", Profile: profile, Result: ResultString}
+			got, err := engine.Evaluate(site, values)
+			if err != nil || got != want {
+				t.Fatalf("Evaluate() = %#v, %v; want %q", got, err, want)
+			}
+			analysis, err := engine.Analyze(site, known)
+			if err != nil || !analysis.Value.Known || analysis.Value.Value != want || analysis.Effects != (Effects{}) {
+				t.Fatalf("known Analyze() = %#v, %v", analysis, err)
+			}
+			analysis, err = engine.Analyze(site, AbstractValues{})
+			if err != nil || analysis.Value.Known || analysis.Effects != (Effects{}) {
+				t.Fatalf("unknown Analyze() = %#v, %v", analysis, err)
+			}
+			if got, err := engine.Evaluate(site, Values{}); err != nil || got != "{}" {
+				t.Fatalf("empty needs = %#v, %v", got, err)
+			}
+		})
+	}
+	guarded := Site{Source: "${{ contains(toJSON(needs), 'success') && github.token || '' }}", Profile: ProfileStepTemplate, Result: ResultString}
+	analysis, err := engine.Analyze(guarded, known)
+	if err != nil || !analysis.Value.Known || analysis.Value.Value != "" || analysis.Effects != (Effects{}) {
+		t.Fatalf("known-false needs guard = %#v, %v", analysis, err)
+	}
+	analysis, err = engine.Analyze(guarded, AbstractValues{})
+	if err != nil || analysis.Value.Known || analysis.Effects.GitHubToken != GitHubTokenDirect {
+		t.Fatalf("unknown needs guard = %#v, %v", analysis, err)
+	}
+}
+
 func TestDeferredInputPreservesDeclaredType(t *testing.T) {
 	engine := NewEngine()
 	for _, test := range []struct {
