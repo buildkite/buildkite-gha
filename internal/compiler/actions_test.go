@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -438,6 +439,108 @@ func TestCompileActionLocksLocalAndDedup(t *testing.T) {
 	}
 	if len(locks) != 1 || len(selectors) != 2 || selectors[0] != selectors[1] || locks[0].Path != "js" || !strings.HasPrefix(locks[0].SourceDigest, "sha256:") || len(caps) != 0 {
 		t.Fatalf("unexpected result: %#v %#v %#v", selectors, locks, caps)
+	}
+	if locks[0].ExecutablePaths == nil || len(locks[0].ExecutablePaths) != 0 {
+		t.Fatalf("action without executables must record an explicit empty list: %#v", locks[0].ExecutablePaths)
+	}
+}
+
+func TestCompileActionExecutablePathsUseLockedTree(t *testing.T) {
+	workspace, remote, substitute := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, root := range []string{workspace, remote, substitute} {
+		writeAction(t, root, "nested", "name: action\nruns:\n  using: node20\n  main: index.js\n")
+	}
+	writeAction(t, substitute, "", "name: cache\nruns:\n  using: node20\n  main: index.js\n")
+	for _, file := range []string{filepath.Join(workspace, "nested", "run"), filepath.Join(remote, "outer"), filepath.Join(remote, "nested", "run"), filepath.Join(substitute, "replacement")} {
+		if err := os.WriteFile(file, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commit := strings.Repeat("a", 40)
+	for _, test := range []struct {
+		uses string
+		want []string
+	}{
+		{"./nested", []string{"run"}},
+		{"owner/repo/nested@" + commit, []string{"nested/run", "outer"}},
+		{"actions/cache@" + commit, []string{"replacement"}},
+	} {
+		t.Run(test.uses, func(t *testing.T) {
+			actionSource := commitActionSource{roots: map[string]string{commit: remote, actionintegration.CacheCommit: substitute}}
+			_, locks, _, _, err := compileActionLocks(t.Context(), workspace, actionSource, []string{test.uses})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(locks) != 1 || !reflect.DeepEqual(locks[0].ExecutablePaths, test.want) {
+				t.Fatalf("locks = %#v, want executable paths %v", locks, test.want)
+			}
+			if _, err := plan.ValidateActionLockList(locks); err != nil {
+				t.Fatalf("compiler produced invalid executable provenance: %v", err)
+			}
+		})
+	}
+}
+
+func TestCompileActionExecutablePathsBeyondActionReferenceLimit(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux filesystem paths beyond macOS's 1024-byte limit; plan/schema boundaries are tested on all hosts")
+	}
+	workspace := t.TempDir()
+	writeAction(t, workspace, "nested", "name: action\nruns:\n  using: node20\n  main: index.js\n")
+	longPath := strings.Repeat(strings.Repeat("a", 210)+"/", 5) + "run"
+	file := filepath.Join(workspace, "nested", longPath)
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, locks, _, _, err := compileActionLocks(t.Context(), workspace, nil, []string{"./nested"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) != 1 || !reflect.DeepEqual(locks[0].ExecutablePaths, []string{longPath}) {
+		t.Fatalf("long source path not recorded: %#v", locks)
+	}
+	if _, err := plan.ValidateActionLockList(locks); err != nil {
+		t.Fatalf("compiler produced invalid executable provenance: %v", err)
+	}
+}
+
+func TestCompileActionExecutablePathsAggregateBudget(t *testing.T) {
+	remote := t.TempDir()
+	for i := range 128 {
+		name := fmt.Sprintf("%03d-", i) + strings.Repeat("x", 240)
+		if err := os.WriteFile(filepath.Join(remote, name), nil, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 64 {
+		writeAction(t, remote, fmt.Sprintf("child%d", i), "name: child\nruns:\n  using: node20\n  main: index.js\n")
+	}
+	commit := strings.Repeat("a", 40)
+	for _, distinct := range []bool{false, true} {
+		t.Run(fmt.Sprintf("distinct=%v", distinct), func(t *testing.T) {
+			body := "name: root\nruns:\n  using: composite\n  steps:\n"
+			for i := range 64 {
+				child := 0
+				if distinct {
+					child = i
+				}
+				body += fmt.Sprintf("    - uses: $/child%d\n", child)
+			}
+			writeAction(t, remote, "root", body)
+			_, locks, _, _, err := compileActionLocks(t.Context(), t.TempDir(), commitActionSource{roots: map[string]string{commit: remote}}, []string{"owner/repo/root@" + commit})
+			if distinct {
+				// Each lock is small; repeating the repository-wide list across
+				// distinct children must fail during construction, before encode.
+				if err == nil || !strings.Contains(err.Error(), "executable paths exceed") {
+					t.Fatalf("aggregate provenance error = %v", err)
+				}
+			} else if err != nil || len(locks) != 2 {
+				t.Fatalf("reused child was charged more than once: locks=%d, error=%v", len(locks), err)
+			}
+		})
 	}
 }
 

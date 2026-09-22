@@ -786,12 +786,46 @@ func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 	}
 	validateJobPlanSchema(t, encoded)
 
+	// Absent provenance remains readable. Explicit empty provenance and paths
+	// survive serialization and each change the bytes bound by the plan digest.
+	digests := map[[32]byte]bool{}
+	maxSourcePath := strings.Repeat(strings.Repeat("a", 254)+"/", 16) + strings.Repeat("b", 16)
+	for _, paths := range [][]string{nil, {}, {"dist/a.sh", "run.sh"}, {maxSourcePath}} {
+		job.Actions[0].ExecutablePaths = paths
+		data, err := Encode(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := Decode(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(decoded.Actions[0].ExecutablePaths, paths) {
+			t.Fatalf("executable paths = %#v, want %#v", decoded.Actions[0].ExecutablePaths, paths)
+		}
+		validateJobPlanSchema(t, data)
+		digest := sha256.Sum256(data)
+		if digests[digest] {
+			t.Fatal("executable provenance was not bound by plan bytes")
+		}
+		digests[digest] = true
+	}
+
 	for _, test := range []struct {
 		name string
 		edit func(*Job)
 		want string
 	}{
 		{name: "invalid image", edit: func(j *Job) { j.Actions[0].DockerImage = "INVALID" }, want: "invalid Docker image"},
+		{name: "unsorted executable paths", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{"z", "a"} }, want: "invalid executable paths"},
+		{name: "duplicate executable paths", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{"a", "a"} }, want: "invalid executable paths"},
+		{name: "escaped executable path", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{"../run"} }, want: "invalid executable paths"},
+		{name: "absolute executable path", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{"/run"} }, want: "invalid executable paths"},
+		{name: "empty executable path", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{""} }, want: "invalid executable paths"},
+		{name: "oversized executable path", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{strings.Repeat("a", 256)} }, want: "invalid executable paths"},
+		{name: "oversized source path", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{maxSourcePath + "b"} }, want: "invalid executable paths"},
+		{name: "action reference retains shorter limit", edit: func(j *Job) { j.Actions[0].Path = maxSourcePath }, want: "invalid workspace identity"},
+		{name: "too many executable paths", edit: func(j *Job) { j.Actions[0].ExecutablePaths = make([]string, 50001) }, want: "too many executable paths"},
 		{name: "missing docker capability", edit: func(j *Job) { j.RequiredCapabilities = []string{"network"} }, want: "require docker capability"},
 		{name: "missing network capability", edit: func(j *Job) { j.RequiredCapabilities = []string{"docker"} }, want: "require network capability"},
 	} {
@@ -804,6 +838,26 @@ func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestActionExecutablePathsAggregateBudget(t *testing.T) {
+	paths := make([]string, 128)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("%03d/", i) + strings.Repeat(strings.Repeat("a", 254)+"/", 16) + strings.Repeat("b", 12)
+	}
+	// Each lock contributes 128 * 4096 bytes. The 1 MiB budget counts repeated
+	// provenance in distinct locks because every copy is serialized.
+	locks := []ActionLock{
+		{ID: "a-0000000000000001", Source: "workspace", Path: "a", SourceDigest: "sha256:" + strings.Repeat("a", 64), ExecutablePaths: paths},
+		{ID: "a-0000000000000002", Source: "workspace", Path: "b", SourceDigest: "sha256:" + strings.Repeat("b", 64), ExecutablePaths: paths},
+	}
+	if _, err := ValidateActionLockList(locks); err != nil {
+		t.Fatalf("exactly 1 MiB of executable paths rejected: %v", err)
+	}
+	locks[1].ExecutablePaths = append(slices.Clone(paths), "z")
+	if _, err := ValidateActionLockList(locks); err == nil || !strings.Contains(err.Error(), "executable paths exceed") {
+		t.Fatalf("aggregate provenance limit error = %v", err)
 	}
 }
 

@@ -12,6 +12,9 @@ func TestActionGraphCacheReusesGraphButNotAuthorityOrResults(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "child", "name: child\ninputs:\n  token:\n    default: ${{ github.token }}\nruns:\n  using: node24\n  main: index.js\n")
 	writeAction(t, workspace, "parent", "name: parent\ninputs:\n  token:\n    default: ''\nruns:\n  using: composite\n  steps:\n    - uses: ./child\n      with:\n        token: ${{ inputs.token }}\n")
+	if err := os.Chmod(filepath.Join(workspace, "child", "index.js"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	instance := JobInstance{RepositoryRoot: workspace, SourcePath: "ci.yml"}
 	refs := []string{"./parent", "./child"}
 	cache := newActionGraphCache(Options{})
@@ -44,6 +47,9 @@ func TestActionGraphCacheReusesGraphButNotAuthorityOrResults(t *testing.T) {
 	first.locks[0].SourceDigest = "corrupted"
 	for _, lock := range first.locks {
 		clear(lock.Children)
+		for i := range lock.ExecutablePaths {
+			lock.ExecutablePaths[i] = "corrupted"
+		}
 	}
 	for _, action := range first.programs {
 		if len(action.Inputs) > 0 && action.Inputs[0].Default != nil {

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -583,6 +584,82 @@ func TestDigestTreeExcludesGitMetadata(t *testing.T) {
 	}
 }
 
+func TestDigestTreeExecutablePathProvenance(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix executable bits")
+	}
+	for _, mutation := range []string{"none", "content", "addition", "removal", "symlink"} {
+		t.Run(mutation, func(t *testing.T) {
+			root := t.TempDir()
+			entry := filepath.Join(root, "runner.js")
+			if err := os.WriteFile(entry, []byte("console.log('ok')"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			want, paths, err := DigestTreeAndExecutablePaths(root)
+			if err != nil || !slices.Equal(paths, []string{"runner.js"}) {
+				t.Fatalf("digest and paths = %q, %v, %v", want, paths, err)
+			}
+			if err := os.Chmod(entry, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := DigestTreeWithExecutablePaths(root, nil); err != nil || got == want {
+				t.Fatalf("absent provenance digest = %q, %v; want mode mismatch", got, err)
+			}
+			switch mutation {
+			case "content":
+				err = os.WriteFile(entry, []byte("console.log('no')"), 0o644)
+			case "addition":
+				err = os.WriteFile(filepath.Join(root, "extra"), []byte("extra"), 0o644)
+			case "removal":
+				err = os.Remove(entry)
+			case "symlink":
+				err = os.Symlink("runner.js", filepath.Join(root, "link"))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := DigestTreeWithExecutablePaths(root, paths)
+			if mutation == "none" {
+				if err != nil || got != want {
+					t.Fatalf("restored digest = %q, %v; want %q", got, err, want)
+				}
+			} else if err == nil && got == want {
+				t.Fatal("provenance hid source tampering")
+			}
+		})
+	}
+}
+
+func TestDigestTreeEmptyAndInvalidExecutablePaths(t *testing.T) {
+	root := t.TempDir()
+	entry := filepath.Join(root, "runner.js")
+	if err := os.WriteFile(entry, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want, paths, err := DigestTreeAndExecutablePaths(root)
+	if err != nil || paths == nil || len(paths) != 0 {
+		t.Fatalf("empty provenance = %v, %v", paths, err)
+	}
+	if err := os.Chmod(entry, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DigestTreeWithExecutablePaths(root, paths); err != nil || got != want {
+		t.Fatalf("explicit empty provenance digest = %q, %v; want %q", got, err, want)
+	}
+	for _, paths := range [][]string{
+		{"missing"}, {"."}, {".."}, {"../runner.js"}, {"/runner.js"}, {"a/../runner.js"},
+		{`a\runner.js`}, {"runner.js", "runner.js"}, {"z", "runner.js"}, {""}, {"a\x00"},
+		{strings.Repeat("a", 256)}, {strings.Repeat("a/", 513)}, make([]string, 50001),
+	} {
+		if _, err := DigestTreeWithExecutablePaths(root, paths); err == nil {
+			t.Fatalf("invalid executable list accepted (length %d)", len(paths))
+		}
+	}
+	if _, err := DigestTreeWithExecutablePaths(entry, []string{}); err == nil {
+		t.Fatal("file accepted as tree root")
+	}
+}
+
 func tarBytes(t *testing.T, entries []tar.Header) []byte {
 	t.Helper()
 	var b bytes.Buffer
@@ -758,6 +835,43 @@ func TestStoreExpectedDigestAndManifestRejectTampering(t *testing.T) {
 	r.SourceDigest = got.SourceDigest
 	if _, err = store.Materialize(t.Context(), r); err == nil || !strings.Contains(err.Error(), "verify action source cache") {
 		t.Fatalf("tamper error = %v", err)
+	}
+}
+
+func TestStoreExecutableProvenanceDoesNotHideUnixModeTampering(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix executable bits")
+	}
+	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1, Mode: 0o755}})
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) }))
+	defer ts.Close()
+	store, err := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, ts.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("owner/repo@v1")
+	resolved := Resolved{Reference: ref, Commit: testSHA, ExecutablePaths: []string{"action.yml"}}
+	if _, err := store.Materialize(t.Context(), resolved); err == nil {
+		t.Fatal("unbound executable provenance accepted")
+	}
+	resolved.ExecutablePaths = nil
+	first, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Release()
+	resolved.SourceDigest = first.SourceDigest
+	resolved.ExecutablePaths = []string{"action.yml"}
+	cached, err := store.Materialize(t.Context(), resolved)
+	if err != nil {
+		t.Fatalf("pre-provenance cache is incompatible: %v", err)
+	}
+	cached.Release()
+	if err := os.Chmod(filepath.Join(first.RepositoryRoot, "action.yml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Materialize(t.Context(), resolved); err == nil || !strings.Contains(err.Error(), "cache verification failed") {
+		t.Fatalf("mode tamper with matching provenance error = %v", err)
 	}
 }
 

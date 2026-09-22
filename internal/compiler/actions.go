@@ -72,6 +72,7 @@ type actionLockBuilder struct {
 	caps                  map[string]bool
 	materialized          []source.Materialized
 	requiresMise          bool
+	executablePathBytes   int
 	// cacheSubstitutions records actions/cache references whose resolved
 	// commit was replaced by an audited release.
 	cacheSubstitutions []CacheSubstitution
@@ -416,6 +417,14 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int, cont
 		}
 		return n, nil
 	}
+	// Charge each distinct lock before retaining or serializing it. The same
+	// repository-wide provenance is serialized again for every remote child.
+	for _, executable := range lock.ExecutablePaths {
+		b.executablePathBytes += len(executable)
+		if b.executablePathBytes > plan.MaxActionExecutablePathBytes {
+			return nil, fmt.Errorf("action executable paths exceed %d-byte limit", plan.MaxActionExecutablePathBytes)
+		}
+	}
 	identityBytes, _ := json.Marshal(lock)
 	identity := string(identityBytes)
 	sum := sha256.Sum256(identityBytes)
@@ -514,8 +523,8 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing
 		if err != nil {
 			return "", plan.ActionLock{}, "", "", err
 		}
-		digest, err := source.DigestTree(m.Path)
-		return "workspace:" + p, plan.ActionLock{Source: "workspace", Path: p, SourceDigest: digest}, b.workspace, p, err
+		digest, executablePaths, err := source.DigestTreeAndExecutablePaths(m.Path)
+		return "workspace:" + p, plan.ActionLock{Source: "workspace", Path: p, SourceDigest: digest, ExecutablePaths: executablePaths}, b.workspace, p, err
 	}
 	self := strings.HasPrefix(raw, "$/")
 	if self {
@@ -568,7 +577,11 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string, containing
 		return "", plan.ActionLock{}, "", "", err
 	}
 	commit := strings.ToLower(resolved.Commit)
-	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: requestedRef, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest}
+	_, executablePaths, err := source.DigestTreeAndExecutablePaths(repositoryRoot)
+	if err != nil {
+		return "", plan.ActionLock{}, "", "", err
+	}
+	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: requestedRef, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest, ExecutablePaths: executablePaths}
 	identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
 	descriptor, _, admitErr := actionintegration.Admit(identity, lock.Commit)
 	if admitErr != nil && descriptor.Service == actionintegration.ServiceCache {
@@ -618,6 +631,10 @@ func (b *actionLockBuilder) substituteCacheRelease(ctx context.Context, ref sour
 	})
 	lock.Commit = substitute
 	lock.SourceDigest = materialized.SourceDigest
+	_, lock.ExecutablePaths, err = source.DigestTreeAndExecutablePaths(repositoryRoot)
+	if err != nil {
+		return plan.ActionLock{}, "", err
+	}
 	return lock, repositoryRoot, nil
 }
 

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -109,6 +110,48 @@ func TestActionLockResolverGitHubExactSourceSingleFlightAndTampering(t *testing.
 	}
 	if _, err := r.resolve(t.Context(), plan.ActionSelector{Lock: "lock"}); err == nil {
 		t.Fatal("resolve after repository tampering succeeded")
+	}
+}
+
+func TestActionLockResolverProvenanceDoesNotHideUnixModeTampering(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix executable bits")
+	}
+	for _, kind := range []string{"workspace", "github"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			writeAction(t, root, "nested")
+			entry := filepath.Join(root, "nested", "index.js")
+			if err := os.Chmod(entry, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			job := workflowJob(t, root)
+			lock := plan.ActionLock{ID: "lock", Source: kind, Path: "nested"}
+			if kind == "workspace" {
+				lock.SourceDigest = digestTree(t, filepath.Join(root, "nested"))
+				lock.ExecutablePaths = []string{"index.js"}
+			} else {
+				lock.Repository, lock.Commit = "owner/repo", strings.Repeat("a", 40)
+				lock.SourceDigest = digestTree(t, root)
+				lock.ExecutablePaths = []string{"nested/index.js"}
+				job.RequiredCapabilities = []string{"network"}
+			}
+			job.Actions = []plan.ActionLock{lock}
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: root, SourceDigest: lock.SourceDigest}}
+			resolver := testActionLockResolver(t, job, root, materializer)
+			if _, err := resolver.resolve(t.Context(), plan.ActionSelector{Lock: lock.ID}); err != nil {
+				t.Fatal(err)
+			}
+			if materializer.resolved.ExecutablePaths != nil {
+				t.Fatal("Unix runtime supplied mode overrides to materializer")
+			}
+			if err := os.Chmod(entry, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := resolver.resolve(t.Context(), plan.ActionSelector{Lock: lock.ID}); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+				t.Fatalf("mode tamper error = %v", err)
+			}
+		})
 	}
 }
 

@@ -30,6 +30,10 @@ const MaxNeedOutputs = 64
 const MaxCallGuards = 4
 const MaxEventPayloadBytes = 25 << 20
 
+// MaxActionExecutablePathBytes bounds the sum of executable path lengths across
+// action locks, including repeated repository-wide provenance in distinct locks.
+const MaxActionExecutablePathBytes = 1 << 20
+
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var compilerVersionPattern = regexp.MustCompile(`^[ -~]{1,256}$`)
 var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
@@ -87,15 +91,17 @@ type ActionSelector struct {
 }
 
 type ActionLock struct {
-	ID           string                    `json:"id"`
-	Source       string                    `json:"source"`
-	Repository   string                    `json:"repository,omitempty"`
-	RequestedRef string                    `json:"requested_ref,omitempty"`
-	Commit       string                    `json:"commit,omitempty"`
-	Path         string                    `json:"path,omitempty"`
-	SourceDigest string                    `json:"source_digest"`
-	DockerImage  string                    `json:"docker_image,omitempty"`
-	Children     map[string]ActionSelector `json:"children,omitempty"`
+	ID           string `json:"id"`
+	Source       string `json:"source"`
+	Repository   string `json:"repository,omitempty"`
+	RequestedRef string `json:"requested_ref,omitempty"`
+	Commit       string `json:"commit,omitempty"`
+	Path         string `json:"path,omitempty"`
+	SourceDigest string `json:"source_digest"`
+	// Nil means provenance is absent; an empty list records no executable files.
+	ExecutablePaths []string                  `json:"executable_paths,omitzero"`
+	DockerImage     string                    `json:"docker_image,omitempty"`
+	Children        map[string]ActionSelector `json:"children,omitempty"`
 }
 
 type Compiler struct {
@@ -1415,12 +1421,25 @@ func ValidateActionLockList(actions []ActionLock) (map[string]ActionLock, error)
 		return nil, fmt.Errorf("job plan has more than 1024 action locks")
 	}
 	locks := make(map[string]ActionLock, len(actions))
+	var executablePathBytes int
 	for i, lock := range actions {
 		if !actionLockIDPattern.MatchString(lock.ID) || i > 0 && actions[i-1].ID >= lock.ID {
 			return nil, fmt.Errorf("action locks must have valid, unique, sorted IDs")
 		}
 		if !digestPattern.MatchString(lock.SourceDigest) || len(lock.Children) > 1024 {
 			return nil, fmt.Errorf("action lock %q has invalid digest or too many children", lock.ID)
+		}
+		if len(lock.ExecutablePaths) > 50000 {
+			return nil, fmt.Errorf("action lock %q has too many executable paths", lock.ID)
+		}
+		for i, executable := range lock.ExecutablePaths {
+			if !cleanSourcePath(executable) || i > 0 && lock.ExecutablePaths[i-1] >= executable {
+				return nil, fmt.Errorf("action lock %q has invalid executable paths", lock.ID)
+			}
+			executablePathBytes += len(executable)
+			if executablePathBytes > MaxActionExecutablePathBytes {
+				return nil, fmt.Errorf("action executable paths exceed %d-byte limit", MaxActionExecutablePathBytes)
+			}
 		}
 		if lock.DockerImage != "" && !ValidContainerImageReference(lock.DockerImage) {
 			return nil, fmt.Errorf("action lock %q has invalid Docker image", lock.ID)
@@ -1638,7 +1657,12 @@ func validateChildIdentity(parent ActionLock, uses string, child ActionLock) err
 }
 
 func cleanActionPath(value string) bool {
-	if value == "" || len(value) > 1024 || !utf8.ValidString(value) || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || hasControl(value) {
+	return len(value) <= 1024 && cleanSourcePath(value)
+}
+
+// Source files use the archive path limit, not the shorter action-reference limit.
+func cleanSourcePath(value string) bool {
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || hasControl(value) {
 		return false
 	}
 	for segment := range strings.SplitSeq(value, "/") {
