@@ -541,18 +541,16 @@ untracked and outside paths.
 always when a path begins with `-`. Pass each path as its own argument; the CLI
 does not split one shell string or decode a JSON or YAML list.
 
-Upload is atomic. A server-selected workflow emits steps without a workflow
-group. Explicitly configured workflows retain groups, including single-workflow
-uploads. Upload leaves the importer label unchanged. Skipped workflows become
-top-level skipped steps. Reusable-only files remain available to local callers
-but do not create groups. Selecting only reusable workflows is an error.
+Upload is atomic. Skipped workflows become top-level skipped steps.
+Reusable-only files remain available to local callers but do not create groups.
+Selecting only reusable workflows is an error.
 
 An explicit non-empty workflow `run-name` appends ` — <run-name>` to its group
 label after resolving supported `github` and `inputs` expressions. Workflow
 names, provider-check names, and the Buildkite build message remain unchanged.
 
 See [Aggregate workflow upload](compatibility.md#aggregate-workflow-upload) for
-group labels, provider checks, and failure behavior.
+workflow grouping, labels, provider checks, and failure behavior.
 
 Private reusable workflows are off by default. Set the plugin's
 `private-reusable-workflows: true` field, or pass

@@ -167,12 +167,11 @@ and deduplicates the paths.
 
 All remaining runnable workflows use one artifact and pipeline transaction:
 
-- With a server-selected workflow, jobs and deferred steps have no workflow
-  group. Explicit `workflow` or `workflows` plugin configuration overrides
-  server selection and retains groups, even for one workflow.
-- With explicitly configured workflows, each compiled workflow becomes a group
-  labeled `:github: workflow · <workflow-name>`. An unnamed workflow uses its
-  canonical path. A resolved, non-empty `run-name` appends ` — <run-name>`.
+- Server-selected workflows emit jobs without a workflow group. Explicitly
+  configured workflows retain groups, even when only one workflow is selected.
+- Each group is labeled `:github: workflow · <workflow-name>`. An unnamed
+  workflow uses its canonical path. A resolved, non-empty `run-name` appends
+  ` — <run-name>`.
 - Upload leaves the importer label unchanged.
 - Each job publishes a provider check named
   `<workflow-name-or-path> / <job-id> (<effective-event>)`. Matrix jobs append
@@ -1037,8 +1036,8 @@ The initial upload creates `plan` and one deferred step,
 `:github: matrix · build`, with check `build (matrix)`. That step waits for
 `plan`, reads the verified `matrix` output, expands it with the static-matrix
 rules, recompiles only `build` and the jobs that transitively need it, such as
-`publish`, and uploads them with the initial workflow's grouping choice. Every other job is
-uploaded once, up front. The deferred step reports `W_MATRIX_DEFERRED` at
+`publish`, and uploads them with the initial workflow's grouping. Every other
+job is uploaded once, up front. The deferred step reports `W_MATRIX_DEFERRED` at
 compile time and leaves the deferred jobs `not-evaluated` in processing
 reports, so `validate` and `compile --format ir-json` show the graph shape
 while `compile` cannot render the pipeline YAML for the workflow. See

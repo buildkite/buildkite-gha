@@ -236,11 +236,16 @@ func TestPluginServerSelectedWorkflowKeepsDeferredStepsUngrouped(t *testing.T) {
 		t.Fatalf("server-selected workflow continuations = %+v", initials)
 	}
 	initial := initials[0]
-	group, _, steps := decodeContinuePipeline(t, []byte(initial.pipeline))
-	if group != "" || len(steps) != 3 {
+	var pipeline struct {
+		Steps []continuePipelineStep `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal([]byte(initial.pipeline), &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 3 {
 		t.Fatalf("initial pipeline must have three flat steps:\n%s", initial.pipeline)
 	}
-	for _, step := range steps {
+	for _, step := range pipeline.Steps {
 		if len(step.DependsOn) == 0 || step.DependsOn[0].Step != "continue-importer" {
 			t.Fatalf("step %q lost importer dependency: %#v", step.Key, step.DependsOn)
 		}
@@ -249,8 +254,10 @@ func TestPluginServerSelectedWorkflowKeepsDeferredStepsUngrouped(t *testing.T) {
 	if code, _, stderr := runContinue(t, runner, initial.digest); code != 0 {
 		t.Fatalf("continue code = %d, stderr = %q", code, stderr)
 	}
-	group, _, steps = decodeContinuePipeline(t, lastPipelineUpload(t, runner))
-	if group != "" || len(steps) != 3 {
+	if err := yaml.Unmarshal(lastPipelineUpload(t, runner), &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 3 {
 		t.Fatalf("deferred pipeline must have three flat steps:\n%s", lastPipelineUpload(t, runner))
 	}
 }

@@ -234,15 +234,13 @@ func runContinueAs(t *testing.T, runner *cliCaptureRunner, digest, producer, job
 type continuePipelineStep struct {
 	Key              string `yaml:"key"`
 	Label            string `yaml:"label"`
-	Block            string `yaml:"block"`
 	Command          string `yaml:"command"`
 	Skip             string `yaml:"skip"`
 	Concurrency      int    `yaml:"concurrency"`
 	ConcurrencyGroup string `yaml:"concurrency_group"`
 	Agents           struct{ Queue string }
 	DependsOn        []struct {
-		Step         string `yaml:"step"`
-		AllowFailure bool   `yaml:"allow_failure"`
+		Step string `yaml:"step"`
 	} `yaml:"depends_on"`
 	Notify []struct {
 		GitHubCheck struct {
@@ -263,24 +261,10 @@ func decodeContinuePipeline(t *testing.T, source []byte) (group string, key stri
 	if err := yaml.Unmarshal(source, &pipeline); err != nil {
 		t.Fatalf("pipeline YAML: %v\n%s", err, source)
 	}
-	if len(pipeline.Steps) == 1 && pipeline.Steps[0].Group != "" {
-		if len(pipeline.Steps[0].Steps) == 0 {
-			t.Fatalf("pipeline group has no steps:\n%s", source)
-		}
-		return pipeline.Steps[0].Group, pipeline.Steps[0].Key, pipeline.Steps[0].Steps
+	if len(pipeline.Steps) != 1 {
+		t.Fatalf("pipeline groups = %d, want 1:\n%s", len(pipeline.Steps), source)
 	}
-	for _, step := range pipeline.Steps {
-		if step.Group != "" || len(step.Steps) != 0 {
-			t.Fatalf("pipeline mixes grouped and flat steps:\n%s", source)
-		}
-	}
-	var flat struct {
-		Steps []continuePipelineStep `yaml:"steps"`
-	}
-	if err := yaml.Unmarshal(source, &flat); err != nil {
-		t.Fatalf("pipeline YAML: %v\n%s", err, source)
-	}
-	return "", "", flat.Steps
+	return pipeline.Steps[0].Group, pipeline.Steps[0].Key, pipeline.Steps[0].Steps
 }
 
 func lastPipelineUpload(t *testing.T, runner *cliCaptureRunner) []byte {
@@ -311,9 +295,6 @@ func pipelineUploads(runner *cliCaptureRunner) int {
 // uploaded again.
 func TestContinueExpandsNeedsDerivedMatrix(t *testing.T) {
 	initial := runContinueInitialUpload(t, "--runner-queue", "ubuntu-latest=custom-linux")
-	if initial.artifact.Workflow.Ungrouped {
-		t.Fatalf("explicit workflow stage record is ungrouped: %+v", initial.artifact.Workflow)
-	}
 	prefix := strings.TrimSuffix(initial.artifact.rootProducer().Key, "plan")
 	if initial.artifact.rootProducer().Key != prefix+"plan" || !slices.Equal(initial.artifact.Continuation.Jobs, []string{"build", "publish"}) || initial.artifact.Continuation.StepKey != prefix+"build-matrix" {
 		t.Fatalf("continuation = %+v", initial.artifact.Continuation)
@@ -933,14 +914,29 @@ func TestContinueSharesApprovalGates(t *testing.T) {
 		}
 	}
 	gateSteps := func(pipeline []byte) (created []string, referenced []string) {
-		_, _, steps := decodeContinuePipeline(t, pipeline)
-		for _, step := range steps {
-			if step.Block != "" {
-				created = append(created, step.Key)
-			}
-			for _, dependency := range step.DependsOn {
-				if strings.Contains(dependency.Step, "approve") {
-					referenced = append(referenced, dependency.Step)
+		var decoded struct {
+			Steps []struct {
+				Steps []struct {
+					Key       string `yaml:"key"`
+					Block     string `yaml:"block"`
+					DependsOn []struct {
+						Step string `yaml:"step"`
+					} `yaml:"depends_on"`
+				} `yaml:"steps"`
+			} `yaml:"steps"`
+		}
+		if err := yaml.Unmarshal(pipeline, &decoded); err != nil {
+			t.Fatalf("pipeline YAML: %v\n%s", err, pipeline)
+		}
+		for _, group := range decoded.Steps {
+			for _, step := range group.Steps {
+				if step.Block != "" {
+					created = append(created, step.Key)
+				}
+				for _, dependency := range step.DependsOn {
+					if strings.Contains(dependency.Step, "approve") {
+						referenced = append(referenced, dependency.Step)
+					}
 				}
 			}
 		}
@@ -1034,14 +1030,29 @@ func TestContinueRetriesWhenOnlySomeGatesRaced(t *testing.T) {
 	// blockKeys returns the block steps a pipeline creates by key and label,
 	// and every step key the pipeline depends on.
 	blockKeys := func(pipeline []byte) (blocks map[string]string, referenced map[string]bool) {
-		_, _, steps := decodeContinuePipeline(t, pipeline)
+		var decoded struct {
+			Steps []struct {
+				Steps []struct {
+					Key       string `yaml:"key"`
+					Block     string `yaml:"block"`
+					DependsOn []struct {
+						Step string `yaml:"step"`
+					} `yaml:"depends_on"`
+				} `yaml:"steps"`
+			} `yaml:"steps"`
+		}
+		if err := yaml.Unmarshal(pipeline, &decoded); err != nil {
+			t.Fatal(err)
+		}
 		blocks, referenced = map[string]string{}, map[string]bool{}
-		for _, step := range steps {
-			if step.Block != "" {
-				blocks[step.Key] = step.Block
-			}
-			for _, dependency := range step.DependsOn {
-				referenced[dependency.Step] = true
+		for _, group := range decoded.Steps {
+			for _, step := range group.Steps {
+				if step.Block != "" {
+					blocks[step.Key] = step.Block
+				}
+				for _, dependency := range step.DependsOn {
+					referenced[dependency.Step] = true
+				}
 			}
 		}
 		return blocks, referenced

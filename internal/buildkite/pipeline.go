@@ -562,9 +562,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		// Keep each opening marker immediately before its dependency-blocked
 		// closing marker. Their ordered queue positions hold the group before a
 		// later build or sibling scope can enter it.
-		dependencies := []dependency{{Step: pipeline.CompilerStep}}
-		if (workflow.Aggregate && !workflow.Ungrouped) || pipeline.CompilerStep == "" {
-			dependencies = nil
+		var dependencies []dependency
+		if (!workflow.Aggregate || workflow.Ungrouped) && pipeline.CompilerStep != "" {
+			dependencies = append(dependencies, dependency{Step: pipeline.CompilerStep})
 		}
 		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start workflow concurrency", workflow.GateOpenKey, workflow.ConcurrencyGate, dependencies, condition)
 		dependencies = workflowGateCloseDependencies(workflow, pipeline.CompilerStep)
