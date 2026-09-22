@@ -41,7 +41,7 @@ func TestValidateBatchWritesAndResumesAtomicReports(t *testing.T) {
 	events := []string{"pull_request_review", "pull_request_review_comment"}
 	deployments := []string{"deployment", "deployment_status"}
 	for i, record := range records {
-		workflow := []byte("on: [push, create, delete, label, fork, public, gollum, page_build, " + events[i] + ", " + deployments[i] + "]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n")
+		workflow := []byte("on: [push, create, delete, label, fork, public, gollum, page_build, watch, " + events[i] + ", " + deployments[i] + "]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n")
 		if err := os.WriteFile(record.Source, workflow, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -69,10 +69,10 @@ func TestValidateBatchWritesAndResumesAtomicReports(t *testing.T) {
 		if report.Workflow == records[1].Source {
 			wantEvent, wantDeployment = events[1], deployments[1]
 		}
-		if len(report.Evaluations) != 10 || report.Evaluations[0].Event != "push" || report.Evaluations[1].Event != wantDeployment || report.Evaluations[1].Report.Result != "admitted" || report.Evaluations[9].Event != wantEvent || report.Evaluations[9].Report.Result != "admitted" {
+		if len(report.Evaluations) != 11 || report.Evaluations[0].Event != "push" || report.Evaluations[1].Event != wantDeployment || report.Evaluations[1].Report.Result != "admitted" || report.Evaluations[10].Event != wantEvent || report.Evaluations[10].Report.Result != "admitted" {
 			t.Fatalf("report %q lost deployment or review evaluation: %#v", path, report.Evaluations)
 		}
-		for i, event := range []string{"create", "delete", "label", "fork", "public", "gollum", "page_build"} {
+		for i, event := range []string{"create", "delete", "label", "fork", "public", "gollum", "page_build", "watch"} {
 			if report.Evaluations[i+2].Event != event || report.Evaluations[i+2].Report.Result != "admitted" {
 				t.Fatalf("report lost %s: %#v", event, report.Evaluations)
 			}

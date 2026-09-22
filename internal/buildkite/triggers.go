@@ -78,6 +78,7 @@ var supportedTriggerEvents = map[string]bool{
 	"public":                      true,
 	"gollum":                      true,
 	"page_build":                  true,
+	"watch":                       true,
 	"issues":                      true,
 	"issue_comment":               true,
 	"pull_request_review":         true,
@@ -480,7 +481,7 @@ func LiveEventPredicate(event string) string {
 		return predicate
 	case "schedule":
 		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source == "schedule"))`
-	case "merge_group", "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete", "label", "fork", "public", "gollum", "page_build":
+	case "merge_group", "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete", "label", "fork", "public", "gollum", "page_build", "watch":
 		return predicate
 	default:
 		return ""
@@ -709,6 +710,19 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 			actions = append(actions, expressions.ReleaseAction+` == `+yamlScalar(action))
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
+	case "watch":
+		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t)
+		}
+		for _, action := range t.Types {
+			if action != "started" {
+				return "", false, triggerFilterError(t, fmt.Errorf("watch activity type %q cannot be mapped exactly", action), "types")
+			}
+		}
+		if expressions.EventPredicate == "" {
+			return "", false, fmt.Errorf("watch requires an effective event expression")
+		}
+		return expressions.EventPredicate, true, nil
 	case "label":
 		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
 			return "", false, unsupportedEventFilter(t)

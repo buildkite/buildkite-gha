@@ -173,6 +173,19 @@ snapshots must supply the resolved default branch. This does not deploy Pages or
 add token authority. Release and select the compatible runtime before backend
 subscription defaults; existing hooks need a separately approved additive update.
 
+### Repository star events
+
+`watch` runs when someone stars the repository (`started`), not when they subscribe
+to notifications or remove a star. Scalar, array, null, empty-map, `types: []`, and
+`types: [started]` declarations are supported; other types and filters are rejected.
+Pipeline Triggers require the original payload and pinned workflow path/ref/SHA.
+Workflows and checkout use the source repository's server-resolved default branch,
+not stale webhook branch metadata. The original payload remains in `github.event`
+and `GITHUB_EVENT_PATH`. Missing or conflicting provenance fails closed, including
+rebuilds without the original payload. No token authority is added. Release and
+select the compatible runtime before backend subscription defaults; existing hooks
+need a separately approved additive update.
+
 ### Repository label lifecycle events
 
 `label` supports `created`, `edited`, and `deleted` activities, all by default.
@@ -422,6 +435,7 @@ the group condition, and the provider-check suffix.
 | `public` | [Repository visibility](#repository-visibility-events). No activity types or filters. Workflows and checkout use the resolved default branch. |
 | `gollum` | [Wiki pages](#wiki-page-events). No activity types or filters. Workflows and checkout use the source repository's resolved default branch, not a wiki commit. |
 | `page_build` | [GitHub Pages builds](#github-pages-build-events). No activity types or filters. Workflows and checkout use the resolved default branch, not the Pages build commit. |
+| `watch` | [Repository stars](#repository-star-events). Only `started`, with no other filters. Workflows and checkout use the resolved default branch. |
 | `issues` | Omitted `types` or `types: []` accepts every GitHub Actions issue activity. Nonempty `types` may contain `opened`, `edited`, `deleted`, `transferred`, `pinned`, `unpinned`, `closed`, `reopened`, `assigned`, `unassigned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `milestoned`, `demilestoned`, `typed`, `untyped`, `field_added`, and `field_removed`. Unknown types and branch, tag, path, or workflow filters are rejected. In a GitHub Actions Pipeline Trigger build, Buildkite selects workflows and the checkout from the latest verified default-branch SHA; native issue-build settings, branch/path filters, and comment gating do not participate. Existing native Buildkite issue builds remain supported through linked webhook data and retain their own build-creation settings. |
 | `issue_comment` | Omitted `types` or `types: []` accepts `created`, `edited`, and `deleted`; nonempty `types` may contain those activities. Both issue and pull request conversation comments are supported. Unknown types and branch, tag, path, or workflow filters are rejected. GitHub Actions Pipeline Trigger builds select workflows and the checkout from the latest verified default-branch SHA and do not inherit native command-word, trusted-commenter, PR-only, branch, or path gating. |
 | `pull_request_review` | Pipeline Triggers support `submitted`, `edited`, and `dismissed`, all by default. Nonempty `types` selects activities, not review states. Use `if: github.event.review.state == 'approved'` on a job or step for approval-only execution. |

@@ -52,6 +52,7 @@ var supportedEvents = map[string]bool{
 	"public":                      true,
 	"gollum":                      true,
 	"page_build":                  true,
+	"watch":                       true,
 }
 
 var supportedWorkflowResults = map[string]bool{
