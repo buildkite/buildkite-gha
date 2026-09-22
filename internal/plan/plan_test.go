@@ -786,12 +786,43 @@ func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 	}
 	validateJobPlanSchema(t, encoded)
 
+	// Absent provenance remains readable. Explicit empty provenance and paths
+	// survive serialization and each change the bytes bound by the plan digest.
+	digests := map[[32]byte]bool{}
+	for _, paths := range [][]string{nil, {}, {"dist/a.sh", "run.sh"}} {
+		job.Actions[0].ExecutablePaths = paths
+		data, err := Encode(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := Decode(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(decoded.Actions[0].ExecutablePaths, paths) {
+			t.Fatalf("executable paths = %#v, want %#v", decoded.Actions[0].ExecutablePaths, paths)
+		}
+		validateJobPlanSchema(t, data)
+		digest := sha256.Sum256(data)
+		if digests[digest] {
+			t.Fatal("executable provenance was not bound by plan bytes")
+		}
+		digests[digest] = true
+	}
+
 	for _, test := range []struct {
 		name string
 		edit func(*Job)
 		want string
 	}{
 		{name: "invalid image", edit: func(j *Job) { j.Actions[0].DockerImage = "INVALID" }, want: "invalid Docker image"},
+		{name: "unsorted executable paths", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{"z", "a"} }, want: "invalid executable paths"},
+		{name: "duplicate executable paths", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{"a", "a"} }, want: "invalid executable paths"},
+		{name: "escaped executable path", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{"../run"} }, want: "invalid executable paths"},
+		{name: "absolute executable path", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{"/run"} }, want: "invalid executable paths"},
+		{name: "empty executable path", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{""} }, want: "invalid executable paths"},
+		{name: "oversized executable path", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{strings.Repeat("a", 256)} }, want: "invalid executable paths"},
+		{name: "too many executable paths", edit: func(j *Job) { j.Actions[0].ExecutablePaths = make([]string, 50001) }, want: "too many executable paths"},
 		{name: "missing docker capability", edit: func(j *Job) { j.RequiredCapabilities = []string{"network"} }, want: "require docker capability"},
 		{name: "missing network capability", edit: func(j *Job) { j.RequiredCapabilities = []string{"docker"} }, want: "require network capability"},
 	} {

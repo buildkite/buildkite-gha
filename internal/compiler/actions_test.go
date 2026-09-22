@@ -439,6 +439,42 @@ func TestCompileActionLocksLocalAndDedup(t *testing.T) {
 	if len(locks) != 1 || len(selectors) != 2 || selectors[0] != selectors[1] || locks[0].Path != "js" || !strings.HasPrefix(locks[0].SourceDigest, "sha256:") || len(caps) != 0 {
 		t.Fatalf("unexpected result: %#v %#v %#v", selectors, locks, caps)
 	}
+	if locks[0].ExecutablePaths == nil || len(locks[0].ExecutablePaths) != 0 {
+		t.Fatalf("action without executables must record an explicit empty list: %#v", locks[0].ExecutablePaths)
+	}
+}
+
+func TestCompileActionExecutablePathsUseLockedTree(t *testing.T) {
+	workspace, remote, substitute := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, root := range []string{workspace, remote, substitute} {
+		writeAction(t, root, "nested", "name: action\nruns:\n  using: node20\n  main: index.js\n")
+	}
+	writeAction(t, substitute, "", "name: cache\nruns:\n  using: node20\n  main: index.js\n")
+	for _, file := range []string{filepath.Join(workspace, "nested", "run"), filepath.Join(remote, "outer"), filepath.Join(remote, "nested", "run"), filepath.Join(substitute, "replacement")} {
+		if err := os.WriteFile(file, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commit := strings.Repeat("a", 40)
+	for _, test := range []struct {
+		uses string
+		want []string
+	}{
+		{"./nested", []string{"run"}},
+		{"owner/repo/nested@" + commit, []string{"nested/run", "outer"}},
+		{"actions/cache@" + commit, []string{"replacement"}},
+	} {
+		t.Run(test.uses, func(t *testing.T) {
+			actionSource := commitActionSource{roots: map[string]string{commit: remote, actionintegration.CacheCommit: substitute}}
+			_, locks, _, _, err := compileActionLocks(t.Context(), workspace, actionSource, []string{test.uses})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(locks) != 1 || !reflect.DeepEqual(locks[0].ExecutablePaths, test.want) {
+				t.Fatalf("locks = %#v, want executable paths %v", locks, test.want)
+			}
+		})
+	}
 }
 
 func TestCompileActionInvocationsDetectsEffectiveGitHubTokenDefaults(t *testing.T) {

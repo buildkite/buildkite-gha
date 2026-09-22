@@ -128,6 +128,23 @@ authority; private images are unsupported.
   provenance. A local `HEAD` fallback preserves compatibility but cannot grant
   hosted release token issuance.
 
+Action locks record a sorted, unique `executable_paths` list alongside the
+source digest. Paths are relative to the local action directory for workspace
+actions and the entire repository for GitHub actions, including substituted
+`actions/cache` releases. The plan digest binds this metadata. An absent list
+uses filesystem modes; an explicit empty list records no executable files.
+
+Linux and macOS verification always reads executable bits from the filesystem,
+so declared paths cannot hide mode changes. The source verifier can use recorded
+paths on Windows, where Unix modes are not preserved; this does not admit
+Windows jobs. Content, additions, removals, and special files remain checked.
+Cache manifests keep their existing format and must match the verified tree;
+stale or mismatched manifests fail rather than being rewritten from provenance.
+
+Plans without `executable_paths` remain readable. New plans require the matching
+runtime: `run-job` still rejects a compiler/runtime version mismatch. This
+optional field does not make plans portable between CLI versions.
+
 Explicit and generated event snapshots provide compatibility context. They do
 not authorize path-filter admission, queues, secrets, or tokens.
 

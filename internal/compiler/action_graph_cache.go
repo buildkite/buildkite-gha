@@ -60,6 +60,7 @@ func (cache *actionGraphCache) compile(ctx context.Context, instance JobInstance
 	compiled.locks = slices.Clone(graph.locks)
 	for i := range compiled.locks {
 		compiled.locks[i].Children = maps.Clone(compiled.locks[i].Children)
+		compiled.locks[i].ExecutablePaths = slices.Clone(compiled.locks[i].ExecutablePaths)
 	}
 	compiled.cacheSubstitutions = slices.Clone(graph.cacheSubstitutions)
 	if graph.workflowSource != nil {

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,6 +61,10 @@ type Resolved struct {
 	Reference    Reference
 	Commit       string
 	SourceDigest string
+	// ExecutablePaths is authenticated by the caller's source lock. Nil uses
+	// filesystem modes; an empty non-nil list declares no executable files.
+	// The store uses it only on hosts that cannot preserve Unix modes.
+	ExecutablePaths []string
 }
 
 // Materialized identifies the immutable repository tree and selected source.
@@ -988,6 +993,9 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	if !git.ValidObjectID(resolved.Commit) {
 		return Materialized{}, fmt.Errorf("commit must be lower-case full SHA")
 	}
+	if resolved.ExecutablePaths != nil && resolved.SourceDigest == "" {
+		return Materialized{}, fmt.Errorf("executable paths require a source digest")
+	}
 	parsed, err := Parse(resolved.Reference.Raw)
 	if err != nil {
 		return Materialized{}, err
@@ -1075,7 +1083,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	if _, err = selected(filepath.Join(tmp, "tree"), selectedPath); err != nil {
 		return Materialized{}, err
 	}
-	m, err = buildManifest(filepath.Join(tmp, "tree"), s.cfg, parsed, resolved.Commit)
+	m, err = buildResolvedManifest(filepath.Join(tmp, "tree"), s.cfg, parsed, resolved)
 	if err != nil {
 		return Materialized{}, err
 	}
@@ -1348,14 +1356,30 @@ type manifestFile struct {
 // It uses the same bounded manifest and file-mode model as immutable remote
 // action source. It rejects symlinks and other special files.
 func DigestTree(root string) (string, error) {
-	info, err := os.Stat(root)
+	return DigestTreeWithExecutablePaths(root, nil)
+}
+
+// DigestTreeAndExecutablePaths returns the canonical digest and sorted relative
+// paths whose executable bits contribute to it. An empty list is non-nil.
+func DigestTreeAndExecutablePaths(root string) (string, []string, error) {
+	m, err := buildManifestFiles(root, defaults(), Reference{}, "", true, nil)
 	if err != nil {
-		return "", fmt.Errorf("stat action source tree: %w", err)
+		return "", nil, fmt.Errorf("digest action source tree: %w", err)
 	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("action source tree is not a directory")
+	paths := []string{}
+	for _, file := range m.Files {
+		if file.Mode == 0o755 {
+			paths = append(paths, file.Path)
+		}
 	}
-	m, err := buildManifestFiles(root, defaults(), Reference{}, "", true)
+	return m.Digest, paths, nil
+}
+
+// DigestTreeWithExecutablePaths calculates a tree digest using executable-mode
+// provenance authenticated by the caller. Nil uses filesystem modes; an empty
+// non-nil list declares no executable files. Every path must name a regular file.
+func DigestTreeWithExecutablePaths(root string, executablePaths []string) (string, error) {
+	m, err := buildManifestFiles(root, defaults(), Reference{}, "", true, executablePaths)
 	if err != nil {
 		return "", fmt.Errorf("digest action source tree: %w", err)
 	}
@@ -1363,13 +1387,43 @@ func DigestTree(root string) (string, error) {
 }
 
 func buildManifest(root string, c config, ref Reference, commit string) (manifest, error) {
-	return buildManifestFiles(root, c, ref, commit, false)
+	return buildManifestFiles(root, c, ref, commit, false, nil)
 }
 
-func buildManifestFiles(root string, c config, ref Reference, commit string, excludeGitMetadata bool) (manifest, error) {
+func buildResolvedManifest(root string, c config, ref Reference, resolved Resolved) (manifest, error) {
+	var executablePaths []string
+	if runtime.GOOS == "windows" {
+		executablePaths = resolved.ExecutablePaths
+	}
+	return buildManifestFiles(root, c, ref, resolved.Commit, false, executablePaths)
+}
+
+func buildManifestFiles(root string, c config, ref Reference, commit string, excludeGitMetadata bool, executablePaths []string) (manifest, error) {
 	m := manifest{Schema: "buildkite-gha-action-source/v1", Owner: strings.ToLower(ref.Owner), Repository: strings.ToLower(ref.Repository), Commit: commit}
+	info, err := os.Stat(root)
+	if err != nil {
+		return m, fmt.Errorf("stat action source tree: %w", err)
+	}
+	if !info.IsDir() {
+		return m, fmt.Errorf("action source tree is not a directory")
+	}
+	if len(executablePaths) > c.maxEntries {
+		return m, fmt.Errorf("too many executable paths")
+	}
+	executable := make(map[string]bool, len(executablePaths))
+	for i, p := range executablePaths {
+		if len(p) > c.maxPath || !utf8.ValidString(p) || hasControl(p) || strings.Contains(p, "\\") || i > 0 && executablePaths[i-1] >= p {
+			return m, fmt.Errorf("invalid executable path list")
+		}
+		for segment := range strings.SplitSeq(p, "/") {
+			if segment == "" || segment == "." || segment == ".." || len(segment) > c.maxSegment {
+				return m, fmt.Errorf("invalid executable path list")
+			}
+		}
+		executable[p] = true
+	}
 	var total int64
-	err := filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
+	err = filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
 		if e != nil {
 			return e
 		}
@@ -1406,14 +1460,18 @@ func buildManifestFiles(root string, c config, ref Reference, commit string, exc
 			return e
 		}
 		mode := uint32(0o644)
-		if st.Mode().Perm()&0o111 != 0 {
+		if executablePaths != nil && executable[rel] || executablePaths == nil && st.Mode().Perm()&0o111 != 0 {
 			mode = 0o755
 		}
+		delete(executable, rel)
 		m.Files = append(m.Files, manifestFile{Path: rel, Size: st.Size(), SHA256: hex.EncodeToString(h.Sum(nil)), Mode: mode})
 		return nil
 	})
 	if err != nil {
 		return m, err
+	}
+	if len(executable) != 0 {
+		return m, fmt.Errorf("executable path does not name a source file")
 	}
 	sort.Slice(m.Files, func(i, j int) bool { return m.Files[i].Path < m.Files[j].Path })
 	b, _ := json.Marshal(m.Files)
@@ -1432,7 +1490,7 @@ func (s *Store) verify(base string, resolved Resolved) (manifest, error) {
 	if dec.Decode(&want) != nil || dec.Decode(&struct{}{}) != io.EOF {
 		return manifest{}, fmt.Errorf("invalid manifest")
 	}
-	got, e := buildManifest(filepath.Join(base, "tree"), s.cfg, resolved.Reference, resolved.Commit)
+	got, e := buildResolvedManifest(filepath.Join(base, "tree"), s.cfg, resolved.Reference, resolved)
 	got.Authenticated = want.Authenticated
 	if e != nil || !reflect.DeepEqual(got, want) {
 		return manifest{}, fmt.Errorf("cache verification failed")
