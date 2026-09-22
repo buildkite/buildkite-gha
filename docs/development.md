@@ -2,12 +2,16 @@
 
 ## Set up the development toolchain
 
-The repository pins Go, Node, lint, and release tools with `mise`:
+The repository pins Go, Node, PowerShell, lint, and release tools with `mise`:
 
 ```sh
 mise trust mise.toml
 mise install
 ```
+
+Runtime tests require the pinned `pwsh` executable on `PATH`. Run them through
+`mise` to use the installed PowerShell; missing PowerShell fails rather than
+skips its execution tests. CI uses the same toolchain on Linux and macOS.
 
 `mise.lock` lets CI install tools without looking up releases. After changing a
 tool version, regenerate the lock with `mise` 2026.5.12 or newer:

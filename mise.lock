@@ -238,6 +238,38 @@ url = "https://nodejs.org/dist/v24.18.0/node-v24.18.0-darwin-x64.tar.gz"
 checksum = "sha256:0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821"
 url = "https://nodejs.org/dist/v24.18.0/node-v24.18.0-win-x64.zip"
 
+[[tools.powershell]]
+version = "7.4.13"
+backend = "aqua:PowerShell/PowerShell"
+
+[tools.powershell."platforms.linux-arm64"]
+checksum = "sha256:bd48076333a08d210e87cb96215cfe49316ce09dd8c92f2cd79eef0f5112959c"
+url = "https://github.com/PowerShell/PowerShell/releases/download/v7.4.13/powershell-7.4.13-linux-arm64.tar.gz"
+
+[tools.powershell."platforms.linux-arm64-musl"]
+checksum = "sha256:bd48076333a08d210e87cb96215cfe49316ce09dd8c92f2cd79eef0f5112959c"
+url = "https://github.com/PowerShell/PowerShell/releases/download/v7.4.13/powershell-7.4.13-linux-arm64.tar.gz"
+
+[tools.powershell."platforms.linux-x64"]
+checksum = "sha256:59e5df675dacbfe45374c32c1bf2480168a33243423c9b19252d0476fd1b748c"
+url = "https://github.com/PowerShell/PowerShell/releases/download/v7.4.13/powershell-7.4.13-linux-x64.tar.gz"
+
+[tools.powershell."platforms.linux-x64-musl"]
+checksum = "sha256:77d22f7fd5a55d224daa13cbcfdeddc1fafc0cb1275ed602e1eedcb2d998f26e"
+url = "https://github.com/PowerShell/PowerShell/releases/download/v7.4.13/powershell-7.4.13-linux-musl-x64.tar.gz"
+
+[tools.powershell."platforms.macos-arm64"]
+checksum = "sha256:a65060c521317f4f8873b5fdda8cb8981f5310462248e82f824b219505ddc3a7"
+url = "https://github.com/PowerShell/PowerShell/releases/download/v7.4.13/powershell-7.4.13-osx-arm64.tar.gz"
+
+[tools.powershell."platforms.macos-x64"]
+checksum = "sha256:37760974faa556ee54ccbf7824abacc88fe879334baa37a2d52af8e07a928c87"
+url = "https://github.com/PowerShell/PowerShell/releases/download/v7.4.13/powershell-7.4.13-osx-x64.tar.gz"
+
+[tools.powershell."platforms.windows-x64"]
+checksum = "sha256:8fb52d2172d285b230c2857a90ba4dd28ecf6477ba4a91f91b6854a647b33b65"
+url = "https://github.com/PowerShell/PowerShell/releases/download/v7.4.13/PowerShell-7.4.13-win-x64.zip"
+
 [[tools.shellcheck]]
 version = "0.11.0"
 backend = "aqua:koalaman/shellcheck"
