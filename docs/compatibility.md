@@ -347,6 +347,10 @@ the group condition, and the provider-check suffix.
 | `workflow_dispatch` | Selected only by an explicit snapshot or authoritative `GITHUB_EVENT_NAME` or `BUILDKITE_GITHUB_EVENT` value. Webhook-style branch, tag, type, and workflow filters are unsupported. |
 | `schedule` | Selected for Buildkite scheduled builds. Buildkite owns cron configuration and does not expose which schedule started a build, so every `on.schedule` workflow is eligible for every Buildkite scheduled build. |
 | `workflow_call` | Defines a reusable-workflow interface. A reusable-only local file is available to callers but does not become a top-level group. |
+| `pull_request_target` | Intentionally unsupported for security reasons. Use `pull_request` with careful [checkout and ref handling](#checkout-action) instead; changing the event alone does not make untrusted code safe. |
+| `repository_dispatch` | Not supported yet. GitHub repository dispatch requests do not start imported workflows through Pipeline Triggers. |
+| `workflow_run` | Not supported yet. Running an imported workflow does not create a GitHub Actions run or emit its workflow-run events. Consider Buildkite trigger steps when migrating cross-pipeline orchestration. |
+| `check_run`, `check_suite` | Not supported yet by GitHub Actions Pipeline Triggers. Native Buildkite builds on completed check runs are a separate integration. |
 | Any other event | No Buildkite build source exists, so the trigger can never start a build. It is ignored with a `W_TRIGGER_EVENT_UNSUPPORTED` warning when the workflow also declares a supported event. A workflow declaring only unsupported events fails event-independent validation and is a skipped step in an uploaded pipeline. |
 
 Supported `pull_request` activity types are `assigned`, `unassigned`, `labeled`, `unlabeled`, `opened`, `edited`, `closed`, `reopened`, `synchronize`, `converted_to_draft`, `locked`, `unlocked`, `enqueued`, `dequeued`, `milestoned`, `demilestoned`, `ready_for_review`, `review_requested`, `review_request_removed`, `auto_merge_enabled`, and `auto_merge_disabled`.
