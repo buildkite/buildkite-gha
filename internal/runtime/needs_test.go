@@ -233,6 +233,70 @@ jobs:
 	}
 }
 
+func TestReusableNeedsJSONExcludesCallerButPreservesCallGuard(t *testing.T) {
+	for _, condition := range []string{"", "if: always()"} {
+		t.Run(condition, func(t *testing.T) {
+			workspace := t.TempDir()
+			const workflowPath = ".github/workflows/caller.yml"
+			caller := `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps: [{run: echo prepare}]
+  delegated:
+    needs: prepare
+    ` + condition + `
+    uses: ./.github/workflows/middle.yml
+`
+			writeFixtureFile(t, workspace, workflowPath, caller)
+			writeFixtureFile(t, workspace, ".github/workflows/middle.yml", `on: workflow_call
+jobs:
+  nested:
+    uses: ./.github/workflows/leaf.yml
+`)
+			writeFixtureFile(t, workspace, ".github/workflows/leaf.yml", `on: workflow_call
+jobs:
+  leaf:
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      seen: ${{ steps.dump.outputs.seen }}
+    steps:
+      - id: dump
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: echo "seen=$NEEDS" >> "$GITHUB_OUTPUT"
+`)
+			event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(caller), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := jobs[len(jobs)-1]
+			if len(job.NeedSources) != 0 || len(job.CallGuards) != 1 || len(job.CallGuards[0].NeedSources["prepare"]) != 1 || len(job.Dependencies) != 1 {
+				t.Fatalf("callee scope and caller guard = %#v / %#v / %#v", job.NeedSources, job.CallGuards, job.Dependencies)
+			}
+			for _, status := range []string{"success", "failure", "skipped", "cancelled"} {
+				job.CallGuards[0].Needs = map[string]plan.Need{"prepare": {Result: status}}
+				result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if condition != "" || status == "success" {
+					if result.Conclusion != "success" || result.Outputs["seen"] != "{}" {
+						t.Fatalf("caller %s: result = %#v, want empty needs", status, result)
+					}
+				} else if result.Conclusion != "skipped" || len(result.Outputs) != 0 {
+					t.Fatalf("caller %s: result = %#v, want skipped", status, result)
+				}
+			}
+		})
+	}
+}
+
 func TestDeferredTypedInputsCompileAndRunNestedWorkflow(t *testing.T) {
 	for _, enabled := range []string{"true", "false", ""} {
 		t.Run("deps="+enabled, func(t *testing.T) {

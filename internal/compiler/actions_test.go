@@ -1357,7 +1357,7 @@ runs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 2 || len(plans[1].CallGuards) != 1 || plans[1].Inputs["deploy"] != false || plans[1].GitHubToken == nil || !plans[1].HasCapability("provider-token-write") {
+	if len(plans) != 2 || len(plans[1].CallGuards) != 2 || plans[1].Inputs["deploy"] != false || plans[1].GitHubToken == nil || !plans[1].HasCapability("provider-token-write") {
 		t.Fatalf("caller-scoped guard authority = %#v", plans)
 	}
 }

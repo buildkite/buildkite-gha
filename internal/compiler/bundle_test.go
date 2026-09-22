@@ -1389,7 +1389,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_CONCURRENCY_QUEUED_BEFORE_PREREQUISITES" {
+	if len(bundle.IR.Warnings) != 2 || bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_CONCURRENCY_QUEUED_BEFORE_PREREQUISITES" || bundle.IR.Warnings[1].Code != "W_REUSABLE_WORKFLOW_CONCURRENCY_ENTERED_BEFORE_CALL_CONDITION" {
 		t.Fatalf("warnings = %#v", bundle.IR.Warnings)
 	}
 	if count := bytes.Count(bundle.Pipeline, []byte("Start reusable-workflow concurrency")); count != 1 {

@@ -514,6 +514,8 @@ Upload configures Git fallback before validating remote calls. After anonymous a
 
 A call condition runs in caller scope before static call-matrix expansion. It keeps the implicit `success()` guard. A false condition skips every flattened descendant, including jobs with `if: always()`, and exposes `skipped` with empty outputs to downstream `needs`. Nested calls evaluate ordered outer-to-inner guards. Callee job results do not change an outer guard. Call conditions cannot use `matrix`, `strategy`, callee inputs or needs, `steps`, `env`, `runner`, or `secrets`.
 
+A call's `needs` governs its condition and scheduling, but does not appear in the called jobs' `needs` context. Each called job sees only dependencies it declares within its own workflow; a job without `needs` sees `{}` when serialized with `toJSON(needs)`.
+
 The called workflow declares its inputs and outputs:
 
 ```yaml

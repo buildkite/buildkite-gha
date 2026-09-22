@@ -78,8 +78,8 @@ func flattenedJobIDs(resolved []sourcedJob) []string {
 // TestJobPrerequisitesCarryGuardAndDeferredInputProvenanceWithoutWideningNeeds
 // builds a nested call whose leaf job reaches the caller's jobs only through
 // a call guard and a forwarded deferred input. Those jobs must be
-// prerequisites of the leaf, but its needs scope must stay the callee's own
-// need, so the callee never sees the caller's needs context.
+// prerequisites of the leaf, but its needs scope must stay empty because
+// the leaf declares no needs of its own.
 func TestJobPrerequisitesCarryGuardAndDeferredInputProvenanceWithoutWideningNeeds(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
@@ -135,8 +135,8 @@ jobs:
 	want := map[string]struct{ prerequisites, needs []string }{
 		"prepare":              {prerequisites: []string{}, needs: nil},
 		"hash":                 {prerequisites: []string{}, needs: nil},
-		"delegated.setup":      {prerequisites: []string{"hash", "prepare"}, needs: []string{"hash", "prepare"}},
-		"delegated.inner.test": {prerequisites: []string{"delegated.setup", "hash", "prepare"}, needs: []string{"delegated.setup"}},
+		"delegated.setup":      {prerequisites: []string{"hash", "prepare"}, needs: nil},
+		"delegated.inner.test": {prerequisites: []string{"delegated.setup", "hash", "prepare"}, needs: nil},
 	}
 	if got := flattenedJobIDs(resolved); len(got) != len(want) {
 		t.Fatalf("flattened jobs = %q", got)
@@ -153,8 +153,8 @@ jobs:
 			t.Errorf("%s need bindings = %q, want the same members as needs %q", id, got, expected.needs)
 		}
 	}
-	// The leaf reaches prepare only through the guard and hash only through
-	// the forwarded input; neither is a need binding it can read.
+	// Caller guards and a forwarded input reach prepare and hash;
+	// neither is a need binding the leaf can read.
 	leaf := sourcedJobByID(t, resolved, "delegated.inner.test")
 	for _, caller := range []string{"prepare", "hash"} {
 		for need, binding := range leaf.needBindings {
@@ -163,7 +163,7 @@ jobs:
 			}
 		}
 	}
-	if len(leaf.callGuards) != 1 || !slices.Equal(bindingMembers(leaf.callGuards[0].needBindings), []string{"hash", "prepare"}) {
+	if len(leaf.callGuards) != 2 || !slices.Equal(bindingMembers(leaf.callGuards[0].needBindings), []string{"hash", "prepare"}) || !slices.Equal(bindingMembers(leaf.callGuards[1].needBindings), []string{"delegated.setup"}) {
 		t.Fatalf("leaf call guards = %#v", leaf.callGuards)
 	}
 	if deferred := leaf.inputs.deferred["subjects"]; !slices.Equal(bindingMembers(deferred.needs), []string{"hash"}) {
@@ -171,10 +171,9 @@ jobs:
 	}
 }
 
-// TestJobPrerequisitesDeduplicateOneJobReachedThreeWays lists a caller job
-// that the callee reaches as a forwarded need, a guard need, and a deferred
-// input exactly once.
-func TestJobPrerequisitesDeduplicateOneJobReachedThreeWays(t *testing.T) {
+// TestJobPrerequisitesDeduplicateGuardAndDeferredInput lists a caller job
+// reached through both a call guard and a deferred input exactly once.
+func TestJobPrerequisitesDeduplicateGuardAndDeferredInput(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -205,7 +204,7 @@ jobs:
 
 	resolved, _, _ := resolveSourcedJobsForTest(t, callerPath)
 	leaf := sourcedJobByID(t, resolved, "consume.test")
-	if len(leaf.callGuards) != 1 || len(leaf.callGuards[0].needBindings) != 1 || len(leaf.inputs.deferred) != 1 || len(leaf.needBindings) != 1 {
+	if len(leaf.callGuards) != 1 || len(leaf.callGuards[0].needBindings) != 1 || len(leaf.inputs.deferred) != 1 || len(leaf.needBindings) != 0 {
 		t.Fatalf("leaf provenance = %#v", leaf)
 	}
 	if got := jobPrerequisites(leaf); !slices.Equal(got, []string{"hash"}) {

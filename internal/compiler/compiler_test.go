@@ -848,10 +848,10 @@ jobs:
 	first := byID["delegated.first"]
 	second := byID["delegated.second"]
 	finish := byID["finish"]
-	if !reflect.DeepEqual(first.Needs, []string{prepare.Key}) || !reflect.DeepEqual(first.NeedGroups, map[string][]string{"prepare": {prepare.Key}}) || !reflect.DeepEqual(first.NeedOutputs, map[string][]NeedOutput{"prepare": {}}) {
-		t.Fatalf("callee root needs = %#v / %#v / %#v, want status-only caller prerequisite", first.Needs, first.NeedGroups, first.NeedOutputs)
+	if !reflect.DeepEqual(first.Needs, []string{prepare.Key}) || len(first.NeedGroups) != 0 || len(first.NeedOutputs) != 0 {
+		t.Fatalf("callee root needs = %#v / %#v / %#v, want caller scheduling dependency without expression access", first.Needs, first.NeedGroups, first.NeedOutputs)
 	}
-	if !reflect.DeepEqual(second.Needs, []string{first.Key}) || !reflect.DeepEqual(second.NeedGroups, map[string][]string{"first": {first.Key}}) {
+	if !reflect.DeepEqual(second.Needs, []string{first.Key, prepare.Key}) || !reflect.DeepEqual(second.NeedGroups, map[string][]string{"first": {first.Key}}) {
 		t.Fatalf("callee dependency = %#v / %#v, want source-local need name", second.Needs, second.NeedGroups)
 	}
 	if !reflect.DeepEqual(finish.Needs, []string{first.Key, second.Key}) || !reflect.DeepEqual(finish.NeedGroups, map[string][]string{"delegated": {first.Key, second.Key}}) || !reflect.DeepEqual(finish.NeedOutputs, map[string][]NeedOutput{"delegated": {}}) {
@@ -892,8 +892,8 @@ jobs:
 	if plans[3].Schema != plan.Schema {
 		t.Fatalf("downstream reusable-workflow plan schema = %q, want current schema", plans[3].Schema)
 	}
-	if plans[1].Schema != plan.Schema || !reflect.DeepEqual(plans[1].NeedOutputs, map[string][]plan.NeedOutput{"prepare": {}}) {
-		t.Fatalf("callee root caller prerequisite projection = %q / %#v", plans[1].Schema, plans[1].NeedOutputs)
+	if plans[1].Schema != plan.Schema || len(plans[1].NeedSources) != 0 || len(plans[1].CallGuards) != 1 || plans[1].CallGuards[0].Condition != "success()" || len(plans[1].CallGuards[0].NeedSources["prepare"]) != 1 {
+		t.Fatalf("callee caller prerequisite guard = %#v", plans[1].CallGuards)
 	}
 	if plans[3].Condition != "always() && needs.delegated.result == 'success'" || plans[3].Program.Job.Steps[0].Run.Command.Source != `test "${{ needs.delegated.result }}" = success` {
 		t.Fatalf("downstream reusable-workflow result expressions = %q / %q", plans[3].Condition, plans[3].Program.Job.Steps[0].Run.Command.Source)
@@ -1030,7 +1030,7 @@ jobs:
 	}
 }
 
-func TestCompileKeepsInheritedReusablePrerequisiteOutputsStatusOnly(t *testing.T) {
+func TestCompileKeepsInheritedReusablePrerequisitesInCallerScope(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -1070,8 +1070,8 @@ jobs:
 	if err := json.Unmarshal(result, &ir); err != nil {
 		t.Fatal(err)
 	}
-	if len(ir.Jobs) != 2 || !reflect.DeepEqual(ir.Jobs[1].NeedOutputs, map[string][]NeedOutput{"producer": {}}) {
-		t.Fatalf("consumer inherited projections = %#v, want producer status only", ir.Jobs)
+	if len(ir.Jobs) != 2 || len(ir.Jobs[1].NeedGroups) != 0 || len(ir.Jobs[1].NeedOutputs) != 0 || len(ir.Jobs[1].CallGuards) != 1 || len(ir.Jobs[1].CallGuards[0].NeedGroups["producer"]) != 1 {
+		t.Fatalf("consumer inherited prerequisites = %#v, want caller-scoped guard only", ir.Jobs)
 	}
 }
 
@@ -1760,7 +1760,7 @@ jobs:
 	if err := json.Unmarshal(result, &ir); err != nil {
 		t.Fatal(err)
 	}
-	if len(ir.Jobs) != 2 || len(ir.Jobs[1].DeferredInputs) != 1 || len(ir.Jobs[1].CallGuards) != 1 || ir.Jobs[1].Steps[0].Run != "echo ${{ inputs.subjects }}" {
+	if len(ir.Jobs) != 2 || len(ir.Jobs[1].DeferredInputs) != 1 || len(ir.Jobs[1].CallGuards) != 2 || ir.Jobs[1].Steps[0].Run != "echo ${{ inputs.subjects }}" {
 		t.Fatalf("forwarded deferred input = %#v", ir.Jobs)
 	}
 	deferred := ir.Jobs[1].DeferredInputs["subjects"]
@@ -1772,7 +1772,7 @@ jobs:
 	if !reflect.DeepEqual(deferred, want) {
 		t.Fatalf("forwarded deferred binding = %#v", deferred)
 	}
-	if !reflect.DeepEqual(ir.Jobs[1].CallGuards[0].DeferredInputs["subjects"], deferred) {
+	if !reflect.DeepEqual(ir.Jobs[1].CallGuards[1].DeferredInputs["subjects"], deferred) {
 		t.Fatalf("forwarded deferred call guard = %#v", ir.Jobs[1].CallGuards)
 	}
 }
