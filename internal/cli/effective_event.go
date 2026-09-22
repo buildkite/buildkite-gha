@@ -54,7 +54,7 @@ func loadEffectiveEventSource(ctx context.Context, eventPath string, agent trans
 		if err != nil {
 			return nil, "", err
 		}
-		if event == "branch_protection_rule" || event == "milestone" || event == "watch" || event == "page_build" || event == "gollum" || event == "public" || event == "fork" || event == "label" || event == "create" || event == "delete" || event == "deployment" || event == "deployment_status" || event == "pull_request_review" || event == "pull_request_review_comment" || ((event == "release" || event == "merge_group") && os.Getenv(pipelineTriggerWorkflowPathEnvironment) != "") {
+		if event == "discussion" || event == "branch_protection_rule" || event == "milestone" || event == "watch" || event == "page_build" || event == "gollum" || event == "public" || event == "fork" || event == "label" || event == "create" || event == "delete" || event == "deployment" || event == "deployment_status" || event == "pull_request_review" || event == "pull_request_review_comment" || ((event == "release" || event == "merge_group") && os.Getenv(pipelineTriggerWorkflowPathEnvironment) != "") {
 			return nil, "", fmt.Errorf("%s requires the original buildkite:webhook payload; rebuilds without it are unsupported", event)
 		}
 		source, err := buildkiteEventSource(os.Getenv)
@@ -98,6 +98,7 @@ func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerCondit
 		LabelAction:             "null",
 		MilestoneAction:         "null",
 		RuleAction:              "null",
+		DiscussionAction:        "null",
 	}
 	snapshot := buildkitepipeline.TriggerEventSnapshot{}
 	if branch, ok := strings.CutPrefix(event.Ref, "refs/heads/"); ok {
@@ -127,6 +128,8 @@ func snapshotTriggerState(event compiler.Event) (buildkitepipeline.TriggerCondit
 		snapshot.MilestoneAction = &action
 		expressions.RuleAction = triggerConditionLiteral(action)
 		snapshot.RuleAction = &action
+		expressions.DiscussionAction = triggerConditionLiteral(action)
+		snapshot.DiscussionAction = &action
 	}
 	if pullRequest, ok := event.Payload["pull_request"].(map[string]any); ok {
 		if base, ok := pullRequest["base"].(map[string]any); ok {
