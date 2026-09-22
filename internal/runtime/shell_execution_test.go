@@ -15,7 +15,7 @@ import (
 func TestPowerShellExecution(t *testing.T) {
 	pwsh, err := exec.LookPath("pwsh")
 	if err != nil {
-		t.Skip("PowerShell is not installed")
+		t.Fatalf("PowerShell is required; run mise install: %v", err)
 	}
 	// Exercise both named shells with the installed PowerShell on Unix.
 	bin := t.TempDir()
