@@ -96,45 +96,52 @@ jobs:
 			t.Fatal("Windows executable was not uploaded intact")
 		}
 	})
-	t.Run("deferred Windows jobs", func(t *testing.T) {
-		initial := runContinueInitialUpload(t, "--runner-queue", "windows-2022=windows", "--runtime-distribution", "windows/amd64="+path)
-		windowsDigest := distributions[compiler.PlatformWindowsAMD64].digest
-		if initial.artifact.Runtimes["windows/amd64"] != windowsDigest {
-			t.Fatalf("deferred runtimes = %#v, want Windows distribution %s", initial.artifact.Runtimes, windowsDigest)
-		}
-		runner := initial.continueRunner(initial.producerManifest(t, "success", `[{"target":"windows","runner":"windows-2022"}]`))
-		code, _, stderr := runContinue(t, runner, initial.digest)
-		if code != 0 {
-			t.Fatalf("continue = %d: %s", code, stderr)
-		}
-		jobs := uploadedPlans(t, runner)["build"]
-		if len(jobs) != 1 || jobs[0].Target.Queue != "windows" || jobs[0].RuntimeDistributionDigest() != windowsDigest {
-			t.Fatalf("deferred Windows plans = %#v", jobs)
-		}
-		_, _, steps := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
-		if len(steps) != 2 || !strings.HasPrefix(steps[0].Command, "pwsh -NoLogo -NoProfile -NonInteractive") {
-			t.Fatalf("deferred Windows pipeline = %s", lastPipelineUpload(t, runner))
-		}
-		for _, missingWindows := range []bool{false, true} {
-			replay := initial.continueRunner(initial.producerManifest(t, "success", `[{"target":"windows","runner":"windows-2022"}]`))
-			replay.pipelineUploadErr = errors.New("pipeline upload: duplicate step key")
-			replay.stepAttributes = make(map[string]map[string]string, len(steps))
-			for _, step := range steps {
-				replay.stepAttributes[step.Key] = map[string]string{"command": step.Command}
+	for _, deferred := range []struct {
+		name, workflow, output string
+	}{
+		{"matrix", continueDeferredMatrixWorkflow, `[{"target":"windows","runner":"windows-2022"}]`},
+		{"runs-on", continueRunsOnWorkflow, `["windows-2022"]`},
+	} {
+		t.Run("deferred Windows "+deferred.name, func(t *testing.T) {
+			initial := runContinueInitialUploads(t, deferred.workflow, "--runner-queue", "windows-2022=windows", "--runtime-distribution", "windows/amd64="+path)[0]
+			windowsDigest := distributions[compiler.PlatformWindowsAMD64].digest
+			if initial.artifact.Runtimes["windows/amd64"] != windowsDigest {
+				t.Fatalf("deferred runtimes = %#v, want Windows distribution %s", initial.artifact.Runtimes, windowsDigest)
 			}
-			if missingWindows {
-				delete(replay.stepAttributes, steps[0].Key)
+			runner := initial.continueRunner(initial.producerManifest(t, "success", deferred.output))
+			code, _, stderr := runContinue(t, runner, initial.digest)
+			if code != 0 {
+				t.Fatalf("continue = %d: %s", code, stderr)
 			}
-			code, stdout, stderr := runContinue(t, replay, initial.digest)
-			if missingWindows {
-				if code != 1 || !strings.Contains(stderr, continueRetryGuidance) {
-					t.Fatalf("missing Windows step replay = %d: %s", code, stderr)
+			jobs := uploadedPlans(t, runner)["build"]
+			if len(jobs) != 1 || jobs[0].Target.Queue != "windows" || jobs[0].RuntimeDistributionDigest() != windowsDigest {
+				t.Fatalf("deferred Windows plans = %#v", jobs)
+			}
+			_, _, steps := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
+			if len(steps) != 2 || !strings.HasPrefix(steps[0].Command, "pwsh -NoLogo -NoProfile -NonInteractive") {
+				t.Fatalf("deferred Windows pipeline = %s", lastPipelineUpload(t, runner))
+			}
+			for _, missingWindows := range []bool{false, true} {
+				replay := initial.continueRunner(initial.producerManifest(t, "success", deferred.output))
+				replay.pipelineUploadErr = errors.New("pipeline upload: duplicate step key")
+				replay.stepAttributes = make(map[string]map[string]string, len(steps))
+				for _, step := range steps {
+					replay.stepAttributes[step.Key] = map[string]string{"command": step.Command}
 				}
-			} else if code != 0 || !strings.Contains(stdout, "were already uploaded by an earlier run") {
-				t.Fatalf("Windows replay = %d: %s\n%s", code, stdout, stderr)
+				if missingWindows {
+					delete(replay.stepAttributes, steps[0].Key)
+				}
+				code, stdout, stderr := runContinue(t, replay, initial.digest)
+				if missingWindows {
+					if code != 1 || !strings.Contains(stderr, "pipeline upload: duplicate step key") || !strings.Contains(stderr, "Retry the whole build") {
+						t.Fatalf("missing Windows step replay = %d: %s", code, stderr)
+					}
+				} else if code != 0 || !strings.Contains(stdout, "were already uploaded by an earlier run") {
+					t.Fatalf("Windows replay = %d: %s\n%s", code, stdout, stderr)
+				}
 			}
-		}
-	})
+		})
+	}
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
