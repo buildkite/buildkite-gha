@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,16 @@ func TestCompileBundleGoldenAndDeterministic(t *testing.T) {
 	}
 	producer := first.IR.Jobs[0].Key
 	for i, artifact := range first.Plans {
+		encoded, err := plan.Encode(artifact.Job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(artifact.Contents, encoded) {
+			t.Fatalf("plan %d retained bytes differ from its final job", i)
+		}
+		if digest := fmt.Sprintf("sha256:%x", sha256.Sum256(artifact.Contents)); artifact.Digest != digest {
+			t.Fatalf("plan %d digest = %q, want %q", i, artifact.Digest, digest)
+		}
 		if artifact.Path != ".buildkite-gha/plans/"+strings.TrimPrefix(artifact.Digest, "sha256:")+".json" {
 			t.Fatalf("plan %d path = %q", i, artifact.Path)
 		}
@@ -49,6 +60,9 @@ func TestCompileBundleGoldenAndDeterministic(t *testing.T) {
 		}
 		if i > 0 && !reflect.DeepEqual(artifact.Job.Dependencies, []string{producer}) {
 			t.Fatalf("consumer dependencies = %#v, want %q", artifact.Job.Dependencies, producer)
+		}
+		if i > 0 && !reflect.DeepEqual(artifact.Job.NeedSources["producer"], []plan.NeedSource{{StepKey: producer, PlanDigest: first.Plans[0].Digest}}) {
+			t.Fatalf("consumer prerequisite does not identify the emitted producer plan: %#v", artifact.Job.NeedSources)
 		}
 	}
 	wantPipeline := readFile(t, filepath.Join("testdata", "shell.pipeline.golden.yml"))

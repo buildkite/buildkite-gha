@@ -137,12 +137,9 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		planningIR = irWithoutJobs(ir, failed)
 		actionErr = errors.Join(actionErr, continuationErr)
 	}
-	plans, authorizations, planEvaluations, planErr := compilePlansWithAuthorization(ctx, planningIR, compilerVersion, compilerDistributionDigest, options, graphs)
+	plans, planEvaluations, planErr := compilePlansWithAuthorization(ctx, planningIR, compilerVersion, compilerDistributionDigest, options, graphs)
 	bundle.Processing.Plans = planEvaluations
 	bundle.JobOutcomes = jobOutcomes(ir, directFailures, failed, planEvaluations)
-	if len(authorizations) != len(plans) {
-		return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("compiler produced %d plans and %d authorizations", len(plans), len(authorizations)))
-	}
 	instances := make(map[string]JobInstance, len(ir.Jobs))
 	for _, instance := range ir.Jobs {
 		instances[instance.Key] = instance
@@ -152,7 +149,8 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	warnedUnknownUploadArtifact := map[string]bool{}
 	warnedLegacyUploadArtifact := map[string]bool{}
 	warnedUnknownDownloadArtifact := map[string]bool{}
-	for _, job := range plans {
+	for _, artifact := range plans {
+		job := artifact.Job
 		instance, exists := instances[job.Target.StepKey]
 		if !exists {
 			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("plan target %q has no expanded job instance", job.Target.StepKey))
@@ -225,8 +223,8 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		}
 	}
 	planned := make(map[string]bool, len(plans))
-	for _, job := range plans {
-		planned[job.Target.StepKey] = true
+	for _, artifact := range plans {
+		planned[artifact.Job.Target.StepKey] = true
 	}
 	warnedCacheSubstitution := map[string]bool{}
 	for _, evaluation := range bundle.Processing.Actions {
@@ -248,7 +246,8 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	}
 	warnedReusablePermissions := false
 	warnedJobPermissions := false
-	for _, job := range plans {
+	for _, artifact := range plans {
+		job := artifact.Job
 		if job.GitHubToken == nil {
 			continue
 		}
@@ -272,8 +271,8 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		}
 	}
 
-	artifacts := make([]PlanArtifact, len(plans))
-	for i, job := range plans {
+	for i, artifact := range plans {
+		job := artifact.Job
 		instance := instances[job.Target.StepKey]
 		if job.Target.Queue != instance.Queue {
 			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("plan %d target %q/%q does not match job instance queue %q", i, job.Target.StepKey, job.Target.Queue, instance.Queue))
@@ -285,19 +284,15 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		if job.Runtime == nil || job.Runtime.DistributionDigest != expectedRuntimeDigest {
 			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("plan %d runtime distribution does not match job platform %s", i, instance.Platform))
 		}
-		contents, err := plan.Encode(job)
-		if err != nil {
-			return bundle, &ProcessingFinding{Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility", Job: job.Workflow.LogicalJobID, Instance: instance.Key, Err: fmt.Errorf("encode plan for job %q: %w", job.Workflow.LogicalJobID, err)}
-		}
-		digest := transport.Digest(contents)
-		planPath, err := buildkitepipeline.PlanPath(digest)
+		planPath, err := buildkitepipeline.PlanPath(artifact.Digest)
 		if err != nil {
 			return bundle, &ProcessingFinding{Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility", Job: job.Workflow.LogicalJobID, Instance: instance.Key, Err: fmt.Errorf("locate plan for job %q: %w", job.Workflow.LogicalJobID, err)}
 		}
-		artifacts[i] = PlanArtifact{Job: job, Digest: digest, Path: planPath, Contents: contents, Authorization: authorizations[i]}
+		plans[i].Path = planPath
 	}
-	bundle.Plans = artifacts
-	for _, job := range plans {
+	bundle.Plans = plans
+	for _, artifact := range plans {
+		job := artifact.Job
 		if !job.Event.PayloadArtifact {
 			continue
 		}
