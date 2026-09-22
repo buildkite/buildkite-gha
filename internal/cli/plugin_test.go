@@ -159,27 +159,27 @@ func TestPluginUsesKeylessPipelineTriggerSelectedWorkflow(t *testing.T) {
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group     string     `yaml:"group"`
+			Label     string     `yaml:"label"`
 			DependsOn *yaml.Node `yaml:"depends_on"`
-			Steps     []struct {
-				Key       string `yaml:"key"`
-				Command   string `yaml:"command"`
-				DependsOn any    `yaml:"depends_on"`
-			} `yaml:"steps"`
+			Key       string     `yaml:"key"`
+			Command   string     `yaml:"command"`
 		} `yaml:"steps"`
 	}
 	pipelineCommand := runner.commands[len(runner.commands)-1]
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · .github/workflows/selected.yml" || pipeline.Steps[0].DependsOn != nil || len(pipeline.Steps[0].Steps) != 1 || !strings.HasSuffix(pipeline.Steps[0].Steps[0].Key, "-pipeline-trigger-importer") || pipeline.Steps[0].Steps[0].DependsOn != nil {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Label != ":github: job · pipeline-trigger-importer" || pipeline.Steps[0].DependsOn != nil || !strings.HasSuffix(pipeline.Steps[0].Key, "-pipeline-trigger-importer") {
 		t.Fatalf("pipeline steps = %#v", pipeline.Steps)
 	}
-	if command := pipeline.Steps[0].Steps[0].Command; strings.Count(command, "--step '"+cliTestJobID+"'") != 2 || !strings.Contains(command, "--artifact-producer '"+cliTestJobID+"'") || strings.Contains(command, "--step ''") {
+	if command := pipeline.Steps[0].Command; strings.Count(command, "--step '"+cliTestJobID+"'") != 2 || !strings.Contains(command, "--artifact-producer '"+cliTestJobID+"'") || strings.Contains(command, "--step ''") {
 		t.Fatalf("keyless generated job does not scope artifacts to importer job %q:\n%s", cliTestJobID, command)
 	}
 	artifactUpload := -1
 	for index, command := range runner.commands {
+		if len(command.args) >= 3 && slices.Equal(command.args[:3], []string{"step", "update", "label"}) {
+			t.Fatalf("importer changed its configured label: %#v", command.args)
+		}
 		if len(command.args) >= 2 && command.args[0] == "artifact" && command.args[1] == "upload" {
 			artifactUpload = index
 		}
@@ -211,6 +211,57 @@ func TestPluginUsesKeylessPipelineTriggerSelectedWorkflow(t *testing.T) {
 	}
 }
 
+func TestPluginServerSelectedWorkflowKeepsDeferredStepsUngrouped(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{"build.yml": "name: Build\n" + continueDeferredMatrixWorkflow})
+	commitUploadWorkflows(t, repository)
+	t.Chdir(repository)
+	commit, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, `{}`)
+	setCLIPluginBuildkiteEnvironment(t, "continue-importer")
+	t.Setenv("BUILDKITE_COMMIT", strings.TrimSpace(string(commit)))
+	t.Setenv("BUILDKITE_JOB_ID", continueImporterJobID)
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	setCLIPipelineTriggerEnvironment(t, ".github/workflows/build.yml", "Build", "push", "buildkite/buildkite-gha/.github/workflows/build.yml@refs/heads/main")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("plugin code = %d, stderr = %q", code, stderr.String())
+	}
+	initials := readContinueInitialUploads(t, runner)
+	if len(initials) != 1 || !initials[0].artifact.Workflow.Ungrouped {
+		t.Fatalf("server-selected workflow continuations = %+v", initials)
+	}
+	initial := initials[0]
+	var pipeline struct {
+		Steps []continuePipelineStep `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal([]byte(initial.pipeline), &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 3 {
+		t.Fatalf("initial pipeline must have three flat steps:\n%s", initial.pipeline)
+	}
+	for _, step := range pipeline.Steps {
+		if len(step.DependsOn) == 0 || step.DependsOn[0].Step != "continue-importer" {
+			t.Fatalf("step %q lost importer dependency: %#v", step.Key, step.DependsOn)
+		}
+	}
+	runner = initial.continueRunner(initial.producerManifest(t, "success", `[{"target":"amd64","runner":"ubuntu-latest"},{"target":"arm64","runner":"ubuntu-latest"}]`))
+	if code, _, stderr := runContinue(t, runner, initial.digest); code != 0 {
+		t.Fatalf("continue code = %d, stderr = %q", code, stderr)
+	}
+	if err := yaml.Unmarshal(lastPipelineUpload(t, runner), &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 3 {
+		t.Fatalf("deferred pipeline must have three flat steps:\n%s", lastPipelineUpload(t, runner))
+	}
+}
+
 func TestPluginPrefersGitHubPipelineTriggerIdentity(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
@@ -231,14 +282,17 @@ func TestPluginPrefersGitHubPipelineTriggerIdentity(t *testing.T) {
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group     string `yaml:"group"`
+			Label     string `yaml:"label"`
 			Condition string `yaml:"if"`
+			DependsOn []struct {
+				Step string `yaml:"step"`
+			} `yaml:"depends_on"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · Preferred" || !strings.Contains(pipeline.Steps[0].Condition, "GITHUB_EVENT_NAME") {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Label != ":github: job · preferred" || len(pipeline.Steps[0].DependsOn) != 1 || pipeline.Steps[0].DependsOn[0].Step != "preferred-pipeline-trigger-importer" || !strings.Contains(pipeline.Steps[0].Condition, "GITHUB_EVENT_NAME") {
 		t.Fatalf("pipeline steps = %#v, want the GITHUB_* workflow and event", pipeline.Steps)
 	}
 }
@@ -336,13 +390,17 @@ func TestPluginUsesPipelineTriggerIssueAndCommentIdentity(t *testing.T) {
 
 			var pipeline struct {
 				Steps []struct {
-					Group string `yaml:"group"`
+					Label     string `yaml:"label"`
+					Condition string `yaml:"if"`
+					DependsOn []struct {
+						Step string `yaml:"step"`
+					} `yaml:"depends_on"`
 				} `yaml:"steps"`
 			}
 			if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 				t.Fatal(err)
 			}
-			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · Selected" {
+			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Label != ":github: job · selected" || len(pipeline.Steps[0].DependsOn) != 1 || pipeline.Steps[0].DependsOn[0].Step != "default-branch-pipeline-trigger-importer" || pipeline.Steps[0].Condition == "" {
 				t.Fatalf("pipeline steps = %#v, want only the server-selected workflow", pipeline.Steps)
 			}
 
@@ -417,13 +475,15 @@ func TestPluginExplicitWorkflowOverridesPipelineTriggerSelection(t *testing.T) {
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group string `yaml:"group"`
+			Group     string `yaml:"group"`
+			Condition string `yaml:"if"`
+			DependsOn string `yaml:"depends_on"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · Configured" {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · Configured" || pipeline.Steps[0].DependsOn != "explicit-workflow-importer" || pipeline.Steps[0].Condition == "" {
 		t.Fatalf("pipeline steps = %#v", pipeline.Steps)
 	}
 
@@ -763,7 +823,7 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 {
+	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Steps) != 3 {
 		t.Fatalf("workflow groups = %#v", pipeline.Steps)
 	}
 	wantCachePaths := []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper", "/cache/bkcache/buildkite-gha/validation/linux-amd64"}
@@ -1130,7 +1190,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 {
+	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Steps) != 5 {
 		t.Fatalf("workflow groups = %#v", pipeline.Steps)
 	}
 	steps := make(map[string]struct {

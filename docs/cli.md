@@ -541,16 +541,16 @@ untracked and outside paths.
 always when a path begins with `-`. Pass each path as its own argument; the CLI
 does not split one shell string or decode a JSON or YAML list.
 
-Upload is atomic. Compiled workflows become groups; skipped workflows become
-top-level skipped steps. Reusable-only files remain available to local callers
-but do not create groups. Selecting only reusable workflows is an error.
+Upload is atomic. Skipped workflows become top-level skipped steps.
+Reusable-only files remain available to local callers but do not create groups.
+Selecting only reusable workflows is an error.
 
 An explicit non-empty workflow `run-name` appends ` — <run-name>` to its group
 label after resolving supported `github` and `inputs` expressions. Workflow
 names, provider-check names, and the Buildkite build message remain unchanged.
 
 See [Aggregate workflow upload](compatibility.md#aggregate-workflow-upload) for
-group labels, provider checks, and failure behavior.
+workflow grouping, labels, provider checks, and failure behavior.
 
 Private reusable workflows are off by default. Set the plugin's
 `private-reusable-workflows: true` field, or pass
@@ -584,7 +584,7 @@ For reduced fallback snapshots, it retains the artifact only when runtime event
 expressions require it. Event data cannot grant queues, secrets, or tokens.
 
 The selected snapshot establishes one event for applicability, compilation,
-group conditions, provider-check names, and explicit run-name evaluation. An
+workflow conditions, provider-check names, and explicit run-name evaluation. An
 explicit event is never replaced with live Buildkite fields.
 
 Linked webhook data can provide native `merge_group`, `release`, and `issues`
@@ -603,7 +603,7 @@ rules and the environment fallback.
 A top-level workflow that does not declare the event becomes a skipped step with
 no plan artifacts. If none apply, upload succeeds with a skipped-only pipeline.
 
-For an applicable workflow, only the selected event contributes a group
+For an applicable workflow, only the selected event contributes a workflow
 condition. Supported branch, tag, base-branch, and activity filters add their
 constraints. A verified path-filter nonmatch becomes a skipped step without
 workflow jobs or plan artifacts. Conditions from different events are never combined.

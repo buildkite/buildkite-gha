@@ -108,7 +108,7 @@ func reusableGateOpenDependencies(workflow preparedWorkflow, gate preparedConcur
 		add(openKeys[gate.ParentID], false)
 	case workflow.GateOpenKey != "":
 		add(workflow.GateOpenKey, false)
-	case !workflow.Aggregate:
+	case !workflow.Aggregate || workflow.Ungrouped:
 		add(compilerStep, false)
 	}
 	for _, key := range gate.Prerequisites {
@@ -132,7 +132,7 @@ func reusableGateCloseDependencies(workflow preparedWorkflow, gate preparedConcu
 
 func workflowGateCloseDependencies(workflow preparedWorkflow, compilerStep string) []dependency {
 	dependencies := make([]dependency, 0, len(workflow.Jobs)+len(workflow.ReusableConcurrencyGates)+1)
-	if !workflow.Aggregate {
+	if (!workflow.Aggregate || workflow.Ungrouped) && compilerStep != "" {
 		dependencies = append(dependencies, dependency{Step: compilerStep})
 	}
 	for _, job := range workflow.Jobs {

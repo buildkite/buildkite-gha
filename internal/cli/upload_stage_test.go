@@ -121,6 +121,11 @@ func runContinueInitialUploadsInCheckout(t *testing.T, workflows []string, event
 	if code := run(append(args, workflows...), &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("upload code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
+	return readContinueInitialUploads(t, runner)
+}
+
+func readContinueInitialUploads(t *testing.T, runner *cliCaptureRunner) []continueInitialUpload {
+	t.Helper()
 	pipeline := string(runner.commands[len(runner.commands)-1].stdin)
 	plans := map[string][]byte{}
 	var events []string

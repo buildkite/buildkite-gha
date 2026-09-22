@@ -471,6 +471,84 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 	}
 }
 
+func TestEmitUngroupedWorkflowPropagatesConditionAndImporterDependency(t *testing.T) {
+	condition := `build.env("BUILDKITE_GITHUB_EVENT") == "push"`
+	gate := ApprovalGate{Key: "approve-production", Environment: "production"}
+	pipeline := Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		EventProvider:      "github",
+		Workflows: []Workflow{{
+			GroupLabel: "CI", GroupKey: "workflow-ci", Ungrouped: true, Event: "push", Condition: condition,
+			ConcurrencyGate: &ConcurrencyGate{Group: "buildkite-gha/concurrency/ci"},
+			ApprovalGates:   []ApprovalGate{gate},
+			Jobs: []Job{
+				{Key: "build", Label: "Build", PlanDigest: testDigest("build")},
+				{Key: "deploy", Label: "Deploy", PlanDigest: testDigest("deploy"), Dependencies: []string{"build"}, ApprovalGate: gate.Key},
+				{Key: "failed", Label: "Failed", Failure: &Failure{AnnotationPath: "annotation", MessagePath: "message", Summary: "could not compile"}},
+				{Key: "skipped", Label: "Skipped", SkipReason: "not selected"},
+			},
+		}},
+	}
+	output, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type dependency struct {
+		Step         string `yaml:"step"`
+		AllowFailure bool   `yaml:"allow_failure"`
+	}
+	var document struct {
+		Steps []struct {
+			Group            string       `yaml:"group"`
+			Key              string       `yaml:"key"`
+			Block            string       `yaml:"block"`
+			Condition        string       `yaml:"if"`
+			ConcurrencyGroup string       `yaml:"concurrency_group"`
+			DependsOn        []dependency `yaml:"depends_on"`
+			Steps            []any        `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 7 {
+		t.Fatalf("flat workflow steps = %#v\n%s", document.Steps, output)
+	}
+	steps := make(map[string]struct {
+		Condition string
+		Block     string
+		DependsOn []dependency
+	})
+	for _, step := range document.Steps {
+		if step.Group != "" || len(step.Steps) != 0 {
+			t.Fatalf("ungrouped workflow synthesized a group: %#v\n%s", step, output)
+		}
+		if step.Condition != condition {
+			t.Fatalf("step %q condition = %q, want %q", step.Key, step.Condition, condition)
+		}
+		steps[step.Key] = struct {
+			Condition string
+			Block     string
+			DependsOn []dependency
+		}{step.Condition, step.Block, step.DependsOn}
+	}
+	openKey, closeKey := concurrencyGateKeys("importer\x00workflow-ci", pipeline.Workflows[0].ConcurrencyGate.Group, pipeline.Workflows[0].Jobs)
+	for _, key := range []string{openKey, "build", "deploy", "failed", "skipped", gate.Key} {
+		dependencies := steps[key].DependsOn
+		if len(dependencies) == 0 || dependencies[0] != (dependency{Step: "importer"}) {
+			t.Fatalf("step %q importer dependencies = %#v\n%s", key, dependencies, output)
+		}
+	}
+	if steps[gate.Key].Block == "" || steps[closeKey].DependsOn[0] != (dependency{Step: "importer"}) {
+		t.Fatalf("approval or concurrency markers were not emitted flat: %#v\n%s", steps, output)
+	}
+	deploy := steps["deploy"].DependsOn
+	if len(deploy) != 4 || deploy[1].Step != openKey || deploy[2] != (dependency{Step: "build", AllowFailure: true}) || deploy[3] != (dependency{Step: gate.Key}) {
+		t.Fatalf("deploy dependencies = %#v", deploy)
+	}
+}
+
 func TestEmitKeylessAggregateScopesArtifactsWithoutImporterDependencies(t *testing.T) {
 	producer := "22222222-2222-4222-8222-222222222222"
 	output, err := Emit(Pipeline{

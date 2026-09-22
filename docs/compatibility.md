@@ -167,10 +167,13 @@ and deduplicates the paths.
 
 All remaining runnable workflows use one artifact and pipeline transaction:
 
-- A compiled workflow becomes a group labeled `:github: workflow ·
-  <workflow-name>`. An unnamed workflow uses its canonical path. A resolved,
-  non-empty `run-name` appends ` — <run-name>`.
-- Each child publishes a provider check named
+- Server-selected workflows emit jobs without a workflow group. Explicitly
+  configured workflows retain groups, even when only one workflow is selected.
+- Each group is labeled `:github: workflow · <workflow-name>`. An unnamed
+  workflow uses its canonical path. A resolved, non-empty `run-name` appends
+  ` — <run-name>`.
+- Upload leaves the importer label unchanged.
+- Each job publishes a provider check named
   `<workflow-name-or-path> / <job-id> (<effective-event>)`. Matrix jobs append
   their sorted values to the job ID.
 - GitHub events publish GitHub checks. Origin events publish Origin checks.
@@ -184,6 +187,9 @@ All remaining runnable workflows use one artifact and pipeline transaction:
 Workflow names, group keys, and provider-check names stay the same across
 events; only an appended run title can vary. Groups and replacement steps
 depend on the importer; their child jobs do not repeat that dependency.
+Without a group, each step carries the workflow condition and depends on the
+importer if it has a step key. Deferred uploads retain the initial workflow's
+grouping choice.
 
 Reusable-only `workflow_call` files remain available to local callers but do not
 create groups. Selecting only reusable workflows is an error.
@@ -228,8 +234,8 @@ preserve both fields. GitHub check summaries show only the concise message.
 | Key | Status | Behavior |
 | --- | --- | --- |
 | `name` | ✅ Supported | Available as `github.workflow` and used to name generated work. |
-| `run-name` | 🟡 Supported subset | An explicit non-empty value is appended to the workflow group label. Compile-time `github` and `inputs` expressions are supported. The Buildkite build message and provider-check names do not change. |
-| `on` | 🟡 Supported subset | Does not create a Buildkite build. Selects and filters aggregate groups for the effective event as described below. |
+| `run-name` | 🟡 Supported subset | An explicit non-empty value is appended to the workflow group label, when grouped. Compile-time `github` and `inputs` expressions are supported. The importer label, Buildkite build message, and provider-check names do not change. |
+| `on` | 🟡 Supported subset | Does not create a Buildkite build. Selects and filters workflows for the effective event as described below. |
 
 A workflow name is retained in generated work:
 
@@ -245,7 +251,7 @@ name: Deploy
 run-name: Deploy ${{ inputs.target }} by @${{ github.actor }}
 ```
 
-This produces `:github: workflow · Deploy — Deploy production by @octocat`.
+When grouped, this produces `:github: workflow · Deploy — Deploy production by @octocat`.
 Omitted, blank, or blank-resolving values retain the static group label. On a
 non-dispatch event, declared dispatch inputs use their typed zero values rather
 than dispatch-only defaults. A skipped workflow does not synthesize dispatch
@@ -1030,8 +1036,8 @@ The initial upload creates `plan` and one deferred step,
 `:github: matrix · build`, with check `build (matrix)`. That step waits for
 `plan`, reads the verified `matrix` output, expands it with the static-matrix
 rules, recompiles only `build` and the jobs that transitively need it, such as
-`publish`, and uploads them into the same workflow group. Every other job is
-uploaded once, up front. The deferred step reports `W_MATRIX_DEFERRED` at
+`publish`, and uploads them with the initial workflow's grouping. Every other
+job is uploaded once, up front. The deferred step reports `W_MATRIX_DEFERRED` at
 compile time and leaves the deferred jobs `not-evaluated` in processing
 reports, so `validate` and `compile --format ir-json` show the graph shape
 while `compile` cannot render the pipeline YAML for the workflow. See

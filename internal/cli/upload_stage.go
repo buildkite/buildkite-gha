@@ -427,6 +427,7 @@ func (r stageRun) deferredPipeline(bundle compiler.Bundle, stage stageResult, sh
 		DisableRunnerUser:    !record.RunnerUser,
 		Workflows: []buildkitepipeline.Workflow{{
 			GroupLabel:    record.Workflow.GroupLabel,
+			Ungrouped:     record.Workflow.Ungrouped,
 			CheckName:     record.Workflow.CheckName,
 			Event:         record.Event.Name,
 			ApprovalGates: gates,
@@ -509,6 +510,7 @@ func (r stageRun) uploadSkipped(fail func(string, ...any) int, result string, gr
 		EventProvider:    record.Event.Provider,
 		Workflows: []buildkitepipeline.Workflow{{
 			GroupLabel: record.Workflow.GroupLabel,
+			Ungrouped:  record.Workflow.Ungrouped,
 			CheckName:  record.Workflow.CheckName,
 			Event:      record.Event.Name,
 			Jobs:       jobs,

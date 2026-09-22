@@ -105,10 +105,9 @@ type Pipeline struct {
 	DisableRunnerUser  bool
 	Jobs               []Job
 	Workflows          []Workflow
-	// Deferred marks the upload a stage step makes from inside an already
-	// uploaded workflow group. Its workflows carry no GroupKey, so Buildkite
-	// merges the group by label, and its jobs may depend on ExistingSteps
-	// that the earlier uploads created.
+	// Deferred marks a stage upload. Grouped workflows carry no GroupKey so
+	// Buildkite merges them by label; ungrouped workflows remain flat. Jobs
+	// may depend on ExistingSteps that earlier uploads created.
 	Deferred bool
 	// ExistingSteps are step keys already present in the build that a
 	// deferred upload may depend on or reference as approval gates.
@@ -135,6 +134,7 @@ type Workflow struct {
 	GroupLabel      string
 	CheckName       string
 	GroupKey        string
+	Ungrouped       bool
 	Event           string
 	Condition       string
 	SkipReason      string
@@ -430,7 +430,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				}
 			}
 		}
-		prepared[i] = preparedWorkflow{Workflow: workflow, Jobs: jobs, Grouped: aggregate || workflow.GroupLabel != "", Aggregate: aggregate}
+		prepared[i] = preparedWorkflow{Workflow: workflow, Jobs: jobs, Grouped: !workflow.Ungrouped && (aggregate || workflow.GroupLabel != ""), Aggregate: aggregate}
 		if workflow.ConcurrencyGate != nil {
 			gateNamespace := pipeline.CompilerStep
 			if aggregate {
@@ -554,25 +554,29 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		stepIndent = "      "
 	}
 	attributeIndent := stepIndent + "  "
+	condition := ""
+	if workflow.Ungrouped {
+		condition = workflow.Condition
+	}
 	if workflow.ConcurrencyGate != nil {
 		// Keep each opening marker immediately before its dependency-blocked
 		// closing marker. Their ordered queue positions hold the group before a
 		// later build or sibling scope can enter it.
-		dependencies := []dependency{{Step: pipeline.CompilerStep}}
-		if workflow.Aggregate {
-			dependencies = nil
+		var dependencies []dependency
+		if (!workflow.Aggregate || workflow.Ungrouped) && pipeline.CompilerStep != "" {
+			dependencies = append(dependencies, dependency{Step: pipeline.CompilerStep})
 		}
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start workflow concurrency", workflow.GateOpenKey, workflow.ConcurrencyGate, dependencies)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start workflow concurrency", workflow.GateOpenKey, workflow.ConcurrencyGate, dependencies, condition)
 		dependencies = workflowGateCloseDependencies(workflow, pipeline.CompilerStep)
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", workflow.GateCloseKey, workflow.ConcurrencyGate, dependencies)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", workflow.GateCloseKey, workflow.ConcurrencyGate, dependencies, condition)
 	}
 	gateOpenKeys := make(map[string]string, len(workflow.ReusableConcurrencyGates))
 	for _, gate := range workflow.ReusableConcurrencyGates {
 		dependencies := reusableGateOpenDependencies(workflow, gate, gateOpenKeys, pipeline.CompilerStep)
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start reusable-workflow concurrency", gate.OpenKey, &gate.ConcurrencyGate, dependencies)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start reusable-workflow concurrency", gate.OpenKey, &gate.ConcurrencyGate, dependencies, condition)
 		gateOpenKeys[gate.ID] = gate.OpenKey
 		dependencies = reusableGateCloseDependencies(workflow, gate)
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish reusable-workflow concurrency", gate.CloseKey, &gate.ConcurrencyGate, dependencies)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish reusable-workflow concurrency", gate.CloseKey, &gate.ConcurrencyGate, dependencies, condition)
 	}
 	for _, job := range workflow.Jobs {
 		if job.Failure != nil || job.SkipReason != "" {
@@ -784,6 +788,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 	for _, gate := range workflow.ApprovalGates {
 		_, _ = fmt.Fprintf(out, "%s- block: %s\n", stepIndent, yamlScalar(":github: approval · "+gate.Environment))
 		_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(gate.Key))
+		if condition != "" {
+			_, _ = fmt.Fprintf(out, "%sif: %s\n", attributeIndent, yamlScalar(condition))
+		}
 		_, _ = fmt.Fprintf(out, "%sprompt: %s\n", attributeIndent, yamlScalar("Approve deployment to GitHub environment "+gate.Environment+"."))
 		out.WriteString(attributeIndent + "blocked_state: running\n")
 		if pipeline.CompilerStep == "" {
@@ -880,6 +887,9 @@ func emitFailureBody(out *bytes.Buffer, indent, artifactProducer string, failure
 }
 
 func emitJobDependencies(out *bytes.Buffer, indent string, workflow preparedWorkflow, job Job, gateOpenKeys map[string]string, compilerStep string) {
+	if workflow.Ungrouped && workflow.Condition != "" {
+		_, _ = fmt.Fprintf(out, "%sif: %s\n", indent, yamlScalar(workflow.Condition))
+	}
 	dependencies := jobDependencies(workflow, job, gateOpenKeys, compilerStep)
 	if len(dependencies) != 0 {
 		_, _ = fmt.Fprintf(out, "%sdepends_on:\n", indent)
@@ -891,7 +901,7 @@ func emitJobDependencies(out *bytes.Buffer, indent string, workflow preparedWork
 
 func jobDependencies(workflow preparedWorkflow, job Job, gateOpenKeys map[string]string, compilerStep string) []dependency {
 	var dependencies []dependency
-	if !workflow.Aggregate {
+	if (!workflow.Aggregate || workflow.Ungrouped) && compilerStep != "" {
 		dependencies = append(dependencies, dependency{Step: compilerStep})
 	}
 	runnable := job.Failure == nil && job.SkipReason == ""
@@ -984,9 +994,12 @@ type dependency struct {
 	AllowFailure bool
 }
 
-func emitConcurrencyGateStep(out *bytes.Buffer, stepIndent, attributeIndent, label, key string, gate *ConcurrencyGate, dependencies []dependency) {
+func emitConcurrencyGateStep(out *bytes.Buffer, stepIndent, attributeIndent, label, key string, gate *ConcurrencyGate, dependencies []dependency, condition string) {
 	_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(label))
 	_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(key))
+	if condition != "" {
+		_, _ = fmt.Fprintf(out, "%sif: %s\n", attributeIndent, yamlScalar(condition))
+	}
 	_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar("true"))
 	if gate.Queue != "" {
 		_, _ = fmt.Fprintf(out, "%sagents:\n", attributeIndent)
