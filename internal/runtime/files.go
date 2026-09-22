@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -58,6 +59,24 @@ func newCommandFilesUnder(parent string) (commandFiles, error) {
 			return commandFiles{}, errors.Join(fmt.Errorf("create file-command file: %w", err), files.cleanup())
 		}
 		files.open[path] = file
+		if runtime.GOOS == "windows" {
+			// O_CREATE adds write access even with O_RDONLY on Windows. Reopen
+			// read-only so Out-File can share this handle, retaining the original
+			// until identity is checked to prevent path replacement races.
+			reader, err := os.Open(path)
+			if err != nil {
+				return commandFiles{}, errors.Join(err, files.cleanup())
+			}
+			created, createErr := file.Stat()
+			retained, retainErr := reader.Stat()
+			if createErr != nil || retainErr != nil || !os.SameFile(created, retained) {
+				return commandFiles{}, errors.Join(fmt.Errorf("file-command file changed while opening"), createErr, retainErr, reader.Close(), files.cleanup())
+			}
+			if err := file.Close(); err != nil {
+				return commandFiles{}, errors.Join(err, reader.Close(), files.cleanup())
+			}
+			files.open[path] = reader
+		}
 	}
 	return files, nil
 }
@@ -132,7 +151,7 @@ func (files commandFiles) apply(result *Result, state map[string]string) (fileCo
 		result.Paths = result.Paths[:0]
 	}
 	maps.Copy(result.Outputs, outputs)
-	maps.Copy(result.Env, env)
+	mergeEnvironmentInto(result.Env, env)
 	for name, value := range states {
 		result.State[name] = value
 		if state != nil {
@@ -181,7 +200,7 @@ func (files commandFiles) parseCommandFile(path string) (map[string]string, erro
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("seek file command %s: %w", filepath.Base(path), err)
 	}
-	return parseCommandReader(path, file)
+	return parseCommandReader(path, file, path == files.env && runtime.GOOS == "windows")
 }
 
 func (files commandFiles) readBoundedFile(path string, limit int64) ([]byte, error) {
@@ -228,7 +247,7 @@ func readBoundedReader(path string, reader io.Reader, limit int64) ([]byte, erro
 	return contents, nil
 }
 
-func parseCommandReader(path string, reader io.Reader) (map[string]string, error) {
+func parseCommandReader(path string, reader io.Reader, foldNames bool) (map[string]string, error) {
 	values := make(map[string]string)
 	buffered := bufio.NewReader(reader)
 	if prefix, _ := buffered.Peek(3); string(prefix) == "\ufeff" {
@@ -261,6 +280,9 @@ func parseCommandReader(path string, reader io.Reader) (map[string]string, error
 			if !found {
 				return nil, fmt.Errorf("missing delimiter %q for %q", delimiter, name)
 			}
+			if foldNames {
+				name = strings.ToUpper(name)
+			}
 			values[name] = strings.Join(lines, "\n")
 			entries++
 			if entries > maxCommandEntries {
@@ -271,6 +293,9 @@ func parseCommandReader(path string, reader io.Reader) (map[string]string, error
 		name, value, ok := strings.Cut(line, "=")
 		if !ok || name == "" {
 			return nil, fmt.Errorf("invalid file command %q", line)
+		}
+		if foldNames {
+			name = strings.ToUpper(name)
 		}
 		values[name] = value
 		entries++

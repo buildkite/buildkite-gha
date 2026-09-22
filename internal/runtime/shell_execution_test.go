@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,20 +18,36 @@ func TestPowerShellExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PowerShell is required; run mise install: %v", err)
 	}
-	// Exercise both named shells with the installed PowerShell on Unix.
-	bin := t.TempDir()
-	if err := os.Symlink(pwsh, filepath.Join(bin, "powershell")); err != nil {
-		t.Fatal(err)
+	command := strconv.Quote(pwsh)
+	if runtime.GOOS == "windows" {
+		// Use native separators, including in Program Files, not Go escapes.
+		command = `"` + pwsh + `"`
+	} else {
+		// Exercise both named shells with the installed PowerShell on Unix.
+		bin := t.TempDir()
+		if err := os.Symlink(pwsh, filepath.Join(bin, "powershell")); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	for _, shell := range []string{"pwsh", "powershell", strconv.Quote(pwsh) + " -NoProfile -File {0}"} {
+	shells := []string{"pwsh", "powershell", command + " -NoProfile -File {0}"}
+	if runtime.GOOS == "windows" {
+		shells = append(shells, "")
+	}
+	for _, shell := range shells {
 		t.Run(shell, func(t *testing.T) {
 			workspace := t.TempDir()
 			temp := filepath.Join(workspace, "runner's temp")
 			if err := os.Mkdir(temp, 0o700); err != nil {
 				t.Fatal(err)
 			}
+			wantTemp, err := os.Stat(temp)
+			if err != nil {
+				t.Fatal(err)
+			}
 			t.Setenv("TMPDIR", temp)
+			t.Setenv("TMP", temp)
+			t.Setenv("TEMP", temp)
 			workflow := ".github/workflows/test.yml"
 			writeFixtureFile(t, workspace, workflow, "name: PowerShell test\n")
 			job := runtimePlan(t, workspace, workflow, []runtimeTestStep{
@@ -46,8 +63,13 @@ func TestPowerShellExecution(t *testing.T) {
 				t.Fatalf("outputs = %#v, error = %v\nstdout: %s\nstderr: %s", result.Outputs, err, stdout.String(), stderr.String())
 			}
 			script := result.Outputs["script"]
-			if filepath.Ext(script) != ".ps1" || filepath.Dir(script) != temp {
+			if filepath.Ext(script) != ".ps1" {
 				t.Fatalf("script = %q, want .ps1 script under %q", script, temp)
+			}
+			// PowerShell may expand Windows 8.3 aliases in the script path.
+			gotTemp, err := os.Stat(filepath.Dir(script))
+			if err != nil || !os.SameFile(gotTemp, wantTemp) {
+				t.Fatalf("script path = %q, want parent directory %q: %v", script, temp, err)
 			}
 			if _, err := os.Stat(script); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("script not removed: %v", err)
@@ -80,7 +102,7 @@ func TestPowerShellExecution(t *testing.T) {
 }
 
 func TestAbsolutePowerShellScriptExtension(t *testing.T) {
-	for _, command := range []string{"/opt/powershell/pwsh", "/opt/powershell/PWSH", "/opt/powershell/powershell", "/opt/powershell/powershell.exe"} {
+	for _, command := range []string{"/opt/powershell/pwsh", "/opt/powershell/PWSH", "/opt/powershell/powershell", "/opt/powershell/powershell.exe", `C:\Program Files\PowerShell\7\pwsh.exe`} {
 		if got := shellScriptExtension(command); got != ".ps1" {
 			t.Fatalf("extension for %q = %q, want .ps1", command, got)
 		}

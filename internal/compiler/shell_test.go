@@ -24,10 +24,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Unsupported shell
-        shell: /opt/msys2/msys2.exe {0}
+        shell: C:/Windows/System32/cmd.exe /C {0}
         run: echo test
 `,
-			wantReportedCommand: "msys2.exe",
+			wantReportedCommand: "cmd.exe",
+			wantLine:            6,
+			wantStep:            1,
+		},
+		{
+			name: "native Windows executable path",
+			workflow: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Unsupported shell
+        shell: C:\Windows\System32\cmd.exe /C {0}
+        run: echo test
+`,
+			wantReportedCommand: "cmd.exe",
 			wantLine:            6,
 			wantStep:            1,
 		},
@@ -178,6 +193,9 @@ func TestCompilePlansAcceptPowerShellAndCustomShellTemplates(t *testing.T) {
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: msys2 {0}
     steps:
       - shell: bash -l {0}
         run: conda info
@@ -191,15 +209,22 @@ jobs:
         run: Write-Output test
       - shell: /opt/powershell/pwsh -File {0}
         run: Write-Output test
+      - shell: D:\cygwin\bin\bash.exe '{0}'
+        run: echo Cygwin
+      - shell: '"C:\Program Files\Cygwin\bin\bash.exe" {0}'
+        run: echo Cygwin
 `)
 	plans, err := compileUntrustedPlans(".github/workflows/shells.yml", workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || len(plans[0].Program.Job.Steps) != 6 {
+	if len(plans) != 1 || len(plans[0].Program.Job.Steps) != 8 {
 		t.Fatalf("compiled plans = %#v", plans)
 	}
-	for i, want := range []string{"bash -l {0}", "Rscript {0}", "julia --color=yes {0}", "pwsh", "powershell", "/opt/powershell/pwsh -File {0}"} {
+	if got := plans[0].Program.Job.Defaults.Shell.Source; got != "msys2 {0}" {
+		t.Fatalf("default shell = %q", got)
+	}
+	for i, want := range []string{"bash -l {0}", "Rscript {0}", "julia --color=yes {0}", "pwsh", "powershell", "/opt/powershell/pwsh -File {0}", `D:\cygwin\bin\bash.exe '{0}'`, `"C:\Program Files\Cygwin\bin\bash.exe" {0}`} {
 		if plans[0].Program.Job.Steps[i].Run.Shell.Source != want {
 			t.Fatalf("step %d shell = %q, want %q", i+1, plans[0].Program.Job.Steps[i].Run.Shell.Source, want)
 		}

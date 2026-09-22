@@ -326,17 +326,15 @@ func (r stageRun) execute(fail func(string, ...any) int) int {
 	expected := make(map[string]string, len(stage.jobs)+len(stage.steps))
 	for _, jobPlan := range stage.plans {
 		artifacts = append(artifacts, transport.Artifact{Path: jobPlan.Path, Digest: jobPlan.Digest, Contents: jobPlan.Contents})
-		// Every bootstrap variant the emitter writes single-quotes the plan
-		// digest, and a digest never contains quotes.
-		expected[jobPlan.Job.Target.StepKey] = "'" + jobPlan.Digest + "'"
+		expected[jobPlan.Job.Target.StepKey] = jobPlan.Digest
 	}
 	for _, job := range stage.jobs {
 		if job.SkipDigest != "" {
-			expected[job.Key] = "'" + job.SkipDigest + "'"
+			expected[job.Key] = job.SkipDigest
 		}
 	}
 	for _, step := range stage.steps {
-		expected[step.Key] = "'" + step.Stage.ArtifactDigest + "'"
+		expected[step.Key] = step.Stage.ArtifactDigest
 	}
 	if err := transport.UploadArtifacts(r.ctx, r.agent, r.root, artifacts, pipeline); err != nil {
 		if r.ctx.Err() != nil || !errors.Is(err, transport.ErrPipelineUpload) {
@@ -564,7 +562,14 @@ func (r stageRun) alreadyApplied(expected map[string]string, attribute string) b
 	}
 	for key, want := range expected {
 		value, err := r.agent.GetStepAttribute(r.ctx, key, attribute)
-		if err != nil || !strings.Contains(string(value), want) {
+		if err != nil {
+			return false
+		}
+		if attribute == "command" {
+			if !buildkitepipeline.BootstrapHasDigest(string(value), want) {
+				return false
+			}
+		} else if !strings.Contains(string(value), want) {
 			return false
 		}
 	}

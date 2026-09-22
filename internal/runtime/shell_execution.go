@@ -5,7 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
+	"runtime"
 	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -29,9 +30,12 @@ func (r *jobRun) runWorkflowShellStep(ctx context.Context, processor *commandOut
 		return result, err
 	}
 	if shell == "" {
-		if r.jobContainer != nil {
+		switch {
+		case r.jobContainer != nil:
 			shell = "sh"
-		} else {
+		case runtime.GOOS == "windows":
+			shell = "pwsh"
+		default:
 			shell = "bash"
 		}
 	}
@@ -150,7 +154,7 @@ func (r *jobRun) runShellProcess(ctx context.Context, processor *commandOutputPr
 		args[i] = strings.ReplaceAll(args[i], "{0}", path)
 	}
 	if r.jobContainer == nil {
-		command, err := resolveExecutableInPath(args[0], env["PATH"])
+		command, err := resolveExecutableInPath(args[0], environmentValue(env, "PATH"))
 		if err != nil {
 			return err
 		}
@@ -160,7 +164,7 @@ func (r *jobRun) runShellProcess(ctx context.Context, processor *commandOutputPr
 }
 
 func shellScriptExtension(command string) string {
-	switch strings.ToLower(filepath.Base(command)) {
+	switch strings.ToLower(path.Base(strings.ReplaceAll(command, `\`, "/"))) {
 	case "bash", "sh":
 		return ".sh"
 	case "python":

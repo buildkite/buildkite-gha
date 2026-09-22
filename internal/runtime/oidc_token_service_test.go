@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -141,11 +142,18 @@ func TestIDTokenServiceWireContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = service.Close(t.Context()) }()
-	env, revoke, err := service.actionEnvironment(t.Context(), nil)
+	env, revoke, err := service.actionEnvironment(t.Context(), map[string]string{"NO_PROXY": "internal.example"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer revoke()
+	wantLower := "127.0.0.1"
+	if runtime.GOOS == "windows" {
+		wantLower = "internal.example,127.0.0.1"
+	}
+	if env["NO_PROXY"] != "internal.example,127.0.0.1" || env["no_proxy"] != wantLower {
+		t.Fatalf("proxy bypass lists = %q / %q", env["NO_PROXY"], env["no_proxy"])
+	}
 	unauthorized, err := http.Get(env["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=denied")
 	if err != nil {
 		t.Fatal(err)

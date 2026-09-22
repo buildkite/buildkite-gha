@@ -152,7 +152,7 @@ func isIDTokenEnvironment(name string) bool {
 }
 
 func removeIDTokenEnvironment(env map[string]string) map[string]string {
-	clean := cloneStrings(env)
+	clean := mergeStringMaps(env)
 	delete(clean, "ACTIONS_ID_TOKEN_REQUEST_URL")
 	delete(clean, "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
 	return clean
@@ -219,8 +219,8 @@ func (s *idTokenService) actionEnvironment(ctx context.Context, baseEnv map[stri
 	}
 	for _, name := range []string{"NO_PROXY", "no_proxy"} {
 		env[name] = host
-		if baseEnv[name] != "" {
-			env[name] = baseEnv[name] + "," + host
+		if existing := environmentValue(baseEnv, name); existing != "" {
+			env[name] = existing + "," + host
 		}
 	}
 	return env, revoke, nil

@@ -62,6 +62,21 @@ func TestPluginAcquiresVerifiedLinuxRuntimeForDarwinHost(t *testing.T) {
 	}
 }
 
+func TestPluginWindowsSelectionIsLazy(t *testing.T) {
+	host := runtimeDistribution{contents: []byte("host"), digest: "sha256:host"}
+	t.Setenv(pluginDevWindowsRuntimeEnvironment, "")
+	got, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(t.Context(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, compiler.PlatformLinuxAMD64, host)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("Linux-only acquisition = %#v, %v", got, err)
+	}
+	if _, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(t.Context(), map[compiler.Platform]bool{compiler.PlatformWindowsAMD64: true}, compiler.PlatformLinuxAMD64, host); err == nil || !strings.Contains(err.Error(), pluginDevWindowsRuntimeEnvironment) {
+		t.Fatalf("Windows dev acquisition error = %v", err)
+	}
+	if pluginRuntimeAsset(compiler.PlatformWindowsAMD64) != pluginWindowsAsset {
+		t.Fatal("Windows release asset was not selected")
+	}
+}
+
 func pluginTestLinuxExecutable() []byte {
 	contents := make([]byte, 64)
 	copy(contents, []byte("\x7fELF"))

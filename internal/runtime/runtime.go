@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -102,12 +104,12 @@ func resolveHostExecutableBeforeWorkflow(configured, fallback, label string) (st
 	if err != nil {
 		return "", fmt.Errorf("resolve %s absolute path before workflow execution: %w", label, err)
 	}
-	resolved, err = filepath.EvalSymlinks(resolved)
+	resolved, err = canonicalHostExecutable(resolved)
 	if err != nil {
 		return "", fmt.Errorf("canonicalize %s before workflow execution: %w", label, err)
 	}
 	info, err := os.Stat(resolved)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+	if err != nil || !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0) {
 		return "", fmt.Errorf("%s must be a real executable resolved before workflow execution", label)
 	}
 	return resolved, nil
@@ -664,7 +666,11 @@ func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandOutpu
 	}
 	env = removeCacheServiceEnvironment(env)
 	if action.Cache {
-		env = isolateCacheActionEnvironment(env)
+		var err error
+		env, err = isolateCacheActionEnvironment(env)
+		if err != nil {
+			return fmt.Errorf("configure actions/cache tools: %w", err)
+		}
 	}
 	if action.Cache || action.CacheClientCompatibility {
 		applyGitHubServerURLOverride(env)
@@ -750,7 +756,7 @@ func restoreStringMap(target, source map[string]string) {
 	for name := range target {
 		delete(target, name)
 	}
-	mergeInto(target, source)
+	maps.Copy(target, source)
 }
 
 func resultContains(result Result, value string) bool {

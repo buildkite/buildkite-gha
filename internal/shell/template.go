@@ -23,7 +23,7 @@ func ValidateCompatibility(shell string) error {
 func compatibilityError(shell, command string) error {
 	command = normalizeCommand(command)
 	switch command {
-	case "cmd", "cmd.exe", "msys2", "msys2.cmd", "msys2.exe":
+	case "cmd", "cmd.exe":
 		return &UnsupportedError{Shell: shell, Command: command}
 	default:
 		return nil
@@ -79,6 +79,17 @@ func ParseTemplate(shell string) ([]string, error) {
 }
 
 func splitTemplate(shell string) ([]string, error) {
+	// A drive-absolute executable uses native separators, even when compiled
+	// on Unix. Keep the existing escape rules for arguments, POSIX commands,
+	// and templates that already escape the drive's first backslash.
+	command := strings.TrimLeft(shell, " \t\r\n")
+	if len(command) > 0 && (command[0] == '\'' || command[0] == '"') {
+		command = command[1:]
+	}
+	nativePath := len(command) >= 3 &&
+		(command[0] >= 'A' && command[0] <= 'Z' || command[0] >= 'a' && command[0] <= 'z') &&
+		command[1] == ':' && command[2] == '\\' && (len(command) == 3 || command[3] != '\\')
+
 	var args []string
 	var arg strings.Builder
 	var quote rune
@@ -95,6 +106,11 @@ func splitTemplate(shell string) ([]string, error) {
 		if escaped {
 			arg.WriteRune(char)
 			escaped = false
+			inArg = true
+			continue
+		}
+		if char == '\\' && nativePath && len(args) == 0 {
+			arg.WriteRune(char)
 			inArg = true
 			continue
 		}

@@ -17,7 +17,6 @@ import (
 
 const (
 	cacheCredentialResponseLimit = 64 << 10
-	cacheActionToolPath          = "/usr/local/bin:/usr/bin:/bin"
 	defaultCacheResultsURL       = "https://ghacs.buildkite.com/"
 	cacheURLCompatibility        = "https://buildkite-gha-cache-gate.invalid/"
 
@@ -172,7 +171,7 @@ func isCacheServiceEnvironment(name string) bool {
 }
 
 func removeCacheServiceEnvironment(env map[string]string) map[string]string {
-	clean := cloneStrings(env)
+	clean := mergeStringMaps(env)
 	for name := range clean {
 		if isCacheServiceEnvironment(name) {
 			delete(clean, name)
@@ -198,7 +197,7 @@ func shouldOverrideGitHubServerURL(serverURL string) bool {
 	return !isGitHub && !isGheCloud && !isLocal
 }
 
-func isolateCacheActionEnvironment(env map[string]string) map[string]string {
+func isolateCacheActionEnvironment(env map[string]string) (map[string]string, error) {
 	isolated := removeCacheServiceEnvironment(env)
 	for _, name := range []string{
 		"NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_AUDIT", "LD_PRELOAD", "LD_LIBRARY_PATH",
@@ -209,8 +208,10 @@ func isolateCacheActionEnvironment(env map[string]string) map[string]string {
 	} {
 		delete(isolated, name)
 	}
-	isolated["PATH"] = cacheActionToolPath
-	return isolated
+	if err := isolateCacheToolEnvironment(isolated); err != nil {
+		return nil, err
+	}
+	return isolated, nil
 }
 
 func applyGitHubServerURLOverride(env map[string]string) {

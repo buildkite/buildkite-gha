@@ -5,6 +5,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -12,13 +13,17 @@ import (
 
 func TestFileCommandParsing(t *testing.T) {
 	tests := []struct {
-		name     string
-		contents string
-		want     map[string]string
-		wantErr  string
+		name      string
+		contents  string
+		want      map[string]string
+		wantErr   string
+		foldNames bool
 	}{
 		{name: "LF", contents: "single=value\nmulti<<END\nfirst\nsecond\nEND\n", want: map[string]string{"single": "value", "multi": "first\nsecond"}},
 		{name: "CRLF", contents: "single=value\r\nmulti<<END\r\nfirst\r\nsecond\r\nEND\r\n", want: map[string]string{"single": "value", "multi": "first\nsecond"}},
+		{name: "fold single after multiline", foldNames: true, contents: "PATH<<END\nfirst\nEND\nPath=second\n", want: map[string]string{"PATH": "second"}},
+		{name: "fold multiline after single", foldNames: true, contents: "Path=first\npAtH<<END\nSecond\nTHIRD\nEND\n", want: map[string]string{"PATH": "Second\nTHIRD"}},
+		{name: "preserve case without folding", contents: "Path=first\nPATH=second\n", want: map[string]string{"Path": "first", "PATH": "second"}},
 		{name: "leading BOM only", contents: "\ufeffsingle=héllo\r\nmulti<<END\r\n\ufeffpayload\r\nEND\r\n\ufeffnext=\ufeffvalue\r\n", want: map[string]string{"single": "héllo", "multi": "\ufeffpayload", "\ufeffnext": "\ufeffvalue"}},
 		{name: "BOM after blank line is payload", contents: "\n\ufeffname=value\n", want: map[string]string{"\ufeffname": "value"}},
 		{name: "BOM only", contents: "\ufeff", want: map[string]string{}},
@@ -31,7 +36,7 @@ func TestFileCommandParsing(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := parseCommandReader("commands", strings.NewReader(test.contents))
+			got, err := parseCommandReader("commands", strings.NewReader(test.contents), test.foldNames)
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 					t.Fatalf("parseCommandReader() error = %v, want %q", err, test.wantErr)
@@ -71,6 +76,34 @@ func TestFileCommandParsing(t *testing.T) {
 	}
 }
 
+func TestFileCommandEnvironmentCaseOrder(t *testing.T) {
+	files, err := newCommandFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = files.cleanup() }()
+	for _, path := range []string{files.env, files.output, files.state} {
+		if err := os.WriteFile(path, []byte("PATH=first\nPath<<END\nSecond\nEND\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := newResult()
+	effects, err := files.apply(&result, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"PATH": "first", "Path": "Second"}
+	if !maps.Equal(result.Outputs, want) || !maps.Equal(result.State, want) {
+		t.Fatalf("output/state names must preserve case: %#v / %#v", result.Outputs, result.State)
+	}
+	if runtime.GOOS == "windows" {
+		want = map[string]string{"PATH": "Second"}
+	}
+	if !maps.Equal(result.Env, want) || !effects.pathSet || effects.pathBase != want["PATH"] {
+		t.Fatalf("environment = %#v, PATH base = %q, set = %t", result.Env, effects.pathBase, effects.pathSet)
+	}
+}
+
 func TestPathFileLeadingBOM(t *testing.T) {
 	for _, test := range []struct {
 		contents string
@@ -88,10 +121,10 @@ func TestPathFileLeadingBOM(t *testing.T) {
 }
 
 func TestFileCommandLineLimitIsExplicit(t *testing.T) {
-	if values, err := parseCommandReader("output", strings.NewReader("value="+strings.Repeat("x", 70*1024)+"\n")); err != nil || len(values["value"]) != 70*1024 {
+	if values, err := parseCommandReader("output", strings.NewReader("value="+strings.Repeat("x", 70*1024)+"\n"), false); err != nil || len(values["value"]) != 70*1024 {
 		t.Fatalf("parseCommandReader() value length = %d, error = %v", len(values["value"]), err)
 	}
-	if _, err := parseCommandReader("output", strings.NewReader("value="+strings.Repeat("x", maxStreamLineBytes)+"\n")); err == nil || !strings.Contains(err.Error(), "parse file command output") {
+	if _, err := parseCommandReader("output", strings.NewReader("value="+strings.Repeat("x", maxStreamLineBytes)+"\n"), false); err == nil || !strings.Contains(err.Error(), "parse file command output") {
 		t.Fatalf("parseCommandReader() error = %v, want attributed size failure", err)
 	}
 }
