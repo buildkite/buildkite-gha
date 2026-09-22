@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -450,11 +451,7 @@ func TestCompileActionExecutablePathsUseLockedTree(t *testing.T) {
 		writeAction(t, root, "nested", "name: action\nruns:\n  using: node20\n  main: index.js\n")
 	}
 	writeAction(t, substitute, "", "name: cache\nruns:\n  using: node20\n  main: index.js\n")
-	longPath := strings.Repeat(strings.Repeat("a", 210)+"/", 5) + "run"
-	for _, file := range []string{filepath.Join(workspace, "nested", longPath), filepath.Join(workspace, "nested", "run"), filepath.Join(remote, "outer"), filepath.Join(remote, "nested", "run"), filepath.Join(substitute, "replacement")} {
-		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-			t.Fatal(err)
-		}
+	for _, file := range []string{filepath.Join(workspace, "nested", "run"), filepath.Join(remote, "outer"), filepath.Join(remote, "nested", "run"), filepath.Join(substitute, "replacement")} {
 		if err := os.WriteFile(file, []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -464,7 +461,7 @@ func TestCompileActionExecutablePathsUseLockedTree(t *testing.T) {
 		uses string
 		want []string
 	}{
-		{"./nested", []string{longPath, "run"}},
+		{"./nested", []string{"run"}},
 		{"owner/repo/nested@" + commit, []string{"nested/run", "outer"}},
 		{"actions/cache@" + commit, []string{"replacement"}},
 	} {
@@ -481,6 +478,32 @@ func TestCompileActionExecutablePathsUseLockedTree(t *testing.T) {
 				t.Fatalf("compiler produced invalid executable provenance: %v", err)
 			}
 		})
+	}
+}
+
+func TestCompileActionExecutablePathsBeyondActionReferenceLimit(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux filesystem paths beyond macOS's 1024-byte limit; plan/schema boundaries are tested on all hosts")
+	}
+	workspace := t.TempDir()
+	writeAction(t, workspace, "nested", "name: action\nruns:\n  using: node20\n  main: index.js\n")
+	longPath := strings.Repeat(strings.Repeat("a", 210)+"/", 5) + "run"
+	file := filepath.Join(workspace, "nested", longPath)
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, locks, _, _, err := compileActionLocks(t.Context(), workspace, nil, []string{"./nested"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) != 1 || !reflect.DeepEqual(locks[0].ExecutablePaths, []string{longPath}) {
+		t.Fatalf("long source path not recorded: %#v", locks)
+	}
+	if _, err := plan.ValidateActionLockList(locks); err != nil {
+		t.Fatalf("compiler produced invalid executable provenance: %v", err)
 	}
 }
 
