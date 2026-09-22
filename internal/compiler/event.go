@@ -76,6 +76,11 @@ func parseEvent(source []byte) (Event, error) {
 	if input.Payload == nil {
 		input.Payload = map[string]any{}
 	}
+	if input.Event == "fork" {
+		if err := validateForkEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
 	if input.Event == "label" {
 		if err := validateLabelEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
 			return Event{}, err
@@ -105,6 +110,30 @@ func parseEvent(source []byte) (Event, error) {
 		Provider: input.Provider, Event: input.Event, Repository: input.Repository,
 		Ref: input.Ref, SHA: input.SHA, Actor: input.Actor, Payload: input.Payload,
 	}, nil
+}
+
+func validateForkEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	id, _ := repo["id"].(json.Number)
+	number, err := id.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("fork requires the original repository identity and a full commit SHA")
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("fork must execute the resolved source default branch")
+	}
+	forkee, _ := payload["forkee"].(map[string]any)
+	id, _ = forkee["id"].(json.Number)
+	number, err = id.Int64()
+	name, _ := forkee["full_name"].(string)
+	if err != nil || number <= 0 || strings.TrimSpace(name) == "" {
+		return fmt.Errorf("fork requires payload.forkee id and full_name")
+	}
+	if _, exists := payload["action"]; exists {
+		return fmt.Errorf("fork has no activity types")
+	}
+	return nil
 }
 
 func validateLabelEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {

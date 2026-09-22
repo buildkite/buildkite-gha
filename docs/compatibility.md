@@ -109,6 +109,26 @@ No shadow GitHub Actions run is created. Buildkite owns scheduling, logs, retrie
 
 Steps remain inside one job because they share a workspace, environment files, action state, and post-action cleanup.
 
+### Repository fork events
+
+`fork` runs when someone forks the source repository. Scalar, array, null, and
+empty-map declarations are supported; activity types and filters are rejected.
+It does not enable pull requests from forks or `pull_request_target`.
+
+Pipeline Triggers require a compatible backend, pinned workflow path/ref/SHA,
+and the original linked payload. Discovery and checkout use the source
+repository's server-resolved default-branch commit, never the forkee's branch or
+commit or stale pipeline/webhook metadata. The complete payload, including
+`github.event.forkee`, survives into `GITHUB_EVENT_PATH`. Missing, malformed,
+foreign-repository, or contradictory provenance fails closed, including rebuilds
+without the original payload. Explicit snapshots must supply a full SHA and
+the resolved source `repository.default_branch`; the runtime does not resolve it.
+
+This adds no token authority or native GitHub Actions run. Release and select the
+fork-capable runtime before deploying backend subscription defaults. Existing
+dedicated hooks require a separately approved additive `fork` subscription;
+deployment does not backfill them.
+
 ### Repository label lifecycle events
 
 `label` supports `created`, `edited`, and `deleted` activities, all by default.
@@ -354,6 +374,7 @@ the group condition, and the provider-check suffix.
 | `deployment`, `deployment_status` | Pipeline Triggers with a compatible server, or explicit event snapshots. Bare, array, null, and empty-map declarations are supported; activity types and event filters are not. Workflows and checkout use the deployment commit. The ref identifies its branch or tag and is empty for SHA-only deployments. Status states `error`, `failure`, `in_progress`, `queued`, `pending`, `success`, and `waiting` are supported ([GitHub status enum](https://docs.github.com/en/graphql/reference/enums#deploymentstatusstate)); `inactive` cannot run a workflow. The genuine payload exposes `github.event.deployment` and `github.event.deployment_status`, including environment, state, `environment_url`, `log_url`, and `target_url` when present. Use job/step conditions on these values, not `types` or environment filters. No deployment creation or environment orchestration is added. |
 | `create`, `delete` | [Branch and tag lifecycle](#branch-and-tag-lifecycle-events). No activity types or filters. Creation uses the exact ref's resolved commit; deletion uses the default branch. |
 | `label` | [Repository label lifecycle](#repository-label-lifecycle-events). `created`, `edited`, and `deleted`, all by default. Workflows and checkout use the resolved default branch. |
+| `fork` | [Repository forks](#repository-fork-events). No activity types or filters. Workflows and checkout use the source repository's resolved default branch, not the forkee. |
 | `issues` | Omitted `types` or `types: []` accepts every GitHub Actions issue activity. Nonempty `types` may contain `opened`, `edited`, `deleted`, `transferred`, `pinned`, `unpinned`, `closed`, `reopened`, `assigned`, `unassigned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `milestoned`, `demilestoned`, `typed`, `untyped`, `field_added`, and `field_removed`. Unknown types and branch, tag, path, or workflow filters are rejected. In a GitHub Actions Pipeline Trigger build, Buildkite selects workflows and the checkout from the latest verified default-branch SHA; native issue-build settings, branch/path filters, and comment gating do not participate. Existing native Buildkite issue builds remain supported through linked webhook data and retain their own build-creation settings. |
 | `issue_comment` | Omitted `types` or `types: []` accepts `created`, `edited`, and `deleted`; nonempty `types` may contain those activities. Both issue and pull request conversation comments are supported. Unknown types and branch, tag, path, or workflow filters are rejected. GitHub Actions Pipeline Trigger builds select workflows and the checkout from the latest verified default-branch SHA and do not inherit native command-word, trusted-commenter, PR-only, branch, or path gating. |
 | `pull_request_review` | Pipeline Triggers support `submitted`, `edited`, and `dismissed`, all by default. Nonempty `types` selects activities, not review states. Use `if: github.event.review.state == 'approved'` on a job or step for approval-only execution. |
