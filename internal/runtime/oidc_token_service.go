@@ -219,8 +219,8 @@ func (s *idTokenService) actionEnvironment(ctx context.Context, baseEnv map[stri
 	}
 	for _, name := range []string{"NO_PROXY", "no_proxy"} {
 		env[name] = host
-		if baseEnv[name] != "" {
-			env[name] = baseEnv[name] + "," + host
+		if existing := environmentValue(baseEnv, name); existing != "" {
+			env[name] = existing + "," + host
 		}
 	}
 	return env, revoke, nil

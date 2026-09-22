@@ -59,6 +59,8 @@ jobs:
         run: |
           $env:BUILDKITE_GHA_TEST_NODE24 = (Get-Command node).Source
           go test ./internal/runtime -run '^(TestCacheServiceLifecycleUsesFreshIsolatedCredentials|TestWindowsCacheArchiveTools|TestIsolateCacheActionEnvironment.*)$' -v -count=1
+      - name: Verify OIDC proxy bypass and token requests
+        run: go test ./internal/runtime -run '^TestIDTokenServiceWireContract$' -v -count=1
       - name: Verify Windows action compatibility
         run: go test ./internal/compiler -run '^TestWindowsActionCompatibilityAndRuntimeDiscovery$' -v -count=1
       - name: Verify bootstrap integrity and exit codes
