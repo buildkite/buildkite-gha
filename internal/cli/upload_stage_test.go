@@ -227,39 +227,47 @@ func runContinueAs(t *testing.T, runner *cliCaptureRunner, digest, producer, job
 }
 
 type continuePipelineStep struct {
+	Group            string `yaml:"group"`
 	Key              string `yaml:"key"`
 	Label            string `yaml:"label"`
+	Block            string `yaml:"block"`
 	Command          string `yaml:"command"`
 	Skip             string `yaml:"skip"`
 	Concurrency      int    `yaml:"concurrency"`
 	ConcurrencyGroup string `yaml:"concurrency_group"`
 	Agents           struct{ Queue string }
 	DependsOn        []struct {
-		Step string `yaml:"step"`
+		Step         string `yaml:"step"`
+		AllowFailure bool   `yaml:"allow_failure"`
 	} `yaml:"depends_on"`
 	Notify []struct {
 		GitHubCheck struct {
 			Name string `yaml:"name"`
 		} `yaml:"github_check"`
 	} `yaml:"notify"`
+	Steps []continuePipelineStep `yaml:"steps"`
 }
 
 func decodeContinuePipeline(t *testing.T, source []byte) (group string, key string, steps []continuePipelineStep) {
 	t.Helper()
 	var pipeline struct {
-		Steps []struct {
-			Group string                 `yaml:"group"`
-			Key   string                 `yaml:"key"`
-			Steps []continuePipelineStep `yaml:"steps"`
-		} `yaml:"steps"`
+		Steps []continuePipelineStep `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(source, &pipeline); err != nil {
 		t.Fatalf("pipeline YAML: %v\n%s", err, source)
 	}
-	if len(pipeline.Steps) != 1 {
-		t.Fatalf("pipeline groups = %d, want 1:\n%s", len(pipeline.Steps), source)
+	if len(pipeline.Steps) == 1 && pipeline.Steps[0].Group != "" {
+		if len(pipeline.Steps[0].Steps) == 0 {
+			t.Fatalf("pipeline group has no steps:\n%s", source)
+		}
+		return pipeline.Steps[0].Group, pipeline.Steps[0].Key, pipeline.Steps[0].Steps
 	}
-	return pipeline.Steps[0].Group, pipeline.Steps[0].Key, pipeline.Steps[0].Steps
+	for _, step := range pipeline.Steps {
+		if step.Group != "" || len(step.Steps) != 0 {
+			t.Fatalf("pipeline mixes grouped and flat steps:\n%s", source)
+		}
+	}
+	return "", "", pipeline.Steps
 }
 
 func lastPipelineUpload(t *testing.T, runner *cliCaptureRunner) []byte {
@@ -290,6 +298,9 @@ func pipelineUploads(runner *cliCaptureRunner) int {
 // uploaded again.
 func TestContinueExpandsNeedsDerivedMatrix(t *testing.T) {
 	initial := runContinueInitialUpload(t, "--runner-queue", "ubuntu-latest=custom-linux")
+	if !initial.artifact.Workflow.Ungrouped {
+		t.Fatalf("initial stage record is grouped: %+v", initial.artifact.Workflow)
+	}
 	prefix := strings.TrimSuffix(initial.artifact.rootProducer().Key, "plan")
 	if initial.artifact.rootProducer().Key != prefix+"plan" || !slices.Equal(initial.artifact.Continuation.Jobs, []string{"build", "publish"}) || initial.artifact.Continuation.StepKey != prefix+"build-matrix" {
 		t.Fatalf("continuation = %+v", initial.artifact.Continuation)
@@ -324,8 +335,8 @@ func TestContinueExpandsNeedsDerivedMatrix(t *testing.T) {
 	}
 
 	group, groupKey, steps := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
-	if group != ":github: workflow · "+initial.artifact.Workflow.GroupLabel || groupKey != "" {
-		t.Fatalf("deferred group = %q key %q, want the workflow group without a key", group, groupKey)
+	if group != "" || groupKey != "" {
+		t.Fatalf("deferred pipeline has group %q key %q, want flat steps", group, groupKey)
 	}
 	if len(steps) != 3 {
 		t.Fatalf("deferred steps = %d, want two build instances and publish:\n%s", len(steps), lastPipelineUpload(t, runner))
@@ -525,7 +536,7 @@ func TestContinueFindsProducerWithOneRowMatrix(t *testing.T) {
 		if step.Key != initial.artifact.Continuation.StepKey {
 			continue
 		}
-		if len(step.DependsOn) != 1 || step.DependsOn[0].Step != producerKey {
+		if len(step.DependsOn) != 2 || step.DependsOn[0].Step != "continue-importer" || step.DependsOn[1].Step != producerKey {
 			t.Fatalf("deferred step depends on %#v, want the producer instance %q", step.DependsOn, producerKey)
 		}
 	}
@@ -909,29 +920,14 @@ func TestContinueSharesApprovalGates(t *testing.T) {
 		}
 	}
 	gateSteps := func(pipeline []byte) (created []string, referenced []string) {
-		var decoded struct {
-			Steps []struct {
-				Steps []struct {
-					Key       string `yaml:"key"`
-					Block     string `yaml:"block"`
-					DependsOn []struct {
-						Step string `yaml:"step"`
-					} `yaml:"depends_on"`
-				} `yaml:"steps"`
-			} `yaml:"steps"`
-		}
-		if err := yaml.Unmarshal(pipeline, &decoded); err != nil {
-			t.Fatalf("pipeline YAML: %v\n%s", err, pipeline)
-		}
-		for _, group := range decoded.Steps {
-			for _, step := range group.Steps {
-				if step.Block != "" {
-					created = append(created, step.Key)
-				}
-				for _, dependency := range step.DependsOn {
-					if strings.Contains(dependency.Step, "approve") {
-						referenced = append(referenced, dependency.Step)
-					}
+		_, _, steps := decodeContinuePipeline(t, pipeline)
+		for _, step := range steps {
+			if step.Block != "" {
+				created = append(created, step.Key)
+			}
+			for _, dependency := range step.DependsOn {
+				if strings.Contains(dependency.Step, "approve") {
+					referenced = append(referenced, dependency.Step)
 				}
 			}
 		}
@@ -1025,29 +1021,14 @@ func TestContinueRetriesWhenOnlySomeGatesRaced(t *testing.T) {
 	// blockKeys returns the block steps a pipeline creates by key and label,
 	// and every step key the pipeline depends on.
 	blockKeys := func(pipeline []byte) (blocks map[string]string, referenced map[string]bool) {
-		var decoded struct {
-			Steps []struct {
-				Steps []struct {
-					Key       string `yaml:"key"`
-					Block     string `yaml:"block"`
-					DependsOn []struct {
-						Step string `yaml:"step"`
-					} `yaml:"depends_on"`
-				} `yaml:"steps"`
-			} `yaml:"steps"`
-		}
-		if err := yaml.Unmarshal(pipeline, &decoded); err != nil {
-			t.Fatal(err)
-		}
+		_, _, steps := decodeContinuePipeline(t, pipeline)
 		blocks, referenced = map[string]string{}, map[string]bool{}
-		for _, group := range decoded.Steps {
-			for _, step := range group.Steps {
-				if step.Block != "" {
-					blocks[step.Key] = step.Block
-				}
-				for _, dependency := range step.DependsOn {
-					referenced[dependency.Step] = true
-				}
+		for _, step := range steps {
+			if step.Block != "" {
+				blocks[step.Key] = step.Block
+			}
+			for _, dependency := range step.DependsOn {
+				referenced[dependency.Step] = true
 			}
 		}
 		return blocks, referenced
@@ -1453,7 +1434,7 @@ func TestContinueJoinedClosures(t *testing.T) {
 	_, _, initialSteps := decodeContinuePipeline(t, []byte(initial.pipeline))
 	for _, step := range initialSteps {
 		if step.Key == initial.artifact.Continuation.StepKey {
-			if len(step.DependsOn) != 2 || step.DependsOn[0].Step != initial.artifact.rootProducer().Key || step.DependsOn[1].Step != producer.Key {
+			if len(step.DependsOn) != 3 || step.DependsOn[0].Step != "continue-importer" || step.DependsOn[1].Step != initial.artifact.rootProducer().Key || step.DependsOn[2].Step != producer.Key {
 				t.Fatalf("owner dependencies = %#v", step.DependsOn)
 			}
 		}

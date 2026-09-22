@@ -185,6 +185,11 @@ func (a Agent) UploadPipeline(ctx context.Context, pipeline []byte) error {
 	return err
 }
 
+func (a Agent) UpdateStepLabel(ctx context.Context, label string) error {
+	_, err := a.run(ctx, []string{"step", "update", "label", label}, nil)
+	return err
+}
+
 // EnsureStepLabelSuffix makes a terminal runtime distinction visible on the
 // current Buildkite step without duplicating it when the step is retried.
 func (a Agent) EnsureStepLabelSuffix(ctx context.Context, suffix string) error {

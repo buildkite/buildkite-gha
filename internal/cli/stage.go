@@ -119,6 +119,7 @@ type stageWorkflow struct {
 	Namespace  string `json:"step_key_namespace"`
 	GroupLabel string `json:"group_label"`
 	CheckName  string `json:"check_name"`
+	Ungrouped  bool   `json:"ungrouped,omitempty"`
 }
 
 type stageEvent struct {

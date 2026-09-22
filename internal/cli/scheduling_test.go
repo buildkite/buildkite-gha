@@ -44,7 +44,7 @@ func TestContinueSchedulingWaitsForStaticGraphAndChecksReplayAttributes(t *testi
 				if step.Key != initial.artifact.Continuation.StepKey {
 					continue
 				}
-				if len(step.DependsOn) != len(initial.artifact.Graph) || step.Concurrency != 0 || step.ConcurrencyGroup != "" {
+				if len(step.DependsOn) != len(initial.artifact.Graph)+1 || step.DependsOn[0].Step != "continue-importer" || step.DependsOn[0].AllowFailure || step.Concurrency != 0 || step.ConcurrencyGroup != "" {
 					t.Fatalf("coordinator must wait without holding a slot: %#v", step)
 				}
 				for _, job := range initial.artifact.Graph {

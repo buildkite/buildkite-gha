@@ -404,6 +404,12 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		runtimeDigests[platform] = runtimeDistribution.digest
 	}
 	generatedWorkflows := make([]buildkitepipeline.Workflow, 0, len(workflows))
+	workflowCount := 0
+	for _, input := range workflows {
+		if !input.ReusableOnly {
+			workflowCount++
+		}
+	}
 	skippedWorkflows := make([]skippedWorkflow, 0)
 	planArtifacts := make([]compiler.PlanArtifact, 0)
 	var eventArtifact *transport.Artifact
@@ -545,6 +551,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			root, event, stageErr := importerStage(request, importerJobID, os.Getenv("BUILDKITE_COMMIT"), input, label, checkName, effectiveEvent, uploadArguments.experimentalRunnerUser, uploadArguments.privateReusableWorkflows)
 			var stage stageResult
 			if stageErr == nil {
+				root.Workflow.Ungrouped = workflowCount == 1
 				stage, stageErr = root.advance(bundle, nil, nil, nil, "")
 			}
 			if stageErr != nil {
@@ -589,6 +596,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	if eventArtifact != nil && importerJobID == "" {
 		return usageError(stderr, "upload: BUILDKITE_JOB_ID is required when a workflow retains the event payload")
 	}
+	if len(generatedWorkflows) == 1 {
+		generatedWorkflows[0].Ungrouped = true
+	}
 	aggregatePipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep:      importerStep,
 		ArtifactProducer:  importerJobID,
@@ -599,6 +609,11 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: emit aggregate Buildkite pipeline: %v\n", err)
 		return 1
+	}
+	if len(generatedWorkflows) == 1 {
+		if err := agent.UpdateStepLabel(ctx, ":github: workflow · "+generatedWorkflows[0].GroupLabel); err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: warning: update step label: %v\n", err)
+		}
 	}
 	for i, input := range workflows {
 		if input.Applicable {

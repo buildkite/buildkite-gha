@@ -295,11 +295,11 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	if !strings.Contains(stdout.String(), "Uploaded 3 jobs") || stderr.Len() != 0 {
 		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
 	}
-	if len(runner.commands) != 2 {
-		t.Fatalf("commands = %#v, want one artifact batch and pipeline", runner.commands)
+	if len(runner.commands) != 3 {
+		t.Fatalf("commands = %#v, want label update, artifact batch, and pipeline", runner.commands)
 	}
-	root := runner.commands[0].dir
-	artifactCommand := runner.commands[0]
+	root := runner.commands[1].dir
+	artifactCommand := runner.commands[1]
 	wantArtifactArgs := []string{"artifact", "upload", ".buildkite-gha/**/*", "--concurrency", "8"}
 	if artifactCommand.name != "buildkite-agent" || !slices.Equal(artifactCommand.args, wantArtifactArgs) {
 		t.Fatalf("artifact command = %#v, want cwd %q and args %#v", artifactCommand, root, wantArtifactArgs)
@@ -310,40 +310,35 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatalf("temporary artifact root still exists: %v", err)
 	}
-	pipelineCommand := runner.commands[1]
+	pipelineCommand := runner.commands[2]
 	wantPipelineArgs := []string{"pipeline", "upload", "--no-interpolation"}
 	if strings.Join(pipelineCommand.args, " ") != strings.Join(wantPipelineArgs, " ") {
 		t.Fatalf("pipeline args = %#v, want %#v", pipelineCommand.args, wantPipelineArgs)
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group     string `yaml:"group"`
 			Key       string `yaml:"key"`
 			Condition string `yaml:"if"`
-			DependsOn string `yaml:"depends_on"`
-			Steps     []struct {
-				Key      string `yaml:"key"`
-				Command  string `yaml:"command"`
-				Cache    any    `yaml:"cache"`
-				Agents   any    `yaml:"agents"`
-				Checkout struct {
-					Skip bool `yaml:"skip"`
-				} `yaml:"checkout"`
-				DependsOn []struct {
-					Step         string `yaml:"step"`
-					AllowFailure bool   `yaml:"allow_failure"`
-				} `yaml:"depends_on"`
-			} `yaml:"steps"`
+			Command   string `yaml:"command"`
+			Cache     any    `yaml:"cache"`
+			Agents    any    `yaml:"agents"`
+			Checkout  struct {
+				Skip bool `yaml:"skip"`
+			} `yaml:"checkout"`
+			DependsOn []struct {
+				Step         string `yaml:"step"`
+				AllowFailure bool   `yaml:"allow_failure"`
+			} `yaml:"depends_on"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatalf("uploaded pipeline YAML: %v", err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · buildkite-gha shell smoke" || pipeline.Steps[0].Key == "" || pipeline.Steps[0].Condition != `(true)` || pipeline.Steps[0].DependsOn != "shell-upload-importer" || len(pipeline.Steps[0].Steps) != 3 {
+	if len(pipeline.Steps) != 3 {
 		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
 	}
 	wantLegacyKeys := map[string]bool{"gha-producer": true, "gha-consumer-5ebbc197d87b": true, "gha-consumer-91934b28b00f": true}
-	for _, step := range pipeline.Steps[0].Steps {
+	for _, step := range pipeline.Steps {
 		if !wantLegacyKeys[step.Key] {
 			t.Fatalf("literal single-workflow upload changed generated key %q", step.Key)
 		}
@@ -353,10 +348,11 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 		if !step.Checkout.Skip || step.Agents != nil {
 			t.Fatalf("step %q lacks isolated checkout or default agent targeting: %#v", step.Key, step)
 		}
-		for _, dependency := range step.DependsOn {
-			if dependency.Step == "shell-upload-importer" {
-				t.Fatalf("step %q retains importer dependency: %#v", step.Key, step.DependsOn)
-			}
+		if step.Condition != `(true)` {
+			t.Fatalf("step %q condition = %q, want true trigger condition", step.Key, step.Condition)
+		}
+		if len(step.DependsOn) == 0 || step.DependsOn[0].Step != "shell-upload-importer" || step.DependsOn[0].AllowFailure {
+			t.Fatalf("step %q lacks importer dependency: %#v", step.Key, step.DependsOn)
 		}
 		if !strings.HasPrefix(step.Command, "set -euo pipefail\n") ||
 			!strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
@@ -461,20 +457,18 @@ func TestRunUploadPublishesMixedRuntimeDistributions(t *testing.T) {
 	}
 	var pipeline struct {
 		Steps []struct {
-			Steps []struct {
-				Key     string `yaml:"key"`
-				Command string `yaml:"command"`
-			} `yaml:"steps"`
+			Key     string `yaml:"key"`
+			Command string `yaml:"command"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 {
-		t.Fatalf("workflow groups = %#v", pipeline.Steps)
+	if len(pipeline.Steps) != 2 {
+		t.Fatalf("workflow steps = %#v", pipeline.Steps)
 	}
 	commands := map[string]string{}
-	for _, step := range pipeline.Steps[0].Steps {
+	for _, step := range pipeline.Steps {
 		commands[step.Key] = step.Command
 	}
 	for jobID, digest := range planRuntime {
@@ -1015,25 +1009,20 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 			}
 			var pipeline struct {
 				Steps []struct {
-					Group     string `yaml:"group"`
 					Condition string `yaml:"if"`
-					Notify    any    `yaml:"notify"`
-					Steps     []struct {
-						Notify []struct {
-							GitHubCheck struct {
-								Name string `yaml:"name"`
-							} `yaml:"github_check"`
-						} `yaml:"notify"`
-					} `yaml:"steps"`
+					Notify    []struct {
+						GitHubCheck struct {
+							Name string `yaml:"name"`
+						} `yaml:"github_check"`
+					} `yaml:"notify"`
 				} `yaml:"steps"`
 			}
 			if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 				t.Fatal(err)
 			}
 			wantCheckName := "Active event / test (" + test.wantEvent + ")"
-			wantGroup := ":github: workflow · Active event"
-			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != wantGroup || !strings.Contains(pipeline.Steps[0].Condition, test.wantCondition) || pipeline.Steps[0].Notify != nil || len(pipeline.Steps[0].Steps) != 1 || len(pipeline.Steps[0].Steps[0].Notify) != 1 || pipeline.Steps[0].Steps[0].Notify[0].GitHubCheck.Name != wantCheckName {
-				t.Fatalf("aggregate event group = %#v, want group %q and check %q", pipeline.Steps, wantGroup, wantCheckName)
+			if len(pipeline.Steps) != 1 || !strings.Contains(pipeline.Steps[0].Condition, test.wantCondition) || len(pipeline.Steps[0].Notify) != 1 || pipeline.Steps[0].Notify[0].GitHubCheck.Name != wantCheckName {
+				t.Fatalf("event step = %#v, want check %q", pipeline.Steps, wantCheckName)
 			}
 			if test.wantFallback != "" && (!strings.Contains(pipeline.Steps[0].Condition, `build.env("BUILDKITE_GITHUB_EVENT") == null`) || !strings.Contains(pipeline.Steps[0].Condition, test.wantFallback)) {
 				t.Fatalf("aggregate event group condition = %q, want missing-event fallback %q", pipeline.Steps[0].Condition, test.wantFallback)
@@ -1069,28 +1058,24 @@ func TestRunUploadUsesOriginCheckForOriginEvent(t *testing.T) {
 	var pipeline struct {
 		Steps []struct {
 			Key    string `yaml:"key"`
-			Notify any    `yaml:"notify"`
-			Steps  []struct {
-				Key    string `yaml:"key"`
-				Notify []struct {
-					GitHubCheck any `yaml:"github_check"`
-					OriginCheck *struct {
-						Key  string `yaml:"key"`
-						Name string `yaml:"name"`
-					} `yaml:"origin_check"`
-				} `yaml:"notify"`
-			} `yaml:"steps"`
+			Notify []struct {
+				GitHubCheck any `yaml:"github_check"`
+				OriginCheck *struct {
+					Key  string `yaml:"key"`
+					Name string `yaml:"name"`
+				} `yaml:"origin_check"`
+			} `yaml:"notify"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Notify != nil || len(pipeline.Steps[0].Steps) != 1 || len(pipeline.Steps[0].Steps[0].Notify) != 1 || pipeline.Steps[0].Steps[0].Notify[0].GitHubCheck != nil || pipeline.Steps[0].Steps[0].Notify[0].OriginCheck == nil {
+	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Notify) != 1 || pipeline.Steps[0].Notify[0].GitHubCheck != nil || pipeline.Steps[0].Notify[0].OriginCheck == nil {
 		t.Fatalf("Origin workflow pipeline = %#v", pipeline.Steps)
 	}
-	check := pipeline.Steps[0].Steps[0].Notify[0].OriginCheck
-	if check.Key != pipeline.Steps[0].Steps[0].Key || check.Name != "Origin CI / test (push)" {
-		t.Fatalf("Origin workflow check = %#v, step key = %q", check, pipeline.Steps[0].Steps[0].Key)
+	check := pipeline.Steps[0].Notify[0].OriginCheck
+	if check.Key != pipeline.Steps[0].Key || check.Name != "Origin CI / test (push)" {
+		t.Fatalf("Origin workflow check = %#v, step key = %q", check, pipeline.Steps[0].Key)
 	}
 }
 
@@ -1892,27 +1877,24 @@ jobs:
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group string `yaml:"group"`
-			Steps []struct {
-				Label            string             `yaml:"label"`
-				Key              string             `yaml:"key"`
-				Skip             string             `yaml:"skip"`
-				Command          string             `yaml:"command"`
-				Plugins          failureStepPlugins `yaml:"plugins"`
-				DependsOn        []dependency       `yaml:"depends_on"`
-				Agents           map[string]string  `yaml:"agents"`
-				Image            string             `yaml:"image"`
-				Concurrency      int                `yaml:"concurrency"`
-				ConcurrencyGroup string             `yaml:"concurrency_group"`
-				Notify           []map[string]any   `yaml:"notify"`
-			} `yaml:"steps"`
+			Label            string             `yaml:"label"`
+			Key              string             `yaml:"key"`
+			Skip             string             `yaml:"skip"`
+			Command          string             `yaml:"command"`
+			Plugins          failureStepPlugins `yaml:"plugins"`
+			DependsOn        []dependency       `yaml:"depends_on"`
+			Agents           map[string]string  `yaml:"agents"`
+			Image            string             `yaml:"image"`
+			Concurrency      int                `yaml:"concurrency"`
+			ConcurrencyGroup string             `yaml:"concurrency_group"`
+			Notify           []map[string]any   `yaml:"notify"`
 		} `yaml:"steps"`
 	}
 	pipelineYAML := runner.commands[len(runner.commands)-1].stdin
 	if err := yaml.Unmarshal(pipelineYAML, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · Reusable CI" || len(pipeline.Steps[0].Steps) != 4 || !strings.Contains(stdout.String(), "Uploaded 4 jobs from 1 workflows") {
+	if len(pipeline.Steps) != 4 || !strings.Contains(stdout.String(), "Uploaded 4 jobs from 1 workflows") {
 		t.Fatalf("reusable failure pipeline = %#v, stdout = %q\n%s", pipeline.Steps, stdout.String(), pipelineYAML)
 	}
 	jobs := make(map[string]struct {
@@ -1920,7 +1902,7 @@ jobs:
 		plugins            failureStepPlugins
 		dependencies       []dependency
 	})
-	for _, step := range pipeline.Steps[0].Steps {
+	for _, step := range pipeline.Steps {
 		jobs[step.Label] = struct {
 			key, skip, command string
 			plugins            failureStepPlugins
@@ -1937,13 +1919,13 @@ jobs:
 	if detect.key == "" || detect.skip != "" || !strings.Contains(detect.command, "run-job") || len(detect.plugins) != 0 {
 		t.Fatalf("detect representation = %#v", detect)
 	}
-	if generator.key == "" || !isGeneratedFailureCommand(generator.command) || len(generator.plugins) != 1 || len(generator.dependencies) != 1 || generator.dependencies[0] != (dependency{Step: detect.key, AllowFailure: true}) {
+	if generator.key == "" || !isGeneratedFailureCommand(generator.command) || len(generator.plugins) != 1 || len(generator.dependencies) != 2 || generator.dependencies[0] != (dependency{Step: "reusable-failure-importer"}) || generator.dependencies[1] != (dependency{Step: detect.key, AllowFailure: true}) {
 		t.Fatalf("generator representation = %#v", generator)
 	}
-	if upload.key == "" || !isGeneratedFailureCommand(upload.command) || len(upload.plugins) != 1 || len(upload.dependencies) != 2 || upload.dependencies[1] != (dependency{Step: generator.key, AllowFailure: true}) {
+	if upload.key == "" || !isGeneratedFailureCommand(upload.command) || len(upload.plugins) != 1 || len(upload.dependencies) != 3 || upload.dependencies[2] != (dependency{Step: generator.key, AllowFailure: true}) {
 		t.Fatalf("upload representation = %#v", upload)
 	}
-	if final.key == "" || final.skip != "Not run because a prerequisite job could not be compiled" || len(final.dependencies) != 3 || final.dependencies[2] != (dependency{Step: upload.key, AllowFailure: true}) {
+	if final.key == "" || final.skip != "Not run because a prerequisite job could not be compiled" || len(final.dependencies) != 4 || final.dependencies[3] != (dependency{Step: upload.key, AllowFailure: true}) {
 		t.Fatalf("final representation = %#v", final)
 	}
 	generatorMessage := string(failureArtifactForStep(generator.plugins, runner.uploaded, "messages"))
@@ -1965,10 +1947,10 @@ jobs:
 			t.Fatalf("independent plan = %#v", job)
 		}
 	}
-	if independentPlans != 1 || pipeline.Steps[0].Steps[0].Concurrency != 1 || pipeline.Steps[0].Steps[0].ConcurrencyGroup == "" {
-		t.Fatalf("independent plan count = %d, detect concurrency = %d/%q", independentPlans, pipeline.Steps[0].Steps[0].Concurrency, pipeline.Steps[0].Steps[0].ConcurrencyGroup)
+	if independentPlans != 1 || pipeline.Steps[0].Concurrency != 1 || pipeline.Steps[0].ConcurrencyGroup == "" {
+		t.Fatalf("independent plan count = %d, detect concurrency = %d/%q", independentPlans, pipeline.Steps[0].Concurrency, pipeline.Steps[0].ConcurrencyGroup)
 	}
-	for _, step := range pipeline.Steps[0].Steps {
+	for _, step := range pipeline.Steps {
 		if len(step.Notify) != 1 {
 			t.Fatalf("job %q provider checks = %#v", step.Label, step.Notify)
 		}
@@ -2790,21 +2772,19 @@ func TestRunUploadUsesExplicitTargetQueueAndRunnerUserDefault(t *testing.T) {
 
 	var pipeline struct {
 		Steps []struct {
-			Steps []struct {
-				Key     string            `yaml:"key"`
-				Image   string            `yaml:"image"`
-				Agents  map[string]string `yaml:"agents"`
-				Command string            `yaml:"command"`
-			} `yaml:"steps"`
+			Key     string            `yaml:"key"`
+			Image   string            `yaml:"image"`
+			Agents  map[string]string `yaml:"agents"`
+			Command string            `yaml:"command"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatalf("uploaded pipeline YAML: %v", err)
 	}
-	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Steps) != 3 {
+	if len(pipeline.Steps) != 3 {
 		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
 	}
-	for _, step := range pipeline.Steps[0].Steps {
+	for _, step := range pipeline.Steps {
 		if step.Agents["queue"] != "hosted" {
 			t.Fatalf("step %q agents = %#v, want hosted queue", step.Key, step.Agents)
 		}
@@ -2839,15 +2819,13 @@ func TestRunUploadUsesExplicitTargetQueueAndRunnerUserDefault(t *testing.T) {
 	}
 	var disabledPipeline struct {
 		Steps []struct {
-			Steps []struct {
-				Command string `yaml:"command"`
-			} `yaml:"steps"`
+			Command string `yaml:"command"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(disabledRunner.commands[len(disabledRunner.commands)-1].stdin, &disabledPipeline); err != nil {
 		t.Fatalf("opt-out pipeline YAML: %v", err)
 	}
-	for _, step := range disabledPipeline.Steps[0].Steps {
+	for _, step := range disabledPipeline.Steps {
 		if strings.Contains(step.Command, "useradd") || strings.Contains(step.Command, "--user runner") || !strings.Contains(step.Command, "run-job --plan-digest") {
 			t.Fatalf("opt-out step still uses runner user: %q", step.Command)
 		}
@@ -2868,21 +2846,19 @@ func TestRunUploadDefaultsHostedToolchainImageWithoutRunnerQueue(t *testing.T) {
 
 	var pipeline struct {
 		Steps []struct {
-			Steps []struct {
-				Key     string            `yaml:"key"`
-				Image   string            `yaml:"image"`
-				Agents  map[string]string `yaml:"agents"`
-				Command string            `yaml:"command"`
-			} `yaml:"steps"`
+			Key     string            `yaml:"key"`
+			Image   string            `yaml:"image"`
+			Agents  map[string]string `yaml:"agents"`
+			Command string            `yaml:"command"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatalf("uploaded pipeline YAML: %v", err)
 	}
-	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Steps) != 3 {
+	if len(pipeline.Steps) != 3 {
 		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
 	}
-	for _, step := range pipeline.Steps[0].Steps {
+	for _, step := range pipeline.Steps {
 		if len(step.Agents) != 0 {
 			t.Fatalf("step %q agents = %#v, want default targeting", step.Key, step.Agents)
 		}
@@ -2906,19 +2882,17 @@ func TestRunUploadUsesExplicitRuntimeImage(t *testing.T) {
 	}
 	var pipeline struct {
 		Steps []struct {
-			Steps []struct {
-				Image   string `yaml:"image"`
-				Command string `yaml:"command"`
-			} `yaml:"steps"`
+			Image   string `yaml:"image"`
+			Command string `yaml:"command"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatalf("uploaded pipeline YAML: %v", err)
 	}
-	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Steps) != 3 {
+	if len(pipeline.Steps) != 3 {
 		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
 	}
-	for _, step := range pipeline.Steps[0].Steps {
+	for _, step := range pipeline.Steps {
 		if step.Image != image || !strings.Contains(step.Command, "--hosted-tool-cache") {
 			t.Fatalf("runtime image step = %#v", step)
 		}
@@ -2960,20 +2934,24 @@ func TestRunUploadUsesWorkflowGroupInsteadOfContainingGroup(t *testing.T) {
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group     string `yaml:"group"`
+			Label     string `yaml:"label"`
 			Key       string `yaml:"key"`
 			Condition string `yaml:"if"`
-			DependsOn string `yaml:"depends_on"`
-			Steps     []struct {
-				Key string `yaml:"key"`
-			} `yaml:"steps"`
+			DependsOn []struct {
+				Step string `yaml:"step"`
+			} `yaml:"depends_on"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatalf("uploaded pipeline YAML: %v", err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: workflow · buildkite-gha shell smoke" || pipeline.Steps[0].Key == "" || pipeline.Steps[0].Condition == "" || pipeline.Steps[0].DependsOn != "grouped-importer" || len(pipeline.Steps[0].Steps) != 3 {
-		t.Fatalf("grouped upload = %#v", pipeline.Steps)
+	if len(pipeline.Steps) != 3 {
+		t.Fatalf("flat upload = %#v", pipeline.Steps)
+	}
+	for _, step := range pipeline.Steps {
+		if !strings.HasPrefix(step.Label, ":github: job · ") || step.Key == "" || step.Condition == "" || len(step.DependsOn) == 0 || step.DependsOn[0].Step != "grouped-importer" {
+			t.Fatalf("flat upload step = %#v", step)
+		}
 	}
 }
 
@@ -3227,35 +3205,32 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Uploaded 2 jobs") || stderr.Len() != 0 {
 		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
 	}
-	if len(runner.commands) != 2 {
-		t.Fatalf("commands = %#v, want one artifact batch and pipeline", runner.commands)
+	if len(runner.commands) != 3 || !slices.Equal(runner.commands[0].args, []string{"step", "update", "label", ":github: workflow · buildkite-gha concurrent smoke"}) {
+		t.Fatalf("commands = %#v, want label update, artifact batch, and pipeline", runner.commands)
 	}
 
 	var pipeline struct {
 		Steps []struct {
-			DependsOn string `yaml:"depends_on"`
-			Steps     []struct {
-				Key       string `yaml:"key"`
-				Agents    any    `yaml:"agents"`
-				DependsOn []struct {
-					Step         string `yaml:"step"`
-					AllowFailure bool   `yaml:"allow_failure"`
-				} `yaml:"depends_on"`
-			} `yaml:"steps"`
+			Key       string `yaml:"key"`
+			Agents    any    `yaml:"agents"`
+			DependsOn []struct {
+				Step         string `yaml:"step"`
+				AllowFailure bool   `yaml:"allow_failure"`
+			} `yaml:"depends_on"`
 		} `yaml:"steps"`
 	}
-	if err := yaml.Unmarshal(runner.commands[1].stdin, &pipeline); err != nil {
+	if err := yaml.Unmarshal(runner.commands[2].stdin, &pipeline); err != nil {
 		t.Fatalf("uploaded pipeline YAML: %v", err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].DependsOn != "concurrent-steps-importer" || len(pipeline.Steps[0].Steps) != 2 {
+	if len(pipeline.Steps) != 2 {
 		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
 	}
-	steps := pipeline.Steps[0].Steps
-	if steps[0].Key != "gha-concurrent" || steps[0].Agents != nil || len(steps[0].DependsOn) != 0 {
+	steps := pipeline.Steps
+	if steps[0].Key != "gha-concurrent" || steps[0].Agents != nil || len(steps[0].DependsOn) != 1 || steps[0].DependsOn[0].Step != "concurrent-steps-importer" || steps[0].DependsOn[0].AllowFailure {
 		t.Fatalf("concurrent step = %#v", steps[0])
 	}
 	observer := steps[1]
-	if observer.Key != "gha-observe" || observer.Agents != nil || len(observer.DependsOn) != 1 || observer.DependsOn[0].Step != "gha-concurrent" || !observer.DependsOn[0].AllowFailure {
+	if observer.Key != "gha-observe" || observer.Agents != nil || len(observer.DependsOn) != 2 || observer.DependsOn[0].Step != "concurrent-steps-importer" || observer.DependsOn[0].AllowFailure || observer.DependsOn[1].Step != "gha-concurrent" || !observer.DependsOn[1].AllowFailure {
 		t.Fatalf("observer step = %#v", observer)
 	}
 }
@@ -3288,8 +3263,8 @@ func TestRunUploadJavaScriptActionRequiresRuntimeMiseWithoutTransport(t *testing
 	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if len(runner.commands) != 2 {
-		t.Fatalf("commands = %d, want one artifact batch and pipeline", len(runner.commands))
+	if len(runner.commands) != 3 {
+		t.Fatalf("commands = %d, want label update, artifact batch, and pipeline", len(runner.commands))
 	}
 	for path := range runner.uploaded {
 		if strings.Contains(path, "/runtimes/") || strings.Contains(path, "/tools/mise/") {
@@ -3298,27 +3273,25 @@ func TestRunUploadJavaScriptActionRequiresRuntimeMiseWithoutTransport(t *testing
 	}
 	var pipeline struct {
 		Steps []struct {
-			Steps []struct {
-				Command string `yaml:"command"`
-				Cache   struct {
-					Paths []string `yaml:"paths"`
-					Name  string   `yaml:"name"`
-				} `yaml:"cache"`
-				Env map[string]string `yaml:"env"`
-			} `yaml:"steps"`
+			Command string `yaml:"command"`
+			Cache   struct {
+				Paths []string `yaml:"paths"`
+				Name  string   `yaml:"name"`
+			} `yaml:"cache"`
+			Env map[string]string `yaml:"env"`
 		} `yaml:"steps"`
 	}
-	if err := yaml.Unmarshal(runner.commands[1].stdin, &pipeline); err != nil {
+	if err := yaml.Unmarshal(runner.commands[2].stdin, &pipeline); err != nil {
 		t.Fatalf("parse uploaded pipeline: %v", err)
 	}
-	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Steps) != 1 {
+	if len(pipeline.Steps) != 1 {
 		t.Fatalf("uploaded pipeline steps = %#v", pipeline.Steps)
 	}
-	command := pipeline.Steps[0].Steps[0].Command
+	command := pipeline.Steps[0].Command
 	if strings.Contains(command, ".buildkite-gha/tools/mise/") || strings.Contains(command, `export PATH="$bootstrap_dir:$PATH"`) || strings.Contains(command, "BUILDKITE_GHA_NODE") || strings.Contains(command, ".buildkite-gha/runtimes") {
 		t.Fatalf("generated pipeline still transports runtime tools:\n%s", command)
 	}
-	step := pipeline.Steps[0].Steps[0]
+	step := pipeline.Steps[0]
 	if step.Cache.Name != "buildkite-gha-linux-amd64" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != "/cache/bkcache/buildkite-gha/mise/linux-amd64" {
 		t.Fatalf("generated action cache = %#v", step.Cache)
 	}
@@ -3378,13 +3351,39 @@ func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "shell-upload-importer")
-	runner := &cliCaptureRunner{failAt: 1}
+	runner := &cliCaptureRunner{failAt: 2}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"upload", workflowPath, "--event-path", eventPath, "--runtime-queue", "hosted"}, &stdout, &stderr, "dev", runner); code != 1 {
 		t.Fatalf("run() code = %d, want 1", code)
 	}
-	if len(runner.commands) != 1 || !strings.Contains(stderr.String(), "upload artifacts") {
+	if len(runner.commands) != 2 || !slices.Equal(runner.commands[0].args[:2], []string{"step", "update"}) || !strings.Contains(stderr.String(), "upload artifacts") {
 		t.Fatalf("commands = %#v, stderr = %q", runner.commands, stderr.String())
+	}
+}
+
+func TestRunUploadWarnsWhenImporterLabelUpdateFails(t *testing.T) {
+	requireImporterHost(t)
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"quoted.yml": "name: Build 'quoted'\nrun-name: Deploy \"release\"\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: 'true'}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "label-importer")
+	runner := &cliCaptureRunner{failStepUpdate: true}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/quoted.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	want := `:github: workflow · Build 'quoted' — Deploy "release"`
+	if len(runner.commands) < 3 || !slices.Equal(runner.commands[0].args, []string{"step", "update", "label", want}) {
+		t.Fatalf("first command = %#v, want safely separated label argument %q", runner.commands, want)
+	}
+	if !strings.Contains(stderr.String(), "warning") || !strings.Contains(stderr.String(), "label") {
+		t.Fatalf("stderr = %q, want advisory label update warning", stderr.String())
 	}
 }
 
