@@ -49,7 +49,7 @@ func TestTriggerFilterErrorLocations(t *testing.T) {
 }
 
 func TestUnfilteredWebhookTriggerConditions(t *testing.T) {
-	for _, event := range []string{"deployment", "deployment_status", "create", "delete"} {
+	for _, event := range []string{"deployment", "deployment_status", "create", "delete", "fork"} {
 		t.Run(event, func(t *testing.T) {
 			for _, declaration := range []string{event, "[push, " + event + "]", "{" + event + ": null}", "{" + event + ": {}}"} {
 				parsed, err := workflow.Parse("deployment.yml", []byte("on: "+declaration+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
