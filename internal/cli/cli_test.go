@@ -114,7 +114,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		tests := []struct {
 			name, trigger, want string
 		}{
-			{name: "unsupported event", trigger: "discussion", want: `unsupported GitHub trigger event "discussion"`},
+			{name: "unsupported event", trigger: "repository_dispatch", want: `unsupported GitHub trigger event "repository_dispatch"`},
 			{name: "malformed path filter", trigger: "push:\n    paths: ['!src/**']", want: "must follow a positive pattern"},
 			{name: "mixed branch filters", trigger: "push:\n    branches: [main]\n    branches-ignore: [release]", want: "include and ignore filters cannot be combined"},
 			{name: "pull request tag filter", trigger: "pull_request:\n    tags: [v1]", want: "pull_request does not support the tags filter"},
@@ -471,7 +471,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile ignores unsupported trigger events beside a supported one", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "mixed.yml")
-		if err := os.WriteFile(workflow, []byte("on: [push, discussion, pull_request_target]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on: [push, repository_dispatch, pull_request_target]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -497,7 +497,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 				messages[event] = message
 			}
 		}
-		for _, event := range []string{"discussion", "pull_request_target"} {
+		for _, event := range []string{"repository_dispatch", "pull_request_target"} {
 			want := "on." + event + " is ignored, so nothing in this workflow runs from it. The supported triggers declared in this workflow still run: push. Move the jobs this trigger guards to one of those triggers if you need them. If you need " + event + ", log an issue on https://github.com/buildkite/buildkite-gha so we can prioritise it."
 			if messages[event] != want {
 				t.Fatalf("unsupported-trigger message for %s = %q, want %q; report = %#v", event, messages[event], want, report)
@@ -507,7 +507,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile keeps unsupported-trigger warnings in a not-applicable report", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "cross-event.yml")
-		if err := os.WriteFile(workflow, []byte("on: [pull_request, discussion]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on: [pull_request, repository_dispatch]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -2321,7 +2321,7 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, _, _, _, _, _, err := validateArgs([]string{"--event", "push", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "requires --profile hosted") {
 		t.Fatalf("validateArgs() error = %v, want profile requirement", err)
 	}
-	if _, _, _, _, _, _, err := validateArgs([]string{"--profile", "hosted", "--event", "discussion", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "supported events") {
+	if _, _, _, _, _, _, err := validateArgs([]string{"--profile", "hosted", "--event", "repository_dispatch", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "supported events") {
 		t.Fatalf("validateArgs() error = %v, want supported event list", err)
 	}
 	if _, _, _, _, _, _, err := validateArgs([]string{"--profile", "hosted", "--all-events", "--event", "push", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {

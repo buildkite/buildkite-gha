@@ -76,6 +76,11 @@ func parseEvent(source []byte) (Event, error) {
 	if input.Payload == nil {
 		input.Payload = map[string]any{}
 	}
+	if input.Event == "discussion" {
+		if err := validateDiscussionEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
 	if input.Event == "branch_protection_rule" {
 		if err := validateBranchProtectionRuleEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
 			return Event{}, err
@@ -168,6 +173,35 @@ func validateGollumEvent(provider string, repository Repository, ref, sha string
 		if strings.TrimSpace(name) == "" || (action != "created" && action != "edited") || !git.ValidObjectID(commit) {
 			return fmt.Errorf("gollum requires valid wiki page names, actions, and commits")
 		}
+	}
+	return nil
+}
+
+func validateDiscussionEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	id, _ := repo["id"].(json.Number)
+	number, err := id.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("discussion requires the original repository identity and a full commit SHA")
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("discussion must execute the resolved default branch")
+	}
+	discussion, _ := payload["discussion"].(map[string]any)
+	for _, key := range []string{"id", "number"} {
+		id, _ = discussion[key].(json.Number)
+		number, err = id.Int64()
+		if err != nil || number <= 0 {
+			return fmt.Errorf("discussion requires payload.discussion %s", key)
+		}
+	}
+	if _, ok := discussion["title"].(string); !ok {
+		return fmt.Errorf("discussion requires payload.discussion title")
+	}
+	action, _ := payload["action"].(string)
+	if !buildkitepipeline.SupportedDiscussionAction(action) {
+		return fmt.Errorf("unsupported discussion activity %q", action)
 	}
 	return nil
 }
