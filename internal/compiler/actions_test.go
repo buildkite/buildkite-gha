@@ -450,7 +450,11 @@ func TestCompileActionExecutablePathsUseLockedTree(t *testing.T) {
 		writeAction(t, root, "nested", "name: action\nruns:\n  using: node20\n  main: index.js\n")
 	}
 	writeAction(t, substitute, "", "name: cache\nruns:\n  using: node20\n  main: index.js\n")
-	for _, file := range []string{filepath.Join(workspace, "nested", "run"), filepath.Join(remote, "outer"), filepath.Join(remote, "nested", "run"), filepath.Join(substitute, "replacement")} {
+	longPath := strings.Repeat(strings.Repeat("a", 210)+"/", 5) + "run"
+	for _, file := range []string{filepath.Join(workspace, "nested", longPath), filepath.Join(workspace, "nested", "run"), filepath.Join(remote, "outer"), filepath.Join(remote, "nested", "run"), filepath.Join(substitute, "replacement")} {
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(file, []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -460,7 +464,7 @@ func TestCompileActionExecutablePathsUseLockedTree(t *testing.T) {
 		uses string
 		want []string
 	}{
-		{"./nested", []string{"run"}},
+		{"./nested", []string{longPath, "run"}},
 		{"owner/repo/nested@" + commit, []string{"nested/run", "outer"}},
 		{"actions/cache@" + commit, []string{"replacement"}},
 	} {
@@ -472,6 +476,9 @@ func TestCompileActionExecutablePathsUseLockedTree(t *testing.T) {
 			}
 			if len(locks) != 1 || !reflect.DeepEqual(locks[0].ExecutablePaths, test.want) {
 				t.Fatalf("locks = %#v, want executable paths %v", locks, test.want)
+			}
+			if _, err := plan.ValidateActionLockList(locks); err != nil {
+				t.Fatalf("compiler produced invalid executable provenance: %v", err)
 			}
 		})
 	}

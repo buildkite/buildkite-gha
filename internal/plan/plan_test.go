@@ -789,7 +789,8 @@ func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 	// Absent provenance remains readable. Explicit empty provenance and paths
 	// survive serialization and each change the bytes bound by the plan digest.
 	digests := map[[32]byte]bool{}
-	for _, paths := range [][]string{nil, {}, {"dist/a.sh", "run.sh"}} {
+	maxSourcePath := strings.Repeat(strings.Repeat("a", 254)+"/", 16) + strings.Repeat("b", 16)
+	for _, paths := range [][]string{nil, {}, {"dist/a.sh", "run.sh"}, {maxSourcePath}} {
 		job.Actions[0].ExecutablePaths = paths
 		data, err := Encode(job)
 		if err != nil {
@@ -822,6 +823,8 @@ func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 		{name: "absolute executable path", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{"/run"} }, want: "invalid executable paths"},
 		{name: "empty executable path", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{""} }, want: "invalid executable paths"},
 		{name: "oversized executable path", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{strings.Repeat("a", 256)} }, want: "invalid executable paths"},
+		{name: "oversized source path", edit: func(j *Job) { j.Actions[0].ExecutablePaths = []string{maxSourcePath + "b"} }, want: "invalid executable paths"},
+		{name: "action reference retains shorter limit", edit: func(j *Job) { j.Actions[0].Path = maxSourcePath }, want: "invalid workspace identity"},
 		{name: "too many executable paths", edit: func(j *Job) { j.Actions[0].ExecutablePaths = make([]string, 50001) }, want: "too many executable paths"},
 		{name: "missing docker capability", edit: func(j *Job) { j.RequiredCapabilities = []string{"network"} }, want: "require docker capability"},
 		{name: "missing network capability", edit: func(j *Job) { j.RequiredCapabilities = []string{"docker"} }, want: "require network capability"},

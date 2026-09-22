@@ -1428,7 +1428,7 @@ func ValidateActionLockList(actions []ActionLock) (map[string]ActionLock, error)
 			return nil, fmt.Errorf("action lock %q has too many executable paths", lock.ID)
 		}
 		for i, executable := range lock.ExecutablePaths {
-			if !cleanActionPath(executable) || i > 0 && lock.ExecutablePaths[i-1] >= executable {
+			if !cleanSourcePath(executable) || i > 0 && lock.ExecutablePaths[i-1] >= executable {
 				return nil, fmt.Errorf("action lock %q has invalid executable paths", lock.ID)
 			}
 		}
@@ -1648,7 +1648,12 @@ func validateChildIdentity(parent ActionLock, uses string, child ActionLock) err
 }
 
 func cleanActionPath(value string) bool {
-	if value == "" || len(value) > 1024 || !utf8.ValidString(value) || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || hasControl(value) {
+	return len(value) <= 1024 && cleanSourcePath(value)
+}
+
+// Source files use the archive path limit, not the shorter action-reference limit.
+func cleanSourcePath(value string) bool {
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || hasControl(value) {
 		return false
 	}
 	for segment := range strings.SplitSeq(value, "/") {
