@@ -76,6 +76,11 @@ func parseEvent(source []byte) (Event, error) {
 	if input.Payload == nil {
 		input.Payload = map[string]any{}
 	}
+	if input.Event == "page_build" {
+		if err := validatePageBuildEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
 	if input.Event == "gollum" {
 		if err := validateGollumEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
 			return Event{}, err
@@ -148,6 +153,31 @@ func validateGollumEvent(provider string, repository Repository, ref, sha string
 		if strings.TrimSpace(name) == "" || (action != "created" && action != "edited") || !git.ValidObjectID(commit) {
 			return fmt.Errorf("gollum requires valid wiki page names, actions, and commits")
 		}
+	}
+	return nil
+}
+
+func validatePageBuildEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	id, _ := repo["id"].(json.Number)
+	number, err := id.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("page_build requires the original repository identity and a full commit SHA")
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("page_build must execute the resolved default branch")
+	}
+	if _, exists := payload["action"]; exists {
+		return fmt.Errorf("page_build has no activity types")
+	}
+	id, _ = payload["id"].(json.Number)
+	number, err = id.Int64()
+	build, _ := payload["build"].(map[string]any)
+	commit, _ := build["commit"].(string)
+	status, _ := build["status"].(string)
+	if err != nil || number <= 0 || !git.ValidObjectID(commit) || strings.TrimSpace(status) == "" {
+		return fmt.Errorf("page_build requires a build id, commit, and status")
 	}
 	return nil
 }

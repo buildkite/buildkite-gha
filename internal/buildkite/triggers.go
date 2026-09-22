@@ -77,6 +77,7 @@ var supportedTriggerEvents = map[string]bool{
 	"fork":                        true,
 	"public":                      true,
 	"gollum":                      true,
+	"page_build":                  true,
 	"issues":                      true,
 	"issue_comment":               true,
 	"pull_request_review":         true,
@@ -479,7 +480,7 @@ func LiveEventPredicate(event string) string {
 		return predicate
 	case "schedule":
 		return "(" + predicate + " || (" + fallbackEvent + ` && build.pull_request.id == null && build.source == "schedule"))`
-	case "merge_group", "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete", "label", "fork", "public", "gollum":
+	case "merge_group", "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete", "label", "fork", "public", "gollum", "page_build":
 		return predicate
 	default:
 		return ""
@@ -508,7 +509,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 	switch t.Event {
 	case "workflow_call":
 		return "", false, nil
-	case "deployment", "deployment_status", "create", "delete", "fork", "public", "gollum":
+	case "deployment", "deployment_status", "create", "delete", "fork", "public", "gollum", "page_build":
 		if hasWebhookFilters(t) {
 			return "", false, unsupportedEventFilter(t, "types", "branches", "branches-ignore", "tags", "tags-ignore", "paths", "paths-ignore", "workflows")
 		}

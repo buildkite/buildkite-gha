@@ -51,6 +51,7 @@ var supportedEvents = map[string]bool{
 	"fork":                        true,
 	"public":                      true,
 	"gollum":                      true,
+	"page_build":                  true,
 }
 
 var supportedWorkflowResults = map[string]bool{
