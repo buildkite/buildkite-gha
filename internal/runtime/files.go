@@ -135,7 +135,6 @@ func (files commandFiles) apply(result *Result, state map[string]string) (fileCo
 	if outputErr != nil || envErr != nil || stateErr != nil || summaryErr != nil || pathErr != nil {
 		return effects, errors.Join(outputErr, envErr, stateErr, summaryErr, pathErr)
 	}
-	env = mergeStringMaps(env)
 	for name := range env {
 		// Match GitHub Runner's file-command behavior: NODE_OPTIONS is blocked,
 		// while actions may deliberately propagate GITHUB_* and RUNNER_* values.
@@ -201,7 +200,7 @@ func (files commandFiles) parseCommandFile(path string) (map[string]string, erro
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("seek file command %s: %w", filepath.Base(path), err)
 	}
-	return parseCommandReader(path, file)
+	return parseCommandReader(path, file, path == files.env && runtime.GOOS == "windows")
 }
 
 func (files commandFiles) readBoundedFile(path string, limit int64) ([]byte, error) {
@@ -248,7 +247,7 @@ func readBoundedReader(path string, reader io.Reader, limit int64) ([]byte, erro
 	return contents, nil
 }
 
-func parseCommandReader(path string, reader io.Reader) (map[string]string, error) {
+func parseCommandReader(path string, reader io.Reader, foldNames bool) (map[string]string, error) {
 	values := make(map[string]string)
 	buffered := bufio.NewReader(reader)
 	if prefix, _ := buffered.Peek(3); string(prefix) == "\ufeff" {
@@ -281,6 +280,9 @@ func parseCommandReader(path string, reader io.Reader) (map[string]string, error
 			if !found {
 				return nil, fmt.Errorf("missing delimiter %q for %q", delimiter, name)
 			}
+			if foldNames {
+				name = strings.ToUpper(name)
+			}
 			values[name] = strings.Join(lines, "\n")
 			entries++
 			if entries > maxCommandEntries {
@@ -291,6 +293,9 @@ func parseCommandReader(path string, reader io.Reader) (map[string]string, error
 		name, value, ok := strings.Cut(line, "=")
 		if !ok || name == "" {
 			return nil, fmt.Errorf("invalid file command %q", line)
+		}
+		if foldNames {
+			name = strings.ToUpper(name)
 		}
 		values[name] = value
 		entries++
