@@ -50,6 +50,7 @@ var supportedEvents = map[string]bool{
 	"schedule":                    true,
 	"fork":                        true,
 	"public":                      true,
+	"gollum":                      true,
 }
 
 var supportedWorkflowResults = map[string]bool{
