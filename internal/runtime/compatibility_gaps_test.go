@@ -12,12 +12,6 @@ import (
 )
 
 func TestCompatibilityGapOtherShells(t *testing.T) {
-	bin := t.TempDir()
-	pwsh := filepath.Join(bin, "pwsh")
-	if err := os.WriteFile(pwsh, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	runCompatibilityGapWorkflow(t, "other-shells.yml")
 }
 

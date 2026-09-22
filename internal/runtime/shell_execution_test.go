@@ -4,11 +4,88 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestPowerShellExecution(t *testing.T) {
+	pwsh, err := exec.LookPath("pwsh")
+	if err != nil {
+		t.Skip("PowerShell is not installed")
+	}
+	// Exercise both named shells with the installed PowerShell on Unix.
+	bin := t.TempDir()
+	if err := os.Symlink(pwsh, filepath.Join(bin, "powershell")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, shell := range []string{"pwsh", "powershell", strconv.Quote(pwsh) + " -NoProfile -File {0}"} {
+		t.Run(shell, func(t *testing.T) {
+			workspace := t.TempDir()
+			temp := filepath.Join(workspace, "runner's temp")
+			if err := os.Mkdir(temp, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("TMPDIR", temp)
+			workflow := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflow, "name: PowerShell test\n")
+			job := runtimePlan(t, workspace, workflow, []runtimeTestStep{
+				{ID: "first", Kind: "run", Shell: shell, Command: `"script=$PSCommandPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+"GREETING=héllo 世界" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`},
+				{ID: "second", Kind: "run", Shell: shell, Command: `if ($env:GREETING -ne 'héllo 世界') { throw 'environment lost' }
+"value=$env:GREETING" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append`},
+			})
+			job.Outputs = map[string]string{"value": "${{ steps.second.outputs.value }}", "script": "${{ steps.first.outputs.script }}"}
+			var stdout, stderr bytes.Buffer
+			result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).runTestJob(t.Context(), job, workspace)
+			if err != nil || result.Outputs["value"] != "héllo 世界" {
+				t.Fatalf("outputs = %#v, error = %v\nstdout: %s\nstderr: %s", result.Outputs, err, stdout.String(), stderr.String())
+			}
+			script := result.Outputs["script"]
+			if filepath.Ext(script) != ".ps1" || filepath.Dir(script) != temp {
+				t.Fatalf("script = %q, want .ps1 script under %q", script, temp)
+			}
+			if _, err := os.Stat(script); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("script not removed: %v", err)
+			}
+			if strings.Contains(shell, "{0}") {
+				return // Custom templates control their own error behavior.
+			}
+			for _, test := range []struct {
+				command string
+				code    int
+			}{
+				{`Write-Error 'stop here'; Set-Content -Path should-not-run -Value yes`, 1},
+				{`& pwsh -NoProfile -Command 'exit 7'`, 7},
+			} {
+				failed := runtimePlan(t, workspace, workflow, []runtimeTestStep{{ID: "failed", Kind: "run", Shell: shell, Command: test.command}})
+				_, err := (Runner{Stdout: &stdout, Stderr: &stderr}).runTestJob(t.Context(), failed, workspace)
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != test.code {
+					t.Fatalf("command %q: error = %v, want exit status %d", test.command, err, test.code)
+				}
+				if _, err := os.Stat(filepath.Join(workspace, "should-not-run")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("Write-Error did not stop execution: %v", err)
+				}
+			}
+			if remaining, err := os.ReadDir(temp); err != nil || len(remaining) != 0 {
+				t.Fatalf("temporary files remain after failure: %v, %v", remaining, err)
+			}
+		})
+	}
+}
+
+func TestAbsolutePowerShellScriptExtension(t *testing.T) {
+	for _, command := range []string{"/opt/powershell/pwsh", "/opt/powershell/PWSH", "/opt/powershell/powershell", "/opt/powershell/powershell.exe"} {
+		if got := shellScriptExtension(command); got != ".ps1" {
+			t.Fatalf("extension for %q = %q, want .ps1", command, got)
+		}
+	}
+}
 
 func TestRunJobPythonShellUsesTemporaryScript(t *testing.T) {
 	installPythonShellTestCommand(t)
