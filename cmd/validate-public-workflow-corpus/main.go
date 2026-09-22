@@ -54,6 +54,7 @@ var supportedEvents = map[string]bool{
 	"page_build":                  true,
 	"watch":                       true,
 	"milestone":                   true,
+	"branch_protection_rule":      true,
 }
 
 var supportedWorkflowResults = map[string]bool{
