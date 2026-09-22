@@ -286,21 +286,6 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		workflows[i].RunName = runName
 	}
-	if runnableWorkflowCount == 1 {
-		for _, input := range workflows {
-			if input.ReusableOnly {
-				continue
-			}
-			name := input.Name
-			if name == "" {
-				name = input.CanonicalPath
-			}
-			label := ":github: Prepare workflow · " + workflowGroupLabel(name, input.RunName)
-			if err := agent.UpdateStepLabel(ctx, label); err != nil {
-				_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: warning: update step label: %v\n", err)
-			}
-		}
-	}
 	vars := resolveUploadVariables(ctx, uploadArguments.variableSource, workflows, processingReports, effectiveEvent.Event)
 	// Every workflow that reaches compilation is validated, preflighted, and
 	// compiled from one request, so those passes cannot disagree about the
@@ -419,12 +404,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		runtimeDigests[platform] = runtimeDistribution.digest
 	}
 	generatedWorkflows := make([]buildkitepipeline.Workflow, 0, len(workflows))
-	workflowCount := 0
-	for _, input := range workflows {
-		if !input.ReusableOnly {
-			workflowCount++
-		}
-	}
+	ungrouped := uploadArguments.serverSelectedWorkflow != nil
 	skippedWorkflows := make([]skippedWorkflow, 0)
 	planArtifacts := make([]compiler.PlanArtifact, 0)
 	var eventArtifact *transport.Artifact
@@ -566,7 +546,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			root, event, stageErr := importerStage(request, importerJobID, os.Getenv("BUILDKITE_COMMIT"), input, label, checkName, effectiveEvent, uploadArguments.experimentalRunnerUser, uploadArguments.privateReusableWorkflows)
 			var stage stageResult
 			if stageErr == nil {
-				root.Workflow.Ungrouped = workflowCount == 1
+				root.Workflow.Ungrouped = ungrouped
 				stage, stageErr = root.advance(bundle, nil, nil, nil, "")
 			}
 			if stageErr != nil {
@@ -611,8 +591,8 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	if eventArtifact != nil && importerJobID == "" {
 		return usageError(stderr, "upload: BUILDKITE_JOB_ID is required when a workflow retains the event payload")
 	}
-	if len(generatedWorkflows) == 1 {
-		generatedWorkflows[0].Ungrouped = true
+	for i := range generatedWorkflows {
+		generatedWorkflows[i].Ungrouped = ungrouped
 	}
 	aggregatePipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep:      importerStep,

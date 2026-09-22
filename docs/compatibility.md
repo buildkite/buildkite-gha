@@ -149,7 +149,7 @@ over server workflow selection. Without either selection, the plugin fails.
 The server-selected importer does not need a step key. The plugin uploads its
 artifacts before the dynamic pipeline and scopes retrieval to the importer job
 ID without using that UUID as a dependency key. Explicit-selector importers
-still require a step key; generated groups or ungrouped steps depend on it.
+still require a step key, and their generated groups depend on it.
 
 Missing or untracked explicitly configured paths warn and are skipped, so
 removing a workflow does not require a simultaneous pipeline configuration
@@ -167,16 +167,13 @@ and deduplicates the paths.
 
 All remaining runnable workflows use one artifact and pipeline transaction:
 
-- With one selected non-reusable workflow, jobs and deferred steps have no
-  workflow group. Upload relabels the importer to `:github: Prepare workflow ·
-  <workflow-name>` using `buildkite-agent step update label`. An unnamed
-  workflow uses its canonical path. A resolved, non-empty `run-name` appends
-  ` — <run-name>`. Relabeling happens after trigger and run-name resolution,
-  before variable resolution and compilation. If relabeling fails, upload
-  warns and continues.
-- With multiple selected workflows, each compiled workflow becomes a group
-  labeled `:github: workflow · <workflow-name>`, with the same run-name suffix;
-  the importer label stays unchanged.
+- With a server-selected workflow, jobs and deferred steps have no workflow
+  group. Explicit `workflow` or `workflows` plugin configuration overrides
+  server selection and retains groups, even for one workflow.
+- With explicitly configured workflows, each compiled workflow becomes a group
+  labeled `:github: workflow · <workflow-name>`. An unnamed workflow uses its
+  canonical path. A resolved, non-empty `run-name` appends ` — <run-name>`.
+- Upload leaves the importer label unchanged.
 - Each job publishes a provider check named
   `<workflow-name-or-path> / <job-id> (<effective-event>)`. Matrix jobs append
   their sorted values to the job ID.
@@ -191,8 +188,9 @@ All remaining runnable workflows use one artifact and pipeline transaction:
 Workflow names, group keys, and provider-check names stay the same across
 events; only an appended run title can vary. Groups and replacement steps
 depend on the importer; their child jobs do not repeat that dependency.
-Without a group, each step carries the workflow condition and importer
-dependency. Deferred uploads retain the initial workflow's grouping choice.
+Without a group, each step carries the workflow condition and depends on the
+importer if it has a step key. Deferred uploads retain the initial workflow's
+grouping choice.
 
 Reusable-only `workflow_call` files remain available to local callers but do not
 create groups. Selecting only reusable workflows is an error.
@@ -237,7 +235,7 @@ preserve both fields. GitHub check summaries show only the concise message.
 | Key | Status | Behavior |
 | --- | --- | --- |
 | `name` | ✅ Supported | Available as `github.workflow` and used to name generated work. |
-| `run-name` | 🟡 Supported subset | An explicit non-empty value is appended to the workflow label. Compile-time `github` and `inputs` expressions are supported. The Buildkite build message and provider-check names do not change. |
+| `run-name` | 🟡 Supported subset | An explicit non-empty value is appended to the workflow group label, when grouped. Compile-time `github` and `inputs` expressions are supported. The importer label, Buildkite build message, and provider-check names do not change. |
 | `on` | 🟡 Supported subset | Does not create a Buildkite build. Selects and filters workflows for the effective event as described below. |
 
 A workflow name is retained in generated work:
@@ -254,8 +252,8 @@ name: Deploy
 run-name: Deploy ${{ inputs.target }} by @${{ github.actor }}
 ```
 
-This produces `:github: workflow · Deploy — Deploy production by @octocat`.
-Omitted, blank, or blank-resolving values retain the static workflow label. On a
+When grouped, this produces `:github: workflow · Deploy — Deploy production by @octocat`.
+Omitted, blank, or blank-resolving values retain the static group label. On a
 non-dispatch event, declared dispatch inputs use their typed zero values rather
 than dispatch-only defaults. A skipped workflow does not synthesize dispatch
 inputs.

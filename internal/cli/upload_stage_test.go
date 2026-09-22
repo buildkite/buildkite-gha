@@ -121,6 +121,11 @@ func runContinueInitialUploadsInCheckout(t *testing.T, workflows []string, event
 	if code := run(append(args, workflows...), &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("upload code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
+	return readContinueInitialUploads(t, runner)
+}
+
+func readContinueInitialUploads(t *testing.T, runner *cliCaptureRunner) []continueInitialUpload {
+	t.Helper()
 	pipeline := string(runner.commands[len(runner.commands)-1].stdin)
 	plans := map[string][]byte{}
 	var events []string
@@ -227,7 +232,6 @@ func runContinueAs(t *testing.T, runner *cliCaptureRunner, digest, producer, job
 }
 
 type continuePipelineStep struct {
-	Group            string `yaml:"group"`
 	Key              string `yaml:"key"`
 	Label            string `yaml:"label"`
 	Block            string `yaml:"block"`
@@ -245,13 +249,16 @@ type continuePipelineStep struct {
 			Name string `yaml:"name"`
 		} `yaml:"github_check"`
 	} `yaml:"notify"`
-	Steps []continuePipelineStep `yaml:"steps"`
 }
 
 func decodeContinuePipeline(t *testing.T, source []byte) (group string, key string, steps []continuePipelineStep) {
 	t.Helper()
 	var pipeline struct {
-		Steps []continuePipelineStep `yaml:"steps"`
+		Steps []struct {
+			Group string                 `yaml:"group"`
+			Key   string                 `yaml:"key"`
+			Steps []continuePipelineStep `yaml:"steps"`
+		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(source, &pipeline); err != nil {
 		t.Fatalf("pipeline YAML: %v\n%s", err, source)
@@ -267,7 +274,13 @@ func decodeContinuePipeline(t *testing.T, source []byte) (group string, key stri
 			t.Fatalf("pipeline mixes grouped and flat steps:\n%s", source)
 		}
 	}
-	return "", "", pipeline.Steps
+	var flat struct {
+		Steps []continuePipelineStep `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(source, &flat); err != nil {
+		t.Fatalf("pipeline YAML: %v\n%s", err, source)
+	}
+	return "", "", flat.Steps
 }
 
 func lastPipelineUpload(t *testing.T, runner *cliCaptureRunner) []byte {
@@ -298,8 +311,8 @@ func pipelineUploads(runner *cliCaptureRunner) int {
 // uploaded again.
 func TestContinueExpandsNeedsDerivedMatrix(t *testing.T) {
 	initial := runContinueInitialUpload(t, "--runner-queue", "ubuntu-latest=custom-linux")
-	if !initial.artifact.Workflow.Ungrouped {
-		t.Fatalf("initial stage record is grouped: %+v", initial.artifact.Workflow)
+	if initial.artifact.Workflow.Ungrouped {
+		t.Fatalf("explicit workflow stage record is ungrouped: %+v", initial.artifact.Workflow)
 	}
 	prefix := strings.TrimSuffix(initial.artifact.rootProducer().Key, "plan")
 	if initial.artifact.rootProducer().Key != prefix+"plan" || !slices.Equal(initial.artifact.Continuation.Jobs, []string{"build", "publish"}) || initial.artifact.Continuation.StepKey != prefix+"build-matrix" {
@@ -335,8 +348,8 @@ func TestContinueExpandsNeedsDerivedMatrix(t *testing.T) {
 	}
 
 	group, groupKey, steps := decodeContinuePipeline(t, lastPipelineUpload(t, runner))
-	if group != "" || groupKey != "" {
-		t.Fatalf("deferred pipeline has group %q key %q, want flat steps", group, groupKey)
+	if group != ":github: workflow · "+initial.artifact.Workflow.GroupLabel || groupKey != "" {
+		t.Fatalf("deferred group = %q key %q, want the workflow group without a key", group, groupKey)
 	}
 	if len(steps) != 3 {
 		t.Fatalf("deferred steps = %d, want two build instances and publish:\n%s", len(steps), lastPipelineUpload(t, runner))
@@ -536,7 +549,7 @@ func TestContinueFindsProducerWithOneRowMatrix(t *testing.T) {
 		if step.Key != initial.artifact.Continuation.StepKey {
 			continue
 		}
-		if len(step.DependsOn) != 2 || step.DependsOn[0].Step != "continue-importer" || step.DependsOn[1].Step != producerKey {
+		if len(step.DependsOn) != 1 || step.DependsOn[0].Step != producerKey {
 			t.Fatalf("deferred step depends on %#v, want the producer instance %q", step.DependsOn, producerKey)
 		}
 	}
@@ -1434,7 +1447,7 @@ func TestContinueJoinedClosures(t *testing.T) {
 	_, _, initialSteps := decodeContinuePipeline(t, []byte(initial.pipeline))
 	for _, step := range initialSteps {
 		if step.Key == initial.artifact.Continuation.StepKey {
-			if len(step.DependsOn) != 3 || step.DependsOn[0].Step != "continue-importer" || step.DependsOn[1].Step != initial.artifact.rootProducer().Key || step.DependsOn[2].Step != producer.Key {
+			if len(step.DependsOn) != 2 || step.DependsOn[0].Step != initial.artifact.rootProducer().Key || step.DependsOn[1].Step != producer.Key {
 				t.Fatalf("owner dependencies = %#v", step.DependsOn)
 			}
 		}

@@ -452,7 +452,7 @@ This server-selected form does not require the importer step to have a `key`.
 The plugin uploads the event, runtime, and plan artifacts before uploading the
 dynamic pipeline, and scopes artifact reads to the importer job. It does not use
 the job ID as a dependency key. Explicit-selector importers still require a
-step `key`; generated workflow groups or ungrouped steps depend on it.
+step `key` and generated workflow groups depend on it.
 
 Missing or untracked explicitly configured workflow paths warn and are skipped.
 If every configured path is missing or untracked, the plugin succeeds without
@@ -541,14 +541,13 @@ untracked and outside paths.
 always when a path begins with `-`. Pass each path as its own argument; the CLI
 does not split one shell string or decode a JSON or YAML list.
 
-Upload is atomic. A single selected workflow emits steps without a workflow
-group and relabels the importer to `:github: Prepare workflow · <workflow-name>`
-before variable resolution and compilation. Multiple selected
-workflows retain groups. Skipped workflows become top-level skipped steps.
-Reusable-only files remain available to local callers but do not count toward
-the selected workflow total. Selecting only reusable workflows is an error.
+Upload is atomic. A server-selected workflow emits steps without a workflow
+group. Explicitly configured workflows retain groups, including single-workflow
+uploads. Upload leaves the importer label unchanged. Skipped workflows become
+top-level skipped steps. Reusable-only files remain available to local callers
+but do not create groups. Selecting only reusable workflows is an error.
 
-An explicit non-empty workflow `run-name` appends ` — <run-name>` to its workflow
+An explicit non-empty workflow `run-name` appends ` — <run-name>` to its group
 label after resolving supported `github` and `inputs` expressions. Workflow
 names, provider-check names, and the Buildkite build message remain unchanged.
 
