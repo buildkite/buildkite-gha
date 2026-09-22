@@ -156,6 +156,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 		"gollum",
 		"page_build",
 		"watch",
+		"milestone",
 	} {
 		report.Evaluations = append(report.Evaluations, EventEvaluation{Event: event, Source: "generated", Report: push})
 	}
@@ -168,7 +169,7 @@ func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
 	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Schema != ProcessingSchemaV3 || decoded.Result != "incompatible" || decoded.Status != Failed || len(decoded.Evaluations) != 20 || decoded.Evaluations[0].Report.Result != "admitted" || decoded.Evaluations[1].Report.Result != "incompatible" {
+	if decoded.Schema != ProcessingSchemaV3 || decoded.Result != "incompatible" || decoded.Status != Failed || len(decoded.Evaluations) != 21 || decoded.Evaluations[0].Report.Result != "admitted" || decoded.Evaluations[1].Report.Result != "incompatible" {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
 	v2Source, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v2.schema.json"))

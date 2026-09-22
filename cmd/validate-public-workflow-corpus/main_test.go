@@ -266,6 +266,7 @@ func TestTallyReports(t *testing.T) {
 		"gollum",
 		"page_build",
 		"watch",
+		"milestone",
 	} {
 		report.Evaluations = append(report.Evaluations, compatibility.EventEvaluation{Event: event, Source: "generated", Report: validation})
 	}
@@ -315,6 +316,7 @@ func TestTallyReports(t *testing.T) {
 		"gollum",
 		"page_build",
 		"watch",
+		"milestone",
 	} {
 		if tally.Evaluations[event] != 1 {
 			t.Fatalf("missing %s evaluation: %#v", event, tally.Evaluations)
