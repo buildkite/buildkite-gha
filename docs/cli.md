@@ -542,7 +542,8 @@ always when a path begins with `-`. Pass each path as its own argument; the CLI
 does not split one shell string or decode a JSON or YAML list.
 
 Upload is atomic. A single selected workflow emits steps without a workflow
-group and relabels the importer with the workflow label. Multiple selected
+group and relabels the importer to `:github: Prepare workflow · <workflow-name>`
+before variable resolution and compilation. Multiple selected
 workflows retain groups. Skipped workflows become top-level skipped steps.
 Reusable-only files remain available to local callers but do not count toward
 the selected workflow total. Selecting only reusable workflows is an error.

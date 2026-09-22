@@ -286,6 +286,21 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		workflows[i].RunName = runName
 	}
+	if runnableWorkflowCount == 1 {
+		for _, input := range workflows {
+			if input.ReusableOnly {
+				continue
+			}
+			name := input.Name
+			if name == "" {
+				name = input.CanonicalPath
+			}
+			label := ":github: Prepare workflow · " + workflowGroupLabel(name, input.RunName)
+			if err := agent.UpdateStepLabel(ctx, label); err != nil {
+				_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: warning: update step label: %v\n", err)
+			}
+		}
+	}
 	vars := resolveUploadVariables(ctx, uploadArguments.variableSource, workflows, processingReports, effectiveEvent.Event)
 	// Every workflow that reaches compilation is validated, preflighted, and
 	// compiled from one request, so those passes cannot disagree about the
@@ -609,11 +624,6 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: emit aggregate Buildkite pipeline: %v\n", err)
 		return 1
-	}
-	if len(generatedWorkflows) == 1 {
-		if err := agent.UpdateStepLabel(ctx, ":github: workflow · "+generatedWorkflows[0].GroupLabel); err != nil {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: warning: update step label: %v\n", err)
-		}
 	}
 	for i, input := range workflows {
 		if input.Applicable {

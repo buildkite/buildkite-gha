@@ -3205,7 +3205,7 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Uploaded 2 jobs") || stderr.Len() != 0 {
 		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
 	}
-	if len(runner.commands) != 3 || !slices.Equal(runner.commands[0].args, []string{"step", "update", "label", ":github: workflow · buildkite-gha concurrent smoke"}) {
+	if len(runner.commands) != 3 || !slices.Equal(runner.commands[0].args, []string{"step", "update", "label", ":github: Prepare workflow · buildkite-gha concurrent smoke"}) {
 		t.Fatalf("commands = %#v, want label update, artifact batch, and pipeline", runner.commands)
 	}
 
@@ -3361,6 +3361,43 @@ func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 	}
 }
 
+type variableSourceFunc func(context.Context, string, string) (compiler.VariableSources, error)
+
+func (f variableSourceFunc) ResolveVariables(ctx context.Context, owner, repository string) (compiler.VariableSources, error) {
+	return f(ctx, owner, repository)
+}
+
+func TestUploadLabelsWorkflowBeforeVariableResolution(t *testing.T) {
+	requireImporterHost(t)
+	eventPath := pushEventPath(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"build.yml":    "name: Build\nrun-name: Build on ${{ github.ref_name }}\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ vars.REGION }}'\n",
+		"reusable.yml": "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: 'true'}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "prepare-importer")
+	args, err := parseUploadArgs([]string{"--event-path", eventPath, ".github/workflows/build.yml", ".github/workflows/reusable.yml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args.importerPlatform = compiler.PlatformLinuxAMD64
+	runner := &cliCaptureRunner{}
+	resolved := false
+	args.variableSource = variableSourceFunc(func(context.Context, string, string) (compiler.VariableSources, error) {
+		resolved = true
+		want := []string{"step", "update", "label", ":github: Prepare workflow · Build — Build on main"}
+		if len(runner.commands) != 1 || !slices.Equal(runner.commands[0].args, want) {
+			t.Fatalf("commands before variable resolution = %#v, want label update %q", runner.commands, want)
+		}
+		return compiler.VariableSources{}, nil
+	})
+	var stdout, stderr bytes.Buffer
+	if code := uploadParsedContext(t.Context(), args, &stdout, &stderr, "dev", transport.Agent{Runner: runner}); code != 0 || !resolved {
+		t.Fatalf("upload = %d, resolved = %t, stderr = %q", code, resolved, stderr.String())
+	}
+}
+
 func TestRunUploadWarnsWhenImporterLabelUpdateFails(t *testing.T) {
 	requireImporterHost(t)
 	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
@@ -3378,7 +3415,7 @@ func TestRunUploadWarnsWhenImporterLabelUpdateFails(t *testing.T) {
 	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/quoted.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	want := `:github: workflow · Build 'quoted' — Deploy "release"`
+	want := `:github: Prepare workflow · Build 'quoted' — Deploy "release"`
 	if len(runner.commands) < 3 || !slices.Equal(runner.commands[0].args, []string{"step", "update", "label", want}) {
 		t.Fatalf("first command = %#v, want safely separated label argument %q", runner.commands, want)
 	}

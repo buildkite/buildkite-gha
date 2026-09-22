@@ -178,7 +178,7 @@ func TestPluginUsesKeylessPipelineTriggerSelectedWorkflow(t *testing.T) {
 	labelUpdate := -1
 	artifactUpload := -1
 	for index, command := range runner.commands {
-		if slices.Equal(command.args, []string{"step", "update", "label", ":github: workflow · .github/workflows/selected.yml"}) {
+		if slices.Equal(command.args, []string{"step", "update", "label", ":github: Prepare workflow · .github/workflows/selected.yml"}) {
 			labelUpdate = index
 		}
 		if len(command.args) >= 2 && command.args[0] == "artifact" && command.args[1] == "upload" {

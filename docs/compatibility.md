@@ -168,12 +168,15 @@ and deduplicates the paths.
 All remaining runnable workflows use one artifact and pipeline transaction:
 
 - With one selected non-reusable workflow, jobs and deferred steps have no
-  workflow group. Upload relabels the importer to `:github: workflow ·
+  workflow group. Upload relabels the importer to `:github: Prepare workflow ·
   <workflow-name>` using `buildkite-agent step update label`. An unnamed
   workflow uses its canonical path. A resolved, non-empty `run-name` appends
-  ` — <run-name>`. If relabeling fails, upload warns and continues.
+  ` — <run-name>`. Relabeling happens after trigger and run-name resolution,
+  before variable resolution and compilation. If relabeling fails, upload
+  warns and continues.
 - With multiple selected workflows, each compiled workflow becomes a group
-  with that label; the importer label stays unchanged.
+  labeled `:github: workflow · <workflow-name>`, with the same run-name suffix;
+  the importer label stays unchanged.
 - Each job publishes a provider check named
   `<workflow-name-or-path> / <job-id> (<effective-event>)`. Matrix jobs append
   their sorted values to the job ID.
