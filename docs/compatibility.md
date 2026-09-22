@@ -39,7 +39,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Platforms](#job-configuration) | 🟡 Supported subset | The hosted importer provides Linux x86-64. The Agent API can map compatible selectors to hosted Linux or native macOS arm64 targets. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Needs-derived matrices can also read their producer's parallel limit. Maximum 256 instances per job. `fail-fast` has no effect. |
-| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `python`, and custom shell templates. |
+| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash`, `sh`, `pwsh`, `powershell`, `python`, and custom shell templates. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | GitHub-compatible core operators and direct references to selected contexts. |
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local, public, and approved private GitHub workflows with static or needs-derived typed inputs and direct job-output mappings. Local calls can inherit or explicitly map Buildkite secret authority. Private access requires a separate importer opt-in and existing Git access. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile and public prebuilt-image actions on Linux only. |
@@ -561,7 +561,7 @@ To grant repository access, list each required permission at the top level, such
 | Key | Status | Behavior |
 | --- | --- | --- |
 | `env` | 🟡 Supported subset | Workflow, job, and step maps use normal precedence; the most specific value wins. Individual values may use supported interpolation. An entire map cannot be expression-valued. |
-| `defaults.run.shell` | 🟡 Supported subset | Supported at workflow and job level for `bash`, `sh`, `python`, and custom shell templates. Host jobs default to `bash`; job containers default to `sh`. |
+| `defaults.run.shell` | 🟡 Supported subset | Supported at workflow and job level for [supported shells](#commands-and-actions). Host jobs default to `bash`; job containers default to `sh`. |
 | `defaults.run.working-directory` | 🟡 Supported subset | Supported at workflow and job level for workspace-relative paths. |
 
 A job-level value overrides the same workflow-level environment variable:
@@ -1304,11 +1304,13 @@ A step can continue after failure and expose its outcome to a later condition:
 
 ### Commands and actions
 
-**🟡 Supported subset.** Use `bash`, `sh`, `python`, or a custom shell template on Linux or macOS. Custom templates use `command [options] {0} [more-options]`. The `{0}` placeholder receives a temporary script path. Arguments can use single quotes, double quotes, and backslash escapes. They do not expand shell syntax.
+**🟡 Supported subset.** Use `bash`, `sh`, `pwsh`, `powershell`, `python`, or a custom shell template on Linux or macOS. Custom templates use `command [options] {0} [more-options]`. The `{0}` placeholder receives a temporary script path. Arguments can use single quotes, double quotes, and backslash escapes. They do not expand shell syntax.
 
-Install the custom command on the runner or in the job container, and add it to `PATH`. R and Julia are not installed automatically.
+Install the interpreter on the runner or in the job container, and add it to `PATH`. PowerShell, R, and Julia are not installed automatically. Named `pwsh` and `powershell` shells use the corresponding executable without fallback.
 
-PowerShell and Windows shells are not supported. If the shell name is known before the job starts, the workflow fails before an agent starts the job. A shell expression that needs a runtime value is checked before its step starts. If it resolves to an unsupported shell, the step fails. Use `bash`, `sh`, `python`, or a valid custom template instead.
+Named PowerShell shells run UTF-8 `.ps1` temporary scripts with `$ErrorActionPreference = 'stop'` and propagate the last native command's exit status. PowerShell custom templates receive a `.ps1` script but control their own error behavior. `GITHUB_ENV`, `GITHUB_OUTPUT`, `GITHUB_STATE`, and `GITHUB_PATH` files ignore a leading UTF-8 byte order mark (BOM); BOMs within values remain unchanged.
+
+Windows hosts, `cmd`, and MSYS2 shells remain unsupported. If the shell name is known before the job starts, the workflow fails before an agent starts the job. A shell expression that needs a runtime value is checked before its step starts. If it resolves to an unsupported shell, the step fails.
 
 Working directories must stay inside the workspace.
 
@@ -1324,6 +1326,9 @@ A shell step can specify its shell and workspace-relative working directory:
 Use an interpreter installed by an earlier step or included in the job image:
 
 ```yaml
+- shell: pwsh
+  run: '"greeting=héllo" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append'
+
 - shell: Rscript {0}
   run: print("R script")
 
@@ -1661,7 +1666,7 @@ parts with values supported by their runtime surface. Action references in
 | Public `owner/repo[/path]@ref` action | 🟡 Supported subset | Resolved to an exact commit and digest. |
 | Private action | ❌ Unsupported | No private action source access. |
 | JavaScript action | ✅ Supported | Declares `node16`, `node20`, or `node24`. |
-| Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; `bash`, `sh`, `python`, or an expression-backed custom shell template for `run`; literal `continue-on-error`. |
+| Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; [supported shells](#commands-and-actions), including expression-backed custom templates, for `run`; literal `continue-on-error`. |
 | Docker action | 🟡 Supported subset | Verified local or public Dockerfile or prebuilt-image action on Linux with optional bounded `runs.args`. Rejected on macOS, including through a composite action. |
 | Direct workflow `uses: docker://...` action | ❌ Unsupported | Rejected during validation. |
 | Top-level action metadata `env` | ➖ Accepted, no effect | Any valid YAML value is discarded. It is not evaluated, injected, retained in plans, or used to request secrets or tokens. |

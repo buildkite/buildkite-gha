@@ -11,6 +11,15 @@
       "action_preflight": "none"
     },
     {
+      "id": "smoke-powershell",
+      "workflow": "testdata/compatibility-gaps/.github/workflows/other-shells.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "runtime-pass",
+      "evidence": "PowerShell 7.4.13 on Linux passes TestPowerShellExecution and TestCompatibilityGapOtherShells.",
+      "note": "Execution requires pwsh on PATH; the local smoke gate only validates and compiles.",
+      "action_preflight": "none"
+    },
+    {
       "id": "smoke-concurrent",
       "workflow": "testdata/smoke/.github/workflows/concurrent.yml",
       "event": "testdata/smoke/events/push.json",

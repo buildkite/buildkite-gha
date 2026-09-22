@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -97,7 +98,8 @@ func shellCommand(shell, script string) ([]string, error) {
 
 func (r *jobRun) runShellProcess(ctx context.Context, processor *commandOutputProcessor, dir string, env map[string]string, result *Result, shell, script string) error {
 	shell = strings.TrimSpace(shell)
-	if shell != "python" && !strings.Contains(shell, "{0}") {
+	powershell := shell == "pwsh" || shell == "powershell"
+	if !powershell && shell != "python" && !strings.Contains(shell, "{0}") {
 		args, err := shellCommand(shell, script)
 		if err != nil {
 			return err
@@ -106,7 +108,10 @@ func (r *jobRun) runShellProcess(ctx context.Context, processor *commandOutputPr
 	}
 
 	args := []string{"python", "{0}"}
-	if shell != "python" {
+	if powershell {
+		args = []string{shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "{0}"}
+		script = "\ufeff$ErrorActionPreference = 'stop'\n" + script + "\nif (Test-Path -LiteralPath variable:\\LASTEXITCODE) { exit $LASTEXITCODE }\n"
+	} else if shell != "python" {
 		if err := shellcompat.ValidateCompatibility(shell); err != nil {
 			return errUnsupportedFeature("shell", "", "%s", err)
 		}
@@ -155,11 +160,13 @@ func (r *jobRun) runShellProcess(ctx context.Context, processor *commandOutputPr
 }
 
 func shellScriptExtension(command string) string {
-	switch strings.ToLower(command) {
+	switch strings.ToLower(filepath.Base(command)) {
 	case "bash", "sh":
 		return ".sh"
 	case "python":
 		return ".py"
+	case "pwsh", "pwsh.exe", "powershell", "powershell.exe":
+		return ".ps1"
 	default:
 		return ""
 	}

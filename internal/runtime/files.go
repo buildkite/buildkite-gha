@@ -205,7 +205,7 @@ func parsePathContents(contents []byte, err error) ([]string, error) {
 		return nil, err
 	}
 	var paths []string
-	for line := range strings.SplitSeq(strings.ReplaceAll(string(contents), "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(strings.TrimPrefix(string(contents), "\ufeff"), "\r\n", "\n"), "\n") {
 		if line == "" {
 			continue
 		}
@@ -230,7 +230,11 @@ func readBoundedReader(path string, reader io.Reader, limit int64) ([]byte, erro
 
 func parseCommandReader(path string, reader io.Reader) (map[string]string, error) {
 	values := make(map[string]string)
-	scanner := bufio.NewScanner(reader)
+	buffered := bufio.NewReader(reader)
+	if prefix, _ := buffered.Peek(3); string(prefix) == "\ufeff" {
+		_, _ = buffered.Discard(3)
+	}
+	scanner := bufio.NewScanner(buffered)
 	scanner.Buffer(make([]byte, 64*1024), maxStreamLineBytes)
 	entries := 0
 	for scanner.Scan() {

@@ -5,6 +5,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -18,6 +19,9 @@ func TestFileCommandParsing(t *testing.T) {
 	}{
 		{name: "LF", contents: "single=value\nmulti<<END\nfirst\nsecond\nEND\n", want: map[string]string{"single": "value", "multi": "first\nsecond"}},
 		{name: "CRLF", contents: "single=value\r\nmulti<<END\r\nfirst\r\nsecond\r\nEND\r\n", want: map[string]string{"single": "value", "multi": "first\nsecond"}},
+		{name: "leading BOM only", contents: "\ufeffsingle=héllo\r\nmulti<<END\r\n\ufeffpayload\r\nEND\r\n\ufeffnext=\ufeffvalue\r\n", want: map[string]string{"single": "héllo", "multi": "\ufeffpayload", "\ufeffnext": "\ufeffvalue"}},
+		{name: "BOM after blank line is payload", contents: "\n\ufeffname=value\n", want: map[string]string{"\ufeffname": "value"}},
+		{name: "BOM only", contents: "\ufeff", want: map[string]string{}},
 		{name: "equals before heredoc", contents: "single=value<<literal\n", want: map[string]string{"single": "value<<literal"}},
 		{name: "heredoc before equals", contents: "multi<<END=value\npayload\nEND=value\n", want: map[string]string{"multi": "payload"}},
 		{name: "missing name", contents: "=value\n", wantErr: "invalid file command"},
@@ -64,6 +68,22 @@ func TestFileCommandParsing(t *testing.T) {
 	result = newResult()
 	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "NODE_OPTIONS") {
 		t.Fatalf("commandFiles.apply() error = %v, want NODE_OPTIONS rejection", err)
+	}
+}
+
+func TestPathFileLeadingBOM(t *testing.T) {
+	for _, test := range []struct {
+		contents string
+		want     []string
+	}{
+		{"\ufeff/opt/héllo\r\n/opt/\ufeffpayload\r\n\ufeff/second\r\n", []string{"/opt/héllo", "/opt/\ufeffpayload", "\ufeff/second"}},
+		{"\n\ufeff/first\n", []string{"\ufeff/first"}},
+		{"\ufeff", nil},
+	} {
+		got, err := parsePathContents([]byte(test.contents), nil)
+		if err != nil || !slices.Equal(got, test.want) {
+			t.Fatalf("parsePathContents(%q) = %q, %v, want %q", test.contents, got, err, test.want)
+		}
 	}
 }
 
