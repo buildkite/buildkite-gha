@@ -17,6 +17,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/program"
 	shellcompat "github.com/buildkite/buildkite-gha/internal/shell"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 // planBuilder lowers expanded job instances into validated execution-plan
@@ -50,10 +51,10 @@ type builtPlanActions struct {
 	programs             map[string]program.Action
 }
 
-func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options, graphs *actionGraphCache) ([]plan.Job, []PlanAuthorization, []JobEvaluation, error) {
+func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options, graphs *actionGraphCache) ([]PlanArtifact, []JobEvaluation, error) {
 	payload, err := json.Marshal(ir.Event.Payload)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("encode event payload: %w", err)
+		return nil, nil, fmt.Errorf("encode event payload: %w", err)
 	}
 	workflowName := ir.Workflow.Name
 	if workflowName == "" {
@@ -61,15 +62,14 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 	}
 	workflowRunPath, err := canonicalWorkflowRunPath(ir.Workflow.Path)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	builder := planBuilder{
 		ctx: ctx, ir: ir, compilerVersion: compilerVersion, compilerDistributionDigest: compilerDistributionDigest,
 		options: options, actionGraphs: graphs, workflowName: workflowName, workflowRunPath: workflowRunPath,
 		eventDigest: sha256.Sum256(payload), planDigests: make(map[string]string, len(ir.Jobs)),
 	}
-	plans := make([]plan.Job, 0, len(ir.Jobs))
-	authorizations := make([]PlanAuthorization, 0, len(ir.Jobs))
+	plans := make([]PlanArtifact, 0, len(ir.Jobs))
 	evaluations := make([]JobEvaluation, 0, len(ir.Jobs))
 	failedInstances := make(map[string]bool, len(ir.Jobs))
 	var diagnostics []error
@@ -93,13 +93,14 @@ instances:
 			diagnostics = append(diagnostics, planConstructionFinding(instance, err))
 			continue
 		}
-		digest := sha256.Sum256(encoded)
-		builder.planDigests[instance.Key] = "sha256:" + hex.EncodeToString(digest[:])
-		plans = append(plans, job)
-		authorizations = append(authorizations, authorization)
+		digest := transport.Digest(encoded)
+		builder.planDigests[instance.Key] = digest
+		// Keep the exact bytes used by dependent plans; bundle assembly adds
+		// the artifact path without re-encoding the job.
+		plans = append(plans, PlanArtifact{Job: job, Digest: digest, Contents: encoded, Authorization: authorization})
 		evaluations = append(evaluations, JobEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Evaluated: true, Passed: true})
 	}
-	return plans, authorizations, evaluations, errors.Join(diagnostics...)
+	return plans, evaluations, errors.Join(diagnostics...)
 }
 
 func canonicalWorkflowRunPath(workflowPath string) (string, error) {
