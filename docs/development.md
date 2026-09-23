@@ -92,8 +92,7 @@ the capability is absent or `false`. Either side can ship first. Native
 selection requires both implementations, including the
 [companion backend change](https://github.com/buildkite/buildkite/pull/34514).
 Explicit client mappings bypass automatic resolution. Backend eligibility and
-label mapping remain server-owned; see its
-[API schema](https://github.com/buildkite/buildkite/blob/master/docs/apis/github-actions-runners.md).
+label mapping remain server-owned.
 
 ## Monitor dependency security
 
