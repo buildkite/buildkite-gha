@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/agentapi"
@@ -162,6 +163,9 @@ func cacheCredentialStatusError(status int) error {
 }
 
 func isCacheServiceEnvironment(name string) bool {
+	if runtime.GOOS == "windows" {
+		name = strings.ToUpper(name)
+	}
 	switch name {
 	case "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_SERVICE_V2", "ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL":
 		return true
@@ -206,7 +210,7 @@ func isolateCacheActionEnvironment(env map[string]string) (map[string]string, er
 		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
 		"BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_JOB_ID",
 	} {
-		delete(isolated, name)
+		deleteEnvironment(isolated, name)
 	}
 	if err := isolateCacheToolEnvironment(isolated); err != nil {
 		return nil, err
@@ -215,8 +219,8 @@ func isolateCacheActionEnvironment(env map[string]string) (map[string]string, er
 }
 
 func applyGitHubServerURLOverride(env map[string]string) {
-	if shouldOverrideGitHubServerURL(env["GITHUB_SERVER_URL"]) {
-		env["GITHUB_SERVER_URL"] = githubServerURLOverride
+	if shouldOverrideGitHubServerURL(environmentValue(env, "GITHUB_SERVER_URL")) {
+		mergeEnvironmentInto(env, map[string]string{"GITHUB_SERVER_URL": githubServerURLOverride})
 	}
 }
 

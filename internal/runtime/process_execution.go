@@ -57,13 +57,13 @@ func (r *jobRun) runProcess(ctx context.Context, processor *commandOutputProcess
 	runErr = markStepProcessExit(runErr)
 	effects, fileErr := files.apply(result, state)
 	effects.reportSummaryUploadFailure(processor)
-	if fileErr == nil && (effects.pathSet || len(effects.paths) > 0) {
+	if fileErr == nil && len(effects.paths) > 0 {
 		pathEnv := map[string]string{"PATH": environmentValue(env, "PATH")}
 		if effects.pathSet {
 			pathEnv["PATH"] = effects.pathBase
 		}
 		applyPaths(pathEnv, effects.paths)
-		result.Env["PATH"] = pathEnv["PATH"]
+		mergeEnvironmentInto(result.Env, pathEnv)
 	}
 	return errors.Join(runErr, fileErr)
 }
@@ -310,15 +310,20 @@ func processEnv(overrides map[string]string) []string {
 }
 
 func environmentValue(env map[string]string, name string) string {
+	value, _ := lookupEnvironment(env, name)
+	return value
+}
+
+func lookupEnvironment(env map[string]string, name string) (string, bool) {
 	if value, ok := env[name]; ok || runtime.GOOS != "windows" {
-		return value
+		return value, ok
 	}
 	for candidate, value := range env {
 		if strings.EqualFold(candidate, name) {
-			return value
+			return value, true
 		}
 	}
-	return ""
+	return "", false
 }
 
 func validateEnvironmentNames(env map[string]string) error {

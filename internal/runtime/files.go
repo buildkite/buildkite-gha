@@ -143,7 +143,7 @@ func (files commandFiles) apply(result *Result, state map[string]string) (fileCo
 		}
 	}
 	effects.paths = paths
-	if pathBase, ok := env["PATH"]; ok {
+	if pathBase, ok := lookupEnvironment(env, "PATH"); ok {
 		effects.pathBase = pathBase
 		effects.pathSet = true
 		result.pathBase = pathBase
@@ -249,6 +249,7 @@ func readBoundedReader(path string, reader io.Reader, limit int64) ([]byte, erro
 
 func parseCommandReader(path string, reader io.Reader, foldNames bool) (map[string]string, error) {
 	values := make(map[string]string)
+	spellings := make(map[string]string)
 	buffered := bufio.NewReader(reader)
 	if prefix, _ := buffered.Peek(3); string(prefix) == "\ufeff" {
 		_, _ = buffered.Discard(3)
@@ -281,7 +282,9 @@ func parseCommandReader(path string, reader io.Reader, foldNames bool) (map[stri
 				return nil, fmt.Errorf("missing delimiter %q for %q", delimiter, name)
 			}
 			if foldNames {
-				name = strings.ToUpper(name)
+				identity := strings.ToUpper(name)
+				delete(values, spellings[identity])
+				spellings[identity] = name
 			}
 			values[name] = strings.Join(lines, "\n")
 			entries++
@@ -295,7 +298,9 @@ func parseCommandReader(path string, reader io.Reader, foldNames bool) (map[stri
 			return nil, fmt.Errorf("invalid file command %q", line)
 		}
 		if foldNames {
-			name = strings.ToUpper(name)
+			identity := strings.ToUpper(name)
+			delete(values, spellings[identity])
+			spellings[identity] = name
 		}
 		values[name] = value
 		entries++
