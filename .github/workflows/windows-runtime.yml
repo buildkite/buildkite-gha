@@ -27,6 +27,8 @@ jobs:
           Copy-Item -LiteralPath 'C:\tools\zstd\zstd.exe' -Destination (Join-Path $directory 'zstd.exe')
       - name: Build Windows runtime
         run: go build ./...
+      - name: Verify absolute artifact paths and archive roots
+        run: go test ./internal/action/integration ./internal/runtime -run '^(TestUploadArtifactPathsNormalizesSafeSpellings|TestUploadArtifactAbsolutePathsUseSearchRoot|TestUploadArtifactArchiveRootAtVolumeBoundary)$' -v -count=1
       - name: Exercise checkout Git preflight
         run: go test ./internal/runtime -run '^(TestCheckoutPreflightResolvesHostGit|TestCheckoutLFSInitializesBeforeFetch|TestWindowsExecutablePreflightPinsJunctionTarget)$' -v -count=1
       - name: Verify action source publication and cleanup

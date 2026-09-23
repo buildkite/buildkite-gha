@@ -261,8 +261,8 @@ func ValidateUploadArtifactName(name string) error {
 	return nil
 }
 
-// UploadArtifactPaths returns bounded workspace-relative literal roots and
-// final-component file globs.
+// UploadArtifactPaths returns bounded relative or absolute literal roots and
+// globs. Windows drive paths are normalized on the importer as well as Windows.
 func UploadArtifactPaths(value string) ([]string, error) {
 	if strings.Contains(value, "${{") {
 		return nil, fmt.Errorf("input %q must contain literal paths, not expressions", "path")
@@ -276,9 +276,16 @@ func UploadArtifactPaths(value string) ([]string, error) {
 		if strings.HasPrefix(root, "#") || uploadArtifactExtglob(root) {
 			return nil, fmt.Errorf("path %q is unsafe; bounded adapter requires literal glob paths", root)
 		}
+		windowsAbsolute := len(root) >= 3 && strings.ContainsAny(root[:1], "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") && root[1] == ':' && (root[2] == '/' || root[2] == '\\')
+		if windowsAbsolute {
+			root = strings.ReplaceAll(root, "\\", "/")
+		}
+		if strings.HasPrefix(root, "//") || strings.Contains(root, ":") && (!windowsAbsolute || strings.Contains(root[2:], ":")) {
+			return nil, fmt.Errorf("path %q uses an unsupported volume or stream", root)
+		}
 		for i, component := range strings.Split(filepath.ToSlash(root), "/") {
 			if component == ".." {
-				return nil, fmt.Errorf("path %q contains traversal; bounded adapter requires workspace-relative paths", root)
+				return nil, fmt.Errorf("path %q contains traversal", root)
 			}
 			if component == "." && i != 0 {
 				return nil, fmt.Errorf("path %q uses non-canonical components", root)
@@ -296,11 +303,12 @@ func UploadArtifactPaths(value string) ([]string, error) {
 			return nil, fmt.Errorf("path %q uses an unsupported directory glob", root)
 		}
 		root = path.Clean(root)
-		if directoryOnly && root != "." {
+		if directoryOnly && root != "." && !strings.HasSuffix(root, "/") {
 			root += "/"
 		}
-		if len(root) > MaxUploadArtifactPathBytes || strings.HasPrefix(root, "!") || strings.ContainsAny(root, "{}") || strings.Contains(root, "\\") || !filepath.IsLocal(root) || !utf8.ValidString(root) {
-			return nil, fmt.Errorf("path %q is unsafe; bounded adapter requires clean workspace-relative paths", root)
+		absolute := path.IsAbs(root) || windowsAbsolute
+		if len(root) > MaxUploadArtifactPathBytes || strings.HasPrefix(root, "!") || strings.ContainsAny(root, "{}") || strings.Contains(root, "\\") || !absolute && !filepath.IsLocal(root) || !utf8.ValidString(root) {
+			return nil, fmt.Errorf("path %q is unsafe; bounded adapter requires clean relative or absolute paths", root)
 		}
 		for _, r := range root {
 			if r < 0x20 || r == 0x7f {
