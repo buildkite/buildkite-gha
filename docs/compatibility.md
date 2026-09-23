@@ -63,6 +63,15 @@ from Linux x86-64 or macOS arm64; Windows agents run generated jobs only.
 to a queue or enabled through Agent API resolution. They have no local preset
 and are otherwise rejected, never silently redirected to Linux.
 
+When Windows routing is enabled, the Agent API also maps `windows-2025` and
+standard Depot `depot-windows-2025` labels (including `-4`, `-8`, `-16`, `-32`,
+and `-64`) to the same `windows-medium` queue as `windows-latest`. It warns that
+the queue may run Windows Server 2022 instead of 2025, and that Depot hardware,
+caches, and networking are not preserved. This fallback requires an existing
+eligible Hosted Windows queue; it does not provision Depot runners or promise
+Server 2025 compatibility. These aliases have no local preset or explicit
+Windows mapping; use Agent API resolution rather than a custom-label mapping.
+
 Use a Windows Server 2022 queue with Buildkite agent v3.129 or newer, PowerShell
 7 (`pwsh`), and Git on `PATH`. Runner labels do not install GitHub's runner image
 or its tools. `runner.os` is `Windows` and `runner.arch` is `X64`. See
@@ -75,8 +84,8 @@ commands; Windows PowerShell needs `Out-File -Encoding utf8 -Append` rather
 than its default UTF-16 redirection. [MSYS2 custom shells](#commands-and-actions)
 are supported. `cmd` shells, containers,
 services, Docker actions, custom images, and cache volumes
-are not supported on Windows. Windows Server 2025 and arm64 labels are not
-enabled by these mappings.
+are not supported on Windows. Native Windows Server 2025 and arm64 execution
+are not enabled by these mappings.
 
 ## How workflows run on Buildkite
 

@@ -353,7 +353,7 @@ func (o processingOutput) annotateRunnerResolutionWarnings(parent context.Contex
 		return
 	}
 	var body strings.Builder
-	body.WriteString("#### Unsupported runner labels were mapped to Ubuntu\n\nBuildkite used heuristic runner mappings:\n\n")
+	body.WriteString("#### Runner labels were mapped to fallback targets\n\nBuildkite used fallback runner mappings:\n\n")
 	for _, warning := range warnings {
 		_, _ = fmt.Fprintf(&body, "* %s — %s\n", annotationCode(warning.Code), annotationHTML(warning.Message))
 	}
