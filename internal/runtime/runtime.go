@@ -656,13 +656,13 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 
 func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandOutputProcessor, workspace, node string, action javaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
 	env := mergeStringMaps(result.Env, action.Env, actionInputEnv(action.Inputs))
-	if path, ok := result.Env["PATH"]; ok {
-		env["PATH"] = path
+	if path, ok := lookupEnvironment(result.Env, "PATH"); ok {
+		mergeEnvironmentInto(env, map[string]string{"PATH": path})
 	}
-	env["GITHUB_ACTION_PATH"] = action.Path
+	mergeEnvironmentInto(env, map[string]string{"GITHUB_ACTION_PATH": action.Path})
 	env = removeIDTokenEnvironment(env)
 	for name, value := range stateEnv {
-		env["STATE_"+name] = value
+		mergeEnvironmentInto(env, map[string]string{"STATE_" + name: value})
 	}
 	env = removeCacheServiceEnvironment(env)
 	if action.Cache {

@@ -32,7 +32,7 @@ func TestWindowsCacheArchiveTools(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	poison := map[string]string{"KEEP_ME": "ordinary-value"}
+	poison := map[string]string{"keepMe": "ordinary-value"}
 	for _, name := range []string{"ProgramFiles", "SystemDrive", "SystemRoot", "WinDir", "ComSpec", "Path", "PathExt", "NoDefaultCurrentDirectoryInExePath"} {
 		poison[name] = workspace
 		t.Setenv(name, workspace)
@@ -45,11 +45,11 @@ func TestWindowsCacheArchiveTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, value := range env {
-		if strings.Contains(value, workspace) || value == "must-not-reach-child" || name != strings.ToUpper(name) {
+		if strings.Contains(value, workspace) || value == "must-not-reach-child" {
 			t.Fatalf("unsafe environment entry %s=%q", name, value)
 		}
 	}
-	if env["PROGRAMFILES"] != programFiles || env["SYSTEMROOT"] != filepath.Dir(systemDirectory) || env["SYSTEMDRIVE"] != filepath.VolumeName(systemDirectory) || env["PATHEXT"] != ".EXE" || env["NODEFAULTCURRENTDIRECTORYINEXEPATH"] != "1" || env["KEEP_ME"] != "ordinary-value" {
+	if env["PROGRAMFILES"] != programFiles || env["SYSTEMROOT"] != filepath.Dir(systemDirectory) || env["SYSTEMDRIVE"] != filepath.VolumeName(systemDirectory) || env["PATHEXT"] != ".EXE" || env["NODEFAULTCURRENTDIRECTORYINEXEPATH"] != "1" || env["keepMe"] != "ordinary-value" {
 		t.Fatalf("incorrect isolated Windows environment: %#v", env)
 	}
 	// Exercise the same GNU tar compressor arguments used by the audited cache

@@ -21,17 +21,19 @@ func isolateCacheToolEnvironment(env map[string]string) error {
 		return fmt.Errorf("locate cache tools System32: %w", err)
 	}
 	systemRoot := filepath.Dir(systemDirectory)
-	env["PROGRAMFILES"] = programFiles
-	env["SYSTEMDRIVE"] = filepath.VolumeName(systemDirectory)
-	env["SYSTEMROOT"] = systemRoot
-	env["WINDIR"] = systemRoot
-	env["COMSPEC"] = filepath.Join(systemDirectory, "cmd.exe")
-	env["PATHEXT"] = ".EXE"
-	env["NODEFAULTCURRENTDIRECTORYINEXEPATH"] = "1"
-	env["PATH"] = strings.Join([]string{
-		filepath.Join(programFiles, "Git", "usr", "bin"),
-		filepath.Join(programFiles, "zstd"),
-		systemDirectory,
-	}, ";")
+	mergeEnvironmentInto(env, map[string]string{
+		"PROGRAMFILES":                       programFiles,
+		"SYSTEMDRIVE":                        filepath.VolumeName(systemDirectory),
+		"SYSTEMROOT":                         systemRoot,
+		"WINDIR":                             systemRoot,
+		"COMSPEC":                            filepath.Join(systemDirectory, "cmd.exe"),
+		"PATHEXT":                            ".EXE",
+		"NODEFAULTCURRENTDIRECTORYINEXEPATH": "1",
+		"PATH": strings.Join([]string{
+			filepath.Join(programFiles, "Git", "usr", "bin"),
+			filepath.Join(programFiles, "zstd"),
+			systemDirectory,
+		}, ";"),
+	})
 	return nil
 }

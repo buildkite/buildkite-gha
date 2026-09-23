@@ -153,8 +153,8 @@ func isIDTokenEnvironment(name string) bool {
 
 func removeIDTokenEnvironment(env map[string]string) map[string]string {
 	clean := mergeStringMaps(env)
-	delete(clean, "ACTIONS_ID_TOKEN_REQUEST_URL")
-	delete(clean, "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+	deleteEnvironment(clean, "ACTIONS_ID_TOKEN_REQUEST_URL")
+	deleteEnvironment(clean, "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
 	return clean
 }
 

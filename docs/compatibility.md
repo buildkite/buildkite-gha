@@ -87,6 +87,11 @@ services, Docker actions, custom images, and cache volumes
 are not supported on Windows. Native Windows Server 2025 and arm64 execution
 are not enabled by these mappings.
 
+Windows environment overlays replace names case-insensitively but preserve the
+winning spelling, so `env: {toolchain: nightly}` remains `$toolchain` in Bash.
+`GITHUB_ENV` preserves the last assignment's spelling and value when names differ
+only by case. Runtime context variables remain protected from step overrides.
+
 ## How workflows run on Buildkite
 
 GitHub Actions combines run creation and workload definition in one file. Buildkite keeps them separate.
