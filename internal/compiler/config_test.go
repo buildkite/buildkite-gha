@@ -593,13 +593,13 @@ func TestRunnerPolicySelectorTargetDoesNotChangeOverlappingLabelTarget(t *testin
 			Target: fallback,
 		}},
 	}
-	if got, err := policy.resolve([]string{"ubuntu-22.04"}, EventTrusted); err != nil || got != jammy {
+	if got, err := policy.resolve([]string{"ubuntu-22.04"}, EventTrusted); err != nil || !reflect.DeepEqual(got, jammy) {
 		t.Fatalf("standalone preset = %#v, %v", got, err)
 	}
-	if got, err := policy.resolve([]string{"ubuntu-22.04", "self-hosted"}, EventTrusted); err != nil || got != fallback {
+	if got, err := policy.resolve([]string{"ubuntu-22.04", "self-hosted"}, EventTrusted); err != nil || !reflect.DeepEqual(got, fallback) {
 		t.Fatalf("multi-label selector = %#v, %v", got, err)
 	}
-	if got, err := (RunnerPolicy{Selectors: []RunnerSelector{{Labels: []string{"windows-latest"}, Target: fallback}}}).resolve([]string{"windows-latest"}, EventTrusted); err != nil || got != fallback {
+	if got, err := (RunnerPolicy{Selectors: []RunnerSelector{{Labels: []string{"windows-latest"}, Target: fallback}}}).resolve([]string{"windows-latest"}, EventTrusted); err != nil || !reflect.DeepEqual(got, fallback) {
 		t.Fatalf("server target = %#v, %v", got, err)
 	}
 }
@@ -643,7 +643,7 @@ func TestRunnerPolicyServerRejectionWinsOverLocalPreset(t *testing.T) {
 func TestRunnerPolicyExplicitWindowsTarget(t *testing.T) {
 	target := RunnerTarget{Queue: "windows", Platform: PlatformWindowsAMD64}
 	policy := RunnerPolicy{Targets: map[string]RunnerTarget{"windows-latest": target}}
-	if got, err := policy.Resolve([]string{"windows-latest"}, EventTrusted); err != nil || got != target {
+	if got, err := policy.Resolve([]string{"windows-latest"}, EventTrusted); err != nil || !reflect.DeepEqual(got, target) {
 		t.Fatalf("Resolve() = %#v, %v, want explicit Windows target", got, err)
 	}
 	options := DefaultOptions()
@@ -861,6 +861,41 @@ func TestCompilePlansUsePolicyQueueAndContainOnlyNonSecretVars(t *testing.T) {
 	}
 	if bytes.Contains(encoded, []byte("resolved-secret-value")) || !bytes.Contains(encoded, []byte(`${{ secrets.TOKEN }}`)) {
 		t.Fatalf("plan contains resolved secret material: %s", encoded)
+	}
+}
+
+func TestRunnerTargetAgentEnvironmentIdentity(t *testing.T) {
+	enabled, disabled := true, false
+	first := RunnerTarget{Queue: "linux", Platform: PlatformLinuxAMD64, Agents: map[string]string{"nsc-gha-image": "ubuntu-24.04"}, ToolCache: &disabled}
+	second := RunnerTarget{Queue: "linux", Platform: PlatformLinuxAMD64, Agents: map[string]string{"nsc-gha-image": "ubuntu-24.04"}, ToolCache: new(bool)}
+	if !RunnerTargetsEqual(first, second) {
+		t.Fatal("equivalent tags and separate cache pointers must compare equal")
+	}
+	second.Agents["nsc-gha-image"] = "ubuntu-22.04"
+	if RunnerTargetsEqual(first, second) {
+		t.Fatal("different environments compare equal")
+	}
+	policy := RunnerPolicy{Targets: map[string]RunnerTarget{"a": first, "b": second}}
+	if _, err := policy.Resolve([]string{"a", "b"}, EventTrusted); err == nil || !strings.Contains(err.Error(), "conflicting targets") || !strings.Contains(err.Error(), "ubuntu-24.04") || !strings.Contains(err.Error(), "ubuntu-22.04") {
+		t.Fatalf("conflicting agent tags = %v", err)
+	}
+	second.Agents["nsc-gha-image"] = "ubuntu-24.04"
+	second.ToolCache = &enabled
+	if RunnerTargetsEqual(first, second) {
+		t.Fatal("different tool cache contracts compare equal")
+	}
+	second.ToolCache = nil
+	if RunnerTargetsEqual(first, second) {
+		t.Fatal("absent tool cache compares equal to explicit false")
+	}
+	for _, target := range []RunnerTarget{
+		{Platform: PlatformLinuxAMD64, Image: "example.com/image@sha256:" + strings.Repeat("a", 64), Agents: first.Agents},
+		{Platform: PlatformLinuxAMD64, Agents: map[string]string{"queue": "other"}},
+		{Platform: PlatformDarwinARM64, Queue: "macos", Agents: first.Agents},
+	} {
+		if err := validateRunnerTarget(map[string]RunnerTarget{}, "runner", target); err == nil {
+			t.Fatalf("accepted invalid target: %#v", target)
+		}
 	}
 }
 

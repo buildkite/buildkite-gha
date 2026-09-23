@@ -1,5 +1,7 @@
 package buildkite
 
+import "strings"
+
 // This file contains the transitional PB-2731 runner-user implementation. The
 // experimental-runner-user flag remains as a temporary opt-out.
 
@@ -8,7 +10,9 @@ const experimentalRunnerTemp = "/tmp/buildkite-gha-runner"
 
 func experimentalRunnerUserBootstrap(requiresMise, hostedToolCache bool, cache *CacheVolume) []string {
 	commands := []string{
-		`test "$(id -u)" -eq 0 || { echo 'buildkite-gha: runner user bootstrap requires root' >&2; exit 1; }`,
+		`bootstrap_dir="$1"`,
+		`distribution="$2"`,
+		`plan="$3"`,
 		`for command in getent useradd usermod install sudo; do command -v "$command" >/dev/null 2>&1 || { echo "buildkite-gha: runner user bootstrap requires $command" >&2; exit 1; }; done`,
 		`if getent passwd runner >/dev/null; then test "$(id -u runner)" -ne 0 && test "$(getent passwd runner | cut -d: -f6)" = '/home/runner' || { echo 'buildkite-gha: existing runner user is incompatible' >&2; exit 1; }; else useradd --create-home --home-dir '/home/runner' --shell /bin/bash runner; fi`,
 		`runner_group="$(id -gn runner)"`,
@@ -50,10 +54,15 @@ func experimentalRunnerUserBootstrap(requiresMise, hostedToolCache bool, cache *
 			`chmod -R u+rwX '/opt/hostedtoolcache'`,
 		)
 	}
-	return append(commands,
+	commands = append(commands,
 		`sudo -n --user runner -- env HOME='/home/runner' TMPDIR='/tmp/buildkite-gha-runner' sh -c 'test "$(id -un)" = runner; test "$(id -u)" -ne 0; test "$HOME" = /home/runner; test -w "$TMPDIR"; sudo -n true'`,
 		`if [ -S /var/run/docker.sock ]; then sudo -n --user runner -- test -w /var/run/docker.sock || { echo 'buildkite-gha: runner cannot access the Docker socket' >&2; exit 1; }; fi`,
 	)
+	setupScript := shellQuote(strings.Join(commands, "\n"))
+	return []string{
+		`runner_bootstrap_sudo=''; if [ "$(id -u)" -ne 0 ]; then test "$(id -un)" = runner || { echo 'buildkite-gha: runner user bootstrap must start as root or runner' >&2; exit 1; }; command -v sudo >/dev/null 2>&1 || { echo 'buildkite-gha: runner user bootstrap requires passwordless sudo' >&2; exit 1; }; sudo -n true >/dev/null 2>&1 || { echo 'buildkite-gha: runner user bootstrap requires passwordless sudo' >&2; exit 1; }; runner_bootstrap_sudo='sudo -n --preserve-env --'; fi`,
+		`$runner_bootstrap_sudo bash -euo pipefail -c ` + setupScript + ` buildkite-gha-runner-bootstrap "$bootstrap_dir" "$distribution" "$plan"`,
+	}
 }
 
 // experimentalRunnerCacheOwnershipCommands uses a compiler-owned cache path as
@@ -83,5 +92,7 @@ func experimentalRunnerCacheOwnershipCommands(cacheRoot, anchor string, paths []
 }
 
 func experimentalRunnerUserCommand(runJob string) string {
-	return `sudo -n --preserve-env --user runner -- env HOME='` + experimentalRunnerHome + `' TMPDIR='` + experimentalRunnerTemp + `' ` + runJob
+	// sudo's secure_path overrides --preserve-env. Keep the host's native
+	// tool locations when launching the runtime as runner.
+	return `sudo -n --preserve-env --user runner -- env HOME='` + experimentalRunnerHome + `' TMPDIR='` + experimentalRunnerTemp + `' PATH="$PATH" ` + runJob
 }

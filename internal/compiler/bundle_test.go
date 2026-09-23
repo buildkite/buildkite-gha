@@ -496,6 +496,44 @@ func TestCompileBundlePreservesRuntimeImagePolicy(t *testing.T) {
 	}
 }
 
+func TestCompileBundleKeepsNativeHostSeparateFromJobContainer(t *testing.T) {
+	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: alpine:3.21\n    steps:\n      - run: true\n")
+	for _, toolCache := range []bool{false, true} {
+		options := defaultOptions()
+		// A general fallback image must not be applied to a tag-selected host.
+		options.RuntimeImage = "registry.example.com/fallback@sha256:" + strings.Repeat("b", 64)
+		options.Runners = RunnerPolicy{Targets: map[string]RunnerTarget{"ubuntu-latest": {
+			Queue: "native-linux", Platform: PlatformLinuxAMD64,
+			Agents: map[string]string{"nsc-gha-image": "ubuntu-24.04", "provider.setting": "opaque: value"}, ToolCache: &toolCache,
+		}}, UntrustedQueues: []string{"native-linux"}}
+		bundle, err := CompileBundleWithOptions("workflow.yml", workflow, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document struct {
+			Steps []struct {
+				Image   string            `yaml:"image"`
+				Agents  map[string]string `yaml:"agents"`
+				Command string            `yaml:"command"`
+			} `yaml:"steps"`
+		}
+		if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
+			t.Fatal(err)
+		}
+		if len(document.Steps) != 1 {
+			t.Fatalf("steps = %#v", document.Steps)
+		}
+		step := document.Steps[0]
+		wantAgents := map[string]string{"queue": "native-linux", "nsc-gha-image": "ubuntu-24.04", "provider.setting": "opaque: value"}
+		if step.Image != "" || !reflect.DeepEqual(step.Agents, wantAgents) || strings.Contains(step.Command, "--hosted-tool-cache") != toolCache || strings.Contains(step.Command, "/opt/hostedtoolcache") != toolCache {
+			t.Fatalf("native step = %#v", step)
+		}
+		if len(bundle.Plans) != 1 || bundle.Plans[0].Job.ExecutionJob().Container == nil || bundle.Plans[0].Job.ExecutionJob().Container.Image.Source != "alpine:3.21" {
+			t.Fatalf("job container was lost: %#v", bundle.Plans)
+		}
+	}
+}
+
 func TestCompileBundleEmitsMixedLinuxAndDarwinRuntimes(t *testing.T) {
 	workflow := []byte(`on: push
 jobs:

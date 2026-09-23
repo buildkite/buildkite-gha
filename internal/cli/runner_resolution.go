@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 )
@@ -62,13 +63,16 @@ func suggestedRunnerTargets(ctx context.Context, reports []compiler.Report, conf
 		if err != nil {
 			return agentRunnerResolution{}, fmt.Errorf("runner resolution response contains an invalid target: %w", err)
 		}
-		if platform == compiler.PlatformLinuxAMD64 && !runnerImagePattern.MatchString(suggestion.Image) {
+		if suggestion.Image != "" && !runnerImagePattern.MatchString(suggestion.Image) {
 			return agentRunnerResolution{}, fmt.Errorf("runner resolution response contains an invalid target image")
 		}
 		if platform != compiler.PlatformLinuxAMD64 && suggestion.Image != "" {
 			return agentRunnerResolution{}, fmt.Errorf("runner resolution response contains an invalid target image")
 		}
-		target := compiler.RunnerTarget{Queue: suggestion.Queue, Platform: platform, Image: suggestion.Image}
+		if err := buildkitepipeline.ValidateRunnerAgents(platform.String(), suggestion.Image, suggestion.Agents); err != nil {
+			return agentRunnerResolution{}, fmt.Errorf("runner resolution response contains an invalid target: %w", err)
+		}
+		target := compiler.RunnerTarget{Queue: suggestion.Queue, Platform: platform, Image: suggestion.Image, Agents: suggestion.Agents, ToolCache: suggestion.ToolCache}
 		resolution.selectors = append(resolution.selectors, compiler.RunnerSelector{Labels: labels, Target: target})
 		resolution.warnings = append(resolution.warnings, suggestion.Warnings...)
 	}

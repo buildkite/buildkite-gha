@@ -3433,13 +3433,13 @@ func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
 	if !slices.Equal(parsed.workflowOperands, []string{"workflow.yml"}) || parsed.eventPath != "event.json" || parsed.runtimeDistributionPaths[compiler.PlatformLinuxAMD64] != "/tmp/buildkite-gha-linux" || parsed.runtimeDistributionPaths[compiler.PlatformDarwinARM64] != "/tmp/buildkite-gha-darwin" || !parsed.experimentalRunnerUser || !parsed.privateReusableWorkflows {
 		t.Fatalf("parseUploadArgs() = %#v", parsed)
 	}
-	if got := parsed.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {
+	if got := parsed.runnerTargets["ubuntu-latest"]; !reflect.DeepEqual(got, compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {
 		t.Fatalf("Linux runner target = %#v", got)
 	}
-	if got := parsed.runnerTargets["ubuntu-20.04"]; got != (compiler.RunnerTarget{Queue: "legacy-linux", Platform: compiler.PlatformLinuxAMD64}) {
+	if got := parsed.runnerTargets["ubuntu-20.04"]; !reflect.DeepEqual(got, compiler.RunnerTarget{Queue: "legacy-linux", Platform: compiler.PlatformLinuxAMD64}) {
 		t.Fatalf("explicit fallback runner target = %#v", got)
 	}
-	if got := parsed.runnerTargets["macos-14"]; got != (compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
+	if got := parsed.runnerTargets["macos-14"]; !reflect.DeepEqual(got, compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("macOS runner target = %#v", got)
 	}
 	for _, test := range []struct {

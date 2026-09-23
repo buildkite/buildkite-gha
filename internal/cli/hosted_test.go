@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -40,7 +41,7 @@ func TestConfiguredLinuxRunnerTargetsDefaultHostedToolchainImages(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if canonical != strings.ToLower(test.label) || target != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: test.image}) {
+			if canonical != strings.ToLower(test.label) || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: test.image}) {
 				t.Fatalf("configuredRunnerTarget() = %q, %#v", canonical, target)
 			}
 		})
@@ -56,7 +57,7 @@ func TestConfiguredLinuxRunnerTargetsDefaultHostedToolchainImages(t *testing.T) 
 	}
 
 	canonical, target, err := configuredRunnerTarget("ubuntu-18.04", "legacy-linux", "")
-	if err != nil || canonical != "ubuntu-18.04" || target != (compiler.RunnerTarget{Queue: "legacy-linux", Platform: compiler.PlatformLinuxAMD64}) {
+	if err != nil || canonical != "ubuntu-18.04" || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "legacy-linux", Platform: compiler.PlatformLinuxAMD64}) {
 		t.Fatalf("fallback override = %q, %#v, %v", canonical, target, err)
 	}
 }
@@ -72,7 +73,7 @@ func TestHostedRunnerTargetsContainOnlyHostedGuarantees(t *testing.T) {
 	if !slices.Equal(labels, want) {
 		t.Fatalf("hosted runner labels = %q, want %q", labels, want)
 	}
-	if got := targets["macos-latest"]; got != (compiler.RunnerTarget{Queue: defaultMacOSRunnerQueue, Platform: compiler.PlatformDarwinARM64}) {
+	if got := targets["macos-latest"]; !reflect.DeepEqual(got, compiler.RunnerTarget{Queue: defaultMacOSRunnerQueue, Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("macos-latest target = %#v", got)
 	}
 	for _, label := range []string{"macos-14", "macos-15", "ubuntu-24.04-arm", "windows-latest"} {
@@ -82,7 +83,7 @@ func TestHostedRunnerTargetsContainOnlyHostedGuarantees(t *testing.T) {
 	}
 
 	canonical, target, err := configuredRunnerTarget("macOS-15", "organization-macos", "")
-	if err != nil || canonical != "macos-15" || target != (compiler.RunnerTarget{Queue: "organization-macos", Platform: compiler.PlatformDarwinARM64}) {
+	if err != nil || canonical != "macos-15" || !reflect.DeepEqual(target, compiler.RunnerTarget{Queue: "organization-macos", Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("organization macOS target = %q, %#v, %v", canonical, target, err)
 	}
 }

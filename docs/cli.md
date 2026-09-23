@@ -638,9 +638,11 @@ buildkite-gha upload \
 
 The hosted preset accepts runner labels case-insensitively, so aliases such as
 `macOS-latest` and `Ubuntu-Latest` are equivalent to their lowercase forms.
-`ubuntu-latest` and `ubuntu-24.04` default to the Noble hosted-toolchains image;
-`ubuntu-22.04` defaults to Jammy. Use `--runner-image` with an immutable digest
-to override the default for a configured profile. An explicit mapping declares
+Local presets use Noble for `ubuntu-latest` and `ubuntu-24.04`, and Jammy for
+`ubuntu-22.04`. Backend resolution can instead select a native Linux environment
+through agent tags. Use `--runner-image` with an immutable digest
+to override the preset for a configured profile; backend tags never replace
+that explicit image. An explicit mapping declares
 that its selector runs on Linux x86-64, except for the known macOS and Windows labels, and
 bypasses Agent API resolution. The Agent API owns compatibility and returns the
 complete target for every other selector. The importer publishes returned
@@ -769,8 +771,10 @@ Retry the whole build to select this runner again. If the producer job was retri
 ### Run Linux jobs as a non-root user
 
 Generated Linux jobs use a dedicated `runner` user by default. This behavior
-requires buildkite-gha v0.13.7 or newer. Generated jobs must start as root. The
-bootstrap creates the `runner` user, grants passwordless `sudo` and Docker
+requires buildkite-gha v0.13.7 or newer. Jobs can start as root or as an existing
+`runner` user with home `/home/runner` and passwordless `sudo`. For a non-root
+start, the bootstrap uses `sudo -n` for privileged setup. It creates the
+`runner` user when needed, grants passwordless `sudo` and Docker
 socket access when the socket exists, prepares the runner home, temp, mise, and
 tool-cache paths, then runs `buildkite-gha run-job` as `runner`. The verified
 executable and compiled plan remain root-owned and read-only to `runner`.
@@ -779,8 +783,8 @@ Generated jobs skip the Buildkite checkout. When a workflow uses
 not recursively change workspace ownership. This behavior does not depend on a
 queue name and does not affect macOS jobs.
 
-During the transition, set the plugin field to `false` to restore root
-execution:
+During the transition, set the plugin field to `false` to run as the agent's
+original user without this bootstrap:
 
 ```yaml
 steps:

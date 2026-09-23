@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"go.yaml.in/yaml/v4"
 )
 
 const continueRunsOnWorkflow = `on: push
@@ -158,6 +159,61 @@ func TestContinueRunsOnUsesLiveRunnerResolution(t *testing.T) {
 				t.Fatalf("runner fallback annotations=%d reject=%v", warnings, reject)
 			}
 		})
+	}
+}
+
+func TestContinueRunsOnPreservesNativeAgentEnvironments(t *testing.T) {
+	server, _ := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+		"ubuntu-latest": {"target": map[string]any{"queue": "native", "platform": "linux/amd64", "agents": map[string]string{"nsc-gha-image": "ubuntu-24.04"}, "tool_cache": false}},
+		"ubuntu-22.04":  {"target": map[string]any{"queue": "native", "platform": "linux/amd64", "agents": map[string]string{"nsc-gha-image": "ubuntu-22.04"}, "tool_cache": false}},
+	})
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	initial := runContinueInitialUploads(t, continueRunsOnWorkflow)[0]
+	var document struct {
+		Steps []struct {
+			Steps []struct {
+				Key     string            `yaml:"key"`
+				Image   string            `yaml:"image"`
+				Agents  map[string]string `yaml:"agents"`
+				Command string            `yaml:"command"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal([]byte(initial.pipeline), &document); err != nil {
+		t.Fatal(err)
+	}
+	stageFound := false
+	for _, step := range document.Steps[0].Steps {
+		if step.Key == initial.artifact.Continuation.StepKey {
+			stageFound = true
+			if step.Image != "" || step.Agents["nsc-gha-image"] != "ubuntu-24.04" || step.Agents["queue"] != "native" {
+				t.Fatalf("continuation host = %#v", step)
+			}
+		}
+	}
+	if !stageFound {
+		t.Fatal("missing stage upload step")
+	}
+	runner := initial.continueRunner(initial.producerManifest(t, "success", `["ubuntu-22.04"]`))
+	code, _, stderr := runContinue(t, runner, initial.digest)
+	if code != 0 {
+		t.Fatalf("continue: %d %s", code, stderr)
+	}
+	if err := yaml.Unmarshal(lastPipelineUpload(t, runner), &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 || len(document.Steps[0].Steps) != 2 {
+		t.Fatalf("expanded steps = %#v", document.Steps)
+	}
+	for _, step := range document.Steps[0].Steps {
+		want := "ubuntu-24.04"
+		if strings.HasSuffix(step.Key, "-build") {
+			want = "ubuntu-22.04"
+		}
+		if step.Image != "" || step.Agents["nsc-gha-image"] != want || step.Agents["queue"] != "native" || strings.Contains(step.Command, "--hosted-tool-cache") {
+			t.Fatalf("expanded host = %#v, want %s", step, want)
+		}
 	}
 }
 

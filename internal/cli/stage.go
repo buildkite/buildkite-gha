@@ -134,11 +134,13 @@ type stageEvent struct {
 }
 
 type stageRunner struct {
-	Label    string                         `json:"label"`
-	Queue    string                         `json:"queue,omitempty"`
-	Platform string                         `json:"platform"`
-	Image    string                         `json:"image,omitempty"`
-	Cache    *buildkitepipeline.CacheVolume `json:"cache,omitempty"`
+	Label     string                         `json:"label"`
+	Queue     string                         `json:"queue,omitempty"`
+	Platform  string                         `json:"platform"`
+	Image     string                         `json:"image,omitempty"`
+	Agents    map[string]string              `json:"agents,omitempty"`
+	ToolCache *bool                          `json:"tool_cache,omitempty"`
+	Cache     *buildkitepipeline.CacheVolume `json:"cache,omitempty"`
 }
 
 type stageVars struct {
@@ -235,7 +237,7 @@ func importerStage(request hostedCompileRequest, importer, buildCommit string, i
 	runners := make([]stageRunner, 0, len(request.RunnerTargets))
 	for _, label := range slices.Sorted(maps.Keys(request.RunnerTargets)) {
 		target := request.RunnerTargets[label]
-		runners = append(runners, stageRunner{Label: label, Queue: target.Queue, Platform: target.Platform.String(), Image: target.Image, Cache: target.Cache})
+		runners = append(runners, stageRunner{Label: label, Queue: target.Queue, Platform: target.Platform.String(), Image: target.Image, Agents: target.Agents, ToolCache: target.ToolCache, Cache: target.Cache})
 	}
 	record := stageRecord{
 		Schema:       stageSchema,
@@ -594,6 +596,8 @@ func (s stageRecord) write(bundle compiler.Bundle) (transport.Artifact, buildkit
 		Platform:           producer.Platform,
 		DistributionDigest: producer.DistributionDigest,
 		RuntimeImage:       producer.RuntimeImage,
+		Agents:             producer.Agents,
+		ToolCache:          producer.ToolCache,
 		Dependencies:       dependencies,
 		Stage:              &buildkitepipeline.StageStep{ArtifactDigest: digest, Kind: continuation.Descriptor.Kind()},
 	}
@@ -689,6 +693,9 @@ func decodeStageRecord(data []byte, version string) (stageRecord, error) {
 	}
 	for _, runner := range record.Runners {
 		if _, err := compiler.ParsePlatform(runner.Platform); err != nil {
+			return stageRecord{}, fmt.Errorf("stage record runner %q: %w", runner.Label, err)
+		}
+		if err := buildkitepipeline.ValidateRunnerAgents(runner.Platform, runner.Image, runner.Agents); err != nil {
 			return stageRecord{}, fmt.Errorf("stage record runner %q: %w", runner.Label, err)
 		}
 	}
@@ -826,7 +833,7 @@ func (s stageRecord) compileRequest(workflowPath string, workflowSource, eventSo
 	targets := make(map[string]compiler.RunnerTarget, len(s.Runners))
 	for _, runner := range s.Runners {
 		platform, _ := compiler.ParsePlatform(runner.Platform)
-		targets[runner.Label] = compiler.RunnerTarget{Queue: runner.Queue, Platform: platform, Image: runner.Image, Cache: runner.Cache}
+		targets[runner.Label] = compiler.RunnerTarget{Queue: runner.Queue, Platform: platform, Image: runner.Image, Agents: runner.Agents, ToolCache: runner.ToolCache, Cache: runner.Cache}
 	}
 	runtimes := make(map[compiler.Platform]string, len(s.Runtimes))
 	for name, digest := range s.Runtimes {
