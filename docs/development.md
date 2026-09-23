@@ -49,6 +49,51 @@ mise run smoke:local
 mise run release:check
 ```
 
+## Runner-resolution API contract
+
+The CLI posts to `POST /v3/jobs/:job_id/github-actions/runners` with the
+job's Agent API credentials. It advertises support for opaque agent tags:
+
+```json
+{
+  "supports_agent_tags": true,
+  "requirements": [
+    {"id": "r1", "selector": {"labels": ["ubuntu-latest"]}}
+  ]
+}
+```
+
+The additive target fields are `agents` (a string map) and `tool_cache`
+(an optional boolean). For example:
+
+```json
+{
+  "resolutions": [{
+    "id": "r1",
+    "target": {
+      "queue": "linux-medium",
+      "platform": "linux/amd64",
+      "agents": {"nsc-gha-image": "ubuntu-24.04"},
+      "tool_cache": false
+    }
+  }]
+}
+```
+
+The client accepts either an immutable `image`, non-empty `agents`, or neither;
+it rejects targets with both and reserves `agents.queue` for the separate
+`queue` field. Agent tags are Linux-only and pass through unchanged. See
+[runner tools](compatibility.md#runner-tools) for `tool_cache` semantics.
+Deferred stages retain both fields, including explicit `false` values.
+
+There is no version header or feature flag. Older backends ignore the request
+extension and return images; newer backends retain image-only responses when
+the capability is absent or `false`. Either side can ship first. Native
+selection requires both implementations, including the
+[companion backend change](https://github.com/buildkite/buildkite/pull/34514).
+Explicit client mappings bypass automatic resolution. Backend eligibility and
+label mapping remain server-owned.
+
 ## Monitor dependency security
 
 Renovate uses the shared `buildkite/renovate-config` preset and runs every four

@@ -880,6 +880,8 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		instance.Queue = target.Queue
 		instance.Platform = target.Platform
 		instance.RuntimeImage = target.Image
+		instance.Agents = target.Agents
+		instance.ToolCache = target.ToolCache
 		instance.Cache = target.Cache
 		instance.ConcurrencyGroup = concurrencyGroup
 		if e.bindInstanceDependencies(sourced, job, key, &instance) {

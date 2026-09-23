@@ -1256,6 +1256,7 @@ func TestEmitMergesConfiguredAndManagedCacheVolume(t *testing.T) {
 	if !slices.Equal(step.Cache.Paths, wantPaths) || step.Cache.Name != "dependencies" || step.Cache.Size != "40g" {
 		t.Fatalf("merged cache = %#v, want paths %#v with configured name and size", step.Cache, wantPaths)
 	}
+	step.Command = strings.ReplaceAll(step.Command, `'"'"'`, `'`)
 	for _, path := range []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper"} {
 		if !strings.Contains(step.Command, "readlink -f -- '"+path+"'") {
 			t.Fatalf("runner-home cache path %q is not made writable by runner:\n%s", path, step.Command)
@@ -1277,7 +1278,8 @@ func TestEmitConfiguredCacheUsesBuildkiteDefaultsWithoutMise(t *testing.T) {
 	}
 	var document struct {
 		Steps []struct {
-			Cache struct {
+			Command string `yaml:"command"`
+			Cache   struct {
 				Paths []string `yaml:"paths"`
 				Name  string   `yaml:"name"`
 				Size  string   `yaml:"size"`
@@ -1291,7 +1293,8 @@ func TestEmitConfiguredCacheUsesBuildkiteDefaultsWithoutMise(t *testing.T) {
 	if len(document.Steps) != 1 || !slices.Equal(document.Steps[0].Cache.Paths, wantPaths) || document.Steps[0].Cache.Name != "" || document.Steps[0].Cache.Size != "" || strings.Contains(string(output), "BUILDKITE_GHA_MISE_DATA_DIR") {
 		t.Fatalf("configured cache did not preserve Buildkite defaults:\n%s", output)
 	}
-	if !strings.Contains(string(output), "readlink -f -- '"+platformCacheValidationPath("linux/amd64")+"'") || !strings.Contains(string(output), "readlink -f -- '/home/runner/.cache'") {
+	command := strings.ReplaceAll(document.Steps[0].Command, `'"'"'`, `'`)
+	if !strings.Contains(command, "readlink -f -- '"+platformCacheValidationPath("linux/amd64")+"'") || !strings.Contains(command, "readlink -f -- '/home/runner/.cache'") {
 		t.Fatalf("cache path is not made writable by runner:\n%s", output)
 	}
 }
@@ -1356,29 +1359,35 @@ func TestEmitDarwinActionRuntimeUsesNativePlatformCache(t *testing.T) {
 
 func TestEmitUsesImmutableRuntimeImageToolCache(t *testing.T) {
 	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
-	output, err := Emit(Pipeline{
-		CompilerStep:       "importer",
-		DistributionDigest: testDigest("distribution"),
-		RuntimeImage:       image,
-		Jobs:               []Job{{Key: "job", Label: "Job", Queue: "hosted", PlanDigest: testDigest("plan")}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var document struct {
-		Steps []struct {
-			Image   string `yaml:"image"`
-			Command string `yaml:"command"`
-		} `yaml:"steps"`
-	}
-	if err := yaml.Unmarshal(output, &document); err != nil {
-		t.Fatal(err)
-	}
-	if len(document.Steps) != 1 || document.Steps[0].Image != image {
-		t.Fatalf("runtime image = %#v, want %q", document.Steps, image)
-	}
-	if !strings.Contains(document.Steps[0].Command, "--hosted-tool-cache") {
-		t.Fatalf("run-job command does not select hosted tool cache: %q", document.Steps[0].Command)
+	disabled := false
+	for _, test := range []struct {
+		cache *bool
+		want  bool
+	}{{nil, true}, {&disabled, false}} {
+		output, err := Emit(Pipeline{
+			CompilerStep:       "importer",
+			DistributionDigest: testDigest("distribution"),
+			RuntimeImage:       image,
+			Jobs:               []Job{{Key: "job", Label: "Job", Queue: "hosted", PlanDigest: testDigest("plan"), ToolCache: test.cache}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document struct {
+			Steps []struct {
+				Image   string `yaml:"image"`
+				Command string `yaml:"command"`
+			} `yaml:"steps"`
+		}
+		if err := yaml.Unmarshal(output, &document); err != nil {
+			t.Fatal(err)
+		}
+		if len(document.Steps) != 1 || document.Steps[0].Image != image {
+			t.Fatalf("runtime image = %#v, want %q", document.Steps, image)
+		}
+		if strings.Contains(document.Steps[0].Command, "--hosted-tool-cache") != test.want || strings.Contains(document.Steps[0].Command, "/opt/hostedtoolcache") != test.want {
+			t.Fatalf("hosted tool cache selection: want %t, command %q", test.want, document.Steps[0].Command)
+		}
 	}
 }
 

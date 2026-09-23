@@ -25,11 +25,13 @@ type RunnerRequirement struct {
 }
 
 type RunnerSuggestion struct {
-	ID       string
-	Queue    string
-	Platform string
-	Image    string
-	Warnings []RunnerWarning
+	ID        string
+	Queue     string
+	Platform  string
+	Image     string
+	Agents    map[string]string
+	ToolCache *bool
+	Warnings  []RunnerWarning
 }
 
 type RunnerWarning struct {
@@ -102,8 +104,9 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 		Selector selector `json:"selector"`
 	}
 	body := struct {
-		Requirements []requirement `json:"requirements"`
-	}{Requirements: make([]requirement, len(requirements))}
+		Requirements      []requirement `json:"requirements"`
+		SupportsAgentTags bool          `json:"supports_agent_tags"`
+	}{Requirements: make([]requirement, len(requirements)), SupportsAgentTags: true}
 	expected := make(map[string]bool, len(requirements))
 	for i, input := range requirements {
 		if input.ID == "" || expected[input.ID] {
@@ -141,9 +144,11 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 		Resolutions []struct {
 			ID     string `json:"id"`
 			Target *struct {
-				Queue    string `json:"queue"`
-				Platform string `json:"platform"`
-				Image    string `json:"image"`
+				Queue     string            `json:"queue"`
+				Platform  string            `json:"platform"`
+				Image     string            `json:"image"`
+				Agents    map[string]string `json:"agents"`
+				ToolCache *bool             `json:"tool_cache"`
 			} `json:"target"`
 			Error *struct {
 				Code    string `json:"code"`
@@ -176,7 +181,7 @@ func (c *AgentRunnerResolver) resolveBatch(ctx context.Context, requirements []R
 		}
 		seen[resolution.ID] = true
 		if resolution.Target != nil {
-			suggestion := RunnerSuggestion{ID: resolution.ID, Queue: resolution.Target.Queue, Platform: resolution.Target.Platform, Image: resolution.Target.Image}
+			suggestion := RunnerSuggestion{ID: resolution.ID, Queue: resolution.Target.Queue, Platform: resolution.Target.Platform, Image: resolution.Target.Image, Agents: resolution.Target.Agents, ToolCache: resolution.Target.ToolCache}
 			for _, warning := range resolution.Warnings {
 				if strings.TrimSpace(warning.Code) == "" || strings.TrimSpace(warning.Message) == "" {
 					return nil, nil, fmt.Errorf("runner resolution response contains an invalid warning")

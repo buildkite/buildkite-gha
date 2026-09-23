@@ -82,10 +82,11 @@ plugins:
           queue: macos-sonoma-arm64
 ```
 
-Hosted runner labels are case-insensitive. Linux labels use the matching Noble
-or Jammy hosted-toolchains image, with or without a configured queue.
-During upload, the Agent API returns complete targets for selectors without an
-explicit mapping. The importer annotates heuristic fallback warnings. See the
+Hosted runner labels are case-insensitive. During upload, the Agent API selects
+native Linux hosts or immutable images for selectors without an explicit
+mapping. Local Linux presets use Noble or Jammy hosted-toolchains images;
+explicit image mappings remain authoritative. The importer annotates heuristic
+fallback warnings. See the
 [cache-volume configuration](docs/cli.md#configure-generated-job-cache-volumes)
 and [compatibility guide](docs/compatibility.md#job-configuration).
 

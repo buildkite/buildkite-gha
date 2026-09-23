@@ -3,6 +3,7 @@ package compiler
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"sort"
@@ -113,12 +114,16 @@ func (sources VariableSources) CompileTimeVars() map[string]string {
 type CacheVolume = buildkitepipeline.CacheVolume
 
 // RunnerTarget atomically selects one Buildkite queue, execution platform, and
-// optional immutable runtime image and cache volume.
+// optional immutable runtime image or opaque agent tags, and cache volume.
 type RunnerTarget struct {
 	Queue    string
 	Platform Platform
 	Image    string
-	Cache    *CacheVolume
+	Agents   map[string]string
+	// ToolCache overrides legacy image/platform-based tool-cache enablement.
+	// Nil preserves the behavior of existing mappings and older backends.
+	ToolCache *bool
+	Cache     *CacheVolume
 }
 
 // RunnerSelector maps one complete runs-on selector to a target without
@@ -358,6 +363,9 @@ func validateRunnerTarget(labels map[string]RunnerTarget, label string, target R
 	if target.Platform != PlatformLinuxAMD64 && target.Image != "" {
 		return fmt.Errorf("runner label %q cannot select a runtime image on %s", label, target.Platform)
 	}
+	if err := buildkitepipeline.ValidateRunnerAgents(target.Platform.String(), target.Image, target.Agents); err != nil {
+		return fmt.Errorf("runner label %q: %w", label, err)
+	}
 	if target.Cache != nil {
 		if target.Platform == PlatformWindowsAMD64 {
 			return fmt.Errorf("runner label %q cannot select cache volumes on windows/amd64", label)
@@ -376,7 +384,14 @@ func validateRunnerTarget(labels map[string]RunnerTarget, label string, target R
 
 // RunnerTargetsEqual reports whether two complete runner mappings are equivalent.
 func RunnerTargetsEqual(first, second RunnerTarget) bool {
-	if first.Queue != second.Queue || first.Platform != second.Platform || first.Image != second.Image {
+	if first.Queue != second.Queue || first.Platform != second.Platform || first.Image != second.Image || !maps.Equal(first.Agents, second.Agents) {
+		return false
+	}
+	if first.ToolCache == nil || second.ToolCache == nil {
+		if first.ToolCache != second.ToolCache {
+			return false
+		}
+	} else if *first.ToolCache != *second.ToolCache {
 		return false
 	}
 	return cachesEqual(first.Cache, second.Cache)
@@ -491,7 +506,9 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 			return RunnerTarget{}, rejectRunnerLabel(reasonUnmappedLabel, label, "runner label %q is not mapped by policy", label)
 		}
 		if resolved && !RunnerTargetsEqual(target, mapped) {
-			if target.Queue != mapped.Queue && target.Platform == mapped.Platform && target.Image == mapped.Image && cachesEqual(target.Cache, mapped.Cache) {
+			withoutQueue := mapped
+			withoutQueue.Queue = target.Queue
+			if target.Queue != mapped.Queue && RunnerTargetsEqual(target, withoutQueue) {
 				return RunnerTarget{}, rejectRunner(reasonConflictingQueues, "runner labels resolve to conflicting queues %q and %q", target.Queue, mapped.Queue)
 			}
 			return RunnerTarget{}, rejectRunner(reasonConflictingTarget, "runner labels resolve to conflicting targets %q and %q", targetDescription(target), targetDescription(mapped))
@@ -659,6 +676,12 @@ func targetDescription(target RunnerTarget) string {
 	description := queue + "@" + target.Platform.String()
 	if target.Image != "" {
 		description += "#" + target.Image
+	}
+	for _, key := range slices.Sorted(maps.Keys(target.Agents)) {
+		description += "#agents." + key + "=" + target.Agents[key]
+	}
+	if target.ToolCache != nil {
+		description += fmt.Sprintf("#tool_cache=%t", *target.ToolCache)
 	}
 	if target.Cache != nil {
 		description += "#cache=" + target.Cache.Name + ":" + target.Cache.Size + ":" + strings.Join(target.Cache.Paths, ",")
