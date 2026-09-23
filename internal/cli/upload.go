@@ -276,12 +276,12 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	}
 	vars := resolveUploadVariables(ctx, uploadArguments.variableSource, workflows, processingReports, effectiveEvent.Event)
 	for i := range workflows {
-		if workflows[i].ReusableOnly || processingReportHasErrors(processingReports[i]) {
+		if workflows[i].ReusableOnly {
 			continue
 		}
 		runName, runNameErr := compiler.ResolveWorkflowRunName(workflows[i].Path, workflows[i].Parsed, effectiveEvent.Event, vars, workflows[i].Applicable)
 		if runNameErr != nil {
-			if workflows[i].Applicable {
+			if workflows[i].Applicable && !processingReportHasErrors(processingReports[i]) {
 				if len(processingReports[i].Stages) == 0 {
 					processingReports[i] = triggerProcessingReport(workflows[i].Path, workflows[i].Source)
 				}

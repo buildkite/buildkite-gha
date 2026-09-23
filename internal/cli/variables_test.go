@@ -281,6 +281,9 @@ func TestRunUploadRunNameVariables(t *testing.T) {
 				if failures != 1 {
 					t.Fatalf("failure artifacts = %d, want 1", failures)
 				}
+				if !strings.Contains(pipeline, `label: ":github: workflow · Deploy"`) {
+					t.Fatalf("unavailable run-name did not retain the static failure label:\n%s", pipeline)
+				}
 			default:
 				if len(plans["deploy"]) != 1 || *environmentRequests != 1 {
 					t.Fatalf("deploy plans = %#v, environment requests = %d", plans, *environmentRequests)
@@ -480,7 +483,7 @@ func TestRunUploadSurfacesVariableResolutionRateLimit(t *testing.T) {
 	t.Setenv("BUILDKITE_STEP_KEY", "variables-agent-limited-importer")
 	eventPath := pushEventPath(t)
 	workflows := writeUploadWorkflows(t, map[string]string{
-		"build.yml":  variablesUploadWorkflow,
+		"build.yml":  "run-name: Build on ${{ github.ref_name }}\n" + variablesUploadWorkflow,
 		"deploy.yml": environmentUploadWorkflow,
 		"plain.yml":  "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo plain\n",
 	})
@@ -509,7 +512,7 @@ func TestRunUploadSurfacesVariableResolutionRateLimit(t *testing.T) {
 		t.Fatalf("failure message artifacts with %q = %d, want 2:\n%s", want, failures, stderr.String())
 	}
 	pipeline := string(runner.commands[len(runner.commands)-1].stdin)
-	for _, want := range []string{`label: ":github: workflow · .github/workflows/build.yml"`, `label: ":github: workflow · .github/workflows/deploy.yml"`, `title: "Workflow could not be run"`} {
+	for _, want := range []string{`label: ":github: workflow · .github/workflows/build.yml — Build on main"`, `label: ":github: workflow · .github/workflows/deploy.yml"`, `title: "Workflow could not be run"`} {
 		if !strings.Contains(pipeline, want) {
 			t.Fatalf("pipeline missing failed workflow step %s:\n%s", want, pipeline)
 		}
