@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -135,6 +136,248 @@ func TestNeedStatusesCopiesOnlyExpressionVisibleState(t *testing.T) {
 	got["producer"].Outputs["release"] = "expression"
 	if outputs["release"] != "plan" {
 		t.Fatalf("plan output changed through expression state: %#v", outputs)
+	}
+}
+
+func TestNeedsJSONCompilesAndRunsWithOnlyDirectDependencies(t *testing.T) {
+	workspace := t.TempDir()
+	const workflowPath = ".github/workflows/check.yml"
+	const source = `on: push
+jobs:
+  ancestor:
+    runs-on: ubuntu-latest
+    steps: [{run: echo ancestor}]
+  build:
+    needs: ancestor
+    runs-on: ubuntu-latest
+    steps: [{run: echo build}]
+  failed:
+    runs-on: ubuntu-latest
+    steps: [{run: exit 1}]
+  skipped:
+    runs-on: ubuntu-latest
+    steps: [{run: echo skipped}]
+  cancelled:
+    runs-on: ubuntu-latest
+    steps: [{run: echo cancelled}]
+  check:
+    needs: [build, failed, skipped, cancelled]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: printf '%s' "$NEEDS" > needs.json
+`
+	writeFixtureFile(t, workspace, workflowPath, source)
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(source), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job plan.Job
+	for _, candidate := range jobs {
+		if candidate.Workflow.LogicalJobID == "check" {
+			job = candidate
+		}
+	}
+	if len(job.NeedSources) != 4 || len(job.NeedSources["ancestor"]) != 0 {
+		t.Fatalf("direct sources = %#v", job.NeedSources)
+	}
+	const buildID = "11111111-1111-4111-8111-111111111111"
+	const jobID = "22222222-2222-4222-8222-222222222222"
+	runner := resultManifestRunner{}
+	want := map[string]map[string]any{
+		"build":     {"result": "success", "outputs": map[string]any{"tag": "v1\n\"<&>"}},
+		"failed":    {"result": "failure", "outputs": map[string]any{}},
+		"skipped":   {"result": "skipped", "outputs": map[string]any{}},
+		"cancelled": {"result": "cancelled", "outputs": map[string]any{}},
+	}
+	for name, sources := range job.NeedSources {
+		producer := sources[0]
+		var outputs []transport.Output
+		if name == "build" {
+			outputs = []transport.Output{{Name: "tag", Value: "v1\n\"<&>"}}
+		}
+		manifest, err := transport.MarshalResultManifest(transport.ResultManifest{
+			PlanDigest: producer.PlanDigest,
+			Producer:   transport.Producer{BuildID: buildID, JobID: jobID, StepKey: producer.StepKey},
+			Result:     want[name]["result"].(string), Outputs: outputs,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runner[transport.ResultPath(producer.StepKey, producer.PlanDigest)] = struct {
+			jobID string
+			data  []byte
+		}{jobID: jobID, data: manifest}
+	}
+	job.Needs, err = ResolveNeeds(t.Context(), transport.Agent{Runner: runner}, t.TempDir(), buildID, job.NeedSources, job.NeedOutputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() = %#v, %v", result, err)
+	}
+	encoded, err := os.ReadFile(filepath.Join(workspace, "needs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]map[string]any
+	if err := json.Unmarshal(encoded, &got); err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("needs JSON = %s, %v; want %#v", encoded, err, want)
+	}
+}
+
+func TestReusableNeedsJSONExcludesCallerButPreservesCallGuard(t *testing.T) {
+	for _, condition := range []string{"", "if: always()"} {
+		t.Run(condition, func(t *testing.T) {
+			workspace := t.TempDir()
+			const workflowPath = ".github/workflows/caller.yml"
+			caller := `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps: [{run: echo prepare}]
+  delegated:
+    needs: prepare
+    ` + condition + `
+    uses: ./.github/workflows/middle.yml
+`
+			writeFixtureFile(t, workspace, workflowPath, caller)
+			writeFixtureFile(t, workspace, ".github/workflows/middle.yml", `on: workflow_call
+jobs:
+  nested:
+    uses: ./.github/workflows/leaf.yml
+`)
+			writeFixtureFile(t, workspace, ".github/workflows/leaf.yml", `on: workflow_call
+jobs:
+  leaf:
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      seen: ${{ steps.dump.outputs.seen }}
+    steps:
+      - id: dump
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: echo "seen=$NEEDS" >> "$GITHUB_OUTPUT"
+`)
+			event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(caller), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := jobs[len(jobs)-1]
+			if len(job.NeedSources) != 0 || len(job.CallGuards) != 1 || len(job.CallGuards[0].NeedSources["prepare"]) != 1 || len(job.Dependencies) != 1 {
+				t.Fatalf("callee scope and caller guard = %#v / %#v / %#v", job.NeedSources, job.CallGuards, job.Dependencies)
+			}
+			for _, status := range []string{"success", "failure", "skipped", "cancelled"} {
+				job.CallGuards[0].Needs = map[string]plan.Need{"prepare": {Result: status}}
+				result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if condition != "" || status == "success" {
+					if result.Conclusion != "success" || result.Outputs["seen"] != "{}" {
+						t.Fatalf("caller %s: result = %#v, want empty needs", status, result)
+					}
+				} else if result.Conclusion != "skipped" || len(result.Outputs) != 0 {
+					t.Fatalf("caller %s: result = %#v, want skipped", status, result)
+				}
+			}
+		})
+	}
+}
+
+func TestImplicitReusableCallGuardIgnoresConflictingMatrixOutputs(t *testing.T) {
+	workspace := t.TempDir()
+	const workflowPath = ".github/workflows/caller.yml"
+	const source = `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [one, two]
+    outputs:
+      target: ${{ matrix.target }}
+    steps: [{run: true}]
+  delegated:
+    needs: prepare
+    uses: ./.github/workflows/callee.yml
+`
+	writeFixtureFile(t, workspace, workflowPath, source)
+	writeFixtureFile(t, workspace, ".github/workflows/callee.yml", `on: workflow_call
+jobs:
+  test:
+    if: always()
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(source), event, "test", "sha256:"+strings.Repeat("2", 64), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := plan.Encode(jobs[len(jobs)-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := plan.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(job.CallGuards) != 1 || len(job.CallGuards[0].NeedSources["prepare"]) != 2 {
+		t.Fatalf("matrix guard sources = %#v", job.CallGuards)
+	}
+	const buildID = "11111111-1111-4111-8111-111111111111"
+	for _, secondResult := range []string{"success", "failure"} {
+		runner := resultManifestRunner{}
+		for i, producer := range job.CallGuards[0].NeedSources["prepare"] {
+			status := "success"
+			if i == 1 {
+				status = secondResult
+			}
+			jobID := fmt.Sprintf("2222222%d-2222-4222-8222-222222222222", i)
+			manifest, err := transport.MarshalResultManifest(transport.ResultManifest{
+				PlanDigest: producer.PlanDigest,
+				Producer:   transport.Producer{BuildID: buildID, JobID: jobID, StepKey: producer.StepKey},
+				Result:     status, Outputs: []transport.Output{{Name: "target", Value: []string{"one", "two"}[i]}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner[transport.ResultPath(producer.StepKey, producer.PlanDigest)] = struct {
+				jobID string
+				data  []byte
+			}{jobID: jobID, data: manifest}
+		}
+		job.CallGuards, err = ResolveCallGuards(t.Context(), transport.Agent{Runner: runner}, t.TempDir(), buildID, job.CallGuards)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if need := job.CallGuards[0].Needs["prepare"]; need.Result != secondResult || len(need.Outputs) != 0 {
+			t.Fatalf("status-only guard = %#v", need)
+		}
+		result, err := (Runner{}).RunJob(t.Context(), job, workspace)
+		want := "success"
+		if secondResult == "failure" {
+			want = "skipped"
+		}
+		if err != nil || result.Conclusion != want {
+			t.Fatalf("second producer %s: RunJob() = %#v, %v, want %s", secondResult, result, err, want)
+		}
 	}
 }
 

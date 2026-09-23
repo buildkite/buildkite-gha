@@ -209,7 +209,7 @@ func resolveReusableWorkflows(ctx context.Context, path string, source []byte, p
 		}
 	}()
 	resolver.discoverRuntimeMatrixBoundaries(ctx, rootSource, parsed, 0, map[string]int{rootSource.identity.key(): 0})
-	resolution, err := resolver.resolve(ctx, rootSource, digest, parsed, "", "", reusableInputs{values: context.Inputs}, nil, nil, secretAuthority{unrestricted: true}, false, workflow.Position{}, nil, nil, 0)
+	resolution, err := resolver.resolve(ctx, rootSource, digest, parsed, "", "", reusableInputs{values: context.Inputs}, nil, secretAuthority{unrestricted: true}, false, workflow.Position{}, nil, nil, 0)
 	return resolution.jobs, resolver.warnings, resolver.scan, err
 }
 
@@ -265,7 +265,7 @@ func (resolver *reusableResolver) scanWorkflow(parsed *workflow.Workflow) {
 	resolver.scan.referencesVars = resolver.scan.referencesVars || workflowReferencesVars(parsed)
 }
 
-func (resolver *reusableResolver) resolve(ctx context.Context, current reusableWorkflowSource, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs reusableInputs, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secrets secretAuthority, tokenPolicyNarrowed bool, reusableCallPosition workflow.Position, callGuards []sourcedCallGuard, concurrencyGates []WorkflowConcurrencyGate, depth int) (reusableResolution, error) {
+func (resolver *reusableResolver) resolve(ctx context.Context, current reusableWorkflowSource, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs reusableInputs, permissionCeiling *workflow.Permissions, secrets secretAuthority, tokenPolicyNarrowed bool, reusableCallPosition workflow.Position, callGuards []sourcedCallGuard, concurrencyGates []WorkflowConcurrencyGate, depth int) (reusableResolution, error) {
 	path := current.displayPath
 	resolver.scanWorkflow(parsed)
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
@@ -305,16 +305,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				return reusableResolution{}, err
 			}
 		}
-		callNeedBindings := replacementNeeds(job.Needs, replacements)
-		needBindings := callNeedBindings
-		if len(job.Needs) == 0 {
-			needBindings = cloneNeedBindings(externalNeeds)
-			for name, binding := range needBindings {
-				binding.projectOutputs = true
-				binding.outputs = nil
-				needBindings[name] = binding
-			}
-		}
+		needBindings := replacementNeeds(job.Needs, replacements)
 		needs := bindingMembers(needBindings)
 		if job.Reusable == nil {
 			job.ID = namespacedJobID(namespace, job.ID)
@@ -344,6 +335,12 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 
 		call := job.Reusable
 		calleeGuards := callGuards
+		implicitSuccess := strings.TrimSpace(job.If) == "" && len(job.Needs) != 0
+		if implicitSuccess {
+			// Caller prerequisites govern the call, not the callee's needs
+			// context. Keep the implicit success check in its caller scope.
+			job.If = "success()"
+		}
 		if strings.TrimSpace(job.If) != "" {
 			// Call guards keep vars residual, like every other condition; see
 			// resolveCompileTimeConditions.
@@ -367,7 +364,16 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				return reusableResolution{}, locatedJobWrappedError(path, job, job.Span.Start.Line, job.Span.Start.Column, "reduce reusable-workflow call condition", err)
 			}
 			guard := sourcedCallGuard{
-				condition: reduced.Source, inputs: cloneReusableInputs(inputs), needBindings: cloneNeedBindings(callNeedBindings),
+				condition: reduced.Source, inputs: cloneReusableInputs(inputs), needBindings: cloneNeedBindings(needBindings),
+			}
+			if implicitSuccess {
+				// This guard reads results only. Matrix outputs may conflict
+				// without affecting whether all caller prerequisites succeeded.
+				for name, binding := range guard.needBindings {
+					binding.projectOutputs = true
+					binding.outputs = nil
+					guard.needBindings[name] = binding
+				}
 			}
 			if reduced.Known {
 				guard.known = true
@@ -444,7 +450,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 		var callOutputs []needOutputBinding
 		callNamespaces := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
-			callInputs, err := resolveCallInputs(path, job, call, callee, inputs, callNeedBindings, matrix, resolver.context)
+			callInputs, err := resolveCallInputs(path, job, call, callee, inputs, needBindings, matrix, resolver.context)
 			if err != nil {
 				return reusableResolution{}, err
 			}
@@ -526,7 +532,7 @@ func (resolver *reusableResolver) resolve(ctx context.Context, current reusableW
 				}
 			}
 			resolver.stack = append(resolver.stack, calleeSource.identity)
-			calleeResolution, err := resolver.resolve(ctx, calleeSource, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, calleeSecrets, jobTokenPolicyNarrowed, calleeCallPosition, calleeGuards, calleeConcurrencyGates, depth+1)
+			calleeResolution, err := resolver.resolve(ctx, calleeSource, calleeDigest, callee, callNamespace, callLabel, callInputs, calleePermissionCeiling, calleeSecrets, jobTokenPolicyNarrowed, calleeCallPosition, calleeGuards, calleeConcurrencyGates, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {
 				message := "reusable workflow could not be resolved"

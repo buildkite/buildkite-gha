@@ -162,8 +162,7 @@ func (e *jobGraphExpansion) acceptJobs(resolved []sourcedJob) {
 // jobPrerequisites returns the flattened logical jobs that must be compiled
 // before this job, sorted and without duplicates:
 //
-//   - the members of every need bound to the job, including the caller needs
-//     a reusable-workflow call forwards to a callee job without needs;
+//   - the members of every source-visible need bound to the job;
 //   - the caller needs whose outputs feed a deferred reusable-workflow input;
 //   - for each enclosing call guard, the caller needs the guard condition
 //     reads and the caller needs feeding that call's deferred inputs.

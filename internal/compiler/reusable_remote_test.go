@@ -330,7 +330,7 @@ jobs:
 	if len(deferred.NeedOutputs["hash"]) != 1 || deferred.NeedOutputs["hash"][0] != (plan.NeedOutput{Name: "hashes", StepKey: producer.Target.StepKey, Output: "hashes"}) {
 		t.Fatalf("deferred input outputs = %#v", deferred.NeedOutputs)
 	}
-	if len(callee.Dependencies) != 1 || callee.Dependencies[0] != producer.Target.StepKey || len(callee.NeedSources["hash"]) != 1 || len(callee.NeedOutputs["hash"]) != 0 {
+	if len(callee.Dependencies) != 1 || callee.Dependencies[0] != producer.Target.StepKey || len(callee.NeedSources) != 0 || len(callee.NeedOutputs) != 0 || len(callee.CallGuards) != 1 || len(callee.CallGuards[0].NeedSources["hash"]) != 1 {
 		t.Fatalf("callee dependencies = %#v, needs = %#v / %#v", callee.Dependencies, callee.NeedSources, callee.NeedOutputs)
 	}
 	step := callee.Program.Job.Steps[0]

@@ -528,6 +528,10 @@ Upload configures Git fallback before validating remote calls. After anonymous a
 
 A call condition runs in caller scope before static call-matrix expansion. It keeps the implicit `success()` guard. A false condition skips every flattened descendant, including jobs with `if: always()`, and exposes `skipped` with empty outputs to downstream `needs`. Nested calls evaluate ordered outer-to-inner guards. Callee job results do not change an outer guard. Call conditions cannot use `matrix`, `strategy`, callee inputs or needs, `steps`, `env`, `runner`, or `secrets`.
 
+A call's `needs` governs its condition and scheduling, but does not appear in the called jobs' `needs` context. Each called job sees only dependencies it declares within its own workflow; a job without `needs` sees `{}` when serialized with `toJSON(needs)`.
+
+A call without `if` checks only dependency results; conflicting matrix outputs do not affect that implicit success check.
+
 The called workflow declares its inputs and outputs:
 
 ```yaml
@@ -1550,9 +1554,11 @@ These step fields support the operators and pure functions listed above:
 - `continue-on-error` and `timeout-minutes`
 
 They support computed indexes and projections over available `matrix`,
-`inputs`, `env`, `vars`, and `runner` values. Computed, whole, and projected
-`steps` or `needs` access is unsupported. Reading an unavailable background
-output is an error.
+`inputs`, `env`, `vars`, and `runner` values. `toJSON(needs)` serializes only
+direct dependencies, with each job's `result` and `outputs` object (empty when
+there are no outputs). Transitive dependencies are not included. Computed and
+projected `needs` access and computed, whole, and projected `steps` access
+remain unsupported. Reading an unavailable background output is an error.
 
 Before creating a job plan, the compiler resolves scalar `github.event.*`
 values and event-dependent parts of otherwise runtime expressions.
@@ -1585,8 +1591,9 @@ support the listed operators and pure functions.
 Outside `continue-on-error`, the runtime has no equivalent value for
 `strategy`. Job outputs support service IDs, networks, and published ports
 through `job.services`, such as `${{ job.services.redis.ports[6379] }}`;
-other `job` fields remain unsupported. Job-level fields reject computed,
-whole, and projected `steps` and `needs` access.
+other `job` fields remain unsupported. The listed job-level fields also
+support `toJSON(needs)`, with the same direct-dependency scope and access
+restrictions as step fields.
 
 Expression-valued `continue-on-error` must produce a Boolean. Expression-valued `timeout-minutes` must produce a number greater than 0 and at most 360.
 

@@ -418,6 +418,11 @@ func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, all
 		case "secrets":
 			return fmt.Errorf("dynamic or whole secrets access is unsupported")
 		case "steps", "needs":
+			// Needs is already restricted to the job's verified direct
+			// dependencies. Serializing it grants no additional authority.
+			if _, whole := access.(*actionlint.VariableNode); root == "needs" && whole {
+				return nil
+			}
 			return fmt.Errorf("computed or aggregate %s access is unsupported", root)
 		case "job":
 			referenceRoot, path, err := referencePath(access)

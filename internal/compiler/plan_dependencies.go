@@ -81,9 +81,10 @@ func buildPlanLogicalNeedOutputs(outputs map[string][]NeedOutput) map[string][]p
 	}
 	projected := make(map[string][]plan.NeedOutput, len(outputs))
 	for _, logicalNeed := range sortedKeys(outputs) {
-		if selected := outputs[logicalNeed]; len(selected) != 0 {
-			projected[logicalNeed] = append(projected[logicalNeed], selected...)
-		}
+		selected := outputs[logicalNeed]
+		// An empty projection means status-only; an absent key exposes all outputs.
+		projected[logicalNeed] = make([]plan.NeedOutput, len(selected))
+		copy(projected[logicalNeed], selected)
 	}
 	return projected
 }
