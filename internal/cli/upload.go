@@ -273,6 +273,13 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			workflows[i].SkipReason = selection.SkipReason
 			workflows[i].AnnotationReason = selection.AnnotationReason
 		}
+		if workflows[i].Applicable && !processingReportHasErrors(processingReports[i]) {
+			if err := compiler.ValidateWorkflowRunName(workflows[i].Path, workflows[i].Parsed); err != nil {
+				processingReports[i] = triggerProcessingReport(workflows[i].Path, workflows[i].Source)
+				processingReports[i].AddFailure(workflows[i].Path, workflowprocessing.StageExpressions, workflowprocessing.CodeExpressionInvalid, "compatibility", err)
+				processingReports[i].Result = "incompatible"
+			}
+		}
 	}
 	vars := resolveUploadVariables(ctx, uploadArguments.variableSource, workflows, processingReports, effectiveEvent.Event)
 	for i := range workflows {

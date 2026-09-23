@@ -2141,6 +2141,63 @@ func TestSkippedWorkflowsAnnotation(t *testing.T) {
 	}
 }
 
+func TestRunUploadInvalidRunNamePrecedesVariableFetchFailure(t *testing.T) {
+	requireImporterHost(t)
+	variables, variableRequests := agentVariablesHandler(t, http.StatusTooManyRequests, "3600")
+	agent, _ := agentStub(t, "job-secret", http.StatusOK, variables)
+	setAgentResolutionEnvironment(t, agent.URL)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "invalid-run-name-importer")
+	eventPath := pushEventPath(t)
+	jobs := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	workflows := writeUploadWorkflows(t, map[string]string{
+		"build.yml":  "name: Invalid\nrun-name: ${{ vars.TARGET }}-${{ env.BAD }}\n" + jobs,
+		"deploy.yml": "name: Valid\nrun-name: ${{ vars.TARGET }}\n" + jobs,
+		"plain.yml":  "name: Unaffected\n" + jobs,
+	})
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run(append([]string{"upload", "--event-path", eventPath}, workflows...), &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+	}
+	if *variableRequests != 1 {
+		t.Fatalf("variable requests = %d, want 1", *variableRequests)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Label   string             `yaml:"label"`
+			Group   string             `yaml:"group"`
+			Plugins failureStepPlugins `yaml:"plugins"`
+			Steps   []any              `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 3 {
+		t.Fatalf("pipeline steps = %#v", pipeline.Steps)
+	}
+	const invalid = `run-name context "env" is unavailable`
+	const unavailable = "variables: variable resolution requests are rate limited; retry after 3600 seconds"
+	for i, test := range []struct{ label, want, notWant string }{
+		{":github: workflow · Invalid", invalid, unavailable},
+		{":github: workflow · Valid", unavailable, invalid},
+	} {
+		step := pipeline.Steps[i]
+		message := failureLogText(failureArtifactForStep(step.Plugins, runner.uploaded, "messages"))
+		annotation := string(failureArtifactForStep(step.Plugins, runner.uploaded, "annotations"))
+		if step.Label != test.label || !strings.Contains(message, test.want) || !strings.Contains(annotation, html.EscapeString(test.want)) || strings.Contains(message, test.notWant) || strings.Contains(annotation, html.EscapeString(test.notWant)) {
+			t.Fatalf("failure label = %q, message = %q, annotation = %q; want %q", step.Label, message, annotation, test.want)
+		}
+	}
+	if step := pipeline.Steps[2]; step.Group != ":github: workflow · Unaffected" || len(step.Steps) != 1 {
+		t.Fatalf("unaffected workflow = %#v", step)
+	}
+	if plans := uploadedPlans(t, runner); len(plans) != 1 || len(plans["test"]) != 1 {
+		t.Fatalf("uploaded plans = %#v, want only the unaffected workflow", plans)
+	}
+}
+
 func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 	requireImporterHost(t)
 	for _, test := range []struct {
@@ -2153,6 +2210,7 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 		{name: "event contexts", runName: "Upload ${{ inputs.target || 'translations' }} on ${{ github.ref_name }}", status: http.StatusOK, wantLabel: ":github: workflow · Crowdin upload — Upload translations on main"},
 		{name: "vars resolved", runName: "Upload ${{ vars.TARGET }}", status: http.StatusOK, wantRequests: 1, wantLabel: ":github: workflow · Crowdin upload — Upload prod"},
 		{name: "vars fetch failure", runName: "Upload ${{ vars.TARGET }}", status: http.StatusTooManyRequests, wantRequests: 1, wantLabel: ":github: workflow · Crowdin upload"},
+		{name: "invalid name retains trigger error", runName: "${{ vars.TARGET }}-${{ env.BAD }}", status: http.StatusTooManyRequests, wantRequests: 1, wantLabel: ":github: workflow · Crowdin upload"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			variables, variableRequests := agentVariablesHandler(t, test.status, "3600")
