@@ -112,7 +112,8 @@ Steps remain inside one job because they share a workspace, environment files, a
 ### Repository fork events
 
 `fork` runs when someone forks the source repository. Scalar, array, null, and
-empty-map declarations are supported; activity types and filters are rejected.
+empty-map declarations and null/empty `types` are supported. `branches` is ignored;
+nonempty activity types and other filters are rejected.
 It does not enable pull requests from forks or `pull_request_target`.
 
 Pipeline Triggers require a compatible backend, pinned workflow path/ref/SHA,
@@ -132,7 +133,8 @@ deployment does not backfill them.
 ### Repository visibility events
 
 `public` runs when a private repository becomes public. Scalar, array, null, and
-empty-map declarations are supported; activity types and filters are rejected.
+empty-map declarations and null/empty `types` are supported. `branches` is ignored;
+nonempty activity types and other filters are rejected.
 Pipeline Triggers require pinned workflow path/ref/SHA and the original payload,
 which must identify the source repository, mark it public, and omit `action`.
 Discovery and checkout use the server-resolved default branch and immutable SHA,
@@ -147,7 +149,8 @@ deployment does not backfill them.
 ### Wiki page events
 
 `gollum` runs when wiki pages are created or edited. Scalar, array, null, and
-empty-map declarations are supported; activity types and filters are rejected.
+empty-map declarations and null/empty `types` are supported. `branches` is ignored;
+nonempty activity types and other filters are rejected.
 Pipeline Triggers require pinned workflow path/ref/SHA and the original payload,
 including a nonempty `pages` array with valid names, actions, and wiki commit SHAs.
 Workflows and checkout use the source repository's server-resolved default branch
@@ -162,8 +165,9 @@ does not backfill them.
 
 ### GitHub Pages build events
 
-`page_build` accepts scalar, array, null, and empty-map declarations, without
-activity types or filters. Pipeline Triggers require pinned workflow path/ref/SHA
+`page_build` accepts scalar, array, null, empty-map, and null/empty `types`
+declarations. `branches` is ignored; nonempty activity types and other filters
+are rejected. Pipeline Triggers require pinned workflow path/ref/SHA
 and the original repository and Pages build payload, including build id, commit,
 and status. Failed builds can trigger workflows. Execution uses the server-resolved
 source default branch and pinned SHA, not the Pages build commit. Status and error
@@ -176,8 +180,9 @@ subscription defaults; existing hooks need a separately approved additive update
 ### Repository star events
 
 `watch` runs when someone stars the repository (`started`), not when they subscribe
-to notifications or remove a star. Scalar, array, null, empty-map, `types: []`, and
-`types: [started]` declarations are supported; other types and filters are rejected.
+to notifications or remove a star. Scalar, array, null, empty-map, null/empty `types`,
+and `types: [started]` declarations are supported. `branches` is ignored; other
+types and filters are rejected.
 Pipeline Triggers require the original payload and pinned workflow path/ref/SHA.
 Workflows and checkout use the source repository's server-resolved default branch,
 not stale webhook branch metadata. The original payload remains in `github.event`
@@ -189,9 +194,9 @@ need a separately approved additive update.
 ### Milestone lifecycle events
 
 `milestone` supports `created`, `closed`, `opened`, `edited`, and `deleted`, all by
-default. Scalar, array, null, empty-map, and `types: []` declarations select all
+default. Scalar, array, null, empty-map, and null/empty `types` declarations select all
 five; explicit `types` selects a subset. Issue/PR `milestoned` activities and
-branch/tag/path filters are rejected. Pipeline Triggers require pinned workflow
+filters other than the ignored `branches` are rejected. Pipeline Triggers require pinned workflow
 path/ref/SHA and the original payload, including milestone id, number, and title.
 Workflows and checkout use the source repository's server-resolved default branch.
 `github.event.milestone` and `GITHUB_EVENT_PATH` retain the original data. Missing
@@ -203,8 +208,8 @@ additive update.
 ### Branch protection rule events
 
 `branch_protection_rule` supports `created`, `edited`, and `deleted`, all by
-default. Scalar, array, null, empty-map, and `types: []` select all three; explicit
-`types` selects a subset. Other filters are rejected. Pipeline Triggers require
+default. Scalar, array, null, empty-map, and null/empty `types` select all three; explicit
+`types` selects a subset. `branches` is ignored; other filters are rejected. Pipeline Triggers require
 pinned workflow path/ref/SHA and the original rule id, name, and repository id
 matching the source repository. Workflows and checkout use the server-resolved
 default branch, not the rule's branch pattern. `github.event.rule` and
@@ -217,13 +222,12 @@ defaults; existing hooks need a separately approved additive update.
 
 `discussion` supports `created`, `edited`, `deleted`, `transferred`, `pinned`,
 `unpinned`, `labeled`, `unlabeled`, `locked`, `unlocked`, `category_changed`,
-`answered`, and `unanswered`, all by default. Scalar, array, null, empty-map, and
-`types: []` select all; explicit `types` selects a subset. `discussion_comment`
+`answered`, `unanswered`, `closed`, and `reopened`, all by default. Scalar, array,
+null, empty-map, and null/empty `types` select all; explicit `types` selects a subset. `discussion_comment`
 supports `created`, `edited`, and `deleted` with the same declaration forms.
 Comments require a positive id and a `discussion_id` matching the discussion;
-there is no command-word or trusted-commenter gating. Other activities
-(including webhook-only `closed` and `reopened`) and branch/tag/path filters are
-rejected. Pipeline Triggers require pinned workflow path/ref/SHA and the original
+there is no command-word or trusted-commenter gating. `branches` is ignored;
+other filters and unknown activities are rejected. Pipeline Triggers require pinned workflow path/ref/SHA and the original
 payload, including discussion id, number, and title. Workflows and checkout use
 the source repository's server-resolved default branch, not a transfer destination.
 `github.event.discussion`, `github.event.comment`, and `GITHUB_EVENT_PATH` retain the original data. Missing

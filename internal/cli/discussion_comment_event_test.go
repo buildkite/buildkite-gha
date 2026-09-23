@@ -43,7 +43,7 @@ func TestDiscussionCommentDeclarations(t *testing.T) {
 			}
 		}
 	}
-	for _, config := range []string{"types: null", "types: [answered]", "branches: [main]", "paths: [src/**]"} {
+	for _, config := range []string{"types: 'null'", "types: [answered]", "branches-ignore: [main]", "paths: [src/**]"} {
 		parsed, err := workflow.Parse("comment.yml", []byte("on: {discussion_comment: {"+config+"}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
 		if err == nil && buildkite.ValidateTriggerConditions(parsed.Triggers) == nil {
 			t.Fatalf("accepted %s", config)

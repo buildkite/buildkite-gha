@@ -26,7 +26,7 @@ func TestDiscussionDeclarations(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, action := range []string{"created", "edited", "deleted", "transferred", "pinned", "unpinned", "labeled", "unlabeled", "locked", "unlocked", "category_changed", "answered", "unanswered"} {
+		for _, action := range []string{"created", "edited", "deleted", "transferred", "pinned", "unpinned", "labeled", "unlabeled", "locked", "unlocked", "category_changed", "answered", "unanswered", "closed", "reopened"} {
 			event.Payload["action"] = action
 			expressions, snapshot := snapshotTriggerState(event)
 			condition, applicable, err := buildkite.TranslateEventTriggerCondition(parsed.Triggers, "discussion", expressions, snapshot)
@@ -43,7 +43,7 @@ func TestDiscussionDeclarations(t *testing.T) {
 			}
 		}
 	}
-	for _, config := range []string{"types: null", "types: [closed]", "types: [reopened]", "branches: [main]", "paths: [src/**]"} {
+	for _, config := range []string{"types: 'null'", "types: [unknown]", "branches-ignore: [main]", "paths: [src/**]"} {
 		parsed, err := workflow.Parse("discussion.yml", []byte("on: {discussion: {"+config+"}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
 		if err == nil && buildkite.ValidateTriggerConditions(parsed.Triggers) == nil {
 			t.Fatalf("accepted %s", config)

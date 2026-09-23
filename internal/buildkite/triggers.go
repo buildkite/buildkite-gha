@@ -120,7 +120,7 @@ func SupportedDiscussionAction(event, action string) bool {
 	if event == "discussion_comment" {
 		return slices.Contains([]string{"created", "edited", "deleted"}, action)
 	}
-	return slices.Contains([]string{"created", "edited", "deleted", "transferred", "pinned", "unpinned", "labeled", "unlabeled", "locked", "unlocked", "category_changed", "answered", "unanswered"}, action)
+	return slices.Contains([]string{"created", "edited", "deleted", "transferred", "pinned", "unpinned", "labeled", "unlabeled", "locked", "unlocked", "category_changed", "answered", "unanswered", "closed", "reopened"}, action)
 }
 
 // SupportedReleaseAction reports whether action is a GitHub Actions release activity.
@@ -548,7 +548,15 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 	switch t.Event {
 	case "workflow_call":
 		return "", false, nil
-	case "deployment", "deployment_status", "create", "delete", "fork", "public", "gollum", "page_build":
+	case "fork", "public", "gollum", "page_build":
+		if len(t.Types) > 0 || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+			return "", false, unsupportedEventFilter(t, "types", "branches-ignore", "tags", "tags-ignore", "workflows")
+		}
+		if expressions.EventPredicate == "" {
+			return "", false, fmt.Errorf("%s requires an effective event predicate", t.Event)
+		}
+		return expressions.EventPredicate, true, nil
+	case "deployment", "deployment_status", "create", "delete":
 		if hasWebhookFilters(t) {
 			return "", false, unsupportedEventFilter(t, "types", "branches", "branches-ignore", "tags", "tags-ignore", "paths", "paths-ignore", "workflows")
 		}
@@ -749,7 +757,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "watch":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+		if t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
 			return "", false, unsupportedEventFilter(t)
 		}
 		for _, action := range t.Types {
@@ -762,7 +770,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate, true, nil
 	case "milestone":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+		if t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
 			return "", false, unsupportedEventFilter(t)
 		}
 		if expressions.EventPredicate == "" || expressions.MilestoneAction == "" || expressions.MilestoneAction == "null" {
@@ -780,7 +788,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "branch_protection_rule":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+		if t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
 			return "", false, unsupportedEventFilter(t)
 		}
 		if expressions.EventPredicate == "" || expressions.RuleAction == "" || expressions.RuleAction == "null" {
@@ -798,7 +806,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "discussion", "discussion_comment":
-		if t.Branches != nil || t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+		if t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
 			return "", false, unsupportedEventFilter(t)
 		}
 		if expressions.EventPredicate == "" || expressions.DiscussionAction == "" || expressions.DiscussionAction == "null" {

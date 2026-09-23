@@ -32,7 +32,7 @@ func TestWatchDeclarations(t *testing.T) {
 			t.Fatalf("%s: %v, %v", declaration, applicable, err)
 		}
 	}
-	for _, config := range []string{"types: null", "types: [deleted]", "branches: [main]", "paths: [src/**]"} {
+	for _, config := range []string{"types: 'null'", "types: [deleted]", "branches-ignore: [main]", "paths: [src/**]"} {
 		parsed, err := workflow.Parse("watch.yml", []byte("on: {watch: {"+config+"}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
 		if err == nil && buildkite.ValidateTriggerConditions(parsed.Triggers) == nil {
 			t.Fatalf("accepted %s", config)

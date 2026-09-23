@@ -61,10 +61,15 @@ func TestUnfilteredWebhookTriggerConditions(t *testing.T) {
 					t.Fatalf("%s: %q, %v, %v", declaration, condition, applicable, err)
 				}
 			}
-			for _, trigger := range []workflow.Trigger{
-				{Types: []string{"created"}}, {Types: []string{"success"}}, {Types: []string{}},
-				{Branches: []string{"main"}}, {Tags: []string{"v1"}}, {Paths: []string{"src/**"}}, {Workflows: []string{"Deploy"}},
-			} {
+			rejected := []workflow.Trigger{
+				{Types: []string{"created"}}, {Types: []string{"success"}},
+				{BranchesIgnore: []string{"main"}}, {Tags: []string{"v1"}}, {Paths: []string{"src/**"}}, {Workflows: []string{"Deploy"}},
+			}
+			switch event {
+			case "deployment", "deployment_status", "create", "delete":
+				rejected = append(rejected, workflow.Trigger{Types: []string{}}, workflow.Trigger{Branches: []string{"main"}})
+			}
+			for _, trigger := range rejected {
 				trigger.Event = event
 				if err := ValidateTriggerConditions([]workflow.Trigger{trigger}); err == nil {
 					t.Fatalf("accepted unsupported deployment filters: %#v", trigger)
