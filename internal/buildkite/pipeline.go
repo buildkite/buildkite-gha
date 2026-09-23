@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -46,6 +47,29 @@ var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[
 var cacheNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$`)
 var cacheNameVariablePattern = regexp.MustCompile(`\$\{BUILDKITE_[A-Z0-9_]+\}`)
 var cacheSizePattern = regexp.MustCompile(`^[0-9]+g$`)
+
+// ValidateRunnerAgents checks opaque Linux host-selection tags. Queue remains
+// a separate authority boundary and must never be replaced by an extra tag.
+func ValidateRunnerAgents(platform, image string, agents map[string]string) error {
+	if len(agents) == 0 {
+		return nil
+	}
+	if platform != "linux/amd64" {
+		return fmt.Errorf("runner agent tags are only supported on linux/amd64")
+	}
+	if image != "" {
+		return fmt.Errorf("runner agent tags and runtime image are mutually exclusive")
+	}
+	for key, value := range agents {
+		if strings.EqualFold(key, "queue") {
+			return fmt.Errorf("runner agent tags cannot override queue")
+		}
+		if strings.TrimSpace(key) == "" || key != strings.TrimSpace(key) || strings.TrimSpace(value) == "" || strings.IndexFunc(key, unicode.IsControl) >= 0 || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+			return fmt.Errorf("runner agent tags require non-empty keys and values without control characters")
+		}
+	}
+	return nil
+}
 
 // CacheVolume is one Buildkite Hosted cache volume attached to a generated job.
 type CacheVolume struct {
@@ -203,19 +227,22 @@ type Job struct {
 	Platform           string
 	DistributionDigest string
 	RuntimeImage       string
-	PlanDigest         string
-	EventPayload       bool
-	Dependencies       []string
-	ApprovalGate       string
-	RequiresMise       bool
-	Cache              *CacheVolume
-	SoftFail           bool
-	ConcurrencyGroup   string
-	Concurrency        int
-	ConcurrencyGates   []ConcurrencyGate
+	Agents             map[string]string
+	// ToolCache overrides image/platform-based defaults when supplied.
+	ToolCache        *bool
+	PlanDigest       string
+	EventPayload     bool
+	Dependencies     []string
+	ApprovalGate     string
+	RequiresMise     bool
+	Cache            *CacheVolume
+	SoftFail         bool
+	ConcurrencyGroup string
+	Concurrency      int
+	ConcurrencyGates []ConcurrencyGate
 	// Stage turns the job into a deferred upload step instead of a workflow
-	// job. Queue, Platform, DistributionDigest, and RuntimeImage select where
-	// it runs; PlanDigest stays empty.
+	// job. Queue, Platform, DistributionDigest, RuntimeImage, and Agents select
+	// where it runs; PlanDigest stays empty.
 	Stage *StageStep
 }
 
@@ -617,7 +644,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			distributionDigest = pipeline.DistributionDigest
 		}
 		runtimeImage := job.RuntimeImage
-		if runtimeImage == "" {
+		if runtimeImage == "" && len(job.Agents) == 0 {
 			runtimeImage = pipeline.RuntimeImage
 		}
 		distributionPath, err := DistributionPath(distributionDigest)
@@ -633,6 +660,13 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if platform != "linux/amd64" && runtimeImage != "" {
 			return fmt.Errorf("job %q cannot select a container runtime image on %s", job.Key, platform)
 		}
+		if err := ValidateRunnerAgents(platform, runtimeImage, job.Agents); err != nil {
+			return fmt.Errorf("job %q: %w", job.Key, err)
+		}
+		hostedToolCache := runtimeImage != "" || platform == "darwin/arm64"
+		if job.ToolCache != nil {
+			hostedToolCache = *job.ToolCache
+		}
 		if platform == "windows/amd64" && job.Cache != nil {
 			return fmt.Errorf("job %q cannot select cache on windows/amd64", job.Key)
 		}
@@ -647,6 +681,15 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))
 		if runtimeImage != "" {
 			_, _ = fmt.Fprintf(out, "%simage: %s\n", attributeIndent, yamlScalar(runtimeImage))
+		}
+		if job.Queue != "" || len(job.Agents) != 0 {
+			_, _ = fmt.Fprintf(out, "%sagents:\n", attributeIndent)
+			if job.Queue != "" {
+				_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
+			}
+			for _, key := range slices.Sorted(maps.Keys(job.Agents)) {
+				_, _ = fmt.Fprintf(out, "%s  %s: %s\n", attributeIndent, yamlScalar(key), yamlScalar(job.Agents[key]))
+			}
 		}
 		commands := []string{
 			"set -euo pipefail",
@@ -674,10 +717,6 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 					checkLabel = job.Label
 				}
 				emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, job.Key, checkLabel, "", "")
-			}
-			if job.Queue != "" {
-				_, _ = fmt.Fprintf(out, "%sagents:\n", attributeIndent)
-				_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
 			}
 			// The stage step keeps the default checkout: it recompiles the
 			// workflow, and local reusable workflows, from the repository at
@@ -707,20 +746,20 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 				`if command -v sha256sum >/dev/null 2>&1; then actual_plan_digest="$(sha256sum "$plan" | awk '{print "sha256:" $1}')"; elif command -v shasum >/dev/null 2>&1; then actual_plan_digest="$(shasum -a 256 "$plan" | awk '{print "sha256:" $1}')"; else echo 'buildkite-gha: no SHA-256 tool available' >&2; exit 1; fi`,
 				"test \"$actual_plan_digest\" = "+shellQuote(job.PlanDigest),
 			)
-			commands = append(commands, experimentalRunnerUserBootstrap(job.RequiresMise, runtimeImage != "", job.Cache)...)
+			commands = append(commands, experimentalRunnerUserBootstrap(job.RequiresMise, hostedToolCache, job.Cache)...)
 			runJob = "BUILDKITE_GHA_PLAN_DIGEST=" + shellQuote(job.PlanDigest) + ` "$distribution" run-job --plan "$plan"`
 			if job.EventPayload {
 				runJob += " --artifact-producer " + shellQuote(artifactProducer)
 			}
 		}
-		if platform == "darwin/arm64" {
+		if platform == "darwin/arm64" && hostedToolCache {
 			commands = append(commands,
 				"sudo -n mkdir -p "+shellQuote(DarwinHostedToolCachePath),
 				`sudo -n chown -R "$(id -u):$(id -g)" `+shellQuote(DarwinHostedToolCachePath),
 				"sudo -n chmod -R u+rwX "+shellQuote(DarwinHostedToolCachePath),
 			)
 		}
-		if runtimeImage != "" || platform == "darwin/arm64" {
+		if hostedToolCache {
 			runJob += " --hosted-tool-cache"
 		}
 		if experimentalRunnerUser {
@@ -740,10 +779,6 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 				checkLabel = job.Label
 			}
 			emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, job.Key, checkLabel, "", "")
-		}
-		if job.Queue != "" {
-			_, _ = fmt.Fprintf(out, "%sagents:\n", attributeIndent)
-			_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
 		}
 		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
 		if job.ApprovalGate != "" {
@@ -1180,7 +1215,7 @@ func validateJob(compilerStep string, job Job) error {
 		if _, err := PlanPath(job.PlanDigest); err != nil {
 			return fmt.Errorf("job %q: %w", job.Key, err)
 		}
-	case job.PlanDigest != "" || job.Queue != "" || job.Platform != "" || job.DistributionDigest != "" || job.RuntimeImage != "" || job.EventPayload || job.ApprovalGate != "" || job.RequiresMise || job.Cache != nil || job.Concurrency != 0 || job.ConcurrencyGroup != "" || len(job.ConcurrencyGates) != 0:
+	case job.PlanDigest != "" || job.Queue != "" || job.Platform != "" || job.DistributionDigest != "" || job.RuntimeImage != "" || len(job.Agents) != 0 || job.ToolCache != nil || job.EventPayload || job.ApprovalGate != "" || job.RequiresMise || job.Cache != nil || job.Concurrency != 0 || job.ConcurrencyGroup != "" || len(job.ConcurrencyGates) != 0:
 		return fmt.Errorf("job %q preparation result cannot include runnable job configuration", job.Key)
 	}
 	if job.Concurrency < 0 {

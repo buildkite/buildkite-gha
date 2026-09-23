@@ -547,6 +547,8 @@ func GeneratePlannedWorkflow(bundle Bundle, options Options) (buildkitepipeline.
 			Label:              instance.Label,
 			CheckLabel:         instanceCheckLabel(instance),
 			Queue:              instance.Queue,
+			Agents:             instance.Agents,
+			ToolCache:          instance.ToolCache,
 			Platform:           instance.Platform.String(),
 			DistributionDigest: job.RuntimeDistributionDigest(),
 			PlanDigest:         artifact.Digest,
@@ -563,7 +565,7 @@ func GeneratePlannedWorkflow(bundle Bundle, options Options) (buildkitepipeline.
 		}
 		if instance.Platform == PlatformLinuxAMD64 {
 			jobs[i].RuntimeImage = instance.RuntimeImage
-			if jobs[i].RuntimeImage == "" {
+			if jobs[i].RuntimeImage == "" && len(instance.Agents) == 0 {
 				jobs[i].RuntimeImage = options.RuntimeImage
 			}
 		}

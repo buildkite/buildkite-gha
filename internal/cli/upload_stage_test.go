@@ -2291,6 +2291,7 @@ func TestStageRecordRoundTrip(t *testing.T) {
 func TestContinuationArtifactRebuildsTheImporterRequest(t *testing.T) {
 	oidc := &plan.OIDCConfiguration{Claims: []string{"repository"}}
 	cache := &buildkitepipeline.CacheVolume{Paths: []string{"~/.cache/go-build"}, Name: "go", Size: "10g"}
+	toolCache := false
 	ownLock := plan.ActionLock{ID: "actions/checkout@v4", Source: "github", Repository: "actions/checkout", RequestedRef: "v4", Commit: strings.Repeat("a", 40)}
 	otherLock := plan.ActionLock{ID: "./.github/actions/setup", Source: "workspace", Path: ".github/actions/setup"}
 	artifact := stageRecord{
@@ -2299,15 +2300,24 @@ func TestContinuationArtifactRebuildsTheImporterRequest(t *testing.T) {
 		Runtimes:     map[string]string{compiler.PlatformLinuxAMD64.String(): "sha256:" + strings.Repeat("1", 64), compiler.PlatformDarwinARM64.String(): "sha256:" + strings.Repeat("2", 64)},
 		Workflow:     stageWorkflow{Path: ".github/workflows/build.yml", Namespace: "build"},
 		Event:        stageEvent{Name: "push", Provider: "github", File: true},
-		Runners:      []stageRunner{{Label: "ubuntu-latest", Queue: "custom-linux", Platform: compiler.PlatformLinuxAMD64.String(), Image: "ubuntu", Cache: cache}},
+		Runners: []stageRunner{
+			{Label: "ubuntu-latest", Queue: "custom-linux", Platform: compiler.PlatformLinuxAMD64.String(), Image: "ubuntu", Cache: cache},
+			{Label: "native", Queue: "native-linux", Platform: compiler.PlatformLinuxAMD64.String(), Agents: map[string]string{"nsc-gha-image": "ubuntu-22.04"}, ToolCache: &toolCache},
+		},
 		Vars:         stageVars{Organization: map[string]string{"REGION": "us-east-1"}, Repository: map[string]string{"TEAM": "pipelines"}, Resolved: true},
 		OIDC:         oidc,
 		Continuation: compiler.RuntimeContinuation{Descriptor: compiler.RuntimeOutputDescriptor{Job: "test"}, ActionLocks: []plan.ActionLock{ownLock}},
 		Others:       []compiler.RuntimeContinuation{{Descriptor: compiler.RuntimeOutputDescriptor{Job: "publish"}, ActionLocks: []plan.ActionLock{otherLock}}},
 	}
+	// Explicit false must survive omitempty and decoding rather than become
+	// the legacy absent-field default.
+	var decoded stageRecord
+	if err := json.Unmarshal(mustJSON(t, artifact), &decoded); err != nil {
+		t.Fatal(err)
+	}
 	rows := []map[string]any{{"os": "ubuntu-latest"}, {"os": "macos-latest"}}
 	source := compiler.MemoizeRepositorySource(nil)
-	got := artifact.compileRequest("/checkout/.github/workflows/build.yml", []byte("on: push\n"), []byte("{}"), map[string][]map[string]any{"test": rows}, nil, nil, source)
+	got := decoded.compileRequest("/checkout/.github/workflows/build.yml", []byte("on: push\n"), []byte("{}"), map[string][]map[string]any{"test": rows}, nil, nil, source)
 	want := hostedCompileRequest{
 		WorkflowPath:       "/checkout/.github/workflows/build.yml",
 		WorkflowSource:     []byte("on: push\n"),
@@ -2317,7 +2327,10 @@ func TestContinuationArtifactRebuildsTheImporterRequest(t *testing.T) {
 		DistributionDigest: artifact.Distribution,
 		ImporterStep:       "pipeline-trigger-importer",
 		StepKeyNamespace:   "build",
-		RunnerTargets:      map[string]compiler.RunnerTarget{"ubuntu-latest": {Queue: "custom-linux", Platform: compiler.PlatformLinuxAMD64, Image: "ubuntu", Cache: cache}},
+		RunnerTargets: map[string]compiler.RunnerTarget{
+			"ubuntu-latest": {Queue: "custom-linux", Platform: compiler.PlatformLinuxAMD64, Image: "ubuntu", Cache: cache},
+			"native":        {Queue: "native-linux", Platform: compiler.PlatformLinuxAMD64, Agents: map[string]string{"nsc-gha-image": "ubuntu-22.04"}, ToolCache: &toolCache},
+		},
 		RuntimeDistributions: map[compiler.Platform]string{
 			compiler.PlatformLinuxAMD64:  artifact.Runtimes[compiler.PlatformLinuxAMD64.String()],
 			compiler.PlatformDarwinARM64: artifact.Runtimes[compiler.PlatformDarwinARM64.String()],

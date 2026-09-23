@@ -41,6 +41,9 @@ func TestEmitRunnerUserIsDefaultForLinuxOnly(t *testing.T) {
 		commands[step.Key] = step.Command
 	}
 	linux := commands["linux"]
+	// Normalize single quotes escaped inside the bash -c argument so these
+	// assertions continue to describe the privileged setup script itself.
+	linuxSetup := strings.ReplaceAll(linux, `'"'"'`, `'`)
 	for _, required := range []string{
 		"useradd --create-home --home-dir '/home/runner'",
 		"runner ALL=(ALL) NOPASSWD: ALL",
@@ -58,7 +61,7 @@ func TestEmitRunnerUserIsDefaultForLinuxOnly(t *testing.T) {
 		"sudo -n --preserve-env --user runner -- env HOME='/home/runner' TMPDIR='/tmp/buildkite-gha-runner'",
 		`BUILDKITE_GHA_PLAN_DIGEST='` + testDigest("linux plan") + `' "$distribution" run-job --plan "$plan"`,
 	} {
-		if !strings.Contains(linux, required) {
+		if !strings.Contains(linuxSetup, required) {
 			t.Errorf("Linux runner-user command does not contain %q:\n%s", required, linux)
 		}
 	}
@@ -78,6 +81,87 @@ func TestEmitRunnerUserIsDefaultForLinuxOnly(t *testing.T) {
 	}
 	if strings.Contains(string(output), "useradd") || strings.Contains(string(output), "--user runner") {
 		t.Fatalf("opt-out pipeline selected runner user:\n%s", output)
+	}
+}
+
+func TestExperimentalRunnerUserBootstrapStartsPrivilegedSetup(t *testing.T) {
+	tests := []struct {
+		name     string
+		uid      string
+		user     string
+		wantSudo bool
+	}{
+		{name: "root", uid: "0", user: "root"},
+		{name: "runner", uid: "1001", user: "runner", wantSudo: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			bin := t.TempDir()
+			logPath := filepath.Join(t.TempDir(), "commands")
+			writeTestCommand(t, bin, "id", `case "$1" in -u) printf '%s\n' "$TEST_UID";; -un) printf '%s\n' "$TEST_USER";; *) exit 2;; esac`)
+			writeTestCommand(t, bin, "bash", `printf 'bash\n'; printf '%s\n' "$@" >> "$TEST_LOG"`)
+			writeTestCommand(t, bin, "sudo", `printf 'sudo\n' >> "$TEST_LOG"; if [ "$#" -eq 2 ] && [ "$1" = -n ] && [ "$2" = true ]; then exit 0; fi; printf '%s\n' "$@" >> "$TEST_LOG"`)
+
+			script := "bootstrap_dir='bootstrap dir'\ndistribution='distribution path'\nplan='plan path'\n" + strings.Join(experimentalRunnerUserBootstrap(false, false, nil), "\n")
+			command := exec.Command("/bin/bash", "-euo", "pipefail", "-c", script)
+			command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "TEST_UID="+test.uid, "TEST_USER="+test.user, "TEST_LOG="+logPath)
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("bootstrap routing failed: %v: %s", err, output)
+			}
+			log, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(log)
+			if test.wantSudo != strings.Contains(got, "sudo\n") {
+				t.Fatalf("command log = %q, want sudo = %t", got, test.wantSudo)
+			}
+			for _, want := range []string{"buildkite-gha-runner-bootstrap\n", "bootstrap dir\n", "distribution path\n", "plan path\n"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("command log = %q, want %q", got, want)
+				}
+			}
+			if test.wantSudo && !strings.Contains(got, "--preserve-env\n") {
+				t.Fatalf("command log = %q, want preserved environment", got)
+			}
+		})
+	}
+}
+
+func TestExperimentalRunnerUserBootstrapRejectsUnavailablePasswordlessSudo(t *testing.T) {
+	bin := t.TempDir()
+	writeTestCommand(t, bin, "id", `case "$1" in -u) echo 1001;; -un) echo runner;; *) exit 2;; esac`)
+	writeTestCommand(t, bin, "sudo", `exit 1`)
+	command := exec.Command("/bin/bash", "-euo", "pipefail", "-c", strings.Join(experimentalRunnerUserBootstrap(false, false, nil), "\n"))
+	command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "runner user bootstrap requires passwordless sudo") {
+		t.Fatalf("bootstrap failure = %v, %q", err, output)
+	}
+}
+
+func TestExperimentalRunnerUserCommandPreservesNativeToolPath(t *testing.T) {
+	bin := t.TempDir()
+	writeTestCommand(t, bin, "native-tool", `printf 'native tool available\n'`)
+	// Model sudo's secure_path: --preserve-env alone does not retain PATH.
+	writeTestCommand(t, bin, "sudo", `while [ "$1" != -- ]; do shift; done
+shift
+PATH=/usr/bin:/bin
+export PATH
+exec "$@"`)
+	command := exec.Command("/bin/bash", "-euo", "pipefail", "-c", experimentalRunnerUserCommand("native-tool"))
+	command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+	output, err := command.CombinedOutput()
+	if err != nil || string(output) != "native tool available\n" {
+		t.Fatalf("native tool lookup = %v, %q", err, output)
+	}
+}
+
+func writeTestCommand(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+		t.Fatal(err)
 	}
 }
 

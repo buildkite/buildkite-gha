@@ -686,7 +686,7 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if got := configuration.runnerTargets["ubuntu-latest"]; got.Queue != "hosted" || got.Platform != compiler.PlatformLinuxAMD64 || got.Image != image || got.Cache == nil || !slices.Equal(got.Cache.Paths, []string{"/home/runner/.gradle/caches", "/home/runner/.gradle/wrapper"}) || got.Cache.Name != "gradle-${BUILDKITE_BRANCH}" || got.Cache.Size != "40g" {
 		t.Fatalf("Linux target = %#v", got)
 	}
-	if got := configuration.runnerTargets["macos-14"]; got != (compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
+	if got := configuration.runnerTargets["macos-14"]; !reflect.DeepEqual(got, compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("Darwin target = %#v", got)
 	}
 	minimal, err := parsePluginConfiguration(`{"workflow":"workflow.yml"}`)

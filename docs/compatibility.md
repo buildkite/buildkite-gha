@@ -15,7 +15,7 @@ It sets `runner.environment` to `self-hosted` on every platform.
 
 Generated Linux jobs use a dedicated `runner` user and need `buildkite-gha`
 v0.13.7 or newer. Use `experimental-runner-user: false` temporarily if an image
-cannot support the root bootstrap.
+cannot support the [privileged bootstrap](cli.md#run-linux-jobs-as-a-non-root-user).
 
 GitHub's [workflow syntax reference](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax)
 describes the original syntax. This page describes the subset that runs on
@@ -768,18 +768,26 @@ Results and outputs come from verified producer manifests. Retrying one producer
 A job with `continue-on-error: true`, or an expression that resolves to `true`, stops ordinary steps after a failure, runs eligible failure and always steps plus post-actions, publishes its outputs, and reports `success` through `needs.<job>.result`. The generated Buildkite job returns reserved status `78` for the tolerated workflow failure and soft-fails only that status, so the failure remains visible without blocking dependent jobs. Job timeout expiry remains `cancelled` and is never tolerated.
 
 Runner labels are case-insensitive. Runner aliases such as `macOS-latest` use
-the same target as `macos-latest`. Linux labels default to the corresponding
-Noble or Jammy hosted-toolchains image; an explicit immutable image overrides
-it for a configured profile. Linux labels use default Buildkite agent targeting
-with that image when unmapped.
+the same target as `macos-latest`. Local Linux presets use the corresponding
+Noble or Jammy hosted-toolchains image with default Buildkite agent targeting.
+An explicit immutable image overrides the preset for a configured profile.
 
 An explicit mapping is authoritative and bypasses Agent API resolution. It
 declares that the selector runs on Linux x86-64, except for the known macOS
 labels, which select Darwin arm64, and the experimental Windows labels, which
 select Windows x86-64. Both reject images. For every other selector,
 the job-scoped Agent API owns compatibility and returns the complete queue,
-platform, and immutable Linux image. The importer applies that target verbatim
+platform, and host environment. The importer applies that target verbatim
 and publishes returned fallback warnings as annotations.
+
+For eligible Namespace-backed Linux queues, the backend selects native GHA
+images through opaque Buildkite agent tags, such as
+`agents: {queue: linux-medium, nsc-gha-image: ubuntu-24.04}`, instead of a
+step-level `image`. The backend owns eligibility and label mapping; the CLI
+does not interpret provider tag names. macOS and Windows do not use this path.
+Immutable `image` targets remain supported for other agents, explicit mappings,
+heuristic fallbacks, and older backends. A workflow's `jobs.<job>.container.image`
+remains a separate job container executed inside the selected host environment.
 
 When the Agent API rejects a selector, the importer reports the server's
 reason at the job's `runs-on` in the workflow diagnostics annotation instead
@@ -2180,15 +2188,20 @@ The runtime sets `GITHUB_WORKFLOW` to the workflow's top-level `name`. If the wo
 
 ### Runner tools
 
-Linux labels use the corresponding Noble or Jammy hosted-toolchains image.
-macOS and Windows agents must provide tools used by shell steps. These images do not provide GitHub image parity. The runtime
+Linux tools come from the [selected host environment](#job-configuration).
+macOS and Windows agents must provide tools used by shell steps. Runner labels
+do not guarantee GitHub image parity. The runtime
 sets `RUNNER_OS` and `RUNNER_ARCH` to `Linux`/`X64`, `macOS`/`ARM64`, or `Windows`/`X64`, and
 `RUNNER_ENVIRONMENT` to `self-hosted`. Workflow and step environment entries
 cannot override these values.
 
-On Linux, `RUNNER_TOOL_CACHE` is job-private unless the job selects an immutable
-image with `/opt/hostedtoolcache`, which the default and configured
-hosted-toolchains images provide.
+On Linux, `RUNNER_TOOL_CACHE` is job-private unless the backend requests the
+hosted tool cache. An explicit `tool_cache: true` selects `/opt/hostedtoolcache`
+and requires it to exist; `false` uses the job-private cache without changing
+the host's preinstalled tools. Native Namespace targets currently return
+`false`. When the field is absent, immutable image targets retain their
+existing `/opt/hostedtoolcache` behavior, including local hosted-toolchains
+presets and explicitly configured images.
 
 On macOS, the bootstrap creates `/Users/runner/hostedtoolcache`, makes it owned
 and writable by the agent user, and selects it as `RUNNER_TOOL_CACHE`. This
