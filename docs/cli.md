@@ -546,7 +546,7 @@ Reusable-only files remain available to local callers but do not create groups.
 Selecting only reusable workflows is an error.
 
 An explicit non-empty workflow `run-name` appends ` — <run-name>` to its group
-label after resolving supported `github` and `inputs` expressions. Workflow
+label after resolving [supported expressions](compatibility.md#names-and-triggers). Workflow
 names, provider-check names, and the Buildkite build message remain unchanged.
 
 See [Aggregate workflow upload](compatibility.md#aggregate-workflow-upload) for

@@ -418,10 +418,10 @@ func compile(ctx context.Context, path string, source, eventSource []byte, optio
 }
 
 // ResolveWorkflowRunName evaluates one parsed workflow's explicit run-name
-// against the event snapshot used for compilation. Dispatch inputs are only
-// available when the workflow applies to the event.
-func ResolveWorkflowRunName(path string, parsed *workflow.Workflow, event Event, applicable bool) (string, error) {
-	context := compileContext(event, nil, path, parsed.Name)
+// against the event and pre-environment variable snapshots used for compilation.
+// Dispatch inputs are only available when the workflow applies to the event.
+func ResolveWorkflowRunName(path string, parsed *workflow.Workflow, event Event, vars VariableSources, applicable bool) (string, error) {
+	context := compileContext(event, vars.CompileTimeVars(), path, parsed.Name)
 	if applicable {
 		context.Inputs = workflowDispatchInputs(parsed, event)
 	}
