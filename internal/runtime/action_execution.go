@@ -353,7 +353,7 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 			return tolerateJobSetupFailure(runCtx, r.continueOnError, jobResult, fmt.Errorf("evaluate job container: %w", err))
 		}
 	}
-	_, explicitJobPATH := jobEnv["PATH"]
+	_, explicitJobPATH := lookupEnvironment(jobEnv, "PATH")
 	runnerTemp, err := os.MkdirTemp("", "buildkite-gha-runner-")
 	if err != nil {
 		return jobResult, fmt.Errorf("create runner temp: %w", err)
@@ -495,8 +495,8 @@ func (r *jobRun) prepare(ctx context.Context) (final JobResult, runJobErr error)
 		jobResult.Env["PATH"] = r.jobContainer.imagePATH
 	}
 	if r.jobContainer == nil {
-		if path, ok := os.LookupEnv("PATH"); ok && jobResult.Env["PATH"] == "" {
-			jobResult.Env["PATH"] = path
+		if path, ok := os.LookupEnv("PATH"); ok && environmentValue(jobResult.Env, "PATH") == "" {
+			mergeEnvironmentInto(jobResult.Env, map[string]string{"PATH": path})
 		}
 	}
 	if job.HasCapability("docker") {
@@ -786,7 +786,7 @@ func (r *jobRun) runPostActions(runCtx context.Context) (JobResult, error) {
 		action.Env = mergeStringMaps(invocation.envOverlay)
 		for name, value := range invocation.action.Env {
 			if isRuntimeContextEnvironment(name) {
-				action.Env[name] = value
+				mergeEnvironmentInto(action.Env, map[string]string{name: value})
 			}
 		}
 		if len(action.jobStatusInputs) != 0 {
@@ -1413,11 +1413,10 @@ func applyStepTimeoutValue(value any) (float64, error) {
 
 func applyPaths(env map[string]string, paths []string) {
 	for _, path := range paths {
-		if env["PATH"] == "" {
-			env["PATH"] = path
-		} else {
-			env["PATH"] = path + string(os.PathListSeparator) + env["PATH"]
+		if base := environmentValue(env, "PATH"); base != "" {
+			path += string(os.PathListSeparator) + base
 		}
+		mergeEnvironmentInto(env, map[string]string{"PATH": path})
 	}
 }
 
@@ -1590,8 +1589,8 @@ type invocationEnvironment struct {
 }
 
 func (r *jobRun) invocationEnvironment(jobEnv, stepEnv map[string]string) invocationEnvironment {
-	_, stepPATH := stepEnv["PATH"]
-	jobPATH := r.explicitJobPATH || jobEnv["PATH"] != r.implicitJobPATH
+	_, stepPATH := lookupEnvironment(stepEnv, "PATH")
+	jobPATH := r.explicitJobPATH || environmentValue(jobEnv, "PATH") != r.implicitJobPATH
 	return invocationEnvironment{jobEnv: jobEnv, stepEnv: stepEnv, explicitPATH: jobPATH || stepPATH}
 }
 
@@ -1620,10 +1619,7 @@ func mergeStepEnvironment(base map[string]string, overlays ...map[string]string)
 	out := mergeStringMaps(append([]map[string]string{base}, overlays...)...)
 	for name, value := range base {
 		if isRuntimeContextEnvironment(name) {
-			if goruntime.GOOS == "windows" {
-				name = strings.ToUpper(name)
-			}
-			out[name] = value
+			mergeEnvironmentInto(out, map[string]string{name: value})
 		}
 	}
 	return out
@@ -2200,7 +2196,7 @@ func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutpu
 	eval.Steps = make(map[string]expression.StepStatus)
 	bindActionReferenceContext(&eval, &action.lock)
 	compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
-	compositeProcessEnv["GITHUB_ACTION_PATH"] = actionPath
+	mergeEnvironmentInto(compositeProcessEnv, map[string]string{"GITHUB_ACTION_PATH": actionPath})
 	// github.action_path is scoped to this composite invocation; nested
 	// composites overlay their own path on entry. Job-container executions
 	// interpolate the mounted path because the script runs in the container.
@@ -2271,7 +2267,7 @@ func (r *jobRun) runCompositeAction(ctx context.Context, processor *commandOutpu
 		stepResult := newResult()
 		childErr := error(nil)
 		childJobEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
-		childJobEnv["GITHUB_ACTION_PATH"] = actionPath
+		mergeEnvironmentInto(childJobEnv, map[string]string{"GITHUB_ACTION_PATH": actionPath})
 		switch {
 		case step.Invocation != nil && step.Invocation.Uses.Source != "":
 			// Resolve composite child fields before entering workflow-authored
@@ -2577,16 +2573,24 @@ func mergeEnvironmentInto(target map[string]string, source map[string]string) {
 		return
 	}
 	for name, value := range source {
-		for existing := range target {
-			if strings.EqualFold(existing, name) {
-				delete(target, existing)
-			}
-		}
-		target[strings.ToUpper(name)] = value
+		deleteEnvironment(target, name)
+		target[name] = value
 	}
 }
 
-// mergeStringMaps combines environment maps, folding Windows variable names.
+func deleteEnvironment(env map[string]string, name string) {
+	delete(env, name)
+	if goruntime.GOOS == "windows" {
+		for existing := range env {
+			if strings.EqualFold(existing, name) {
+				delete(env, existing)
+			}
+		}
+	}
+}
+
+// mergeStringMaps combines environment maps, replacing Windows aliases while
+// preserving the winning spelling for case-sensitive shells such as Bash.
 // Inputs, outputs, state, and other maps must preserve their original keys.
 func mergeStringMaps(values ...map[string]string) map[string]string {
 	out := map[string]string{}

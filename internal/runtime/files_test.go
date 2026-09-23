@@ -21,8 +21,8 @@ func TestFileCommandParsing(t *testing.T) {
 	}{
 		{name: "LF", contents: "single=value\nmulti<<END\nfirst\nsecond\nEND\n", want: map[string]string{"single": "value", "multi": "first\nsecond"}},
 		{name: "CRLF", contents: "single=value\r\nmulti<<END\r\nfirst\r\nsecond\r\nEND\r\n", want: map[string]string{"single": "value", "multi": "first\nsecond"}},
-		{name: "fold single after multiline", foldNames: true, contents: "PATH<<END\nfirst\nEND\nPath=second\n", want: map[string]string{"PATH": "second"}},
-		{name: "fold multiline after single", foldNames: true, contents: "Path=first\npAtH<<END\nSecond\nTHIRD\nEND\n", want: map[string]string{"PATH": "Second\nTHIRD"}},
+		{name: "fold single after multiline", foldNames: true, contents: "PATH<<END\nfirst\nEND\nPath=second\n", want: map[string]string{"Path": "second"}},
+		{name: "fold multiline after single", foldNames: true, contents: "Path=first\npAtH<<END\nSecond\nTHIRD\nEND\n", want: map[string]string{"pAtH": "Second\nTHIRD"}},
 		{name: "preserve case without folding", contents: "Path=first\nPATH=second\n", want: map[string]string{"Path": "first", "PATH": "second"}},
 		{name: "leading BOM only", contents: "\ufeffsingle=héllo\r\nmulti<<END\r\n\ufeffpayload\r\nEND\r\n\ufeffnext=\ufeffvalue\r\n", want: map[string]string{"single": "héllo", "multi": "\ufeffpayload", "\ufeffnext": "\ufeffvalue"}},
 		{name: "BOM after blank line is payload", contents: "\n\ufeffname=value\n", want: map[string]string{"\ufeffname": "value"}},
@@ -67,7 +67,7 @@ func TestFileCommandParsing(t *testing.T) {
 	if !maps.Equal(result.Env, map[string]string{"GITHUB_TOKEN": "action-token", "RUNNER_CUSTOM": "action-value"}) {
 		t.Fatalf("commandFiles.apply() environment = %#v", result.Env)
 	}
-	if err := os.WriteFile(files.env, []byte("NODE_OPTIONS=--require bad\n"), 0o600); err != nil {
+	if err := os.WriteFile(files.env, []byte("node_Options=--require bad\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	result = newResult()
@@ -96,10 +96,12 @@ func TestFileCommandEnvironmentCaseOrder(t *testing.T) {
 	if !maps.Equal(result.Outputs, want) || !maps.Equal(result.State, want) {
 		t.Fatalf("output/state names must preserve case: %#v / %#v", result.Outputs, result.State)
 	}
+	wantPath := "first"
 	if runtime.GOOS == "windows" {
-		want = map[string]string{"PATH": "Second"}
+		want = map[string]string{"Path": "Second"}
+		wantPath = "Second"
 	}
-	if !maps.Equal(result.Env, want) || !effects.pathSet || effects.pathBase != want["PATH"] {
+	if !maps.Equal(result.Env, want) || !effects.pathSet || effects.pathBase != wantPath {
 		t.Fatalf("environment = %#v, PATH base = %q, set = %t", result.Env, effects.pathBase, effects.pathSet)
 	}
 }

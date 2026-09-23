@@ -63,6 +63,15 @@ from Linux x86-64 or macOS arm64; Windows agents run generated jobs only.
 to a queue or enabled through Agent API resolution. They have no local preset
 and are otherwise rejected, never silently redirected to Linux.
 
+When Windows routing is enabled, the Agent API also maps `windows-2025` and
+standard Depot `depot-windows-2025` labels (including `-4`, `-8`, `-16`, `-32`,
+and `-64`) to the same `windows-medium` queue as `windows-latest`. It warns that
+the queue may run Windows Server 2022 instead of 2025, and that Depot hardware,
+caches, and networking are not preserved. This fallback requires an existing
+eligible Hosted Windows queue; it does not provision Depot runners or promise
+Server 2025 compatibility. These aliases have no local preset or explicit
+Windows mapping; use Agent API resolution rather than a custom-label mapping.
+
 Use a Windows Server 2022 queue with Buildkite agent v3.129 or newer, PowerShell
 7 (`pwsh`), and Git on `PATH`. Runner labels do not install GitHub's runner image
 or its tools. `runner.os` is `Windows` and `runner.arch` is `X64`. See
@@ -75,8 +84,13 @@ commands; Windows PowerShell needs `Out-File -Encoding utf8 -Append` rather
 than its default UTF-16 redirection. [MSYS2 custom shells](#commands-and-actions)
 are supported. `cmd` shells, containers,
 services, Docker actions, custom images, and cache volumes
-are not supported on Windows. Windows Server 2025 and arm64 labels are not
-enabled by these mappings.
+are not supported on Windows. Native Windows Server 2025 and arm64 execution
+are not enabled by these mappings.
+
+Windows environment overlays replace names case-insensitively but preserve the
+winning spelling, so `env: {toolchain: nightly}` remains `$toolchain` in Bash.
+`GITHUB_ENV` preserves the last assignment's spelling and value when names differ
+only by case. Runtime context variables remain protected from step overrides.
 
 ## How workflows run on Buildkite
 
@@ -615,7 +629,7 @@ defaults:
 
 ### Concurrency
 
-**🟡 Supported subset with different queue behavior.** A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use supported `github` fields, static reusable-workflow inputs, and concrete matrix values at job level. Core operators, `fromJSON`, and the case-insensitive string functions `startsWith`, `contains`, and `endsWith` are supported when the whole expression resolves during compilation. A needs-derived matrix consumer can also read its producer's outputs for its job group; see [Scheduling from matrix-producer outputs](#scheduling-from-matrix-producer-outputs). Other runtime `needs` and `strategy` values remain unsupported.
+**🟡 Supported subset with different queue behavior.** A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use supported `github` fields, static reusable-workflow inputs, and concrete `matrix` and `strategy` values at job level. Core operators, `fromJSON`, and the case-insensitive string functions `startsWith`, `contains`, and `endsWith` are supported when the whole expression resolves during compilation. A needs-derived matrix consumer can also read its producer's outputs for its job group; see [Scheduling from matrix-producer outputs](#scheduling-from-matrix-producer-outputs). Other runtime `needs` values remain unsupported.
 
 A workflow can set a group and cancellation expression while a job uses a matrix-derived group:
 
@@ -693,9 +707,9 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 
 | Key | Status | Behavior |
 | --- | --- | --- |
-| `name` | ✅ Supported | Labels may use static `github`, reusable-workflow `inputs`, and matrix values. |
+| `name` | ✅ Supported | Labels may use static `github`, reusable-workflow `inputs`, and concrete `matrix` and `strategy` values. |
 | `needs` | ✅ Supported | Accepts a string or list of static job IDs. Matrix fan-out and fan-in are automatic. |
-| `runs-on` | 🟡 Supported subset | Explicit mappings are authoritative. The Agent API returns a complete target for every other selector and can return a fallback warning annotation. The local preset accepts `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04`, and `macos-latest`. Labels are case-insensitive. Expressions may resolve to an accepted label or label list, including [values from a job output](#runners-from-job-outputs). |
+| `runs-on` | 🟡 Supported subset | Explicit mappings are authoritative. The Agent API returns a complete target for every other selector and can return a fallback warning annotation. The local preset accepts `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04`, and `macos-latest`. Labels are case-insensitive. Expressions may use concrete `matrix` and `strategy` values or [values from a job output](#runners-from-job-outputs) to resolve to an accepted label or label list. |
 | `if` | 🟡 Supported subset | Runs before the job starts. See [Conditions](#conditions). |
 | `outputs` | 🟡 Supported subset | Maps step outputs for consumption through `needs`. A job may publish 64 outputs of up to 1 KiB each. Ambiguous matrix output values stop the job with an error. |
 | `env`, `defaults.run` | 🟡 Supported subset | Uses the [workflow-level behavior](#environment-and-defaults). |
@@ -1294,7 +1308,7 @@ Job containers support `image`, `env`, `ports`, `volumes`, and `options`. Servic
 - Job container images can use compile-time `github`, `inputs`, `strategy`, and `matrix` values. A null or exactly empty evaluated image runs the job on the host, including object-form containers, without applying container `env` or `ports`. For example, `container: ${{ matrix.target.container }}` selects host execution when the matrix entry omits `container`. Other results must be strings containing valid image references; whitespace-only results are invalid. Literal images must be non-empty. Secrets, `needs`, step outputs, and whole or dynamic contexts are unsupported.
 - Service fields can use compile-time `github`, `inputs`, `strategy`, and `matrix` values or runtime `needs` outputs, including fallback expressions such as `${{ needs.build.outputs.image || 'redis:7' }}`. An empty evaluated image skips the service.
 - A complete non-credential service map can use `${{ fromJSON(needs.build.outputs.services || '{}') }}`. The argument supports needs-output expressions and pure functions. Declare credentials statically so the compiler can prove their secret authority.
-- Credentials accept values and expressions using `github`, `vars`, `secrets`, or `env`, including `${{ vars.REGISTRY_USER || 'default-user' }}`. Ordinary secrets remain in the job's required inventory even in an unused fallback. Passwords pass to `docker login` through standard input. Authentication uses a private per-job Docker configuration and never reads ambient Docker credentials.
+- Credentials accept values and expressions using `github`, `vars`, `secrets`, `env`, or `needs`, including `${{ needs.auth.outputs.password || secrets.REGISTRY_PASSWORD }}`. Prerequisite results and outputs resolve before service setup. Ordinary secrets remain in the job's required inventory even in an unused fallback. Passwords pass to `docker login` through standard input. Authentication uses a private per-job Docker configuration and never reads ambient Docker credentials.
 - Job container volumes accept `DESTINATION` for an anonymous volume or `SOURCE:DESTINATION[:ro|rw]` for a named volume or bind mount. `DESTINATION` must be absolute. `SOURCE` must be a Docker volume name or absolute host path. A job can define 128 unique declarations. Expressions are unsupported.
 - Job container options pass through to `docker create`, except `--network`, `--net`, and `--entrypoint`, including their `--flag=value` forms. Options split into arguments without a shell. Double quotes group arguments; single quotes are ordinary characters. Expressions, line breaks, NUL bytes, and values over 65,536 bytes are unsupported.
 - Service Docker options pass through except `--network` and its `--net` aliases, which GitHub Actions does not support. Options can grant privileges, mount host paths, publish ports, and change resource settings.
@@ -1564,7 +1578,7 @@ Job-level expressions support the same operators and pure functions with these f
 | `continue-on-error` | `github`, `needs`, `strategy`, `matrix`, `vars`, `inputs` |
 | `env` | `github`, `needs`, `matrix`, `vars`, `secrets`, `inputs` |
 | `defaults.run` | `github`, `needs`, `matrix`, `env`, `vars`, `inputs` |
-| `outputs` | `github`, `needs`, `matrix`, `runner`, `env`, `vars`, `secrets`, `steps`, `inputs` |
+| `outputs` | `github`, `needs`, `matrix`, `job`, `runner`, `env`, `vars`, `secrets`, `steps`, `inputs` |
 
 Workflow-level `env` values use the job `env` expression rules, including
 fallbacks such as `${{ github.head_ref || github.ref_name }}`. Workflow-level
@@ -1575,9 +1589,11 @@ do not. Composite action `run`, `env`, `with`, and `working-directory` fields do
 support the listed operators and pure functions.
 
 Outside `continue-on-error`, the runtime has no equivalent value for
-`strategy`; job outputs also have no `job` value. Those contexts remain
-unsupported. The listed job-level fields also support `toJSON(needs)`, with
-the same direct-dependency scope and access restrictions as step fields.
+`strategy`. Job outputs support service IDs, networks, and published ports
+through `job.services`, such as `${{ job.services.redis.ports[6379] }}`;
+other `job` fields remain unsupported. The listed job-level fields also
+support `toJSON(needs)`, with the same direct-dependency scope and access
+restrictions as step fields.
 
 Expression-valued `continue-on-error` must produce a Boolean. Expression-valued `timeout-minutes` must produce a number greater than 0 and at most 360.
 

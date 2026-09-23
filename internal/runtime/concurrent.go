@@ -250,9 +250,9 @@ func commitResultEnvironment(env map[string]string, result Result) {
 	if len(result.Paths) > 0 {
 		effects = mergeStringMaps(effects)
 		if result.pathBaseSet {
-			effects["PATH"] = result.pathBase
+			mergeEnvironmentInto(effects, map[string]string{"PATH": result.pathBase})
 		} else {
-			delete(effects, "PATH")
+			deleteEnvironment(effects, "PATH")
 		}
 	}
 	mergeEnvironmentInto(env, effects)

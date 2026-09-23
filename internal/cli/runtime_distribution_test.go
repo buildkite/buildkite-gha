@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,6 +97,54 @@ jobs:
 			t.Fatal("Windows executable was not uploaded intact")
 		}
 	})
+	for _, label := range []string{"windows-2025", "depot-windows-2025-16"} {
+		t.Run("server fallback "+label, func(t *testing.T) {
+			requireImporterHost(t)
+			workflow := filepath.Join(t.TempDir(), "fallback.yml")
+			if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  windows:\n    runs-on: "+label+"\n    steps: [{run: Write-Output windows}]\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			const warning = "The Windows queue may run Windows Server 2022 instead of 2025."
+			server, requests := runnerResolutionServer(t, http.StatusOK, map[string]map[string]any{
+				label: {
+					"target":   map[string]string{"queue": "windows-medium", "platform": "windows/amd64"},
+					"warnings": []map[string]string{{"code": "runner_label_fallback", "message": warning}},
+				},
+			})
+			t.Setenv("BUILDKITE", "true")
+			t.Setenv("BUILDKITE_STEP_KEY", "windows-fallback-importer")
+			t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+			t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+			t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+			t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "true")
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			args := []string{"upload", "--event-path", "../../testdata/smoke/events/push.json",
+				"--runtime-distribution", "windows/amd64=" + path, workflow}
+			if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
+				t.Fatalf("upload = %d: %s", code, stderr.String())
+			}
+			jobs := uploadedPlans(t, runner)["windows"]
+			if *requests != 1 || len(jobs) != 1 || jobs[0].Target.Queue != "windows-medium" || jobs[0].RuntimeDistributionDigest() != distributions[compiler.PlatformWindowsAMD64].digest {
+				t.Fatalf("requests = %d, Windows plans = %#v", *requests, jobs)
+			}
+			if !strings.Contains(string(lastPipelineUpload(t, runner)), "pwsh -NoLogo -NoProfile -NonInteractive") {
+				t.Fatalf("missing Windows bootstrap: %s", lastPipelineUpload(t, runner))
+			}
+			warned := false
+			for _, command := range runner.commands {
+				if len(command.args) > 0 && command.args[0] == "annotate" && strings.Contains(string(command.stdin), warning) {
+					if !strings.HasPrefix(string(command.stdin), "#### Runner labels were mapped to fallback targets\n") || strings.Contains(string(command.stdin), "Ubuntu") {
+						t.Fatalf("incorrect Windows fallback annotation: %s", command.stdin)
+					}
+					warned = true
+				}
+			}
+			if !warned {
+				t.Fatal("missing Windows version fallback warning")
+			}
+		})
+	}
 	for _, deferred := range []struct {
 		name, workflow, output string
 	}{

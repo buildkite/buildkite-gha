@@ -32,7 +32,7 @@ jobs:
       - name: Verify action source publication and cleanup
         run: go test ./internal/action/source -run '^(TestStoreExactCommitAtomicHitAndSubpath|TestStoreConcurrentMaterialize|TestStoreMaintenanceUsesLRUAndCleansOnlyUnlockedPartials|TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease)$' -v -count=1
       - name: Exercise PowerShell and process cleanup
-        run: go test ./internal/runtime -run '^(TestPowerShellExecution|TestWindowsEnvironment|TestWindowsProcessTree)$' -v -count=1 -timeout=3m
+        run: go test ./internal/runtime -run '^(TestPowerShellExecution|TestWindowsEnvironment.*|TestWindowsProcessTree)$' -v -count=1 -timeout=3m
       - uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6.0.2
         with:
           platform: x86_64

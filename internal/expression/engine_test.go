@@ -675,6 +675,18 @@ func TestEngineAbstractEvaluationNarrowsMonotonicallyToConcrete(t *testing.T) {
 			values:     Values{Runtime: Context{Env: map[string]string{"PASSWORD": ""}, GitHub: map[string]any{"token": "ghs_scoped"}}},
 		},
 		{
+			name:       "service credential uses prerequisite output",
+			site:       Site{Source: "${{ needs.auth.outputs.password || github.token }}", Profile: ProfileServiceCredential, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"needs.auth.outputs.password": "supplied"},
+			values:     Values{Runtime: Context{Needs: map[string]NeedStatus{"auth": {Outputs: map[string]string{"password": "supplied"}}}}},
+		},
+		{
+			name:       "service credential missing prerequisite output",
+			site:       Site{Source: "${{ needs.auth.outputs.password || github.token }}", Profile: ProfileServiceCredential, Result: ResultString, Purpose: PurposeExpression},
+			references: map[string]any{"needs.auth.outputs.password": nil, "github.token": "ghs_scoped"},
+			values:     Values{Runtime: Context{Needs: map[string]NeedStatus{"auth": {}}, GitHub: map[string]any{"token": "ghs_scoped"}}},
+		},
+		{
 			name:       "known failure status",
 			site:       Site{Source: "failure() && needs.build.result == 'failure'", Profile: ProfileStepCondition, Result: ResultBoolean, Purpose: PurposeExpression},
 			references: map[string]any{"failure": true, "needs.build.result": "failure"},
