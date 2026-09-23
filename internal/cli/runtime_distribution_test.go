@@ -134,6 +134,9 @@ jobs:
 			warned := false
 			for _, command := range runner.commands {
 				if len(command.args) > 0 && command.args[0] == "annotate" && strings.Contains(string(command.stdin), warning) {
+					if !strings.HasPrefix(string(command.stdin), "#### Runner labels were mapped to fallback targets\n") || strings.Contains(string(command.stdin), "Ubuntu") {
+						t.Fatalf("incorrect Windows fallback annotation: %s", command.stdin)
+					}
 					warned = true
 				}
 			}
