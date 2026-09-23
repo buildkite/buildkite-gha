@@ -709,6 +709,7 @@ func (b planBuilder) lowerPlanJob(instance JobInstance, workflowProgram program.
 		GitHubToken:          githubToken,
 		IDTokenPermission:    instance.Permissions["id-token"],
 		OIDC:                 cloneOIDCConfiguration(b.options.OIDC),
+		CacheMode:            instance.CacheMode,
 		Matrix:               instance.Matrix,
 		Inputs:               cloneAnyMap(instance.Inputs),
 		DeferredInputs:       deferredInputs,

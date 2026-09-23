@@ -112,6 +112,41 @@ func TestWorkflowTokenPolicyEvidence(t *testing.T) {
 	}
 }
 
+func TestCompilePlansCacheMode(t *testing.T) {
+	for _, test := range []struct{ workflow, job, want string }{
+		{"", "", ""}, {"write", "", "write"}, {"write", "read", "read"},
+		{"", "write-only", "write-only"}, {"read", "none", "none"},
+	} {
+		t.Run(test.workflow+"/"+test.job, func(t *testing.T) {
+			workflowMode, jobMode := "", ""
+			if test.workflow != "" {
+				workflowMode = "cache-mode: " + test.workflow + "\n"
+			}
+			if test.job != "" {
+				jobMode = "    cache-mode: " + test.job + "\n"
+			}
+			source := []byte("on: push\n" + workflowMode + "jobs:\n  test:\n" + jobMode + "    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        variant: [one, two]\n    steps: [{run: echo ok}]\n")
+			plans, err := compileUntrustedPlans("cache.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-cache")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 2 {
+				t.Fatalf("got %d plans, want two matrix instances", len(plans))
+			}
+			for _, job := range plans {
+				encoded, err := plan.Encode(job)
+				if err != nil {
+					t.Fatal(err)
+				}
+				decoded, err := plan.Decode(encoded)
+				if err != nil || decoded.CacheMode != test.want {
+					t.Fatalf("decoded mode = %q, want %q; error = %v", decoded.CacheMode, test.want, err)
+				}
+			}
+		})
+	}
+}
+
 func TestCompilePlansCarriesIDTokenWithoutForwardingItToGitHubToken(t *testing.T) {
 	repository := t.TempDir()
 	path := writeWorkflow(t, repository, "oidc.yml", `on: push

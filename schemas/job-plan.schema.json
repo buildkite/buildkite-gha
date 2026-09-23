@@ -18,6 +18,7 @@
     "github_token": {"$ref": "#/$defs/githubToken"},
     "id_token_permission": {"enum": ["read", "write"]},
     "oidc": {"$ref": "#/$defs/oidcConfiguration"},
+    "cache_mode": {"enum": ["read", "write", "write-only", "none"]},
     "matrix": {"type": "object"},
     "inputs": {"type": "object", "maxProperties": 25, "propertyNames": {"minLength": 1, "maxLength": 255}, "additionalProperties": {"type": ["string", "number", "boolean"], "maxLength": 65536}},
     "deferred_inputs": {"type": "object", "maxProperties": 25, "propertyNames": {"minLength": 1, "maxLength": 255}, "additionalProperties": {"$ref": "#/$defs/deferredInput"}},

@@ -927,7 +927,8 @@ func matrixStrategy(job workflow.Job, index, total int) map[string]any {
 func newJobCandidate(sourced sourcedJob, job workflow.Job, matrix map[string]any, key string, services []workflow.Service) JobInstance {
 	candidate := JobInstance{
 		Key: key, LogicalJobID: job.ID, Matrix: matrix, Inputs: cloneAnyMap(sourced.inputs.values),
-		FailFast: job.FailFast, MaxParallel: job.MaxParallel, Steps: append([]workflow.Step(nil), job.Steps...),
+		CacheMode: job.CacheMode,
+		FailFast:  job.FailFast, MaxParallel: job.MaxParallel, Steps: append([]workflow.Step(nil), job.Steps...),
 		Env: cloneMap(job.Env), Permissions: permissionScopes(job.Permissions), If: job.If, Environment: job.Environment,
 		ContinueOnError: job.ContinueOnError, ContinueOnErrorExpression: job.ContinueOnErrorExpression, ContinueOnErrorSpan: job.ContinueOnErrorSpan, TimeoutMinutes: job.TimeoutMinutes,
 		DefaultShell: job.DefaultShell, DefaultWorkingDirectory: job.DefaultWorkingDirectory,

@@ -17,6 +17,7 @@ type Span struct {
 // Workflow is the actionlint-independent syntax needed by the workflow compiler.
 type Workflow struct {
 	Name                    string                `json:"name,omitempty"`
+	CacheMode               string                `json:"cache_mode,omitempty"`
 	RunName                 string                `json:"run_name,omitempty"`
 	RunNameSpan             Span                  `json:"-"`
 	Triggers                []Trigger             `json:"triggers,omitempty"`
@@ -124,6 +125,7 @@ type CallSecret struct {
 
 // Job is one logical GitHub Actions job.
 type Job struct {
+	CacheMode                 string                 `json:"cache_mode,omitempty"`
 	ID                        string                 `json:"id"`
 	Name                      string                 `json:"name,omitempty"`
 	Needs                     []string               `json:"needs,omitempty"`

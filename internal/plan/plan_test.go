@@ -20,6 +20,39 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
+func TestCacheModePlanBoundary(t *testing.T) {
+	for _, mode := range []string{"", "read", "write", "write-only", "none"} {
+		job := validJob()
+		job.CacheMode = mode
+		encoded, err := Encode(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		validateJobPlanSchema(t, encoded)
+		decoded, err := Decode(encoded)
+		if err != nil || decoded.CacheMode != mode {
+			t.Fatalf("mode %q: decoded %q, error %v", mode, decoded.CacheMode, err)
+		}
+		if mode == "" && bytes.Contains(encoded, []byte(`"cache_mode"`)) {
+			t.Fatal("omitted mode was serialized")
+		}
+	}
+	for _, mode := range []string{"READ", "read-write", "${{ github.ref }}"} {
+		job := validJob()
+		job.CacheMode = mode
+		if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "cache_mode") {
+			t.Fatalf("accepted invalid mode %q: %v", mode, err)
+		}
+		encoded, err := json.Marshal(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Decode(encoded); err == nil || !strings.Contains(err.Error(), "cache_mode") {
+			t.Fatalf("decoded invalid mode %q: %v", mode, err)
+		}
+	}
+}
+
 func TestDecodePreservesPlanContract(t *testing.T) {
 	fixture := validJob()
 	fixture.Event.HeadRef = "feature/head-ref"
