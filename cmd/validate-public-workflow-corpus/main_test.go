@@ -259,7 +259,18 @@ func TestTallyReports(t *testing.T) {
 			{Event: "issue_comment", Source: "generated", Report: validation},
 		},
 	}
-	for _, event := range []string{"pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete", "label"} {
+	for _, event := range []string{
+		"pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete", "label",
+		"fork",
+		"public",
+		"gollum",
+		"page_build",
+		"watch",
+		"milestone",
+		"branch_protection_rule",
+		"discussion",
+		"discussion_comment",
+	} {
 		report.Evaluations = append(report.Evaluations, compatibility.EventEvaluation{Event: event, Source: "generated", Report: validation})
 	}
 	contents, err := json.Marshal(report)
@@ -301,7 +312,18 @@ func TestTallyReports(t *testing.T) {
 	if tally.ByFinding["E_EXAMPLE"] != 1 || tally.ByRepo["E_EXAMPLE"] != 1 || tally.Evaluations["push"] != 1 || tally.Evaluations["issue_comment"] != 1 {
 		t.Fatalf("diagnostic tally = %#v", tally)
 	}
-	for _, event := range []string{"pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete", "label"} {
+	for _, event := range []string{
+		"pull_request_review", "pull_request_review_comment", "deployment", "deployment_status", "create", "delete", "label",
+		"fork",
+		"public",
+		"gollum",
+		"page_build",
+		"watch",
+		"milestone",
+		"branch_protection_rule",
+		"discussion",
+		"discussion_comment",
+	} {
 		if tally.Evaluations[event] != 1 {
 			t.Fatalf("missing %s evaluation: %#v", event, tally.Evaluations)
 		}

@@ -31,6 +31,9 @@ func TestNewEffectiveEventSeparatesExpressionsAndSnapshot(t *testing.T) {
 		IssueCommentAction:      "null",
 		PullRequestReviewAction: "null",
 		LabelAction:             "null",
+		MilestoneAction:         "null",
+		RuleAction:              "null",
+		DiscussionAction:        "null",
 	}
 	branch := "main"
 	wantSnapshot := buildkitepipeline.TriggerEventSnapshot{Branch: &branch}

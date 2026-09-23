@@ -48,6 +48,15 @@ var supportedEvents = map[string]bool{
 	"issue_comment":               true,
 	"workflow_dispatch":           true,
 	"schedule":                    true,
+	"fork":                        true,
+	"public":                      true,
+	"gollum":                      true,
+	"page_build":                  true,
+	"watch":                       true,
+	"milestone":                   true,
+	"branch_protection_rule":      true,
+	"discussion":                  true,
+	"discussion_comment":          true,
 }
 
 var supportedWorkflowResults = map[string]bool{

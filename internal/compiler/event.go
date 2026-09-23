@@ -76,6 +76,46 @@ func parseEvent(source []byte) (Event, error) {
 	if input.Payload == nil {
 		input.Payload = map[string]any{}
 	}
+	if input.Event == "discussion" || input.Event == "discussion_comment" {
+		if err := validateDiscussionEvent(input.Event, input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
+	if input.Event == "branch_protection_rule" {
+		if err := validateBranchProtectionRuleEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
+	if input.Event == "milestone" {
+		if err := validateMilestoneEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
+	if input.Event == "watch" {
+		if err := validateWatchEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
+	if input.Event == "page_build" {
+		if err := validatePageBuildEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
+	if input.Event == "gollum" {
+		if err := validateGollumEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
+	if input.Event == "public" {
+		if err := validatePublicEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
+	if input.Event == "fork" {
+		if err := validateForkEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
 	if input.Event == "label" {
 		if err := validateLabelEvent(input.Provider, input.Repository, input.Ref, input.SHA, input.Payload); err != nil {
 			return Event{}, err
@@ -105,6 +145,212 @@ func parseEvent(source []byte) (Event, error) {
 		Provider: input.Provider, Event: input.Event, Repository: input.Repository,
 		Ref: input.Ref, SHA: input.SHA, Actor: input.Actor, Payload: input.Payload,
 	}, nil
+}
+
+func validateGollumEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	id, _ := repo["id"].(json.Number)
+	number, err := id.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("gollum requires the original repository identity and a full commit SHA")
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("gollum must execute the resolved default branch")
+	}
+	if _, exists := payload["action"]; exists {
+		return fmt.Errorf("gollum has no activity types")
+	}
+	pages, _ := payload["pages"].([]any)
+	if len(pages) == 0 {
+		return fmt.Errorf("gollum requires payload.pages")
+	}
+	for _, value := range pages {
+		page, _ := value.(map[string]any)
+		name, _ := page["page_name"].(string)
+		action, _ := page["action"].(string)
+		commit, _ := page["sha"].(string)
+		if strings.TrimSpace(name) == "" || (action != "created" && action != "edited") || !git.ValidObjectID(commit) {
+			return fmt.Errorf("gollum requires valid wiki page names, actions, and commits")
+		}
+	}
+	return nil
+}
+
+func validateDiscussionEvent(event, provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	id, _ := repo["id"].(json.Number)
+	number, err := id.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("%s requires the original repository identity and a full commit SHA", event)
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("%s must execute the resolved default branch", event)
+	}
+	discussion, _ := payload["discussion"].(map[string]any)
+	for _, key := range []string{"id", "number"} {
+		id, _ = discussion[key].(json.Number)
+		number, err = id.Int64()
+		if err != nil || number <= 0 {
+			return fmt.Errorf("discussion requires payload.discussion %s", key)
+		}
+	}
+	if _, ok := discussion["title"].(string); !ok {
+		return fmt.Errorf("discussion requires payload.discussion title")
+	}
+	if event == "discussion_comment" {
+		comment, _ := payload["comment"].(map[string]any)
+		id, _ = comment["id"].(json.Number)
+		number, err = id.Int64()
+		if err != nil || number <= 0 || comment["discussion_id"] != discussion["id"] {
+			return fmt.Errorf("discussion_comment requires comment id and matching discussion_id")
+		}
+	}
+	action, _ := payload["action"].(string)
+	if !buildkitepipeline.SupportedDiscussionAction(event, action) {
+		return fmt.Errorf("unsupported %s activity %q", event, action)
+	}
+	return nil
+}
+
+func validateBranchProtectionRuleEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	repositoryID, _ := repo["id"].(json.Number)
+	number, err := repositoryID.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("branch_protection_rule requires the original repository identity and a full commit SHA")
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("branch_protection_rule must execute the resolved default branch")
+	}
+	rule, _ := payload["rule"].(map[string]any)
+	id, _ := rule["id"].(json.Number)
+	number, err = id.Int64()
+	_, named := rule["name"].(string)
+	if err != nil || number <= 0 || !named || rule["repository_id"] != repositoryID {
+		return fmt.Errorf("branch_protection_rule requires payload.rule id, name, and matching repository_id")
+	}
+	if action := payload["action"]; action != "created" && action != "edited" && action != "deleted" {
+		return fmt.Errorf("branch_protection_rule action must be created, edited, or deleted")
+	}
+	return nil
+}
+
+func validateMilestoneEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	id, _ := repo["id"].(json.Number)
+	number, err := id.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("milestone requires the original repository identity and a full commit SHA")
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("milestone must execute the resolved default branch")
+	}
+	milestone, _ := payload["milestone"].(map[string]any)
+	for _, key := range []string{"id", "number"} {
+		id, _ = milestone[key].(json.Number)
+		number, err = id.Int64()
+		if err != nil || number <= 0 {
+			return fmt.Errorf("milestone requires payload.milestone %s", key)
+		}
+	}
+	if _, ok := milestone["title"].(string); !ok {
+		return fmt.Errorf("milestone requires payload.milestone title")
+	}
+	action, _ := payload["action"].(string)
+	if !buildkitepipeline.SupportedMilestoneAction(action) {
+		return fmt.Errorf("milestone action must be created, closed, opened, edited, or deleted")
+	}
+	return nil
+}
+
+func validateWatchEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	id, _ := repo["id"].(json.Number)
+	number, err := id.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("watch requires the original repository identity and a full commit SHA")
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("watch must execute the resolved default branch")
+	}
+	if payload["action"] != "started" {
+		return fmt.Errorf("watch action must be started")
+	}
+	return nil
+}
+
+func validatePageBuildEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	id, _ := repo["id"].(json.Number)
+	number, err := id.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("page_build requires the original repository identity and a full commit SHA")
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("page_build must execute the resolved default branch")
+	}
+	if _, exists := payload["action"]; exists {
+		return fmt.Errorf("page_build has no activity types")
+	}
+	id, _ = payload["id"].(json.Number)
+	number, err = id.Int64()
+	build, _ := payload["build"].(map[string]any)
+	commit, _ := build["commit"].(string)
+	status, _ := build["status"].(string)
+	if err != nil || number <= 0 || !git.ValidObjectID(commit) || strings.TrimSpace(status) == "" {
+		return fmt.Errorf("page_build requires a build id, commit, and status")
+	}
+	return nil
+}
+
+func validatePublicEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	id, _ := repo["id"].(json.Number)
+	number, err := id.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("public requires the original repository identity and a full commit SHA")
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("public must execute the resolved default branch")
+	}
+	if repo["private"] != false {
+		return fmt.Errorf("public requires a public repository payload")
+	}
+	if _, exists := payload["action"]; exists {
+		return fmt.Errorf("public has no activity types")
+	}
+	return nil
+}
+
+func validateForkEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {
+	repo, _ := payload["repository"].(map[string]any)
+	fullName, _ := repo["full_name"].(string)
+	id, _ := repo["id"].(json.Number)
+	number, err := id.Int64()
+	if provider != "github" || err != nil || number <= 0 || !strings.EqualFold(fullName, repository.Owner+"/"+repository.Name) || !git.ValidObjectID(sha) {
+		return fmt.Errorf("fork requires the original repository identity and a full commit SHA")
+	}
+	if repository.DefaultBranch == "" || ref != "refs/heads/"+repository.DefaultBranch {
+		return fmt.Errorf("fork must execute the resolved source default branch")
+	}
+	forkee, _ := payload["forkee"].(map[string]any)
+	id, _ = forkee["id"].(json.Number)
+	number, err = id.Int64()
+	name, _ := forkee["full_name"].(string)
+	if err != nil || number <= 0 || strings.TrimSpace(name) == "" {
+		return fmt.Errorf("fork requires payload.forkee id and full_name")
+	}
+	if _, exists := payload["action"]; exists {
+		return fmt.Errorf("fork has no activity types")
+	}
+	return nil
 }
 
 func validateLabelEvent(provider string, repository Repository, ref, sha string, payload map[string]any) error {

@@ -124,7 +124,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 				}
 				payload = map[string]any{"ref": ref}
 			}
-		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "release", "merge_group", "deployment", "deployment_status", "create", "delete", "label":
+		case "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "release", "merge_group", "deployment", "deployment_status", "create", "delete", "label", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment":
 			if (githubEvent == "issues" || githubEvent == "release" || githubEvent == "merge_group") && getenv(pipelineTriggerWorkflowPathEnvironment) == "" &&
 				getenv(githubWorkflowRefEnvironment) == "" && getenv(githubWorkflowSHAEnvironment) == "" {
 				break
@@ -164,12 +164,12 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	if defaultBranch := strings.TrimSpace(getenv("BUILDKITE_PIPELINE_DEFAULT_BRANCH")); defaultBranch != "" {
 		repository["default_branch"] = defaultBranch
 	}
-	if event == "create" || event == "delete" || event == "label" {
+	if event == "discussion_comment" || event == "discussion" || event == "branch_protection_rule" || event == "milestone" || event == "watch" || event == "create" || event == "delete" || event == "label" || event == "fork" || event == "public" || event == "gollum" || event == "page_build" {
 		if pullRequest != "" && pullRequest != "false" || branch != plan.EventRefName(ref) ||
 			(plan.EventRefType(event, ref) == "tag" && tag != branch) || (plan.EventRefType(event, ref) == "branch" && tag != "") {
 			return nil, fmt.Errorf("%s workflow ref does not match the Buildkite branch and tag", event)
 		}
-		if event == "delete" || event == "label" {
+		if event == "discussion_comment" || event == "discussion" || event == "branch_protection_rule" || event == "milestone" || event == "watch" || event == "delete" || event == "label" || event == "fork" || event == "public" || event == "gollum" || event == "page_build" {
 			// The server resolved this branch at ingestion; neither pipeline settings
 			// nor the older webhook's repository metadata can replace that identity.
 			repository["default_branch"] = branch
@@ -216,8 +216,8 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 	if event != "" {
 		snapshot["event"] = event
 	}
-	if event == "label" && payload["action"] != getenv("BUILDKITE_GITHUB_ACTION") {
-		return nil, fmt.Errorf("label action does not match BUILDKITE_GITHUB_ACTION")
+	if (event == "label" || event == "watch" || event == "milestone" || event == "branch_protection_rule" || event == "discussion" || event == "discussion_comment") && payload["action"] != getenv("BUILDKITE_GITHUB_ACTION") {
+		return nil, fmt.Errorf("%s action does not match BUILDKITE_GITHUB_ACTION", event)
 	}
 	if sender, ok := payload["sender"].(map[string]any); ok {
 		if login, ok := sender["login"].(string); ok && safeGitHubLogin(login) {

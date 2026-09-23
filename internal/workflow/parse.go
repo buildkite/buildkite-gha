@@ -80,6 +80,12 @@ func Parse(path string, source []byte) (*Workflow, error) {
 			position := Position{Line: key.Line, Column: key.Column}
 			trigger.FilterSpans[key.Value] = Span{Start: position, End: position}
 		}
+		switch trigger.Event {
+		case "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment":
+			if types := mappingValue(node, "types"); types != nil && types.Tag == "!!null" {
+				trigger.Types = nil
+			}
+		}
 	}
 	if parsed.Name != nil {
 		owned.Name = parsed.Name.Value
@@ -244,7 +250,7 @@ func acceptedEmptyTypesDiagnostics(document *yaml.Node) []expectedActionlintDiag
 	}
 	on := mappingValue(document.Content[0], "on")
 	var diagnostics []expectedActionlintDiagnostic
-	for _, event := range []string{"issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "merge_group", "label", "release"} {
+	for _, event := range []string{"issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "merge_group", "label", "release", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment"} {
 		types := mappingValue(mappingValue(on, event), "types")
 		if types != nil && types.Kind == yaml.SequenceNode && len(types.Content) == 0 {
 			diagnostics = append(diagnostics, expectedActionlintDiagnostic{
