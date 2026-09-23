@@ -814,9 +814,10 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, err))
 			valid = false
 		}
-		runnerContext := jobContext
+		runnerContext := instanceContext
 		if supplied, ok := e.runsOnContexts[id]; ok {
 			runnerContext = supplied
+			runnerContext.Strategy = strategy
 		}
 		labels, runsOnErr := resolveRunsOn(job, runnerContext, matrix)
 		if runsOnErr != nil {
@@ -852,7 +853,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 		if schedulingGroup != nil {
 			concurrencyGroup = *schedulingGroup
 		} else {
-			concurrencyGroup, concurrencyErr = resolveConcurrency(jobPath, job.ID, job.Concurrency, jobContext, matrix)
+			concurrencyGroup, concurrencyErr = resolveConcurrency(jobPath, job.ID, job.Concurrency, instanceContext, matrix)
 		}
 		if concurrencyErr != nil {
 			e.diagnostics = append(e.diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, concurrencyErr))
@@ -876,7 +877,7 @@ func (e *jobGraphExpansion) expandJobInstances(id string) {
 			continue
 		}
 		instance := candidate
-		instance.Label = instanceLabel(job, matrix, e.context)
+		instance.Label = instanceLabel(job, matrix, instanceContext)
 		instance.Queue = target.Queue
 		instance.Platform = target.Platform
 		instance.RuntimeImage = target.Image

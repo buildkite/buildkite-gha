@@ -1477,6 +1477,75 @@ func TestEvaluateProgramServicesResolvesCredentialVarsWithEnvironment(t *testing
 	}
 }
 
+func TestCompiledServiceCredentialsResolveNeeds(t *testing.T) {
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, password, fallback string
+		secret                   bool
+	}{
+		{name: "outputs only", password: "needs.auth.outputs.password"},
+		{name: "secret fallback", password: "needs.auth.outputs.password || secrets.REGISTRY_PASSWORD", fallback: "secret-password", secret: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := []byte(`on: push
+jobs:
+  auth:
+    runs-on: ubuntu-latest
+    outputs:
+      user: ${{ steps.login.outputs.user }}
+      password: ${{ steps.login.outputs.password }}
+    steps: [{id: login, run: true}]
+  consumer:
+    needs: auth
+    runs-on: ubuntu-latest
+    services:
+      private:
+        image: registry.example.test/app:1
+        credentials:
+          username: ${{ needs.auth.result == 'success' && needs.auth.outputs.user || 'fallback-user' }}
+          password: ${{ ` + test.password + ` }}
+    steps: [{run: true}]
+`)
+			plans, err := compileUntrustedPlans("credentials.yml", source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plans) != 2 || plans[1].Workflow.LogicalJobID != "consumer" {
+				t.Fatalf("compiled jobs = %#v", plans)
+			}
+			job := plans[1]
+			var wantSecrets []string
+			if test.secret {
+				wantSecrets = []string{"REGISTRY_PASSWORD"}
+			}
+			if !slices.Equal(job.RequiredSecrets, wantSecrets) || job.GitHubToken != nil {
+				t.Fatalf("credential authority: secrets = %v, token = %#v", job.RequiredSecrets, job.GitHubToken)
+			}
+			for _, supplied := range []bool{true, false} {
+				outputs := map[string]string{}
+				wantUser, wantPassword := "fallback-user", test.fallback
+				if supplied {
+					wantUser, wantPassword = "output-user", "output-password"
+					outputs = map[string]string{"user": wantUser, "password": wantPassword}
+				}
+				services, _, err := evaluateProgramServices(job.Program.Job.Services, expression.Context{
+					Needs:   map[string]expression.NeedStatus{"auth": {Result: "success", Outputs: outputs}},
+					Secrets: map[string]string{"REGISTRY_PASSWORD": "secret-password"},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := services["private"].Credentials; got == nil || got.Username != wantUser || got.Password != wantPassword {
+					t.Fatalf("supplied=%t: credentials = %#v, want %q / %q", supplied, got, wantUser, wantPassword)
+				}
+			}
+		})
+	}
+}
+
 func testProgramServices(services map[string]plan.ServiceContainer) executionprogram.Services {
 	result := executionprogram.Services{Static: make([]executionprogram.Service, 0, len(services))}
 	for _, name := range sortedKeys(services) {
@@ -1896,14 +1965,40 @@ func TestJobContainerCleanupBudgetScalesToMaximumServices(t *testing.T) {
 
 func TestRunJobHostServicesLifecycle(t *testing.T) {
 	f := newJobDocker(t, "")
-	w := t.TempDir()
-	j := jobContainerPlan(t, w, nil)
-	j.Container = nil
-	j.Services = map[string]plan.ServiceContainer{"db": {Image: "postgres", Ports: []string{"6379"}}}
-	j.ServiceOrder = []string{"db"}
-	j.Program.Job.Steps = normalizeRuntimeTestSteps([]runtimeTestStep{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 49152`}})
-	if _, err := (Runner{Docker: f.path}).runTestJob(t.Context(), j, w); err != nil {
+	workspace := t.TempDir()
+	const path = ".github/workflows/services.yml"
+	source := []byte(`on: push
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres
+        ports: ['6379', '6543:6380']
+    outputs:
+      dynamic: ${{ job.services.db.ports[6379] }}
+      fixed: ${{ job.services.db.ports[6380] }}
+    steps:
+      - run: test "$SERVICE_PORT" = 49152
+        shell: sh
+        env:
+          SERVICE_PORT: ${{ job.services.db.ports[6379] }}
+`)
+	writeFixtureFile(t, workspace, path, string(source))
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
 		t.Fatal(err)
+	}
+	jobs, err := compileUntrustedPlans(path, source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (Runner{Docker: f.path}).RunJob(t.Context(), jobs[0], workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !maps.Equal(result.Outputs, map[string]string{"dynamic": "49152", "fixed": "6543"}) {
+		t.Fatalf("service outputs = %v", result.Outputs)
 	}
 	for _, call := range f.calls(t) {
 		if call.Args[0] == "exec" {
