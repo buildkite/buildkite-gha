@@ -35,6 +35,25 @@ func TestParseCacheMode(t *testing.T) {
 	}
 }
 
+func TestParseCacheModeAliases(t *testing.T) {
+	for _, source := range []string{
+		"on: push\ncache-mode: write\nenv: {ID: &job-id test}\njobs:\n  *job-id:\n    cache-mode: read\n    runs-on: ubuntu-latest\n    steps: [{run: echo ok}]\n",
+		"on: push\nenv: {MODE: &mode read}\ncache-mode: *mode\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: echo ok}]\n",
+		"on: push\ncache-mode: write\nenv: {MODE: &mode read}\njobs:\n  test:\n    cache-mode: *mode\n    runs-on: ubuntu-latest\n    steps: [{run: echo ok}]\n",
+		"on: push\ncache-mode: write\njobs:\n  first: &job\n    cache-mode: read\n    runs-on: ubuntu-latest\n    steps: [{run: echo ok}]\n  second: *job\n",
+	} {
+		parsed, err := Parse("alias.yml", []byte(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, job := range parsed.Jobs {
+			if job.CacheMode != "read" {
+				t.Errorf("job %q mode = %q, want read", job.ID, job.CacheMode)
+			}
+		}
+	}
+}
+
 func TestParseCacheModeDoesNotHideOtherSyntaxErrors(t *testing.T) {
 	for _, source := range []string{
 		"cache-mode: read\ncache-mode: write\non: push\njobs: {test: {runs-on: ubuntu-latest, steps: [{run: echo ok}]}}",

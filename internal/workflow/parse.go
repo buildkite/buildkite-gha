@@ -255,13 +255,14 @@ func Parse(path string, source []byte) (*Workflow, error) {
 func parseCacheModes(path string, document *yaml.Node) (string, map[string]string, []expectedActionlintDiagnostic, error) {
 	var diagnostics []expectedActionlintDiagnostic
 	parse := func(node *yaml.Node, section string) (string, error) {
+		node = resolveAlias(node)
 		if node == nil || node.Kind != yaml.MappingNode {
 			return "", nil
 		}
 		mode := ""
 		for i := 0; i+1 < len(node.Content); i += 2 {
-			key, value := node.Content[i], node.Content[i+1]
-			if key.Value != "cache-mode" {
+			key, value := node.Content[i], resolveAlias(node.Content[i+1])
+			if !mappingKeyMatches(key, "cache-mode") {
 				continue
 			}
 			if value.Kind != yaml.ScalarNode || value.Tag != "!!str" || !plan.ValidCacheMode(value.Value) {
@@ -283,8 +284,13 @@ func parseCacheModes(path string, document *yaml.Node) (string, map[string]strin
 	if err != nil {
 		return "", nil, nil, err
 	}
-	for id, node := range mappingEntries(mappingValue(root, "jobs")) {
-		jobMode, err := parse(node, "job")
+	jobNodes := mappingValue(root, "jobs")
+	if jobNodes == nil || jobNodes.Kind != yaml.MappingNode {
+		return mode, jobs, diagnostics, nil
+	}
+	for i := 0; i+1 < len(jobNodes.Content); i += 2 {
+		id := resolveAlias(jobNodes.Content[i]).Value
+		jobMode, err := parse(jobNodes.Content[i+1], "job")
 		if err != nil {
 			return "", nil, nil, err
 		}
