@@ -1042,6 +1042,8 @@ func TestEvaluateJobSurfacesErrors(t *testing.T) {
 		{name: "dynamic secret", evaluate: EvaluateJobEnvironment, template: "${{ false && secrets[env.KEY] || 'ok' }}"},
 		{name: "aggregate needs", evaluate: EvaluateJobDefault, template: "${{ false && toJSON(needs) || 'ok' }}"},
 		{name: "aggregate steps", evaluate: EvaluateJobOutput, template: "${{ false && toJSON(steps) || 'ok' }}"},
+		{name: "dynamic service", evaluate: EvaluateJobOutput, template: "${{ false && job.services[env.KEY].id || 'ok' }}"},
+		{name: "job status", evaluate: EvaluateJobOutput, template: "${{ false && job.status || 'ok' }}"},
 		{name: "hash files", evaluate: EvaluateJobDefault, template: "${{ false && hashFiles('go.sum') || 'ok' }}"},
 	}
 	for _, test := range tests {
@@ -2076,12 +2078,12 @@ func TestEvaluateCompileTemplateUsesGitHubNumberRendering(t *testing.T) {
 }
 
 func TestValidateServiceCredentialTemplateContexts(t *testing.T) {
-	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER || 'user' }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}"} {
+	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER || 'user' }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}", "${{ needs.build.outputs.user }}"} {
 		if err := ValidateServiceCredentialTemplate(template); err != nil {
 			t.Errorf("ValidateServiceCredentialTemplate(%q) = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ needs.build.outputs.user }}", "${{ env.USER.extra }}", "${{ secrets }}", "${{ 'safe' || inputs.user }}", "${{ 'safe' || secrets[env.KEY] }}", "${{ 'safe' || toJSON(github) }}"} {
+	for _, template := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ env.USER.extra }}", "${{ secrets }}", "${{ 'safe' || inputs.user }}", "${{ 'safe' || secrets[env.KEY] }}", "${{ 'safe' || secrets[needs.build.outputs.key] }}", "${{ 'safe' || toJSON(github) }}"} {
 		if err := ValidateServiceCredentialTemplate(template); err == nil {
 			t.Errorf("ValidateServiceCredentialTemplate(%q) succeeded", template)
 		}
