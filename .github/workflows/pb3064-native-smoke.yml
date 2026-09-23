@@ -1,0 +1,43 @@
+name: PB-3064 native Namespace smoke
+on: workflow_dispatch
+permissions: {}
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Native shell and tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -un)" = runner
+          test "$(id -u)" -ne 0
+          sudo -n true
+          . /etc/os-release
+          test "$VERSION_ID" = 24.04
+          test "$RUNNER_TOOL_CACHE" != /opt/hostedtoolcache
+          printf 'PB3064 shell PASS user=%s uid=%s os=%s toolcache=%s\n' "$(id -un)" "$(id -u)" "$VERSION_ID" "$RUNNER_TOOL_CACHE"
+          command -v git python3 docker
+          git --version
+          python3 --version
+      - name: Docker daemon and container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker version
+          test "$(docker run --rm alpine:3.21 printf pb3064-docker-ok)" = pb3064-docker-ok
+          echo 'PB3064 Docker PASS'
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+          package-manager-cache: "false"
+          token: ""
+      - name: Verify setup action and lookup
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v node npm
+          node --version | grep '^v24\.'
+          npm --version
+          node -e 'if (6 * 7 !== 42) process.exit(1); console.log("PB3064 setup-node PASS")'
+          test "$RUNNER_TOOL_CACHE" != /opt/hostedtoolcache
