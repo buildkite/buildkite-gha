@@ -675,6 +675,11 @@ func (r *jobRun) runJavaScriptPhase(ctx context.Context, processor *commandOutpu
 	if action.Cache || action.CacheClientCompatibility {
 		applyGitHubServerURLOverride(env)
 	}
+	// This is a client hint, not cache-token authority. Leave an omitted
+	// mode unchanged; explicit plan values win over action/workflow env.
+	if r.job.CacheMode != "" {
+		mergeEnvironmentInto(env, map[string]string{"ACTIONS_CACHE_MODE": r.job.CacheMode})
+	}
 	cacheEnv, cacheErr := r.cacheActionEnvironment(ctx, processor)
 	if cacheErr != nil && ctx.Err() != nil {
 		return ctx.Err()

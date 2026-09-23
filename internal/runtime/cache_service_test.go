@@ -226,13 +226,21 @@ func TestCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T) {
 		{name: "v6.1.0", using: "node24", commit: actionintegration.CacheCommit},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			testCacheServiceLifecycleUsesFreshIsolatedCredentials(t, test.using, test.commit)
+			for _, mode := range []string{"", "read", "write", "write-only", "none"} {
+				t.Run("mode="+mode, func(t *testing.T) {
+					testCacheServiceLifecycleUsesFreshIsolatedCredentials(t, test.using, test.commit, mode)
+				})
+			}
 		})
 	}
 }
 
-func testCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T, using, commit string) {
+func testCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T, using, commit, mode string) {
 	t.Helper()
+	wantMode := mode
+	if wantMode == "" {
+		wantMode = "workflow-env-preserved"
+	}
 	node := requireNode24(t)
 	toolEnv, err := isolateCacheActionEnvironment(nil)
 	if err != nil {
@@ -251,6 +259,7 @@ import {spawnSync} from "node:child_process";
 if (process.versions.node.split(".")[0] !== "24") throw new Error("actions/cache did not use managed Node 24");
 const required = ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_URL"];
 for (const name of required) if (!process.env[name]) throw new Error("missing " + name);
+if (process.env.ACTIONS_CACHE_MODE !== %q) throw new Error("unexpected cache mode: " + process.env.ACTIONS_CACHE_MODE);
 if (process.env.ACTIONS_CACHE_URL !== %q) throw new Error("unexpected ACTIONS_CACHE_URL: " + process.env.ACTIONS_CACHE_URL);
 if (process.env.GITHUB_SERVER_URL !== %q) throw new Error("unexpected GITHUB_SERVER_URL: " + process.env.GITHUB_SERVER_URL);
 for (const name of [
@@ -266,7 +275,7 @@ if (tar.status !== 0) throw new Error("trusted tar failed: " + tar.stderr);
 if (process.env.PATH !== %q) throw new Error("unsafe PATH: " + process.env.PATH);
 fs.appendFileSync(process.env.LIFECYCLE_LOG, "%s|" + process.env.ACTIONS_RUNTIME_TOKEN + "|" + process.env.ACTIONS_RESULTS_URL + "|" + process.env.ACTIONS_CACHE_SERVICE_V2 + "\n");
 console.log("credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
-`, cacheURLCompatibility, githubServerURLOverride, cacheActionToolPath, phase)
+`, wantMode, cacheURLCompatibility, githubServerURLOverride, cacheActionToolPath, phase)
 		writeFixtureFile(t, remote, phase+".js", program)
 	}
 	writeFixtureFile(t, remote, "ordinary/action.yml", "name: ordinary\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
@@ -298,6 +307,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 		t.Fatal(err)
 	}
 	cacheEnv := map[string]string{
+		"ACTIONS_CACHE_MODE":  "workflow-env-preserved",
 		"ACTIONS_RESULTS_URL": "https://attacker.invalid", "ACTIONS_RUNTIME_TOKEN": "workflow-token", "ACTIONS_CACHE_SERVICE_V2": "false",
 		"ACTIONS_CACHE_URL": "https://legacy.invalid", "ACTIONS_RUNTIME_URL": "https://legacy.invalid",
 		"NODE_OPTIONS": "--require attacker", "NODE_PATH": "/attacker", "NODE_EXTRA_CA_CERTS": "/attacker.pem", "NODE_TLS_REJECT_UNAUTHORIZED": "0",
@@ -333,6 +343,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 		{ID: "shell-after", Kind: "run", Command: shellCheck},
 	})
 	job.Schema = plan.Schema
+	job.CacheMode = mode
 	job.Event.Provider = "cursor-origin"
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle, "ATTACKER_BIN": attackerBin}

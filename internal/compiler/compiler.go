@@ -110,6 +110,7 @@ type WorkflowSource struct {
 // JobInstance is one statically expanded job in the owned IR.
 type JobInstance struct {
 	Key                       string                    `json:"key"`
+	CacheMode                 string                    `json:"cache_mode,omitempty"`
 	LogicalJobID              string                    `json:"logical_job_id"`
 	Label                     string                    `json:"label"`
 	Needs                     []string                  `json:"needs,omitempty"`

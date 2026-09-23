@@ -54,7 +54,11 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, err
 	}
 	parsed, errs := actionlint.Parse(source)
-	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, acceptedEmptyTypesDiagnostics(&document))
+	cacheMode, jobCacheModes, cacheDiagnostics, err := parseCacheModes(path, &document)
+	if err != nil {
+		return nil, err
+	}
+	expectedDiagnostics := slices.Concat(concurrency.Diagnostics, containerDiagnostics, acceptedEmptyTypesDiagnostics(&document), cacheDiagnostics)
 	if err := filterActionlintDiagnostics(path, errs, expectedDiagnostics); err != nil {
 		return nil, err
 	}
@@ -63,7 +67,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, fmt.Errorf("%s: parse scalar values: %w", path, err)
 	}
 
-	owned := &Workflow{}
+	owned := &Workflow{CacheMode: cacheMode}
 	owned.Triggers = adaptTriggers(parsed.On)
 	// The raw mapping also retains keys such as types and workflows, whose
 	// positions are not preserved by actionlint's event model.
@@ -206,6 +210,13 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		if err != nil {
 			return nil, err
 		}
+		job.CacheMode = jobCacheModes[id]
+		if job.CacheMode == "" {
+			job.CacheMode = owned.CacheMode
+		}
+		if job.CacheMode != "" && (job.Reusable != nil || owned.Callable) {
+			return nil, locatedError(path, parsed.Jobs[id].Pos, fmt.Sprintf("job %q", id), "cache-mode with reusable workflows is unsupported")
+		}
 		if position, ok := jobCancellations[id]; ok {
 			if job.Concurrency == nil {
 				return nil, fmt.Errorf("%s:%d:%d: job %q: concurrency cancellation has no concurrency group", path, position.Line, position.Column, id)
@@ -237,6 +248,49 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, fmt.Errorf("%s:%d:%d: concurrent step did not match the pinned actionlint syntax tree", path, position.Line, position.Column)
 	}
 	return owned, nil
+}
+
+// The pinned actionlint predates cache-mode. Validate the raw values and
+// suppress only its unexpected-key diagnostic at each accepted position.
+func parseCacheModes(path string, document *yaml.Node) (string, map[string]string, []expectedActionlintDiagnostic, error) {
+	var diagnostics []expectedActionlintDiagnostic
+	parse := func(node *yaml.Node, section string) (string, error) {
+		if node == nil || node.Kind != yaml.MappingNode {
+			return "", nil
+		}
+		mode := ""
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key, value := node.Content[i], node.Content[i+1]
+			if key.Value != "cache-mode" {
+				continue
+			}
+			if value.Kind != yaml.ScalarNode || value.Tag != "!!str" || !plan.ValidCacheMode(value.Value) {
+				return "", rawError(path, value, "cache-mode must be read, write, write-only, or none")
+			}
+			mode = value.Value
+			diagnostics = append(diagnostics, expectedActionlintDiagnostic{
+				Position: nodePosition(key), Prefix: fmt.Sprintf("unexpected key %q for %q section", "cache-mode", section),
+			})
+		}
+		return mode, nil
+	}
+	jobs := make(map[string]string)
+	if len(document.Content) == 0 {
+		return "", jobs, nil, nil
+	}
+	root := document.Content[0]
+	mode, err := parse(root, "workflow")
+	if err != nil {
+		return "", nil, nil, err
+	}
+	for id, node := range mappingEntries(mappingValue(root, "jobs")) {
+		jobMode, err := parse(node, "job")
+		if err != nil {
+			return "", nil, nil, err
+		}
+		jobs[strings.ToLower(id)] = jobMode
+	}
+	return mode, jobs, diagnostics, nil
 }
 
 // The pinned actionlint parser rejects empty activity lists more strictly than

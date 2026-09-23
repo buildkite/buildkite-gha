@@ -315,6 +315,7 @@ type OIDCConfiguration struct {
 // transport, authority, and runtime configuration needed to execute it.
 type Job struct {
 	Schema               string                   `json:"schema"`
+	CacheMode            string                   `json:"cache_mode,omitempty"`
 	Compiler             Compiler                 `json:"compiler"`
 	Runtime              *Runtime                 `json:"runtime,omitempty"`
 	Workflow             Workflow                 `json:"workflow"`
@@ -581,9 +582,23 @@ func DecodeEventPayload(source []byte, expectedDigest string) (map[string]any, e
 	return payload, nil
 }
 
+// ValidCacheMode reports whether mode is an explicit client-side cache mode.
+// An omitted mode is represented separately by an empty string in job plans.
+func ValidCacheMode(mode string) bool {
+	switch mode {
+	case "read", "write", "write-only", "none":
+		return true
+	default:
+		return false
+	}
+}
+
 func (job Job) Validate() error {
 	if job.Schema != Schema {
 		return fmt.Errorf("unsupported job plan schema %q", job.Schema)
+	}
+	if job.CacheMode != "" && !ValidCacheMode(job.CacheMode) {
+		return fmt.Errorf("cache_mode must be read, write, write-only, or none")
 	}
 	if job.Program == nil {
 		return fmt.Errorf("normalized execution program is required")

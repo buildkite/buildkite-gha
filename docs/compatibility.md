@@ -2119,6 +2119,36 @@ Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP v
 
 ### Cache action
 
+Workflow-level and job-level `cache-mode` accept exactly `read`, `write`,
+`write-only`, and `none`. Jobs inherit the workflow mode unless they override
+it. For example, workflow `cache-mode: write` with job `cache-mode: read`
+selects read-only client behavior for that job. Modes on reusable-workflow
+calls or in workflows declaring `workflow_call` are not supported.
+
+The compiled plan carries the effective mode. JavaScript action pre, main,
+and post phases receive it as `ACTIONS_CACHE_MODE`, overriding workflow or
+action environment values. Omitting both keys preserves existing behavior;
+the runtime does not choose a trigger-based default.
+
+| Mode | Client restore | Client save |
+| --- | --- | --- |
+| `read` | Allowed | Skipped |
+| `write` | Allowed | Allowed |
+| `write-only` | Skipped | Allowed |
+| `none` | Skipped | Skipped |
+
+This is **best-effort client behavior, not a security boundary**. It does not
+change cache-token issuance or widen the server's existing provenance-based
+authorization. Direct service requests remain subject to that authorization,
+not the requested mode. Clients that ignore `ACTIONS_CACHE_MODE` do not apply
+these additional restrictions.
+
+The audited [upstream commit `3edfce9`](https://github.com/actions/cache/commit/3edfce9056124e459a23f683a21433670d47daca)
+bundles `@actions/cache` 6.2.0, which logs and skips disallowed operations.
+The v6.1.0 release listed below and older bundled clients ignore the variable.
+A skipped restore is a cache miss, so `fail-on-cache-miss: true` can still
+fail the action. Docker actions do not receive the compiled mode.
+
 **🟡 Supported subset.** Immutable commits captured from frozen upstream tags and the `main` and `releases/v5` branches are admitted when their root, `restore`, and `save` bundles all speak the cache-v2 protocol the Buildkite Results service implements. The snapshot covers historical development and release commits from v3.4.0 and v4.2.0 onward, including untagged `main` commits. The admitted release commits run their stock cache-v2 clients; these principal releases are named in diagnostics:
 
 | Release | Commit | Node | `@actions/cache` |
