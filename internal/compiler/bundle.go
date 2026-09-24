@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -82,6 +83,7 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 // CompileBundlePlansContext constructs every immutable plan but deliberately
 // stops before pipeline generation so callers can apply admission policy.
 func CompileBundlePlansContext(ctx context.Context, path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest string, options Options) (Bundle, error) {
+	ctx = actionsource.WithPublicRepositoryChecks(ctx)
 	if compilerVersion == "" {
 		return Bundle{}, fmt.Errorf("compiler version is required")
 	}

@@ -171,6 +171,7 @@ references bypass the snapshot.
 
 The snapshot records definitively missing public refs. It does not record
 network, cancellation, TLS, rate-limit, or server failures; those are retried.
+Rate-limited requests follow the [action resolver's retry deadline](compatibility.md#action-sources-and-runtimes).
 Use `--refresh-action-resolution-snapshot` to start a new generation. The public
 corpus script then removes old report sets for that corpus record.
 

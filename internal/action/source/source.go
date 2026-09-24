@@ -153,7 +153,7 @@ func hasControl(s string) bool {
 	return false
 }
 
-// RateLimitError reports anonymous GitHub API exhaustion.
+// RateLimitError reports when GitHub API requests may resume after throttling.
 type RateLimitError struct{ Reset time.Time }
 
 func (e *RateLimitError) Error() string {
@@ -180,6 +180,7 @@ type config struct {
 	resolutionSnapshot                  *actionResolutionSnapshot
 	cacheMaxBytes                       int64
 	userAgent                           string
+	now                                 func() time.Time
 	maxCompressed, maxExpanded, maxFile int64
 	maxEntries                          int
 	maxPath, maxSegment                 int
@@ -188,7 +189,7 @@ type config struct {
 func defaults() config {
 	api, _ := url.Parse(defaultAPI)
 	codeload, _ := url.Parse(defaultCodeload)
-	return config{api: api, codeload: codeload, finalHosts: map[string]bool{"codeload.github.com": true}, userAgent: useragent.FromVersion(""), maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
+	return config{api: api, codeload: codeload, finalHosts: map[string]bool{"codeload.github.com": true}, userAgent: useragent.FromVersion(""), now: time.Now, maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
 }
 
 // Option configures trusted process-level limits or test endpoints. Options must
@@ -319,8 +320,9 @@ func WithCacheMaxBytes(maxBytes int64) Option {
 // Resolver resolves GitHub references, optionally using credentials only for
 // GitHub API requests. Requests discard the client's cookie jar.
 type Resolver struct {
-	client *http.Client
-	cfg    config
+	client    *http.Client
+	cfg       config
+	apiBudget githubAPIBudget
 }
 
 func NewResolver(client *http.Client, opts ...Option) (*Resolver, error) {
@@ -336,7 +338,7 @@ func NewResolver(client *http.Client, opts ...Option) (*Resolver, error) {
 			c.mutableRefs, _ = newMutableRefCache(filepath.Join(root, "buildkite-gha", "action-ref-resolutions", "v1"), mutableRefTTL)
 		}
 	}
-	return &Resolver{client, c}, nil
+	return &Resolver{client: client, cfg: c}, nil
 }
 func makeConfig(opts []Option) (config, error) {
 	c := defaults()
@@ -404,7 +406,7 @@ func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved,
 		return Resolved{}, err
 	}
 	if r.cfg.credential != nil && r.cfg.credential.token != "" {
-		if err := ensurePublic(ctx, r.client, r.cfg, ref); err != nil {
+		if err := r.ensurePublic(ctx, ref); err != nil {
 			if !gitFallbackError(err) || !r.gitRepositorySource(ref) {
 				return Resolved{}, err
 			}
@@ -495,7 +497,16 @@ func apiURL(base *url.URL, parts ...string) *url.URL {
 	return &u
 }
 func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
-	return githubAPIGet(ctx, r.client, r.cfg, parts, out)
+	authenticated := actionSourceToken(r.cfg, parts) != ""
+	if err := r.apiBudget.check(ctx, authenticated, r.cfg.now()); err != nil {
+		return err
+	}
+	err := githubAPIGet(ctx, r.client, r.cfg, parts, out)
+	var rate *RateLimitError
+	if errors.As(err, &rate) {
+		r.apiBudget.record(authenticated, rate)
+	}
+	return err
 }
 func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []string, out any) error {
 	u := apiURL(cfg.api, parts...)
@@ -523,7 +534,7 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	if resp.StatusCode == http.StatusNotFound {
 		return &NotPublicError{}
 	}
-	if rate := rateLimitError(resp, body); rate != nil {
+	if rate := rateLimitError(resp, body, cfg.now()); rate != nil {
 		return rate
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
@@ -534,22 +545,6 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("malformed GitHub API response: %w", err)
-	}
-	return nil
-}
-func ensurePublic(ctx context.Context, client *http.Client, cfg config, ref Reference) error {
-	var repository struct {
-		Private    *bool   `json:"private"`
-		Visibility *string `json:"visibility"`
-	}
-	if err := githubAPIGet(ctx, client, cfg, repoParts(ref), &repository); err != nil {
-		return err
-	}
-	if repository.Private == nil || repository.Visibility == nil {
-		return fmt.Errorf("malformed GitHub API response: repository visibility is missing")
-	}
-	if *repository.Private || *repository.Visibility != "public" {
-		return &NotPublicError{}
 	}
 	return nil
 }
@@ -913,19 +908,32 @@ func gitEnvironment() []string {
 	// repository fails instead of running or blocking on a prompt program.
 	return append(filtered, "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "GCM_INTERACTIVE=never")
 }
-func rateLimitError(resp *http.Response, body []byte) error {
-	if resp.StatusCode != http.StatusTooManyRequests && (resp.StatusCode != http.StatusForbidden || (resp.Header.Get("X-RateLimit-Remaining") != "0" && !strings.Contains(strings.ToLower(string(body)), "rate limit"))) {
+func rateLimitError(resp *http.Response, body []byte, now time.Time) error {
+	remaining := resp.Header.Get("X-RateLimit-Remaining")
+	retryAfter := resp.Header.Get("Retry-After")
+	if resp.StatusCode != http.StatusTooManyRequests && (resp.StatusCode != http.StatusForbidden || (remaining != "0" && retryAfter == "" && !strings.Contains(strings.ToLower(string(body)), "rate limit"))) {
 		return nil
 	}
 	var reset time.Time
-	if n, e := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); e == nil {
-		reset = time.Unix(n, 0)
-	} else if n, e := strconv.ParseInt(resp.Header.Get("Retry-After"), 10, 64); e == nil {
-		reset = time.Now().Add(time.Duration(n) * time.Second)
-	} else if t, e := http.ParseTime(resp.Header.Get("Retry-After")); e == nil {
+	if n, e := strconv.ParseInt(retryAfter, 10, 32); e == nil && n > 0 {
+		reset = now.Add(time.Duration(n) * time.Second)
+	} else if t, e := http.ParseTime(retryAfter); e == nil {
 		reset = t
 	}
-	return &RateLimitError{reset}
+	// A secondary limit can apply while primary quota remains. Its retry
+	// deadline is independent of that primary quota's reset time. If both
+	// limits apply, neither deadline may be shortened by the other.
+	if remaining == "0" || (remaining == "" && reset.IsZero()) {
+		if n, e := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); e == nil {
+			if primaryReset := time.Unix(n, 0); primaryReset.After(reset) {
+				reset = primaryReset
+			}
+		}
+	}
+	if !reset.After(now) {
+		reset = now.Add(time.Minute)
+	}
+	return &RateLimitError{Reset: reset}
 }
 func setAPIHeaders(r *http.Request, token, userAgent string) {
 	r.Header.Del("Authorization")
@@ -1297,7 +1305,7 @@ func (s *Store) downloadArchive(ctx context.Context, u *url.URL, dst string) err
 		if readErr != nil {
 			return fmt.Errorf("read archive error response: %w", readErr)
 		}
-		if rate := rateLimitError(resp, body); rate != nil {
+		if rate := rateLimitError(resp, body, s.cfg.now()); rate != nil {
 			return rate
 		}
 	}
