@@ -62,6 +62,8 @@ func validateBatch(ctx context.Context, args []string, stderr io.Writer, clientV
 	if err != nil {
 		return usageError(stderr, "validate-batch: %v", err)
 	}
+	ctx, stopSignals := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 	records, err := loadBatchValidationManifest(options.manifest)
 	if err != nil {
 		return usageError(stderr, "validate-batch: %v", err)
@@ -71,7 +73,7 @@ func validateBatch(ctx context.Context, args []string, stderr io.Writer, clientV
 		storeOptions = append(storeOptions, actionsource.WithCacheMaxBytes(options.actionCacheMaxBytes))
 	}
 	if options.actionResolutionSnapshot != "" {
-		resolverOptions = append(resolverOptions, actionsource.WithActionResolutionSnapshot(options.actionResolutionSnapshot, options.refreshActionResolutionSnapshot))
+		resolverOptions = append(resolverOptions, actionsource.WithActionResolutionSnapshotContext(ctx, options.actionResolutionSnapshot, options.refreshActionResolutionSnapshot))
 	}
 	if options.githubTokenEnv != "" {
 		token, ok := os.LookupEnv(options.githubTokenEnv)
@@ -93,10 +95,8 @@ func validateBatch(ctx context.Context, args []string, stderr io.Writer, clientV
 	}
 	runtime := &profileValidationRuntime{actionSource: actionSource, distributionDigest: distributionDigest}
 	workerStderr := &synchronizedWriter{w: stderr}
-	ctx, stopSignals := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	defer stopSignals()
 	work := make(chan batchValidationRecord)
 	failures := make(chan error, 1)
 	var completed atomic.Int64

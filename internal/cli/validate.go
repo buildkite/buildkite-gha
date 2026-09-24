@@ -33,16 +33,16 @@ func validate(ctx context.Context, args []string, stdout, stderr io.Writer, clie
 	if actionCacheDir != "" && profile == "" {
 		return usageError(stderr, "validate: --action-cache-dir requires --profile hosted")
 	}
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	if actionCacheDir != "" {
-		if _, err := actionsource.NewStore(actionCacheDir, nil); err != nil {
+		if _, err := actionsource.NewStoreContext(ctx, actionCacheDir, nil); err != nil {
 			return usageError(stderr, "validate: --action-cache-dir: %v", err)
 		}
 	}
 	if profile != "" && eventPath == "" && eventName == "" && !allEvents {
 		return usageError(stderr, "validate: --profile hosted requires --event, --event-path, or --all-events; use bare validate <workflow> for event-independent syntax and trigger compatibility validation")
 	}
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	out := newProcessingOutput(ctx, "validate", format, stdout, stderr, agent)
 	if allEvents {
 		return validateAllEvents(ctx, out, workflowPath, clientVersion, actionCacheDir, nil, stderr)
