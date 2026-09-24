@@ -62,12 +62,13 @@ func validateBatch(ctx context.Context, args []string, stderr io.Writer, clientV
 	if err != nil {
 		return usageError(stderr, "validate-batch: %v", err)
 	}
-	ctx, stopSignals := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
+	// Keep default signal handling during the non-cancelable manifest read.
 	records, err := loadBatchValidationManifest(options.manifest)
 	if err != nil {
 		return usageError(stderr, "validate-batch: %v", err)
 	}
+	ctx, stopSignals := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 	var resolverOptions, storeOptions []actionsource.Option
 	if options.actionCacheMaxBytes > 0 {
 		storeOptions = append(storeOptions, actionsource.WithCacheMaxBytes(options.actionCacheMaxBytes))
