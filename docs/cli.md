@@ -124,15 +124,30 @@ buildkite-gha validate \
 ```
 
 `--action-cache-dir` is available only with `--profile hosted`. It stores
-verified action source by immutable commit.
+verified action source by immutable commit, separately from the ref-resolution
+cache that avoids repeated GitHub API requests.
 
 Mutable ref resolutions are cached for one hour under
 `$XDG_CACHE_HOME/buildkite-gha/action-ref-resolutions/v1`, or the platform's
-user cache directory. Concurrent validators can share this cache, so a moved
+user cache directory. Concurrent importers can share this cache, so a moved
 tag or branch may use its previous commit for up to one hour. Uploads with
 `private-reusable-workflows` enabled skip this cache for called repositories
 and resolve their refs once per operation. Do not share either writable cache
-between untrusted validation jobs.
+between untrusted jobs.
+
+On ephemeral Linux agents, mount a persistent directory writable only by trusted
+importers and set `XDG_CACHE_HOME` for the importer command. Keep its host path
+outside writable mounts available to imported jobs. For example, with
+that directory mounted at `/cache/importer`:
+
+```sh
+XDG_CACHE_HOME="${XDG_CACHE_HOME:-/cache/importer}" \
+  buildkite-gha upload --event-path event.json .github/workflows/ci.yml
+```
+
+This preserves an explicit cache override and lets later invocations reuse
+fresh ref resolutions. Persisting only `--action-cache-dir` does not preserve
+the ref-resolution cache. Full commit SHA references need no resolution request.
 
 For a large workflow corpus, reuse one validator process and action resolver:
 
