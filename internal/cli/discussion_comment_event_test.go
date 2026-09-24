@@ -43,11 +43,49 @@ func TestDiscussionCommentDeclarations(t *testing.T) {
 			}
 		}
 	}
-	for _, config := range []string{"types: 'null'", "types: [answered]", "branches-ignore: [main]", "paths: [src/**]"} {
+	for _, config := range []string{"types: 'null'", "types: [answered]", "workflows: [CI]"} {
 		parsed, err := workflow.Parse("comment.yml", []byte("on: {discussion_comment: {"+config+"}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
 		if err == nil && buildkite.ValidateTriggerConditions(parsed.Triggers) == nil {
 			t.Fatalf("accepted %s", config)
 		}
+	}
+}
+
+func TestDiscussionCommentIgnoresRefAndPathFilters(t *testing.T) {
+	for _, test := range []struct {
+		config, selectedAction string
+	}{
+		{"types: [created], branches-ignore: ['**']", "created"},
+		{"types: [created], paths-ignore: ['**']", "created"},
+		{"types: [created], paths: ['never/matching/**']", "created"},
+		{"types: [created], tags-ignore: ['**']", "created"},
+		{"types: [created], tags: [never-this-tag]", "created"},
+		{"types: created", "created"},
+		{"types: [created], branches: [never-this-branch]", "created"},
+		{"types: [edited], branches: [main]", "edited"},
+	} {
+		t.Run(test.config, func(t *testing.T) {
+			parsed, err := workflow.Parse("comment.yml", []byte("on: {discussion_comment: {"+test.config+"}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := buildkite.ValidateTriggerConditions(parsed.Triggers); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range []string{"created", "edited"} {
+				event := compiler.Event{Event: "discussion_comment", Ref: "refs/heads/main", Payload: map[string]any{"action": action}}
+				expressions, snapshot := snapshotTriggerState(event)
+				condition, applicable, err := buildkite.TranslateEventTriggerCondition(parsed.Triggers, event.Event, expressions, snapshot)
+				want := `(true && ("` + action + `" == "` + test.selectedAction + `"))`
+				if err != nil || !applicable || condition != want {
+					t.Fatalf("condition=%q, want=%q, applicable=%v: %v", condition, want, applicable, err)
+				}
+				reason, err := buildkite.TriggerFilterMismatchReason(parsed.Triggers, event.Event, snapshot)
+				if err != nil || (reason != "") != (action != test.selectedAction) {
+					t.Fatalf("action=%s: reason=%q: %v", action, reason, err)
+				}
+			}
+		})
 	}
 }
 

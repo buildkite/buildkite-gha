@@ -537,7 +537,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		return "", false, &UnsupportedTriggerEventError{Event: t.Event}
 	}
 	pathFilters := t.Paths != nil || t.PathsIgnore != nil
-	if pathFilters && t.Event != "merge_group" {
+	if pathFilters && t.Event != "merge_group" && t.Event != "discussion_comment" {
 		if t.Event != "push" && t.Event != "pull_request" {
 			return "", false, triggerFilterError(t, &UnsupportedPathFiltersError{Event: t.Event}, "paths", "paths-ignore")
 		}
@@ -806,7 +806,7 @@ func translateTrigger(t workflow.Trigger, expressions TriggerConditionExpression
 		}
 		return expressions.EventPredicate + " && (" + strings.Join(actions, " || ") + ")", true, nil
 	case "discussion", "discussion_comment":
-		if t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+		if t.Workflows != nil || t.Event == "discussion" && (t.BranchesIgnore != nil || t.Tags != nil || t.TagsIgnore != nil) {
 			return "", false, unsupportedEventFilter(t)
 		}
 		if expressions.EventPredicate == "" || expressions.DiscussionAction == "" || expressions.DiscussionAction == "null" {

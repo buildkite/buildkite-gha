@@ -227,8 +227,10 @@ null, empty-map, and null/empty `types` select all; explicit `types` selects a
 subset. `discussion_comment` supports `created`, `edited`, and `deleted` with
 the same declaration forms.
 Comments require a positive id and a `discussion_id` matching the discussion;
-there is no command-word or trusted-commenter gating. `branches` is ignored;
-other filters and unknown activities are rejected. Pipeline Triggers require
+there is no command-word or trusted-commenter gating. Both events ignore
+`branches`. `discussion_comment` also ignores `branches-ignore`, `tags`,
+`tags-ignore`, `paths`, and `paths-ignore`; explicit `types` still selects the
+activity. Other filters and unknown activities are rejected. Pipeline Triggers require
 pinned workflow path/ref/SHA and the original payload, including discussion id,
 number, and title. Each event uses its repository's server-resolved default
 branch. A transfer emits `transferred` in the source repository and a separate
