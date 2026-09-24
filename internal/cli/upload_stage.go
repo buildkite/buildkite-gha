@@ -71,8 +71,8 @@ func stageArgs(args []string) (stageOptions, error) {
 // uploadStage runs a later stage of a workflow's upload: it reads the stage
 // record an earlier stage uploaded, expands one needs-derived matrix from its
 // producers' results, and uploads the jobs that compile from it.
-func uploadStage(options stageOptions, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+func uploadStage(ctx context.Context, options stageOptions, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) int {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return uploadStageContext(ctx, options, stdout, stderr, version, clientVersion, agent)
 }

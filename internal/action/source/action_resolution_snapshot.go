@@ -201,6 +201,11 @@ func (s *actionResolutionSnapshot) resolve(ctx context.Context, ref Reference, r
 					return Resolved{}, claimErr
 				}
 			}
+			if err == nil {
+				recordSourceCacheHit(ctx, cacheSnapshotResolved)
+			} else {
+				recordSourceCacheHit(ctx, cacheSnapshotMissing)
+			}
 		}
 		return resolved, err
 	}

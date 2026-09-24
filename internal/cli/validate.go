@@ -21,7 +21,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
-func validate(args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
+func validate(ctx context.Context, args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
 	args, actionCacheDir, err := validateActionCacheArgs(args)
 	if err != nil {
 		return usageError(stderr, "validate: %v", err)
@@ -41,7 +41,7 @@ func validate(args []string, stdout, stderr io.Writer, clientVersion string, age
 	if profile != "" && eventPath == "" && eventName == "" && !allEvents {
 		return usageError(stderr, "validate: --profile hosted requires --event, --event-path, or --all-events; use bare validate <workflow> for event-independent syntax and trigger compatibility validation")
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	out := newProcessingOutput(ctx, "validate", format, stdout, stderr, agent)
 	if allEvents {

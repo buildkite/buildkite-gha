@@ -800,6 +800,39 @@ For a custom importer, pass `upload --experimental-runner-user=false`. The bare
 `--experimental-runner-user` form and a plugin value of `true` remain accepted.
 The plugin value must be a YAML boolean, not a quoted string.
 
+## Inspect source API requests
+
+Set `BUILDKITE_GHA_GITHUB_API_STATS=true` to print one JSON summary to stderr
+when `compile`, `upload`, `plugin`, `validate`, or `validate-batch` finishes,
+including failures. Only the exact value `true` enables it.
+
+```sh
+BUILDKITE_GHA_GITHUB_API_STATS=true buildkite-gha compile \
+  --event-path event.json workflow.yml > pipeline.yml
+```
+
+The line starts with `buildkite-gha source REST API stats: ` and identifies the
+command and `github_source_rest` scope. Pipeline and report output on stdout
+remains unchanged.
+
+| Field | Meaning |
+| --- | --- |
+| `http_attempts` | Calls started through the source REST HTTP client. |
+| `http_responses` | Completed attempts that received an HTTP response. |
+| `requests` | Completed attempts grouped by actual `anonymous` or `authenticated` access, endpoint category, status, and outcome. Status `0` means no valid HTTP status was received. Outcomes distinguish `response`, `transport_error`, `canceled`, `read_error`, and `decode_error`. |
+| `cache_hits` | Reused results from `mutable_ref_disk`, `snapshot_resolved`, `snapshot_missing`, or `public_repository_check`. |
+| `suppressed` | Lookups prevented by a rate-limit cooldown, grouped by authentication and endpoint. These did not start an HTTP attempt. |
+
+The summary covers action and reusable-workflow source REST lookups. Archive
+downloads, Git commands, token minting, runtime actions, compiler graph reuse,
+and source-tree cache hits are outside its scope. Client request counts can
+differ from quota consumption when attempts fail before reaching GitHub;
+other clients can also consume a shared quota.
+
+Counters contain fixed categories and status codes without request identities,
+URLs, credentials, headers, or error text. Collection makes no extra GitHub
+requests and adds no fields to completion telemetry.
+
 ## Disable telemetry
 
 In Buildkite jobs, the importer and runtime send best-effort completion
