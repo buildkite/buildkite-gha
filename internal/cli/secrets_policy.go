@@ -47,7 +47,7 @@ func readSecretsPolicy(path string) (string, error) {
 }
 
 func validateSecretsPolicy(contents string) (string, error) {
-	policy := strings.TrimSpace(contents)
+	policy := strings.TrimSpace(strings.ReplaceAll(contents, "\r\n", "\n"))
 	if policy == "" {
 		return "", errors.New("policy must not be empty")
 	}

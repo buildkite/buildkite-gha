@@ -672,6 +672,8 @@ func runSecretsMigration(ctx context.Context, workflowPath string, stdout io.Wri
 	if len(workflow) > maxMigrationFileBytes {
 		return fmt.Errorf("workflow exceeds %d bytes", maxMigrationFileBytes)
 	}
+	// Git can check out the committed LF workflow as CRLF on Windows.
+	workflow = bytes.ReplaceAll(workflow, []byte("\r\n"), []byte("\n"))
 	manifest, err := decodeMigrationManifest(workflow)
 	if err != nil {
 		return err
@@ -717,7 +719,15 @@ func runSecretsMigration(ctx context.Context, workflowPath string, stdout io.Wri
 		return fmt.Errorf("encode migration grant: %w", err)
 	}
 	endpoint := fmt.Sprintf("/clusters/%s/github-actions-secret-migrations", manifest.Cluster)
-	output, err := runBuildkiteAPI(ctx, runner, manifest.Organization, endpoint, []string{"--method", "POST", "--data", string(data)}, nil)
+	args := []string{"--method", "POST", "--data", string(data)}
+	var stdin []byte
+	// Keep ordinary requests compatible with released bk. Large requests need
+	// bk api --data - to avoid Windows' 32,767-character process argument limit.
+	if len(data) > 16<<10 {
+		args[3] = "-"
+		stdin = data
+	}
+	output, err := runBuildkiteAPI(ctx, runner, manifest.Organization, endpoint, args, stdin)
 	if err != nil {
 		return fmt.Errorf("create Buildkite migration grant with bk: %w", err)
 	}

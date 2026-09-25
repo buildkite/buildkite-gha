@@ -118,6 +118,14 @@ func TestValidateSecretsPolicyAcceptsBuildkiteClaimTypes(t *testing.T) {
 	}
 }
 
+func TestValidateSecretsPolicyCanonicalizesCRLF(t *testing.T) {
+	policy := "- pipeline_slug: widgets\r\n  build_branch: main\r\n"
+	got, err := validateSecretsPolicy(policy)
+	if err != nil || got != "- pipeline_slug: widgets\n  build_branch: main\n" {
+		t.Fatalf("validateSecretsPolicy() = %q, %v", got, err)
+	}
+}
+
 func TestSelectMigrationSecretNames(t *testing.T) {
 	t.Run("interactive explicit selection", func(t *testing.T) {
 		var prompt bytes.Buffer
@@ -411,7 +419,7 @@ func TestRunSecretsMigrationPinsCommittedWorkflowCreatesGrantAndDispatches(t *te
 	}
 	grantCommand := runner.commands[3]
 	dataIndex := slices.Index(grantCommand.args, "--data")
-	if grantCommand.name != "bk" || !slices.Equal(runner.envs[3], []string{"BUILDKITE_ORGANIZATION_SLUG=acme"}) || dataIndex < 0 || dataIndex+1 >= len(grantCommand.args) {
+	if grantCommand.name != "bk" || !slices.Equal(runner.envs[3], []string{"BUILDKITE_ORGANIZATION_SLUG=acme"}) || dataIndex < 0 || dataIndex+1 >= len(grantCommand.args) || grantCommand.stdin != nil {
 		t.Fatalf("grant command/env = %#v/%q", grantCommand, runner.envs[3])
 	}
 	var grantRequest map[string]any
@@ -427,6 +435,84 @@ func TestRunSecretsMigrationPinsCommittedWorkflowCreatesGrantAndDispatches(t *te
 	}
 	if !strings.Contains(stdout.String(), "Remove the workflow") {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunSecretsMigrationPipesLargeGrant(t *testing.T) {
+	t.Chdir(t.TempDir())
+	workflowPath := ".github/workflows/migrate.yml"
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := testMigrationManifest()
+	manifest.Policy = "- build_branch: " + strings.Repeat("a", 20<<10) + "\n"
+	workflow, err := renderOIDCSecretsMigrationWorkflow(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	remote, _ := json.Marshal(map[string]string{"encoding": "base64", "content": base64.StdEncoding.EncodeToString(workflow)})
+	runner := &migrationTestRunner{results: []migrationCommandResult{
+		{output: []byte(`{"id":42,"full_name":"acme/widgets","html_url":"https://github.com/acme/widgets","default_branch":"main","owner":{"id":7}}`)},
+		{output: []byte(testMigrationCommit + "\n")},
+		{output: remote},
+		{err: errors.New("grant disabled for test")},
+	}}
+	err = runSecretsMigration(t.Context(), workflowPath, io.Discard, runner)
+	if err == nil || !strings.Contains(err.Error(), "grant disabled for test") || len(runner.commands) != 4 {
+		t.Fatalf("runSecretsMigration() error = %v, commands = %d", err, len(runner.commands))
+	}
+	grant := runner.commands[3]
+	if grant.name != "bk" || !slices.Contains(grant.args, "--data") || !slices.Contains(grant.args, "-") || len(grant.stdin) <= 16<<10 {
+		t.Fatalf("grant args = %q, stdin size = %d", grant.args, len(grant.stdin))
+	}
+	var request struct {
+		Policy string `json:"policy"`
+	}
+	if err := json.Unmarshal(grant.stdin, &request); err != nil || request.Policy != manifest.Policy {
+		t.Fatalf("grant policy length = %d, error = %v", len(request.Policy), err)
+	}
+}
+
+func TestRunSecretsMigrationAcceptsCRLFCheckoutButRejectsTampering(t *testing.T) {
+	t.Chdir(t.TempDir())
+	workflowPath := ".github/workflows/migrate.yml"
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow, err := renderOIDCSecretsMigrationWorkflow(testMigrationManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, _ := json.Marshal(map[string]string{"encoding": "base64", "content": base64.StdEncoding.EncodeToString(workflow)})
+	for _, test := range []struct {
+		name     string
+		local    []byte
+		remote   []byte
+		wantErr  string
+		commands int
+	}{
+		{name: "Git CRLF checkout", local: bytes.ReplaceAll(workflow, []byte("\n"), []byte("\r\n")), remote: remote, wantErr: "create Buildkite migration grant", commands: 4},
+		{name: "local change", local: bytes.Replace(bytes.ReplaceAll(workflow, []byte("\n"), []byte("\r\n")), []byte("timeout-minutes: 10"), []byte("timeout-minutes: 11"), 1), remote: remote, wantErr: "workflow differs from the deterministic", commands: 0},
+		{name: "remote change", local: bytes.ReplaceAll(workflow, []byte("\n"), []byte("\r\n")), remote: []byte(`{"encoding":"base64","content":"` + base64.StdEncoding.EncodeToString(bytes.Replace(workflow, []byte("timeout-minutes: 10"), []byte("timeout-minutes: 11"), 1)) + `"}`), wantErr: "local workflow differs", commands: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(workflowPath, test.local, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runner := &migrationTestRunner{results: []migrationCommandResult{
+				{output: []byte(`{"id":42,"full_name":"acme/widgets","html_url":"https://github.com/acme/widgets","default_branch":"main","owner":{"id":7}}`)},
+				{output: []byte(testMigrationCommit + "\n")},
+				{output: test.remote},
+				{err: errors.New("grant disabled for test")},
+			}}
+			err := runSecretsMigration(t.Context(), workflowPath, io.Discard, runner)
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) || len(runner.commands) != test.commands {
+				t.Fatalf("runSecretsMigration() error = %v, commands = %d", err, len(runner.commands))
+			}
+		})
 	}
 }
 

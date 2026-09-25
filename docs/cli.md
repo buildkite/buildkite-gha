@@ -311,6 +311,9 @@ buildkite-gha migrate-secrets prepare \
 The Buildkite API token used by `bk` needs `read_pipelines`,
 `read_secrets_details`, and `write_secrets`. Its user also needs
 `manage_cluster` permission for the destination cluster.
+Large custom policies require a `bk` release that supports `api --data -`
+(reading request data from stdin). Until that release is installed, use a
+smaller policy; ordinary grants still work with existing `bk` versions.
 
 Without `--secret` or `--match`, the command lists the repository's Actions
 secret names and prompts for a selection. It selects a Buildkite pipeline
@@ -334,8 +337,9 @@ buildkite-gha migrate-secrets run \
   --workflow .github/workflows/migrate-buildkite-secrets.yml
 ```
 
-`run` verifies that the local file exactly matches the workflow at a resolved
-default-branch commit. It creates a short-lived, one-use Buildkite migration
+`run` verifies that the local file matches the workflow at a resolved
+default-branch commit, allowing Git's CRLF checkout conversion on Windows.
+It creates a short-lived, one-use Buildkite migration
 grant bound to that commit, then dispatches the default branch through `gh`.
 The workflow obtains a GitHub-signed OIDC identity and sends all selected
 values to Buildkite in one in-memory HTTPS request. Values never enter local
