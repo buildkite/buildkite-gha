@@ -331,38 +331,64 @@ func TestGeneratedOIDCMigrationSendsOneInMemoryBatchWithoutLeakingValues(t *test
 	}
 }
 
-func TestGeneratedOIDCMigrationDoesNotPrintBackendResponse(t *testing.T) {
+func TestGeneratedOIDCMigrationPrintsOnlySafeBackendMessage(t *testing.T) {
 	generated, err := renderOIDCSecretsMigrationWorkflow(testMigrationManifest())
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := migrationWorkflowScript(t, generated)
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/oidc" {
-			_ = json.NewEncoder(response).Encode(map[string]string{"value": "github-oidc-token"})
-			return
-		}
-		response.WriteHeader(http.StatusConflict)
-		_, _ = io.WriteString(response, `{"message":"sensitive backend detail"}`)
-	}))
-	defer server.Close()
-	script = strings.Replace(script,
-		`migration_url_prefix = "https://api.buildkite.com/v2/organizations/acme/clusters/11111111-2222-4333-8444-555555555555/github-actions-secret-migrations/"`,
-		`migration_url_prefix = "`+server.URL+`/"`, 1)
-	command := exec.Command("bash", "-c", script)
-	command.Env = append(command.Environ(),
-		"GITHUB_REF=refs/heads/main", "DEFAULT_BRANCH=main", "GRANT_ID=grant-identifier-123",
-		"ACTIONS_ID_TOKEN_REQUEST_URL="+server.URL+"/oidc", "ACTIONS_ID_TOKEN_REQUEST_TOKEN=github-request-token",
-		"MIGRATION_SECRET_000=first-secret-value", "MIGRATION_SECRET_001=second-secret-value",
-	)
-	output, runErr := command.CombinedOutput()
-	if runErr == nil || !strings.Contains(string(output), "HTTP 409") {
-		t.Fatalf("generated script error/output = %v/%q", runErr, output)
-	}
-	for _, forbidden := range []string{"sensitive backend detail", "first-secret-value", "second-secret-value"} {
-		if strings.Contains(string(output), forbidden) {
-			t.Fatalf("generated script leaked %q in %q", forbidden, output)
-		}
+	for _, test := range []struct {
+		name, body, want string
+		status           int
+	}{
+		{
+			name:   "message",
+			status: http.StatusConflict,
+			body:   `{"message":"Destination already contains one or more requested secret keys"}`,
+			want:   "Buildkite rejected the migration with HTTP 409: Destination already contains one or more requested secret keys; no Buildkite secrets were created\n",
+		},
+		{
+			name:   "reflected value",
+			status: http.StatusUnprocessableEntity,
+			body:   `{"message":"Secret values are invalid: second-secret-value"}`,
+			want:   "Buildkite rejected the migration with HTTP 422; no Buildkite secrets were created\n",
+		},
+		{
+			name:   "workflow command",
+			status: http.StatusBadRequest,
+			body:   `{"message":"Bad\n::error::injected"}`,
+			want:   "Buildkite rejected the migration with HTTP 400: Bad ::error::injected; no Buildkite secrets were created\n",
+		},
+		{
+			name:   "server error",
+			status: http.StatusBadGateway,
+			body:   `<html>Bad Gateway</html>`,
+			want:   "Buildkite rejected the migration with HTTP 502; no existing value was overwritten\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == "/oidc" {
+					_ = json.NewEncoder(response).Encode(map[string]string{"value": "github-oidc-token"})
+					return
+				}
+				response.WriteHeader(test.status)
+				_, _ = io.WriteString(response, test.body)
+			}))
+			defer server.Close()
+			script := strings.Replace(migrationWorkflowScript(t, generated),
+				`migration_url_prefix = "https://api.buildkite.com/v2/organizations/acme/clusters/11111111-2222-4333-8444-555555555555/github-actions-secret-migrations/"`,
+				`migration_url_prefix = "`+server.URL+`/"`, 1)
+			command := exec.Command("bash", "-c", script)
+			command.Env = append(command.Environ(),
+				"GITHUB_REF=refs/heads/main", "DEFAULT_BRANCH=main", "GRANT_ID=grant-identifier-123",
+				"ACTIONS_ID_TOKEN_REQUEST_URL="+server.URL+"/oidc", "ACTIONS_ID_TOKEN_REQUEST_TOKEN=github-request-token",
+				"MIGRATION_SECRET_000=first-secret-value", "MIGRATION_SECRET_001=second-secret-value",
+			)
+			output, runErr := command.CombinedOutput()
+			if runErr == nil || string(output) != test.want {
+				t.Fatalf("generated script error/output = %v/%q, want output %q", runErr, output, test.want)
+			}
+		})
 	}
 }
 
@@ -371,18 +397,28 @@ func TestGeneratedOIDCMigrationValidatesAllValuesBeforeRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("bash", "-c", migrationWorkflowScript(t, generated))
-	command.Env = append(command.Environ(),
-		"GITHUB_REF=refs/heads/main", "DEFAULT_BRANCH=main", "GRANT_ID=grant-identifier-123",
-		"ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:1/should-not-run", "ACTIONS_ID_TOKEN_REQUEST_TOKEN=github-request-token",
-		"MIGRATION_SECRET_000=first-secret-value", "MIGRATION_SECRET_001=   ",
-	)
-	output, runErr := command.CombinedOutput()
-	if runErr == nil || !strings.Contains(string(output), "DEPLOY_TOKEN is missing or empty; no Buildkite secrets were created") {
-		t.Fatalf("generated script error/output = %v/%q", runErr, output)
-	}
-	if strings.Contains(string(output), "first-secret-value") {
-		t.Fatalf("generated script leaked a validated value in %q", output)
+	for _, test := range []struct {
+		name, value, want string
+	}{
+		{name: "empty", value: "", want: "DEPLOY_TOKEN is missing or empty; no Buildkite secrets were created"},
+		{name: "whitespace", value: " \t\n ", want: "DEPLOY_TOKEN contains only whitespace; no Buildkite secrets were created"},
+		{name: "oversize", value: strings.Repeat("é", 16384), want: "DEPLOY_TOKEN is 32768 bytes; Buildkite secrets must be smaller than 32768 bytes; no Buildkite secrets were created"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.Command("bash", "-c", migrationWorkflowScript(t, generated))
+			command.Env = append(command.Environ(),
+				"GITHUB_REF=refs/heads/main", "DEFAULT_BRANCH=main", "GRANT_ID=grant-identifier-123",
+				"ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:1/should-not-run", "ACTIONS_ID_TOKEN_REQUEST_TOKEN=github-request-token",
+				"MIGRATION_SECRET_000=first-secret-value", "MIGRATION_SECRET_001="+test.value,
+			)
+			output, runErr := command.CombinedOutput()
+			if runErr == nil || !strings.Contains(string(output), test.want) {
+				t.Fatalf("generated script error/output = %v/%q", runErr, output)
+			}
+			if strings.Contains(string(output), "first-secret-value") {
+				t.Fatalf("generated script leaked a validated value in %q", output)
+			}
+		})
 	}
 }
 
