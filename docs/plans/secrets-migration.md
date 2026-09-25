@@ -56,10 +56,12 @@ It contains:
 - Success output containing destination names only, followed by instructions
   to remove the workflow.
 
-The workflow validates every selected value before making the request. It
-disables shell tracing, rejects redirects, and does not print backend response
-bodies. The backend must also exclude values from validation errors, audit
-events, and application logs.
+The workflow validates every selected value before making the request, naming
+the key and reason for any failure. It disables shell tracing and rejects
+redirects. From a backend error body it prints only the JSON `message`, on one
+line of printable ASCII, and omits it if it contains a submitted value. The
+backend must exclude values from validation errors, audit events, and
+application logs; its errors may name keys and fixed reasons.
 
 ## Backend contract
 
