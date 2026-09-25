@@ -1901,6 +1901,12 @@ or for one minute if GitHub supplies none. Already running requests may finish;
 cached refs and exact commit pins remain usable. Rate-limit suppression stays
 local to that resolver and is not written to source caches.
 
+Within a compilation, repeated missing refs reuse the same failure after all
+required API lookups return HTTP 404. Authentication, network, server, and
+cancellation failures are not cached as missing. Permitted Git fallback still
+runs. Later compilations retry missing refs, and every affected action keeps
+its diagnostic.
+
 Nested calls from a repository-local composite must be local. Public composites may call local children or other public actions; every child is resolved and locked.
 
 Prebuilt-image actions declare `docker://` in action metadata, not in a
