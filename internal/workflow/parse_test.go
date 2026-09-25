@@ -154,6 +154,8 @@ func TestParseMergeGroupTypes(t *testing.T) {
 		{types: ""},
 		{types: "    types: []\n"},
 		{types: "    types: [ # empty\n    ]\n"},
+		{types: "    types: null\n"},
+		{types: "    types: [null]\n", want: []string{"null"}},
 		{types: "    types: [checks_requested]\n", want: []string{"checks_requested"}},
 	} {
 		source := "on:\n  merge_group:\n" + test.types + "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
