@@ -85,7 +85,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 			trigger.FilterSpans[key.Value] = Span{Start: position, End: position}
 		}
 		switch trigger.Event {
-		case "issues", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment":
+		case "issues", "issue_comment", "fork", "public", "gollum", "page_build", "watch", "milestone", "branch_protection_rule", "discussion", "discussion_comment":
 			if types := mappingValue(node, "types"); types != nil && types.Tag == "!!null" {
 				trigger.Types = nil
 			}

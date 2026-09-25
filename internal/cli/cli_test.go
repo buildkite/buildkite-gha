@@ -96,48 +96,54 @@ func TestRunEmptyIssueTypesNativeFixtures(t *testing.T) {
 	}
 }
 
-func TestRunIssuesNullTypes(t *testing.T) {
+func TestRunNullActivityTypes(t *testing.T) {
 	requireImporterHost(t)
 	t.Setenv("BUILDKITE", "true")
-	t.Setenv("BUILDKITE_STEP_KEY", "issues-importer")
-	for _, test := range []struct{ configuration, condition string }{
-		{"{}", "(true)"},
-		{"{types: null}", "(true)"},
-		{"{types: []}", "(true)"},
-		{"{types: [opened]}", `(true && ("opened" == "opened"))`},
-		{"{types: [closed]}", `(true && ("opened" == "closed"))`},
+	t.Setenv("BUILDKITE_STEP_KEY", "activity-types-importer")
+	for _, event := range []struct {
+		name, action, excluded string
+		payload                map[string]any
+	}{
+		{"issues", "opened", "closed", map[string]any{"action": "opened", "issue": map[string]any{"number": 1, "title": "Null types"}}},
+		{"issue_comment", "created", "deleted", map[string]any{"action": "created", "issue": map[string]any{"number": 1}, "comment": map[string]any{"id": 2}}},
 	} {
-		t.Run(test.configuration, func(t *testing.T) {
-			dir := t.TempDir()
-			workflowPath := filepath.Join(dir, "issues.yml")
-			source := "on: {issues: " + test.configuration + "}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
-			if err := os.WriteFile(workflowPath, []byte(source), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			var stdout, stderr bytes.Buffer
-			if code := Run([]string{"validate", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
-				t.Fatalf("validate code = %d, stdout = %s, stderr = %s", code, &stdout, &stderr)
-			}
-			eventPath := writeUploadEvent(t, dir, "issues", "refs/heads/main", map[string]any{
-				"action": "opened", "issue": map[string]any{"number": 1, "title": "Null types"},
+		for _, test := range []struct{ configuration, condition string }{
+			{"{}", "(true)"},
+			{"{types: null}", "(true)"},
+			{"{types: []}", "(true)"},
+			{"{types: [" + event.action + "]}", `(true && ("` + event.action + `" == "` + event.action + `"))`},
+			{"{types: [" + event.excluded + "]}", `(true && ("` + event.action + `" == "` + event.excluded + `"))`},
+		} {
+			t.Run(event.name+"/"+test.configuration, func(t *testing.T) {
+				dir := t.TempDir()
+				workflowPath := filepath.Join(dir, event.name+".yml")
+				source := "on: {" + event.name + ": " + test.configuration + "}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+				if err := os.WriteFile(workflowPath, []byte(source), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var stdout, stderr bytes.Buffer
+				if code := Run([]string{"validate", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+					t.Fatalf("validate code = %d, stdout = %s, stderr = %s", code, &stdout, &stderr)
+				}
+				eventPath := writeUploadEvent(t, dir, event.name, "refs/heads/main", event.payload)
+				runner := &cliCaptureRunner{}
+				if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+					t.Fatalf("upload code = %d, stderr = %s", code, &stderr)
+				}
+				var pipeline struct {
+					Steps []struct {
+						Condition string `yaml:"if"`
+						Skip      any    `yaml:"skip"`
+					} `yaml:"steps"`
+				}
+				if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+					t.Fatal(err)
+				}
+				if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != nil || pipeline.Steps[0].Condition != test.condition {
+					t.Fatalf("pipeline steps = %#v, want condition %q without skip", pipeline.Steps, test.condition)
+				}
 			})
-			runner := &cliCaptureRunner{}
-			if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
-				t.Fatalf("upload code = %d, stderr = %s", code, &stderr)
-			}
-			var pipeline struct {
-				Steps []struct {
-					Condition string `yaml:"if"`
-					Skip      any    `yaml:"skip"`
-				} `yaml:"steps"`
-			}
-			if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
-				t.Fatal(err)
-			}
-			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != nil || pipeline.Steps[0].Condition != test.condition {
-				t.Fatalf("pipeline steps = %#v, want condition %q without skip", pipeline.Steps, test.condition)
-			}
-		})
+		}
 	}
 }
 

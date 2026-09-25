@@ -121,26 +121,28 @@ func TestParseIssueTypes(t *testing.T) {
 	}
 }
 
-func TestParseIssuesNullTypes(t *testing.T) {
-	for _, test := range []struct {
-		types string
-		want  []string
-	}{
-		{types: "null"},
-		{types: "'null'", want: []string{"null"}},
-		{types: "[null]", want: []string{"null"}},
-		{types: "[opened]", want: []string{"opened"}},
-	} {
-		t.Run(test.types, func(t *testing.T) {
-			source := "on: {issues: {types: " + test.types + "}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
-			parsed, err := Parse("types.yml", []byte(source))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(parsed.Triggers) != 1 || !reflect.DeepEqual(parsed.Triggers[0].Types, test.want) {
-				t.Fatalf("triggers = %#v, want issues types %#v", parsed.Triggers, test.want)
-			}
-		})
+func TestParseNullActivityTypes(t *testing.T) {
+	for _, event := range []string{"issues", "issue_comment"} {
+		for _, test := range []struct {
+			types string
+			want  []string
+		}{
+			{types: "null"},
+			{types: "'null'", want: []string{"null"}},
+			{types: "[null]", want: []string{"null"}},
+			{types: "[edited]", want: []string{"edited"}},
+		} {
+			t.Run(event+"/"+test.types, func(t *testing.T) {
+				source := "on: {" + event + ": {types: " + test.types + "}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+				parsed, err := Parse("types.yml", []byte(source))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(parsed.Triggers) != 1 || !reflect.DeepEqual(parsed.Triggers[0].Types, test.want) {
+					t.Fatalf("triggers = %#v, want %s types %#v", parsed.Triggers, event, test.want)
+				}
+			})
+		}
 	}
 }
 
