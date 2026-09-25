@@ -1893,6 +1893,14 @@ parts with values supported by their runtime surface. Action references in
 
 Mutable public refs are resolved during upload, then locked to a commit. The importer lazily requests one Buildkite action-source token and reuses it across all workflow roots and nested composite actions. This token authenticates only public metadata requests for repositories other than the credential repository; the credential repository and codeload requests remain anonymous. If token issuance is unavailable during rollout, resolution safely falls back to anonymous GitHub API access. Exact lowercase commit SHAs need no GitHub API lookup. Complete source trees are verified again at runtime.
 
+Authenticated resolution shares successful repository visibility checks within
+each compilation. Later compilations recheck visibility when resolving uncached
+refs. When GitHub rate-limits requests, the resolver suppresses new API requests
+against the affected authenticated or anonymous budget until the retry deadline,
+or for one minute if GitHub supplies none. Already running requests may finish;
+cached refs and exact commit pins remain usable. Rate-limit suppression stays
+local to that resolver and is not written to source caches.
+
 Nested calls from a repository-local composite must be local. Public composites may call local children or other public actions; every child is resolved and locked.
 
 Prebuilt-image actions declare `docker://` in action metadata, not in a
