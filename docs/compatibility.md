@@ -243,8 +243,8 @@ preview.
 ### Repository label lifecycle events
 
 `label` supports `created`, `edited`, and `deleted` activities, all by default.
-Scalar, array, null, empty-map, and `types: []` declarations select all three;
-explicit `types` selects a subset. Issue/PR `labeled` actions and branch/tag/path
+Scalar, array, null, empty-map, `types: null`, and `types: []` declarations select
+all three; explicit `types` selects a subset. Issue/PR `labeled` actions and branch/tag/path
 filters are not label lifecycle events and are rejected.
 
 Pipeline Triggers require a compatible backend and the original linked payload.
