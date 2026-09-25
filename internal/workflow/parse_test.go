@@ -146,6 +146,29 @@ func TestParseNullActivityTypes(t *testing.T) {
 	}
 }
 
+func TestParsePullRequestNullAndEmptyTypes(t *testing.T) {
+	for _, test := range []struct {
+		types string
+		want  []string
+	}{
+		{types: "null"},
+		{types: "[]"},
+		{types: "[null]", want: []string{"null"}},
+		{types: "[edited]", want: []string{"edited"}},
+	} {
+		t.Run(test.types, func(t *testing.T) {
+			source := "on: {pull_request: {types: " + test.types + "}}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+			parsed, err := Parse("types.yml", []byte(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(parsed.Triggers) != 1 || !reflect.DeepEqual(parsed.Triggers[0].Types, test.want) {
+				t.Fatalf("triggers = %#v, want pull_request types %#v", parsed.Triggers, test.want)
+			}
+		})
+	}
+}
+
 func TestParseMergeGroupTypes(t *testing.T) {
 	for _, test := range []struct {
 		types string
@@ -215,9 +238,10 @@ func TestParseEmptyIssueTypesTogether(t *testing.T) {
 
 func TestParseEmptyIssueTypesPreservesDiagnostics(t *testing.T) {
 	for _, test := range []struct{ on, want string }{
-		{"issues: {types: []}\n  pull_request: {types: []}", `"types" section should not be empty`},
+		{"issues: {types: []}\n  pull_request: {types: []}", `types.yml:7:12: "steps" section should not be empty`},
 		{"issue_comment: {types: []}\n  release: {types: []}", `types.yml:7:12: "steps" section should not be empty`},
-		{"issues: {types: &empty []}\n  pull_request: {types: *empty}", `"types" section should not be empty`},
+		{"issues: {types: &empty []}\n  pull_request: {types: *empty}", `types.yml:7:12: "steps" section should not be empty`},
+		{"issues: {types: &empty []}\n  push: {types: *empty}", `"types" section should not be empty`},
 		{"issues: {types: {}}", "sequence"},
 		{"issue_comment: {types: null}", "should not be empty"},
 		{"issues: {types: ''}", "should not be empty"},
