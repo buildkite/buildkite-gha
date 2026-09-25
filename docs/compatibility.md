@@ -510,7 +510,7 @@ the group condition, and the provider-check suffix.
 Supported `pull_request` activity types are `assigned`, `unassigned`, `labeled`, `unlabeled`, `opened`, `edited`, `closed`, `reopened`, `synchronize`, `converted_to_draft`, `locked`, `unlocked`, `enqueued`, `dequeued`, `milestoned`, `demilestoned`, `ready_for_review`, `review_requested`, `review_request_removed`, `auto_merge_enabled`, and `auto_merge_disabled`.
 
 Both review events accept scalar, array, and map `on` declarations, including
-empty maps and `types: []` for all activities. Unknown types and branch, tag,
+empty maps, `types: null`, and `types: []` for all activities. Unknown types and branch, tag,
 path, and workflow filters are rejected. The workflow and checkout use the PR
 head SHA, not the synthetic merge commit or an older reviewed commit; the event
 ref remains `refs/pull/<number>/merge`. There is no default-branch-only workflow
