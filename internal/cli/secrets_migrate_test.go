@@ -35,16 +35,24 @@ type migrationCommandResult struct {
 type migrationTestRunner struct {
 	results  []migrationCommandResult
 	commands []cliCommand
+	envs     [][]string
 }
 
 func (r *migrationTestRunner) Run(_ context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
 	r.commands = append(r.commands, cliCommand{dir: dir, name: name, args: slices.Clone(args), stdin: bytes.Clone(stdin)})
+	r.envs = append(r.envs, nil)
 	if len(r.results) == 0 {
 		return nil, errors.New("unexpected command")
 	}
 	result := r.results[0]
 	r.results = r.results[1:]
 	return bytes.Clone(result.output), result.err
+}
+
+func (r *migrationTestRunner) RunWithEnv(ctx context.Context, dir, name string, args []string, stdin []byte, env []string) ([]byte, error) {
+	output, err := r.Run(ctx, dir, name, args, stdin)
+	r.envs[len(r.envs)-1] = slices.Clone(env)
+	return output, err
 }
 
 func TestParseMigrateSecretsPrepareArgs(t *testing.T) {
@@ -207,10 +215,10 @@ func TestRejectExistingBuildkiteSecretsBeforeWorkflowGeneration(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "API_KEY") || !strings.Contains(err.Error(), "will not be overwritten") {
 		t.Fatalf("rejectExistingBuildkiteSecrets() error = %v", err)
 	}
-	if command := runner.commands[0]; command.name != "env" || !slices.Equal(command.args, []string{
-		"BUILDKITE_ORGANIZATION_SLUG=acme", "bk", "api", "/clusters/" + testMigrationCluster + "/secrets?per_page=100&page=1", "--no-input",
-	}) {
-		t.Fatalf("list command = %#v", command)
+	if command := runner.commands[0]; command.name != "bk" || !slices.Equal(command.args, []string{
+		"api", "/clusters/" + testMigrationCluster + "/secrets?per_page=100&page=1", "--no-input",
+	}) || !slices.Equal(runner.envs[0], []string{"BUILDKITE_ORGANIZATION_SLUG=acme"}) {
+		t.Fatalf("list command/env = %#v/%q", command, runner.envs[0])
 	}
 }
 
@@ -403,8 +411,8 @@ func TestRunSecretsMigrationPinsCommittedWorkflowCreatesGrantAndDispatches(t *te
 	}
 	grantCommand := runner.commands[3]
 	dataIndex := slices.Index(grantCommand.args, "--data")
-	if grantCommand.name != "env" || !slices.Contains(grantCommand.args, "BUILDKITE_ORGANIZATION_SLUG=acme") || dataIndex < 0 || dataIndex+1 >= len(grantCommand.args) {
-		t.Fatalf("grant command = %#v", grantCommand)
+	if grantCommand.name != "bk" || !slices.Equal(runner.envs[3], []string{"BUILDKITE_ORGANIZATION_SLUG=acme"}) || dataIndex < 0 || dataIndex+1 >= len(grantCommand.args) {
+		t.Fatalf("grant command/env = %#v/%q", grantCommand, runner.envs[3])
 	}
 	var grantRequest map[string]any
 	if err := json.Unmarshal([]byte(grantCommand.args[dataIndex+1]), &grantRequest); err != nil {

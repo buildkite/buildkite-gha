@@ -458,10 +458,16 @@ func rejectExistingBuildkiteSecrets(ctx context.Context, runner transport.Runner
 }
 
 func runBuildkiteAPI(ctx context.Context, runner transport.Runner, organization, endpoint string, args []string, stdin []byte) ([]byte, error) {
-	commandArgs := []string{"BUILDKITE_ORGANIZATION_SLUG=" + organization, "bk", "api", endpoint}
+	commandArgs := []string{"api", endpoint}
 	commandArgs = append(commandArgs, args...)
 	commandArgs = append(commandArgs, "--no-input")
-	return runner.Run(ctx, "", "env", commandArgs, stdin)
+	scopedRunner, ok := runner.(interface {
+		RunWithEnv(context.Context, string, string, []string, []byte, []string) ([]byte, error)
+	})
+	if !ok {
+		return nil, errors.New("runner cannot set the Buildkite organization for bk")
+	}
+	return scopedRunner.RunWithEnv(ctx, "", "bk", commandArgs, stdin, []string{"BUILDKITE_ORGANIZATION_SLUG=" + organization})
 }
 
 func validateMigrationWorkflowPath(workflowPath string) error {
