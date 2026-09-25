@@ -57,21 +57,24 @@ func (w *synchronizedWriter) Write(data []byte) (int, error) {
 	return w.w.Write(data)
 }
 
-func validateBatch(args []string, stderr io.Writer, clientVersion string) int {
+func validateBatch(ctx context.Context, args []string, stderr io.Writer, clientVersion string) int {
 	options, err := parseBatchValidationArgs(args)
 	if err != nil {
 		return usageError(stderr, "validate-batch: %v", err)
 	}
+	// Keep default signal handling during the non-cancelable manifest read.
 	records, err := loadBatchValidationManifest(options.manifest)
 	if err != nil {
 		return usageError(stderr, "validate-batch: %v", err)
 	}
+	ctx, stopSignals := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 	var resolverOptions, storeOptions []actionsource.Option
 	if options.actionCacheMaxBytes > 0 {
 		storeOptions = append(storeOptions, actionsource.WithCacheMaxBytes(options.actionCacheMaxBytes))
 	}
 	if options.actionResolutionSnapshot != "" {
-		resolverOptions = append(resolverOptions, actionsource.WithActionResolutionSnapshot(options.actionResolutionSnapshot, options.refreshActionResolutionSnapshot))
+		resolverOptions = append(resolverOptions, actionsource.WithActionResolutionSnapshotContext(ctx, options.actionResolutionSnapshot, options.refreshActionResolutionSnapshot))
 	}
 	if options.githubTokenEnv != "" {
 		token, ok := os.LookupEnv(options.githubTokenEnv)
@@ -80,7 +83,7 @@ func validateBatch(args []string, stderr io.Writer, clientVersion string) int {
 		}
 		resolverOptions = append(resolverOptions, actionsource.WithGitHubAPITokenProvider(func(context.Context) (string, error) { return token, nil }))
 	}
-	actionSource, cleanup, resolutionSnapshotID, err := newHostedActionSourceWithSnapshot(context.Background(), options.actionCacheDir, clientVersion, resolverOptions, storeOptions)
+	actionSource, cleanup, resolutionSnapshotID, err := newHostedActionSourceWithSnapshot(ctx, options.actionCacheDir, clientVersion, resolverOptions, storeOptions)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate-batch: %v\n", err)
 		return 1
@@ -93,10 +96,8 @@ func validateBatch(args []string, stderr io.Writer, clientVersion string) int {
 	}
 	runtime := &profileValidationRuntime{actionSource: actionSource, distributionDigest: distributionDigest}
 	workerStderr := &synchronizedWriter{w: stderr}
-	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	defer stopSignals()
 	work := make(chan batchValidationRecord)
 	failures := make(chan error, 1)
 	var completed atomic.Int64

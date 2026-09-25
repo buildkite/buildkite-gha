@@ -2335,7 +2335,7 @@ func TestActionResolutionSnapshotRetriesStorageFailures(t *testing.T) {
 			t.Run(operation, func(t *testing.T) {
 				actionResolutionSnapshotStorage = original
 				root := t.TempDir()
-				prior, err := newActionResolutionSnapshot(root, false)
+				prior, err := newActionResolutionSnapshot(t.Context(), root, false)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -2344,11 +2344,11 @@ func TestActionResolutionSnapshotRetriesStorageFailures(t *testing.T) {
 				if operation == "short write" {
 					wantErr = io.ErrShortWrite
 				}
-				if _, err := newActionResolutionSnapshot(root, true); !errors.Is(err, wantErr) {
+				if _, err := newActionResolutionSnapshot(t.Context(), root, true); !errors.Is(err, wantErr) {
 					t.Fatalf("refresh error = %v, want %v", err, wantErr)
 				}
 				actionResolutionSnapshotStorage = original
-				retried, err := newActionResolutionSnapshot(root, false)
+				retried, err := newActionResolutionSnapshot(t.Context(), root, false)
 				if err != nil || retried.generation != prior.generation {
 					t.Fatalf("retry = %#v, %v; want generation %q", retried, err, prior.generation)
 				}
@@ -2366,11 +2366,11 @@ func TestActionResolutionSnapshotRetriesStorageFailures(t *testing.T) {
 				if operation == "short write" {
 					wantErr = io.ErrShortWrite
 				}
-				if _, err := newActionResolutionSnapshot(root, false); !errors.Is(err, wantErr) {
+				if _, err := newActionResolutionSnapshot(t.Context(), root, false); !errors.Is(err, wantErr) {
 					t.Fatalf("initialization error = %v, want %v", err, wantErr)
 				}
 				actionResolutionSnapshotStorage = original
-				if _, err := newActionResolutionSnapshot(root, false); err != nil {
+				if _, err := newActionResolutionSnapshot(t.Context(), root, false); err != nil {
 					t.Fatalf("retry: %v", err)
 				}
 			})
@@ -2381,7 +2381,7 @@ func TestActionResolutionSnapshotRetriesStorageFailures(t *testing.T) {
 		for _, operation := range []string{"claim create", "claim close", "entry create", "entry write", "entry short write", "entry close", "entry rename"} {
 			t.Run(operation, func(t *testing.T) {
 				actionResolutionSnapshotStorage = original
-				snapshot, err := newActionResolutionSnapshot(t.TempDir(), false)
+				snapshot, err := newActionResolutionSnapshot(t.Context(), t.TempDir(), false)
 				if err != nil {
 					t.Fatal(err)
 				}

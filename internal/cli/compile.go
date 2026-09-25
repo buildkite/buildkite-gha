@@ -16,7 +16,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/workflowprocessing"
 )
 
-func compile(args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
+func compile(ctx context.Context, args []string, stdout, stderr io.Writer, clientVersion string, agent transport.Agent) int {
 	version := commandVersion(clientVersion)
 	workflowPath, eventPath, format, err := compileArgs(args)
 	if err != nil {
@@ -25,7 +25,7 @@ func compile(args []string, stdout, stderr io.Writer, clientVersion string, agen
 	if eventPath == "" {
 		return usageError(stderr, "compile: --event-path is required")
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	out := newProcessingOutput(ctx, "compile", "text", stderr, stderr, agent)
 	event, eventErr := os.ReadFile(eventPath)

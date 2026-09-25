@@ -499,6 +499,10 @@ func apiURL(base *url.URL, parts ...string) *url.URL {
 func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
 	authenticated := actionSourceToken(r.cfg, parts) != ""
 	if err := r.apiBudget.check(ctx, authenticated, r.cfg.now()); err != nil {
+		var rate *RateLimitError
+		if errors.As(err, &rate) {
+			recordGitHubAPISuppression(ctx, authenticated, parts)
+		}
 		return err
 	}
 	err := githubAPIGet(ctx, r.client, r.cfg, parts, out)
@@ -518,17 +522,26 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	c := *client
 	c.Jar = nil
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	observation := beginGitHubAPIRequest(ctx, req.Header.Get("Authorization") != "", parts)
+	status, outcome := 0, apiOutcomeTransportError
+	defer func() { observation.finish(status, outcome) }()
 	resp, err := c.Do(req)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			outcome = apiOutcomeCanceled
+		}
 		return fmt.Errorf("GitHub API request: %w", err)
 	}
+	status, outcome = resp.StatusCode, apiOutcomeResponse
 	defer func() { _ = resp.Body.Close() }()
 	lr := io.LimitReader(resp.Body, 1<<20+1)
 	body, err := io.ReadAll(lr)
 	if err != nil {
+		outcome = apiOutcomeReadError
 		return err
 	}
 	if len(body) > 1<<20 {
+		outcome = apiOutcomeReadError
 		return fmt.Errorf("GitHub API response too large")
 	}
 	if resp.StatusCode == http.StatusNotFound {
@@ -544,6 +557,7 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 		return fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
 	}
 	if err := json.Unmarshal(body, out); err != nil {
+		outcome = apiOutcomeDecodeError
 		return fmt.Errorf("malformed GitHub API response: %w", err)
 	}
 	return nil
