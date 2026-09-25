@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
@@ -11,10 +12,14 @@ import (
 
 // Run executes the command and returns its process exit code.
 func Run(args []string, stdout, stderr io.Writer, version string) int {
-	return run(args, stdout, stderr, version, transport.CommandRunner{Stderr: stderr})
+	return runWithInput(args, os.Stdin, stdout, stderr, version, transport.CommandRunner{Stderr: stderr})
 }
 
 func run(args []string, stdout, stderr io.Writer, clientVersion string, agentRunner transport.Runner) int {
+	return runWithInput(args, strings.NewReader(""), stdout, stderr, clientVersion, agentRunner)
+}
+
+func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, clientVersion string, agentRunner transport.Runner) int {
 	if len(args) == 0 {
 		_, _ = fmt.Fprint(stderr, usage)
 		return 2
@@ -53,6 +58,8 @@ func run(args []string, stdout, stderr io.Writer, clientVersion string, agentRun
 				return compile(args[1:], stdout, stderr, clientVersion, transport.Agent{Runner: agentRunner})
 			case "upload":
 				return upload(args[1:], stdout, stderr, clientVersion, transport.Agent{Runner: agentRunner})
+			case "migrate-secrets":
+				return migrateSecrets(args[1:], stdin, stdout, stderr, agentRunner)
 			case "run-job":
 				return runJob(args[1:], stdout, stderr, version, clientVersion, transport.Agent{Runner: agentRunner})
 			default:
